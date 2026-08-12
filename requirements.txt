@@ -1,0 +1,9 @@
+PyQt6>=6.11
+Pillow>=10.0
+
+# Only needed to rebuild the standalone EXE - run `pyinstaller Atomic.spec`
+# (the --add-data bundling app_icon.ico into the build is only in the spec
+# file; the plain `pyinstaller main.py` form omits it and the window/
+# taskbar icon comes up blank at runtime even though the EXE file's own
+# icon looks fine in Explorer), not needed to run from source.
+pyinstaller>=6.0
