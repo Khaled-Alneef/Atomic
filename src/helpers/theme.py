@@ -282,15 +282,15 @@ QPushButton#Danger {{
 QPushButton#Danger:hover {{ background: {DANGER_HOVER}; }}
 
 QPushButton#Icon {{
-    background: transparent;
+    background: {SURFACE};
     color: {TEXT_MUTED};
-    border: none;
+    border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
     padding: 6px;
-    font-size: 15pt;
+    font-size: 18pt;
     font-weight: 700;
 }}
-QPushButton#Icon:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; }}
+QPushButton#Icon:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; border: 1px solid {ACCENT}; }}
 
 QPushButton#Flat {{
     background: transparent;

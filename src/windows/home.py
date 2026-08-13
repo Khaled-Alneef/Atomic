@@ -10,7 +10,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import (
+    QEasingCurve, QParallelAnimationGroup, QPoint, QPropertyAnimation, QTimer, Qt,
+)
 from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
@@ -38,6 +40,11 @@ TRACKER_PREVIEW_LIMIT = 6
 SERIES_PREVIEW_LIMIT = 6
 GAMES_PREVIEW_LIMIT = 6
 QUICK_LIST_LIMIT = 5
+
+HERO_CONTENT_WIDTH = 620
+HERO_SLIDE_LIMIT = 4
+HERO_SLIDE_INTERVAL_MS = 5000
+HERO_SLIDE_ANIM_MS = 320
 
 PAGE_FOR_TYPE = {"Anime": "anime", "Series": "series", **{t: "manga" for t in MANGA_TYPES}}
 
@@ -105,13 +112,13 @@ class HomePage(GlassPage):
         # whichever of the two sits earlier.
         sections = []
 
-        anime_manga_recent = self._recent_entries(self.tracker_entries, self._hero_entry())
+        anime_manga_recent = self._recent_entries(self.tracker_entries)
         if anime_manga_recent:
             pos = min(nav_config.nav_position("anime"), nav_config.nav_position("manga"))
             sections.append((pos, self._build_section(
                 "Anime & Reading", self._build_poster_grid(anime_manga_recent))))
 
-        series_recent = self._recent_entries(self.series_entries, self._hero_entry())
+        series_recent = self._recent_entries(self.series_entries)
         if series_recent:
             pos = nav_config.nav_position("series")
             sections.append((pos, self._build_section(
@@ -151,14 +158,8 @@ class HomePage(GlassPage):
         entries = [e for e in self._all_trackable_entries() if e.get("status") in IN_PROGRESS_STATUSES]
         return sorted(entries, key=lambda e: e.get("updated_at") or "", reverse=True)
 
-    def _hero_entry(self):
-        in_progress = self._in_progress_entries()
-        return in_progress[0] if in_progress else None
-
-    def _recent_entries(self, entries, exclude_entry):
-        exclude_id = exclude_entry["id"] if exclude_entry else None
+    def _recent_entries(self, entries):
         entries = sorted(entries, key=lambda e: e.get("updated_at") or "", reverse=True)
-        entries = [e for e in entries if e["id"] != exclude_id]
         return entries[:TRACKER_PREVIEW_LIMIT]
 
     def _recent_games(self):
@@ -189,13 +190,47 @@ class HomePage(GlassPage):
         outer_layout = QHBoxLayout(hero)
         outer_layout.setContentsMargins(20, 20, 20, 20)
 
-        entry = self._hero_entry()
-        if entry is None:
+        self._hero_entries = self._in_progress_entries()[:HERO_SLIDE_LIMIT]
+        if not self._hero_entries:
             empty = QLabel("Nothing in progress yet - add an anime, manga, or series to start tracking.",
                             objectName="Muted")
             outer_layout.addWidget(empty)
             return hero
 
+        # A fixed-size clipping viewport, not a layout - _advance_hero
+        # slides the current/next slide widgets across it by animating
+        # raw geometry, which needs stable pixel bounds to slide within
+        # rather than a layout that would just reflow around them.
+        # Height matches HERO_COVER_SIZE the same way the unanimated
+        # single-entry version implicitly did (the cover was always the
+        # tallest thing in the row).
+        self._hero_viewport = QWidget(objectName="Bare")
+        self._hero_viewport.setFixedSize(HERO_CONTENT_WIDTH, HERO_COVER_SIZE[1])
+        self._hero_index = 0
+        self._hero_slide = self._build_hero_slide(self._hero_entries[0])
+        self._hero_slide.setParent(self._hero_viewport)
+        self._hero_slide.setGeometry(0, 0, HERO_CONTENT_WIDTH, HERO_COVER_SIZE[1])
+        self._hero_slide.show()
+
+        if len(self._hero_entries) > 1:
+            self._hero_timer = QTimer(self)
+            self._hero_timer.timeout.connect(self._advance_hero)
+            self._hero_timer.start(HERO_SLIDE_INTERVAL_MS)
+
+        outer_layout.addStretch()
+        # See the comment further down (theme.SCROLLBAR_WIDTH nudge) -
+        # unchanged from the single-entry version, just now positioning
+        # the viewport instead of the content block directly.
+        outer_layout.addSpacing(9 + 45)
+        outer_layout.addWidget(self._hero_viewport)
+        outer_layout.addStretch()
+        return hero
+
+    def _build_hero_slide(self, entry):
+        """One carousel page: cover+title+progress+Continue button for a
+        single in-progress entry. Built fresh per entry (initial slide
+        and every _advance_hero swap) rather than kept alive - simpler
+        than diffing/updating one persistent widget's contents."""
         # The cover+text block is centered as a group within the hero
         # card (stretches on both sides below) rather than pinned flush
         # left with a big empty gap on wide windows. A *fixed* width -
@@ -204,7 +239,7 @@ class HomePage(GlassPage):
         # without this the block would shrink to that guess instead of
         # actually using the room a fixed width guarantees it.
         content = QWidget(objectName="Bare")
-        content.setFixedWidth(620)
+        content.setFixedWidth(HERO_CONTENT_WIDTH)
         layout = QHBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(20)
@@ -269,25 +304,41 @@ class HomePage(GlassPage):
         text_col.addLayout(continue_row)
 
         layout.addWidget(text_widget, stretch=1)
+        return content
 
-        outer_layout.addStretch()
-        # The vertical scrollbar (always reserved - see the
-        # always_show_vbar scroll_area() call above) eats its width only
-        # from the right of the viewport this whole page renders in, so
-        # centering symmetrically against *this frame's own* width still
-        # looks off-center relative to the page's actual visible card,
-        # which is theme.SCROLLBAR_WIDTH wider than what this frame can
-        # see on the right. A fixed spacer taken only out of the left
-        # stretch's share (not the right one's) nudges the block over to
-        # compensate, without needing to know this frame's actual width
-        # (which changes with the window's) - empirically tuned against
-        # theme.SCROLLBAR_WIDTH=11 (Qt's own stretch-distribution
-        # rounding means the offset isn't a clean half of it). The extra
-        # 45 on top is a deliberate nudge further right of true-center.
-        outer_layout.addSpacing(9 + 45)
-        outer_layout.addWidget(content)
-        outer_layout.addStretch()
-        return hero
+    def _advance_hero(self):
+        """Slide from the current carousel entry to the next one (wraps
+        back to the first after the last) - old slide exits to the
+        left, new one enters from the right. Always the same direction
+        since this is a timed loop, not a user-driven back/forward."""
+        self._hero_index = (self._hero_index + 1) % len(self._hero_entries)
+        old_slide = self._hero_slide
+        new_slide = self._build_hero_slide(self._hero_entries[self._hero_index])
+        new_slide.setParent(self._hero_viewport)
+        width, height = HERO_CONTENT_WIDTH, HERO_COVER_SIZE[1]
+        new_slide.setGeometry(width, 0, width, height)
+        new_slide.show()
+        new_slide.raise_()
+
+        group = QParallelAnimationGroup(self)
+        anim_new = QPropertyAnimation(new_slide, b"pos", self)
+        anim_new.setDuration(HERO_SLIDE_ANIM_MS)
+        anim_new.setStartValue(QPoint(width, 0))
+        anim_new.setEndValue(QPoint(0, 0))
+        anim_new.setEasingCurve(QEasingCurve.Type.OutCubic)
+        group.addAnimation(anim_new)
+
+        anim_old = QPropertyAnimation(old_slide, b"pos", self)
+        anim_old.setDuration(HERO_SLIDE_ANIM_MS)
+        anim_old.setStartValue(QPoint(0, 0))
+        anim_old.setEndValue(QPoint(-width, 0))
+        anim_old.setEasingCurve(QEasingCurve.Type.OutCubic)
+        group.addAnimation(anim_old)
+
+        group.finished.connect(old_slide.deleteLater)
+        self._hero_anim_group = group  # keep a reference so it isn't gc'd mid-animation
+        self._hero_slide = new_slide
+        group.start()
 
     def _continue_entry(self, entry):
         if not open_tracker_entry(self, entry):
