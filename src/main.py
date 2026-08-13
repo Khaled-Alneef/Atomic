@@ -154,10 +154,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Atomic", objectName="Brand"))
         layout.addSpacing(12)
 
-        home_name, _, home_icon = HOME_ITEM
-        self.home_btn = QPushButton(
-            f"  {home_icon}   {home_name}", objectName="NavButton"
-        )
+        home_name, _ = HOME_ITEM
+        self.home_btn = QPushButton(home_name, objectName="NavButton")
+        self.home_btn.setIcon(QIcon(theme.NAV_ICON_PATH))
+        self.home_btn.setIconSize(QSize(16, 16))
         self.home_btn.setCheckable(True)
         self.home_btn.clicked.connect(lambda: self.navigate_to("home"))
         layout.addWidget(self.home_btn)
@@ -173,6 +173,7 @@ class MainWindow(QMainWindow):
         self.nav_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        self.nav_list.setIconSize(QSize(16, 16))
         self.nav_list.setSpacing(2)
         self.nav_list.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
@@ -198,8 +199,8 @@ class MainWindow(QMainWindow):
 
     def _populate_nav_list(self):
         self.nav_list.clear()
-        for name, page_name, icon in visible_nav_items():
-            item = QListWidgetItem(f"  {icon}   {name}")
+        for name, page_name in visible_nav_items():
+            item = QListWidgetItem(QIcon(theme.NAV_ICON_PATH), name)
             item.setData(Qt.ItemDataRole.UserRole, page_name)
             self.nav_list.addItem(item)
         self.nav_list.updateGeometry()

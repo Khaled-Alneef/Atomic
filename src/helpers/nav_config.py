@@ -1,27 +1,24 @@
 """Sidebar nav definitions shared by main.py (builds the sidebar) and
 windows/home.py (orders its preview sections to match it) - kept out of
-main.py itself to avoid a circular import between the two."""
+main.py itself to avoid a circular import between the two.
+
+Every entry shows the same marker icon (theme.NAV_ICON_PATH, an atom
+symbol) instead of a different emoji per section, so these tuples don't
+carry a per-item icon anymore - just (name, page_name)."""
 
 from . import app_settings
 
-# One uniform marker used for every sidebar entry instead of a different
-# emoji per section - modern flat-nav style, not a per-category pictogram.
-NAV_ICON = "⚛"  # ⚛ atom symbol, fitting for "Atomic" - plain glyph (not an
-# emoji-presentation character), so it inherits the button/list-item text
-# color like the rest of the label instead of rendering as a fixed-color
-# emoji glyph.
-
-HOME_ITEM = ("Home", "home", NAV_ICON)
+HOME_ITEM = ("Home", "home")
 
 # Default order; the sidebar's drag-to-reorder list overrides this once
 # the user has customized it (see app_settings.get/set_nav_order).
 NAV_ITEMS = [
-    ("Anime", "anime", NAV_ICON),
-    ("Reading", "manga", NAV_ICON),
-    ("Series", "series", NAV_ICON),
-    ("Games", "games", NAV_ICON),
-    ("Apps", "apps", NAV_ICON),
-    ("Websites", "websites", NAV_ICON),
+    ("Anime", "anime"),
+    ("Reading", "manga"),
+    ("Series", "series"),
+    ("Games", "games"),
+    ("Apps", "apps"),
+    ("Websites", "websites"),
 ]
 
 

@@ -136,7 +136,7 @@ class SettingsDialog(QDialog):
 
         hidden = set(app_settings.get_hidden_sections())
         self.section_checks = {}
-        for name, page_name, _icon in nav_config.ordered_nav_items():
+        for name, page_name in nav_config.ordered_nav_items():
             cb = QCheckBox(name)
             cb.setChecked(page_name not in hidden)
             cb.toggled.connect(lambda checked, p=page_name: self._toggle_section_visibility(p, checked))

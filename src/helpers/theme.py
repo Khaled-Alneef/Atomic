@@ -5,6 +5,7 @@ draws its native title bar in dark mode too.
 """
 
 import ctypes
+import math
 import sys
 
 from PIL import Image, ImageDraw
@@ -69,6 +70,58 @@ def _ensure_checkmark_asset() -> str:
 
 
 CHECKMARK_PATH = _ensure_checkmark_asset()
+
+
+def _ensure_nav_icon_asset() -> str:
+    """A small atom-symbol PNG (three tilted orbit rings around a nucleus,
+    each with an electron riding it) used as the one shared sidebar marker
+    for Home + every section, in place of a plain text glyph.
+
+    Drawn at 4x and downsampled with LANCZOS for clean anti-aliased edges
+    at the small size it's actually shown at (PIL's own draw calls aren't
+    anti-aliased). Each electron is drawn directly onto its own orbit's
+    layer *before* that layer is rotated, so it rides along exactly on
+    the ring with no separate trig needed to place it post-rotation.
+    """
+    path = storage.DATA_DIR / "ui_assets" / "nav_atom.png"
+    if path.exists():
+        return path.as_posix()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    scale = 4
+    size = 64 * scale
+    cx = cy = size / 2
+    color = TEXT
+
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+
+    rx, ry = 27 * scale, 11 * scale
+    stroke = 3 * scale
+    electron_r = 3.4 * scale
+    # (rotation angle, parametric phase the electron sits at on the
+    # unrotated ring) - varied per orbit so the three electrons land at
+    # different points around the atom instead of all lining up.
+    orbits = ((0, 15), (60, 195), (120, 315))
+    for angle, phase_deg in orbits:
+        layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        layer_draw = ImageDraw.Draw(layer)
+        layer_draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), outline=color, width=stroke)
+        phase = math.radians(phase_deg)
+        ex, ey = cx + rx * math.cos(phase), cy + ry * math.sin(phase)
+        layer_draw.ellipse((ex - electron_r, ey - electron_r, ex + electron_r, ey + electron_r), fill=color)
+        layer = layer.rotate(angle, resample=Image.BICUBIC, center=(cx, cy))
+        canvas.alpha_composite(layer)
+
+    nucleus_r = 6.5 * scale
+    canvas_draw = ImageDraw.Draw(canvas)
+    canvas_draw.ellipse((cx - nucleus_r, cy - nucleus_r, cx + nucleus_r, cy + nucleus_r), fill=color)
+
+    canvas = canvas.resize((64, 64), Image.LANCZOS)
+    canvas.save(path)
+    return path.as_posix()
+
+
+NAV_ICON_PATH = _ensure_nav_icon_asset()
 
 
 STYLESHEET = f"""
