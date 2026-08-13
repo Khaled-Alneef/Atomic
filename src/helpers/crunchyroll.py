@@ -17,23 +17,18 @@ it's just an alternate *open target*. Picking it as your Anime provider
 Stremio's Cinemeta - that's public metadata, unrelated to where you
 watch) or how "latest episode"/real watch-progress tracking works (still
 Stremio's account API, since there's no Crunchyroll equivalent this app
-can reach) - it only changes what a double-click opens.
+can reach) - it only changes what a double-click opens: a Crunchyroll
+search for the title, in this one tab.
 
-series_url() below tries to land straight on the title's actual series
-page rather than Crunchyroll's own on-site search results list, via
-Google's public "site:" search + "I'm Feeling Lucky" redirect scoped to
-crunchyroll.com/series - not scraping or querying Crunchyroll itself,
-just a plain Google search URL. In practice Google sometimes shows its
-own one-click "you're being redirected to <url>" interstitial instead of
-jumping straight there (that's Google's anti-abuse behavior for the
-Lucky redirect, not something this app can control) - either way it
-resolves to the right page, one click away at worst, instead of a list
-of search results to sift through.
+(A Google "I'm Feeling Lucky" redirect scoped to crunchyroll.com/series
+was tried here to land straight on the actual show page instead of a
+search list - reverted, since in real-world use Google shows its own
+"you're being redirected" interstitial *and* opens the target in a
+second tab, which is worse than just showing the search results.)
 """
 
 import urllib.parse
 
 
-def series_url(title: str) -> str:
-    query = f"site:crunchyroll.com/series {title or ''}"
-    return f"https://www.google.com/search?q={urllib.parse.quote(query)}&btnI=1"
+def search_url(title: str) -> str:
+    return f"https://www.crunchyroll.com/search?q={urllib.parse.quote(title or '')}"

@@ -24,6 +24,13 @@ from . import storage
 
 SITES_FILE = "manga_sites.json"
 
+DEFAULT_SITES = [
+    {"name": "3asq", "base_url": "https://3asq.online/"},
+    {"name": "TeamX", "base_url": "https://www.olympustaff.com/"},
+    {"name": "Lava Scans", "base_url": "https://lavascans.com/"},
+    {"name": "SWAT", "base_url": "https://meshmanga.com/"},
+]
+
 
 def _normalize(base_url: str) -> str:
     base_url = (base_url or "").strip()
@@ -33,7 +40,15 @@ def _normalize(base_url: str) -> str:
 
 
 def _load():
-    return storage.load(SITES_FILE, [])
+    sites = storage.load(SITES_FILE, None)
+    if sites is None:
+        # First run: seed the well-known reading sites so Manga suggestions
+        # work out of the box. Once the file exists, an empty list (the
+        # user removed every site) is respected as-is - never re-seeded.
+        sites = [{"id": str(uuid.uuid4()), "name": s["name"], "base_url": s["base_url"]}
+                  for s in DEFAULT_SITES]
+        storage.save(SITES_FILE, sites)
+    return sites
 
 
 def list_sites() -> list:

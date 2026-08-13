@@ -178,11 +178,9 @@ class SettingsDialog(QDialog):
         anime_provider_hint = QLabel(
             "Which app an Anime entry opens on double-click. Stremio gets a "
             "direct deep link straight to the title; Crunchyroll doesn't - "
-            "its own search isn't something this app can query safely (it's "
+            "its search isn't something this app can query safely (it's "
             "behind bot protection this app won't try to bypass), so it "
-            "opens the title's Crunchyroll page via a best-effort redirect "
-            "instead (occasionally a one-click \"you're being redirected\" "
-            "page rather than landing there directly). Either way, "
+            "opens a Crunchyroll search for the title instead. Either way, "
             "suggestions/covers while adding an entry still come from "
             "Stremio's public metadata, and the auto-filled Last Season/"
             "Episode below comes from your connected Stremio account "

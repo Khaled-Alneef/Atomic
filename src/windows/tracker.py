@@ -122,13 +122,12 @@ def format_chapter_progress(value):
 def open_tracker_entry(parent, entry):
     """Open an entry's page: for Anime/Series, a saved stremio:// link
     (opens Stremio) or a plain URL as-is; an Anime entry with no saved
-    link falls back to the title's actual Crunchyroll series page (see
-    crunchyroll.series_url) if that's the configured provider (Settings).
-    Straight to a Manga's matched page on its reading site otherwise (or
-    that site's search results for the title, if no specific page was
-    matched) - the configured Manga Music site (if any) opens first, so
-    it starts loading/playing before the reading tab takes focus. Returns
-    False if there's nothing to open."""
+    link falls back to a Crunchyroll search for the title if that's the
+    configured provider (Settings). Straight to a Manga's matched page on
+    its reading site otherwise (or that site's search results for the
+    title, if no specific page was matched) - the configured Manga Music
+    site (if any) opens first, so it starts loading/playing before the
+    reading tab takes focus. Returns False if there's nothing to open."""
     if entry.get("type") in MANGA_TYPES:
         return _open_manga_entry(parent, entry)
 
@@ -140,7 +139,7 @@ def open_tracker_entry(parent, entry):
             webbrowser.open(url)
         return True
     if entry.get("type") == "Anime" and app_settings.get_anime_provider() == "crunchyroll":
-        webbrowser.open(crunchyroll.series_url(entry["title"]))
+        webbrowser.open(crunchyroll.search_url(entry["title"]))
         return True
     return False
 
