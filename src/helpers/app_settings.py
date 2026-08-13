@@ -1,26 +1,13 @@
-"""Small persisted app-wide settings (Anime open-provider, connected
-Stremio account, AniList username, sidebar nav order, manga sites/music)."""
+"""Small persisted app-wide settings (connected Stremio account, AniList
+username, sidebar nav order, manga sites/music)."""
 
 from . import storage
 
 SETTINGS_FILE = "settings.json"
 
-ANIME_PROVIDERS = ("stremio", "crunchyroll")
-
 
 def _load():
     return storage.load(SETTINGS_FILE, {})
-
-
-def get_anime_provider() -> str:
-    provider = _load().get("anime_provider", "stremio")
-    return provider if provider in ANIME_PROVIDERS else "stremio"
-
-
-def set_anime_provider(provider: str):
-    data = _load()
-    data["anime_provider"] = provider if provider in ANIME_PROVIDERS else "stremio"
-    storage.save(SETTINGS_FILE, data)
 
 
 def get_nav_order() -> list:
@@ -84,4 +71,18 @@ def get_anilist_username() -> str:
 def set_anilist_username(username: str):
     data = _load()
     data["anilist_username"] = (username or "").strip()
+    storage.save(SETTINGS_FILE, data)
+
+
+def get_launcher_dirs() -> dict:
+    """{"steam": "G:\\Steam", ...} for whichever game launchers have a
+    directory configured in Settings > Games - see helpers.launchers."""
+    return _load().get("launcher_dirs", {})
+
+
+def set_launcher_dir(key: str, path: str):
+    data = _load()
+    dirs = data.get("launcher_dirs", {})
+    dirs[key] = path or ""
+    data["launcher_dirs"] = dirs
     storage.save(SETTINGS_FILE, data)

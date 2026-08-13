@@ -13,10 +13,10 @@ from pathlib import Path
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QVBoxLayout, QWidget,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import images, nav_config, storage
+from helpers import images, nav_config, storage, theme
 from helpers.widgets import Card, GlassPage, scroll_area
 from windows.link_grid import open_link_entry
 from windows.tracker import IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress, open_tracker_entry
@@ -30,7 +30,7 @@ WEBSITES_FILE = "websites.json"
 APPS_FILE = "apps.json"
 
 POSTER_SIZE = (78, 104)
-HERO_COVER_SIZE = (108, 144)
+HERO_COVER_SIZE = (156, 208)
 ICON_SIZE = (40, 40)
 ROW_ICON_SIZE = (28, 28)
 
@@ -72,9 +72,19 @@ class HomePage(GlassPage):
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 8, 0)
+        # Symmetric, not just a right-side clearance gap for the
+        # scrollbar - an asymmetric margin here would shift every fixed-
+        # width centered block on this page (the hero) slightly left of
+        # true-center relative to the panel, even though it measures as
+        # centered within its own now-narrower-on-one-side container.
+        body_layout.setContentsMargins(8, 0, 8, 0)
         body_layout.setSpacing(22)
-        panel_layout.addWidget(scroll_area(body))
+        # The hero's cover+text block is a fixed width centered against
+        # this viewport (see _build_hero) - reserving the scrollbar's
+        # width unconditionally keeps that centered regardless of
+        # whether this page's content is currently tall enough to
+        # actually need scrolling (see scroll_area's always_show_vbar).
+        panel_layout.addWidget(scroll_area(body, always_show_vbar=True))
 
         header = QVBoxLayout()
         header.setSpacing(2)
@@ -169,49 +179,107 @@ class HomePage(GlassPage):
 
     def _build_hero(self):
         hero = QFrame(objectName="Hero")
-        layout = QHBoxLayout(hero)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(20)
+        outer_layout = QHBoxLayout(hero)
+        outer_layout.setContentsMargins(20, 20, 20, 20)
 
         entry = self._hero_entry()
         if entry is None:
             empty = QLabel("Nothing in progress yet - add an anime, manga, or series to start tracking.",
                             objectName="Muted")
-            layout.addWidget(empty)
+            outer_layout.addWidget(empty)
             return hero
+
+        # The cover+text block is centered as a group within the hero
+        # card (stretches on both sides below) rather than pinned flush
+        # left with a big empty gap on wide windows. A *fixed* width -
+        # not just a cap - matters here: a word-wrapped QLabel's sizeHint
+        # is a conservative guess unless something forces it wider, so
+        # without this the block would shrink to that guess instead of
+        # actually using the room a fixed width guarantees it.
+        content = QWidget(objectName="Bare")
+        content.setFixedWidth(620)
+        layout = QHBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(20)
 
         cover = QLabel()
         cover.setFixedSize(*HERO_COVER_SIZE)
         cover.setPixmap(images.thumbnail_or_avatar(entry.get("cover_path"), entry["title"], HERO_COVER_SIZE))
         layout.addWidget(cover)
 
-        text_col = QVBoxLayout()
+        # A real QWidget (not a bare layout) so it gets actual geometry
+        # from the HBoxLayout's stretch - the wrapped title label below
+        # needs that to compute its wrap width against the row's real
+        # available space instead of a too-narrow layout-item guess.
+        text_widget = QWidget(objectName="Bare")
+        text_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        text_col = QVBoxLayout(text_widget)
+        text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(4)
         text_col.addWidget(QLabel("CONTINUE READING" if entry["type"] in MANGA_TYPES else "CONTINUE WATCHING",
                                    objectName="Muted"))
-        title = QLabel(entry["title"], objectName="PanelTitle")
+        title = QLabel(entry["title"], objectName="HeroTitle")
         title.setWordWrap(True)
+        title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         text_col.addWidget(title)
         # Manga shows your own last-*watched* chapter (manually entered on
         # the Reading page), not the site's latest-available one - "Chapter
-        # 24.5" reads naturally. Anime/Series progress is already self-
-        # descriptive ("S01E10"/"E10"), so it doesn't need a prefix.
+        # 24.5" reads naturally. Anime/Series progress is only ever auto-
+        # filled with a *guess* (the latest episode currently out, not
+        # necessarily what you've watched) unless it's been verified (a
+        # connected account, or typed in by hand) - shown only once
+        # verified, same rule as the Anime/Reading pages themselves,
+        # rather than stating a guess as fact.
         if entry["type"] in MANGA_TYPES:
             watched = entry.get("last_watched_chapter")
             progress_text = f"Chapter {format_chapter_progress(watched)}" if watched else entry["status"]
-        elif entry.get("progress"):
+        elif entry.get("progress_verified") and entry.get("progress"):
             progress_text = entry["progress"]
         else:
-            progress_text = entry["status"]
-        text_col.addWidget(QLabel(progress_text, objectName="CardMeta"))
-        text_col.addStretch()
+            progress_text = ""
+        if progress_text:
+            text_col.addWidget(QLabel(progress_text, objectName="CardMeta"))
+        # A capped gap, not addStretch() - a full stretch would soak up
+        # all the column's leftover height and pin the button to the
+        # very bottom of the (taller) cover; this keeps it up near the
+        # cover's middle instead.
+        text_col.addSpacing(20)
 
         continue_btn = QPushButton("▶ Continue", objectName="Accent")
-        continue_btn.setFixedWidth(150)
+        continue_btn.setFixedSize(170, 46)
         continue_btn.clicked.connect(lambda: self._continue_entry(entry))
-        text_col.addWidget(continue_btn)
+        # Nudged right on its own - everything else in this column
+        # (label, title, progress) stays flush with the column's edge.
+        # The trailing addStretch() matters: without something claiming
+        # the row's leftover width, Qt centers a no-stretch row instead
+        # of anchoring it to the fixed leading spacer, overshooting the
+        # nudge far past what was asked for.
+        continue_row = QHBoxLayout()
+        continue_row.setContentsMargins(0, 0, 0, 0)
+        continue_row.addSpacing(35)
+        continue_row.addWidget(continue_btn)
+        continue_row.addStretch()
+        text_col.addLayout(continue_row)
 
-        layout.addLayout(text_col, stretch=1)
+        layout.addWidget(text_widget, stretch=1)
+
+        outer_layout.addStretch()
+        # The vertical scrollbar (always reserved - see the
+        # always_show_vbar scroll_area() call above) eats its width only
+        # from the right of the viewport this whole page renders in, so
+        # centering symmetrically against *this frame's own* width still
+        # looks off-center relative to the page's actual visible card,
+        # which is theme.SCROLLBAR_WIDTH wider than what this frame can
+        # see on the right. A fixed spacer taken only out of the left
+        # stretch's share (not the right one's) nudges the block over to
+        # compensate, without needing to know this frame's actual width
+        # (which changes with the window's) - empirically tuned against
+        # theme.SCROLLBAR_WIDTH=11 (Qt's own stretch-distribution
+        # rounding means the offset isn't a clean half of it). The extra
+        # 45 on top is a deliberate nudge further right of true-center.
+        outer_layout.addSpacing(9 + 45)
+        outer_layout.addWidget(content)
+        outer_layout.addStretch()
         return hero
 
     def _continue_entry(self, entry):
@@ -248,13 +316,14 @@ class HomePage(GlassPage):
             if entry["type"] in MANGA_TYPES:
                 watched = entry.get("last_watched_chapter")
                 meta_text = f"Ch {format_chapter_progress(watched)}" if watched else entry["type"]
-            elif entry.get("progress"):
+            elif entry.get("progress_verified") and entry.get("progress"):
                 meta_text = entry["progress"]
             else:
-                meta_text = entry["type"]
-            meta = QLabel(meta_text, objectName="CardMeta")
-            meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            card_layout.addWidget(meta)
+                meta_text = ""
+            if meta_text:
+                meta = QLabel(meta_text, objectName="CardMeta")
+                meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+                card_layout.addWidget(meta)
 
             card.clicked.connect(lambda en=entry: self._continue_entry(en))
             grid.addWidget(card, 0, index)

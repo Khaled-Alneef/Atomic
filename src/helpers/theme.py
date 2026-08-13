@@ -5,7 +5,6 @@ draws its native title bar in dark mode too.
 """
 
 import ctypes
-import math
 import sys
 
 from PIL import Image, ImageDraw
@@ -39,10 +38,26 @@ WARNING = "#f1c40f"
 
 FONT_FAMILY = "Segoe UI"
 FONT_FAMILY_EMOJI = "Segoe UI Emoji"
+# Condensed/geometric, sci-fi-HUD-flavored - ships with Windows - used
+# for the sidebar nav list to read more "atomic/tech" than the default
+# Segoe UI body font.
+FONT_FAMILY_NAV = "Agency FB"
+
+# Bullet marker prefixed onto every sidebar nav label (Home + each
+# section) in place of the old rasterized arrow-glyph icon column - as
+# plain text it always matches FONT_FAMILY_NAV/color/size exactly,
+# instead of a separately-rendered PNG that could fall out of sync.
+NAV_BULLET = "◈"
 
 RADIUS_SM = 8
 RADIUS = 12
 RADIUS_LG = 18
+
+# Also referenced outside the stylesheet (see windows.home) to compensate
+# fixed-width centered content for the vertical scrollbar's width - it
+# only ever eats space from the right of a scroll area's viewport, never
+# both sides, which would otherwise throw off that centering.
+SCROLLBAR_WIDTH = 11
 
 
 def font(size=10, weight=QFont.Weight.Normal, family=FONT_FAMILY):
@@ -72,58 +87,6 @@ def _ensure_checkmark_asset() -> str:
 CHECKMARK_PATH = _ensure_checkmark_asset()
 
 
-def _ensure_nav_icon_asset() -> str:
-    """A small atom-symbol PNG (three tilted orbit rings around a nucleus,
-    each with an electron riding it) used as the one shared sidebar marker
-    for Home + every section, in place of a plain text glyph.
-
-    Drawn at 4x and downsampled with LANCZOS for clean anti-aliased edges
-    at the small size it's actually shown at (PIL's own draw calls aren't
-    anti-aliased). Each electron is drawn directly onto its own orbit's
-    layer *before* that layer is rotated, so it rides along exactly on
-    the ring with no separate trig needed to place it post-rotation.
-    """
-    path = storage.DATA_DIR / "ui_assets" / "nav_atom.png"
-    if path.exists():
-        return path.as_posix()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    scale = 4
-    size = 64 * scale
-    cx = cy = size / 2
-    color = TEXT
-
-    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-
-    rx, ry = 27 * scale, 11 * scale
-    stroke = 3 * scale
-    electron_r = 3.4 * scale
-    # (rotation angle, parametric phase the electron sits at on the
-    # unrotated ring) - varied per orbit so the three electrons land at
-    # different points around the atom instead of all lining up.
-    orbits = ((0, 15), (60, 195), (120, 315))
-    for angle, phase_deg in orbits:
-        layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        layer_draw = ImageDraw.Draw(layer)
-        layer_draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), outline=color, width=stroke)
-        phase = math.radians(phase_deg)
-        ex, ey = cx + rx * math.cos(phase), cy + ry * math.sin(phase)
-        layer_draw.ellipse((ex - electron_r, ey - electron_r, ex + electron_r, ey + electron_r), fill=color)
-        layer = layer.rotate(angle, resample=Image.BICUBIC, center=(cx, cy))
-        canvas.alpha_composite(layer)
-
-    nucleus_r = 6.5 * scale
-    canvas_draw = ImageDraw.Draw(canvas)
-    canvas_draw.ellipse((cx - nucleus_r, cy - nucleus_r, cx + nucleus_r, cy + nucleus_r), fill=color)
-
-    canvas = canvas.resize((64, 64), Image.LANCZOS)
-    canvas.save(path)
-    return path.as_posix()
-
-
-NAV_ICON_PATH = _ensure_nav_icon_asset()
-
-
 STYLESHEET = f"""
 * {{
     outline: none;
@@ -149,12 +112,6 @@ QLabel {{
 QWidget#Sidebar {{
     background: {SIDEBAR};
     border-right: 1px solid {BORDER};
-}}
-QLabel#Brand {{
-    color: {TEXT};
-    font-size: 15pt;
-    font-weight: 700;
-    padding: 4px 4px;
 }}
 QPushButton#NavButton {{
     background: transparent;
@@ -199,9 +156,10 @@ QListWidget#NavList::item {{
     color: {TEXT_MUTED};
     border: 1px solid transparent;
     border-radius: {RADIUS_SM}px;
-    padding: 7px 12px;
-    font-size: 10.5pt;
-    font-weight: 600;
+    padding: 9px 12px;
+    font-family: "{FONT_FAMILY_NAV}";
+    font-size: 15pt;
+    font-weight: 700;
 }}
 QListWidget#NavList::item:hover {{
     background: {SURFACE};
@@ -221,6 +179,12 @@ QWidget#Panel {{
 QLabel#PanelTitle {{
     color: {TEXT};
     font-size: 19pt;
+    font-weight: 700;
+    background: transparent;
+}}
+QLabel#HeroTitle {{
+    color: {TEXT};
+    font-size: 16pt;
     font-weight: 700;
     background: transparent;
 }}
@@ -407,7 +371,7 @@ QScrollArea > QWidget {{ background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QScrollBar:vertical {{
     background: transparent;
-    width: 11px;
+    width: {SCROLLBAR_WIDTH}px;
     margin: 2px 0px 2px 0px;
 }}
 QScrollBar::handle:vertical {{

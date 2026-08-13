@@ -78,11 +78,23 @@ def show_toast(anchor, text, duration_ms=2000):
     Toast(anchor, text, duration_ms)
 
 
-def scroll_area(body: QWidget) -> QScrollArea:
-    """Wrap `body` in a frameless, resizable, mouse-wheel-scrollable area."""
+def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
+    """Wrap `body` in a frameless, resizable, mouse-wheel-scrollable area.
+
+    `always_show_vbar` reserves the vertical scrollbar's width whether or
+    not it's actually needed, instead of the default "only when content
+    overflows" - the scrollbar only ever eats width from the right, so
+    on a page whose content only sometimes overflows, its coming and
+    going shifts anything centered against the viewport's width left/
+    right depending on scroll state. Pages with fixed-width centered
+    content (Home's hero) want that width reserved unconditionally so
+    centering math stays consistent either way; pages that never center
+    anything against the full viewport width don't need it."""
     area = QScrollArea()
     area.setWidgetResizable(True)
     area.setFrameShape(QFrame.Shape.NoFrame)
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    if always_show_vbar:
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     area.setWidget(body)
     return area

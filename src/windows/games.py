@@ -6,37 +6,34 @@ reorder manually (Move Up/Down) while sorted as Custom Order.
 """
 
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt
+from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import icon_extract, images, storage, theme
-from helpers.widgets import Card, GlassPage, scroll_area
+from helpers import app_settings, images, launchers, storage, theme
+from helpers.widgets import Card, GlassPage, scroll_area, show_toast
 from windows.link_grid import CARD_WIDTH, GRID_COLS, THUMB_SIZE
 
 DATA_FILE = "games.json"
-ICON_EXTRACT_SIZE = 96
 CARD_ICON_SIZE = THUMB_SIZE  # match the Apps/Websites card image size
 FILE_FILTER = "Games (*.exe *.lnk *.url);;All files (*.*)"
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Played"]
 
+# Shared with Settings' per-launcher auto-import - one place doing icon
+# extraction/caching for games, regardless of which UI triggered it.
+_extract_and_cache_icon = launchers.extract_and_cache_icon
 
-def _extract_and_cache_icon(path, size=ICON_EXTRACT_SIZE):
-    img = icon_extract.extract_icon(path, size=size)
-    if img is None:
-        return None
-    dest = images.CACHE_DIR / f"game_{uuid.uuid4().hex}.png"
-    try:
-        img.save(dest)
-        return str(dest)
-    except Exception:
-        return None
+
+class _ScanSignals(QObject):
+    done = Signal(list)  # [{"name", "path", "launcher"}, ...] found by the background scan
 
 
 class GamesPage(GlassPage):
@@ -56,9 +53,17 @@ class GamesPage(GlassPage):
         layout.setContentsMargins(24, 20, 24, 24)
         layout.setSpacing(14)
 
+        self._scan_signals = _ScanSignals()
+        self._scan_signals.done.connect(self._on_scan_done)
+
         header = QHBoxLayout()
         header.addWidget(QLabel("Games", objectName="PanelTitle"))
         header.addStretch()
+        import_btn = QPushButton("⟳", objectName="AccentIcon")
+        import_btn.setFixedSize(40, 40)
+        import_btn.setToolTip("Import from Launchers")
+        import_btn.clicked.connect(self._import_from_launchers)
+        header.addWidget(import_btn)
         add_btn = QPushButton("+", objectName="AccentIcon")
         add_btn.setFixedSize(40, 40)
         add_btn.setToolTip("Add Game")
@@ -165,17 +170,43 @@ class GamesPage(GlassPage):
 
     # ------------------------------------------------------------------
     def _add_game(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select a game executable or shortcut", "", FILE_FILTER)
-        if not path:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select game executables or shortcuts", "", FILE_FILTER)
+        if not paths:
             return
-        name = Path(path).stem
-        icon_path = _extract_and_cache_icon(path)
-        self.games.append({
-            "id": str(uuid.uuid4()), "name": name, "path": path, "icon": icon_path,
-            "added_at": storage.now_iso(), "last_played": None,
-        })
+        added_at = storage.now_iso()
+        for path in paths:
+            self.games.append({
+                "id": str(uuid.uuid4()), "name": Path(path).stem, "path": path,
+                "icon": _extract_and_cache_icon(path), "added_at": added_at, "last_played": None,
+            })
         storage.save(DATA_FILE, self.games)
         self._refresh_grid()
+
+    def _import_from_launchers(self):
+        dirs = app_settings.get_launcher_dirs()
+        if not any(dirs.values()):
+            QMessageBox.information(
+                self, "Import from Launchers",
+                "Add at least one launcher's install directory in Settings > Games first.")
+            return
+        show_toast(self, "Scanning...")
+        threading.Thread(target=self._scan_worker, args=(dirs,), daemon=True).start()
+
+    def _scan_worker(self, dirs):
+        try:
+            found = launchers.scan_all(dirs)
+        except Exception:
+            found = []
+        self._scan_signals.done.emit(found)
+
+    def _on_scan_done(self, found):
+        added = launchers.import_scanned_games(found)
+        if added:
+            self.games = storage.load(DATA_FILE, [])
+            self._refresh_grid()
+        QMessageBox.information(
+            self, "Import from Launchers",
+            f"Added {added} new game(s)." if added else "No new games found.")
 
     def _launch(self, game):
         try:

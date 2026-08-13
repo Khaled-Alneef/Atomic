@@ -2,9 +2,9 @@
 windows/home.py (orders its preview sections to match it) - kept out of
 main.py itself to avoid a circular import between the two.
 
-Every entry shows the same marker icon (theme.NAV_ICON_PATH, an atom
-symbol) instead of a different emoji per section, so these tuples don't
-carry a per-item icon anymore - just (name, page_name)."""
+Every entry shows the same bullet marker (theme.NAV_BULLET) instead of
+a different emoji per section, so these tuples don't carry a per-item
+icon - just (name, page_name)."""
 
 from . import app_settings
 

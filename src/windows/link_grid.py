@@ -24,9 +24,9 @@ IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 EXE_FILTER = "Executable / Shortcut (*.exe *.lnk);;All files (*.*)"
 MAX_TARGETS = 3
 
-CARD_WIDTH = 108
+CARD_WIDTH = 120
 THUMB_SIZE = (44, 44)
-GRID_COLS = 7
+GRID_COLS = 13
 
 
 def open_link_entry(parent, entry, label="Links"):

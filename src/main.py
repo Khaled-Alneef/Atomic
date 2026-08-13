@@ -30,7 +30,7 @@ from PyQt6.QtCore import (
     QSize,
     Qt,
 )
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -76,6 +76,7 @@ ADD_ITEMS = [
 ]
 
 ANIM_DURATION_MS = 220
+LOGO_HEIGHT = 320
 
 
 class NavListWidget(QListWidget):
@@ -151,18 +152,59 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 20, 16, 16)
         layout.setSpacing(4)
 
-        layout.addWidget(QLabel("Atomic", objectName="Brand"))
-        layout.addSpacing(12)
+        # Logo, centered - the artwork already has the "Atomic" wordmark
+        # built in, so it's the whole brand header on its own (no separate
+        # text label) - anchoring the top of the sidebar, with the nav
+        # list/Add button below pushed down to make room for it (see the
+        # extra spacing further down).
+        logo_label = QLabel()
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # Scale to LOGO_HEIGHT *physical* pixels (source PNG is 1672px tall,
+        # plenty of headroom) and tag the result with the screen's DPI
+        # scale, or Qt stretches the merely-260px-tall pixmap to fill a
+        # 260*scale screen area on any non-100%-scaled display (125% here)
+        # and it comes out visibly blurry.
+        dpr = QApplication.primaryScreen().devicePixelRatio()
+        logo_pixmap = QPixmap(str(APP_DIR / "atomic_icon.png")).scaledToHeight(
+            int(LOGO_HEIGHT * dpr), Qt.TransformationMode.SmoothTransformation)
+        logo_pixmap.setDevicePixelRatio(dpr)
+        logo_label.setPixmap(logo_pixmap)
+        layout.addWidget(logo_label)
 
+        layout.addSpacing(16)
+
+        # Home as a single-row NavList of its own - not a QPushButton -
+        # so it's rendered by exactly the same widget type/QSS rules as
+        # every other nav item below it (a QPushButton, even styled to
+        # match on paper, doesn't compute the same box-model height/
+        # padding as a QListWidgetItem, so it never quite lined up).
+        # Kept as a separate list rather than folded into nav_list itself
+        # so it stays put above the user's drag-to-reorder order instead
+        # of becoming a reorderable/draggable row.
         home_name, _ = HOME_ITEM
-        self.home_btn = QPushButton(home_name, objectName="NavButton")
-        self.home_btn.setIcon(QIcon(theme.NAV_ICON_PATH))
-        self.home_btn.setIconSize(QSize(16, 16))
-        self.home_btn.setCheckable(True)
-        self.home_btn.clicked.connect(lambda: self.navigate_to("home"))
-        layout.addWidget(self.home_btn)
-
-        layout.addSpacing(4)
+        self.home_list = NavListWidget(objectName="NavList")
+        self.home_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.home_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.home_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.home_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.home_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.home_list.setSpacing(2)  # matches nav_list's item inset, else Home renders edge-to-edge
+        self.home_list.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        # QListWidget's item delegate paints with the widget's own font(),
+        # not the ::item QSS font-family - the stylesheet rule alone gets
+        # silently ignored for list items, so it has to be set here too.
+        self.home_list.setFont(theme.font(15, QFont.Weight.Bold, theme.FONT_FAMILY_NAV))
+        self.home_list.addItem(QListWidgetItem(f"{theme.NAV_BULLET}  {home_name}"))
+        self.home_list.itemClicked.connect(lambda: self.navigate_to("home"))
+        # NavListWidget.sizeHint() pads in a generous +12 "safety margin"
+        # below the last row (see its docstring) - fine for nav_list's
+        # multi-row case, but on a single-item list that margin is just
+        # dead space, widening the visible gap before the next item well
+        # past the ~spacing()px gap between every other pair of items.
+        # A minimal explicit height (one row + its own top/bottom inset)
+        # keeps that gap consistent instead.
+        self.home_list.setFixedHeight(self.home_list.sizeHintForRow(0) + self.home_list.spacing() * 2)
+        layout.addWidget(self.home_list)
 
         self.nav_list = NavListWidget(objectName="NavList")
         self.nav_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -173,18 +215,18 @@ class MainWindow(QMainWindow):
         self.nav_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.nav_list.setIconSize(QSize(16, 16))
         self.nav_list.setSpacing(2)
         self.nav_list.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
+        self.nav_list.setFont(theme.font(15, QFont.Weight.Bold, theme.FONT_FAMILY_NAV))
         self._populate_nav_list()
         self.nav_list.itemClicked.connect(self._on_nav_item_clicked)
         self.nav_list.model().rowsMoved.connect(self._on_nav_reordered)
         self.nav_list.updateGeometry()
         layout.addWidget(self.nav_list)
 
-        layout.addSpacing(28)
+        layout.addSpacing(40)
         add_btn = QPushButton("  ➕   Add", objectName="AddButton")
         add_btn.clicked.connect(lambda: self._show_add_menu(add_btn))
         layout.addWidget(add_btn)
@@ -200,7 +242,7 @@ class MainWindow(QMainWindow):
     def _populate_nav_list(self):
         self.nav_list.clear()
         for name, page_name in visible_nav_items():
-            item = QListWidgetItem(QIcon(theme.NAV_ICON_PATH), name)
+            item = QListWidgetItem(f"{theme.NAV_BULLET}  {name}")
             item.setData(Qt.ItemDataRole.UserRole, page_name)
             self.nav_list.addItem(item)
         self.nav_list.updateGeometry()
@@ -238,6 +280,15 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self):
         SettingsDialog(self)
+
+    def refresh_current_page(self):
+        """Re-create whichever page is currently showing, fresh from
+        disk - each page only loads its saved entries once, in __init__,
+        so an edit made elsewhere (Settings > Clear Data, wiping a
+        category out from under a page that's already open behind the
+        dialog) wouldn't otherwise show up until the user navigated away
+        and back on their own."""
+        self._show_page(self._history[self._history_index], animate=False)
 
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):
@@ -292,7 +343,10 @@ class MainWindow(QMainWindow):
             self._show_page(target, direction=self._direction_between(current, target))
 
     def _sync_nav_highlight(self, page_name):
-        self.home_btn.setChecked(page_name == "home")
+        if page_name == "home":
+            self.home_list.setCurrentRow(0)
+        else:
+            self.home_list.clearSelection()
         match = None
         for i in range(self.nav_list.count()):
             item = self.nav_list.item(i)

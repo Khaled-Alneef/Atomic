@@ -7,6 +7,7 @@ import os
 # regardless of the working directory it's invoked from.
 SRC_DIR = os.path.join(SPECPATH, "..", "src")
 ICON_FILE = os.path.join(SRC_DIR, "app_icon.ico")
+LOGO_FILE = os.path.join(SRC_DIR, "atomic_icon.png")
 
 a = Analysis(
     [os.path.join(SRC_DIR, "main.py")],
@@ -18,7 +19,8 @@ a = Analysis(
     # frozen script at runtime (sys._MEIPASS) - without bundling it here,
     # that lookup silently fails and every window/taskbar icon comes up
     # blank even though the EXE file itself looks fine in Explorer.
-    datas=[(ICON_FILE, '.')],
+    # atomic_icon.png (the sidebar header logo) needs the same treatment.
+    datas=[(ICON_FILE, '.'), (LOGO_FILE, '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

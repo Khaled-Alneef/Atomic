@@ -152,16 +152,25 @@ def fetch_watch_progress(imdb_id: str, auth_key: str, timeout: int = 6):
     items = body.get("result") or []
     if not items:
         return None
+    state = items[0].get("state") or {}
     # Stremio's library state keys the last-touched video as
-    # "<imdb_id>:<season>:<episode>".
-    video_id = ((items[0].get("state") or {}).get("video_id")) or ""
-    parts = video_id.split(":")
-    if len(parts) != 3:
-        return None
-    try:
-        return int(parts[1]), int(parts[2])
-    except ValueError:
-        return None
+    # "<imdb_id>:<season>:<episode>" - but that's only set once you've
+    # actually resumed/pressed play on a specific episode. A title whose
+    # episodes were instead marked watched via checkmarks (never resumed
+    # in the player) leaves video_id as the bare id with no season/
+    # episode, even though Stremio clearly knows your progress - that
+    # progress lives in "watched" instead, which encodes as
+    # "<imdb_id>:<season>:<episode>:<bitmask length>:<bitmask>" (the
+    # highest episode you've marked watched, followed by a compressed
+    # per-episode watched bitmask we don't need here).
+    for field in ("video_id", "watched"):
+        parts = (state.get(field) or "").split(":")
+        if len(parts) >= 3:
+            try:
+                return int(parts[1]), int(parts[2])
+            except ValueError:
+                continue
+    return None
 
 
 def launch(url: str):

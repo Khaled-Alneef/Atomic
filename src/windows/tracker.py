@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from helpers import anilist, app_settings, crunchyroll, images, manga_sites, storage, stremio, theme
+from helpers import anilist, anime_sites, app_settings, images, manga_sites, storage, stremio, theme
 from helpers.widgets import Card, GlassPage, scroll_area, show_toast
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
@@ -83,6 +83,17 @@ def _imdb_id_from_url(url):
     return match.group(0) if match else None
 
 
+def _entry_imdb_id(entry):
+    """The Cinemeta id to sync progress against - stored directly on the
+    entry (see EntryForm._save) since an Anime entry set to open on a
+    Video Website other than the built-in "Stremio" one deliberately
+    saves no url (see EntryForm._on_suggestion_selected), which would
+    otherwise leave no way to recover it. Falls back to pulling it out of
+    a saved stremio:// url for older entries saved before this field
+    existed (see _migrate)."""
+    return entry.get("imdb_id") or _imdb_id_from_url(entry.get("url"))
+
+
 def parse_episode_progress(text):
     """"S1E10" / "E10" / "10" -> (season, episode) ints, or (0, 0) if the
     text doesn't match any of those (e.g. old freeform notes) - the form
@@ -120,16 +131,18 @@ def format_chapter_progress(value):
 
 
 def open_tracker_entry(parent, entry):
-    """Open an entry's page: for Anime/Series, a saved stremio:// link
-    (opens Stremio) or a plain URL as-is; an Anime entry with no saved
-    link falls back to a Crunchyroll search for the title if that's the
-    configured provider (Settings). Straight to a Manga's matched page on
-    its reading site otherwise (or that site's search results for the
-    title, if no specific page was matched) - the configured Manga Music
-    site (if any) opens first, so it starts loading/playing before the
-    reading tab takes focus. Returns False if there's nothing to open."""
+    """Open an entry's page: for Manga, its matched page on its reading
+    site (or that site's search results for the title, if no specific
+    page was matched) - the configured Manga Music site (if any) opens
+    first, so it starts loading/playing before the reading tab takes
+    focus. For Anime, a saved stremio:// deep link (opens Stremio) if the
+    entry uses the built-in Stremio option, or its configured Video
+    Website's search results otherwise. For Series, a saved stremio://
+    link or plain URL as-is. Returns False if there's nothing to open."""
     if entry.get("type") in MANGA_TYPES:
         return _open_manga_entry(parent, entry)
+    if entry.get("type") == "Anime":
+        return _open_anime_entry(parent, entry)
 
     url = entry.get("url")
     if url:
@@ -137,9 +150,6 @@ def open_tracker_entry(parent, entry):
             stremio.launch(url)
         else:
             webbrowser.open(url)
-        return True
-    if entry.get("type") == "Anime" and app_settings.get_anime_provider() == "crunchyroll":
-        webbrowser.open(crunchyroll.search_url(entry["title"]))
         return True
     return False
 
@@ -159,9 +169,43 @@ def _open_manga_entry(parent, entry):
     return True
 
 
+def _open_anime_entry(parent, entry):
+    url = entry.get("url")
+    if url:
+        if url.startswith("stremio://"):
+            stremio.launch(url)
+        else:
+            webbrowser.open(url)
+        return True
+    site = anime_sites.get_site(entry["site_id"]) if entry.get("site_id") else None
+    if site and site.get("search_url"):
+        webbrowser.open(anime_sites.search_page_url(site["search_url"], entry["title"]))
+        return True
+    return False
+
+
 def _migrate(entries, data_file):
     changed = False
+    # Anime used to have one global Settings toggle ("Anime Opens In":
+    # Stremio or Crunchyroll) instead of today's per-entry Video Website.
+    # Entries saved under the old Crunchyroll choice have no url and no
+    # site_id - point them at a Crunchyroll site (adding the default one
+    # back if the user had since removed it) so they keep opening the
+    # same place instead of silently going nowhere.
+    old_provider = storage.load(app_settings.SETTINGS_FILE, {}).get("anime_provider")
+    crunchyroll_site_id = None
+    if old_provider == "crunchyroll":
+        crunchyroll_site_id = next(
+            (s["id"] for s in anime_sites.list_sites() if s["name"] == "Crunchyroll"), None)
+        if crunchyroll_site_id is None:
+            crunchyroll_site_id = anime_sites.add_site(
+                "Crunchyroll", "https://www.crunchyroll.com/search?q=")["id"]
+
     for entry in entries:
+        if (crunchyroll_site_id and entry.get("type") == "Anime"
+                and not entry.get("url") and not entry.get("site_id")):
+            entry["site_id"] = crunchyroll_site_id
+            changed = True
         if "added_at" not in entry:
             entry["added_at"] = storage.now_iso()
             changed = True
@@ -182,6 +226,17 @@ def _migrate(entries, data_file):
             parts = entry["url"].split("/")
             if len(parts) >= 2 and parts[-1] == parts[-2]:
                 entry["url"] = "/".join(parts[:-1])
+                changed = True
+        # Backfill the id progress-syncing needs from a saved stremio://
+        # link, for entries saved before it got its own field (see
+        # _entry_imdb_id/EntryForm._save) - a Video-Website Anime entry
+        # has no url to pull this from at all, so those need re-picking
+        # the suggestion once to start syncing, but that's a one-time gap
+        # for entries saved in the narrow window before this existed.
+        if not entry.get("imdb_id"):
+            found_id = _imdb_id_from_url(entry.get("url"))
+            if found_id:
+                entry["imdb_id"] = found_id
                 changed = True
         # Older saves used one shared "Watching/Reading" status wording;
         # split it into the per-type wording (Watching vs Reading).
@@ -225,6 +280,8 @@ class TrackerPage(GlassPage):
         self._sync_signals = _ProgressSyncSignals()
         self._sync_signals.resolved.connect(self._on_progress_synced)
         self._sync_pending = 0
+        self._sync_found_count = 0
+        self._sync_not_found_count = 0
 
         self.entries = _migrate(storage.load(self.DATA_FILE, []), self.DATA_FILE)
 
@@ -269,6 +326,27 @@ class TrackerPage(GlassPage):
         layout.addWidget(scroll_area(self.grid_body), stretch=1)
 
         self._refresh_grid()
+        if self.SUPPORTS_PROGRESS_SYNC:
+            self._backfill_missing_latest_available()
+
+    # ------------------------------------------------------------------
+    def _backfill_missing_latest_available(self):
+        """Entries saved before latest_available was tracked (or from a
+        pick where the background lookup didn't finish/land) leave the
+        Last Season/Last Episode tooltip permanently blank otherwise -
+        nothing else ever re-fetches it later. Silently top those up in
+        the background on load, the same way Sync Progress would for one
+        entry by hand, instead of leaving the user to notice and fix it."""
+        targets = [e for e in self.entries
+                   if e["type"] in self.ENTRY_TYPES and not e.get("latest_available") and _entry_imdb_id(e)]
+        if not targets:
+            return
+        self._sync_pending += len(targets)
+        for entry in targets:
+            threading.Thread(
+                target=self._fetch_real_progress,
+                args=(entry["id"], _entry_imdb_id(entry), entry["title"], entry.get("type") == "Anime", True),
+                daemon=True).start()
 
     # ------------------------------------------------------------------
     def _visible_entries(self):
@@ -421,7 +499,7 @@ class TrackerPage(GlassPage):
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_form(edit=True, entry=entry))
-        if entry.get("type") in ("Anime", "Series") and _imdb_id_from_url(entry.get("url")):
+        if entry.get("type") in ("Anime", "Series") and _entry_imdb_id(entry):
             menu.addAction("Sync Progress", lambda: self._sync_progress(entry))
         if self.sort_box.currentText() == "Custom Order":
             menu.addAction("Move Up", lambda: self._move_entry(entry, -1))
@@ -435,7 +513,7 @@ class TrackerPage(GlassPage):
         overwrite the stored value with it. Unlike the initial add-time
         guess, this can be re-run any time, so a saved entry never has to
         stay stuck on a fallback estimate."""
-        imdb_id = _imdb_id_from_url(entry.get("url"))
+        imdb_id = _entry_imdb_id(entry)
         if not imdb_id:
             return
         threading.Thread(
@@ -446,16 +524,15 @@ class TrackerPage(GlassPage):
     def _sync_all_progress(self):
         """Header refresh button: re-sync every linked entry on this page
         at once, instead of right-clicking each card individually."""
-        targets = [e for e in self.entries
-                   if e["type"] in self.ENTRY_TYPES and _imdb_id_from_url(e.get("url"))]
+        targets = [e for e in self.entries if e["type"] in self.ENTRY_TYPES and _entry_imdb_id(e)]
         if not targets:
-            show_toast(self, "Updated")
+            show_toast(self, "Nothing to sync yet - no linked entries")
             return
-        self._sync_pending = len(targets)
+        self._sync_pending += len(targets)
         for entry in targets:
             threading.Thread(
                 target=self._fetch_real_progress,
-                args=(entry["id"], _imdb_id_from_url(entry["url"]), entry["title"],
+                args=(entry["id"], _entry_imdb_id(entry), entry["title"],
                       entry.get("type") == "Anime", True),
                 daemon=True).start()
 
@@ -497,21 +574,38 @@ class TrackerPage(GlassPage):
             if not found:
                 QMessageBox.information(
                     self, "Sync Progress",
-                    "No real progress found for this title. Connect a Stremio account "
-                    "(or, for Anime, an AniList username) in Settings, and make sure "
-                    "it's in your library/list there.")
+                    "No real progress found for this title. Either it's not in "
+                    "your Stremio library (or, for Anime, your AniList list), or "
+                    "Stremio has no specific episode recorded for it - that only "
+                    "happens once you've actually pressed play on one through "
+                    "Stremio itself, not just added it to your library. You can "
+                    "still set your progress by hand in Edit.")
                 return
             storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
             return
 
         # Bulk refresh: results trickle in from several background threads,
-        # so only save/redraw/report once they've all come back.
+        # so only save/redraw/report once they've all come back. Reports a
+        # real breakdown rather than a blanket "Updated" - found=False here
+        # usually means Stremio genuinely has no per-episode history for
+        # that title (see the single-entry message above), not a failure,
+        # but silently doing nothing about it looks exactly like one.
+        if found:
+            self._sync_found_count += 1
+        else:
+            self._sync_not_found_count += 1
         self._sync_pending -= 1
         if self._sync_pending <= 0:
             storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
-            show_toast(self, "Updated")
+            found_count, not_found_count = self._sync_found_count, self._sync_not_found_count
+            self._sync_found_count = 0
+            self._sync_not_found_count = 0
+            if not_found_count:
+                show_toast(self, f"Synced {found_count} - no history for {not_found_count}", duration_ms=3500)
+            else:
+                show_toast(self, "Updated")
 
     def _move_entry(self, entry, delta):
         idx = self.entries.index(entry)
@@ -570,8 +664,7 @@ class _SearchSignals(QObject):
     results = Signal(str, list, int)  # provider ("stremio"/"manga_sites"), results, search sequence #
     cover_ready = Signal(str, object)
     manga_details_resolved = Signal(str, str, float)  # page url, cover url, latest chapter
-    # identity (stremio url), progress season/episode, is real progress, total available season/episode
-    latest_episode_resolved = Signal(str, int, int, bool, int, int)
+    latest_episode_resolved = Signal(str, int, int)  # identity (stremio url), latest available season/episode
 
 
 class EntryForm(QDialog):
@@ -584,6 +677,11 @@ class EntryForm(QDialog):
 
         self.selected_cover_url = entry.get("cover_url") if entry else None
         self.selected_cover_path = entry.get("cover_path") if entry else None
+        # The Cinemeta id to sync progress against later, independent of
+        # url (which an Anime entry set to a Video Website other than the
+        # built-in "Stremio" one deliberately leaves blank) - see
+        # _entry_imdb_id/_save.
+        self.selected_imdb_id = entry.get("imdb_id") if entry else None
         self._search_results = {}
         self._search_seq = 0
         self._status_parts = {}  # "cover"/"progress" -> current message, composed onto status_label
@@ -734,9 +832,9 @@ class EntryForm(QDialog):
         self.season_spin.valueChanged.connect(self._on_progress_hand_edited)
         self.episode_spin.valueChanged.connect(self._on_progress_hand_edited)
 
-        # Anime/Series only: the Stremio deep link, freely editable. Manga
-        # has no equivalent field - its open target is fully derived from
-        # the matched site below, never manually typed.
+        # Series only: the Stremio deep link, freely editable. Anime/Manga
+        # have no equivalent field - their open target is fully derived
+        # from the site dropdown below, never manually typed.
         self.url_row = QWidget()
         url_layout = QVBoxLayout(self.url_row)
         url_layout.setContentsMargins(0, 8, 0, 0)
@@ -747,14 +845,18 @@ class EntryForm(QDialog):
         url_layout.addWidget(self.url_edit)
         form.addWidget(self.url_row)
 
-        # Manga-only: which reading site (from Settings) this entry opens
-        # to. Picking a search suggestion below sets both this and the
-        # matched page link (kept on url_edit internally, just not shown).
+        # Manga/Anime only: which site (from Settings) this entry opens
+        # to - "Reading Website" for Manga, "Video Website" for Anime
+        # (where the built-in "Stremio" option means "use the deep link"
+        # instead of a configured site). Picking a search suggestion below
+        # sets both this and the matched link (kept on url_edit
+        # internally, just not shown).
         self.site_row = QWidget()
         site_layout = QVBoxLayout(self.site_row)
         site_layout.setContentsMargins(0, 8, 0, 0)
         site_layout.setSpacing(4)
-        site_layout.addWidget(QLabel("Reading Website (opens directly on double-click)"))
+        self.site_label = QLabel()
+        site_layout.addWidget(self.site_label)
         self.site_box = QComboBox()
         self._populate_site_options(entry.get("site_id") if entry else None)
         site_layout.addWidget(self.site_box)
@@ -797,12 +899,12 @@ class EntryForm(QDialog):
     def _update_labels(self):
         if self._provider() == "stremio":
             self.title_label.setText("Title (type to search Stremio)")
-            if self.type_box.currentText() == "Anime" and app_settings.get_anime_provider() == "crunchyroll":
-                self.url_label.setText("Direct link (optional - leave blank to search Crunchyroll for the title)")
-            else:
-                self.url_label.setText("Stremio link (opens Stremio on double-click)")
+            self.url_label.setText("Stremio link (opens Stremio on double-click)")
         else:
             self.title_label.setText("Title (type to search your reading websites)")
+        self.site_label.setText(
+            "Video Website (opens directly on double-click)" if self.type_box.currentText() == "Anime"
+            else "Reading Website (opens directly on double-click)")
 
     def _status_options(self):
         return STATUSES_BY_TYPE.get(self.type_box.currentText(), STATUSES_BY_TYPE["Anime"])
@@ -822,14 +924,16 @@ class EntryForm(QDialog):
         # fresh suggestion pick invalidates the current cover.
         self._update_labels()
         self._populate_status_options(self.status_box.currentText())
+        self._populate_site_options(self.site_box.currentData())
         self._update_url_and_site_visibility()
         self._update_progress_visibility()
         self._trigger_search()
 
     def _update_url_and_site_visibility(self):
-        is_manga = self.type_box.currentText() in MANGA_TYPES
-        self.url_row.setVisible(not is_manga)
-        self.site_row.setVisible(is_manga)
+        current_type = self.type_box.currentText()
+        has_site = current_type in MANGA_TYPES or current_type == "Anime"
+        self.url_row.setVisible(not has_site)
+        self.site_row.setVisible(has_site)
 
     def _update_progress_visibility(self):
         is_manga = self.type_box.currentText() in MANGA_TYPES
@@ -843,8 +947,13 @@ class EntryForm(QDialog):
     def _populate_site_options(self, current_site_id=None):
         self.site_box.blockSignals(True)
         self.site_box.clear()
-        self.site_box.addItem("— None —", None)
-        for site in manga_sites.list_sites():
+        if self.type_box.currentText() == "Anime":
+            self.site_box.addItem("Stremio", None)
+            sites = anime_sites.list_sites()
+        else:
+            self.site_box.addItem("— None —", None)
+            sites = manga_sites.list_sites()
+        for site in sites:
             self.site_box.addItem(site["name"], site["id"])
         if current_site_id:
             idx = self.site_box.findData(current_site_id)
@@ -855,6 +964,7 @@ class EntryForm(QDialog):
     def _on_title_edited(self, _text):
         self.selected_cover_url = None
         self.selected_cover_path = None
+        self.selected_imdb_id = None
         self._suggestion_applied = False
         self._search_timer.start(SEARCH_DEBOUNCE_MS)
 
@@ -877,15 +987,37 @@ class EntryForm(QDialog):
             results = manga_sites.search_all(text)
         self._signals.results.emit(provider, results, seq)
 
+    def _video_site_options(self):
+        """(site_id, site_name) pairs matching the Video Website dropdown -
+        the built-in Stremio option (None) first, then every configured
+        anime site, same order as _populate_site_options."""
+        return [(None, "Stremio")] + [(s["id"], s["name"]) for s in anime_sites.list_sites()]
+
+    def _expand_for_video_sites(self, results):
+        """One Stremio match can open on any configured Video Website -
+        fan each raw result out into one suggestion per site (mirroring
+        manga's one-result-per-site search), tagged with which site it
+        represents so picking it can set the dropdown below to match."""
+        expanded = []
+        for r in results:
+            for site_id, site_name in self._video_site_options():
+                expanded.append({**r, "_video_site_id": site_id, "_video_site_name": site_name})
+        return expanded
+
     def _label_for_result(self, provider, r):
         if provider == "manga_sites":
             return f"{r['title']} ({r['site_name']})"
+        if "_video_site_name" in r:
+            return f"{r['title']} ({r['_video_site_name']})"
         suffix = f" ({r['format']})" if r.get("format") else ""
         return f"{r['title']}{suffix}"
 
     def _apply_search_results(self, provider, results, seq):
         if seq != self._search_seq:
             return
+
+        if provider == "stremio" and self.type_box.currentText() == "Anime":
+            results = self._expand_for_video_sites(results)
 
         source_name = "Stremio" if provider == "stremio" else "your manga websites"
         self._search_results = {}
@@ -949,26 +1081,47 @@ class EntryForm(QDialog):
                 # detail endpoint instead of leaving them blank.
                 threading.Thread(target=self._resolve_manga_details, args=(result["url"],), daemon=True).start()
         elif result.get("stremio_url"):
-            # Anime set to open in Crunchyroll doesn't get a stremio://
-            # link saved - open_tracker_entry falls back to a Crunchyroll
-            # search for the title instead when there's no saved url.
-            uses_crunchyroll = (self.type_box.currentText() == "Anime"
-                                 and app_settings.get_anime_provider() == "crunchyroll")
-            if not uses_crunchyroll:
+            # Saved regardless of which Video Website ends up selected
+            # below, so progress-syncing keeps working even for entries
+            # that save no url at all (see _entry_imdb_id).
+            self.selected_imdb_id = result.get("id")
+            # An Anime suggestion is tagged with the Video Website it
+            # represents (see _expand_for_video_sites) - picking it moves
+            # the dropdown below to match, so the two always agree instead
+            # of the dropdown silently staying on whatever it last was.
+            video_site_id = result.get("_video_site_id")
+            if self.type_box.currentText() == "Anime" and "_video_site_id" in result:
+                idx = self.site_box.findData(video_site_id)
+                if idx >= 0:
+                    self.site_box.setCurrentIndex(idx)
+            # A site other than the built-in "Stremio" option doesn't get
+            # a stremio:// link saved - open_tracker_entry falls back to
+            # that site's search results for the title instead when
+            # there's no saved url. Explicitly clearing it (not just
+            # skipping the setText below) matters when switching from an
+            # earlier Stremio pick on the same title - otherwise that
+            # leftover deep link stays in the hidden field and wins over
+            # the site on open.
+            uses_site = self.type_box.currentText() == "Anime" and video_site_id is not None
+            if uses_site:
+                self.url_edit.setText("")
+            else:
                 self.url_edit.setText(result["stremio_url"])
             # Cinemeta's catalog search has no episode data at all (title/
-            # poster/year only) - a background lookup is the only way to
-            # know your progress: your real watch state from a connected
-            # Stremio account, or (Anime only) your real AniList progress
-            # if that's connected instead/as well, else the latest aired
-            # episode as a starting point. Tracked via its own identity
-            # (not url_edit's text) since Crunchyroll-provider Anime
-            # doesn't get a url saved at all.
+            # poster/year only) - a background lookup fills in the Last
+            # Season/Last Episode fields with the latest aired episode
+            # (how far the release currently goes), *not* your own watch
+            # progress - that's a separate concept, only ever set via
+            # Sync Progress (a connected Stremio account, or for Anime
+            # your AniList username) after the entry's saved, same as
+            # Manga's "Last Chapter" (site's latest) never doubles as
+            # "Last Watched Chapter" (your own progress) either. Tracked
+            # via its own identity (not url_edit's text) since site-
+            # provider Anime doesn't get a url saved at all.
             self._pending_episode_identity = result["stremio_url"]
             catalog = STREMIO_CATALOG_BY_TYPE.get(self.type_box.currentText(), "series")
-            is_anime = self.type_box.currentText() == "Anime"
             threading.Thread(target=self._resolve_episode_progress,
-                              args=(result["id"], catalog, result["stremio_url"], result["title"], is_anime),
+                              args=(result["id"], catalog, result["stremio_url"]),
                               daemon=True).start()
 
         self._refresh_preview()
@@ -1019,54 +1172,28 @@ class EntryForm(QDialog):
         elif not self.selected_cover_url:
             self._set_status_part("cover", "")
 
-    def _resolve_episode_progress(self, imdb_id, catalog, identity, title, is_anime):
-        result, is_real = None, False
-        _, auth_key = app_settings.get_stremio_auth()
-        if auth_key:
-            try:
-                result = stremio.fetch_watch_progress(imdb_id, auth_key)
-                is_real = result is not None
-            except Exception:
-                result = None
-        if not result and is_anime:
-            # AniList doesn't have general TV data, only anime/manga - and
-            # unlike the imdb_id match above, this is a title search, so
-            # it's a second choice, not tried for Series.
-            anilist_username = app_settings.get_anilist_username()
-            if anilist_username:
-                try:
-                    result = anilist.fetch_watch_progress(title, anilist_username)
-                    is_real = result is not None
-                except Exception:
-                    result = None
-        # The latest aired episode is fetched regardless of whether real
-        # progress was found above - it's not used as a progress fallback
-        # here, it's the separate "latest available" figure shown on hover
-        # (see TrackerPage._progress_columns), so it's needed either way.
+    def _resolve_episode_progress(self, imdb_id, catalog, identity):
         try:
             total = stremio.fetch_latest_episode(imdb_id, catalog)
         except Exception:
             total = None
-        if not result:
-            is_real = False
-            result = total
-        season, episode = result or (0, 0)
         total_season, total_episode = total or (0, 0)
-        self._signals.latest_episode_resolved.emit(identity, season, episode, is_real, total_season, total_episode)
+        self._signals.latest_episode_resolved.emit(identity, total_season, total_episode)
 
-    def _on_latest_episode_resolved(self, identity, season, episode, is_real, total_season, total_episode):
+    def _on_latest_episode_resolved(self, identity, total_season, total_episode):
         if identity != self._pending_episode_identity:
             return  # the user picked a different suggestion meanwhile
         self._latest_available = format_episode_progress(total_season, total_episode)
-        if episode and not self.season_spin.value() and not self.episode_spin.value():
-            self.season_spin.setValue(season)
-            self.episode_spin.setValue(episode)
-            # These setValue() calls above also trigger _on_progress_hand_
+        if total_episode and not self.season_spin.value() and not self.episode_spin.value():
+            self.season_spin.setValue(total_season)
+            self.episode_spin.setValue(total_episode)
+            # The setValue() calls above also trigger _on_progress_hand_
             # edited (which assumes any spinner change is a manual edit) -
-            # this line runs after them and wins, recording the real
-            # is_real verdict instead.
-            self._progress_verified = is_real
-            self._set_status_part("progress", "" if is_real else NOT_YOUR_PROGRESS_HINT)
+            # this line runs after them and wins: this is never your real
+            # progress, only ever the latest aired episode, so it should
+            # never count as verified.
+            self._progress_verified = False
+            self._set_status_part("progress", NOT_YOUR_PROGRESS_HINT)
 
     def _on_progress_hand_edited(self, _value):
         self._progress_verified = True
@@ -1092,19 +1219,32 @@ class EntryForm(QDialog):
 
         if self.is_new:
             self.entry = {"id": str(uuid.uuid4())}
-        is_manga = self.type_box.currentText() in MANGA_TYPES
+        current_type = self.type_box.currentText()
+        is_manga = current_type in MANGA_TYPES
+        is_anime = current_type == "Anime"
+        has_site = is_manga or is_anime
+        site_id = self.site_box.currentData() if has_site else None
+        saved_url = self.url_edit.text().strip()
+        # An Anime entry set to a configured Video Website (not the
+        # built-in "Stremio" option) must never carry a stray stremio://
+        # link left over from an earlier pick or from switching the
+        # dropdown by hand after one - open_tracker_entry tries url
+        # first, so a stale one there would silently override the site.
+        if is_anime and site_id is not None:
+            saved_url = ""
         self.entry.update(
             title=title,
-            type=self.type_box.currentText(),
+            type=current_type,
             status=self.status_box.currentText(),
             progress=self._progress_text(),
             progress_verified=self._progress_verified,
             latest_available=self._latest_available,
             last_watched_chapter=self.watched_chapter_spin.value() if is_manga else None,
-            url=self.url_edit.text().strip(),
+            url=saved_url,
             cover_url=self.selected_cover_url,
             cover_path=self.selected_cover_path,
-            site_id=self.site_box.currentData() if self.type_box.currentText() in MANGA_TYPES else None,
+            site_id=site_id,
+            imdb_id=self.selected_imdb_id if (is_anime or current_type == "Series") else None,
         )
         self.on_save(self.entry, self.is_new)
         self.accept()
