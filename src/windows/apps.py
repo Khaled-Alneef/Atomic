@@ -8,3 +8,4 @@ class AppsPage(LinkGridPage):
     TITLE = "Apps"
     SUBTITLE = "Programs you launch every day"
     DEFAULT_ENTRIES = []
+    TARGET_KIND = "app"

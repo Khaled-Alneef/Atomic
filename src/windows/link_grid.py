@@ -1,6 +1,8 @@
 """Shared base for the Websites and Apps pages: a customizable grid of
 icon+name cards (right-click for Edit/Delete, click to open) where each
-entry can launch up to 3 URLs/apps together at once."""
+entry can launch up to 3 targets together at once - URLs for Websites,
+executables/shortcuts for Apps (each page is single-purpose via its own
+TARGET_KIND, not a per-target Website/App choice)."""
 
 import subprocess
 import threading
@@ -11,7 +13,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -54,12 +56,20 @@ def _migrate_entry(entry):
 
 class LinkGridPage(GlassPage):
     """Base for a customizable icon+name grid of sites/apps. Subclasses
-    just set DATA_FILE/TITLE/SUBTITLE/DEFAULT_ENTRIES."""
+    just set DATA_FILE/TITLE/SUBTITLE/DEFAULT_ENTRIES/TARGET_KIND.
+
+    TARGET_KIND fixes what every target on this page's entries is - "site"
+    (a URL, opened in the browser) or "app" (an executable/shortcut,
+    launched directly) - so the Add/Edit form doesn't need a per-target
+    Website/App choice; Websites only ever adds URLs, Apps only ever adds
+    executables.
+    """
 
     DATA_FILE = "links.json"
     TITLE = "Links"
     SUBTITLE = ""
     DEFAULT_ENTRIES = []
+    TARGET_KIND = "site"
 
     def __init__(self, app):
         super().__init__(parent=None)
@@ -172,14 +182,18 @@ class LinkGridPage(GlassPage):
 
 
 class TargetRow(QWidget):
-    """One Type + URL/path field, used up to MAX_TARGETS times per entry.
+    """One URL/path field, used up to MAX_TARGETS times per entry. `kind`
+    ("site" or "app", fixed by the owning page's TARGET_KIND) decides the
+    placeholder text and whether a Browse... button is shown - there's no
+    per-row type choice anymore, each page is single-purpose.
 
     `on_target_changed` (if given) fires with this row's `get()` result
     whenever the target actually changes - used by the first row to
     auto-fetch the entry's icon instead of making the user pick one."""
 
-    def __init__(self, label_text, parent=None, on_target_changed=None):
+    def __init__(self, label_text, kind, parent=None, on_target_changed=None):
         super().__init__(parent)
+        self.kind = kind
         self._on_target_changed = on_target_changed
         self._last_notified = None
         layout = QVBoxLayout(self)
@@ -189,33 +203,27 @@ class TargetRow(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(6)
-        self.type_box = QComboBox()
-        self.type_box.addItems(["Website", "App"])
-        self.type_box.setFixedWidth(90)
-        self.type_box.currentTextChanged.connect(self._update_browse)
-        self.type_box.currentTextChanged.connect(self._notify_change)
-        row.addWidget(self.type_box)
 
         self.target_edit = QLineEdit()
+        self.target_edit.setPlaceholderText(
+            "Path to .exe/.lnk" if kind == "app" else "https://example.com"
+        )
         self.target_edit.editingFinished.connect(self._notify_change)
         row.addWidget(self.target_edit, stretch=1)
 
         self.browse_btn = QPushButton("...", objectName="Small")
         self.browse_btn.setFixedWidth(36)
         self.browse_btn.clicked.connect(self._browse)
+        self.browse_btn.setVisible(kind == "app")
         row.addWidget(self.browse_btn)
 
         layout.addLayout(row)
-        self._update_browse()
-
-    def _update_browse(self):
-        self.browse_btn.setVisible(self.type_box.currentText() == "App")
 
     def _notify_change(self):
         if not self._on_target_changed:
             return
         data = self.get()
-        key = (data["type"], data["target"]) if data else None
+        key = data["target"] if data else None
         if key == self._last_notified:
             return
         self._last_notified = key
@@ -231,14 +239,12 @@ class TargetRow(QWidget):
         target = self.target_edit.text().strip()
         if not target:
             return None
-        return {"type": "app" if self.type_box.currentText() == "App" else "site", "target": target}
+        return {"type": self.kind, "target": target}
 
     def set(self, data):
         if not data:
             return
-        self.type_box.setCurrentText("App" if data.get("type") == "app" else "Website")
         self.target_edit.setText(data.get("target", ""))
-        self._update_browse()
 
 
 class _IconSignals(QObject):
@@ -251,6 +257,7 @@ class EntryForm(QDialog):
         self.on_save = on_save
         self.entry = entry
         self.is_new = entry is None
+        self.target_kind = getattr(parent, "TARGET_KIND", "site")
         self.image_path = entry.get("image") if entry else None
         # Only auto-fetch an icon while there isn't one yet - once an
         # entry has an image (auto-fetched or manually chosen), further
@@ -271,13 +278,15 @@ class EntryForm(QDialog):
         self.name_edit = QLineEdit(entry["name"] if entry else "")
         form.addWidget(self.name_edit)
 
+        kind_label = "apps" if self.target_kind == "app" else "URLs"
         form.addSpacing(10)
-        form.addWidget(QLabel("Opens (up to 3 URLs/apps at once)"))
+        form.addWidget(QLabel(f"Opens (up to {MAX_TARGETS} {kind_label} at once)"))
         existing_targets = entry.get("targets", []) if entry else []
         labels = ["Target 1", "Target 2 (optional)", "Target 3 (optional)"]
         self.rows = []
         for i in range(MAX_TARGETS):
-            row = TargetRow(labels[i], on_target_changed=self._on_primary_target_changed if i == 0 else None)
+            row = TargetRow(labels[i], self.target_kind,
+                             on_target_changed=self._on_primary_target_changed if i == 0 else None)
             if i < len(existing_targets):
                 row.set(existing_targets[i])
             form.addWidget(row)

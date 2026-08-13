@@ -9,3 +9,4 @@ class WebsitesPage(LinkGridPage):
     TITLE = "Websites"
     SUBTITLE = "Sites you open all the time"
     DEFAULT_ENTRIES = []
+    TARGET_KIND = "site"

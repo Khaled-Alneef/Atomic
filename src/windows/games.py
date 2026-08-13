@@ -17,11 +17,11 @@ from PyQt6.QtWidgets import (
 
 from helpers import icon_extract, images, storage, theme
 from helpers.widgets import Card, GlassPage, scroll_area
+from windows.link_grid import CARD_WIDTH, GRID_COLS, THUMB_SIZE
 
 DATA_FILE = "games.json"
 ICON_EXTRACT_SIZE = 96
-CARD_ICON_SIZE = (112, 112)
-GRID_COLS = 6
+CARD_ICON_SIZE = THUMB_SIZE  # match the Apps/Websites card image size
 FILE_FILTER = "Games (*.exe *.lnk *.url);;All files (*.*)"
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Played"]
@@ -133,12 +133,11 @@ class GamesPage(GlassPage):
 
     def _build_card(self, game):
         card = Card(hoverable=True)
-        card.setFixedWidth(CARD_ICON_SIZE[0] + 24)
+        card.setFixedWidth(CARD_WIDTH)
         card.setToolTip(game["name"])
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.setContentsMargins(10, 12, 10, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 10, 8, 10)
 
         icon = QLabel()
         icon.setFixedSize(*CARD_ICON_SIZE)
