@@ -6,7 +6,7 @@ from . import app_settings
 
 # One uniform marker used for every sidebar entry instead of a different
 # emoji per section - modern flat-nav style, not a per-category pictogram.
-NAV_ICON = "●"  # ●
+NAV_ICON = "✦"  # ✦
 
 HOME_ITEM = ("Home", "home", NAV_ICON)
 
