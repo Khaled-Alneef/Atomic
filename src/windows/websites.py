@@ -8,7 +8,4 @@ class WebsitesPage(LinkGridPage):
     DATA_FILE = "websites.json"
     TITLE = "Websites"
     SUBTITLE = "Sites you open all the time"
-    DEFAULT_ENTRIES = [
-        {"id": "youtube", "name": "YouTube", "image": None,
-         "targets": [{"type": "site", "target": "https://www.youtube.com"}]},
-    ]
+    DEFAULT_ENTRIES = []
