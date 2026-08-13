@@ -62,6 +62,7 @@ class SettingsDialog(QDialog):
         self.stack.addWidget(scroll_area(self._build_anime_page()))
         self.stack.addWidget(scroll_area(self._build_reading_page()))
         content_col.addWidget(self.stack, stretch=1)
+        self.category_list.setCurrentRow(0)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -99,7 +100,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.category_list)
         layout.addStretch()
 
-        self.category_list.setCurrentRow(0)
         return sidebar
 
     def _on_category_changed(self, row):
