@@ -122,12 +122,13 @@ def format_chapter_progress(value):
 def open_tracker_entry(parent, entry):
     """Open an entry's page: for Anime/Series, a saved stremio:// link
     (opens Stremio) or a plain URL as-is; an Anime entry with no saved
-    link falls back to a Crunchyroll search for the title if that's the
-    configured provider (Settings). Straight to a Manga's matched page on
-    its reading site otherwise (or that site's search results for the
-    title, if no specific page was matched) - the configured Manga Music
-    site (if any) opens first, so it starts loading/playing before the
-    reading tab takes focus. Returns False if there's nothing to open."""
+    link falls back to the title's actual Crunchyroll series page (see
+    crunchyroll.series_url) if that's the configured provider (Settings).
+    Straight to a Manga's matched page on its reading site otherwise (or
+    that site's search results for the title, if no specific page was
+    matched) - the configured Manga Music site (if any) opens first, so
+    it starts loading/playing before the reading tab takes focus. Returns
+    False if there's nothing to open."""
     if entry.get("type") in MANGA_TYPES:
         return _open_manga_entry(parent, entry)
 
@@ -139,7 +140,7 @@ def open_tracker_entry(parent, entry):
             webbrowser.open(url)
         return True
     if entry.get("type") == "Anime" and app_settings.get_anime_provider() == "crunchyroll":
-        webbrowser.open(crunchyroll.search_url(entry["title"]))
+        webbrowser.open(crunchyroll.series_url(entry["title"]))
         return True
     return False
 
@@ -405,6 +406,13 @@ class TrackerPage(GlassPage):
         if entry["type"] in MANGA_TYPES:
             watched = entry.get("last_watched_chapter")
             return f"Ch {format_chapter_progress(watched)}" if watched else ""
+        # Anime/Series progress is only ever auto-filled with a *guess*
+        # (the latest episode currently out, not necessarily what you've
+        # watched) unless it came from a connected account or you typed it
+        # in yourself - only show it here once it's actually confirmed as
+        # real, so the card never states a guess as fact.
+        if not entry.get("progress_verified"):
+            return ""
         return entry.get("progress") or ""
 
     def _open_entry(self, entry):
@@ -481,6 +489,7 @@ class TrackerPage(GlassPage):
         if entry:
             if found:
                 entry["progress"] = format_episode_progress(season, episode)
+                entry["progress_verified"] = True
                 entry["updated_at"] = storage.now_iso()
             if total_season or total_episode:
                 entry["latest_available"] = format_episode_progress(total_season, total_episode)
@@ -581,6 +590,14 @@ class EntryForm(QDialog):
         self._status_parts = {}  # "cover"/"progress" -> current message, composed onto status_label
         self._pending_episode_identity = None  # tracks staleness for the async episode-progress lookup
         self._latest_available = entry.get("latest_available", "") if entry else ""
+        # Whether the season/episode spinners hold *confirmed* progress
+        # (fetched from a connected Stremio/AniList account, or typed in
+        # by hand) rather than just the unconfirmed "latest episode out"
+        # guess - only verified progress shows on the card. Manual edits
+        # to the spinners flip this true (see the valueChanged connect
+        # below, wired up only after the initial values are set so
+        # loading an existing entry doesn't misread as a fresh edit).
+        self._progress_verified = bool(entry and entry.get("progress_verified"))
         # Whether a suggestion has been applied yet (by click or by exact-
         # title auto-match - see _apply_search_results). Starts True for
         # an existing entry that's already resolved, so re-opening it to
@@ -711,6 +728,12 @@ class EntryForm(QDialog):
         episode_layout.addLayout(episode_col)
         episode_layout.addStretch()
         form.addWidget(self.episode_row)
+
+        # Wired up only after both initial values are set above, so
+        # loading an existing entry's saved progress isn't mistaken for a
+        # fresh manual edit - only edits from here on mark it verified.
+        self.season_spin.valueChanged.connect(self._on_progress_hand_edited)
+        self.episode_spin.valueChanged.connect(self._on_progress_hand_edited)
 
         # Anime/Series only: the Stremio deep link, freely editable. Manga
         # has no equivalent field - its open target is fully derived from
@@ -1039,7 +1062,15 @@ class EntryForm(QDialog):
         if episode and not self.season_spin.value() and not self.episode_spin.value():
             self.season_spin.setValue(season)
             self.episode_spin.setValue(episode)
+            # These setValue() calls above also trigger _on_progress_hand_
+            # edited (which assumes any spinner change is a manual edit) -
+            # this line runs after them and wins, recording the real
+            # is_real verdict instead.
+            self._progress_verified = is_real
             self._set_status_part("progress", "" if is_real else NOT_YOUR_PROGRESS_HINT)
+
+    def _on_progress_hand_edited(self, _value):
+        self._progress_verified = True
 
     # ------------------------------------------------------------------
     def _progress_text(self):
@@ -1068,6 +1099,7 @@ class EntryForm(QDialog):
             type=self.type_box.currentText(),
             status=self.status_box.currentText(),
             progress=self._progress_text(),
+            progress_verified=self._progress_verified,
             latest_available=self._latest_available,
             last_watched_chapter=self.watched_chapter_spin.value() if is_manga else None,
             url=self.url_edit.text().strip(),
