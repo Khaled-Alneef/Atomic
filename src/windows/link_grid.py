@@ -303,6 +303,7 @@ class EntryForm(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
         save_btn = QPushButton("Save", objectName="Accent")
+        save_btn.setDefault(True)
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)

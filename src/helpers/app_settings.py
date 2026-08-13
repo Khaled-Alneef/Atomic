@@ -35,6 +35,19 @@ def set_nav_order(order: list):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_hidden_sections() -> list:
+    """Sidebar page-names the user has hidden from the main sidebar (see
+    Settings > General), or [] if nothing's hidden. Hidden sections keep
+    their saved data - this only controls sidebar visibility."""
+    return _load().get("hidden_sections", [])
+
+
+def set_hidden_sections(hidden: list):
+    data = _load()
+    data["hidden_sections"] = list(hidden)
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 

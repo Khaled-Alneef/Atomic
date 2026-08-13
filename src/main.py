@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from helpers import app_settings, theme
-from helpers.nav_config import HOME_ITEM, nav_position, ordered_nav_items
+from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
@@ -177,10 +177,7 @@ class MainWindow(QMainWindow):
         self.nav_list.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
-        for name, page_name, icon in ordered_nav_items():
-            item = QListWidgetItem(f"  {icon}   {name}")
-            item.setData(Qt.ItemDataRole.UserRole, page_name)
-            self.nav_list.addItem(item)
+        self._populate_nav_list()
         self.nav_list.itemClicked.connect(self._on_nav_item_clicked)
         self.nav_list.model().rowsMoved.connect(self._on_nav_reordered)
         self.nav_list.updateGeometry()
@@ -199,6 +196,22 @@ class MainWindow(QMainWindow):
 
         return sidebar
 
+    def _populate_nav_list(self):
+        self.nav_list.clear()
+        for name, page_name, icon in visible_nav_items():
+            item = QListWidgetItem(f"  {icon}   {name}")
+            item.setData(Qt.ItemDataRole.UserRole, page_name)
+            self.nav_list.addItem(item)
+        self.nav_list.updateGeometry()
+
+    def _refresh_nav_list(self):
+        """Called by Settings when a section is hidden/unhidden, so the
+        sidebar updates immediately instead of needing a restart."""
+        self.nav_list.blockSignals(True)
+        self._populate_nav_list()
+        self.nav_list.blockSignals(False)
+        self._sync_nav_highlight(self._history[self._history_index])
+
     def _on_nav_item_clicked(self, item):
         self.navigate_to(item.data(Qt.ItemDataRole.UserRole))
 
@@ -210,8 +223,11 @@ class MainWindow(QMainWindow):
         app_settings.set_nav_order(order)
 
     def _show_add_menu(self, anchor_btn):
+        hidden = set(app_settings.get_hidden_sections())
         menu = QMenu(self)
         for label, page_name, action in ADD_ITEMS:
+            if page_name in hidden:
+                continue
             menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
         menu.exec(anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft()))
 

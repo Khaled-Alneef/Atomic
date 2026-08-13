@@ -4,17 +4,21 @@ main.py itself to avoid a circular import between the two."""
 
 from . import app_settings
 
-HOME_ITEM = ("Home", "home", "\U0001F3E0")
+# One uniform marker used for every sidebar entry instead of a different
+# emoji per section - modern flat-nav style, not a per-category pictogram.
+NAV_ICON = "●"  # ●
+
+HOME_ITEM = ("Home", "home", NAV_ICON)
 
 # Default order; the sidebar's drag-to-reorder list overrides this once
 # the user has customized it (see app_settings.get/set_nav_order).
 NAV_ITEMS = [
-    ("Anime", "anime", "\U0001F38C"),
-    ("Reading", "manga", "\U0001F4D6"),
-    ("Series", "series", "\U0001F3AC"),
-    ("Games", "games", "\U0001F3AE"),
-    ("Apps", "apps", "\U0001F4BB"),
-    ("Websites", "websites", "\U0001F310"),
+    ("Anime", "anime", NAV_ICON),
+    ("Reading", "manga", NAV_ICON),
+    ("Series", "series", NAV_ICON),
+    ("Games", "games", NAV_ICON),
+    ("Apps", "apps", NAV_ICON),
+    ("Websites", "websites", NAV_ICON),
 ]
 
 
@@ -27,6 +31,15 @@ def ordered_nav_items():
     ordered = [by_page[p] for p in order if p in by_page]
     ordered += [item for item in NAV_ITEMS if item[1] not in order]
     return ordered
+
+
+def visible_nav_items():
+    """ordered_nav_items() minus whatever the user has hidden from the
+    main sidebar in Settings > General (see app_settings.get/set_hidden_
+    sections) - hidden sections keep their saved data, they just don't
+    get a sidebar entry until toggled back on."""
+    hidden = set(app_settings.get_hidden_sections())
+    return [item for item in ordered_nav_items() if item[1] not in hidden]
 
 
 def nav_position(page_name: str) -> int:

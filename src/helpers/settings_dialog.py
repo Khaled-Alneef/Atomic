@@ -1,21 +1,29 @@
-"""Small Settings popup: Windows-startup toggle, which app Anime entries
+"""Settings window: a category sidebar (mirroring the main app window's
+own sidebar) on the left, the selected category's controls on the right.
+
+General: Windows-startup toggle and which sections show up in the main
+sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
+without losing their saved data). Anime & Series: which app Anime entries
 open in (Stremio or Crunchyroll), the connected Stremio account and/or
-AniList username used to pull in real watch progress for either, and the
-list of manga/manhwa/manhua reading sites the Reading page can search
-and open to."""
+AniList username used to pull in real watch progress for either. Reading:
+the list of manga/manhwa/manhua reading sites the Reading page can search
+and open to, plus an optional music/ambience URL.
+"""
 
 import threading
 
 from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
-from . import app_settings, manga_sites, startup, stremio, theme
+from . import app_settings, manga_sites, nav_config, startup, stremio, theme
 from .widgets import scroll_area
+
+CATEGORIES = ["General", "Anime & Series", "Reading"]
 
 
 class _StremioLoginSignals(QObject):
@@ -26,20 +34,86 @@ class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setFixedSize(440, 640)
+        self.resize(920, 640)
+        self.setMinimumSize(760, 560)
         theme.apply_dark_titlebar(self)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 20)
-        outer.setSpacing(10)
-        outer.addWidget(QLabel("Settings", objectName="PanelTitle"))
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        body = QWidget()
-        form = QVBoxLayout(body)
-        form.setContentsMargins(0, 0, 10, 0)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        outer.addLayout(body, stretch=1)
+
+        body.addWidget(self._build_category_sidebar())
+
+        content_col = QVBoxLayout()
+        content_col.setContentsMargins(28, 24, 28, 20)
+        content_col.setSpacing(14)
+        content_col.addWidget(QLabel("Settings", objectName="PanelTitle"))
+
+        self._login_signals = _StremioLoginSignals()
+        self._login_signals.done.connect(self._on_stremio_login_done)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(scroll_area(self._build_general_page()))
+        self.stack.addWidget(scroll_area(self._build_anime_page()))
+        self.stack.addWidget(scroll_area(self._build_reading_page()))
+        content_col.addWidget(self.stack, stretch=1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        content_col.addLayout(btn_row)
+
+        content_wrap = QWidget()
+        content_wrap.setLayout(content_col)
+        body.addWidget(content_wrap, stretch=1)
+
+        self._refresh_stremio_account()
+        self._refresh_sites()
+
+        self.exec()
+
+    # ------------------------------------------------------------------
+    def _build_category_sidebar(self):
+        sidebar = QWidget(objectName="Sidebar")
+        sidebar.setFixedWidth(210)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(14, 20, 14, 16)
+        layout.setSpacing(4)
+
+        self.category_list = QListWidget(objectName="NavList")
+        self.category_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.category_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.category_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.category_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.category_list.setSpacing(2)
+        for name in CATEGORIES:
+            self.category_list.addItem(QListWidgetItem(f"  {name}"))
+        self.category_list.currentRowChanged.connect(self._on_category_changed)
+        layout.addWidget(self.category_list)
+        layout.addStretch()
+
+        self.category_list.setCurrentRow(0)
+        return sidebar
+
+    def _on_category_changed(self, row):
+        if row >= 0:
+            self.stack.setCurrentIndex(row)
+
+    # ------------------------------------------------------------------
+    def _build_general_page(self):
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
         form.setSpacing(6)
-        outer.addWidget(scroll_area(body), stretch=1)
 
+        form.addWidget(QLabel("Startup", objectName="SectionTitle"))
         self.startup_check = QCheckBox("Launch on Windows startup")
         self.startup_check.setChecked(startup.is_enabled())
         self.startup_check.toggled.connect(self._toggle_startup)
@@ -49,8 +123,48 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         form.addWidget(hint)
 
-        form.addSpacing(18)
-        form.addWidget(QLabel("Anime Opens In"))
+        form.addSpacing(24)
+        form.addWidget(QLabel("Sidebar Sections", objectName="SectionTitle"))
+        sections_hint = QLabel(
+            "Choose which sections show up in the main sidebar. Hidden "
+            "sections keep their saved entries - toggle one back on any "
+            "time to bring it back.",
+            objectName="Muted",
+        )
+        sections_hint.setWordWrap(True)
+        form.addWidget(sections_hint)
+
+        hidden = set(app_settings.get_hidden_sections())
+        self.section_checks = {}
+        for name, page_name, _icon in nav_config.ordered_nav_items():
+            cb = QCheckBox(name)
+            cb.setChecked(page_name not in hidden)
+            cb.toggled.connect(lambda checked, p=page_name: self._toggle_section_visibility(p, checked))
+            form.addWidget(cb)
+            self.section_checks[page_name] = cb
+
+        form.addStretch()
+        return page
+
+    def _toggle_section_visibility(self, page_name, visible):
+        hidden = set(app_settings.get_hidden_sections())
+        if visible:
+            hidden.discard(page_name)
+        else:
+            hidden.add(page_name)
+        app_settings.set_hidden_sections(hidden)
+        main_window = self.parent()
+        if main_window is not None and hasattr(main_window, "_refresh_nav_list"):
+            main_window._refresh_nav_list()
+
+    # ------------------------------------------------------------------
+    def _build_anime_page(self):
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        form.addWidget(QLabel("Anime Opens In", objectName="SectionTitle"))
         self.anime_provider_box = QComboBox()
         self.anime_provider_box.addItem("Stremio", "stremio")
         self.anime_provider_box.addItem("Crunchyroll", "crunchyroll")
@@ -77,10 +191,8 @@ class SettingsDialog(QDialog):
         anime_provider_hint.setWordWrap(True)
         form.addWidget(anime_provider_hint)
 
-        form.addSpacing(18)
-        form.addWidget(QLabel("Stremio Account"))
-        self._login_signals = _StremioLoginSignals()
-        self._login_signals.done.connect(self._on_stremio_login_done)
+        form.addSpacing(24)
+        form.addWidget(QLabel("Stremio Account", objectName="SectionTitle"))
 
         self.stremio_account_status = QLabel("", objectName="Muted")
         form.addWidget(self.stremio_account_status)
@@ -113,10 +225,9 @@ class SettingsDialog(QDialog):
         )
         stremio_account_hint.setWordWrap(True)
         form.addWidget(stremio_account_hint)
-        self._refresh_stremio_account()
 
-        form.addSpacing(18)
-        form.addWidget(QLabel("AniList Username"))
+        form.addSpacing(24)
+        form.addWidget(QLabel("AniList Username", objectName="SectionTitle"))
         self.anilist_username_edit = QLineEdit(app_settings.get_anilist_username())
         self.anilist_username_edit.setPlaceholderText("Your AniList username")
         self.anilist_username_edit.editingFinished.connect(self._save_anilist_username)
@@ -134,8 +245,17 @@ class SettingsDialog(QDialog):
         anilist_hint.setWordWrap(True)
         form.addWidget(anilist_hint)
 
-        form.addSpacing(18)
-        form.addWidget(QLabel("Reading Websites"))
+        form.addStretch()
+        return page
+
+    # ------------------------------------------------------------------
+    def _build_reading_page(self):
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        form.addWidget(QLabel("Reading Websites", objectName="SectionTitle"))
         sites_hint = QLabel(
             "Sites the Reading page searches for direct links and can open "
             "entries straight to, the way Stremio does for Anime/Series. "
@@ -147,9 +267,9 @@ class SettingsDialog(QDialog):
         form.addWidget(sites_hint)
 
         self.sites_list = QListWidget()
-        self.sites_list.setFixedHeight(120)
+        self.sites_list.setMinimumHeight(160)
         self.sites_list.itemDoubleClicked.connect(self._edit_site)
-        form.addWidget(self.sites_list)
+        form.addWidget(self.sites_list, stretch=1)
 
         sites_btn_row = QHBoxLayout()
         add_site_btn = QPushButton("Add...")
@@ -162,10 +282,9 @@ class SettingsDialog(QDialog):
         remove_site_btn.clicked.connect(self._remove_site)
         sites_btn_row.addWidget(remove_site_btn)
         form.addLayout(sites_btn_row)
-        self._refresh_sites()
 
-        form.addSpacing(18)
-        form.addWidget(QLabel("Reading Music URL"))
+        form.addSpacing(24)
+        form.addWidget(QLabel("Reading Music URL", objectName="SectionTitle"))
         self.manga_music_edit = QLineEdit(app_settings.get_manga_music_url())
         self.manga_music_edit.setPlaceholderText("https://example.com/lofi-playlist")
         self.manga_music_edit.editingFinished.connect(self._save_manga_music_url)
@@ -179,13 +298,9 @@ class SettingsDialog(QDialog):
         )
         manga_music_hint.setWordWrap(True)
         form.addWidget(manga_music_hint)
+
         form.addStretch()
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        outer.addWidget(close_btn)
-
-        self.exec()
+        return page
 
     # ------------------------------------------------------------------
     def _refresh_sites(self):
@@ -317,6 +432,7 @@ class MangaSiteForm(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
         save_btn = QPushButton("Save", objectName="Accent")
+        save_btn.setDefault(True)
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)

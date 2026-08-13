@@ -1,32 +1,34 @@
 """Games page: a small local launcher. Add a game's executable/shortcut
 once (its icon is picked up automatically), then launch it with one click.
-Reorder manually by dragging (or Move Up/Down), or sort by name/date/last
-played."""
+Shown as a poster-style grid, same as Anime/Reading/Series - right-click a
+card for Edit/Move Up/Move Down/Delete, sort by name/date/last played, or
+reorder manually (Move Up/Down) while sorted as Custom Order.
+"""
 
 import subprocess
 import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout,
+    QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
 from helpers import icon_extract, images, storage, theme
-from helpers.widgets import GlassPage
+from helpers.widgets import Card, GlassPage, scroll_area
 
 DATA_FILE = "games.json"
-ICON_SIZE = (34, 34)
+ICON_EXTRACT_SIZE = 96
+CARD_ICON_SIZE = (112, 112)
+GRID_COLS = 6
 FILE_FILTER = "Games (*.exe *.lnk *.url);;All files (*.*)"
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Played"]
 
 
-def _extract_and_cache_icon(path):
-    img = icon_extract.extract_icon(path, size=64)
+def _extract_and_cache_icon(path, size=ICON_EXTRACT_SIZE):
+    img = icon_extract.extract_icon(path, size=size)
     if img is None:
         return None
     dest = images.CACHE_DIR / f"game_{uuid.uuid4().hex}.png"
@@ -52,54 +54,36 @@ class GamesPage(GlassPage):
         outer.addWidget(panel)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(24, 20, 24, 24)
-        layout.setSpacing(12)
+        layout.setSpacing(14)
 
-        layout.addWidget(QLabel("Games", objectName="PanelTitle"))
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Games", objectName="PanelTitle"))
+        header.addStretch()
+        add_btn = QPushButton("+", objectName="AccentIcon")
+        add_btn.setFixedSize(40, 40)
+        add_btn.setToolTip("Add Game")
+        add_btn.clicked.connect(self._add_game)
+        header.addWidget(add_btn)
+        layout.addLayout(header)
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
         self.sort_box = QComboBox()
         self.sort_box.addItems(SORT_OPTIONS)
-        self.sort_box.currentTextChanged.connect(self._refresh_list)
+        self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        hint = QLabel("(drag rows, or use Move Up/Down, while sorted as Custom Order)", objectName="Muted")
+        hint = QLabel("(right-click a game for Move Up/Down while sorted as Custom Order)", objectName="Muted")
         top_row.addWidget(hint)
         top_row.addStretch()
         layout.addLayout(top_row)
 
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setRootIsDecorated(False)
-        self.tree.setIconSize(QSize(*ICON_SIZE))
-        self.tree.itemDoubleClicked.connect(lambda *_: self._launch_selected())
-        self.tree.model().rowsMoved.connect(self._on_reorder)
-        layout.addWidget(self.tree, stretch=1)
+        self.grid_body = QWidget()
+        self.grid_layout = QGridLayout(self.grid_body)
+        self.grid_layout.setSpacing(14)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(scroll_area(self.grid_body), stretch=1)
 
-        btn_row = QHBoxLayout()
-        add_btn = QPushButton("+ Add Game", objectName="Accent")
-        add_btn.clicked.connect(self._add_game)
-        btn_row.addWidget(add_btn)
-        launch_btn = QPushButton("Launch")
-        launch_btn.clicked.connect(self._launch_selected)
-        btn_row.addWidget(launch_btn)
-        edit_btn = QPushButton("Edit")
-        edit_btn.clicked.connect(self._edit_selected)
-        btn_row.addWidget(edit_btn)
-        up_btn = QPushButton("↑", objectName="Small")
-        up_btn.setFixedWidth(36)
-        up_btn.clicked.connect(lambda: self._move_selected(-1))
-        btn_row.addWidget(up_btn)
-        down_btn = QPushButton("↓", objectName="Small")
-        down_btn.setFixedWidth(36)
-        down_btn.clicked.connect(lambda: self._move_selected(1))
-        btn_row.addWidget(down_btn)
-        btn_row.addStretch()
-        remove_btn = QPushButton("Remove", objectName="Danger")
-        remove_btn.clicked.connect(self._remove_selected)
-        btn_row.addWidget(remove_btn)
-        layout.addLayout(btn_row)
-
-        self._refresh_list()
+        self._refresh_grid()
 
     # ------------------------------------------------------------------
     def _migrate_and_backfill(self):
@@ -129,28 +113,56 @@ class GamesPage(GlassPage):
             return sorted(self.games, key=lambda g: g.get("last_played") or "", reverse=True)
         return self.games
 
-    def _refresh_list(self):
-        self.tree.blockSignals(True)
-        self.tree.clear()
-        custom = self.sort_box.currentText() == "Custom Order"
-        self.tree.setDragDropMode(
-            QAbstractItemView.DragDropMode.InternalMove if custom
-            else QAbstractItemView.DragDropMode.NoDragDrop
-        )
-        for game in self._sorted_games():
-            item = QTreeWidgetItem([f"  {game['name']}"])
-            pixmap = images.thumbnail_or_avatar(game.get("icon"), game["name"], ICON_SIZE)
-            item.setIcon(0, QIcon(pixmap))
-            item.setData(0, Qt.ItemDataRole.UserRole, game["id"])
-            self.tree.addTopLevelItem(item)
-        self.tree.blockSignals(False)
+    # ------------------------------------------------------------------
+    def _refresh_grid(self, *_args):
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
 
-    def _on_reorder(self, *_args):
-        visible_ids = [self.tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
-                       for i in range(self.tree.topLevelItemCount())]
-        by_id = {g["id"]: g for g in self.games}
-        self.games = [by_id[i] for i in visible_ids if i in by_id]
-        storage.save(DATA_FILE, self.games)
+        games = self._sorted_games()
+        if not games:
+            empty = QLabel("No games yet - click '+' to add one.", objectName="Muted")
+            self.grid_layout.addWidget(empty, 0, 0)
+            return
+
+        for index, game in enumerate(games):
+            card = self._build_card(game)
+            self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
+
+    def _build_card(self, game):
+        card = Card(hoverable=True)
+        card.setFixedWidth(CARD_ICON_SIZE[0] + 24)
+        card.setToolTip(game["name"])
+        layout = QVBoxLayout(card)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.setContentsMargins(10, 12, 10, 12)
+        layout.setSpacing(6)
+
+        icon = QLabel()
+        icon.setFixedSize(*CARD_ICON_SIZE)
+        icon.setPixmap(images.thumbnail_or_avatar(game.get("icon"), game["name"], CARD_ICON_SIZE))
+        layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        name = QLabel(game["name"], objectName="CardTitle")
+        name.setWordWrap(True)
+        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(name)
+
+        card.clicked.connect(lambda g=game: self._launch(g))
+        card.rightClicked.connect(lambda event, g=game: self._show_context_menu(event, g))
+        return card
+
+    def _show_context_menu(self, event, game):
+        menu = QMenu(self)
+        menu.addAction("Launch", lambda: self._launch(game))
+        menu.addAction("Edit", lambda: self._edit(game))
+        if self.sort_box.currentText() == "Custom Order":
+            menu.addAction("Move Up", lambda: self._move(game, -1))
+            menu.addAction("Move Down", lambda: self._move(game, 1))
+        menu.addAction("Delete", lambda: self._remove(game))
+        menu.exec(event.globalPosition().toPoint())
 
     # ------------------------------------------------------------------
     def _add_game(self):
@@ -164,65 +176,41 @@ class GamesPage(GlassPage):
             "added_at": storage.now_iso(), "last_played": None,
         })
         storage.save(DATA_FILE, self.games)
-        self._refresh_list()
+        self._refresh_grid()
 
-    def _selected_index(self):
-        items = self.tree.selectedItems()
-        if not items:
-            return None
-        game_id = items[0].data(0, Qt.ItemDataRole.UserRole)
-        return next((i for i, g in enumerate(self.games) if g["id"] == game_id), None)
-
-    def _launch_selected(self):
-        idx = self._selected_index()
-        if idx is None:
-            QMessageBox.information(self, "Games", "Select a game first.")
-            return
-        game = self.games[idx]
+    def _launch(self, game):
         try:
             subprocess.Popen([game["path"]], shell=True, cwd=str(Path(game["path"]).parent))
             game["last_played"] = storage.now_iso()
             storage.save(DATA_FILE, self.games)
             if self.sort_box.currentText() == "Last Played":
-                self._refresh_list()
+                self._refresh_grid()
         except OSError as exc:
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
 
-    def _edit_selected(self):
-        idx = self._selected_index()
-        if idx is None:
-            QMessageBox.information(self, "Games", "Select a game first.")
-            return
-        EditGameForm(self, self.games[idx], on_save=self._on_edit_save)
+    def _edit(self, game):
+        EditGameForm(self, game, on_save=self._on_edit_save)
 
     def _on_edit_save(self):
         storage.save(DATA_FILE, self.games)
-        self._refresh_list()
+        self._refresh_grid()
 
-    def _move_selected(self, delta):
+    def _move(self, game, delta):
         if self.sort_box.currentText() != "Custom Order":
             QMessageBox.information(self, "Games", "Switch Sort to 'Custom Order' to reorder manually.")
             return
-        idx = self._selected_index()
-        if idx is None:
-            QMessageBox.information(self, "Games", "Select a game first.")
-            return
+        idx = self.games.index(game)
         new_idx = idx + delta
         if 0 <= new_idx < len(self.games):
             self.games[idx], self.games[new_idx] = self.games[new_idx], self.games[idx]
             storage.save(DATA_FILE, self.games)
-            self._refresh_list()
+            self._refresh_grid()
 
-    def _remove_selected(self):
-        idx = self._selected_index()
-        if idx is None:
-            QMessageBox.information(self, "Games", "Select a game first.")
-            return
-        game = self.games[idx]
+    def _remove(self, game):
         if QMessageBox.question(self, "Remove Game", f"Remove '{game['name']}' from the list?") == QMessageBox.StandardButton.Yes:
-            del self.games[idx]
+            self.games.remove(game)
             storage.save(DATA_FILE, self.games)
-            self._refresh_list()
+            self._refresh_grid()
 
 
 class EditGameForm(QDialog):
@@ -277,6 +265,7 @@ class EditGameForm(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
         save_btn = QPushButton("Save", objectName="Accent")
+        save_btn.setDefault(True)
         save_btn.clicked.connect(self._save)
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)
