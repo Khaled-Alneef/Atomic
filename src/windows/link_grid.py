@@ -13,7 +13,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -27,6 +27,10 @@ MAX_TARGETS = 3
 CARD_WIDTH = 120
 THUMB_SIZE = (44, 44)
 GRID_COLS = 13
+
+# Same shape as Games' SORT_OPTIONS ("Last Played" here is "Last Used" -
+# whenever an entry's targets were last opened, see _open_entry).
+SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Used"]
 
 
 def open_link_entry(parent, entry, label="Links"):
@@ -48,9 +52,15 @@ def open_link_entry(parent, entry, label="Links"):
 def _migrate_entry(entry):
     """Older saves stored a single type/target pair directly on the
     entry; fold that into the new `targets` list so existing data keeps
-    working."""
+    working. Also backfills added_at/last_used (added once sorting/Move
+    Up-Down was added, matching Games) for entries saved before either
+    existed."""
     if "targets" not in entry:
         entry["targets"] = [{"type": entry.pop("type", "site"), "target": entry.pop("target", "")}]
+    if "added_at" not in entry:
+        entry["added_at"] = storage.now_iso()
+    if "last_used" not in entry:
+        entry["last_used"] = None
     return entry
 
 
@@ -105,6 +115,17 @@ class LinkGridPage(GlassPage):
         header.addWidget(add_btn, alignment=Qt.AlignmentFlag.AlignTop)
         panel_layout.addLayout(header)
 
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("Sort:"))
+        self.sort_box = QComboBox()
+        self.sort_box.addItems(SORT_OPTIONS)
+        self.sort_box.currentTextChanged.connect(self._refresh_grid)
+        top_row.addWidget(self.sort_box)
+        hint = QLabel("(right-click a card for Move Up/Down while sorted as Custom Order)", objectName="Muted")
+        top_row.addWidget(hint)
+        top_row.addStretch()
+        panel_layout.addLayout(top_row)
+
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
         self.grid_layout.setSpacing(10)
@@ -114,11 +135,27 @@ class LinkGridPage(GlassPage):
         self._refresh_grid()
 
     # ------------------------------------------------------------------
-    def _refresh_grid(self):
+    def _sorted_entries(self):
+        mode = self.sort_box.currentText()
+        if mode == "Name (A-Z)":
+            return sorted(self.entries, key=lambda e: e["name"].lower())
+        if mode == "Date Added (Newest)":
+            return sorted(self.entries, key=lambda e: e.get("added_at") or "", reverse=True)
+        if mode == "Last Used":
+            return sorted(self.entries, key=lambda e: e.get("last_used") or "", reverse=True)
+        return self.entries
+
+    def _refresh_grid(self, *_args):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                # deleteLater() alone leaves the widget visible (just no
+                # longer laid out) until Qt gets around to the deferred
+                # delete - hide() immediately so a leftover "no entries
+                # yet" placeholder doesn't linger behind the first card
+                # added right after it.
+                widget.hide()
                 widget.deleteLater()
 
         if not self.entries:
@@ -127,7 +164,7 @@ class LinkGridPage(GlassPage):
             self.grid_layout.addWidget(empty, 0, 0)
             return
 
-        for index, entry in enumerate(self.entries):
+        for index, entry in enumerate(self._sorted_entries()):
             card = self._build_card(entry)
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
@@ -155,12 +192,30 @@ class LinkGridPage(GlassPage):
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_edit_form(entry))
+        if self.sort_box.currentText() == "Custom Order":
+            menu.addAction("Move Up", lambda: self._move_entry(entry, -1))
+            menu.addAction("Move Down", lambda: self._move_entry(entry, 1))
         menu.addAction("Delete", lambda: self._remove_entry(entry))
         menu.exec(event.globalPosition().toPoint())
 
     # ------------------------------------------------------------------
     def _open_entry(self, entry):
         open_link_entry(self, entry, self.TITLE)
+        entry["last_used"] = storage.now_iso()
+        storage.save(self.DATA_FILE, self.entries)
+        if self.sort_box.currentText() == "Last Used":
+            self._refresh_grid()
+
+    def _move_entry(self, entry, delta):
+        if self.sort_box.currentText() != "Custom Order":
+            QMessageBox.information(self, self.TITLE, "Switch Sort to 'Custom Order' to reorder manually.")
+            return
+        idx = self.entries.index(entry)
+        new_idx = idx + delta
+        if 0 <= new_idx < len(self.entries):
+            self.entries[idx], self.entries[new_idx] = self.entries[new_idx], self.entries[idx]
+            storage.save(self.DATA_FILE, self.entries)
+            self._refresh_grid()
 
     def _remove_entry(self, entry):
         if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") == QMessageBox.StandardButton.Yes:
@@ -176,6 +231,8 @@ class LinkGridPage(GlassPage):
 
     def _on_form_save(self, entry, is_new):
         if is_new:
+            entry["added_at"] = storage.now_iso()
+            entry["last_used"] = None
             self.entries.append(entry)
         storage.save(self.DATA_FILE, self.entries)
         self._refresh_grid()

@@ -287,6 +287,8 @@ QPushButton#Icon {{
     border: none;
     border-radius: {RADIUS_SM}px;
     padding: 6px;
+    font-size: 15pt;
+    font-weight: 700;
 }}
 QPushButton#Icon:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; }}
 

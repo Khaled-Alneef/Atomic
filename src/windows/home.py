@@ -126,9 +126,9 @@ class HomePage(GlassPage):
         lists_row = QHBoxLayout()
         lists_row.setSpacing(16)
         if self.apps:
-            lists_row.addWidget(self._build_quick_list("Quick Apps", self.apps))
+            lists_row.addWidget(self._build_quick_list("Quick Apps", self.apps, APPS_FILE))
         if self.websites:
-            lists_row.addWidget(self._build_quick_list("Websites", self.websites))
+            lists_row.addWidget(self._build_quick_list("Websites", self.websites, WEBSITES_FILE))
         if self.apps or self.websites:
             row_wrap = QWidget(objectName="Bare")
             row_wrap.setLayout(lists_row)
@@ -166,6 +166,13 @@ class HomePage(GlassPage):
         played = sorted(played, key=lambda g: g["last_played"], reverse=True)
         rest = [g for g in self.games if not g.get("last_played")]
         return (played + rest)[:GAMES_PREVIEW_LIMIT]
+
+    def _recent_links(self, entries):
+        """Same "sort by latest used" rule as Anime/Manga/Series'
+        updated_at (see _recent_entries) - Quick Apps/Websites previews
+        aren't a static list anymore, they float whatever was opened
+        most recently to the top."""
+        return sorted(entries, key=lambda e: e.get("last_used") or "", reverse=True)
 
     # ------------------------------------------------------------------
     def _build_section(self, title, content_widget):
@@ -368,14 +375,14 @@ class HomePage(GlassPage):
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
 
     # ------------------------------------------------------------------
-    def _build_quick_list(self, title, entries):
+    def _build_quick_list(self, title, entries, data_file):
         frame = QWidget(objectName="SectionBox")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(8)
         layout.addWidget(QLabel(title, objectName="CardTitle"))
 
-        for entry in entries[:QUICK_LIST_LIMIT]:
+        for entry in self._recent_links(entries)[:QUICK_LIST_LIMIT]:
             row = Card(hoverable=True)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(8, 6, 8, 6)
@@ -388,7 +395,12 @@ class HomePage(GlassPage):
             row_layout.addWidget(QLabel(entry["name"]))
             row_layout.addStretch()
 
-            row.clicked.connect(lambda en=entry: open_link_entry(self, en, title))
+            row.clicked.connect(lambda en=entry, df=data_file, es=entries: self._open_quick_link(en, title, df, es))
             layout.addWidget(row)
 
         return frame
+
+    def _open_quick_link(self, entry, title, data_file, entries):
+        open_link_entry(self, entry, title)
+        entry["last_used"] = storage.now_iso()
+        storage.save(data_file, entries)
