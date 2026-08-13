@@ -1,6 +1,6 @@
 """Bulk-discover installed games from launcher install directories
-(Steam/Battle.net/Epic Games/Riot Games), instead of adding each one by
-hand through a file picker.
+(Steam/Battle.net/Epic Games/Riot Games/Xbox), instead of adding each one
+by hand through a file picker.
 
 Each launcher installs every game as its own subfolder somewhere under
 the directory the user points at in Settings > Games - Steam nests that
@@ -29,6 +29,12 @@ LAUNCHERS = [
     ("battlenet", "Battle.net", None),
     ("epicgames", "Epic Games", None),
     ("riotgames", "Riot Games", None),
+    # Xbox app / PC Game Pass installs put each game in its own folder
+    # directly under the configured root too (the actual .exe then sits a
+    # level or two deeper, under a "Content" subfolder - already handled
+    # by _candidate_exes' recursive per-game-folder search, same as the
+    # nesting in every other launcher above).
+    ("xbox", "Xbox", None),
 ]
 
 # How many folder levels deep to look for a .exe inside one game's own

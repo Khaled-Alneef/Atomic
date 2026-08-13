@@ -105,6 +105,19 @@ _MADARA_COVER_RE = re.compile(
 
 _SWAT_SERIES_URL_RE = re.compile(r'^(https?://[^/]+/)series/(\d+)/?$')
 
+# WordPress auto-generates a whole family of cropped sizes for every
+# upload ("cover-800x1200.jpg", "cover-231x300.jpg", ...) alongside the
+# original - sites that link search-result covers to one of those small
+# crops still serve the un-suffixed original at the same path, so
+# stripping this and re-requesting it gets a much sharper image (verified
+# against Lava Scans/TeamX: a "-210x300" or "-231x300" hit is routinely
+# 3-10x the pixel dimensions once stripped).
+_WP_SIZE_SUFFIX_RE = re.compile(r'-\d{2,4}x\d{2,4}(?=\.[a-zA-Z0-9]+(?:[?#].*)?$)')
+
+
+def _strip_wp_size_suffix(url):
+    return _WP_SIZE_SUFFIX_RE.sub("", url, count=1) if url else url
+
 
 def fetch_manga_details(page_url: str, timeout: int = 6):
     """Best-effort cover + latest-chapter number for a specific manga
@@ -144,6 +157,7 @@ def _scrape_manga_page(page_url: str, timeout: int):
     else:
         og_match = _OG_IMAGE_RE.search(body)
         cover_url = (og_match.group(1) or og_match.group(2)) if og_match else None
+    cover_url = _strip_wp_size_suffix(cover_url)
 
     # Heuristic: the highest chapter number linked from the manga's own
     # page is its latest chapter - works across Madara-style themes
@@ -209,7 +223,8 @@ def _search_ajaxy(base_url: str, query: str, timeout: int) -> list:
                 except (TypeError, ValueError):
                     latest_chapter = None
                 results.append({"title": r["post_title"], "url": r["post_link"],
-                                 "cover_url": r.get("post_image"), "latest_chapter": latest_chapter})
+                                 "cover_url": _strip_wp_size_suffix(r.get("post_image")),
+                                 "latest_chapter": latest_chapter})
     return results
 
 
@@ -238,6 +253,11 @@ _AJAX_SEARCH_CARD_RE = re.compile(r'<a\s+href="(?P<url>[^"]+)"[^>]*>(?P<body>.*?
 _AJAX_SEARCH_IMG_RE = re.compile(r'<img[^>]*src="(?P<img>[^"]+)"[^>]*alt="(?P<title>[^"]+)"')
 _AJAX_SEARCH_CHAPTER_RE = re.compile(r'([0-9]+(?:\.[0-9]+)?)\s*(?:فصل|chapters?)', re.IGNORECASE)
 
+# TeamX's search cards link a tiny (~100x130) "thumbnail_<name>" crop -
+# the plain "<name>" at the same path is the real cover, 5-10x the pixel
+# dimensions (verified against several live results).
+_TEAMX_THUMBNAIL_PREFIX_RE = re.compile(r'/thumbnail_(?=[^/]+$)')
+
 
 def _search_ajax_html(base_url: str, query: str, timeout: int) -> list:
     """A plain GET endpoint (found on TeamX/olympustaff.com) that returns
@@ -252,10 +272,11 @@ def _search_ajax_html(base_url: str, query: str, timeout: int) -> list:
         if not img_match:
             continue
         chapter_match = _AJAX_SEARCH_CHAPTER_RE.search(card.group("body"))
+        cover_url = _TEAMX_THUMBNAIL_PREFIX_RE.sub("/", img_match.group("img"), count=1)
         results.append({
             "title": html.unescape(img_match.group("title")),
             "url": card.group("url"),
-            "cover_url": img_match.group("img"),
+            "cover_url": cover_url,
             "latest_chapter": float(chapter_match.group(1)) if chapter_match else None,
         })
     return results
@@ -300,3 +321,18 @@ def search_all(query: str, timeout: int = 6) -> list:
             for r in site_results:
                 results.append({**r, "site_id": site["id"], "site_name": site["name"]})
     return results
+
+
+def upgrade_cover_url(url):
+    """Re-derive the sharp original for a cover_url saved before the
+    engines above started stripping WordPress's size-suffixed crops /
+    TeamX's thumbnail_ prefix - same transforms, applied to an
+    already-saved URL instead of a fresh search result, so existing
+    tracker entries can be backfilled without re-searching. Returns the
+    url unchanged if neither pattern matches (nothing to upgrade)."""
+    if not url:
+        return url
+    url = _strip_wp_size_suffix(url)
+    if "olympustaff.com" in url:
+        url = _TEAMX_THUMBNAIL_PREFIX_RE.sub("/", url, count=1)
+    return url

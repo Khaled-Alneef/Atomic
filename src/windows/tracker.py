@@ -65,8 +65,8 @@ STREMIO_CATALOG_BY_TYPE = {"Anime": "series", "Series": "series"}
 # far, via Settings > Stremio Account).
 NOT_YOUR_PROGRESS_HINT = "Filled with the latest available - not your progress, adjust if you're behind"
 
-POSTER_SIZE = (140, 190)
-GRID_COLS = 6
+POSTER_SIZE = (160, 216)
+GRID_COLS = 9
 PREVIEW_SIZE = (90, 120)
 SEARCH_DEBOUNCE_MS = 450
 
@@ -257,6 +257,10 @@ class _ProgressSyncSignals(QObject):
     resolved = Signal(str, int, int, bool, int, int, bool)
 
 
+class _CoverSignals(QObject):
+    ready = Signal(str, str, str)  # entry id, new cover_url, local cache path
+
+
 class TrackerPage(GlassPage):
     """Base for the Anime/Manga/Series pages. Subclasses set
     DATA_FILE/ENTRY_TYPES/TITLE/TYPE_OPTIONS/PROGRESS_COLUMNS.
@@ -282,6 +286,9 @@ class TrackerPage(GlassPage):
         self._sync_pending = 0
         self._sync_found_count = 0
         self._sync_not_found_count = 0
+
+        self._cover_signals = _CoverSignals()
+        self._cover_signals.ready.connect(self._on_sharper_cover_ready)
 
         self.entries = _migrate(storage.load(self.DATA_FILE, []), self.DATA_FILE)
 
@@ -328,8 +335,45 @@ class TrackerPage(GlassPage):
         self._refresh_grid()
         if self.SUPPORTS_PROGRESS_SYNC:
             self._backfill_missing_latest_available()
+        self._backfill_sharper_covers()
 
     # ------------------------------------------------------------------
+    def _backfill_sharper_covers(self):
+        """Manga covers saved before manga_sites.py started stripping
+        WordPress's size-suffixed crops / TeamX's thumbnail_ prefix off
+        search-result covers (see manga_sites.upgrade_cover_url) are
+        stuck on those blurry small images forever otherwise - nothing
+        else ever re-derives cover_path from cover_url after the initial
+        save. Silently re-download the sharper original in the
+        background, same one-time-catch-up pattern as
+        _backfill_missing_latest_available."""
+        for entry in self.entries:
+            if entry["type"] not in MANGA_TYPES:
+                continue
+            upgraded = manga_sites.upgrade_cover_url(entry.get("cover_url"))
+            if upgraded and upgraded != entry.get("cover_url"):
+                threading.Thread(target=self._fetch_sharper_cover,
+                                  args=(entry["id"], upgraded), daemon=True).start()
+
+    def _fetch_sharper_cover(self, entry_id, new_url):
+        # Must never raise: an uncaught exception here would kill the
+        # background thread silently.
+        try:
+            path = images.download(new_url)
+        except Exception:
+            path = None
+        if path:
+            self._cover_signals.ready.emit(entry_id, new_url, str(path))
+
+    def _on_sharper_cover_ready(self, entry_id, new_url, path):
+        entry = next((e for e in self.entries if e["id"] == entry_id), None)
+        if not entry:
+            return
+        entry["cover_url"] = new_url
+        entry["cover_path"] = path
+        storage.save(self.DATA_FILE, self.entries)
+        self._refresh_grid()
+
     def _backfill_missing_latest_available(self):
         """Entries saved before latest_available was tracked (or from a
         pick where the background lookup didn't finish/land) leave the
