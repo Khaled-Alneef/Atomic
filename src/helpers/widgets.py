@@ -2,7 +2,7 @@
 
 import weakref
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QPainter, QRadialGradient
 from PyQt6.QtWidgets import (
@@ -225,9 +225,22 @@ class Toast(QLabel):
         self._dismiss_timer.start(duration_ms if duration_ms else STICKY_TOAST_MAX_MS)
 
     def _move_to_corner(self, window, margin=24):
+        """Sit in the bottom-right corner of the anchor window.
+
+        Off window.geometry(), which is already in global coordinates,
+        rather than mapToGlobal(width, height) - which this used to do and
+        which does not survive two monitors on different scale factors.
+        With the primary display at 125% and the app maximized on a 100%
+        one, that call came back 1032 -> 826: the window's real bottom
+        edge divided by the *other* screen's scale factor. Every message
+        was then placed against a bottom edge some 200px too high, which
+        is why they floated in the middle of the page instead of sitting
+        in the corner.
+        """
         self.adjustSize()
-        corner = window.mapToGlobal(QPoint(window.width(), window.height()))
-        x, y = corner.x() - self.width() - margin, corner.y() - self.height() - margin
+        frame = window.geometry()
+        x = frame.x() + frame.width() - self.width() - margin
+        y = frame.y() + frame.height() - self.height() - margin
         # Clamped to the visible desktop so it can't end up off-screen if
         # the anchor window itself is partly outside it.
         screen = window.screen() or QApplication.primaryScreen()
