@@ -11,8 +11,9 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QEasingCurve, QParallelAnimationGroup, QPoint, QPropertyAnimation, QTimer, Qt,
+    QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, QRect, QTimer, Qt, pyqtSignal,
 )
+from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
@@ -45,8 +46,89 @@ HERO_CONTENT_WIDTH = 620
 HERO_SLIDE_LIMIT = 4
 HERO_SLIDE_INTERVAL_MS = 5000
 HERO_SLIDE_ANIM_MS = 320
+# The active slide's cover+text+button block sits on its own framed
+# card (same #Card look the peeks use below), padded out beyond the
+# cover's own HERO_COVER_SIZE so the frame reads as a background for
+# the whole block rather than just a border around the cover.
+HERO_SLIDE_PADDING = 18
+HERO_SLIDE_HEIGHT = HERO_COVER_SIZE[1] + HERO_SLIDE_PADDING * 2
+HERO_COVER_TEXT_GAP = 20   # cover -> text column gap in the active slide
+# Left/right breathing room for the Continue button, which otherwise
+# spans its whole column edge to edge.
+HERO_CONTINUE_INSET = 24
+HERO_PEEK_GAP = 14
+# The previous/next entries flanking the active slide are that same
+# slide's exact layout at half scale (rendered scaled, not re-laid-out
+# smaller) - the size difference alone reads as "further back", so the
+# active slide doesn't need to compete with a same-size neighbor.
+#
+# Deriving the peek size by halving BOTH of the active slide's own
+# dimensions - rather than composing it from its own cover/padding
+# constants - is what keeps the two rects the same shape, and that
+# matters: QPropertyAnimation interpolates a QRect's width and height
+# independently, so tweening between two differently-shaped rects makes
+# every frame in between some third shape. With a scaled pixmap that
+# means a non-uniform stretch - a portrait cover visibly fattening
+# toward square as it grows. Same aspect ratio at both ends keeps the
+# whole grow/shrink a clean uniform zoom instead.
+HERO_PEEK_FRAME_SIZE = (HERO_CONTENT_WIDTH // 2, HERO_SLIDE_HEIGHT // 2)
+# Card pixmaps are rendered at this multiple of the *active slide's*
+# full size, so they stay sharp all the way up to it rather than only
+# at the smaller peek size they spend most of their time at.
+HERO_CARD_SUPERSAMPLE = 2
+
+# The carousel's 3 slots (peek/mid/peek) plus 2 off-stage holding spots
+# (further out on each side) that an entering peek starts from / an
+# exiting one animates into before being deleted - all laid out once on
+# a fixed "stage" widget so _transition_hero can animate real widgets'
+# geometry directly between them instead of juggling a viewport +
+# separately-positioned peeks (see _transition_hero).
+HERO_STAGE_WIDTH = HERO_PEEK_FRAME_SIZE[0] * 2 + HERO_PEEK_GAP * 2 + HERO_CONTENT_WIDTH
+HERO_STAGE_HEIGHT = HERO_SLIDE_HEIGHT
+_HERO_PEEK_TOP = (HERO_STAGE_HEIGHT - HERO_PEEK_FRAME_SIZE[1]) // 2
+HERO_LEFT_RECT = QRect(0, _HERO_PEEK_TOP, *HERO_PEEK_FRAME_SIZE)
+HERO_MID_RECT = QRect(HERO_PEEK_FRAME_SIZE[0] + HERO_PEEK_GAP, 0, HERO_CONTENT_WIDTH, HERO_SLIDE_HEIGHT)
+HERO_RIGHT_RECT = QRect(
+    HERO_PEEK_FRAME_SIZE[0] + HERO_PEEK_GAP + HERO_CONTENT_WIDTH + HERO_PEEK_GAP, _HERO_PEEK_TOP,
+    *HERO_PEEK_FRAME_SIZE)
+HERO_EXIT_LEFT_RECT = QRect(-(HERO_PEEK_FRAME_SIZE[0] + HERO_PEEK_GAP), _HERO_PEEK_TOP, *HERO_PEEK_FRAME_SIZE)
+HERO_EXIT_RIGHT_RECT = QRect(HERO_STAGE_WIDTH + HERO_PEEK_GAP, _HERO_PEEK_TOP, *HERO_PEEK_FRAME_SIZE)
 
 PAGE_FOR_TYPE = {"Anime": "anime", "Series": "series", **{t: "manga" for t in MANGA_TYPES}}
+
+
+class _HeroCardLabel(QLabel):
+    """A clickable, pixmap-backed carousel card - scaledContents makes it
+    stretch the pixmap to fill whatever geometry it's given, so animating
+    its `geometry` (see _transition_hero) smoothly shrinks/grows it while
+    it moves. A plain widget with a laid-out cover+text row can't do this:
+    its children have fixed pixel sizes and just get clipped/reflowed,
+    not visually scaled, when the parent's geometry is animated - hence
+    rendering the card to a pixmap first (see _build_hero_card_pixmap,
+    which supersamples so this stays sharp when stretched up toward the
+    much larger active-slide size, not just shrunk down).
+
+    The scaling only stays undistorted because every rect this is
+    animated between shares one aspect ratio - see HERO_PEEK_FRAME_SIZE."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        # A dedicated objectName rather than the shared #Card hoverable
+        # rule (theme.py) - that rule highlights via *background*, which
+        # a scaledContents pixmap filling the whole label would just
+        # paint over invisibly. QLabel is a QFrame under the hood, so a
+        # :hover *border* still shows up fine around the pixmap instead.
+        self.setObjectName("HeroCardLabel")
+        self.setScaledContents(True)
+        self.setPixmap(pixmap)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 def _greeting():
@@ -72,7 +154,12 @@ class HomePage(GlassPage):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
 
-        panel = QFrame(objectName="Panel")
+        # No #Panel background here (unlike other pages) - Home's own
+        # pieces (the hero's cards, each section's #SectionBox) already
+        # carry their own framing, so a big panel behind all of them
+        # just added an extra layer of background covering the whole
+        # page underneath.
+        panel = QFrame(objectName="Bare")
         outer.addWidget(panel)
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(24, 20, 24, 24)
@@ -175,6 +262,19 @@ class HomePage(GlassPage):
         most recently to the top."""
         return sorted(entries, key=lambda e: e.get("last_used") or "", reverse=True)
 
+    def _progress_meta_text(self, entry):
+        """Short progress caption for a tracker/series entry - "Ch N" for
+        manga (your own last-*read* chapter, not the site's latest), or
+        the verified watch progress for anime/series. Shared by the
+        poster grid and the hero peeks, which both show this under a
+        title rather than the hero's own fuller "Chapter N" phrasing."""
+        if entry["type"] in MANGA_TYPES:
+            watched = entry.get("last_watched_chapter")
+            return f"Ch {format_chapter_progress(watched)}" if watched else entry["type"]
+        if entry.get("progress_verified") and entry.get("progress"):
+            return entry["progress"]
+        return ""
+
     # ------------------------------------------------------------------
     def _build_section(self, title, content_widget):
         section = QWidget(objectName="Bare")
@@ -197,40 +297,91 @@ class HomePage(GlassPage):
             outer_layout.addWidget(empty)
             return hero
 
-        # A fixed-size clipping viewport, not a layout - _advance_hero
-        # slides the current/next slide widgets across it by animating
-        # raw geometry, which needs stable pixel bounds to slide within
-        # rather than a layout that would just reflow around them.
-        # Height matches HERO_COVER_SIZE the same way the unanimated
-        # single-entry version implicitly did (the cover was always the
-        # tallest thing in the row).
-        self._hero_viewport = QWidget(objectName="Bare")
-        self._hero_viewport.setFixedSize(HERO_CONTENT_WIDTH, HERO_COVER_SIZE[1])
+        # A fixed-size stage, not a layout - _transition_hero animates
+        # the peek/mid widgets' raw geometry directly between the fixed
+        # slot rects (HERO_LEFT_RECT/HERO_MID_RECT/HERO_RIGHT_RECT etc.,
+        # in this widget's local coordinates), which needs stable pixel
+        # bounds rather than a layout that would just reflow around them.
+        self._hero_stage = QWidget(objectName="Bare")
+        self._hero_stage.setFixedSize(HERO_STAGE_WIDTH, HERO_STAGE_HEIGHT)
         self._hero_index = 0
-        self._hero_slide = self._build_hero_slide(self._hero_entries[0])
-        self._hero_slide.setParent(self._hero_viewport)
-        self._hero_slide.setGeometry(0, 0, HERO_CONTENT_WIDTH, HERO_COVER_SIZE[1])
-        self._hero_slide.show()
+        self._hero_transitioning = False
 
-        if len(self._hero_entries) > 1:
+        self._hero_mid_widget = self._build_hero_slide(self._hero_entries[0])
+        self._hero_mid_widget.setParent(self._hero_stage)
+        self._hero_mid_widget.setGeometry(HERO_MID_RECT)
+        self._hero_mid_widget.show()
+
+        has_neighbors = len(self._hero_entries) > 1
+        self._hero_left_widget = None
+        self._hero_right_widget = None
+        if has_neighbors:
+            self._hero_left_widget = self._build_hero_peek_label(self._neighbor_entry(-1))
+            self._hero_left_widget.setParent(self._hero_stage)
+            self._hero_left_widget.setGeometry(HERO_LEFT_RECT)
+            self._hero_left_widget.clicked.connect(lambda: self._transition_hero(-1))
+            self._hero_left_widget.show()
+
+            self._hero_right_widget = self._build_hero_peek_label(self._neighbor_entry(1))
+            self._hero_right_widget.setParent(self._hero_stage)
+            self._hero_right_widget.setGeometry(HERO_RIGHT_RECT)
+            self._hero_right_widget.clicked.connect(lambda: self._transition_hero(1))
+            self._hero_right_widget.show()
+
             self._hero_timer = QTimer(self)
-            self._hero_timer.timeout.connect(self._advance_hero)
+            self._hero_timer.timeout.connect(lambda: self._transition_hero(1))
             self._hero_timer.start(HERO_SLIDE_INTERVAL_MS)
 
         outer_layout.addStretch()
         # See the comment further down (theme.SCROLLBAR_WIDTH nudge) -
         # unchanged from the single-entry version, just now positioning
-        # the viewport instead of the content block directly.
+        # the whole stage instead of the content block directly.
         outer_layout.addSpacing(9 + 45)
-        outer_layout.addWidget(self._hero_viewport)
+        outer_layout.addWidget(self._hero_stage)
         outer_layout.addStretch()
         return hero
 
-    def _build_hero_slide(self, entry):
+    def _neighbor_entry(self, offset):
+        n = len(self._hero_entries)
+        return self._hero_entries[(self._hero_index + offset) % n]
+
+    def _build_hero_card_pixmap(self, entry, with_button):
+        """Renders one carousel entry's card (the same full-size layout
+        the active slide uses - see _build_hero_slide) to a QPixmap
+        rather than returning the live widget. _HeroCardLabel displays
+        this and scales it as it animates; the widget itself is thrown
+        away immediately since only its rendered appearance is needed.
+
+        Always rendered at the *active slide's* size regardless of where
+        it'll be shown - a peek is this exact pixmap displayed at half
+        scale, which is what makes growing one into the active slide a
+        clean uniform zoom rather than a re-layout. Supersampled on top
+        of that so it stays sharp at full size too."""
+        frame = self._build_hero_slide(entry, with_button=with_button)
+        pixmap = QPixmap(frame.width() * HERO_CARD_SUPERSAMPLE, frame.height() * HERO_CARD_SUPERSAMPLE)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.scale(HERO_CARD_SUPERSAMPLE, HERO_CARD_SUPERSAMPLE)
+        frame.render(painter)
+        painter.end()
+        frame.deleteLater()
+        return pixmap
+
+    def _build_hero_peek_label(self, entry):
+        """A resting peek: the buttonless card, shown at half size."""
+        return _HeroCardLabel(self._build_hero_card_pixmap(entry, with_button=False))
+
+    def _build_hero_slide(self, entry, with_button=True):
         """One carousel page: cover+title+progress+Continue button for a
         single in-progress entry. Built fresh per entry (initial slide
-        and every _advance_hero swap) rather than kept alive - simpler
-        than diffing/updating one persistent widget's contents."""
+        and every _transition_hero swap) rather than kept alive -
+        simpler than diffing/updating one persistent widget's
+        contents.
+
+        with_button=False builds the identical card minus the Continue
+        button, for the peeks - they're this same layout rendered at
+        half scale (see _build_hero_card_pixmap), so they have to be
+        built from the same code to stay perfectly in proportion."""
         # The cover+text block is centered as a group within the hero
         # card (stretches on both sides below) rather than pinned flush
         # left with a big empty gap on wide windows. A *fixed* width -
@@ -238,11 +389,14 @@ class HomePage(GlassPage):
         # is a conservative guess unless something forces it wider, so
         # without this the block would shrink to that guess instead of
         # actually using the room a fixed width guarantees it.
-        content = QWidget(objectName="Bare")
-        content.setFixedWidth(HERO_CONTENT_WIDTH)
+        # A #Card frame (same look the peeks use) rather than a bare
+        # widget, so the cover+text+button all sit on one shared
+        # background instead of floating directly on the Hero's own.
+        content = QFrame(objectName="Card")
+        content.setFixedSize(HERO_CONTENT_WIDTH, HERO_SLIDE_HEIGHT)
         layout = QHBoxLayout(content)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(20)
+        layout.setContentsMargins(*([HERO_SLIDE_PADDING] * 4))
+        layout.setSpacing(HERO_COVER_TEXT_GAP)
 
         cover = QLabel()
         cover.setFixedSize(*HERO_COVER_SIZE)
@@ -287,57 +441,148 @@ class HomePage(GlassPage):
         # cover's middle instead.
         text_col.addSpacing(20)
 
-        continue_btn = QPushButton("▶ Continue", objectName="Accent")
-        continue_btn.setFixedSize(170, 46)
-        continue_btn.clicked.connect(lambda: self._continue_entry(entry))
-        # Nudged right on its own - everything else in this column
-        # (label, title, progress) stays flush with the column's edge.
-        # The trailing addStretch() matters: without something claiming
-        # the row's leftover width, Qt centers a no-stretch row instead
-        # of anchoring it to the fixed leading spacer, overshooting the
-        # nudge far past what was asked for.
-        continue_row = QHBoxLayout()
-        continue_row.setContentsMargins(0, 0, 0, 0)
-        continue_row.addSpacing(35)
-        continue_row.addWidget(continue_btn)
-        continue_row.addStretch()
-        text_col.addLayout(continue_row)
+        if with_button:
+            continue_btn = QPushButton("▶ Continue", objectName="Accent")
+            continue_btn.setFixedHeight(46)
+            continue_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            continue_btn.clicked.connect(lambda: self._continue_entry(entry))
+            # Stretched to fill rather than a fixed width nudged off to
+            # one side, so it's as wide as the space allows and centred
+            # in it. "The space" is the whole gap from the cover's right
+            # edge to the card's inner edge - which is the text column
+            # *plus* the column's leading gap, so the trailing inset has
+            # to absorb that extra gap for the button to sit centred on
+            # that span rather than on the narrower column alone.
+            continue_row = QHBoxLayout()
+            continue_row.setContentsMargins(
+                HERO_CONTINUE_INSET, 0, HERO_CONTINUE_INSET + HERO_COVER_TEXT_GAP, 0)
+            continue_row.addWidget(continue_btn)
+            text_col.addLayout(continue_row)
 
         layout.addWidget(text_widget, stretch=1)
         return content
 
-    def _advance_hero(self):
-        """Slide from the current carousel entry to the next one (wraps
-        back to the first after the last) - old slide exits to the
-        left, new one enters from the right. Always the same direction
-        since this is a timed loop, not a user-driven back/forward."""
-        self._hero_index = (self._hero_index + 1) % len(self._hero_entries)
-        old_slide = self._hero_slide
-        new_slide = self._build_hero_slide(self._hero_entries[self._hero_index])
-        new_slide.setParent(self._hero_viewport)
-        width, height = HERO_CONTENT_WIDTH, HERO_COVER_SIZE[1]
-        new_slide.setGeometry(width, 0, width, height)
-        new_slide.show()
-        new_slide.raise_()
+    def _transition_hero(self, direction):
+        """Advance the carousel forward (direction=1, the auto-play
+        timer's only mode) or backward (direction=-1, clicking the left
+        peek) - the active slide shrinks and moves to become the peek
+        on the departure side, the peek on the arrival side grows and
+        moves to become the active slide, and a freshly-built peek
+        slides in from off-stage to refill the arrival side. Clicking
+        the right peek is direction=1, same as the timer.
+
+        The active slide is a live interactive widget (it owns the real
+        Continue button), but a live widget with fixed-size children
+        can't be smoothly resized by animating its geometry - only
+        moved. So it's ghosted to a _HeroCardLabel (a static pixmap
+        that *can* be scaled smoothly) for the duration of the move,
+        and only swapped back to a real widget once it lands - see
+        _HeroCardLabel. The two peeks are already pixmap-backed, so
+        they animate directly with no ghosting needed.
+
+        The outgoing ghost is rendered as peek-style content (cover+
+        title+meta, no button/eyebrow) from the very first frame, not
+        grabbed from the live mid widget - it's *becoming* a peek, and
+        a peek-shaped target doesn't have room for the button, so
+        animating a full mid-with-button pixmap down to that size just
+        squishes the button into a mangled sliver instead of shrinking
+        cleanly."""
+        if len(self._hero_entries) <= 1 or self._hero_transitioning:
+            return
+        self._hero_transitioning = True
+        self._hero_timer.stop()
+
+        n = len(self._hero_entries)
+        old_index = self._hero_index
+        new_index = (old_index + direction) % n
+        old_mid_entry = self._hero_entries[old_index]
+        entering_entry = self._hero_entries[(new_index + direction) % n]
+
+        # Each card in motion is rendered as whatever it's *becoming*,
+        # not what it was, so it already matches its neighbours when it
+        # arrives: this one is on its way out to a peek slot, so it
+        # drops the Continue button for the whole trip (the peeks it's
+        # joining don't have one), while the peek on its way in to the
+        # mid slot picks one up (see arriving_widget below). Each swap
+        # is therefore invisible at the end of the move; the button
+        # blinks only at the very first frame, where it's covered by
+        # the motion starting.
+        mid_ghost = _HeroCardLabel(
+            self._build_hero_card_pixmap(old_mid_entry, with_button=False), self._hero_stage)
+        mid_ghost.setGeometry(HERO_MID_RECT)
+        mid_ghost.show()
+        mid_ghost.raise_()
+        self._hero_mid_widget.hide()
+        self._hero_mid_widget.deleteLater()
+
+        if direction == 1:
+            exiting_widget, arriving_widget = self._hero_left_widget, self._hero_right_widget
+            exit_rect, enter_rect = HERO_EXIT_LEFT_RECT, HERO_EXIT_RIGHT_RECT
+            mid_ghost_target, entering_target = HERO_LEFT_RECT, HERO_RIGHT_RECT
+        else:
+            exiting_widget, arriving_widget = self._hero_right_widget, self._hero_left_widget
+            exit_rect, enter_rect = HERO_EXIT_RIGHT_RECT, HERO_EXIT_LEFT_RECT
+            mid_ghost_target, entering_target = HERO_RIGHT_RECT, HERO_LEFT_RECT
+
+        # The mirror of mid_ghost above - this peek is becoming the
+        # active slide, so it carries the button in on the way.
+        arriving_widget.setPixmap(
+            self._build_hero_card_pixmap(self._hero_entries[new_index], with_button=True))
+
+        entering_widget = self._build_hero_peek_label(entering_entry)
+        entering_widget.setParent(self._hero_stage)
+        entering_widget.setGeometry(enter_rect)
+        entering_widget.show()
+        entering_widget.raise_()
+        arriving_widget.raise_()
 
         group = QParallelAnimationGroup(self)
-        anim_new = QPropertyAnimation(new_slide, b"pos", self)
-        anim_new.setDuration(HERO_SLIDE_ANIM_MS)
-        anim_new.setStartValue(QPoint(width, 0))
-        anim_new.setEndValue(QPoint(0, 0))
-        anim_new.setEasingCurve(QEasingCurve.Type.OutCubic)
-        group.addAnimation(anim_new)
 
-        anim_old = QPropertyAnimation(old_slide, b"pos", self)
-        anim_old.setDuration(HERO_SLIDE_ANIM_MS)
-        anim_old.setStartValue(QPoint(0, 0))
-        anim_old.setEndValue(QPoint(-width, 0))
-        anim_old.setEasingCurve(QEasingCurve.Type.OutCubic)
-        group.addAnimation(anim_old)
+        def animate(widget, end_rect):
+            anim = QPropertyAnimation(widget, b"geometry", self)
+            anim.setDuration(HERO_SLIDE_ANIM_MS)
+            anim.setStartValue(widget.geometry())
+            anim.setEndValue(end_rect)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            group.addAnimation(anim)
 
-        group.finished.connect(old_slide.deleteLater)
+        animate(exiting_widget, exit_rect)
+        animate(mid_ghost, mid_ghost_target)
+        animate(arriving_widget, HERO_MID_RECT)
+        animate(entering_widget, entering_target)
+
+        def finish():
+            exiting_widget.deleteLater()
+            mid_ghost.deleteLater()
+            arriving_widget.deleteLater()
+
+            self._hero_index = new_index
+            self._hero_mid_widget = self._build_hero_slide(self._hero_entries[new_index])
+            self._hero_mid_widget.setParent(self._hero_stage)
+            self._hero_mid_widget.setGeometry(HERO_MID_RECT)
+            self._hero_mid_widget.show()
+
+            settled_side_widget = self._build_hero_peek_label(old_mid_entry)
+            settled_side_widget.setParent(self._hero_stage)
+            settled_side_widget.setGeometry(mid_ghost_target)
+            settled_side_widget.show()
+
+            if direction == 1:
+                self._hero_left_widget = settled_side_widget
+                self._hero_left_widget.clicked.connect(lambda: self._transition_hero(-1))
+                self._hero_right_widget = entering_widget
+                self._hero_right_widget.clicked.connect(lambda: self._transition_hero(1))
+            else:
+                self._hero_right_widget = settled_side_widget
+                self._hero_right_widget.clicked.connect(lambda: self._transition_hero(1))
+                self._hero_left_widget = entering_widget
+                self._hero_left_widget.clicked.connect(lambda: self._transition_hero(-1))
+
+            self._hero_transitioning = False
+            self._hero_timer.start(HERO_SLIDE_INTERVAL_MS)
+
+        group.finished.connect(finish)
         self._hero_anim_group = group  # keep a reference so it isn't gc'd mid-animation
-        self._hero_slide = new_slide
         group.start()
 
     def _continue_entry(self, entry):
@@ -346,7 +591,10 @@ class HomePage(GlassPage):
 
     # ------------------------------------------------------------------
     def _build_poster_grid(self, entries):
-        box = QWidget(objectName="SectionBox")
+        # No #SectionBox frame here (unlike the Apps/Websites lists
+        # below) - a wall of poster art doesn't need a background box
+        # to read as a group the way rows of icon+text do.
+        box = QWidget(objectName="Bare")
         outer = QVBoxLayout(box)
         outer.setContentsMargins(16, 16, 16, 16)
 
@@ -356,7 +604,11 @@ class HomePage(GlassPage):
         outer.addLayout(grid)
 
         for index, entry in enumerate(entries):
+            # One shared #SectionBox frame for the whole grid (below)
+            # rather than one behind every poster - #HomeItem drops the
+            # per-item frame while keeping a hover highlight.
             card = Card(hoverable=True)
+            card.setObjectName("HomeItem")
             card.setFixedWidth(POSTER_SIZE[0] + 20)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(6, 8, 6, 8)
@@ -371,13 +623,7 @@ class HomePage(GlassPage):
             name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             card_layout.addWidget(name)
 
-            if entry["type"] in MANGA_TYPES:
-                watched = entry.get("last_watched_chapter")
-                meta_text = f"Ch {format_chapter_progress(watched)}" if watched else entry["type"]
-            elif entry.get("progress_verified") and entry.get("progress"):
-                meta_text = entry["progress"]
-            else:
-                meta_text = ""
+            meta_text = self._progress_meta_text(entry)
             if meta_text:
                 meta = QLabel(meta_text, objectName="CardMeta")
                 meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -388,7 +634,8 @@ class HomePage(GlassPage):
         return box
 
     def _build_games_grid(self, games):
-        box = QWidget(objectName="SectionBox")
+        # No #SectionBox frame here either - see _build_poster_grid.
+        box = QWidget(objectName="Bare")
         outer = QVBoxLayout(box)
         outer.setContentsMargins(16, 16, 16, 16)
 
@@ -399,6 +646,7 @@ class HomePage(GlassPage):
 
         for index, game in enumerate(games):
             card = Card(hoverable=True)
+            card.setObjectName("HomeItem")
             card.setFixedWidth(96)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(6, 10, 6, 10)
@@ -435,6 +683,7 @@ class HomePage(GlassPage):
 
         for entry in self._recent_links(entries)[:QUICK_LIST_LIMIT]:
             row = Card(hoverable=True)
+            row.setObjectName("HomeItem")
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(8, 6, 8, 6)
             row_layout.setSpacing(10)

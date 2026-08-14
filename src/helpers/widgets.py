@@ -3,7 +3,7 @@
 from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QPainter, QRadialGradient
-from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QWidget
+from PyQt6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QScrollArea, QWidget
 
 from . import theme
 
@@ -51,13 +51,24 @@ class Card(QFrame):
         super().mousePressEvent(event)
 
 
+def _toast_anchor_window(widget):
+    """The app's main window, not whatever dialog happens to sit on top
+    of it - a scan started from the Settings dialog should still drop its
+    toast in the app's own bottom-right corner rather than the dialog's
+    (which floats mid-screen, so the toast looked misplaced)."""
+    window = widget.window()
+    while isinstance(window, QDialog) and window.parent() is not None:
+        window = window.parent().window()
+    return window
+
+
 class Toast(QLabel):
     """A small, self-dismissing confirmation message in the bottom-right
-    corner of `anchor`'s window - for lightweight feedback (e.g. "Saved")
-    that doesn't need a modal dialog click to dismiss."""
+    corner of the app's main window - for lightweight feedback (e.g.
+    "Saved") that doesn't need a modal dialog click to dismiss."""
 
     def __init__(self, anchor, text, duration_ms=2000):
-        window = anchor.window()
+        window = _toast_anchor_window(anchor)
         super().__init__(text, window)
         self.setWindowFlags(Qt.WindowType.ToolTip)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -66,12 +77,25 @@ class Toast(QLabel):
             f"background: {theme.SURFACE}; color: {theme.TEXT}; "
             f"border: 1px solid {theme.ACCENT}; border-radius: {theme.RADIUS_SM}px; "
             f"padding: 10px 18px; font-weight: 700;")
-        self.adjustSize()
-        margin = 24
-        corner = window.mapToGlobal(QPoint(window.width(), window.height()))
-        self.move(corner.x() - self.width() - margin, corner.y() - self.height() - margin)
+        # Shown before being positioned: a ToolTip-flagged window only
+        # settles at its final polished size once shown, and positioning
+        # against a stale size would push it past the intended corner.
         self.show()
+        self._move_to_corner(window)
         QTimer.singleShot(duration_ms, self.close)
+
+    def _move_to_corner(self, window, margin=24):
+        self.adjustSize()
+        corner = window.mapToGlobal(QPoint(window.width(), window.height()))
+        x, y = corner.x() - self.width() - margin, corner.y() - self.height() - margin
+        # Clamped to the visible desktop so it can't end up off-screen if
+        # the anchor window itself is partly outside it.
+        screen = window.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(area.left(), min(x, area.right() - self.width()))
+            y = max(area.top(), min(y, area.bottom() - self.height()))
+        self.move(x, y)
 
 
 def show_toast(anchor, text, duration_ms=2000):

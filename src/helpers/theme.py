@@ -17,6 +17,8 @@ BG = "#0a0b0f"           # app background
 BG_ALT = "#111319"       # secondary background (page panels)
 GLOW = "#241f3d"         # soft purple tint used in the page glow backdrop
 SIDEBAR = "#0d0e13"      # sidebar column
+SIDEBAR_SHEEN = "#171922"  # subtle highlight at the sidebar's top edge
+SIDEBAR_DEEP = "#08090d"   # ...fading darker toward its bottom
 SURFACE = "#1b1d25"      # cards / inputs
 SURFACE_HOVER = "#242731"
 SURFACE_ACTIVE = "#2b2e3a"
@@ -36,18 +38,67 @@ DANGER = "#e74c3c"
 DANGER_HOVER = "#ef6152"
 WARNING = "#f1c40f"
 
+# Glossy dark gradient used by every #Card item across the app (poster
+# grids, game icons, quick-list rows, the Home hero carousel) - darker
+# than a flat fill, with a highlight band near the top that reads as a
+# sheen rather than matte. Tinted purple (the same family as ACCENT/
+# ACCENT_SOFT) rather than neutral gray, to match the app's theme.
+CARD_SHEEN = "#3a3260"
+CARD_TOP = "#211d38"
+CARD_MID = "#161328"
+CARD_BOTTOM = "#0a0915"
+CARD_BORDER = "#453d6e"
+CARD_HOVER_SHEEN = "#4f4483"
+CARD_HOVER_TOP = "#2e2850"
+CARD_HOVER_MID = "#201c3a"
+CARD_HOVER_BOTTOM = "#141228"
+
 FONT_FAMILY = "Segoe UI"
 FONT_FAMILY_EMOJI = "Segoe UI Emoji"
-# Condensed/geometric, sci-fi-HUD-flavored - ships with Windows - used
-# for the sidebar nav list to read more "atomic/tech" than the default
-# Segoe UI body font.
-FONT_FAMILY_NAV = "Agency FB"
+# Sidebar nav list. Bahnschrift is the DIN-derived technical face that
+# ships with Windows 10/11 - geometric and a little industrial, which
+# suits the app's "atomic" styling better than the very condensed,
+# dated Agency FB it replaces, while staying far more legible at the
+# larger nav size below. Listed as a fallback chain rather than one
+# name so a machine without it degrades to Segoe UI rather than to
+# whatever Qt picks by itself.
+FONT_FAMILY_NAV = "Bahnschrift"
+FONT_FAMILY_NAV_FALLBACKS = (FONT_FAMILY_NAV, "Segoe UI Semibold", "Segoe UI")
+# Same chain in the form a QSS font-family property wants.
+FONT_STACK_NAV = ", ".join(f'"{name}"' for name in FONT_FAMILY_NAV_FALLBACKS)
+NAV_FONT_SIZE = 13
 
 # Bullet marker prefixed onto every sidebar nav label (Home + each
 # section) in place of the old rasterized arrow-glyph icon column - as
 # plain text it always matches FONT_FAMILY_NAV/color/size exactly,
 # instead of a separately-rendered PNG that could fall out of sync.
 NAV_BULLET = "◈"
+
+# Per-section glyphs, shown in place of the bullet+label when the
+# sidebar is collapsed (the expanded sidebar keeps the bullets).
+# Deliberately from the Segoe icon fonts that ship with Windows rather
+# than emoji: these are monochrome and inherit whatever color the QSS
+# gives the row, so they pick up the nav's normal/hover/selected colors
+# automatically, while emoji would render in their own fixed colors and
+# clash with the theme.
+FONT_FAMILY_ICONS = "Segoe Fluent Icons"
+FONT_FAMILY_ICON_FALLBACKS = (FONT_FAMILY_ICONS, "Segoe MDL2 Assets", FONT_FAMILY)
+# Same chain in the form a QSS font-family property wants. Needed
+# because a widget that any QSS rule gives font properties to resolves
+# its font from that rule, not from setFont() - so a styled button
+# showing one of these glyphs has to be handed the family here too, or
+# it renders the codepoint as a missing-glyph box.
+FONT_STACK_ICONS = ", ".join(f'"{name}"' for name in FONT_FAMILY_ICON_FALLBACKS)
+NAV_ICONS = {
+    "home": "",      # Home
+    "anime": "",     # Video
+    "manga": "",     # ReadingMode
+    "series": "",    # TVMonitor
+    "games": "",     # Game (controller)
+    "apps": "",      # AllApps
+    "websites": "",  # Globe
+}
+SETTINGS_ICON = ""   # Setting (gear)
 
 RADIUS_SM = 8
 RADIUS = 12
@@ -60,10 +111,31 @@ RADIUS_LG = 18
 SCROLLBAR_WIDTH = 11
 
 
-def font(size=10, weight=QFont.Weight.Normal, family=FONT_FAMILY):
+def font(size=10, weight=QFont.Weight.Normal, family=FONT_FAMILY, fallbacks=()):
     f = QFont(family, size)
     f.setWeight(weight)
+    if fallbacks:
+        # setFamilies is the only way to hand Qt a real fallback chain -
+        # QFont(family) alone silently resolves to some default face if
+        # that one name is missing, rather than trying the next choice.
+        f.setFamilies(list(fallbacks))
     return f
+
+
+def icon_font(size=14):
+    """The Segoe icon font used for the collapsed sidebar's glyphs."""
+    return font(size, QFont.Weight.Normal, FONT_FAMILY_ICONS,
+                fallbacks=FONT_FAMILY_ICON_FALLBACKS)
+
+
+def nav_font():
+    """The sidebar nav list's font. QListWidget's item delegate paints
+    with the widget's own font(), not the ::item QSS font-family, so the
+    stylesheet rule alone is silently ignored for list items - both have
+    to be kept in step, hence one helper rather than a literal at each
+    call site."""
+    return font(NAV_FONT_SIZE, QFont.Weight.Bold, FONT_FAMILY_NAV,
+                fallbacks=FONT_FAMILY_NAV_FALLBACKS)
 
 
 def _ensure_checkmark_asset() -> str:
@@ -109,9 +181,29 @@ QLabel {{
 }}
 
 /* ---- Sidebar --------------------------------------------------------- */
+/* A restrained top-to-bottom sheen rather than a flat fill - just enough
+   gradient to catch the light without competing with the item cards,
+   which carry the app's more pronounced gloss. */
 QWidget#Sidebar {{
-    background: {SIDEBAR};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {SIDEBAR_SHEEN},
+        stop:0.35 {SIDEBAR},
+        stop:1 {SIDEBAR_DEEP});
     border-right: 1px solid {BORDER};
+}}
+/* The collapse/expand chevron pinned at the sidebar's top edge. */
+QPushButton#FoldButton {{
+    background: transparent;
+    color: {TEXT_MUTED};
+    border: none;
+    border-radius: {RADIUS_SM}px;
+    padding: 2px;
+    font-size: 13pt;
+    font-weight: 700;
+}}
+QPushButton#FoldButton:hover {{
+    background: {SURFACE};
+    color: {TEXT};
 }}
 QPushButton#NavButton {{
     background: transparent;
@@ -127,19 +219,32 @@ QPushButton#NavButton:hover {{
     background: {SURFACE};
     color: {TEXT};
 }}
+/* Collapsed sidebar: the label is gone, so the lone glyph gets centred
+   and the left text inset that positioned that label is dropped - with
+   it still applied the glyph was pushed off-centre and clipped against
+   the narrow rail's edge. */
+QPushButton#NavButton[collapsed="true"] {{
+    text-align: center;
+    padding: 7px 0px;
+    font-family: {FONT_STACK_ICONS};
+    font-size: 14pt;
+    font-weight: 400;
+}}
 QPushButton#NavButton:checked {{
     background: {ACCENT_SOFT};
     color: {TEXT};
     border: 1px solid {ACCENT};
 }}
+/* Just a centered "+" now, so it reads the same at either sidebar width
+   instead of having a label that only fits when expanded. */
 QPushButton#AddButton {{
     background: {ACCENT};
     color: white;
     border: none;
     border-radius: {RADIUS_SM}px;
-    text-align: left;
-    padding: 7px 12px;
-    font-size: 10.5pt;
+    text-align: center;
+    padding: 4px;
+    font-size: 16pt;
     font-weight: 700;
 }}
 QPushButton#AddButton:hover {{ background: {ACCENT_HOVER}; }}
@@ -157,8 +262,8 @@ QListWidget#NavList::item {{
     border: 1px solid transparent;
     border-radius: {RADIUS_SM}px;
     padding: 9px 12px;
-    font-family: "{FONT_FAMILY_NAV}";
-    font-size: 15pt;
+    font-family: {FONT_STACK_NAV};
+    font-size: {NAV_FONT_SIZE}pt;
     font-weight: 700;
 }}
 QListWidget#NavList::item:hover {{
@@ -206,13 +311,48 @@ QLabel#Muted {{
 
 /* ---- Cards ------------------------------------------------------------ */
 QFrame#Card {{
-    background: {SURFACE};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {CARD_SHEEN},
+        stop:0.18 {CARD_TOP},
+        stop:0.6 {CARD_MID},
+        stop:1 {CARD_BOTTOM});
     border-radius: {RADIUS}px;
-    border: 1px solid {BORDER};
+    border: 1px solid {CARD_BORDER};
 }}
 QFrame#Card[hoverable="true"]:hover {{
-    background: {SURFACE_HOVER};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {CARD_HOVER_SHEEN},
+        stop:0.18 {CARD_HOVER_TOP},
+        stop:0.6 {CARD_HOVER_MID},
+        stop:1 {CARD_HOVER_BOTTOM});
     border: 1px solid {ACCENT};
+}}
+/* Home's frameless item cards - poster/game tiles and quick-list rows.
+   No resting fill, so the section behind them shows through, plus a
+   hover highlight.
+
+   These need an objectName of their own rather than reusing #Bare:
+   the transparent-background #Bare rule above is an ID selector, which
+   outranks any attribute- or pseudo-class-based rule on CSS
+   specificity, so a #Bare item can never paint a hover background at
+   all no matter how the hover rule is written. The transparent resting
+   border reserves the hover border's space so nothing shifts on
+   mouse-over. */
+QFrame#HomeItem {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {RADIUS}px;
+}}
+QFrame#HomeItem:hover {{
+    background: {ACCENT_SOFT};
+    border: 1px solid {ACCENT};
+}}
+/* Home hero carousel peeks (_HeroCardLabel) - pixmap-filled, so a
+   background highlight would be painted over invisibly; a border
+   isn't, since QLabel is a QFrame under the hood. */
+QLabel#HeroCardLabel:hover {{
+    border: 2px solid {ACCENT};
+    border-radius: {RADIUS}px;
 }}
 QLabel#CardTitle {{
     color: {TEXT};
@@ -225,14 +365,20 @@ QLabel#CardMeta {{
     background: transparent;
 }}
 QFrame#Hero {{
-    background: {SURFACE};
-    border-radius: {RADIUS_LG}px;
-    border: 1px solid {BORDER};
+    background: transparent;
+    border: none;
 }}
+/* One shared glossy frame per Home section (Anime & Reading, Series,
+   Games, Apps, Websites) instead of a frame behind every individual
+   item inside it - the items themselves are styled #Bare now. */
 QWidget#SectionBox {{
-    background: {BG};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {CARD_SHEEN},
+        stop:0.18 {CARD_TOP},
+        stop:0.6 {CARD_MID},
+        stop:1 {CARD_BOTTOM});
     border-radius: {RADIUS_LG}px;
-    border: 1px solid {BORDER};
+    border: 1px solid {CARD_BORDER};
 }}
 QWidget#Bare {{
     background: transparent;

@@ -76,7 +76,13 @@ ADD_ITEMS = [
 ]
 
 ANIM_DURATION_MS = 220
-LOGO_HEIGHT = 320
+LOGO_HEIGHT = 120
+
+SIDEBAR_WIDTH = 220
+# Wide enough for the nav bullets and the +/gear buttons once the text
+# labels are dropped (see _set_sidebar_collapsed).
+SIDEBAR_COLLAPSED_WIDTH = 68
+SIDEBAR_ANIM_MS = 180
 
 
 class NavListWidget(QListWidget):
@@ -147,10 +153,25 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _build_sidebar(self):
         sidebar = QWidget(objectName="Sidebar")
-        sidebar.setFixedWidth(220)
+        sidebar.setFixedWidth(SIDEBAR_WIDTH)
+        self.sidebar = sidebar
+        self._sidebar_collapsed = False
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 20, 16, 16)
         layout.setSpacing(4)
+
+        # Collapse/expand toggle, pinned top-right of the sidebar so it
+        # stays put (and stays reachable) at either width.
+        self.fold_btn = QPushButton("«", objectName="FoldButton")
+        self.fold_btn.setFixedSize(28, 28)
+        self.fold_btn.setToolTip("Collapse sidebar")
+        self.fold_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fold_btn.clicked.connect(self._toggle_sidebar)
+        fold_row = QHBoxLayout()
+        fold_row.setContentsMargins(0, 0, 0, 0)
+        fold_row.addStretch()
+        fold_row.addWidget(self.fold_btn)
+        layout.addLayout(fold_row)
 
         # Logo, centered - the artwork already has the "Atomic" wordmark
         # built in, so it's the whole brand header on its own (no separate
@@ -169,6 +190,7 @@ class MainWindow(QMainWindow):
             int(LOGO_HEIGHT * dpr), Qt.TransformationMode.SmoothTransformation)
         logo_pixmap.setDevicePixelRatio(dpr)
         logo_label.setPixmap(logo_pixmap)
+        self.logo_label = logo_label
         layout.addWidget(logo_label)
 
         layout.addSpacing(16)
@@ -181,7 +203,7 @@ class MainWindow(QMainWindow):
         # Kept as a separate list rather than folded into nav_list itself
         # so it stays put above the user's drag-to-reorder order instead
         # of becoming a reorderable/draggable row.
-        home_name, _ = HOME_ITEM
+        home_name, home_page = HOME_ITEM
         self.home_list = NavListWidget(objectName="NavList")
         self.home_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.home_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -193,8 +215,10 @@ class MainWindow(QMainWindow):
         # QListWidget's item delegate paints with the widget's own font(),
         # not the ::item QSS font-family - the stylesheet rule alone gets
         # silently ignored for list items, so it has to be set here too.
-        self.home_list.setFont(theme.font(15, QFont.Weight.Bold, theme.FONT_FAMILY_NAV))
-        self.home_list.addItem(QListWidgetItem(f"{theme.NAV_BULLET}  {home_name}"))
+        self.home_list.setFont(theme.nav_font())
+        home_item = QListWidgetItem()
+        self.home_list.addItem(home_item)
+        self._style_nav_item(home_item, home_name, home_page)
         self.home_list.itemClicked.connect(lambda: self.navigate_to("home"))
         # NavListWidget.sizeHint() pads in a generous +12 "safety margin"
         # below the last row (see its docstring) - fine for nav_list's
@@ -203,7 +227,7 @@ class MainWindow(QMainWindow):
         # past the ~spacing()px gap between every other pair of items.
         # A minimal explicit height (one row + its own top/bottom inset)
         # keeps that gap consistent instead.
-        self.home_list.setFixedHeight(self.home_list.sizeHintForRow(0) + self.home_list.spacing() * 2)
+        self._sync_home_list_height()
         layout.addWidget(self.home_list)
 
         self.nav_list = NavListWidget(objectName="NavList")
@@ -219,32 +243,111 @@ class MainWindow(QMainWindow):
         self.nav_list.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
-        self.nav_list.setFont(theme.font(15, QFont.Weight.Bold, theme.FONT_FAMILY_NAV))
+        self.nav_list.setFont(theme.nav_font())
         self._populate_nav_list()
         self.nav_list.itemClicked.connect(self._on_nav_item_clicked)
         self.nav_list.model().rowsMoved.connect(self._on_nav_reordered)
         self.nav_list.updateGeometry()
         layout.addWidget(self.nav_list)
 
-        layout.addSpacing(40)
-        add_btn = QPushButton("  ➕   Add", objectName="AddButton")
-        add_btn.clicked.connect(lambda: self._show_add_menu(add_btn))
-        layout.addWidget(add_btn)
-
+        # Add and Settings both sit at the very bottom, Add directly
+        # above Settings, with the stretch above them pushing the pair
+        # down clear of the nav list.
         layout.addStretch()
 
-        settings_btn = QPushButton("  ⚙   Settings", objectName="NavButton")
-        settings_btn.clicked.connect(self._open_settings)
-        layout.addWidget(settings_btn)
+        self.add_btn = QPushButton("+", objectName="AddButton")
+        self.add_btn.setFixedHeight(34)
+        self.add_btn.setToolTip("Add")
+        self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_btn.clicked.connect(lambda: self._show_add_menu(self.add_btn))
+        layout.addWidget(self.add_btn)
+
+        self.settings_btn = QPushButton(objectName="NavButton")
+        # Matches the Add button above it, and gives the collapsed gear
+        # glyph room to render without being clipped.
+        self.settings_btn.setFixedHeight(34)
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.clicked.connect(self._open_settings)
+        self._style_settings_btn()
+        layout.addWidget(self.settings_btn)
 
         return sidebar
+
+    # ------------------------------------------------------------------
+    def _style_nav_item(self, item, name, page_name):
+        """Expanded rows keep the bullet+label they always had; collapsed
+        ones swap to that section's own glyph, centred in the rail, with
+        the label moved to a tooltip since there's no room to show it."""
+        if self._sidebar_collapsed:
+            item.setText(theme.NAV_ICONS.get(page_name, theme.NAV_BULLET))
+            item.setFont(theme.icon_font())
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setToolTip(name)
+        else:
+            item.setText(f"{theme.NAV_BULLET}  {name}")
+            item.setFont(theme.nav_font())
+            item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            item.setToolTip("")
+
+    def _sync_home_list_height(self):
+        """The single-row Home list is pinned to its row height, which
+        changes when that row swaps between the nav and icon fonts - so
+        it has to be re-measured whenever the sidebar folds."""
+        self.home_list.setFixedHeight(
+            self.home_list.sizeHintForRow(0) + self.home_list.spacing() * 2)
+
+    def _style_settings_btn(self):
+        collapsed = self._sidebar_collapsed
+        self.settings_btn.setText(theme.SETTINGS_ICON if collapsed else "  ⚙   Settings")
+        self.settings_btn.setFont(theme.icon_font() if collapsed else theme.font())
+        self.settings_btn.setToolTip("Settings" if collapsed else "")
+        # Drives the [collapsed="true"] QSS rule; Qt only re-evaluates
+        # property-based selectors after an explicit unpolish/polish.
+        self.settings_btn.setProperty("collapsed", collapsed)
+        self.settings_btn.style().unpolish(self.settings_btn)
+        self.settings_btn.style().polish(self.settings_btn)
+
+    def _toggle_sidebar(self):
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        collapsed = self._sidebar_collapsed
+
+        self.fold_btn.setText("»" if collapsed else "«")
+        self.fold_btn.setToolTip("Expand sidebar" if collapsed else "Collapse sidebar")
+        self.logo_label.setVisible(not collapsed)
+        self._style_settings_btn()
+
+        # Restyled in place rather than rebuilt, so the user's drag order
+        # and the current selection both survive the fold.
+        home_name, home_page = HOME_ITEM
+        self._style_nav_item(self.home_list.item(0), home_name, home_page)
+        self._sync_home_list_height()
+        for row, (name, page_name) in enumerate(visible_nav_items()):
+            item = self.nav_list.item(row)
+            if item is not None:
+                self._style_nav_item(item, name, page_name)
+        self.nav_list.updateGeometry()
+
+        target = SIDEBAR_COLLAPSED_WIDTH if collapsed else SIDEBAR_WIDTH
+        # setFixedWidth pins min and max together, so the animation drives
+        # maximumWidth and drags minimumWidth along with it - animating
+        # only one would let the other clamp the result.
+        anim = QPropertyAnimation(self.sidebar, b"maximumWidth", self)
+        anim.setDuration(SIDEBAR_ANIM_MS)
+        anim.setStartValue(self.sidebar.width())
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(lambda value: self.sidebar.setMinimumWidth(int(value)))
+        anim.finished.connect(lambda: self.sidebar.setFixedWidth(target))
+        self._sidebar_anim = anim  # keep a reference so it isn't gc'd mid-animation
+        anim.start()
 
     def _populate_nav_list(self):
         self.nav_list.clear()
         for name, page_name in visible_nav_items():
-            item = QListWidgetItem(f"{theme.NAV_BULLET}  {name}")
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, page_name)
             self.nav_list.addItem(item)
+            self._style_nav_item(item, name, page_name)
         self.nav_list.updateGeometry()
 
     def _refresh_nav_list(self):

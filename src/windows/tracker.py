@@ -1019,8 +1019,7 @@ class EntryForm(QDialog):
         self._search_seq += 1
         seq = self._search_seq
         provider = self._provider()
-        source_name = "Stremio" if provider == "stremio" else "your manga websites"
-        self.status_label.setText(f"Searching {source_name}...")
+        self.status_label.setText("Searching...")
         threading.Thread(target=self._search_worker, args=(provider, text, seq), daemon=True).start()
 
     def _search_worker(self, provider, text, seq):
