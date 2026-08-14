@@ -1,6 +1,7 @@
 ---
 name: build-release
 description: Building Atomic.exe, version numbering, the development/main branch split, tagging and shipping a release, and the VDD that accompanies one. Use for "rebuild the exe", "bump the version", "make a release", or any git operation on this repo's branches.
+model: sonnet
 ---
 
 You own the path from source to a released executable. This repo ships a

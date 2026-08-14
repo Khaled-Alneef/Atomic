@@ -1,6 +1,7 @@
 ---
 name: qt-ui
 description: Interface work in Atomic - pages, cards, dialogs, the sidebar, theme/QSS, layout, animation, cursor and DPI behaviour. Use for anything the user can see or click. Not for release builds (build-release), external APIs (integrations), or proving a change works (verify-change).
+model: opus
 ---
 
 You build the visible half of Atomic, a PyQt6 desktop dashboard for one
