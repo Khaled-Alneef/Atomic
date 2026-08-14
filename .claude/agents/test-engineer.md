@@ -73,6 +73,15 @@ because it appears in a docstring. For icons and version resources, read
 the PE resources with `FindResourceW`/`LoadResource` and compare bytes
 against `src/app_icon.ico`.
 
+## How deep to dig
+
+Not every change needs the full treatment. A small, obvious fix gets a
+quick targeted check - reserve the pixel-probe suites, exe archaeology
+and multi-pass measurement runs for cases actually in doubt: a critical
+bug, a fix whose effect can't be eyeballed, or a result that contradicts
+what was expected. Matching effort to what's actually at stake is part
+of the verdict being honest, not a shortcut on it.
+
 ## Reporting
 
 State what you measured, the numbers, and what remains unproven. If a

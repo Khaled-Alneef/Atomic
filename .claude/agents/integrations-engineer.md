@@ -66,7 +66,9 @@ retried once, because the tracker fires one lookup per entry at once.
 
 Check the title match before the network. Most "wrong schedule" reports
 are a near-miss title resolving to a different series. Reproduce with the
-real title string, not a tidied one.
+real title string, not a tidied one. That's usually the whole
+investigation - reserve deeper tracing (packet-level, diffing multiple
+sources) for a genuinely critical failure, not one wrong schedule.
 
 ## Testing
 

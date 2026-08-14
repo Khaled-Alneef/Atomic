@@ -74,6 +74,15 @@ comment that restates the code is noise here, a comment that says "this
 is not mapToGlobal because..." is the point. Use the same hyphenated
 asides and plain wording as the surrounding file.
 
+## How deep to dig
+
+For a routine visible fix - a colour, a layout tweak, a known cause - go
+straight to the change. Save tracing, profiling or multi-pass digging for
+when the cause is genuinely unknown or the bug is critical (broken
+functionality, data loss risk); guessing at a fix under those conditions
+is worse than taking the time to actually find it. If unsure which case
+you're in, say so rather than defaulting to the deep dig.
+
 ## Scope
 
 If you notice another agent's file under `.claude/agents/` is stale,
