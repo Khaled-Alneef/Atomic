@@ -1,6 +1,8 @@
 """Small reusable widgets shared across windows."""
 
-from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
+import weakref
+
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QPainter, QRadialGradient
 from PyQt6.QtWidgets import (
@@ -32,6 +34,64 @@ class GlassPage(QWidget):
         super().paintEvent(event)
 
 
+# Widgets currently holding the pointing-hand cursor because the pointer
+# is inside them. Weak, so a card being torn down on a page rebuild drops
+# out on its own rather than being kept alive by this.
+#
+# The registry exists because Qt's Leave event cannot be relied on. After
+# a modal dialog closes, Qt's idea of which widget the pointer is over is
+# stale, and moving off the widget it thinks you are on generates no
+# Leave at all - so that widget goes on answering "pointing hand" for
+# every cursor query, and the hand follows the pointer across the whole
+# app. Knowing who is holding one makes it possible to check them against
+# the pointer's real position and let go (see release_stale_hover_cursors).
+_HOVER_CURSOR_WIDGETS = weakref.WeakSet()
+
+
+def hold_hover_cursor(widget):
+    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    _HOVER_CURSOR_WIDGETS.add(widget)
+
+
+def release_hover_cursor(widget):
+    widget.unsetCursor()
+    _HOVER_CURSOR_WIDGETS.discard(widget)
+
+
+def release_stale_hover_cursors(global_pos):
+    """Let go of the hand cursor on any widget the pointer is not really
+    inside, whatever Qt believes. Cheap: at most a couple of widgets are
+    ever holding one at a time."""
+    for widget in list(_HOVER_CURSOR_WIDGETS):
+        try:
+            inside = (widget.isVisible()
+                      and widget.rect().contains(widget.mapFromGlobal(global_pos)))
+        except RuntimeError:
+            inside = False   # already deleted on the C++ side
+        if not inside:
+            release_hover_cursor(widget)
+
+
+class _HoverCursorFilter(QObject):
+    """Gives a plain widget the same hover-only cursor behaviour the
+    cards below have, without needing to subclass it."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Enter:
+            hold_hover_cursor(obj)
+        elif event.type() == QEvent.Type.Leave:
+            release_hover_cursor(obj)
+        return False
+
+
+def use_hover_cursor(widget):
+    """Point-and-click cursor for `widget`, only while the pointer is
+    genuinely inside it. Parented to the widget so the filter lives
+    exactly as long as it does."""
+    widget.installEventFilter(_HoverCursorFilter(widget))
+    return widget
+
+
 class Card(QFrame):
     """A clickable card (icon + label, cover art, etc.) with hover
     feedback and left/right click signals.
@@ -48,8 +108,29 @@ class Card(QFrame):
         self.setObjectName("Card")
         self.setProperty("hoverable", hoverable)
         self.setProperty("matte", matte)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._tooltip_provider = None
+
+    # A card carries no cursor of its own until the pointer is genuinely
+    # inside it. Setting the pointing hand in __init__ instead - which is
+    # what this used to do - meant every card was born holding a cursor,
+    # and a page rebuild creates a screenful of them at once. Rebuilds
+    # happen while the pointer is somewhere else entirely (on the
+    # Settings dialog floating above, after launching a game), and that
+    # left the hand on screen with nothing under the pointer wanting it,
+    # stuck there across every page afterwards.
+    #
+    # Enter/Leave is the reliable signal for "the pointer is really in
+    # here": it's the same mechanism behind the :hover rule that already
+    # paints these cards' highlight, so if the highlight is correct the
+    # cursor now is too. Nothing gets a hand cursor it didn't earn by
+    # actually being hovered.
+    def enterEvent(self, event):
+        hold_hover_cursor(self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        release_hover_cursor(self)
+        super().leaveEvent(event)
 
     def set_tooltip_provider(self, provider):
         """Build this card's tooltip fresh on every hover instead of once

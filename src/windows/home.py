@@ -20,7 +20,9 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import images, launchers, nav_config, storage, theme
-from helpers.widgets import Card, GlassPage, scroll_area
+from helpers.widgets import (
+    Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
+)
 from windows.link_grid import open_link_entry
 from windows.tracker import IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress, open_tracker_entry
 
@@ -123,7 +125,18 @@ class _HeroCardLabel(QLabel):
         self.setObjectName("HeroCardLabel")
         self.setScaledContents(True)
         self.setPixmap(pixmap)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    # Only while the pointer is genuinely inside, same as widgets.Card -
+    # and these are the worst offenders for holding a cursor they
+    # shouldn't, since the carousel builds fresh ones on a timer whether
+    # or not anyone is looking at this page.
+    def enterEvent(self, event):
+        hold_hover_cursor(self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        release_hover_cursor(self)
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

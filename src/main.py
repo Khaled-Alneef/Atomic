@@ -19,7 +19,7 @@ the slide direction immediately too - nothing to keep in sync by hand.
 import sys
 from pathlib import Path
 
-from helpers import app_settings, images, storage, theme
+from helpers import app_settings, images, native_cursor, storage, theme
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -29,8 +29,9 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     QSize,
     Qt,
+    QTimer,
 )
-from PyQt6.QtGui import QFont, QIcon, QPixmap
+from PyQt6.QtGui import QCursor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -47,6 +48,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
+from helpers.widgets import release_stale_hover_cursors, use_hover_cursor
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -58,14 +60,11 @@ from windows.websites import WebsitesPage
 
 APP_DIR = Path(__file__).resolve().parent
 
-# Events after which a stuck override cursor should be cleared - any sign
-# the pointer is interacting with this app again. See MainWindow.
-# _drain_override_cursor.
-_CURSOR_RESYNC_EVENTS = frozenset({
-    QEvent.Type.MouseMove,
-    QEvent.Type.MouseButtonPress,
-    QEvent.Type.Enter,
-})
+# How often the pointer is checked for movement, to re-derive its cursor
+# when it has moved. Fast enough that a wrong cursor is never on screen
+# long enough to notice, and each check that finds no movement is a
+# single coordinate comparison. See MainWindow._cursor_watchdog_tick.
+CURSOR_WATCHDOG_MS = 120
 
 # The image sizes each page renders at, for the startup prewarm (see
 # _prewarm_image_specs) - read off the pages themselves so a size
@@ -151,6 +150,15 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Atomic")
         self.resize(1280, 840)
+        # The window explicitly owns the plain arrow, rather than leaving
+        # it as "no cursor set". Without an explicit cursor anywhere in
+        # the chain, Qt has nothing to hand Windows when the pointer sits
+        # over ordinary content, so it makes no native cursor call at all
+        # and Windows simply keeps painting whichever cursor was last
+        # set - which is how the pointing hand from a button or card
+        # could stay on screen indefinitely. Owning the arrow means every
+        # move onto plain content actively restores it.
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         theme.apply_dark_titlebar(self)
 
         central = QWidget()
@@ -168,6 +176,10 @@ class MainWindow(QMainWindow):
         self._history_index = 0
         self._current_page = None
         self._anim_group = None
+        self._last_pointer_pos = QCursor.pos()
+        self._cursor_watchdog = QTimer(self)
+        self._cursor_watchdog.timeout.connect(self._cursor_watchdog_tick)
+        self._cursor_watchdog.start(CURSOR_WATCHDOG_MS)
 
         self._show_page("home", animate=False)
 
@@ -191,7 +203,7 @@ class MainWindow(QMainWindow):
         self.fold_btn = QPushButton("«", objectName="FoldButton")
         self.fold_btn.setFixedSize(28, 28)
         self.fold_btn.setToolTip("Collapse sidebar")
-        self.fold_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        use_hover_cursor(self.fold_btn)
         self.fold_btn.clicked.connect(self._toggle_sidebar)
         fold_row = QHBoxLayout()
         fold_row.setContentsMargins(0, 0, 0, 0)
@@ -284,7 +296,7 @@ class MainWindow(QMainWindow):
         self.add_btn = QPushButton("+", objectName="AddButton")
         self.add_btn.setFixedHeight(34)
         self.add_btn.setToolTip("Add")
-        self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        use_hover_cursor(self.add_btn)
         self.add_btn.clicked.connect(lambda: self._show_add_menu(self.add_btn))
         layout.addWidget(self.add_btn)
 
@@ -292,7 +304,7 @@ class MainWindow(QMainWindow):
         # Matches the Add button above it, and gives the collapsed gear
         # glyph room to render without being clipped.
         self.settings_btn.setFixedHeight(34)
-        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        use_hover_cursor(self.settings_btn)
         self.settings_btn.clicked.connect(self._open_settings)
         self._style_settings_btn()
         layout.addWidget(self.settings_btn)
@@ -432,14 +444,6 @@ class MainWindow(QMainWindow):
         # looking like a second sidebar had appeared out of nowhere.
         if obj is self.container and event.type() == QEvent.Type.Resize:
             self._fit_current_page()
-        # The backstop for the stuck cursor (see _drain_override_cursor):
-        # whatever leaves an override behind, the next time the pointer
-        # moves over, enters, or clicks anything in this app it gets
-        # cleared. The check is a null test on an already-cheap call and
-        # the drain only runs when one is genuinely stuck, so the normal
-        # case costs nothing measurable.
-        if event.type() in _CURSOR_RESYNC_EVENTS and QApplication.overrideCursor() is not None:
-            self._drain_override_cursor()
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.BackButton:
                 self.go_back()
@@ -477,10 +481,59 @@ class MainWindow(QMainWindow):
                 return
             QApplication.restoreOverrideCursor()
 
+    def _cursor_watchdog_tick(self):
+        """Keep the pointer's cursor honest, by re-deriving it whenever
+        the pointer has moved since the last tick.
+
+        This exists because Qt can lose track of which widget the pointer
+        is over, and then stops updating the cursor at all. Closing a
+        modal dialog is the reproducible way in: open Settings from the
+        sidebar button - which asks for the pointing-hand cursor - close
+        it, and moving the pointer off that button never restores the
+        arrow. The hand then follows you across every page. Confirmed by
+        reading the OS cursor directly, not inferred.
+
+        It has to be a timer rather than an event handler. Qt only
+        delivers MouseMove for a widget with mouse tracking switched on,
+        which nothing here does, and the Enter event that would normally
+        cover it is exactly what the stale state stops being generated -
+        so the app cannot see this movement at all. Polling the pointer
+        position sidesteps that entirely.
+
+        Repairing has to happen *after* the pointer has moved, too: every
+        candidate repair applied at the moment of closing leaves it
+        stuck, and every one applied after a move clears it - hence
+        re-deriving on movement rather than on the dialog closing."""
+        pos = QCursor.pos()
+        moved = pos != self._last_pointer_pos
+        self._last_pointer_pos = pos
+        if not moved:
+            return
+        # Never mid-drag: Qt drives drag-and-drop with an override cursor
+        # of its own (the sidebar's reorderable nav list), and tearing
+        # that down under it would break the drag's feedback. A held
+        # button is the cheapest reliable "a drag may be in progress"
+        # test there is.
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            return
+        # Any widget still claiming the hand cursor that the pointer has
+        # actually left lets go of it, so Qt's own answer is right.
+        release_stale_hover_cursors(pos)
+        if QApplication.overrideCursor() is not None:
+            self._drain_override_cursor()
+            return
+        # Then make Windows agree with that answer. Qt stops issuing
+        # native cursor calls for this window after a modal dialog
+        # closes, so this is the only step that actually reaches the
+        # screen in that state - see helpers/native_cursor.
+        widget = QApplication.widgetAt(pos)
+        if widget is not None:
+            native_cursor.enforce(widget.cursor().shape())
+
     def _on_app_state_changed(self, state):
-        """Coming back to the front is the first moment a cursor left
-        stuck by a launch can be corrected, and it costs nothing to
-        check."""
+        """Returning to the front is the other way the pointer can end
+        up somewhere Qt has lost track of - after a game or website
+        launched from a card took focus mid-click."""
         if state == Qt.ApplicationState.ApplicationActive:
             self._drain_override_cursor()
 

@@ -89,39 +89,35 @@ def needs_refresh(entry: dict, force: bool = False) -> bool:
 def tooltip_lines(entry: dict, medium: str) -> list:
     """The extra hover lines for an entry, or [] when nothing's known.
 
-    Anime/Series read as a statement of fact ("Uploads Monday at 8:00 PM")
-    because that's what the schedule says; Manga reads as the projection
-    it is ("Expected: ...")."""
+    Identical wording for every medium - "Expected:" then "Countdown:" -
+    so a card reads the same whichever page it's on. Manga adds the
+    chapter number it's counting down to, which anime/series have no
+    equivalent for (the number a schedule gives is per-cour and doesn't
+    line up with the season/episode already shown above it)."""
     when = _release_time(entry.get("next_release"))
     if not when:
         return []
     local = when.astimezone()
     remaining = when - datetime.now(timezone.utc)
 
+    lines = []
     if medium == MEDIUM_MANGA:
-        lines = []
         chapter = (entry.get("next_release") or {}).get("chapter")
         if chapter:
             lines.append(f"Next Chapter: {chapter:g}")
-        lines.append(f"Expected: {format_slot(local)}")
-        lines.append(f"Countdown: {format_countdown(remaining)}")
-        return lines
-    # "In <countdown>" only reads right while there's time left on it -
-    # a slot that's just passed (the schedule is re-checked hourly at
-    # most, so it can be) says so instead.
-    countdown = (f"In {format_countdown(remaining)}" if remaining.total_seconds() > 0
-                 else "Airing about now")
-    return [f"Uploads {format_slot(local, joiner=' at ')}", countdown]
+    lines.append(f"Expected: {format_slot(local)}")
+    lines.append(f"Countdown: {format_countdown(remaining)}")
+    return lines
 
 
-def format_slot(local: datetime, joiner: str = " ") -> str:
+def format_slot(local: datetime) -> str:
     """"Monday 8:00 PM" - always the weekday name, never a date, so every
     card reads the same way. Something more than a week out is genuinely
     ambiguous stated as a weekday alone, but the countdown sitting right
     underneath it resolves that ("Monday 8:00 PM" + "10d 13h 1m" can
     only mean the Monday after next)."""
     clock = local.strftime("%I:%M %p").lstrip("0")
-    return f"{local.strftime('%A')}{joiner}{clock}"
+    return f"{local.strftime('%A')} {clock}"
 
 
 def format_countdown(remaining: timedelta) -> str:
