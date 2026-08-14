@@ -173,9 +173,41 @@ A release is identified by a git tag on this repository (`v1.0`, `v1.1`,
 …), and what gets downloaded is the `Atomic.exe` committed at that tag.
 GitHub's contents API reports that file's git blob hash, and the download
 is verified against it before anything is replaced: a truncated or
-tampered download is discarded rather than installed. Publishing a
-release is therefore exactly "commit the rebuilt exe, tag it, push the
-tag".
+tampered download is discarded rather than installed.
+
+### 6.2.1 How a release is published
+
+The repository separates the two things `main` was previously doing at
+once:
+
+| Branch | Holds |
+|---|---|
+| `development` | The work, commit by commit, including every intermediate `Rebuild Atomic.exe` step |
+| `main` | One commit per *released* version, each tagged — nothing else ever lands here |
+
+`main` is what the updater reads, so this keeps unreleased work from ever
+being visible to a running copy of the app: until a version is put on
+`main` and tagged, `check_for_update` cannot see it, however many commits
+`development` is ahead by.
+
+The two branches deliberately share no history — `main` was restarted at
+1.0 as a single commit — so a release is taken as a *snapshot* rather
+than merged (a merge would refuse, as unrelated histories):
+
+```
+git checkout main
+git read-tree -u --reset development    # main's tree becomes development's
+git commit -m "Atomic 1.1"
+git tag -a v1.1 -m "Atomic 1.1"
+git push origin main && git push origin v1.1
+git checkout development
+```
+
+The resulting commit has the previous release as its parent and the new
+version's exact contents as its tree, so `main` reads as a list of
+releases and nothing else. `APP_VERSION` in `helpers/updater.py` must be
+bumped on `development` first, or the new build goes on offering itself
+an update.
 
 ### 6.3 Interface
 
