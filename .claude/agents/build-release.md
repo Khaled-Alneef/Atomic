@@ -9,6 +9,8 @@ updates itself from GitHub tags, so mistakes here reach users.
 
 ## The two branches
 
+Full procedure: `docs/RELEASING.md`. The essentials:
+
 | Branch | Holds |
 |---|---|
 | `development` | all work, full history - this is where you commit |
@@ -71,16 +73,15 @@ git push origin main && git push origin v1.1
 git checkout development
 ```
 
-There is one VDD, named for the current release
-(`docs/VDD-1.0.md`), and it is kept current as work accumulates: §3
-lists what has changed since that release and says plainly that it is
-unreleased. Because the repository's executable is then a development
-build rather than the released one, the inventory lists both, each with
-its own size and SHA-256 - the document must never state a single hash
-as if the released and in-repository builds were the same file. At
-release, copy it to `docs/VDD-<new version>.md`, set the version and
-date, fold §3 into the new document's history, and re-take the sizes and
-hashes from the released build. Afterwards, confirm the updater still
+**A VDD is written for a release, and only for a release.** A
+development build (1.0.1, 1.0.2, ...) is delivered to nobody and gets no
+document - do not create one, and do not add unreleased work to an
+existing one. As part of making the release, write
+`docs/VDD-<version>.md` starting from the previous release's document:
+size and SHA-256 taken from the released build, and the "Changes since"
+section built from `git log v<previous>..development`, which is what the
+detailed commit messages are for. Never edit a released version's VDD -
+it records what was actually delivered under that number. Afterwards, confirm the updater still
 resolves the release by calling `updater.check_for_update()` against the
 live repo with `APP_VERSION` temporarily lowered.
 
