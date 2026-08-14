@@ -69,6 +69,14 @@ from the source sitting next to it. The history already carries about
 1.1GB from when it was committed on every change; this stops that
 growing, it does not shrink what is there.
 
+One consequence to expect: because `main` tracks the file and
+`development` ignores it, switching between them rewrites or deletes your
+local build without warning — git treats ignored files as expendable.
+`git checkout main` replaces it with the released one, and coming back to
+`development` removes it. Nothing is lost that `python packaging/build.py`
+cannot produce again, but do not expect a local build to survive a branch
+switch, and do not keep anything else you care about at that path.
+
 ## Releasing
 
 Only when the release is actually asked for.
