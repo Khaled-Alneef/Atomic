@@ -295,9 +295,11 @@ class _CoverSignals(QObject):
 
 
 class _ScheduleSignals(QObject):
-    # entry id, next_release dict (or None when nothing's scheduled), and
-    # which refresh run asked for it (0 = none, see TrackerPage._refresh_run)
-    resolved = Signal(str, object, int)
+    # entry id, next_release dict (or None when nothing's scheduled), the
+    # MangaDex id the title resolved to (or None - manga only, see
+    # release_schedule.fetch), and which refresh run asked for it
+    # (0 = none, see TrackerPage._refresh_run)
+    resolved = Signal(str, object, object, int)
 
 
 class TrackerPage(GlassPage):
@@ -484,14 +486,15 @@ class TrackerPage(GlassPage):
         # Must never raise: an uncaught exception here would kill the
         # background thread silently.
         try:
-            found = release_schedule.fetch(
+            found, manga_id = release_schedule.fetch(
                 self.MEDIUM, entry["title"], imdb_id=_entry_imdb_id(entry),
-                known_latest_chapter=_latest_known_chapter(entry))
+                known_latest_chapter=_latest_known_chapter(entry),
+                manga_id=entry.get("mangadex_id"))
         except Exception:
-            found = None
-        self._schedule_signals.resolved.emit(entry["id"], found, run)
+            found, manga_id = None, None
+        self._schedule_signals.resolved.emit(entry["id"], found, manga_id, run)
 
-    def _on_schedule_resolved(self, entry_id, found, run=0):
+    def _on_schedule_resolved(self, entry_id, found, manga_id=None, run=0):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if not entry:
             self._refresh_step_done(run)
@@ -504,6 +507,16 @@ class TrackerPage(GlassPage):
         # single page visit - the timestamp is what needs_refresh rate-
         # limits against.
         fields = {"next_release": found, "next_release_checked_at": storage.now_iso()}
+        # Which MangaDex title this entry is, once it has been worked out:
+        # kept so the next refresh can go straight to the chapter feed
+        # instead of searching for the same title again (the single
+        # biggest cost of a Reading refresh - see mangadex.
+        # fetch_next_chapter). Written, never cleared here: a lookup that
+        # finds nothing says the series is quiet, not that the id went
+        # wrong, and the one thing that can invalidate it - the title being
+        # edited - clears it at the point of the edit (see _on_form_save).
+        if manga_id:
+            fields["mangadex_id"] = manga_id
         entry.update(fields)
         # Just these fields, not a wholesale save of self.entries - Anime
         # and Manga are separate pages backed by the same tracker.json
@@ -865,8 +878,11 @@ class TrackerPage(GlassPage):
         # A new entry has no schedule yet, and an edited one may have had
         # the title it's looked up by changed out from under the old one -
         # either way the stored lookup is worth redoing, so clear what
-        # rate-limits it before saving.
+        # rate-limits it before saving. The cached MangaDex id goes with
+        # it: it was resolved from the *old* title, and reusing it would
+        # keep answering for the series the user just corrected away from.
         entry.pop("next_release_checked_at", None)
+        entry.pop("mangadex_id", None)
         storage.save(self.DATA_FILE, self.entries)
         self._refresh_grid()
         self._refresh_schedules()

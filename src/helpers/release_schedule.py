@@ -35,24 +35,39 @@ FINISHED_STATUSES = {"Completed", "Dropped"}
 
 # ---- lookup ----------------------------------------------------------
 
-def fetch(medium: str, title: str, imdb_id=None, known_latest_chapter=None):
+def fetch(medium: str, title: str, imdb_id=None, known_latest_chapter=None,
+          manga_id=None):
     """Look up the next release. Blocking (call it off the UI thread) and
     fails soft: any lookup problem just means no schedule is known.
-    Returns the dict stored as the entry's `next_release`, or None."""
+
+    Returns (next_release, manga id): the dict stored as the entry's
+    `next_release` (or None), and - manga only - the MangaDex id this
+    title resolved to, for the caller to cache on the entry and pass back
+    in as `manga_id` next time. That id is returned separately from the
+    schedule rather than inside it precisely because it outlives one: a
+    lookup that comes back empty overwrites `next_release` with None, and
+    an id stored in there would be lost with it, putting the search this
+    exists to avoid back on the next refresh (see
+    mangadex.fetch_next_chapter). Anime and series have a real published
+    schedule keyed by title/IMDb id, so they have nothing to cache."""
     if medium == MEDIUM_MANGA:
-        return _pack(mangadex.fetch_next_chapter(title, known_latest_chapter), "mangadex")
+        found, resolved_id = mangadex.fetch_next_chapter(
+            title, known_latest_chapter, manga_id)
+        return _pack(found, "mangadex"), resolved_id
     if medium == MEDIUM_SERIES:
-        return _pack(tvmaze.fetch_next_episode(imdb_id, title), "tvmaze")
+        return _pack(tvmaze.fetch_next_episode(imdb_id, title), "tvmaze"), None
 
     found = anilist.fetch_next_episode(title)
     if found:
-        return _pack(found, "anilist")
+        return _pack(found, "anilist"), None
     # AniList is the anime schedule source, but it only knows what it has
     # an entry for and the tracker's title has to match one. Anime entries
     # carry the same IMDb id Series entries do, and TVMaze lists plenty of
     # anime by it - so an exact-id lookup is a free second chance at a
     # real schedule rather than showing nothing.
-    return _pack(tvmaze.fetch_next_episode(imdb_id, title), "tvmaze") if imdb_id else None
+    if not imdb_id:
+        return None, None
+    return _pack(tvmaze.fetch_next_episode(imdb_id, title), "tvmaze"), None
 
 
 def _pack(found, source):
