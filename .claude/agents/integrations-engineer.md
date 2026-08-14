@@ -73,3 +73,11 @@ real title string, not a tidied one.
 Never hit the real APIs in a test - stub the module-level functions and
 assert on what the page does with the answer. See the `test-engineer`
 agent for the harness.
+
+## Scope
+
+If a source change here (a return shape, a field name, a behaviour)
+leaves another agent's file under `.claude/agents/` stale - `test-engineer.md`
+stubbing the old shape of `release_schedule.fetch` is the shipped
+example - report it to the `project-manager` rather than fixing it ad
+hoc or leaving it unaddressed. See project-manager.md.

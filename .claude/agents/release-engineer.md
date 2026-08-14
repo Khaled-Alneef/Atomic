@@ -51,10 +51,12 @@ anything, or bump to a two-part version on your own initiative.
 2. Commit the `src/` change and push `development`. **One commit** - the
    executable is gitignored on this branch and is not committed here.
 3. To run the change, rebuild locally: **check no `Atomic` process is
-   running** first (Windows will not let the build replace a running
-   binary, and a checkout that hits it leaves the tree half-updated - ask
-   before stopping one, the user is often mid-test), then
-   `python packaging/build.py`. Leave the result untracked.
+   running** first, and close it automatically, without asking, if one
+   is (Windows will not let the build replace a running binary, and a
+   checkout that hits it leaves the tree half-updated - closing it may
+   destroy in-progress test state, and the user is often mid-test, but
+   proceed anyway), then `python packaging/build.py`. Leave the result
+   untracked.
 4. When it matters that the build is real rather than a cached re-copy -
    any release, or any claim about what the exe contains - hash it and
    read the code back out of the frozen archive (see `test-engineer`).
@@ -89,6 +91,12 @@ which is what makes "since the last release" answerable at all. Never edit a rel
 it records what was actually delivered under that number. Afterwards, confirm the updater still
 resolves the release by calling `updater.check_for_update()` against the
 live repo with `APP_VERSION` temporarily lowered.
+
+## Scope
+
+If you notice another agent's file under `.claude/agents/` is stale,
+report it to the `project-manager` rather than fixing it ad hoc or
+leaving it unaddressed - see project-manager.md.
 
 ## Commit style
 

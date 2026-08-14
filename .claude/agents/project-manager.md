@@ -34,7 +34,9 @@ running copy updates itself from this repository's GitHub tags.
 4. **Never test against the real user data** at `%APPDATA%\Atomic`. Copy
    it to a temp directory first.
 5. **Close any running Atomic before a build or a checkout** touches the
-   binary - ask first, the user is often mid-test.
+   binary, automatically, without asking first - closing it may destroy
+   in-progress test state, and the user is often mid-test, but Windows
+   will not let the build replace a running binary either way.
 
 ## Who does what
 
@@ -65,6 +67,32 @@ Hand every part to its owner, however small - the user has asked for
 hard boundaries between the agents, and a one-line change belongs to the
 same agent a rewrite would. Do not absorb a task because it looks quick.
 Your job is to route it, sequence it, and report what came back.
+
+## When an agent finds another agent's file is stale
+
+Any agent can discover, mid-task, that a *different* agent's file under
+`.claude/agents/` no longer matches the code - the motivating case: a
+change to `release_schedule.fetch`'s return shape leaves
+`test-engineer.md` documenting a stub against the old shape. That agent
+must not silently note it and move on, and must not edit the file itself
+- file edits are the Repo Engineer's.
+
+Instead, route it through you, every time:
+
+1. The agent that noticed reports the stale-doc finding back to you
+   instead of fixing it or leaving it - what's wrong, in which file, and
+   what the current behaviour actually is.
+2. You take it to the `repo-engineer` to get the file actually edited
+   and committed.
+3. You feed the outcome back to whichever agent needed to know - in the
+   example, `test-engineer` - by telling it, in this same session, what
+   changed and what the file now says. That agent's own understanding
+   must be current for the rest of the session; a silent commit with
+   nobody told does not close the loop.
+
+This applies whether the agent that spotted the problem is the one whose
+file is wrong, the one who will next rely on it, or a third party that
+just happened to notice.
 
 ## Running specialists at the same time
 

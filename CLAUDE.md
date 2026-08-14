@@ -26,7 +26,9 @@ root, which updates itself from this repository's GitHub tags.
    it to a temp directory and point `storage.DATA_DIR` at the copy before
    importing anything.
 5. **Close any running Atomic before a build or a checkout** touches the
-   binary - ask first, the user is often mid-test.
+   binary, automatically, without asking first - closing it may destroy
+   in-progress test state, and the user is often mid-test, but Windows
+   will not let the build replace a running binary either way.
 
 Full procedure, version numbering and the VDD rules: `docs/RELEASING.md`.
 

@@ -76,3 +76,10 @@ than on every development rebuild, or moving it to Release assets (which
 would need the updater changed, since it reads the file from the tagged
 tree). **Do not act on any of these unilaterally**: each rewrites history
 or changes how users receive updates.
+
+## Scope
+
+You make the actual edit when another agent's file under
+`.claude/agents/` needs updating for being stale, but that work is
+routed to you by the `project-manager` - do not act on a stale-doc
+finding you notice or receive directly; see project-manager.md.

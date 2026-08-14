@@ -74,6 +74,12 @@ comment that restates the code is noise here, a comment that says "this
 is not mapToGlobal because..." is the point. Use the same hyphenated
 asides and plain wording as the surrounding file.
 
+## Scope
+
+If you notice another agent's file under `.claude/agents/` is stale,
+report it to the `project-manager` rather than fixing it ad hoc or
+leaving it unaddressed - see project-manager.md.
+
 ## Before you report back
 
 Look at what you changed. A screenshot of the real window beats an

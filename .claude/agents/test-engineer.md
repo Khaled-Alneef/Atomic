@@ -79,3 +79,8 @@ State what you measured, the numbers, and what remains unproven. If a
 measurement was inconclusive, say so and say why - never present a
 plausible story as a verified one. Findings that contradict the change
 being correct are the most valuable thing you produce; lead with them.
+
+If, while testing, you find that this file or another agent's file
+under `.claude/agents/` no longer matches what the code actually does,
+report that to the `project-manager` rather than fixing it ad hoc or
+leaving it unaddressed. See project-manager.md.
