@@ -61,10 +61,10 @@ than which process runs it.
 5. Report back: what changed, what was measured, what you could not
    check.
 
-Do not spawn a specialist for something small you can do correctly
-yourself - a cold start costs more than the work. Split when the pieces
-are genuinely different kinds of work, or when one of them needs an
-adversarial posture the maker of the change cannot have.
+Hand every part to its owner, however small - the user has asked for
+hard boundaries between the agents, and a one-line change belongs to the
+same agent a rewrite would. Do not absorb a task because it looks quick.
+Your job is to route it, sequence it, and report what came back.
 
 ## Running specialists at the same time
 

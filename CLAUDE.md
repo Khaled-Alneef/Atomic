@@ -38,11 +38,17 @@ change works, `build-release` for the exe and version discipline,
 `github` for anything touching `origin`, and `atomic-lead` as the front
 door for a request that spans several of them.
 
-**Hand substantial work to a specialist and let it run in the background,
-so the conversation stays free.** Do not spawn one for something small
-you can do correctly yourself - a cold start costs more than the work.
-Never invent or predict what a running agent will report; if asked before
-it lands, say it is still running.
+**Everything goes to the agent that owns it - every task, however
+small.** A one-line colour change goes to `qt-ui` exactly as a new page
+does; a single `git push` goes to `github`. The boundaries are the point:
+one owner per area, no overlap, no exceptions for small work. The main
+session routes the request and relays the result; it does not do the work
+itself.
+
+Run them in the background so the conversation stays free. Never invent
+or predict what a running agent will report; if asked before it lands,
+say it is still running. Questions with no owner - what the repo
+contains, what an agent is for - are answered directly.
 
 Three things cannot overlap, and running them concurrently produces wrong
 answers rather than slow ones: anything measuring the screen (pixel
