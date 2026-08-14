@@ -52,6 +52,7 @@ nothing to migrate — 1.0's saved entries are read as they are.
 | 3 | The dialog Games raised after an import is gone; the result is a corner message like every other one | `windows/games.py` |
 | 4 | Leaving full screen no longer flashes the window at its restored size before zooming back out (§7.5) | `main.py`, `helpers/theme.py` |
 | 5 | The executable carries a Windows version resource: its Properties now report the version it runs as, and the shell has a changed file identity to re-read its icon from | `packaging/Atomic.spec` |
+| 6 | Corner messages sit in the corner again on a multi-monitor setup with mixed display scaling, instead of floating in the middle of the page (§7.6) | `helpers/widgets.py` |
 
 Two smaller corrections came out of the first two. A tracker page fired
 the same background lookups when it opened as the refresh button does,
@@ -69,8 +70,8 @@ reports now.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,143,568 bytes. SHA-256 `b4c1d538b7035ecf13397c62c4fd6c03a8ef222e21567da3ea014d8c1918d373` |
-| `src/` | Full Python source, 8,406 lines across 29 modules |
+| `Atomic.exe` | The application. 47,143,062 bytes. SHA-256 `1ff9aef8f4490595e74c7f341539931911a73e22799278abc9c0147f50c5927d` |
+| `src/` | Full Python source, 8,419 lines across 29 modules |
 | `packaging/` | `build.py` and `Atomic.spec`, which produce the executable |
 | `docs/VDD-1.0.md` | The previous version's document, kept as released |
 | `docs/VDD-1.1.md` | This document |
@@ -118,7 +119,7 @@ administrator rights.
 | `updater.py` | 241 | In-app updates from the GitHub repository |
 | `mangadex.py` | 238 | MangaDex client and next-chapter estimation |
 | `launchers.py` | 244 | Game-launcher scanning, icon extraction and caching |
-| `widgets.py` | 284 | Shared widgets — cards, toasts, scroll areas, hover-cursor registry |
+| `widgets.py` | 297 | Shared widgets — cards, toasts, scroll areas, hover-cursor registry |
 | `images.py` | 225 | Image loading, thumbnail caching, letter avatars |
 | `icon_extract.py` | 202 | Executable icon extraction |
 | `stremio.py` | 179 | Cinemeta search / metadata and Stremio account progress |
@@ -225,7 +226,7 @@ Qt involvement — is performed on a background thread at startup.
 
 ## 7. Design notes
 
-Five decisions are recorded here because the reasoning is not obvious
+Six decisions are recorded here because the reasoning is not obvious
 from the code, and each cost real investigation to arrive at.
 
 ### 7.1 Manga schedules are estimates, and say so
@@ -328,6 +329,23 @@ change and cleared after it — measured zero frames. That is what ships
 (`theme.without_window_animation`). It is cleared afterwards rather than
 left off, so minimizing to the taskbar and restoring from it still
 animate as they always did.
+
+### 7.6 Window positions are read, never mapped
+
+Everything the app places against the window's own corner reads
+`window.geometry()`, which is already in global coordinates, rather than
+mapping a local point out with `mapToGlobal()`.
+
+The corner messages were placed the second way and landed in the middle
+of the page. On two monitors with different scale factors - the primary
+at 125%, the app maximized on a 100% one - `mapToGlobal(width, height)`
+returned 826 for a window whose bottom edge is genuinely at 1032: the
+right answer divided by the *other* screen's scale factor. Every message
+was then positioned against a bottom edge some 200px too high.
+
+A coordinate that is already global cannot disagree with itself that way,
+which is why it is preferred here even though the mapping call reads more
+naturally.
 
 ---
 
