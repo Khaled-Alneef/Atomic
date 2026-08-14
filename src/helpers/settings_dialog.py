@@ -156,11 +156,11 @@ class SettingsDialog(QDialog):
         form.addWidget(hint)
 
         form.addSpacing(24)
-        form.addWidget(QLabel("Sidebar Sections", objectName="SectionTitle"))
+        form.addWidget(QLabel("Sections", objectName="SectionTitle"))
         sections_hint = QLabel(
-            "Choose which sections show up in the main sidebar. Hidden "
-            "sections keep their saved entries - toggle one back on any "
-            "time to bring it back.",
+            "Choose which sections show up in the app. Hidden sections "
+            "keep their saved entries - toggle one back on any time to "
+            "bring it back.",
             objectName="Muted",
         )
         sections_hint.setWordWrap(True)
@@ -175,6 +175,22 @@ class SettingsDialog(QDialog):
             form.addWidget(cb)
             self.section_checks[page_name] = cb
 
+        form.addSpacing(12)
+        self.hide_from_home_check = QCheckBox("Hide them from the Home page too")
+        self.hide_from_home_check.setChecked(app_settings.get_hide_sections_from_home())
+        self.hide_from_home_check.toggled.connect(self._toggle_hide_from_home)
+        form.addWidget(self.hide_from_home_check)
+
+        home_hint = QLabel(
+            "Off by default, where unticking a section above only drops "
+            "its sidebar entry and Home still previews it. Tick this to "
+            "leave hidden sections off Home as well - their preview row, "
+            "quick list, and any \"Continue\" slides all go with them.",
+            objectName="Muted",
+        )
+        home_hint.setWordWrap(True)
+        form.addWidget(home_hint)
+
         form.addStretch()
         return page
 
@@ -185,9 +201,25 @@ class SettingsDialog(QDialog):
         else:
             hidden.add(page_name)
         app_settings.set_hidden_sections(hidden)
+        self._apply_section_visibility()
+
+    def _toggle_hide_from_home(self, enabled):
+        app_settings.set_hide_sections_from_home(enabled)
+        self._apply_section_visibility()
+
+    def _apply_section_visibility(self):
+        """Rebuild the sidebar and the page behind this dialog, so a
+        toggle lands immediately rather than on the next restart. The
+        page is redrawn as well as the sidebar because the toggle can
+        now change what Home shows, and Home is very often what's
+        sitting behind Settings when this gets changed."""
         main_window = self.parent()
-        if main_window is not None and hasattr(main_window, "_refresh_nav_list"):
+        if main_window is None:
+            return
+        if hasattr(main_window, "_refresh_nav_list"):
             main_window._refresh_nav_list()
+        if hasattr(main_window, "refresh_current_page"):
+            main_window.refresh_current_page()
 
     # ------------------------------------------------------------------
     def _build_anime_page(self):

@@ -23,15 +23,32 @@ def set_nav_order(order: list):
 
 
 def get_hidden_sections() -> list:
-    """Sidebar page-names the user has hidden from the main sidebar (see
-    Settings > General), or [] if nothing's hidden. Hidden sections keep
-    their saved data - this only controls sidebar visibility."""
+    """Page-names the user has hidden (see Settings > General), or [] if
+    nothing's hidden. Hidden sections keep their saved data - this only
+    controls visibility, in the sidebar always and on Home as well if
+    get_hide_sections_from_home() is on."""
     return _load().get("hidden_sections", [])
 
 
 def set_hidden_sections(hidden: list):
     data = _load()
     data["hidden_sections"] = list(hidden)
+    storage.save(SETTINGS_FILE, data)
+
+
+def get_hide_sections_from_home() -> bool:
+    """Whether hiding a section also leaves it off the Home page, rather
+    than only removing its sidebar entry.
+
+    Defaults off, which is what hiding has always meant here - turning it
+    on for existing users would silently strip previews off their Home
+    page as a side effect of an unrelated update."""
+    return bool(_load().get("hide_sections_from_home", False))
+
+
+def set_hide_sections_from_home(enabled: bool):
+    data = _load()
+    data["hide_sections_from_home"] = bool(enabled)
     storage.save(SETTINGS_FILE, data)
 
 

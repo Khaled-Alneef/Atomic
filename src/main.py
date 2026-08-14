@@ -58,6 +58,15 @@ from windows.websites import WebsitesPage
 
 APP_DIR = Path(__file__).resolve().parent
 
+# Events after which a stuck override cursor should be cleared - any sign
+# the pointer is interacting with this app again. See MainWindow.
+# _drain_override_cursor.
+_CURSOR_RESYNC_EVENTS = frozenset({
+    QEvent.Type.MouseMove,
+    QEvent.Type.MouseButtonPress,
+    QEvent.Type.Enter,
+})
+
 # The image sizes each page renders at, for the startup prewarm (see
 # _prewarm_image_specs) - read off the pages themselves so a size
 # changed there can't quietly leave the prewarm decoding the wrong one.
@@ -423,6 +432,14 @@ class MainWindow(QMainWindow):
         # looking like a second sidebar had appeared out of nowhere.
         if obj is self.container and event.type() == QEvent.Type.Resize:
             self._fit_current_page()
+        # The backstop for the stuck cursor (see _drain_override_cursor):
+        # whatever leaves an override behind, the next time the pointer
+        # moves over, enters, or clicks anything in this app it gets
+        # cleared. The check is a null test on an already-cheap call and
+        # the drain only runs when one is genuinely stuck, so the normal
+        # case costs nothing measurable.
+        if event.type() in _CURSOR_RESYNC_EVENTS and QApplication.overrideCursor() is not None:
+            self._drain_override_cursor()
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.BackButton:
                 self.go_back()
@@ -436,22 +453,36 @@ class MainWindow(QMainWindow):
         if self._current_page is not None:
             self._current_page.setGeometry(self.container.rect())
 
-    def _on_app_state_changed(self, state):
-        """Re-apply the cursor whenever the app comes back to the front.
+    def _drain_override_cursor(self):
+        """Drop any application-wide override cursor.
 
-        Launching a game/app/website hands focus to something else mid-
-        click, while the mouse is sitting on a card that asked for the
-        pointing-hand cursor. Qt only issues a native cursor change when
-        it believes the shape differs from the last one it set, and that
-        bookkeeping goes stale across the focus handover - so the hand
-        stayed on screen over every page afterwards, since nothing in
-        this app ever asks for a *different* shape to correct it with.
-        Pushing an override and immediately dropping it forces Qt to
-        recompute the cursor for whatever is actually under the mouse."""
-        if state != Qt.ApplicationState.ApplicationActive:
-            return
-        QApplication.setOverrideCursor(Qt.CursorShape.ArrowCursor)
-        QApplication.restoreOverrideCursor()
+        This is what left the pointing hand stuck over every page after
+        launching a game. A cursor set on a widget (which is all this app
+        does - see widgets.Card) is re-evaluated the moment the pointer
+        crosses into a widget that doesn't set one, so it cannot be
+        responsible for a shape that survives moving the mouse
+        everywhere. An *override* cursor can: it sits on top of the whole
+        application and outranks every widget until it is popped.
+
+        Nothing here pushes one deliberately, but Qt does internally -
+        drag-and-drop being the one this app enables (the sidebar's
+        InternalMove nav list), and a drag whose grab is broken by
+        another window taking focus mid-gesture can leave its override
+        behind. Popping to empty is therefore always the right move, and
+        can't discard anything the app meant to keep. The loop is because
+        overrides nest, and the guard is so a stuck one can't spin here
+        forever."""
+        for _ in range(16):
+            if QApplication.overrideCursor() is None:
+                return
+            QApplication.restoreOverrideCursor()
+
+    def _on_app_state_changed(self, state):
+        """Coming back to the front is the first moment a cursor left
+        stuck by a launch can be corrected, and it costs nothing to
+        check."""
+        if state == Qt.ApplicationState.ApplicationActive:
+            self._drain_override_cursor()
 
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.AltModifier:

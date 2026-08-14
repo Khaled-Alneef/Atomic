@@ -154,6 +154,20 @@ class HomePage(GlassPage):
         self.websites = storage.load(WEBSITES_FILE, [])
         self.apps = storage.load(APPS_FILE, [])
 
+        # Sections the user has hidden *and* asked to keep off Home (see
+        # nav_config.home_hidden_sections). Applied to what gets drawn
+        # rather than to the loaded lists above, which stay whole -
+        # they're what gets written back when an entry is opened from
+        # here, and saving a filtered copy would delete the rest.
+        hidden = nav_config.home_hidden_sections()
+        self._hidden_home_sections = hidden
+        self._home_tracker_entries = [
+            entry for entry in self.tracker_entries
+            if not ("anime" in hidden and entry.get("type") == "Anime")
+            and not ("manga" in hidden and entry.get("type") in MANGA_TYPES)
+        ]
+        self._home_series_entries = [] if "series" in hidden else self.series_entries
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
 
@@ -202,31 +216,41 @@ class HomePage(GlassPage):
         # whichever of the two sits earlier.
         sections = []
 
-        anime_manga_recent = self._recent_entries(self.tracker_entries)
+        anime_manga_recent = self._recent_entries(self._home_tracker_entries)
         if anime_manga_recent:
+            # One section covering two nav entries, so hiding just one of
+            # them retitles it rather than dropping it - a row of only
+            # manga still headed "Anime & Reading" reads like a bug.
+            title = "Anime & Reading"
+            if "anime" in hidden:
+                title = "Reading"
+            elif "manga" in hidden:
+                title = "Anime"
             pos = min(nav_config.nav_position("anime"), nav_config.nav_position("manga"))
             sections.append((pos, self._build_section(
-                "Anime & Reading", self._build_poster_grid(anime_manga_recent))))
+                title, self._build_poster_grid(anime_manga_recent))))
 
-        series_recent = self._recent_entries(self.series_entries)
+        series_recent = self._recent_entries(self._home_series_entries)
         if series_recent:
             pos = nav_config.nav_position("series")
             sections.append((pos, self._build_section(
                 "Series", self._build_poster_grid(series_recent))))
 
-        recent_games = self._recent_games()
+        recent_games = [] if "games" in hidden else self._recent_games()
         if recent_games:
             pos = nav_config.nav_position("games")
             sections.append((pos, self._build_section(
                 "Games", self._build_games_grid(recent_games))))
 
+        show_apps = bool(self.apps) and "apps" not in hidden
+        show_websites = bool(self.websites) and "websites" not in hidden
         lists_row = QHBoxLayout()
         lists_row.setSpacing(16)
-        if self.apps:
+        if show_apps:
             lists_row.addWidget(self._build_quick_list("Quick Apps", self.apps, APPS_FILE))
-        if self.websites:
+        if show_websites:
             lists_row.addWidget(self._build_quick_list("Websites", self.websites, WEBSITES_FILE))
-        if self.apps or self.websites:
+        if show_apps or show_websites:
             row_wrap = QWidget(objectName="Bare")
             row_wrap.setLayout(lists_row)
             pos = min(nav_config.nav_position("apps"), nav_config.nav_position("websites"))
@@ -242,7 +266,10 @@ class HomePage(GlassPage):
 
     # ------------------------------------------------------------------
     def _all_trackable_entries(self):
-        return self.tracker_entries + self.series_entries
+        """Everything Home may draw on - the hidden-from-Home sections
+        already filtered out, so the "Continue" carousel can't headline
+        a section the user has taken off this page."""
+        return self._home_tracker_entries + self._home_series_entries
 
     def _in_progress_entries(self):
         entries = [e for e in self._all_trackable_entries() if e.get("status") in IN_PROGRESS_STATUSES]
@@ -715,4 +742,8 @@ class HomePage(GlassPage):
     def _open_quick_link(self, entry, title, data_file, entries):
         open_link_entry(self, entry, title)
         entry["last_used"] = storage.now_iso()
-        storage.save(data_file, entries)
+        # This entry's field only - the Apps/Websites pages hold their
+        # own copy of the same file, so writing Home's whole list back
+        # would undo anything they'd changed since Home was built (same
+        # reason games.json edits go through update_entry).
+        storage.update_entry(data_file, entry.get("id"), {"last_used": entry["last_used"]})

@@ -34,12 +34,24 @@ def ordered_nav_items():
 
 
 def visible_nav_items():
-    """ordered_nav_items() minus whatever the user has hidden from the
-    main sidebar in Settings > General (see app_settings.get/set_hidden_
-    sections) - hidden sections keep their saved data, they just don't
-    get a sidebar entry until toggled back on."""
+    """ordered_nav_items() minus whatever the user has hidden in
+    Settings > General (see app_settings.get/set_hidden_sections) -
+    hidden sections keep their saved data, they just don't get a sidebar
+    entry until toggled back on."""
     hidden = set(app_settings.get_hidden_sections())
     return [item for item in ordered_nav_items() if item[1] not in hidden]
+
+
+def home_hidden_sections() -> set:
+    """Page-names Home should leave out entirely - its carousel slides,
+    preview rows and quick lists alike.
+
+    Empty unless the user has ticked "hide them from the Home page too"
+    in Settings, since hiding a section has always meant only dropping
+    its sidebar entry; Home kept previewing it either way."""
+    if not app_settings.get_hide_sections_from_home():
+        return set()
+    return set(app_settings.get_hidden_sections())
 
 
 def nav_position(page_name: str) -> int:
