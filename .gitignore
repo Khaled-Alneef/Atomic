@@ -6,6 +6,15 @@ __pycache__/
 build/
 dist/
 
+# The built executable. Tracked only on `main`, and only at a release
+# (see docs/RELEASING.md) - that is the copy the in-app updater serves,
+# and the only one anybody downloads. On `development` it is an artifact
+# like any other: rebuildable from source at any time with
+# `python packaging/build.py`, and 47MB of permanent repository weight
+# every time it is committed. Adding it to a release commit needs
+# `git add -f`, since this rule would otherwise skip it.
+/Atomic.exe
+
 # User data: personal tracker lists, settings (incl. Stremio auth key/
 # email once connected), cached cover images, site config - none of this
 # belongs in source control, and dev data is auto-recreated on first run.

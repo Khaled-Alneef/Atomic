@@ -18,9 +18,10 @@ root, which updates itself from this repository's GitHub tags.
 2. **Work happens on `development`.** `main` holds released versions
    only, as squashed snapshots, so the two share no ancestry and a merge
    between them refuses. Release by snapshot - see `docs/RELEASING.md`.
-3. **Every change that produces a new executable bumps the third part of
-   `APP_VERSION`**, in the same commit as the source change; the rebuilt
-   exe is then its own separate commit.
+3. **Every change bumps the third part of `APP_VERSION`**, in the same
+   commit as the source change. `Atomic.exe` is *not* committed on
+   `development` - it is gitignored there and tracked only on `main`, at
+   a release. Rebuild locally to run a change; do not commit the result.
 4. **Never test against the real user data** in `%APPDATA%\Atomic`. Copy
    it to a temp directory and point `storage.DATA_DIR` at the copy before
    importing anything.
@@ -54,8 +55,8 @@ Verification always comes *after* the change it checks, never alongside.
 Comments here explain *why*, often recording what failed before and what
 was measured; match that. Commit messages are a sentence-case summary
 line plus a body explaining what was wrong and what was measured - not a
-list of files. Two commits per change: the `src/` change, then a separate
-`Rebuild Atomic.exe with …`.
+list of files. One commit per change on `development`; the executable is
+only committed on `main`, as part of making a release.
 
 Measure rather than assert. Several things in this codebase look correct
 and are not - a toast positioned with `mapToGlobal` on mixed-DPI

@@ -50,28 +50,43 @@ would offer that build to everyone running Atomic.
 
 1. Bump the third part of `APP_VERSION` in `src/helpers/updater.py`, in
    the same commit as the source change.
-2. Commit the `src/` change.
-3. Close any running Atomic — Windows will not let git or the build
-   replace a running binary.
-4. `python packaging/build.py`
-5. Confirm it is a real rebuild rather than a cached re-copy: hash the
-   executable, and read the new code back out of the frozen archive.
-6. Commit the executable separately: `Rebuild Atomic.exe with …`
-7. Push `development`.
+2. Commit the `src/` change and push `development`. One commit — there is
+   no executable to commit alongside it.
+3. To actually run the change, rebuild locally: close any running Atomic
+   (Windows will not let the build replace a running binary), then
+   `python packaging/build.py`. The result is deliberately untracked on
+   this branch.
 
 Nothing goes on `main` and nothing is tagged during ordinary work.
+
+### Why the executable is not committed here
+
+`Atomic.exe` is tracked only on `main`, and only at a release. It is
+gitignored otherwise. The updater fetches it from a *tag*, and tags are
+on `main`, so a copy on `development` is never downloaded by anybody — it
+is 47MB of permanent repository weight for a file that can be rebuilt
+from the source sitting next to it. The history already carries about
+1.1GB from when it was committed on every change; this stops that
+growing, it does not shrink what is there.
 
 ## Releasing
 
 Only when the release is actually asked for.
 
-Set `APP_VERSION` to the two-part number and rebuild **first** — the
-snapshot copies whatever `development` holds, executable included, so a
-stale development-numbered build would otherwise ship as the release.
+Set `APP_VERSION` to the two-part number on `development` and commit it
+**first** — the snapshot copies whatever `development` holds, so the
+release would otherwise be built from development-numbered source.
+
+The executable is built *on `main`*, from the source the release
+actually contains, and added there — it is not inherited from
+`development`, which does not carry one.
 
 ```
+# on development first: set APP_VERSION = "1.1", commit, push
 git checkout main
 git read-tree -u --reset development    # main's tree becomes development's
+python packaging/build.py               # build the release exe from that source
+git add -f Atomic.exe                   # -f: gitignored, and tracked only here
 git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"
 git push origin main && git push origin v1.1
@@ -79,6 +94,11 @@ git checkout development                # next round opens at 1.1.1
 git tag -a released/1.1 -m "The development commit released as 1.1"
 git push origin released/1.1
 ```
+
+Check the release commit actually contains the executable before pushing
+— `git ls-tree main -- Atomic.exe` — because a release without one leaves
+`contents/Atomic.exe?ref=v1.1` returning nothing and every update
+attempt failing.
 
 ### Marker tags
 

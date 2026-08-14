@@ -47,16 +47,16 @@ anything, or bump to a two-part version on your own initiative.
 
 1. Bump the third part of `APP_VERSION` in `src/helpers/updater.py`, in
    the same commit as the source change.
-2. Commit the `src/` change.
-3. **Check no `Atomic` process is running** - Windows will not let git or
-   the build replace a running binary, and a checkout that hits it leaves
-   the tree half-updated. Ask before stopping one; the user is often
-   mid-test.
-4. `python packaging/build.py`
-5. Verify it is a real rebuild, not a cached re-copy: hash the exe, and
-   read the new code back out of the frozen archive (see `verify-change`).
-6. Separate commit: `Rebuild Atomic.exe with ...`
-7. Push `development`.
+2. Commit the `src/` change and push `development`. **One commit** - the
+   executable is gitignored on this branch and is not committed here.
+3. To run the change, rebuild locally: **check no `Atomic` process is
+   running** first (Windows will not let the build replace a running
+   binary, and a checkout that hits it leaves the tree half-updated - ask
+   before stopping one, the user is often mid-test), then
+   `python packaging/build.py`. Leave the result untracked.
+4. When it matters that the build is real rather than a cached re-copy -
+   any release, or any claim about what the exe contains - hash it and
+   read the code back out of the frozen archive (see `verify-change`).
 
 ## Releasing, when actually asked
 
