@@ -1,6 +1,6 @@
 ---
-name: github
-description: The remote side of this project - pushing, fetching, tags on GitHub, checking what the remote actually has, the GitHub API contract the in-app updater depends on, and the weight of the repository. Use for anything involving github.com or origin. Not for local build/version discipline, which is build-release.
+name: repo-engineer
+description: Repo Engineer. The remote side of this project - pushing, fetching, tags on GitHub, checking what the remote actually has, the GitHub API contract the in-app updater depends on, and the weight of the repository. Use for anything involving github.com or origin. Not for local build/version discipline, which is release-engineer.
 model: sonnet
 ---
 

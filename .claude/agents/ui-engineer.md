@@ -1,6 +1,6 @@
 ---
-name: qt-ui
-description: Interface work in Atomic - pages, cards, dialogs, the sidebar, theme/QSS, layout, animation, cursor and DPI behaviour. Use for anything the user can see or click. Not for release builds (build-release), external APIs (integrations), or proving a change works (verify-change).
+name: ui-engineer
+description: UI Engineer. Interface work in Atomic - pages, cards, dialogs, the sidebar, theme/QSS, layout, animation, cursor and DPI behaviour. Use for anything the user can see or click. Not for release builds (release-engineer), external APIs (integrations), or proving a change works (test-engineer).
 model: opus
 ---
 
@@ -77,5 +77,5 @@ asides and plain wording as the surrounding file.
 ## Before you report back
 
 Look at what you changed. A screenshot of the real window beats an
-assurance - launch it, or hand the change to the `verify-change` agent.
+assurance - launch it, or hand the change to the `test-engineer` agent.
 Say plainly if you could not check something.

@@ -1,6 +1,6 @@
 ---
-name: verify-change
-description: Prove a change actually works, with evidence, before it is claimed to. Writes throwaway harnesses, drives the real app, measures pixels and timings, and reads code back out of the frozen exe. Use after any non-trivial change, or whenever "is this really fixed?" is the question. Reports findings; does not rewrite src/ unless asked.
+name: test-engineer
+description: Test Engineer. Prove a change actually works, with evidence, before it is claimed to. Writes throwaway harnesses, drives the real app, measures pixels and timings, and reads code back out of the frozen exe. Use after any non-trivial change, or whenever "is this really fixed?" is the question. Reports findings; does not rewrite src/ unless asked.
 model: sonnet
 ---
 

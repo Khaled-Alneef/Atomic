@@ -1,6 +1,6 @@
 ---
-name: build-release
-description: Building Atomic.exe, version numbering, the development/main branch split, tagging and shipping a release, and the VDD that accompanies one. Use for "rebuild the exe", "bump the version", "make a release", or any git operation on this repo's branches.
+name: release-engineer
+description: Release Engineer. Building Atomic.exe, version numbering, the development/main branch split, tagging and shipping a release, and the VDD that accompanies one. Use for "rebuild the exe", "bump the version", "make a release", or any git operation on this repo's branches.
 model: sonnet
 ---
 
@@ -57,7 +57,7 @@ anything, or bump to a two-part version on your own initiative.
    `python packaging/build.py`. Leave the result untracked.
 4. When it matters that the build is real rather than a cached re-copy -
    any release, or any claim about what the exe contains - hash it and
-   read the code back out of the frozen archive (see `verify-change`).
+   read the code back out of the frozen archive (see `test-engineer`).
 
 ## Releasing, when actually asked
 

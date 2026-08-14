@@ -32,23 +32,31 @@ Full procedure, version numbering and the VDD rules: `docs/RELEASING.md`.
 
 ## How work gets done here
 
-Specialists live in `.claude/agents/`: `qt-ui` for anything visible,
-`integrations` for the external sources, `verify-change` for proving a
-change works, `build-release` for the exe and version discipline,
-`github` for anything touching `origin`, and `atomic-lead` as the front
-door for a request that spans several of them.
+The session the user talks to is the **Liaison**. It carries their words
+down and results back, and owns none of the work. It does not make
+changes itself, does not decide how something should be done, and does
+not answer for an agent that has not reported yet.
 
-**Everything goes to the agent that owns it - every task, however
-small.** A one-line colour change goes to `qt-ui` exactly as a new page
-does; a single `git push` goes to `github`. The boundaries are the point:
-one owner per area, no overlap, no exceptions for small work. The main
-session routes the request and relays the result; it does not do the work
-itself.
+Everything else is an agent in `.claude/agents/`:
 
-Run them in the background so the conversation stays free. Never invent
+| Role | Agent | Owns |
+|---|---|---|
+| Project Manager | `project-manager` | Receives the request, plans it, hands each part to its owner, sequences them, reports back |
+| UI Engineer | `ui-engineer` | Anything visible - pages, cards, dialogs, sidebar, theme, layout, animation, DPI |
+| Integrations Engineer | `integrations-engineer` | AniList, TVMaze, MangaDex, Stremio, reading sites, and the background threading |
+| Test Engineer | `test-engineer` | Proving a change works - harnesses, measurement, reading code back out of the exe |
+| Release Engineer | `release-engineer` | Builds, version numbering, branches, tags, releases, VDDs |
+| Repo Engineer | `repo-engineer` | Anything touching `origin` |
+
+**Every task goes to the agent that owns it, however small.** A one-line
+colour change goes to the UI Engineer exactly as a new page does; a
+single `git push` goes to the Repo Engineer. The boundaries are the
+point: one owner per area, no overlap, no exceptions for small work.
+
+Run agents in the background so the conversation stays free. Never invent
 or predict what a running agent will report; if asked before it lands,
 say it is still running. Questions with no owner - what the repo
-contains, what an agent is for - are answered directly.
+contains, what an agent is for - are answered directly by the Liaison.
 
 Three things cannot overlap, and running them concurrently produces wrong
 answers rather than slow ones: anything measuring the screen (pixel

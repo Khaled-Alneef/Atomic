@@ -1,6 +1,6 @@
 ---
-name: integrations
-description: The outside world - AniList, TVMaze, MangaDex, Stremio/Cinemeta, the GitHub updater, reading-site scrapers, favicon lookup, and the background threading that carries their results back to the UI. Use when a lookup is wrong, missing, slow, or a new source is being added.
+name: integrations-engineer
+description: Integrations Engineer. The outside world - AniList, TVMaze, MangaDex, Stremio/Cinemeta, the GitHub updater, reading-site scrapers, favicon lookup, and the background threading that carries their results back to the UI. Use when a lookup is wrong, missing, slow, or a new source is being added.
 model: opus
 ---
 
@@ -71,5 +71,5 @@ real title string, not a tidied one.
 ## Testing
 
 Never hit the real APIs in a test - stub the module-level functions and
-assert on what the page does with the answer. See the `verify-change`
+assert on what the page does with the answer. See the `test-engineer`
 agent for the harness.
