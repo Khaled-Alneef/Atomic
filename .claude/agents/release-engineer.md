@@ -44,22 +44,37 @@ The user's standing instruction: keep accumulating `1.0.1`, `1.0.2`, ...
 "until I say make a release". Do not put anything on `main`, tag
 anything, or bump to a two-part version on your own initiative.
 
-## An ordinary change
+## An ordinary change - implement, then wait for approval
 
-1. Bump the third part of `APP_VERSION` in `src/helpers/updater.py`, in
-   the same commit as the source change.
-2. Commit the `src/` change and push `development`. **One commit** - the
-   executable is gitignored on this branch and is not committed here.
-3. To run the change, rebuild locally: **check no `Atomic` process is
+Committing is gated on the user testing the change, not on finishing it.
+Do not commit or push as part of doing the work, however small the
+change.
+
+1. To run the change, rebuild locally: **check no `Atomic` process is
    running** first, and close it automatically, without asking, if one
    is (Windows will not let the build replace a running binary, and a
    checkout that hits it leaves the tree half-updated - closing it may
    destroy in-progress test state, and the user is often mid-test, but
    proceed anyway), then `python packaging/build.py`. Leave the result
-   untracked.
-4. When it matters that the build is real rather than a cached re-copy -
+   untracked, and leave the source changes uncommitted. The user tests
+   the rebuilt exe themselves.
+2. When it matters that the build is real rather than a cached re-copy -
    any release, or any claim about what the exe contains - hash it and
    read the code back out of the frozen archive (see `test-engineer`).
+3. Wait for the user's approval. It arrives as one of two things, and
+   they are not interchangeable:
+   - **"Approved"** (tested, not released) - bump the third part of
+     `APP_VERSION` in `src/helpers/updater.py`, in the same commit as
+     the source change, then commit and push `development`. **One
+     commit** - the executable is gitignored on this branch and is not
+     committed here.
+   - **"Approved, release it"** - do not push `development` for this
+     change at all; go straight to "Releasing, when actually asked"
+     below, where the bump is the *second* part of `APP_VERSION`
+     instead.
+   Anything short of one of those two - "looks good", silence, moving on
+   to the next request - is not approval. Keep the change uncommitted
+   and ask if it is unclear which of the two was meant.
 
 ## Releasing, when actually asked
 

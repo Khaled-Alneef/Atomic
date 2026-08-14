@@ -18,14 +18,28 @@ root, which updates itself from this repository's GitHub tags.
 2. **Work happens on `development`.** `main` holds released versions
    only, as squashed snapshots, so the two share no ancestry and a merge
    between them refuses. Release by snapshot - see `docs/RELEASING.md`.
-3. **Every change bumps the third part of `APP_VERSION`**, in the same
-   commit as the source change. `Atomic.exe` is *not* committed on
-   `development` - it is gitignored there and tracked only on `main`, at
-   a release. Rebuild locally to run a change; do not commit the result.
-4. **Never test against the real user data** in `%APPDATA%\Atomic`. Copy
+3. **Implement, then stop - do not commit or push until the user
+   approves.** An agent finishes a change, rebuilds locally, and leaves
+   it for the user to test. It does not commit-and-push on its own
+   initiative, however small the change: testing has to happen before
+   code lands, not after. Only once the user says the change is
+   **approved** does an agent commit and push - see rule 4 for which
+   branch and which version part.
+4. **Every change bumps the third part of `APP_VERSION`**, in the same
+   commit as the source change, once approved. `Atomic.exe` is *not*
+   committed on `development` - it is gitignored there and tracked only
+   on `main`, at a release. Two shapes of approval, two different
+   pushes:
+   - **"Approved"** (tested, not released): commit and push to
+     `development` as usual - 1.0.1 becomes 1.0.2, and so on.
+   - **"Approved, release it"**: skip the `development` push and follow
+     `docs/RELEASING.md` instead - the change goes out on `main`, and
+     the version bump is the *second* part (1.0 becomes 1.1), not the
+     third.
+5. **Never test against the real user data** in `%APPDATA%\Atomic`. Copy
    it to a temp directory and point `storage.DATA_DIR` at the copy before
    importing anything.
-5. **Close any running Atomic before a build or a checkout** touches the
+6. **Close any running Atomic before a build or a checkout** touches the
    binary, automatically, without asking first - closing it may destroy
    in-progress test state, and the user is often mid-test, but Windows
    will not let the build replace a running binary either way.

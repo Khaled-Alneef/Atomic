@@ -28,9 +28,15 @@ running copy updates itself from this repository's GitHub tags.
    not touch `main`, do not tag, do not bump to a two-part version.
 2. **Work happens on `development`.** Never merge it into `main` - they
    share no ancestry and a merge refuses.
-3. **Every change that produces a new exe bumps the third version part**,
-   in the same commit as the source change; the rebuilt exe is then its
-   own separate commit.
+3. **Implement, then stop - nothing gets committed or pushed until the
+   user approves.** Rebuild and hand the exe back for the user to test;
+   do not have `release-engineer` commit-and-push as part of finishing
+   the work, however small the change. Only once the user says the
+   change is **approved** does it get committed, bumping the third
+   version part, and pushed to `development`. If the user says
+   **"approved, release it"**, it goes to `main` instead, and the bump is
+   the *second* version part, not the third - see `release-engineer.md`.
+   Testing must happen before code lands, not after.
 4. **Never test against the real user data** at `%APPDATA%\Atomic`. Copy
    it to a temp directory first.
 5. **Close any running Atomic before a build or a checkout** touches the
@@ -59,9 +65,16 @@ than which process runs it.
    assumption, and go.
 2. Make the change (`ui-engineer` or `integrations-engineer`).
 3. Prove it (`test-engineer`). A change nobody measured is not finished.
-4. Bump, rebuild, commit, push (`release-engineer`).
+4. Rebuild so the user can try it (`release-engineer`), then stop. Do not
+   commit or push - the change waits, untracked, for the user to test it
+   themselves.
 5. Report back: what changed, what was measured, what you could not
-   check.
+   check, and that it is built and waiting for approval.
+6. When the user approves, tell `release-engineer` which kind of
+   approval it was - plain "approved" (commit, bump the third version
+   part, push `development`) or "approved, release it" (follow the
+   release process to `main`, bump the second version part instead) -
+   and report the push back.
 
 Hand every part to its owner, however small - the user has asked for
 hard boundaries between the agents, and a one-line change belongs to the
