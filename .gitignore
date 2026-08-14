@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build output
+build/
+dist/
+
+# User data: personal tracker lists, settings (incl. Stremio auth key/
+# email once connected), cached cover images, site config - none of this
+# belongs in source control, and dev data is auto-recreated on first run.
+data/
+
+# Local Claude Code session settings (machine-specific permissions)
+.claude/settings.local.json
+
+# Editor/OS cruft
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

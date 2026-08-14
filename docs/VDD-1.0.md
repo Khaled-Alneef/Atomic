@@ -1,0 +1,392 @@
+# Atomic — Version Description Document
+
+**Version 1.0** · 14 August 2026
+
+---
+
+## 1. Identification
+
+| | |
+|---|---|
+| System name | Atomic |
+| Version | 1.0 |
+| Release date | 2026-08-14 |
+| Repository | https://github.com/Khaled-Alneef/Atomic |
+| Target platform | Windows 10 / 11, 64-bit |
+| Delivered as | `Atomic.exe` — a single self-contained executable |
+
+---
+
+## 2. System overview
+
+Atomic is a personal desktop dashboard: one window that collects the
+things you watch, read, play, and open, so they are reachable in a click
+instead of scattered across browser tabs, launchers, and bookmarks.
+
+It holds seven sections behind a single sidebar:
+
+| Section | Purpose |
+|---|---|
+| **Home** | A "Continue Watching" carousel for whatever is in progress, plus a preview row per section |
+| **Anime** | Tracked anime, as a poster grid, opening in Stremio or a configured video site |
+| **Reading** | Tracked manga / manhwa / manhua, opening on your own reading sites |
+| **Series** | Tracked live-action series, opening via Stremio deep links |
+| **Games** | A local game launcher, bulk-importable from Steam, Battle.net, Epic, Riot and Xbox install folders |
+| **Apps** | A grid of local applications |
+| **Websites** | A grid of sites, with icons fetched automatically |
+
+Nothing is a separate "recents" store — every list is derived from the
+same saved entries the pages themselves write.
+
+---
+
+## 3. Inventory of materials released
+
+| Item | Description |
+|---|---|
+| `Atomic.exe` | The application. 47,137,488 bytes. SHA-256 `2b42a3359e1c4e1c14a14bac001abad0d5939355cf0578af36e960f33eb6400a` |
+| `src/` | Full Python source, 8,167 lines across 30 modules |
+| `packaging/` | `build.py` and `Atomic.spec`, which produce the executable |
+| `docs/VDD-1.0.md` | This document |
+
+The executable is self-contained: it bundles the Python runtime and all
+libraries, and requires no installer, no Python installation, and no
+administrator rights.
+
+### Build environment
+
+| Component | Version |
+|---|---|
+| Python | 3.15.0b3 |
+| PyQt6 | 6.11.0 (Qt 6.11.0) |
+| Pillow | 12.3.0 |
+| PyInstaller | 6.22.0 |
+
+---
+
+## 4. Inventory of software contents
+
+### Application shell
+
+| Module | Lines | Responsibility |
+|---|---|---|
+| `main.py` | 727 | Window, sidebar, navigation and page transitions, full screen, startup image prewarm, cursor watchdog |
+
+### Feature pages (`src/windows/`)
+
+| Module | Lines | Responsibility |
+|---|---|---|
+| `tracker.py` | 1,386 | Anime / Reading / Series pages, entry form, progress sync, release schedules |
+| `home.py` | 764 | Dashboard, hero carousel, preview sections |
+| `link_grid.py` | 431 | Shared grid behind Apps and Websites |
+| `games.py` | 362 | Games page, launcher import, icon handling |
+| `websites.py`, `apps.py` | 23 | Thin configurations of `link_grid` |
+
+### Support modules (`src/helpers/`)
+
+| Module | Lines | Responsibility |
+|---|---|---|
+| `settings_dialog.py` | 876 | Settings window — General, Anime & Series, Reading, Games, Data |
+| `theme.py` | 664 | Palette, application-wide stylesheet, native window tweaks |
+| `manga_sites.py` | 338 | Reading-site directory and live search across four site engines |
+| `updater.py` | 241 | In-app updates from the GitHub repository |
+| `mangadex.py` | 238 | MangaDex client and next-chapter estimation |
+| `launchers.py` | 232 | Game-launcher scanning, icon extraction and caching |
+| `widgets.py` | 228 | Shared widgets — cards, toasts, scroll areas, hover-cursor registry |
+| `images.py` | 225 | Image loading, thumbnail caching, letter avatars |
+| `icon_extract.py` | 202 | Executable icon extraction |
+| `stremio.py` | 179 | Cinemeta search / metadata and Stremio account progress |
+| `anilist.py` | 160 | AniList search, list progress, airing schedule |
+| `release_schedule.py` | 155 | Chooses a schedule source per medium; formats the hover lines |
+| `tvmaze.py` | 105 | TVMaze show lookup and next-episode schedule |
+| `app_settings.py` | 105 | Persisted application settings |
+| `native_cursor.py` | 82 | Windows cursor correction (see §6.3) |
+| `storage.py` | 78 | JSON persistence and per-entry updates |
+| `anime_sites.py` | 74 | Video-site directory |
+| `nav_config.py` | 65 | Sidebar order and section visibility |
+| `child_process.py` | 62 | Environment and window flags for launched programs (see §6.2) |
+| `title_match.py` | 61 | Fuzzy title matching for external catalogues |
+| `startup.py` | 59 | Launch-on-Windows-startup registration |
+| `uninstall.py` | 45 | Full removal of the app and its data |
+
+---
+
+## 5. What this version provides
+
+### 5.1 Tracking with release schedules
+
+Every tracked card says when its next episode or chapter is due, on hover,
+alongside the title, status and progress:
+
+```
+Bleach: Thousand-Year Blood War        Kingdom (WAN)
+Watching                               Reading
+Last Season: 4                         Last Chapter: 884
+Last Episode: 3                        Next Chapter: 885
+Expected: Saturday 5:00 PM             Expected: Tuesday 2:49 AM
+Countdown: 1d 3h 50m                   Countdown: 10d 12h 39m
+```
+
+The countdown is regenerated on every hover from a cached timestamp, so
+it is never stale and never costs a network request to display. Schedules
+are looked up in the background and re-checked at most every 12 hours.
+
+Watch progress can be pulled from a connected Stremio account or a public
+AniList username; reading progress is kept by hand, with `+`/`-` on each
+card.
+
+### 5.2 In-app updates
+
+Settings › General shows the running version with a **Check for Updates**
+button. One button runs the whole flow: check, then download and install.
+Atomic closes, the executable is replaced, and it reopens on the new
+version — saved entries are untouched, since only the `.exe` changes.
+
+A release is identified by a git tag on this repository (`v1.0`, `v1.1`,
+…), and what gets downloaded is the `Atomic.exe` committed at that tag.
+GitHub's contents API reports that file's git blob hash, and the download
+is verified against it before anything is replaced: a truncated or
+tampered download is discarded rather than installed. Publishing a
+release is therefore exactly "commit the rebuilt exe, tag it, push the
+tag".
+
+### 5.3 Interface
+
+- A dark blue-violet palette, with every tone derived from six specified
+  colours. Home, Games, Apps and Websites use a flat matte card fill; the
+  tracker's poster grids keep a glossy one.
+- A collapsible sidebar, drag-to-reorder, with any section hideable —
+  optionally from the Home page as well as the sidebar.
+- **F11** enters full screen, **Escape** leaves it, returning a maximized
+  window to maximized rather than dropping it to a restored size.
+
+### 5.4 Measured performance
+
+Page build time, against a library of 12 tracked entries, 8 games and 12
+links:
+
+| Page | First visit | Return visit |
+|---|---|---|
+| Home | 268 ms once at launch | ~10 ms |
+| Reading | 8 ms | 5 ms |
+| Websites | 3 ms | 3 ms |
+| Anime | 2 ms | 2 ms |
+
+Each cover or icon costs roughly 14 ms to decode and resize, and pages
+are rebuilt on every visit and on every sort change. Those results are
+cached, and the expensive decode — 6.3 ms of the 14, pure Pillow with no
+Qt involvement — is performed on a background thread at startup.
+
+---
+
+## 6. Design notes
+
+Four decisions are recorded here because the reasoning is not obvious
+from the code, and each cost real investigation to arrive at.
+
+### 6.1 Manga schedules are estimates, and say so
+
+AniList and TVMaze both publish real airing schedules, so Anime and
+Series state their release times as fact. MangaDex has no equivalent
+field — scanlation release dates are not announced anywhere — so the
+Reading page extrapolates from release history and labels the result
+*Expected*.
+
+The estimate is deliberately conservative, because a confidently wrong
+countdown is worse than none:
+
+- The title must genuinely match. MangaDex's search returns *The
+  Beginning After the End* for *The World After The End*, and inheriting
+  an unrelated series' schedule is the worst available failure.
+- Chapters are read across all languages. Most tracked titles are
+  licensed in English, leaving their English feed a near-empty stub while
+  other feeds are current.
+- Only the single language furthest into the series is measured. Mixing
+  them measures translators racing each other, not the series' pace.
+- The rhythm must look like one: a plausible interval, a feed that is
+  still current, and enough chapters to measure.
+
+Anything failing those checks produces no estimate at all. Against a
+real 8-title library this resolves 3; the rest show nothing, which is the
+honest answer.
+
+### 6.2 Launched programs get a scrubbed environment
+
+PyInstaller's bootloader records where the running app unpacked itself in
+`_PYI_*` environment variables, and those are inherited by every program
+Atomic launches. For an ordinary program that is harmless. For another
+PyInstaller-built program it is fatal: its bootloader sees the variables
+already set, assumes it has been unpacked, and looks for its Python DLL
+in *Atomic's* folder. If Atomic has exited, that folder is gone and the
+launched program dies with "Failed to load Python DLL".
+
+The updater hit exactly this, since it relaunches Atomic itself. Games
+and apps launched from Atomic were vulnerable to the same thing. So
+`child_process.clean_env()` strips those variables from anything Atomic
+starts, and `child_process.flags()` adds `CREATE_NO_WINDOW` so launching
+through the shell never flashes a console window.
+
+### 6.3 The cursor correction reaches past Qt
+
+`native_cursor.py` sets the Windows cursor through the Win32 API. That is
+unusual enough to record why.
+
+After a modal dialog closes, Qt stops issuing native cursor calls for the
+main window. Its own state is entirely correct — no override cursor, no
+widget claiming one, the widget under the pointer reporting a plain arrow
+— yet Windows goes on painting whichever cursor it was last handed, which
+is the pointing hand from whatever button was clicked on the way in.
+
+This was established by reading the OS cursor back with `GetCursorInfo`
+rather than by inference. Every repair available through Qt was measured
+and left it unchanged: pushing and popping override cursors of three
+shapes, giving the window an explicit arrow, releasing the hand from
+every widget holding one, and polling on a timer. Setting the cursor
+through Win32 does correct it.
+
+The correction is applied only when Qt and the OS genuinely disagree, so
+Qt retains full control in normal operation. A watchdog checks on pointer
+movement: 1.0 µs per tick while the pointer is still, 8 µs when it has
+moved, at roughly eight ticks per second.
+
+### 6.4 Each entry is saved on its own
+
+Several pages are backed by the same file and each holds its own copy in
+memory — Home lists games, apps, websites and tracker entries that other
+pages own, and Anime and Reading share `tracker.json`. Writing a whole
+list back from one of them therefore restores a snapshot that may be
+minutes stale, silently undoing everything saved since.
+
+That was a real defect: reordering a game discarded freshly-extracted
+icons and whole batches of imported games. Every edit now re-reads the
+file and updates only the entry that changed
+(`storage.update_entry`).
+
+---
+
+## 7. Configuration and user data
+
+All user data lives in `%APPDATA%\Atomic\`. Nothing is written beside the
+executable, so the `.exe` can be moved or replaced freely — which is what
+makes in-app updating safe.
+
+| File | Contents |
+|---|---|
+| `tracker.json` | Anime and Reading entries |
+| `series.json` | Series entries |
+| `games.json` | Games, their paths and cached icon paths |
+| `apps.json`, `websites.json` | App and website entries |
+| `anime_sites.json`, `manga_sites.json` | Configured video and reading sites |
+| `settings.json` | Sidebar order, hidden sections, launcher directories, connected accounts |
+| `image_cache/` | Downloaded covers, favicons and extracted executable icons |
+| `ui_assets/` | Generated interface assets |
+
+**Credentials.** Connecting a Stremio account stores only the session key
+returned by Stremio's own login endpoint. The password is used for that
+single request and never written to disk. An AniList username is stored
+as plain text — it is public information and no password is involved.
+
+---
+
+## 8. External interfaces
+
+| Service | Endpoint | Used for |
+|---|---|---|
+| AniList | `graphql.anilist.co` | Anime search, public list progress, airing schedule |
+| TVMaze | `api.tvmaze.com` | Series lookup by IMDb id, next-episode schedule |
+| MangaDex | `api.mangadex.org` | Manga matching and release history |
+| Stremio Cinemeta | `v3-cinemeta.strem.io` | Anime/Series search, metadata, latest aired episode |
+| Stremio Account | `api.strem.io` | Watch progress from a connected account |
+| GitHub | `api.github.com`, `raw.githubusercontent.com` | Release tags and the update download |
+| Reading sites | user-configured | Title search and chapter pages |
+| Favicon lookup | `google.com/s2/favicons` | Website icons, when a site serves none itself |
+
+No API keys are required. Every lookup fails soft: a flaky connection or
+an unreachable service means missing suggestions or a missing schedule,
+never an error dialog or a crash.
+
+---
+
+## 9. Installation and removal
+
+**Install.** Run `Atomic.exe`. There is no installer and no dependency to
+satisfy. Data is created under `%APPDATA%\Atomic\` on first launch.
+
+**Start with Windows.** Settings › General › *Launch on Windows startup*
+registers the app under `HKCU\...\CurrentVersion\Run`.
+
+**Update.** Settings › General › *Check for Updates*. Replacing
+`Atomic.exe` by hand also works, and saved data is untouched either way —
+close the app first, since Windows will not overwrite a running
+executable.
+
+**Removal.** Settings › Data › Uninstall removes every saved file, the
+startup registration, and the executable itself. Deleting `Atomic.exe`
+and `%APPDATA%\Atomic\` by hand achieves the same.
+
+---
+
+## 10. Known limitations
+
+These are current behaviours, not defects scheduled for repair.
+
+1. **Windows only.** Executable icon extraction, the dark title bar,
+   startup registration, the console-window suppression and the cursor
+   correction are all Win32-specific.
+2. **Manga schedules resolve for a minority of titles.** By design — see
+   §6.1. A title with no current MangaDex feed shows no estimate.
+3. **Anime schedules depend on title matching.** An entry whose title
+   does not match an AniList record closely enough gets no schedule; the
+   IMDb id is used as a second chance via TVMaze where one exists.
+4. **Real watch progress needs a connected source.** Without a Stremio
+   account or AniList username, Anime/Series progress must be entered by
+   hand. Reading progress is always manual — no site exposes it.
+5. **Reading-site search covers four engine shapes.** A site matching
+   none of them still opens, but offers no live suggestions.
+6. **Updates need the executable to sit somewhere writable.** Atomic
+   checks before closing and says so rather than quitting and failing.
+   GitHub also rate-limits anonymous callers, which is reported plainly
+   when it happens.
+7. **Home costs ~270 ms on the first visit of a session**, spent on Qt
+   polishing the carousel's stylesheet. It happens while the window is
+   already appearing and does not recur.
+8. **The executable is committed to the repository.** Deliberate — it is
+   both the always-available build and what the updater downloads — at
+   the cost of a large binary in history.
+
+---
+
+## 11. Verification performed
+
+- The update path was exercised end to end against a real release: an
+  older build checked, downloaded 48 MB, verified the checksum, replaced
+  its own executable and reopened on the new version. Rejection of a
+  tampered checksum and of a truncated download was confirmed separately.
+- The stuck-cursor defect was reproduced against the real OS cursor and
+  confirmed corrected across repeated runs, with hover behaviour
+  re-checked on cards, buttons and empty page areas.
+- Console-window suppression was verified by enumerating window classes
+  while the update script ran.
+- Full screen was verified in five combinations, including returning a
+  maximized window to maximized.
+- Schedule lookups were exercised against a real library for all three
+  media, including titles that correctly yield no schedule.
+- Section hiding was verified in all four combinations, including the
+  case where Anime and Reading share one Home section.
+- The saved-list defect was reproduced — an entry imported while a page
+  was open, then erased by moving another entry — and confirmed fixed.
+- The packaged executable's bundle contents were verified module by
+  module, after a stale build once shipped without the updater in it.
+
+---
+
+## 12. Glossary
+
+| Term | Meaning |
+|---|---|
+| **Cinemeta** | Stremio's public metadata add-on, used for search and episode data |
+| **Cour** | A broadcast quarter; long anime are split into several, each a separate catalogue entry |
+| **Deep link** | A `stremio://` URL that opens a title directly in the Stremio desktop app |
+| **Matte / glossy card** | The two card fills — a flat colour, or a gradient with a highlight |
+| **Peek** | The half-scale neighbouring slides flanking Home's carousel |
+| **VDD** | Version Description Document — this document |
