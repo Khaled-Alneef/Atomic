@@ -1,6 +1,17 @@
-# Atomic — Version Description Document
+# Atomic — Version Description Document (draft)
 
-**Version 1.1** · 14 August 2026
+**Unreleased** · drafted 14 August 2026
+
+> This is not a released version. It describes the work accumulated on
+> the `development` branch since 1.0, which currently runs as development
+> build **1.0.1**. Nothing here has been tagged, and no copy of Atomic in
+> use can be offered it.
+>
+> The only released version is **1.0**, described by
+> [`VDD-1.0.md`](VDD-1.0.md), which stays exactly as it was delivered.
+> When this work is released, this file becomes `VDD-<version>.md`, its
+> version and release date are filled in, and the executable's size and
+> hash are re-taken from the released build.
 
 ---
 
@@ -9,8 +20,9 @@
 | | |
 |---|---|
 | System name | Atomic |
-| Version | 1.1 |
-| Release date | 2026-08-14 |
+| Version | not yet assigned — released as the next version after 1.0 |
+| Release date | not released |
+| Currently runs as | development build 1.0.1 |
 | Repository | https://github.com/Khaled-Alneef/Atomic |
 | Target platform | Windows 10 / 11, 64-bit |
 | Delivered as | `Atomic.exe` — a single self-contained executable |
@@ -42,7 +54,7 @@ same saved entries the pages themselves write.
 
 ## 3. Changes since 1.0
 
-A maintenance release: no new sections, no data-format changes, and
+Intended as a maintenance release: no new sections, no data-format changes, and
 nothing to migrate — 1.0's saved entries are read as they are.
 
 | # | Change | Where |
@@ -67,15 +79,15 @@ reports now.
 
 ---
 
-## 4. Inventory of materials released
+## 4. Inventory of materials
 
 | Item | Description |
 |---|---|
 | `Atomic.exe` | The application. 47,143,539 bytes. SHA-256 `2b91f870accfce81c7faa8fe24f3a492d068a3881f8b353550a7b489acf59949`. Built from development build 1.0.1; the released build carries 1.1 (§6.2.1) |
 | `src/` | Full Python source, 8,419 lines across 29 modules |
 | `packaging/` | `build.py` and `Atomic.spec`, which produce the executable |
-| `docs/VDD-1.0.md` | The previous version's document, kept as released |
-| `docs/VDD-1.1.md` | This document |
+| `docs/VDD-1.0.md` | The released version's document, untouched |
+| `docs/VDD-next.md` | This document, a draft until the work is released |
 
 The executable is self-contained: it bundles the Python runtime and all
 libraries, and requires no installer, no Python installation, and no

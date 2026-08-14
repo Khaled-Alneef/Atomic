@@ -71,9 +71,13 @@ git push origin main && git push origin v1.1
 git checkout development
 ```
 
-Then write `docs/VDD-<version>.md` from the previous one: version, date,
-exe size and SHA-256, module line counts, a "Changes since" table, and
-any design note worth recording. Afterwards, confirm the updater still
+The document for the next release is kept as a draft at
+`docs/VDD-next.md` while work accumulates, and never claims a version or
+a release date it does not have - a VDD describes a *delivered* version.
+At release, rename it to `docs/VDD-<version>.md`, fill in the version and
+date, and re-take the exe's size and SHA-256 from the released build.
+Keep the previous release's document exactly as it was delivered; never
+edit it to include work that shipped later. Afterwards, confirm the updater still
 resolves the release by calling `updater.check_for_update()` against the
 live repo with `APP_VERSION` temporarily lowered.
 
