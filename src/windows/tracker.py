@@ -25,7 +25,10 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from helpers import anilist, anime_sites, app_settings, images, manga_sites, storage, stremio, theme
+from helpers import (
+    anilist, anime_sites, app_settings, images, manga_sites, release_schedule,
+    storage, stremio, theme,
+)
 from helpers.widgets import Card, GlassPage, scroll_area, show_toast
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
@@ -92,6 +95,19 @@ def _entry_imdb_id(entry):
     a saved stremio:// url for older entries saved before this field
     existed (see _migrate)."""
     return entry.get("imdb_id") or _imdb_id_from_url(entry.get("url"))
+
+
+def _latest_known_chapter(entry):
+    """The highest chapter number this entry knows about - whichever is
+    further along of the reading site's latest release and the user's own
+    last-read chapter. Scanlation sites routinely run ahead of MangaDex,
+    so this is what "next chapter" gets counted from rather than however
+    far MangaDex's own feed happens to have got (see mangadex.
+    fetch_next_chapter)."""
+    if entry.get("type") not in MANGA_TYPES:
+        return None
+    return max(parse_chapter_progress(entry.get("progress")),
+               entry.get("last_watched_chapter") or 0.0)
 
 
 def parse_episode_progress(text):
@@ -261,6 +277,10 @@ class _CoverSignals(QObject):
     ready = Signal(str, str, str)  # entry id, new cover_url, local cache path
 
 
+class _ScheduleSignals(QObject):
+    resolved = Signal(str, object)  # entry id, next_release dict (or None when nothing's scheduled)
+
+
 class TrackerPage(GlassPage):
     """Base for the Anime/Manga/Series pages. Subclasses set
     DATA_FILE/ENTRY_TYPES/TITLE/TYPE_OPTIONS/PROGRESS_COLUMNS.
@@ -276,6 +296,9 @@ class TrackerPage(GlassPage):
     PROGRESS_COLUMNS = ["Last Season", "Last Episode"]
     # Manga has no Stremio/AniList presence to sync progress against.
     SUPPORTS_PROGRESS_SYNC = True
+    # Which release-schedule source the hover tooltip's "next episode/
+    # chapter" lines come from for this page - see helpers/release_schedule.
+    MEDIUM = release_schedule.MEDIUM_ANIME
 
     def __init__(self, app):
         super().__init__(parent=None)
@@ -289,6 +312,9 @@ class TrackerPage(GlassPage):
 
         self._cover_signals = _CoverSignals()
         self._cover_signals.ready.connect(self._on_sharper_cover_ready)
+
+        self._schedule_signals = _ScheduleSignals()
+        self._schedule_signals.resolved.connect(self._on_schedule_resolved)
 
         self.entries = _migrate(storage.load(self.DATA_FILE, []), self.DATA_FILE)
 
@@ -304,12 +330,12 @@ class TrackerPage(GlassPage):
         header = QHBoxLayout()
         header.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
         header.addStretch()
-        if self.SUPPORTS_PROGRESS_SYNC:
-            refresh_btn = QPushButton("⟳", objectName="AccentIcon")
-            refresh_btn.setFixedSize(40, 40)
-            refresh_btn.setToolTip("Refresh progress from Stremio/AniList")
-            refresh_btn.clicked.connect(self._sync_all_progress)
-            header.addWidget(refresh_btn)
+        refresh_btn = QPushButton("⟳", objectName="AccentIcon")
+        refresh_btn.setFixedSize(40, 40)
+        refresh_btn.setToolTip("Refresh progress from Stremio/AniList and re-check release schedules"
+                               if self.SUPPORTS_PROGRESS_SYNC else "Re-check release schedules")
+        refresh_btn.clicked.connect(self._refresh_everything)
+        header.addWidget(refresh_btn)
         add_btn = QPushButton("+", objectName="AccentIcon")
         add_btn.setFixedSize(40, 40)
         add_btn.setToolTip("Add Entry")
@@ -336,6 +362,60 @@ class TrackerPage(GlassPage):
         if self.SUPPORTS_PROGRESS_SYNC:
             self._backfill_missing_latest_available()
         self._backfill_sharper_covers()
+        self._refresh_schedules()
+
+    # ------------------------------------------------------------------
+    def _refresh_everything(self):
+        """Header refresh button: re-check what's out there for every
+        entry on this page - both your own watched/read progress (where
+        the page has a source for it) and when the next episode/chapter
+        is due."""
+        self._refresh_schedules(force=True)
+        if self.SUPPORTS_PROGRESS_SYNC:
+            self._sync_all_progress()
+        else:
+            show_toast(self, "Re-checking release schedules")
+
+    def _refresh_schedules(self, force=False):
+        """Look up when each entry's next episode/chapter lands, in the
+        background. Cached on the entry (see release_schedule.needs_
+        refresh), so a normal page visit usually fires no requests at all
+        - only entries with nothing stored, a stale check, or a release
+        time that's already passed get looked up again."""
+        for entry in self.entries:
+            if entry["type"] not in self.ENTRY_TYPES:
+                continue
+            if not release_schedule.needs_refresh(entry, force):
+                continue
+            threading.Thread(target=self._fetch_schedule, args=(entry,), daemon=True).start()
+
+    def _fetch_schedule(self, entry):
+        # Must never raise: an uncaught exception here would kill the
+        # background thread silently.
+        try:
+            found = release_schedule.fetch(
+                self.MEDIUM, entry["title"], imdb_id=_entry_imdb_id(entry),
+                known_latest_chapter=_latest_known_chapter(entry))
+        except Exception:
+            found = None
+        self._schedule_signals.resolved.emit(entry["id"], found)
+
+    def _on_schedule_resolved(self, entry_id, found):
+        entry = next((e for e in self.entries if e["id"] == entry_id), None)
+        if not entry:
+            return
+        # Stored even when nothing was found, so a title with no schedule
+        # (finished airing, not on the source) isn't re-looked-up on every
+        # single page visit - the timestamp is what needs_refresh rate-
+        # limits against.
+        fields = {"next_release": found, "next_release_checked_at": storage.now_iso()}
+        entry.update(fields)
+        # Just these fields, not a wholesale save of self.entries - Anime
+        # and Manga are separate pages backed by the same tracker.json
+        # and each holds its own copy of it (see storage.update_entry).
+        storage.update_entry(self.DATA_FILE, entry["id"], fields)
+        # No grid rebuild: the tooltip is generated on hover from the
+        # entry itself (see _build_card), so it picks this up as-is.
 
     # ------------------------------------------------------------------
     def _backfill_sharper_covers(self):
@@ -422,10 +502,14 @@ class TrackerPage(GlassPage):
         return [str(season) if season else "", str(episode) if episode else ""]
 
     def _tooltip_html(self, entry):
+        """Built fresh on every hover (see _build_card) rather than once
+        per card, because the countdown at the end of it is only right at
+        the moment it's shown."""
         rows = [f"<b>{entry['title']}</b>", entry["status"]]
         for label, value in zip(self.PROGRESS_COLUMNS, self._progress_columns(entry)):
             if value:
                 rows.append(f"{label}: {value}")
+        rows.extend(release_schedule.tooltip_lines(entry, self.MEDIUM))
         return "<br>".join(rows)
 
     # ------------------------------------------------------------------
@@ -467,7 +551,7 @@ class TrackerPage(GlassPage):
     def _build_card(self, entry):
         card = Card(hoverable=True)
         card.setFixedWidth(POSTER_SIZE[0] + 20)
-        card.setToolTip(self._tooltip_html(entry))
+        card.set_tooltip_provider(lambda en=entry: self._tooltip_html(en))
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(8, 10, 8, 10)
         card_layout.setSpacing(6)
@@ -677,8 +761,14 @@ class TrackerPage(GlassPage):
         if is_new:
             entry["added_at"] = entry["updated_at"]
             self.entries.append(entry)
+        # A new entry has no schedule yet, and an edited one may have had
+        # the title it's looked up by changed out from under the old one -
+        # either way the stored lookup is worth redoing, so clear what
+        # rate-limits it before saving.
+        entry.pop("next_release_checked_at", None)
         storage.save(self.DATA_FILE, self.entries)
         self._refresh_grid()
+        self._refresh_schedules()
 
 
 class AnimePage(TrackerPage):
@@ -686,6 +776,7 @@ class AnimePage(TrackerPage):
     ENTRY_TYPES = ("Anime",)
     TITLE = "Anime"
     TYPE_OPTIONS = ["Anime"]
+    MEDIUM = release_schedule.MEDIUM_ANIME
 
 
 class MangaPage(TrackerPage):
@@ -695,6 +786,7 @@ class MangaPage(TrackerPage):
     TYPE_OPTIONS = list(MANGA_TYPES)
     PROGRESS_COLUMNS = ["Last Chapter"]
     SUPPORTS_PROGRESS_SYNC = False
+    MEDIUM = release_schedule.MEDIUM_MANGA
 
 
 class SeriesPage(TrackerPage):
@@ -702,6 +794,7 @@ class SeriesPage(TrackerPage):
     ENTRY_TYPES = ("Series",)
     TITLE = "Series"
     TYPE_OPTIONS = ["Series"]
+    MEDIUM = release_schedule.MEDIUM_SERIES
 
 
 class _SearchSignals(QObject):

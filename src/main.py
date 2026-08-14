@@ -19,7 +19,7 @@ the slide direction immediately too - nothing to keep in sync by hand.
 import sys
 from pathlib import Path
 
-from helpers import app_settings, theme
+from helpers import app_settings, images, storage, theme
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -47,6 +47,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
+from windows import home as home_page_module
+from windows import link_grid as link_grid_module
+from windows import tracker as tracker_module
 from windows.apps import AppsPage
 from windows.games import GamesPage
 from windows.home import HomePage
@@ -54,6 +57,17 @@ from windows.tracker import AnimePage, MangaPage, SeriesPage
 from windows.websites import WebsitesPage
 
 APP_DIR = Path(__file__).resolve().parent
+
+# The image sizes each page renders at, for the startup prewarm (see
+# _prewarm_image_specs) - read off the pages themselves so a size
+# changed there can't quietly leave the prewarm decoding the wrong one.
+tracker_poster_size = tracker_module.POSTER_SIZE
+home_poster_size = home_page_module.POSTER_SIZE
+home_hero_cover_size = home_page_module.HERO_COVER_SIZE
+home_icon_size = home_page_module.ICON_SIZE
+home_row_icon_size = home_page_module.ROW_ICON_SIZE
+games_icon_size = link_grid_module.THUMB_SIZE
+link_thumb_size = link_grid_module.THUMB_SIZE
 
 PAGES = {
     "home": HomePage,
@@ -148,7 +162,10 @@ class MainWindow(QMainWindow):
 
         self._show_page("home", animate=False)
 
+        # Application-wide, so it sees the container's own resize events
+        # too (see eventFilter), not just this window's.
         QApplication.instance().installEventFilter(self)
+        QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
     # ------------------------------------------------------------------
     def _build_sidebar(self):
@@ -395,6 +412,17 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):
+        # Pages are positioned by hand (they slide over each other on
+        # navigation) rather than sitting in a layout, so nothing resizes
+        # them automatically. Following the *container* covers every way
+        # it can change width - not only the window resizing, but the
+        # sidebar collapsing/expanding, which widens the container
+        # without the window itself changing size at all. Without this a
+        # page kept whatever width it was built at, and the uncovered
+        # strip of window showed through down the right-hand side,
+        # looking like a second sidebar had appeared out of nowhere.
+        if obj is self.container and event.type() == QEvent.Type.Resize:
+            self._fit_current_page()
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.BackButton:
                 self.go_back()
@@ -403,6 +431,27 @@ class MainWindow(QMainWindow):
                 self.go_forward()
                 return True
         return super().eventFilter(obj, event)
+
+    def _fit_current_page(self):
+        if self._current_page is not None:
+            self._current_page.setGeometry(self.container.rect())
+
+    def _on_app_state_changed(self, state):
+        """Re-apply the cursor whenever the app comes back to the front.
+
+        Launching a game/app/website hands focus to something else mid-
+        click, while the mouse is sitting on a card that asked for the
+        pointing-hand cursor. Qt only issues a native cursor change when
+        it believes the shape differs from the last one it set, and that
+        bookkeeping goes stale across the focus handover - so the hand
+        stayed on screen over every page afterwards, since nothing in
+        this app ever asks for a *different* shape to correct it with.
+        Pushing an override and immediately dropping it forces Qt to
+        recompute the cursor for whatever is actually under the mouse."""
+        if state != Qt.ApplicationState.ApplicationActive:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.ArrowCursor)
+        QApplication.restoreOverrideCursor()
 
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.AltModifier:
@@ -510,8 +559,37 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._current_page is not None:
-            self._current_page.setGeometry(self.container.rect())
+        self._fit_current_page()
+
+
+def _prewarm_image_specs():
+    """(path, size) pairs for every cover/icon a page might draw, at the
+    sizes those pages actually ask for.
+
+    Assembled here rather than inside images.py, which has no business
+    knowing which file holds what - and read straight off disk rather
+    than off the pages, since the whole point is to have this done
+    before those pages are ever built. Each page renders at its own
+    size, and a cover shown at two sizes is two separate decodes, so
+    both are listed."""
+    specs = []
+    for data_file, key in (("tracker.json", "cover_path"), ("series.json", "cover_path")):
+        for entry in storage.load(data_file, []):
+            path = entry.get(key)
+            if path:
+                specs.append((path, tracker_poster_size))
+                specs.append((path, home_poster_size))
+                specs.append((path, home_hero_cover_size))
+    for game in storage.load("games.json", []):
+        if game.get("icon"):
+            specs.append((game["icon"], games_icon_size))
+            specs.append((game["icon"], home_icon_size))
+    for data_file in ("apps.json", "websites.json"):
+        for entry in storage.load(data_file, []):
+            if entry.get("image"):
+                specs.append((entry["image"], link_thumb_size))
+                specs.append((entry["image"], home_row_icon_size))
+    return specs
 
 
 def main():
@@ -523,6 +601,9 @@ def main():
 
     window = MainWindow()
     window.showMaximized()
+    # Started after the window is up, so it fills the time the user
+    # spends looking at Home rather than delaying it appearing.
+    images.prewarm(_prewarm_image_specs())
     sys.exit(app.exec())
 
 

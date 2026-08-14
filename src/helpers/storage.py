@@ -53,3 +53,26 @@ def save(filename: str, data):
     path = DATA_DIR / filename
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def update_entry(filename: str, entry_id, fields: dict, id_key: str = "id") -> bool:
+    """Merge `fields` into one saved entry, re-reading the file first.
+
+    Several pages are backed by the same file and each holds its own
+    in-memory copy of it, loaded when that page was built (Home lists
+    games/apps/websites/tracker entries that the Games/Apps/Websites/
+    tracker pages own; Anime and Manga share tracker.json). Saving a
+    whole list from one of them writes back a snapshot that can be
+    minutes stale, silently undoing everything written since - which is
+    how a game's freshly-extracted icon, or a whole batch of imported
+    games, could vanish on the next unrelated edit. Touching only the
+    one entry that actually changed can't do that.
+
+    Returns False if no entry with that id is in the file (any more)."""
+    entries = load(filename, [])
+    for item in entries:
+        if item.get(id_key) == entry_id:
+            item.update(fields)
+            save(filename, entries)
+            return True
+    return False

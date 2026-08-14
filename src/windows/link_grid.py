@@ -169,7 +169,7 @@ class LinkGridPage(GlassPage):
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
     def _build_card(self, entry):
-        card = Card(hoverable=True)
+        card = Card(hoverable=True, matte=True)
         card.setFixedWidth(CARD_WIDTH)
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)

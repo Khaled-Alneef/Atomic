@@ -13,6 +13,7 @@ result is meant to be reviewed (and pruned via Edit/Delete on the Games
 page) after import, not blindly trusted.
 """
 
+import hashlib
 import os
 import uuid
 from pathlib import Path
@@ -161,16 +162,48 @@ def extract_and_cache_icon(path, size=ICON_EXTRACT_SIZE):
     """Shared with windows.games (which also lets a user pick/override a
     game's icon by hand) - kept here rather than only there since
     Settings' per-launcher auto-import (see settings_dialog.py) needs it
-    too, without a helpers/ module reaching into windows/ just for this."""
+    too, without a helpers/ module reaching into windows/ just for this.
+
+    Cached under a name derived from the executable's path rather than a
+    random one, so re-extracting the same game (a re-import, or the
+    backfill below re-running) lands on the file it already wrote
+    instead of leaving a trail of orphaned copies behind it."""
+    digest = hashlib.sha1(os.path.normcase(str(path)).encode("utf-8")).hexdigest()
+    dest = images.CACHE_DIR / f"game_{digest}.png"
+    if dest.exists():
+        return str(dest)
     img = icon_extract.extract_icon(path, size=size)
     if img is None:
         return None
-    dest = images.CACHE_DIR / f"game_{uuid.uuid4().hex}.png"
     try:
         img.save(dest)
         return str(dest)
     except Exception:
         return None
+
+
+def backfill_missing_icons(games=None):
+    """Give every saved game an icon it can actually show, re-extracting
+    for any whose icon was never captured or whose cached file has since
+    gone missing. Returns the up-to-date list.
+
+    Called by both the Games page and Home: Home renders the same icons
+    but used to just fall back to a letter avatar when one was absent,
+    so a game could sit there as a colored initial until the Games page
+    happened to be opened and fix it."""
+    games = storage.load(GAMES_FILE, []) if games is None else games
+    for game in games:
+        icon = game.get("icon")
+        if icon and os.path.exists(icon):
+            continue
+        path = game.get("path")
+        if not path or not os.path.exists(path):
+            continue
+        extracted = extract_and_cache_icon(path)
+        if extracted and extracted != icon:
+            game["icon"] = extracted
+            storage.update_entry(GAMES_FILE, game.get("id"), {"icon": extracted})
+    return games
 
 
 def import_scanned_games(found):

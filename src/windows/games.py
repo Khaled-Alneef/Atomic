@@ -100,13 +100,29 @@ class GamesPage(GlassPage):
             if "last_played" not in game:
                 game["last_played"] = None
                 changed = True
-            if not game.get("icon") and game.get("path") and Path(game["path"]).exists():
-                icon_path = _extract_and_cache_icon(game["path"])
-                if icon_path:
-                    game["icon"] = icon_path
-                    changed = True
         if changed:
             storage.save(DATA_FILE, self.games)
+        self.games = launchers.backfill_missing_icons(self.games)
+
+    def _mutate(self, apply_change):
+        """Apply a change to the saved games list and redraw.
+
+        Re-reads the file first and works on that, rather than saving
+        this page's own `self.games`: Home holds its own copy of the
+        same list, Settings can import launcher games into it while this
+        page sits open behind the dialog, and the icon backfill writes
+        to it too. Saving a snapshot taken when this page was built
+        would roll all of that back - which is what made game icons
+        (and, worse, whole imported games) disappear after something as
+        unrelated as moving one entry down the list."""
+        self.games = storage.load(DATA_FILE, [])
+        apply_change(self.games)
+        storage.save(DATA_FILE, self.games)
+        self._refresh_grid()
+
+    @staticmethod
+    def _index_of(games, game):
+        return next((i for i, g in enumerate(games) if g.get("id") == game.get("id")), None)
 
     def _sorted_games(self):
         mode = self.sort_box.currentText()
@@ -137,7 +153,7 @@ class GamesPage(GlassPage):
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
     def _build_card(self, game):
-        card = Card(hoverable=True)
+        card = Card(hoverable=True, matte=True)
         card.setFixedWidth(CARD_WIDTH)
         card.setToolTip(game["name"])
         layout = QVBoxLayout(card)
@@ -174,13 +190,11 @@ class GamesPage(GlassPage):
         if not paths:
             return
         added_at = storage.now_iso()
-        for path in paths:
-            self.games.append({
-                "id": str(uuid.uuid4()), "name": Path(path).stem, "path": path,
-                "icon": _extract_and_cache_icon(path), "added_at": added_at, "last_played": None,
-            })
-        storage.save(DATA_FILE, self.games)
-        self._refresh_grid()
+        new_games = [{
+            "id": str(uuid.uuid4()), "name": Path(path).stem, "path": path,
+            "icon": _extract_and_cache_icon(path), "added_at": added_at, "last_played": None,
+        } for path in paths]
+        self._mutate(lambda games: games.extend(new_games))
 
     def _import_from_launchers(self):
         dirs = app_settings.get_launcher_dirs()
@@ -211,36 +225,46 @@ class GamesPage(GlassPage):
     def _launch(self, game):
         try:
             subprocess.Popen([game["path"]], shell=True, cwd=str(Path(game["path"]).parent))
-            game["last_played"] = storage.now_iso()
-            storage.save(DATA_FILE, self.games)
-            if self.sort_box.currentText() == "Last Played":
-                self._refresh_grid()
         except OSError as exc:
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
+            return
+        game["last_played"] = storage.now_iso()
+        storage.update_entry(DATA_FILE, game.get("id"), {"last_played": game["last_played"]})
+        if self.sort_box.currentText() == "Last Played":
+            self._refresh_grid()
 
     def _edit(self, game):
-        EditGameForm(self, game, on_save=self._on_edit_save)
+        EditGameForm(self, game, on_save=lambda: self._on_edit_save(game))
 
-    def _on_edit_save(self):
-        storage.save(DATA_FILE, self.games)
+    def _on_edit_save(self, game):
+        storage.update_entry(DATA_FILE, game.get("id"), {
+            "name": game["name"], "path": game["path"], "icon": game.get("icon"),
+        })
         self._refresh_grid()
 
     def _move(self, game, delta):
         if self.sort_box.currentText() != "Custom Order":
             QMessageBox.information(self, "Games", "Switch Sort to 'Custom Order' to reorder manually.")
             return
-        idx = self.games.index(game)
-        new_idx = idx + delta
-        if 0 <= new_idx < len(self.games):
-            self.games[idx], self.games[new_idx] = self.games[new_idx], self.games[idx]
-            storage.save(DATA_FILE, self.games)
-            self._refresh_grid()
+
+        def apply_change(games):
+            idx = self._index_of(games, game)
+            new_idx = idx + delta if idx is not None else None
+            if new_idx is not None and 0 <= new_idx < len(games):
+                games[idx], games[new_idx] = games[new_idx], games[idx]
+
+        self._mutate(apply_change)
 
     def _remove(self, game):
-        if QMessageBox.question(self, "Remove Game", f"Remove '{game['name']}' from the list?") == QMessageBox.StandardButton.Yes:
-            self.games.remove(game)
-            storage.save(DATA_FILE, self.games)
-            self._refresh_grid()
+        if QMessageBox.question(self, "Remove Game", f"Remove '{game['name']}' from the list?") != QMessageBox.StandardButton.Yes:
+            return
+
+        def apply_change(games):
+            idx = self._index_of(games, game)
+            if idx is not None:
+                games.pop(idx)
+
+        self._mutate(apply_change)
 
 
 class EditGameForm(QDialog):

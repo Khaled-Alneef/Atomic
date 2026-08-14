@@ -6,6 +6,7 @@ result is converted to a QPixmap right before it's handed to a Qt widget.
 """
 
 import hashlib
+import threading
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -125,10 +126,100 @@ def to_pixmap(img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qimg.copy())
 
 
+# Every page is rebuilt from scratch on each visit, and again on every
+# sort change or +/- chapter tap, so a grid of covers kept re-deriving
+# pixels it had already produced - measured at ~14ms per image, which is
+# what made opening a page with a lot on it feel slow. Two caches,
+# because the two halves of that cost are paid in different places:
+#
+#   _FITTED  decode + LANCZOS resize, ~6.3ms - the expensive half, and
+#            the only half that can be done off the UI thread (see
+#            prewarm), since it's pure Pillow with no Qt involved.
+#   _PIXMAP  the finished QPixmap, ~0.1ms to convert - has to be built
+#            on the UI thread, so it's cached separately rather than
+#            being something prewarm could hand over ready-made.
+#
+# Both are bounded so a big library browsed for a long session can't
+# grow them without limit.
+_FITTED = {}
+_PIXMAP = {}
+_CACHE_MAX = 512
+
+
+def _stamp(path):
+    """The file's mtime/size, so a cover that gets re-downloaded at the
+    same path (see tracker's sharper-cover backfill) is re-read rather
+    than served stale from an earlier render. None means missing or
+    unreadable - callers fall through to the letter avatar."""
+    try:
+        stat = Path(path).stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+def _evict(cache):
+    if len(cache) >= _CACHE_MAX:
+        # Plain FIFO rather than a real LRU: these all cost about the
+        # same to rebuild, so tracking use order would buy nothing over
+        # dropping whatever went in first.
+        for old_key in list(cache)[:_CACHE_MAX // 4]:
+            cache.pop(old_key, None)
+
+
+def _fitted(path, size, stamp):
+    """The decoded, resized PIL image for `path`, cached. Safe to call
+    from a background thread - it touches no Qt types."""
+    key = (str(path), stamp, size)
+    if key in _FITTED:
+        return _FITTED[key]
+    img = load_thumbnail(path, size)
+    _evict(_FITTED)
+    _FITTED[key] = img
+    return img
+
+
+def prewarm(specs):
+    """Decode the images in `specs` - (path, size) pairs - ahead of time,
+    on a background thread.
+
+    The caches above make *returning* to a page instant, but the first
+    visit still had to decode everything on the UI thread while the user
+    waited. Doing it in the background right after launch means the
+    heavy half is usually already done by the time a page is opened, and
+    building it only has the ~0.1ms QPixmap conversion left to do.
+
+    Fails soft and silently: this is pure optimization, and anything it
+    misses just gets decoded on demand the way it always was."""
+    def worker():
+        for path, size in specs:
+            if not path:
+                continue
+            try:
+                _fitted(path, tuple(size), _stamp(path))
+            except Exception:
+                continue
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def thumbnail_or_avatar(path, label_text, size=(64, 64)) -> QPixmap:
     """Best-effort thumbnail: try to load `path` as an image, and fall
-    back to a letter avatar generated from `label_text`."""
-    img = load_thumbnail(path, size) if path else None
+    back to a letter avatar generated from `label_text`.
+
+    Cached - QPixmap is implicitly shared, so handing the same one to
+    several widgets copies a handle, not the pixels."""
+    size = tuple(size)
+    stamp = _stamp(path) if path else None
+    key = (str(path) if path else None, stamp, label_text, size)
+    cached = _PIXMAP.get(key)
+    if cached is not None:
+        return cached
+
+    img = _fitted(path, size, stamp) if path else None
     if img is None:
         img = letter_avatar(label_text, size)
-    return to_pixmap(img)
+    pixmap = to_pixmap(img)
+    _evict(_PIXMAP)
+    _PIXMAP[key] = pixmap
+    return pixmap

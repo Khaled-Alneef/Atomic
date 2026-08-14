@@ -13,25 +13,36 @@ from PyQt6.QtGui import QFont
 from . import storage
 
 # ---- Palette -------------------------------------------------------------
-BG = "#0a0b0f"           # app background
-BG_ALT = "#111319"       # secondary background (page panels)
-GLOW = "#241f3d"         # soft purple tint used in the page glow backdrop
-SIDEBAR = "#0d0e13"      # sidebar column
-SIDEBAR_SHEEN = "#171922"  # subtle highlight at the sidebar's top edge
-SIDEBAR_DEEP = "#08090d"   # ...fading darker toward its bottom
-SURFACE = "#1b1d25"      # cards / inputs
-SURFACE_HOVER = "#242731"
-SURFACE_ACTIVE = "#2b2e3a"
-BORDER = "#282b35"
+# Six of these are fixed by the app's color spec and everything else is
+# derived from them, so the whole UI stays one family rather than drifting
+# per page:
+#
+#   TEXT #F1F1F7 · TEXT_MUTED #9495AD · SURFACE #1A1B2E
+#   SURFACE_HOVER #232442 · BORDER #34355A · ACCENT #7C6FF2
+#
+# The derived tones keep the spec's hue (a blue-violet around 237-246 deg)
+# and only move lightness - a neutral gray mixed in anywhere reads as a
+# dirty patch against these, which is what the old near-neutral palette
+# did once the specified colors sat next to it.
+BG = "#0d0e18"           # app background
+BG_ALT = "#141525"       # secondary background (page panels)
+GLOW = "#272451"         # soft purple tint used in the page glow backdrop
+SIDEBAR = "#101121"      # sidebar column
+SIDEBAR_SHEEN = "#1c1d33"  # subtle highlight at the sidebar's top edge
+SIDEBAR_DEEP = "#0a0b13"   # ...fading darker toward its bottom
+SURFACE = "#1a1b2e"      # cards / inputs ("card background")
+SURFACE_HOVER = "#232442"  # ...lifted on hover ("card elevated")
+SURFACE_ACTIVE = "#2c2d52"
+BORDER = "#34355a"
 
-TEXT = "#e9e9ee"
-TEXT_MUTED = "#90929e"
-TEXT_DIM = "#5c5e69"
+TEXT = "#f1f1f7"
+TEXT_MUTED = "#9495ad"
+TEXT_DIM = "#61627f"
 
-ACCENT = "#7c6cf0"
-ACCENT_HOVER = "#8d7ff5"
-ACCENT_ACTIVE = "#6656d6"
-ACCENT_SOFT = "#221f38"   # tinted background for the active nav item
+ACCENT = "#7c6ff2"        # primary button
+ACCENT_HOVER = "#8f84f5"
+ACCENT_ACTIVE = "#6a5ce0"
+ACCENT_SOFT = "#26244a"   # tinted background for the active nav item
 
 SUCCESS = "#2ecc71"
 DANGER = "#e74c3c"
@@ -39,19 +50,25 @@ DANGER_HOVER = "#ef6152"
 WARNING = "#f1c40f"
 
 # Glossy dark gradient used by every #Card item across the app (poster
-# grids, game icons, quick-list rows, the Home hero carousel) - darker
-# than a flat fill, with a highlight band near the top that reads as a
-# sheen rather than matte. Tinted purple (the same family as ACCENT/
-# ACCENT_SOFT) rather than neutral gray, to match the app's theme.
-CARD_SHEEN = "#3a3260"
-CARD_TOP = "#211d38"
-CARD_MID = "#161328"
-CARD_BOTTOM = "#0a0915"
-CARD_BORDER = "#453d6e"
-CARD_HOVER_SHEEN = "#4f4483"
-CARD_HOVER_TOP = "#2e2850"
-CARD_HOVER_MID = "#201c3a"
-CARD_HOVER_BOTTOM = "#141228"
+# grids, game icons, quick-list rows, the Home hero carousel) and by the
+# #SectionBox frames that group them on Home - darker than a flat fill,
+# with a highlight band near the top that reads as a sheen rather than
+# matte.
+#
+# Anchored to the palette above rather than being its own set of colors:
+# the gradient's dominant band (MID, which covers most of a card's
+# height) *is* SURFACE, its hover counterpart is SURFACE_HOVER, and the
+# border is BORDER. So a card reads as the specified card background,
+# with the sheen and the darker foot only shading around it.
+CARD_SHEEN = "#3e3f6b"
+CARD_TOP = SURFACE_HOVER
+CARD_MID = SURFACE
+CARD_BOTTOM = "#101120"
+CARD_BORDER = BORDER
+CARD_HOVER_SHEEN = "#524fa0"
+CARD_HOVER_TOP = SURFACE_ACTIVE
+CARD_HOVER_MID = SURFACE_HOVER
+CARD_HOVER_BOTTOM = "#16172a"
 
 FONT_FAMILY = "Segoe UI"
 FONT_FAMILY_EMOJI = "Segoe UI Emoji"
@@ -327,6 +344,23 @@ QFrame#Card[hoverable="true"]:hover {{
         stop:1 {CARD_HOVER_BOTTOM});
     border: 1px solid {ACCENT};
 }}
+/* Matte variant of the same card, opted into per widget (Card(matte=
+   True), or the property set directly on a plain #Card frame) - flat
+   SURFACE fill instead of the gradient above, so no sheen and no
+   darkened foot, just the palette's card background.
+
+   Used by Home, Games, Apps and Websites; the Anime/Reading/Series
+   poster grids stay glossy. Both selectors below outrank the gradient
+   rules on specificity (same id, one more attribute), which is what
+   lets one #Card rule set override the other. */
+QFrame#Card[matte="true"] {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+}}
+QFrame#Card[matte="true"][hoverable="true"]:hover {{
+    background: {SURFACE_HOVER};
+    border: 1px solid {ACCENT};
+}}
 /* Home's frameless item cards - poster/game tiles and quick-list rows.
    No resting fill, so the section behind them shows through, plus a
    hover highlight.
@@ -368,17 +402,17 @@ QFrame#Hero {{
     background: transparent;
     border: none;
 }}
-/* One shared glossy frame per Home section (Anime & Reading, Series,
-   Games, Apps, Websites) instead of a frame behind every individual
-   item inside it - the items themselves are styled #Bare now. */
+/* One shared frame per Home section (Anime & Reading, Series, Games,
+   Apps, Websites) instead of a frame behind every individual item
+   inside it - the items themselves are styled #Bare now.
+
+   Matte like the rest of Home: a flat SURFACE fill. These frames are
+   large, and the gloss that reads as a sheen at poster-tile size just
+   reads as an uneven wash spread across something this big. */
 QWidget#SectionBox {{
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 {CARD_SHEEN},
-        stop:0.18 {CARD_TOP},
-        stop:0.6 {CARD_MID},
-        stop:1 {CARD_BOTTOM});
+    background: {SURFACE};
     border-radius: {RADIUS_LG}px;
-    border: 1px solid {CARD_BORDER};
+    border: 1px solid {BORDER};
 }}
 QWidget#Bare {{
     background: transparent;

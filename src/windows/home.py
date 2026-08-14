@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import images, nav_config, storage, theme
+from helpers import images, launchers, nav_config, storage, theme
 from helpers.widgets import Card, GlassPage, scroll_area
 from windows.link_grid import open_link_entry
 from windows.tracker import IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress, open_tracker_entry
@@ -147,7 +147,10 @@ class HomePage(GlassPage):
 
         self.tracker_entries = storage.load(TRACKER_FILE, [])
         self.series_entries = storage.load(SERIES_FILE, [])
-        self.games = storage.load(GAMES_FILE, [])
+        # Re-extracts any game icon that was never captured or whose
+        # cached file has gone missing, rather than silently showing a
+        # letter avatar here until the Games page is next opened.
+        self.games = launchers.backfill_missing_icons(storage.load(GAMES_FILE, []))
         self.websites = storage.load(WEBSITES_FILE, [])
         self.apps = storage.load(APPS_FILE, [])
 
@@ -392,7 +395,11 @@ class HomePage(GlassPage):
         # A #Card frame (same look the peeks use) rather than a bare
         # widget, so the cover+text+button all sit on one shared
         # background instead of floating directly on the Hero's own.
+        # Matte like the rest of Home - set as a property rather than
+        # via Card(matte=True) since this is a plain frame, not a
+        # clickable Card.
         content = QFrame(objectName="Card")
+        content.setProperty("matte", True)
         content.setFixedSize(HERO_CONTENT_WIDTH, HERO_SLIDE_HEIGHT)
         layout = QHBoxLayout(content)
         layout.setContentsMargins(*([HERO_SLIDE_PADDING] * 4))
@@ -668,10 +675,15 @@ class HomePage(GlassPage):
     def _launch_game(self, game):
         try:
             subprocess.Popen([game["path"]], shell=True, cwd=str(Path(game["path"]).parent))
-            game["last_played"] = storage.now_iso()
-            storage.save(GAMES_FILE, self.games)
         except OSError as exc:
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
+            return
+        game["last_played"] = storage.now_iso()
+        # Only this game's own field, not a wholesale save of the copy
+        # Home loaded when it was built - that snapshot goes stale the
+        # moment the Games page (or a Settings import) touches the list,
+        # and writing it back would undo their changes.
+        storage.update_entry(GAMES_FILE, game.get("id"), {"last_played": game["last_played"]})
 
     # ------------------------------------------------------------------
     def _build_quick_list(self, title, entries, data_file):

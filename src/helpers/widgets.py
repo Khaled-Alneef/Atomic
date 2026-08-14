@@ -1,9 +1,11 @@
 """Small reusable widgets shared across windows."""
 
-from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QPainter, QRadialGradient
-from PyQt6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QScrollArea, QWidget
+from PyQt6.QtWidgets import (
+    QApplication, QDialog, QFrame, QLabel, QScrollArea, QToolTip, QWidget,
+)
 
 from . import theme
 
@@ -32,16 +34,37 @@ class GlassPage(QWidget):
 
 class Card(QFrame):
     """A clickable card (icon + label, cover art, etc.) with hover
-    feedback and left/right click signals."""
+    feedback and left/right click signals.
+
+    `matte` swaps the glossy gradient fill for a flat one (see the
+    #Card rules in theme.py) - Home/Games/Apps/Websites pass it, the
+    poster grids on Anime/Reading/Series don't."""
 
     clicked = Signal()
     rightClicked = Signal(object)  # emits the originating QMouseEvent
 
-    def __init__(self, parent=None, hoverable=True):
+    def __init__(self, parent=None, hoverable=True, matte=False):
         super().__init__(parent)
         self.setObjectName("Card")
         self.setProperty("hoverable", hoverable)
+        self.setProperty("matte", matte)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tooltip_provider = None
+
+    def set_tooltip_provider(self, provider):
+        """Build this card's tooltip fresh on every hover instead of once
+        at construction - for content that goes stale sitting there, like
+        a countdown to the next episode. The generated text is also set
+        as the plain tooltip, so the card still has one if the event
+        below never fires (and so Qt knows to offer one at all)."""
+        self._tooltip_provider = provider
+        self.setToolTip(provider())
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip and self._tooltip_provider:
+            QToolTip.showText(event.globalPos(), self._tooltip_provider(), self)
+            return True
+        return super().event(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
