@@ -76,7 +76,26 @@ git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"
 git push origin main && git push origin v1.1
 git checkout development                # next round opens at 1.1.1
+git tag -a released/1.1 -m "The development commit released as 1.1"
+git push origin released/1.1
 ```
+
+### Marker tags
+
+`main`'s history is a chain of squashed snapshots, so a release tag there
+is not an ancestor of anything on `development` and cannot be used as a
+range endpoint — `git log v1.0..development` silently returns *every*
+commit in the project rather than the ones since the release.
+
+Each release therefore also tags the `development` commit it was taken
+from, as `released/<version>`. That is what "since the last release"
+means in practice:
+
+    git log released/1.0..development            # what has changed since 1.0
+    git diff --stat released/1.0 development -- src/
+
+These markers are never offered as updates: `RELEASE_TAG_RE` accepts only
+bare two-part tags, and `released/1.0` is not one.
 
 Afterwards, confirm the updater resolves the new release: call
 `updater.check_for_update()` against the live repository with
@@ -94,10 +113,13 @@ Write it as part of making the release, not before:
 - Name it `docs/VDD-<version>.md`, starting from the previous release's
   document.
 - Take the executable's size and SHA-256 from the released build.
-- Build the "Changes since" section from the commit log since the
-  previous release tag — `git log v1.0..development` — which is why
-  commit messages here carry a real explanation rather than a list of
-  files.
+- Build the "Changes since" section from
+  `git log released/<previous>..development`, which is why commit
+  messages here carry a real explanation rather than a list of files.
+  **Not** `git log v1.0..development`: `main`'s release tags point at
+  squashed snapshots that share no ancestry with `development`, so that
+  range excludes nothing and returns the entire project history. See the
+  marker tags below.
 - Record any design decision whose reasoning is not obvious from the
   code, especially where it cost investigation to arrive at.
 

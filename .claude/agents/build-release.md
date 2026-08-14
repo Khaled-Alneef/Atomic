@@ -79,8 +79,12 @@ document - do not create one, and do not add unreleased work to an
 existing one. As part of making the release, write
 `docs/VDD-<version>.md` starting from the previous release's document:
 size and SHA-256 taken from the released build, and the "Changes since"
-section built from `git log v<previous>..development`, which is what the
-detailed commit messages are for. Never edit a released version's VDD -
+section built from `git log released/<previous>..development` - note
+`released/1.0`, not `v1.0`: `main`'s tags point at squashed snapshots
+that share no ancestry with `development`, so a `v1.0..development` range
+excludes nothing and returns the whole project history. Each release also
+tags the development commit it was taken from as `released/<version>`,
+which is what makes "since the last release" answerable at all. Never edit a released version's VDD -
 it records what was actually delivered under that number. Afterwards, confirm the updater still
 resolves the release by calling `updater.check_for_update()` against the
 live repo with `APP_VERSION` temporarily lowered.
