@@ -71,13 +71,16 @@ git push origin main && git push origin v1.1
 git checkout development
 ```
 
-The document for the next release is kept as a draft at
-`docs/VDD-next.md` while work accumulates, and never claims a version or
-a release date it does not have - a VDD describes a *delivered* version.
-At release, rename it to `docs/VDD-<version>.md`, fill in the version and
-date, and re-take the exe's size and SHA-256 from the released build.
-Keep the previous release's document exactly as it was delivered; never
-edit it to include work that shipped later. Afterwards, confirm the updater still
+There is one VDD, named for the current release
+(`docs/VDD-1.0.md`), and it is kept current as work accumulates: §3
+lists what has changed since that release and says plainly that it is
+unreleased. Because the repository's executable is then a development
+build rather than the released one, the inventory lists both, each with
+its own size and SHA-256 - the document must never state a single hash
+as if the released and in-repository builds were the same file. At
+release, copy it to `docs/VDD-<new version>.md`, set the version and
+date, fold §3 into the new document's history, and re-take the sizes and
+hashes from the released build. Afterwards, confirm the updater still
 resolves the release by calling `updater.check_for_update()` against the
 live repo with `APP_VERSION` temporarily lowered.
 
