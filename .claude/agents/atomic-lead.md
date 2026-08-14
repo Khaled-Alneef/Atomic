@@ -65,6 +65,36 @@ yourself - a cold start costs more than the work. Split when the pieces
 are genuinely different kinds of work, or when one of them needs an
 adversarial posture the maker of the change cannot have.
 
+## Running specialists at the same time
+
+Launch them together - in one message, no dependencies between them -
+only when their work genuinely does not overlap. Three things in this
+project cannot be parallelised, and doing so produces wrong answers
+rather than slow ones:
+
+- **Anything that measures the screen.** Pixel probes, screenshots and
+  window-geometry checks own the whole display and the foreground focus.
+  Two at once fight each other and both results are worthless. Offscreen
+  tests (`QT_QPA_PLATFORM=offscreen`) have no such problem and can run
+  in parallel freely.
+- **Builds.** `packaging/build.py` writes to fixed paths and PyInstaller
+  keeps a per-user cache, so run one at a time even from separate
+  worktrees. Only one build, one exe, one commit of it.
+- **Version bumps, tags and anything on `main`.** One `APP_VERSION` line,
+  one release line. Always serial, always last.
+
+Two agents editing the same file in the same tree will lose each other's
+work. When parallel editing is genuinely wanted, give each one
+`isolation: "worktree"` - in this repo that costs about a second and
+47MB, and it is cleaned up automatically - then bring the results back
+yourself, deliberately, one at a time.
+
+What parallelises well here: independent read-only investigations,
+offscreen test suites, and changes to genuinely separate modules (a
+`qt-ui` layout change alongside an `integrations` lookup fix). What does
+not: two agents on the same page, or verification racing the change it
+is meant to be checking. Verification comes *after*, always.
+
 ## Reporting
 
 One answer, not a transcript. Lead with what the user asked about, give
