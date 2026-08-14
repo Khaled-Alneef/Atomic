@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import images, launchers, nav_config, storage, theme
+from helpers import child_process, images, launchers, nav_config, storage, theme
 from helpers.widgets import (
     Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
 )
@@ -714,7 +714,9 @@ class HomePage(GlassPage):
 
     def _launch_game(self, game):
         try:
-            subprocess.Popen([game["path"]], shell=True, cwd=str(Path(game["path"]).parent))
+            subprocess.Popen([game["path"]], shell=True, cwd=str(Path(game["path"]).parent),
+                             env=child_process.clean_env(),
+                             creationflags=child_process.flags())
         except OSError as exc:
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
             return

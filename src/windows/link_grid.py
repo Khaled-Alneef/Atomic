@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import images, storage, theme
+from helpers import child_process, images, storage, theme
 from helpers.widgets import Card, GlassPage, scroll_area
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
@@ -42,7 +42,9 @@ def open_link_entry(parent, entry, label="Links"):
         if t["type"] == "app":
             try:
                 subprocess.Popen([t["target"]], shell=True,
-                                  cwd=str(Path(t["target"]).parent))
+                                  cwd=str(Path(t["target"]).parent),
+                                  env=child_process.clean_env(),
+                                  creationflags=child_process.flags())
             except OSError as exc:
                 QMessageBox.critical(parent, label, f"Couldn't launch '{t['target']}':\n{exc}")
         else:

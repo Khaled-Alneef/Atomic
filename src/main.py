@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
         self._history_index = 0
         self._current_page = None
         self._anim_group = None
+        self._was_maximized = False
         self._last_pointer_pos = QCursor.pos()
         self._cursor_watchdog = QTimer(self)
         self._cursor_watchdog.timeout.connect(self._cursor_watchdog_tick)
@@ -537,6 +538,24 @@ class MainWindow(QMainWindow):
         if state == Qt.ApplicationState.ApplicationActive:
             self._drain_override_cursor()
 
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.exit_fullscreen()
+            return
+        # Remembered so leaving full screen puts the window back the way
+        # it was found, rather than dropping a maximized window down to a
+        # restored one.
+        self._was_maximized = self.isMaximized()
+        self.showFullScreen()
+
+    def exit_fullscreen(self):
+        if not self.isFullScreen():
+            return
+        if self._was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.AltModifier:
             if event.key() == Qt.Key.Key_Left:
@@ -545,6 +564,14 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key.Key_Right:
                 self.go_forward()
                 return
+        if event.key() == Qt.Key.Key_F11:
+            self.toggle_fullscreen()
+            return
+        # Escape only means "leave full screen" while in it - otherwise it
+        # is left alone, so it keeps closing dialogs and menus as usual.
+        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+            self.exit_fullscreen()
+            return
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -685,6 +712,11 @@ def main():
 
     window = MainWindow()
     window.showMaximized()
+    # Not just shown but actually brought forward. Launched normally this
+    # is what already happens; launched by the updater's relaunch it is
+    # not, and the window would otherwise sit behind everything blinking
+    # in the taskbar (see theme.bring_window_to_front).
+    theme.bring_window_to_front(window)
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())

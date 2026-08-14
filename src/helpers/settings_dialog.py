@@ -27,7 +27,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import anime_sites, app_settings, launchers, manga_sites, nav_config, startup, storage, stremio, theme, uninstall
+from . import (
+    anime_sites, app_settings, launchers, manga_sites, nav_config, startup,
+    storage, stremio, theme, uninstall, updater,
+)
 from .widgets import scroll_area, show_toast
 
 CATEGORIES = ["General", "Anime & Series", "Reading", "Games", "Data"]
@@ -54,6 +57,14 @@ class _StremioLoginSignals(QObject):
 
 class _LauncherImportSignals(QObject):
     done = Signal(str, int)  # launcher key, number of games added
+
+
+class _UpdateSignals(QObject):
+    # The check and the download both run off the UI thread; these carry
+    # their results back onto it.
+    checked = Signal(object, str)      # update dict (or None), error message
+    progress = Signal(int, int)        # bytes received, total
+    downloaded = Signal(object, str)   # downloaded Path (or None), error message
 
 
 class SettingsDialog(QDialog):
@@ -85,6 +96,14 @@ class SettingsDialog(QDialog):
 
         self._launcher_import_signals = _LauncherImportSignals()
         self._launcher_import_signals.done.connect(self._on_launcher_import_done)
+
+        # The update found by the last check, kept so the same button can
+        # go on to install it without checking again.
+        self._pending_update = None
+        self._update_signals = _UpdateSignals()
+        self._update_signals.checked.connect(self._on_update_checked)
+        self._update_signals.progress.connect(self._on_update_progress)
+        self._update_signals.downloaded.connect(self._on_update_downloaded)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(scroll_area(self._build_general_page()))
@@ -145,6 +164,24 @@ class SettingsDialog(QDialog):
         form.setContentsMargins(4, 4, 12, 4)
         form.setSpacing(6)
 
+        form.addWidget(QLabel("Version", objectName="SectionTitle"))
+        version_row = QHBoxLayout()
+        version_row.addWidget(QLabel(f"Atomic {updater.APP_VERSION}"))
+        self.update_btn = QPushButton("Check for Updates")
+        self.update_btn.clicked.connect(self._on_update_clicked)
+        version_row.addWidget(self.update_btn)
+        version_row.addStretch()
+        form.addLayout(version_row)
+
+        self.update_status = QLabel(
+            "Updates come straight from the project's GitHub repository - no "
+            "reinstalling, and your saved entries are left alone.",
+            objectName="Muted",
+        )
+        self.update_status.setWordWrap(True)
+        form.addWidget(self.update_status)
+
+        form.addSpacing(24)
         form.addWidget(QLabel("Startup", objectName="SectionTitle"))
         self.startup_check = QCheckBox("Launch on Windows startup")
         self.startup_check.setChecked(startup.is_enabled())
@@ -193,6 +230,98 @@ class SettingsDialog(QDialog):
 
         form.addStretch()
         return page
+
+    # ---- Updates ------------------------------------------------------
+    def _on_update_clicked(self):
+        """One button for the whole flow: check, then - once something has
+        been found - download and install it."""
+        if self._pending_update is not None:
+            self._start_update_download()
+            return
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("Checking...")
+        self.update_status.setText("Asking GitHub for the latest release...")
+        threading.Thread(target=self._check_update_worker, daemon=True).start()
+
+    def _check_update_worker(self):
+        try:
+            found = updater.check_for_update()
+            error = ""
+        except updater.UpdateError as exc:
+            found, error = None, str(exc)
+        except Exception as exc:                      # never kill the thread
+            found, error = None, f"Couldn't check for updates: {exc}"
+        self._update_signals.checked.emit(found, error)
+
+    def _on_update_checked(self, found, error):
+        self.update_btn.setEnabled(True)
+        if error:
+            self.update_btn.setText("Check for Updates")
+            self.update_status.setText(error)
+            return
+        if not found:
+            self.update_btn.setText("Check for Updates")
+            self.update_status.setText(
+                f"Atomic {updater.APP_VERSION} is the latest version.")
+            return
+
+        self._pending_update = found
+        size_mb = (found.get("size") or 0) / (1024 * 1024)
+        self.update_btn.setText(f"Install {found['tag']}")
+        self.update_status.setText(
+            f"Version {found['version']} is available ({size_mb:.0f} MB). "
+            "Installing closes Atomic and reopens it on the new version; "
+            "your saved entries are untouched.")
+
+    def _start_update_download(self):
+        if not updater.is_frozen():
+            self.update_status.setText(
+                "This is running from source, so there is no executable to "
+                "replace - use git to update instead.")
+            return
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("Downloading...")
+        threading.Thread(target=self._download_update_worker, daemon=True).start()
+
+    def _download_update_worker(self):
+        try:
+            path = updater.download_update(
+                self._pending_update,
+                progress=lambda done, total: self._update_signals.progress.emit(done, total))
+            error = ""
+        except updater.UpdateError as exc:
+            path, error = None, str(exc)
+        except Exception as exc:
+            path, error = None, f"Couldn't download the update: {exc}"
+        self._update_signals.downloaded.emit(path, error)
+
+    def _on_update_progress(self, received, total):
+        if total:
+            self.update_status.setText(
+                f"Downloading... {received / (1024 * 1024):.0f} of "
+                f"{total / (1024 * 1024):.0f} MB")
+        else:
+            self.update_status.setText(
+                f"Downloading... {received / (1024 * 1024):.0f} MB")
+
+    def _on_update_downloaded(self, path, error):
+        if error or path is None:
+            self.update_btn.setEnabled(True)
+            self.update_btn.setText(f"Install {self._pending_update['tag']}")
+            self.update_status.setText(error or "The download failed.")
+            return
+
+        self.update_status.setText("Verified. Restarting into the new version...")
+        try:
+            updater.apply_update(path)
+        except updater.UpdateError as exc:
+            self.update_btn.setEnabled(True)
+            self.update_btn.setText(f"Install {self._pending_update['tag']}")
+            self.update_status.setText(str(exc))
+            return
+        # The swap only happens once this process lets go of the exe, so
+        # closing is part of installing rather than something after it.
+        QApplication.quit()
 
     def _toggle_section_visibility(self, page_name, visible):
         hidden = set(app_settings.get_hidden_sections())

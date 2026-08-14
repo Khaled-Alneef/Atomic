@@ -631,3 +631,34 @@ def apply_dark_titlebar(widget):
                 break
     except Exception:
         pass
+
+
+def bring_window_to_front(widget):
+    """Show `widget`'s window, restore it if minimized, and put it in
+    front of everything else.
+
+    Needed because a window opened by a process Windows doesn't consider
+    to be in the foreground is not allowed to raise itself - it appears
+    behind whatever was there and only blinks in the taskbar. That is how
+    the app came back after an update: relaunched by a detached script,
+    with no foreground rights of its own. The updater hands those rights
+    over before it quits (see updater._allow_foreground_for_relaunch);
+    this is the other half, the new window actually claiming them.
+
+    SW_RESTORE rather than showNormal(): it returns a minimized window to
+    whatever it was before - maximized stays maximized - where showNormal
+    would drop it to a restored size.
+    """
+    widget.show()
+    widget.raise_()
+    widget.activateWindow()
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = int(widget.winId())
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass

@@ -11,7 +11,6 @@
 | System name | Atomic |
 | Version | 1.0 |
 | Release date | 2026-08-14 |
-| Release commit | `8926b1a` |
 | Repository | https://github.com/Khaled-Alneef/Atomic |
 | Target platform | Windows 10 / 11, 64-bit |
 | Delivered as | `Atomic.exe` — a single self-contained executable |
@@ -45,8 +44,8 @@ same saved entries the pages themselves write.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 48,423,173 bytes. SHA-256 `1ea2af60500633a2e1f52f449365678f6fe48faa82e7ef7a3d16bb6c71b65511` |
-| `src/` | Full Python source, 7,730 lines across 28 modules |
+| `Atomic.exe` | The application. 47,137,488 bytes. SHA-256 `2b42a3359e1c4e1c14a14bac001abad0d5939355cf0578af36e960f33eb6400a` |
+| `src/` | Full Python source, 8,167 lines across 30 modules |
 | `packaging/` | `build.py` and `Atomic.spec`, which produce the executable |
 | `docs/VDD-1.0.md` | This document |
 
@@ -71,25 +70,26 @@ administrator rights.
 
 | Module | Lines | Responsibility |
 |---|---|---|
-| `main.py` | 695 | Window, sidebar, navigation and page transitions, startup image prewarm, cursor watchdog |
+| `main.py` | 727 | Window, sidebar, navigation and page transitions, full screen, startup image prewarm, cursor watchdog |
 
 ### Feature pages (`src/windows/`)
 
 | Module | Lines | Responsibility |
 |---|---|---|
 | `tracker.py` | 1,386 | Anime / Reading / Series pages, entry form, progress sync, release schedules |
-| `home.py` | 762 | Dashboard, hero carousel, preview sections |
-| `link_grid.py` | 429 | Shared grid behind Apps and Websites |
-| `games.py` | 360 | Games page, launcher import, icon handling |
+| `home.py` | 764 | Dashboard, hero carousel, preview sections |
+| `link_grid.py` | 431 | Shared grid behind Apps and Websites |
+| `games.py` | 362 | Games page, launcher import, icon handling |
 | `websites.py`, `apps.py` | 23 | Thin configurations of `link_grid` |
 
 ### Support modules (`src/helpers/`)
 
 | Module | Lines | Responsibility |
 |---|---|---|
-| `settings_dialog.py` | 747 | Settings window — General, Anime & Series, Reading, Games, Data |
-| `theme.py` | 633 | Palette and the application-wide stylesheet |
+| `settings_dialog.py` | 876 | Settings window — General, Anime & Series, Reading, Games, Data |
+| `theme.py` | 664 | Palette, application-wide stylesheet, native window tweaks |
 | `manga_sites.py` | 338 | Reading-site directory and live search across four site engines |
+| `updater.py` | 241 | In-app updates from the GitHub repository |
 | `mangadex.py` | 238 | MangaDex client and next-chapter estimation |
 | `launchers.py` | 232 | Game-launcher scanning, icon extraction and caching |
 | `widgets.py` | 228 | Shared widgets — cards, toasts, scroll areas, hover-cursor registry |
@@ -100,23 +100,23 @@ administrator rights.
 | `release_schedule.py` | 155 | Chooses a schedule source per medium; formats the hover lines |
 | `tvmaze.py` | 105 | TVMaze show lookup and next-episode schedule |
 | `app_settings.py` | 105 | Persisted application settings |
-| `native_cursor.py` | 82 | Windows cursor correction (see §6.2) |
+| `native_cursor.py` | 82 | Windows cursor correction (see §6.3) |
 | `storage.py` | 78 | JSON persistence and per-entry updates |
 | `anime_sites.py` | 74 | Video-site directory |
 | `nav_config.py` | 65 | Sidebar order and section visibility |
+| `child_process.py` | 62 | Environment and window flags for launched programs (see §6.2) |
 | `title_match.py` | 61 | Fuzzy title matching for external catalogues |
 | `startup.py` | 59 | Launch-on-Windows-startup registration |
 | `uninstall.py` | 45 | Full removal of the app and its data |
 
 ---
 
-## 5. Changes in this version
+## 5. What this version provides
 
-### 5.1 New capability
+### 5.1 Tracking with release schedules
 
-**Release schedules on hover.** Every tracked card now says when its next
-episode or chapter is due, on top of the title, status and progress it
-already showed:
+Every tracked card says when its next episode or chapter is due, on hover,
+alongside the title, status and progress:
 
 ```
 Bleach: Thousand-Year Blood War        Kingdom (WAN)
@@ -128,50 +128,61 @@ Countdown: 1d 3h 50m                   Countdown: 10d 12h 39m
 ```
 
 The countdown is regenerated on every hover from a cached timestamp, so
-it is never stale and never costs a network request to display.
-Schedules are looked up in the background and re-checked at most every
-12 hours.
+it is never stale and never costs a network request to display. Schedules
+are looked up in the background and re-checked at most every 12 hours.
 
-**Section visibility on Home.** Settings › General gains *"Hide them from
-the Home page too"*. Off by default, where hiding a section only removes
-its sidebar entry; on, a hidden section also leaves Home entirely —
-preview row, quick list, and carousel slides.
+Watch progress can be pulled from a connected Stremio account or a public
+AniList username; reading progress is kept by hand, with `+`/`-` on each
+card.
 
-**Visual redesign.** A new palette applied across every page, with all
-tones derived from six specified colours. Home, Games, Apps and Websites
-use a flat matte card fill; the tracker's poster grids keep a glossy one.
+### 5.2 In-app updates
 
-### 5.2 Defects corrected
+Settings › General shows the running version with a **Check for Updates**
+button. One button runs the whole flow: check, then download and install.
+Atomic closes, the executable is replaced, and it reopens on the new
+version — saved entries are untouched, since only the `.exe` changes.
 
-| # | Defect | Resolution |
-|---|---|---|
-| 1 | The pointing-hand cursor stayed on screen over every page after closing a dialog or launching a game, until the app was restarted | Corrected natively — see §6.2 |
-| 2 | Reordering a game silently discarded recent changes to the games list, including freshly-extracted icons and whole batches of imported games | All edits re-read the file and update only the entry that changed |
-| 3 | Game icons could show as coloured letters on Home until the Games page was opened | Home re-extracts missing icons itself; the icon cache is keyed by the game's path so re-extraction is idempotent |
-| 4 | Opening a page with many entries was slow, and the delay recurred on every visit | Thumbnails are cached and pre-decoded off-thread at startup — see §5.3 |
-| 5 | A strip of bare window showed down the right-hand side, resembling a second sidebar | Pages now follow the container's width, not only the window's |
-| 6 | Anime and Series stated release times differently from Reading | All three now read `Expected:` / `Countdown:` |
+A release is identified by a git tag on this repository (`v1.0`, `v1.1`,
+…), and what gets downloaded is the `Atomic.exe` committed at that tag.
+GitHub's contents API reports that file's git blob hash, and the download
+is verified against it before anything is replaced: a truncated or
+tampered download is discarded rather than installed. Publishing a
+release is therefore exactly "commit the rebuilt exe, tag it, push the
+tag".
 
-### 5.3 Measured performance change
+### 5.3 Interface
+
+- A dark blue-violet palette, with every tone derived from six specified
+  colours. Home, Games, Apps and Websites use a flat matte card fill; the
+  tracker's poster grids keep a glossy one.
+- A collapsible sidebar, drag-to-reorder, with any section hideable —
+  optionally from the Home page as well as the sidebar.
+- **F11** enters full screen, **Escape** leaves it, returning a maximized
+  window to maximized rather than dropping it to a restored size.
+
+### 5.4 Measured performance
 
 Page build time, against a library of 12 tracked entries, 8 games and 12
 links:
 
-| Page | Before | After |
+| Page | First visit | Return visit |
 |---|---|---|
-| Reading | 293 ms every visit | 8 ms first, 5 ms after |
-| Home | 475 ms every visit | 268 ms once at launch, ~10 ms after |
-| Websites | 32 ms | 3 ms |
-| Anime | 9 ms | 2 ms |
+| Home | 268 ms once at launch | ~10 ms |
+| Reading | 8 ms | 5 ms |
+| Websites | 3 ms | 3 ms |
+| Anime | 2 ms | 2 ms |
 
-Each cover or icon cost roughly 14 ms to decode and resize, and pages are
-rebuilt on every visit and on every sort change. Those results are now
+Each cover or icon costs roughly 14 ms to decode and resize, and pages
+are rebuilt on every visit and on every sort change. Those results are
 cached, and the expensive decode — 6.3 ms of the 14, pure Pillow with no
 Qt involvement — is performed on a background thread at startup.
 
 ---
 
-## 6. Design notes on two decisions
+## 6. Design notes
+
+Four decisions are recorded here because the reasoning is not obvious
+from the code, and each cost real investigation to arrive at.
 
 ### 6.1 Manga schedules are estimates, and say so
 
@@ -199,7 +210,23 @@ Anything failing those checks produces no estimate at all. Against a
 real 8-title library this resolves 3; the rest show nothing, which is the
 honest answer.
 
-### 6.2 The cursor correction reaches past Qt
+### 6.2 Launched programs get a scrubbed environment
+
+PyInstaller's bootloader records where the running app unpacked itself in
+`_PYI_*` environment variables, and those are inherited by every program
+Atomic launches. For an ordinary program that is harmless. For another
+PyInstaller-built program it is fatal: its bootloader sees the variables
+already set, assumes it has been unpacked, and looks for its Python DLL
+in *Atomic's* folder. If Atomic has exited, that folder is gone and the
+launched program dies with "Failed to load Python DLL".
+
+The updater hit exactly this, since it relaunches Atomic itself. Games
+and apps launched from Atomic were vulnerable to the same thing. So
+`child_process.clean_env()` strips those variables from anything Atomic
+starts, and `child_process.flags()` adds `CREATE_NO_WINDOW` so launching
+through the shell never flashes a console window.
+
+### 6.3 The cursor correction reaches past Qt
 
 `native_cursor.py` sets the Windows cursor through the Win32 API. That is
 unusual enough to record why.
@@ -222,12 +249,26 @@ Qt retains full control in normal operation. A watchdog checks on pointer
 movement: 1.0 µs per tick while the pointer is still, 8 µs when it has
 moved, at roughly eight ticks per second.
 
+### 6.4 Each entry is saved on its own
+
+Several pages are backed by the same file and each holds its own copy in
+memory — Home lists games, apps, websites and tracker entries that other
+pages own, and Anime and Reading share `tracker.json`. Writing a whole
+list back from one of them therefore restores a snapshot that may be
+minutes stale, silently undoing everything saved since.
+
+That was a real defect: reordering a game discarded freshly-extracted
+icons and whole batches of imported games. Every edit now re-reads the
+file and updates only the entry that changed
+(`storage.update_entry`).
+
 ---
 
 ## 7. Configuration and user data
 
 All user data lives in `%APPDATA%\Atomic\`. Nothing is written beside the
-executable, so the `.exe` can be moved or replaced freely.
+executable, so the `.exe` can be moved or replaced freely — which is what
+makes in-app updating safe.
 
 | File | Contents |
 |---|---|
@@ -256,6 +297,7 @@ as plain text — it is public information and no password is involved.
 | MangaDex | `api.mangadex.org` | Manga matching and release history |
 | Stremio Cinemeta | `v3-cinemeta.strem.io` | Anime/Series search, metadata, latest aired episode |
 | Stremio Account | `api.strem.io` | Watch progress from a connected account |
+| GitHub | `api.github.com`, `raw.githubusercontent.com` | Release tags and the update download |
 | Reading sites | user-configured | Title search and chapter pages |
 | Favicon lookup | `google.com/s2/favicons` | Website icons, when a site serves none itself |
 
@@ -273,8 +315,10 @@ satisfy. Data is created under `%APPDATA%\Atomic\` on first launch.
 **Start with Windows.** Settings › General › *Launch on Windows startup*
 registers the app under `HKCU\...\CurrentVersion\Run`.
 
-**Upgrade.** Replace `Atomic.exe`. Saved data is untouched. Close the app
-first — Windows will not let a running executable be overwritten.
+**Update.** Settings › General › *Check for Updates*. Replacing
+`Atomic.exe` by hand also works, and saved data is untouched either way —
+close the app first, since Windows will not overwrite a running
+executable.
 
 **Removal.** Settings › Data › Uninstall removes every saved file, the
 startup registration, and the executable itself. Deleting `Atomic.exe`
@@ -287,7 +331,8 @@ and `%APPDATA%\Atomic\` by hand achieves the same.
 These are current behaviours, not defects scheduled for repair.
 
 1. **Windows only.** Executable icon extraction, the dark title bar,
-   startup registration and the cursor correction are all Win32-specific.
+   startup registration, the console-window suppression and the cursor
+   correction are all Win32-specific.
 2. **Manga schedules resolve for a minority of titles.** By design — see
    §6.1. A title with no current MangaDex feed shows no estimate.
 3. **Anime schedules depend on title matching.** An entry whose title
@@ -298,31 +343,40 @@ These are current behaviours, not defects scheduled for repair.
    hand. Reading progress is always manual — no site exposes it.
 5. **Reading-site search covers four engine shapes.** A site matching
    none of them still opens, but offers no live suggestions.
-6. **Home costs ~270 ms on the first visit of a session**, spent on Qt
+6. **Updates need the executable to sit somewhere writable.** Atomic
+   checks before closing and says so rather than quitting and failing.
+   GitHub also rate-limits anonymous callers, which is reported plainly
+   when it happens.
+7. **Home costs ~270 ms on the first visit of a session**, spent on Qt
    polishing the carousel's stylesheet. It happens while the window is
    already appearing and does not recur.
-7. **The executable is committed to the repository.** Deliberate, so a
-   working build is always available, at the cost of a large binary in
-   history.
+8. **The executable is committed to the repository.** Deliberate — it is
+   both the always-available build and what the updater downloads — at
+   the cost of a large binary in history.
 
 ---
 
 ## 11. Verification performed
 
-- The reported cursor defect was reproduced against the real OS cursor
-  and confirmed corrected across repeated runs, with hover behaviour
-  re-checked on cards, the sidebar buttons and empty page areas.
-- Schedule lookups were exercised end-to-end against a real library for
-  all three media, including titles that correctly yield no schedule.
-- Tooltip wording was verified identical across Anime, Series and
-  Reading.
+- The update path was exercised end to end against a real release: an
+  older build checked, downloaded 48 MB, verified the checksum, replaced
+  its own executable and reopened on the new version. Rejection of a
+  tampered checksum and of a truncated download was confirmed separately.
+- The stuck-cursor defect was reproduced against the real OS cursor and
+  confirmed corrected across repeated runs, with hover behaviour
+  re-checked on cards, buttons and empty page areas.
+- Console-window suppression was verified by enumerating window classes
+  while the update script ran.
+- Full screen was verified in five combinations, including returning a
+  maximized window to maximized.
+- Schedule lookups were exercised against a real library for all three
+  media, including titles that correctly yield no schedule.
 - Section hiding was verified in all four combinations, including the
   case where Anime and Reading share one Home section.
-- The games-list defect was reproduced — an entry imported while the page
+- The saved-list defect was reproduced — an entry imported while a page
   was open, then erased by moving another entry — and confirmed fixed.
-- Page-build timings were measured before and after (§5.3).
-- Every page was built without error, and the packaged executable was
-  launched from a clean build and confirmed to start.
+- The packaged executable's bundle contents were verified module by
+  module, after a stale build once shipped without the updater in it.
 
 ---
 
