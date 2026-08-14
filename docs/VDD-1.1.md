@@ -53,6 +53,7 @@ nothing to migrate — 1.0's saved entries are read as they are.
 | 4 | Leaving full screen no longer flashes the window at its restored size before zooming back out (§7.5) | `main.py`, `helpers/theme.py` |
 | 5 | The executable carries a Windows version resource: its Properties now report the version it runs as, and the shell has a changed file identity to re-read its icon from | `packaging/Atomic.spec` |
 | 6 | Corner messages sit in the corner again on a multi-monitor setup with mixed display scaling, instead of floating in the middle of the page (§7.6) | `helpers/widgets.py` |
+| 7 | Release and development builds are numbered apart (1.1 vs 1.0.1), and only a two-part tag counts as a release (§6.2.1) | `helpers/updater.py` |
 
 Two smaller corrections came out of the first two. A tracker page fired
 the same background lookups when it opened as the refresh button does,
@@ -70,7 +71,7 @@ reports now.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,143,062 bytes. SHA-256 `1ff9aef8f4490595e74c7f341539931911a73e22799278abc9c0147f50c5927d` |
+| `Atomic.exe` | The application. 47,143,539 bytes. SHA-256 `2b91f870accfce81c7faa8fe24f3a492d068a3881f8b353550a7b489acf59949`. Built from development build 1.0.1; the released build carries 1.1 (§6.2.1) |
 | `src/` | Full Python source, 8,419 lines across 29 modules |
 | `packaging/` | `build.py` and `Atomic.spec`, which produce the executable |
 | `docs/VDD-1.0.md` | The previous version's document, kept as released |
@@ -190,24 +191,52 @@ being visible to a running copy of the app: until a version is put on
 `main` and tagged, `check_for_update` cannot see it, however many commits
 `development` is ahead by.
 
+**Version numbers say which line a build came from.** A release has two
+parts; a build still in development has three, counting up from the
+release it sits on top of:
+
+| Version | Where | Tagged |
+|---|---|---|
+| 1.0 | `main` | `v1.0` |
+| 1.0.1, 1.0.2, … | `development` | not as a release |
+| 1.1 | `main` | `v1.1` |
+| 1.1.1, 1.1.2, … | `development` | not as a release |
+
+The three-part form deliberately sorts *below* the release it leads to —
+1.0.2 < 1.1 — so a development build correctly recognises its own release
+as newer when it lands. Numbering development builds with the version
+they are *becoming* (1.1.1 heading for 1.1) would invert that: 1.1.1
+sorts above 1.1, and such a build would never accept the release. The
+conventional `1.1.0-dev.2` spelling fails the same way here, because
+`parse_version` reads only the digits and lands on (1, 1, 0, 2).
+
+Two guards back this up rather than relying on the rule being remembered.
+`RELEASE_TAG_RE` accepts only two-part tags, because GitHub's tag list is
+per *repository* and not per branch — without it, tagging a development
+build would offer that build to everyone running Atomic. And a build
+numbered 1.0.1 is already ahead of `v1.0`, so it is never offered a
+downgrade to the release it came from.
+
 The two branches deliberately share no history — `main` was restarted at
 1.0 as a single commit — so a release is taken as a *snapshot* rather
-than merged (a merge would refuse, as unrelated histories):
+than merged (a merge would refuse, as unrelated histories). Bump
+`APP_VERSION` to the two-part number and rebuild *first*, since the
+snapshot copies whatever `development` holds, executable included:
 
 ```
+# on development: APP_VERSION = "1.1", then python packaging/build.py,
+# then commit both
 git checkout main
 git read-tree -u --reset development    # main's tree becomes development's
 git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"
 git push origin main && git push origin v1.1
-git checkout development
+git checkout development                # and open 1.1.1 for the next round
 ```
 
 The resulting commit has the previous release as its parent and the new
 version's exact contents as its tree, so `main` reads as a list of
-releases and nothing else. `APP_VERSION` in `helpers/updater.py` must be
-bumped on `development` first, or the new build goes on offering itself
-an update.
+releases and nothing else.
 
 ### 6.3 Interface
 

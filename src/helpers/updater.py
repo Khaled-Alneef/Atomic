@@ -4,12 +4,27 @@ Atomic ships as a single executable with no installer, so without this
 every update means finding the repo, downloading Atomic.exe by hand and
 replacing the old one. This does the same thing from Settings.
 
-How a version is identified: the repo is tagged for each release (`v1.0`,
-`v1.1`, ...), and APP_VERSION below is what the running build was tagged
-as. Checking asks GitHub for the tag list, takes the highest, and offers
-it when it is newer than APP_VERSION - so publishing a release is exactly
-"commit the rebuilt exe, tag it, push the tag", which is already how this
-project releases.
+How a version is identified. A version has two parts when it is a release
+and three while it is being worked on:
+
+    1.0      released, on `main`, tagged v1.0
+    1.0.1    development build after it, on `development`
+    1.0.2    the next one
+    1.1      what those are released as, on `main`, tagged v1.1
+
+Versions are compared as numbers, part by part (see parse_version), so a
+development build always sorts *below* the release it is heading for -
+1.0.2 < 1.1 - and correctly sees that release as newer when it lands.
+That is why development builds count up from the last release rather than
+carrying the number they are becoming: 1.1.2 would sort *above* 1.1 and a
+build numbered that way would never accept its own release. The usual
+"1.1.0-dev.2" spelling has exactly that problem here too, since only the
+digits are read.
+
+Checking asks GitHub for the tag list, keeps the ones that name a release
+(RELEASE_TAG_RE - the repository's tag list covers every branch, so a
+tagged development build would otherwise be offered to everyone), takes
+the highest, and offers it when it is newer than APP_VERSION.
 
 What gets downloaded is the Atomic.exe committed at that tag. GitHub's
 contents API hands back the file's git blob hash alongside it, and the
@@ -35,9 +50,18 @@ from pathlib import Path
 
 from . import child_process
 
-# What this build was released as. Bump it in the same commit that tags a
-# new release, or the new build will go on offering itself an update.
-APP_VERSION = "1.1"
+# What this build is. Three parts while the work is in progress on
+# `development`, counting up from the last release; two parts on a build
+# that is being released, bumped in the same commit that tags it - or the
+# new build goes on offering itself an update.
+APP_VERSION = "1.0.1"
+
+# What counts as a release: exactly two numeric parts, with or without the
+# leading v. Development builds are tagged (if at all) with three, and are
+# ignored here - GitHub's tag list is per repository, not per branch, so
+# this is what keeps work on `development` from reaching anyone running
+# the app, however it gets tagged.
+RELEASE_TAG_RE = re.compile(r"^v?\d+\.\d+$")
 
 REPO = "Khaled-Alneef/Atomic"
 EXE_NAME = "Atomic.exe"
@@ -85,10 +109,12 @@ def check_for_update(timeout: int = 10):
     except Exception as exc:
         raise UpdateError(_readable_network_error(exc)) from exc
 
-    if not tags:
+    releases = [tag for tag in tags
+                if RELEASE_TAG_RE.match((tag.get("name") or "").strip())]
+    if not releases:
         raise UpdateError("No releases have been published yet.")
 
-    newest = max(tags, key=lambda tag: parse_version(tag.get("name")))
+    newest = max(releases, key=lambda tag: parse_version(tag.get("name")))
     tag_name = newest.get("name") or ""
     if parse_version(tag_name) <= parse_version(APP_VERSION):
         return None
