@@ -546,15 +546,19 @@ class MainWindow(QMainWindow):
         # it was found, rather than dropping a maximized window down to a
         # restored one.
         self._was_maximized = self.isMaximized()
-        self.showFullScreen()
+        theme.without_window_animation(self, self.showFullScreen)
 
     def exit_fullscreen(self):
         if not self.isFullScreen():
             return
+        # Both ways through without_window_animation: Windows' maximize
+        # animation zooms from the window's restored size, which on this
+        # trip is not where it is coming from or going to - see its
+        # docstring for what that looked like.
         if self._was_maximized:
-            self.showMaximized()
+            theme.without_window_animation(self, self.showMaximized)
         else:
-            self.showNormal()
+            theme.without_window_animation(self, self.showNormal)
 
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.AltModifier:

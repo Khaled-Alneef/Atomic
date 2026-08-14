@@ -37,7 +37,7 @@ from . import child_process
 
 # What this build was released as. Bump it in the same commit that tags a
 # new release, or the new build will go on offering itself an update.
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 REPO = "Khaled-Alneef/Atomic"
 EXE_NAME = "Atomic.exe"

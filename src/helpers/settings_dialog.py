@@ -31,7 +31,7 @@ from . import (
     anime_sites, app_settings, launchers, manga_sites, nav_config, startup,
     storage, stremio, theme, uninstall, updater,
 )
-from .widgets import scroll_area, show_toast
+from .widgets import finish_toast, scroll_area, show_toast
 
 CATEGORIES = ["General", "Anime & Series", "Reading", "Games", "Data"]
 
@@ -96,6 +96,9 @@ class SettingsDialog(QDialog):
 
         self._launcher_import_signals = _LauncherImportSignals()
         self._launcher_import_signals.done.connect(self._on_launcher_import_done)
+        # The "Scanning..." toast each in-progress launcher import is
+        # waiting to report into, keyed by launcher.
+        self._scan_toasts = {}
 
         # The update found by the last check, kept so the same button can
         # go on to install it without checking again.
@@ -556,7 +559,7 @@ class SettingsDialog(QDialog):
         app_settings.set_launcher_dir(key, path)
         if not path:
             return
-        show_toast(self, "Scanning...")
+        self._scan_toasts[key] = show_toast(self, "Scanning...", duration_ms=None)
         threading.Thread(target=self._import_launcher_worker, args=(key, path), daemon=True).start()
 
     def _import_launcher_worker(self, key, path):
@@ -573,7 +576,11 @@ class SettingsDialog(QDialog):
         if main_window is not None and hasattr(main_window, "refresh_current_page"):
             main_window.refresh_current_page()
         label = next((l for k, l, _s in launchers.LAUNCHERS if k == key), key)
-        show_toast(self, f"{label}: added {added} new game(s)" if added else f"{label}: no new games found")
+        # Same wording as the Games page's own Import button, prefixed
+        # with which launcher this was - several can be scanning at once
+        # here, one per directory the user fills in.
+        finish_toast(self._scan_toasts.pop(key, None), self,
+                     f"{label}: {launchers.import_result_message(added)}")
 
     # ------------------------------------------------------------------
     def _build_data_page(self):

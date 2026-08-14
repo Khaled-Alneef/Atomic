@@ -29,7 +29,7 @@ from helpers import (
     anilist, anime_sites, app_settings, images, manga_sites, release_schedule,
     storage, stremio, theme,
 )
-from helpers.widgets import Card, GlassPage, scroll_area, show_toast
+from helpers.widgets import Card, GlassPage, finish_toast, scroll_area, show_toast
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
 
@@ -95,6 +95,23 @@ def _entry_imdb_id(entry):
     a saved stremio:// url for older entries saved before this field
     existed (see _migrate)."""
     return entry.get("imdb_id") or _imdb_id_from_url(entry.get("url"))
+
+
+def _release_content(stored):
+    """What a stored `next_release` says is *coming* - the episode or
+    chapter number - as opposed to when it lands.
+
+    This, and not the whole record, is what decides whether the refresh
+    button turned up anything new. The time on its own can't: the manga
+    estimate is extrapolated from a title's release rhythm (see
+    mangadex._predict), so once a predicted slot has come and gone the
+    next check simply projects the slot after it. That moving timestamp
+    means nothing has happened yet, not that something has - reporting it
+    as an update would make "no new chapter" indistinguishable from a
+    chapter actually landing."""
+    if not isinstance(stored, dict):
+        return None
+    return (stored.get("season"), stored.get("episode"), stored.get("chapter"))
 
 
 def _latest_known_chapter(entry):
@@ -278,7 +295,9 @@ class _CoverSignals(QObject):
 
 
 class _ScheduleSignals(QObject):
-    resolved = Signal(str, object)  # entry id, next_release dict (or None when nothing's scheduled)
+    # entry id, next_release dict (or None when nothing's scheduled), and
+    # which refresh run asked for it (0 = none, see TrackerPage._refresh_run)
+    resolved = Signal(str, object, int)
 
 
 class TrackerPage(GlassPage):
@@ -307,8 +326,26 @@ class TrackerPage(GlassPage):
         self._sync_signals = _ProgressSyncSignals()
         self._sync_signals.resolved.connect(self._on_progress_synced)
         self._sync_pending = 0
-        self._sync_found_count = 0
-        self._sync_not_found_count = 0
+        self._sync_changed = False
+        self._sync_batch_run = 0
+
+        # The refresh button's run, if one is in progress: the "Updating..."
+        # toast waiting to be told how it went, how many background lookups
+        # are still out, and whether any of them found anything new. Only
+        # ever touched on the UI thread - every lookup reports back through
+        # a signal - so no locking is needed.
+        #
+        # _refresh_run numbers the runs, and every lookup carries the
+        # number of the run that asked for it. The same lookups also run on
+        # their own at page load, and one of those landing mid-refresh
+        # would otherwise be counted as one of the run's own results -
+        # ending it early, on a verdict that came from a different lookup
+        # than the one still out. Carrying the number keeps that exact.
+        self._refresh_run = 0
+        self._refresh_toast = None
+        self._refresh_pending = 0
+        self._refresh_changed = False
+        self._refresh_before = {}
 
         self._cover_signals = _CoverSignals()
         self._cover_signals.ready.connect(self._on_sharper_cover_ready)
@@ -369,12 +406,65 @@ class TrackerPage(GlassPage):
         """Header refresh button: re-check what's out there for every
         entry on this page - both your own watched/read progress (where
         the page has a source for it) and when the next episode/chapter
-        is due."""
+        is due.
+
+        Says so while it works, and says how it went when it's finished
+        (see _refresh_step_done) - every lookup runs on its own background
+        thread, so without that the button reads as doing nothing at all
+        for however long the slowest source takes to answer."""
+        if self._refresh_toast is not None:
+            return  # already running - let it finish rather than double it
+        self._refresh_run += 1
+        self._refresh_changed = False
+        # What every entry says right now, to judge the results against.
+        # Against this rather than against whatever is stored by the time
+        # a result lands: the same lookups fire on their own when a page
+        # opens, so one of those finishing first would have already
+        # absorbed the news, and the run would then compare the answer
+        # with itself and report nothing new.
+        self._refresh_before = {
+            entry["id"]: (_release_content(entry.get("next_release")),
+                          entry.get("progress"), entry.get("latest_available"))
+            for entry in self.entries if entry["type"] in self.ENTRY_TYPES
+        }
+        # Starts at one and is released at the end: the lookups below
+        # report back through the event loop, so they cannot land before
+        # this method returns - but a page with nothing to look up would
+        # otherwise sit at zero pending and never report at all.
+        self._refresh_pending = 1
+        self._refresh_toast = show_toast(self, "Updating...", duration_ms=None)
+
         self._refresh_schedules(force=True)
         if self.SUPPORTS_PROGRESS_SYNC:
             self._sync_all_progress()
-        else:
-            show_toast(self, "Re-checking release schedules")
+        self._refresh_step_done(self._refresh_run)
+
+    def _refresh_step_started(self):
+        """Count one more background lookup into the running refresh and
+        return which run it belongs to, for it to report back with. 0 when
+        no refresh is running - the same lookups also happen on page load,
+        where there is nothing to report to."""
+        if self._refresh_toast is None:
+            return 0
+        self._refresh_pending += 1
+        return self._refresh_run
+
+    def _refresh_step_done(self, run, found_something_new=False):
+        """One lookup back. The last one to return reports the verdict.
+
+        Anything from another run (or from no run at all) is ignored
+        rather than counted: it was never counted in, so counting it out
+        would end this run one result early."""
+        if not run or run != self._refresh_run or self._refresh_toast is None:
+            return
+        self._refresh_changed = self._refresh_changed or found_something_new
+        self._refresh_pending -= 1
+        if self._refresh_pending > 0:
+            return
+        toast, self._refresh_toast = self._refresh_toast, None
+        self._refresh_before = {}
+        finish_toast(toast, self, "Updated Successfully" if self._refresh_changed
+                     else "There is No New Update")
 
     def _refresh_schedules(self, force=False):
         """Look up when each entry's next episode/chapter lands, in the
@@ -387,9 +477,10 @@ class TrackerPage(GlassPage):
                 continue
             if not release_schedule.needs_refresh(entry, force):
                 continue
-            threading.Thread(target=self._fetch_schedule, args=(entry,), daemon=True).start()
+            run = self._refresh_step_started()
+            threading.Thread(target=self._fetch_schedule, args=(entry, run), daemon=True).start()
 
-    def _fetch_schedule(self, entry):
+    def _fetch_schedule(self, entry, run=0):
         # Must never raise: an uncaught exception here would kill the
         # background thread silently.
         try:
@@ -398,12 +489,16 @@ class TrackerPage(GlassPage):
                 known_latest_chapter=_latest_known_chapter(entry))
         except Exception:
             found = None
-        self._schedule_signals.resolved.emit(entry["id"], found)
+        self._schedule_signals.resolved.emit(entry["id"], found, run)
 
-    def _on_schedule_resolved(self, entry_id, found):
+    def _on_schedule_resolved(self, entry_id, found, run=0):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if not entry:
+            self._refresh_step_done(run)
             return
+        snapshot = self._refresh_before.get(entry_id)
+        before = snapshot[0] if snapshot else _release_content(entry.get("next_release"))
+        self._refresh_step_done(run, _release_content(found) != before)
         # Stored even when nothing was found, so a title with no schedule
         # (finished airing, not on the source) isn't re-looked-up on every
         # single page visit - the timestamp is what needs_refresh rate-
@@ -654,8 +749,15 @@ class TrackerPage(GlassPage):
         at once, instead of right-clicking each card individually."""
         targets = [e for e in self.entries if e["type"] in self.ENTRY_TYPES and _entry_imdb_id(e)]
         if not targets:
-            show_toast(self, "Nothing to sync yet - no linked entries")
+            # Only worth saying on its own; during a refresh the verdict
+            # toast covers it, and two toasts share the same corner.
+            if self._refresh_toast is None:
+                show_toast(self, "Nothing to sync yet - no linked entries")
             return
+        # The whole batch counts as one step of the refresh, closed out
+        # when the last of them comes back (see _on_progress_synced) -
+        # they already have _sync_pending counting them individually.
+        self._sync_batch_run = self._refresh_step_started()
         self._sync_pending += len(targets)
         for entry in targets:
             threading.Thread(
@@ -691,12 +793,20 @@ class TrackerPage(GlassPage):
     def _on_progress_synced(self, entry_id, season, episode, found, total_season, total_episode, silent):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if entry:
+            snapshot = self._refresh_before.get(entry_id)
+            before = (snapshot[1:] if snapshot
+                      else (entry.get("progress"), entry.get("latest_available")))
             if found:
                 entry["progress"] = format_episode_progress(season, episode)
                 entry["progress_verified"] = True
                 entry["updated_at"] = storage.now_iso()
             if total_season or total_episode:
                 entry["latest_available"] = format_episode_progress(total_season, total_episode)
+            # Only the bulk path feeds the refresh button's verdict - a
+            # single entry synced by hand from its right-click menu isn't
+            # part of anything being reported on.
+            if silent and (entry.get("progress"), entry.get("latest_available")) != before:
+                self._sync_changed = True
 
         if not silent:
             if not found:
@@ -713,27 +823,18 @@ class TrackerPage(GlassPage):
             self._refresh_grid()
             return
 
-        # Bulk refresh: results trickle in from several background threads,
-        # so only save/redraw/report once they've all come back. Reports a
-        # real breakdown rather than a blanket "Updated" - found=False here
-        # usually means Stremio genuinely has no per-episode history for
-        # that title (see the single-entry message above), not a failure,
-        # but silently doing nothing about it looks exactly like one.
-        if found:
-            self._sync_found_count += 1
-        else:
-            self._sync_not_found_count += 1
+        # Bulk sync: results trickle in from several background threads, so
+        # only save/redraw once they've all come back. Whether any of them
+        # actually moved anything is what the refresh button reports; a
+        # title Stremio has no per-episode history for (see the
+        # single-entry message above) is not a failure, just nothing new.
         self._sync_pending -= 1
         if self._sync_pending <= 0:
             storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
-            found_count, not_found_count = self._sync_found_count, self._sync_not_found_count
-            self._sync_found_count = 0
-            self._sync_not_found_count = 0
-            if not_found_count:
-                show_toast(self, f"Synced {found_count} - no history for {not_found_count}", duration_ms=3500)
-            else:
-                show_toast(self, "Updated")
+            changed, self._sync_changed = self._sync_changed, False
+            run, self._sync_batch_run = self._sync_batch_run, 0
+            self._refresh_step_done(run, changed)
 
     def _move_entry(self, entry, delta):
         idx = self.entries.index(entry)

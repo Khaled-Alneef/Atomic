@@ -166,14 +166,29 @@ def _toast_anchor_window(widget):
     return window
 
 
+# How long a "sticky" toast (duration_ms=None - one that waits for a
+# background job to report back) is allowed to sit there before it gives
+# up and closes itself. Nothing should ever reach this: it is purely so a
+# lookup that never returns - or a page torn down mid-refresh, taking the
+# handler that would have finished the toast with it - can't leave
+# "Updating..." on screen for the rest of the session.
+STICKY_TOAST_MAX_MS = 120_000
+
+
 class Toast(QLabel):
     """A small, self-dismissing confirmation message in the bottom-right
     corner of the app's main window - for lightweight feedback (e.g.
-    "Saved") that doesn't need a modal dialog click to dismiss."""
+    "Saved") that doesn't need a modal dialog click to dismiss.
+
+    `duration_ms=None` makes it stick around instead of fading on its own,
+    for the "working... / here's the result" pattern: show one while a
+    background job runs, then hand it its result with set_text (see
+    finish_toast, which is what callers should actually use)."""
 
     def __init__(self, anchor, text, duration_ms=2000):
         window = _toast_anchor_window(anchor)
         super().__init__(text, window)
+        self._anchor_window = window
         self.setWindowFlags(Qt.WindowType.ToolTip)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -181,12 +196,33 @@ class Toast(QLabel):
             f"background: {theme.SURFACE}; color: {theme.TEXT}; "
             f"border: 1px solid {theme.ACCENT}; border-radius: {theme.RADIUS_SM}px; "
             f"padding: 10px 18px; font-weight: 700;")
+        # A timer owned by this toast, rather than QTimer.singleShot: the
+        # message can be replaced while it's up (see set_text), and the
+        # dismissal that was scheduled for the old message has to be
+        # called off when that happens.
+        self._dismiss_timer = QTimer(self)
+        self._dismiss_timer.setSingleShot(True)
+        self._dismiss_timer.timeout.connect(self.close)
         # Shown before being positioned: a ToolTip-flagged window only
         # settles at its final polished size once shown, and positioning
         # against a stale size would push it past the intended corner.
         self.show()
         self._move_to_corner(window)
-        QTimer.singleShot(duration_ms, self.close)
+        self._dismiss_timer.start(duration_ms if duration_ms else STICKY_TOAST_MAX_MS)
+
+    def set_text(self, text, duration_ms=2000):
+        """Swap the message in place and restart the countdown to closing.
+
+        In place rather than closing this one and opening another, so the
+        box doesn't blink out and back in between "Updating..." and its
+        result - it just re-reads."""
+        self.setText(text)
+        # Re-anchors as well as re-measures: the replacement message is a
+        # different width, and these are positioned from their bottom-
+        # right corner, so the box would otherwise grow off to the right.
+        self._move_to_corner(self._anchor_window)
+        self._dismiss_timer.stop()
+        self._dismiss_timer.start(duration_ms if duration_ms else STICKY_TOAST_MAX_MS)
 
     def _move_to_corner(self, window, margin=24):
         self.adjustSize()
@@ -203,7 +239,27 @@ class Toast(QLabel):
 
 
 def show_toast(anchor, text, duration_ms=2000):
-    Toast(anchor, text, duration_ms)
+    """Drop a message in the corner. `duration_ms=None` keeps it up until
+    finish_toast replaces it; the returned Toast is the handle for that."""
+    return Toast(anchor, text, duration_ms)
+
+
+def finish_toast(toast, anchor, text, duration_ms=2600):
+    """Report a background job's result into the toast that announced it,
+    replacing "Updating..." with what actually happened.
+
+    `toast` may be gone by now - a toast is deleted when it closes, and a
+    sticky one closes itself eventually (see STICKY_TOAST_MAX_MS) - so the
+    result is shown as a fresh toast in that case rather than silently
+    dropped. Slightly longer than the default dwell: a result is worth
+    reading, where "Updating..." only needed to be noticed."""
+    try:
+        if toast is not None:
+            toast.set_text(text, duration_ms)
+            return
+    except RuntimeError:
+        pass  # already closed and deleted on the C++ side
+    show_toast(anchor, text, duration_ms)
 
 
 def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:

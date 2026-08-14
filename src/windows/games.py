@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import app_settings, child_process, images, launchers, storage, theme
-from helpers.widgets import Card, GlassPage, scroll_area, show_toast
+from helpers.widgets import Card, GlassPage, finish_toast, scroll_area, show_toast
 from windows.link_grid import CARD_WIDTH, GRID_COLS, THUMB_SIZE
 
 DATA_FILE = "games.json"
@@ -55,6 +55,9 @@ class GamesPage(GlassPage):
 
         self._scan_signals = _ScanSignals()
         self._scan_signals.done.connect(self._on_scan_done)
+        # The "Scanning..." toast waiting to be told what was found, while
+        # an import is in progress.
+        self._scan_toast = None
 
         header = QHBoxLayout()
         header.addWidget(QLabel("Games", objectName="PanelTitle"))
@@ -203,7 +206,14 @@ class GamesPage(GlassPage):
                 self, "Import from Launchers",
                 "Add at least one launcher's install directory in Settings > Games first.")
             return
-        show_toast(self, "Scanning...")
+        if self._scan_toast is not None:
+            return  # a scan is already running - let it finish
+        # Walking several launcher directories takes a moment, and it all
+        # happens on a background thread, so the button needs to say it is
+        # working; the same toast is then handed the result (see
+        # _on_scan_done) rather than interrupting with a dialog to
+        # dismiss for something that needs no decision.
+        self._scan_toast = show_toast(self, "Scanning...", duration_ms=None)
         threading.Thread(target=self._scan_worker, args=(dirs,), daemon=True).start()
 
     def _scan_worker(self, dirs):
@@ -218,9 +228,8 @@ class GamesPage(GlassPage):
         if added:
             self.games = storage.load(DATA_FILE, [])
             self._refresh_grid()
-        QMessageBox.information(
-            self, "Import from Launchers",
-            f"Added {added} new game(s)." if added else "No new games found.")
+        toast, self._scan_toast = self._scan_toast, None
+        finish_toast(toast, self, launchers.import_result_message(added))
 
     def _launch(self, game):
         try:

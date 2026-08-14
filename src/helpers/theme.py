@@ -8,6 +8,7 @@ import ctypes
 import sys
 
 from PIL import Image, ImageDraw
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QFont
 
 from . import storage
@@ -629,6 +630,55 @@ def apply_dark_titlebar(widget):
             )
             if result == 0:
                 break
+    except Exception:
+        pass
+
+
+def without_window_animation(widget, action, resume_after_ms=400):
+    """Run `action` (a window state change) with Windows' own open/close/
+    minimize/maximize animation switched off for this window, then switch
+    it back on.
+
+    This is what makes leaving full screen look right. Windows animates a
+    window being maximized by zooming it out from wherever its *restored*
+    size sits - and a window that went full screen from maximized is,
+    underneath, a restored-size window with a full-screen frame on top.
+    So the return trip played that zoom: the window appeared at its small
+    restored size for a moment and then flew back out to full size.
+    Measured, not guessed - reading the screen every 10 ms across the
+    transition, the window failed to cover its own maximized area for
+    about 120 ms of it, and with the animation off, for none of it.
+
+    Restoring the setting afterwards rather than leaving it off keeps the
+    ordinary animations (minimize to the taskbar, restore from it) that
+    the user does still expect to see.
+    """
+    if sys.platform != "win32":
+        action()
+        return
+    handle = None
+    try:
+        handle = ctypes.c_void_p(int(widget.winId()))
+        _set_window_transitions(handle, disabled=True)
+    except Exception:
+        handle = None
+    try:
+        action()
+    finally:
+        if handle is not None:
+            # After the state change has settled, not immediately: the
+            # animation this is suppressing would otherwise still be
+            # queued up and play as soon as it is re-enabled.
+            QTimer.singleShot(resume_after_ms,
+                              lambda: _set_window_transitions(handle, disabled=False))
+
+
+def _set_window_transitions(handle, disabled):
+    try:
+        value = ctypes.c_int(1 if disabled else 0)
+        # 3 = DWMWA_TRANSITIONS_FORCEDISABLED
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            handle, 3, ctypes.byref(value), ctypes.sizeof(value))
     except Exception:
         pass
 
