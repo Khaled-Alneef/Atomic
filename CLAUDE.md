@@ -69,6 +69,16 @@ report - say it's still running if asked. Questions with no owner (what
 the repo contains, what an agent is for) are answered directly by the
 Liaison.
 
+**Agents start cold - spend accordingly.** A fresh `Agent` call has no
+memory of anything; minimise how often that cost gets paid rather than
+fighting it. Resume an existing agent (message its id) instead of
+spawning a new one when it already has live/recent context on the same
+topic. Skip the Project Manager hop and dispatch straight to the owning
+specialist for a single-owner task. Brief with facts already known
+(paths, line numbers, findings), not just the ask, so the agent spends
+tokens acting instead of re-discovering. Doc/meta edits to this file or
+`.claude/agents/` the Liaison makes directly - no agent needed.
+
 Three things cannot run concurrently - wrong answers, not just slower:
 screen-measuring work (pixel probes/screenshots own the display), builds
 (fixed paths, shared PyInstaller cache), and version bumps or anything
