@@ -70,6 +70,58 @@ def set_fullscreen_on_startup(enabled: bool):
     storage.save(SETTINGS_FILE, data)
 
 
+def set_updated_from(version: str):
+    """Leave a marker that this build is being replaced by an update, so
+    the *new* build knows to show what changed (see helpers.whats_new).
+
+    Written by the outgoing version right before it quits, because only
+    it knows what version was running - the new executable starts with
+    no idea what it replaced. Stored rather than passed on the command
+    line: the swap script relaunches Atomic itself, and arguments there
+    would also survive into every later hand-launch."""
+    data = _load()
+    data["updated_from"] = version or ""
+    storage.save(SETTINGS_FILE, data)
+
+
+def take_updated_from() -> str:
+    """The version an update replaced, clearing it as it's read - the
+    summary is shown once, not on every launch afterwards. Empty string
+    when this launch didn't follow an update."""
+    data = _load()
+    previous = data.get("updated_from") or ""
+    if previous:
+        data.pop("updated_from", None)
+        storage.save(SETTINGS_FILE, data)
+    return previous
+
+
+def get_last_seen_version() -> str:
+    """The version that last finished starting up, or "" if no build has
+    ever recorded one. Backs up the updated_from marker: an executable
+    replaced by hand leaves no marker, and neither does any build older
+    than the one that introduced set_updated_from."""
+    return _load().get("last_seen_version") or ""
+
+
+def set_last_seen_version(version: str):
+    data = _load()
+    data["last_seen_version"] = version or ""
+    storage.save(SETTINGS_FILE, data)
+
+
+def has_run_before() -> bool:
+    """Whether this profile holds settings written by some earlier run.
+
+    The one way to tell an upgrade from a first-ever install when
+    neither version marker is present - which is exactly the state a
+    build older than those markers leaves behind. Anything at all in
+    settings.json means the app has run here before, since a genuine
+    first launch writes the file only once something is saved."""
+    return bool({k: v for k, v in _load().items()
+                 if k not in ("updated_from", "last_seen_version")})
+
+
 def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 

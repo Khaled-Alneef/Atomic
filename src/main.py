@@ -19,7 +19,8 @@ the slide direction immediately too - nothing to keep in sync by hand.
 import sys
 from pathlib import Path
 
-from helpers import app_settings, images, native_cursor, startup, storage, theme
+from helpers import (app_settings, images, native_cursor, startup, storage,
+                     theme, whats_new)
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -751,6 +752,12 @@ def main():
     # not, and the window would otherwise sit behind everything blinking
     # in the taskbar (see theme.bring_window_to_front).
     theme.bring_window_to_front(window)
+    # Only after the window is up and forward: this is modal, and a
+    # dialog raised before its parent is showing would sit behind it -
+    # the same foreground problem the relaunch already has to solve
+    # above, and this launch is precisely the one that came from a
+    # relaunch. Does nothing unless this launch followed an update.
+    whats_new.show_if_updated(window)
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())
