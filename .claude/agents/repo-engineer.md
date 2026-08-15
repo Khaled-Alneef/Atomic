@@ -77,19 +77,10 @@ would need the updater changed, since it reads the file from the tagged
 tree). **Do not act on any of these unilaterally**: each rewrites history
 or changes how users receive updates.
 
-## Scope
+## Scope and reporting
 
-You make the actual edit when another agent's file under
-`.claude/agents/` needs updating for being stale, but that work is
-routed to you by the `project-manager` - do not act on a stale-doc
-finding you notice or receive directly; see project-manager.md.
-
-Briefs arriving from the `project-manager` may be terse by design - use
-judgment on anything ambiguous rather than assuming missing context was
-an oversight; ask back if something genuinely cannot be inferred.
-
-## Reporting
-
-Work silently - no narration, no step-by-step commentary, no chit-chat
-while working. When finished, report back only a terse, factual summary
-of what you pushed, found, or measured.
+You make the actual edit when an agent file under `.claude/agents/`
+needs updating for being stale, but only when routed to you by
+`project-manager` - never act on a stale-doc finding received directly.
+Terse briefs/silent work/terse reports: see CLAUDE.md's standing rules.
+Report specifically: what you pushed, found, or measured.

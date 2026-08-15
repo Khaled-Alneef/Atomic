@@ -17,88 +17,69 @@ person's anime, reading, series, games, apps and websites.
     src/helpers/storage.py   JSON persistence
     src/helpers/nav_config.py sidebar order and section visibility
 
-## Conventions that are not optional
+## Non-optional conventions
 
-**Colours come from `theme`, never from a literal.** `BG`, `SURFACE`,
-`ACCENT`, `TEXT`, `BORDER`, `CARD_*` and the rest are all defined at the
-top of theme.py, and six of them are fixed by the app's colour spec with
-everything else derived. A hardcoded `#7c6ff2` is a bug even when it
-matches today.
+- **Colours from `theme`, never a literal.** `BG`, `SURFACE`, `ACCENT`,
+  `TEXT`, `BORDER`, `CARD_*` etc. live at the top of theme.py; six are
+  fixed by the app's colour spec, the rest derived. A hardcoded
+  `#7c6ff2` is a bug even when it matches today.
+- **Pages rebuild from scratch on every visit and sort change** - never
+  keep state in a widget that must survive; it lives in the saved JSON
+  or it doesn't exist.
+- **Save with `storage.update_entry(file, id, fields)` for one entry,
+  never a whole list back from a page.** Several pages share a file,
+  each holding its own copy loaded at build time - writing the whole
+  list restores a snapshot that may be minutes stale. Shipped defect:
+  reordering a game erased freshly imported games.
+- **New clickable thing → `widgets.Card`** (hover highlight, hand
+  cursor, click signals already handled). A plain widget needing the
+  hand cursor gets `use_hover_cursor(widget)`. Never call `setCursor`
+  and leave it set - see cursor trap below.
+- **Messages → `show_toast`/`finish_toast`, not QMessageBox.** Dialogs
+  only for something the user must decide or not miss. For work that
+  takes a moment, a sticky toast (`duration_ms=None`) updated via
+  `finish_toast` so the box re-reads instead of blinking. Title case:
+  "Updating...", "Updated Successfully", "There is No New Update", "No
+  New Games Found".
 
-**Pages are rebuilt from scratch on every visit** and on every sort
-change, so never keep state in a widget that has to survive - it lives in
-the saved JSON or it does not exist.
+## Traps already paid for
 
-**Saving: `storage.update_entry(file, id, fields)` for one entry.** Never
-write a whole list back from a page. Several pages are backed by the same
-file and each holds its own copy loaded when it was built, so saving the
-whole list restores a snapshot that may be minutes stale. That defect
-really happened: reordering a game erased freshly imported games.
-
-**New clickable thing → `widgets.Card`**, which already handles hover
-highlight, the pointing-hand cursor and left/right click signals. A plain
-widget that needs the hand cursor gets `use_hover_cursor(widget)`. Never
-call `setCursor` and leave it set - see the cursor notes below.
-
-**Messages → `show_toast` / `finish_toast`, not a QMessageBox.** A dialog
-is only for something the user must decide or must not miss. For work
-that takes a moment, show a sticky toast (`duration_ms=None`) and hand it
-the result with `finish_toast`, so the same box re-reads rather than
-blinking. Wording in this app is title case: "Updating...", "Updated
-Successfully", "There is No New Update", "No New Games Found".
-
-## Traps this codebase has already paid for
-
-- **Never position anything with `mapToGlobal()`.** On two monitors with
-  different scale factors it returns coordinates divided by the *other*
-  screen's factor - toasts landed 200px above where they belonged.
-  `window.geometry()` is already global. Use it.
+- **Never position with `mapToGlobal()`.** On two monitors at different
+  scale factors it returns coordinates divided by the *other* screen's
+  factor - toasts landed 200px off. `window.geometry()` is already
+  global; use it.
 - **Scale pixmaps by `devicePixelRatio` and tag the result**, or images
-  come out blurry on any display that is not at 100% (see the sidebar
-  logo in main.py).
+  blur on any non-100% display (see the sidebar logo in main.py).
 - **QListWidget draws items with the widget's font, not the QSS
   `::item` font-family.** Set the font on the widget too or the rule is
   silently ignored.
-- **Cursors:** a widget only holds the hand cursor while the pointer is
-  genuinely inside it (Enter/Leave). Qt loses track after a modal dialog
-  closes, which is why `native_cursor.py` and the watchdog in main.py
-  exist. Do not "fix" a cursor problem by setting a cursor permanently.
-- **Window state changes go through `theme.without_window_animation`**
-  when the window is changing between maximized and full screen.
+- **Cursors:** a widget holds the hand cursor only while the pointer is
+  genuinely inside it (Enter/Leave); Qt loses track after a modal
+  dialog closes - that's why `native_cursor.py` and the main.py
+  watchdog exist. Don't "fix" a cursor problem by setting one
+  permanently.
+- **Window state changes** (maximized ↔ full screen) go through
+  `theme.without_window_animation`.
 
 ## House style
 
-Comments in this codebase explain *why*, often recording what failed
-before and what was measured. Match that density and that voice - a
-comment that restates the code is noise here, a comment that says "this
-is not mapToGlobal because..." is the point. Use the same hyphenated
-asides and plain wording as the surrounding file.
+Comments explain *why*, often recording what failed and what was
+measured - match that density and voice. A comment restating the code
+is noise; "this is not mapToGlobal because..." is the point.
 
 ## How deep to dig
 
-For a routine visible fix - a colour, a layout tweak, a known cause - go
-straight to the change. Save tracing, profiling or multi-pass digging for
-when the cause is genuinely unknown or the bug is critical (broken
-functionality, data loss risk); guessing at a fix under those conditions
-is worse than taking the time to actually find it. If unsure which case
-you're in, say so rather than defaulting to the deep dig.
+Routine visible fix (colour, layout tweak, known cause) → go straight to
+the change. Save tracing/profiling/multi-pass digging for a genuinely
+unknown cause or a critical bug (broken functionality, data-loss risk) -
+guessing there is worse than taking the time. If unsure which case
+applies, say so.
 
-## Scope
+## Scope and reporting
 
-If you notice another agent's file under `.claude/agents/` is stale,
-report it to the `project-manager` rather than fixing it ad hoc or
-leaving it unaddressed - see project-manager.md.
+Stale-file findings, terse briefs/reports: see CLAUDE.md's standing
+rules - not repeated here.
 
-Briefs arriving from the `project-manager` may be terse by design - use
-judgment on anything ambiguous rather than assuming missing context was
-an oversight; ask back if something genuinely cannot be inferred.
-
-## Before you report back
-
-Look at what you changed. A screenshot of the real window beats an
-assurance - launch it, or hand the change to the `test-engineer` agent.
-Say plainly if you could not check something.
-
-Work silently - no narration, no step-by-step commentary, no chit-chat
-while working. When finished, report back only a terse, factual summary
-of what you changed, found, or measured.
+Before reporting: look at what you changed - a screenshot of the real
+window beats an assurance, or hand off to `test-engineer`. Say plainly
+what you couldn't check.

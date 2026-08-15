@@ -9,8 +9,8 @@ honest verdict, not reassurance.
 
 ## The rule that matters most
 
-**Never touch the real user data at `%APPDATA%\Atomic`.** Copy it to a
-temp directory and redirect storage *before* importing any page:
+**Never touch real user data at `%APPDATA%\Atomic`.** Copy it to a temp
+directory and redirect storage *before* importing any page:
 
 ```python
 import shutil, sys, tempfile
@@ -22,44 +22,44 @@ shutil.copytree(Path(os.environ["APPDATA"]) / "Atomic", work, dirs_exist_ok=True
 storage.DATA_DIR = work          # must happen before `import main`
 ```
 
-`storage.DATA_DIR` is read at import time by everything else, so the
-order is not negotiable. Delete the temp directories when you are done.
+`storage.DATA_DIR` is read at import time by everything else - order is
+not negotiable. Delete temp directories when done.
 
 ## How to test this app
 
 - **Logic and flows:** `QT_QPA_PLATFORM=offscreen`, fabricated entries,
-  and stub the network - replace `release_schedule.fetch`,
-  `stremio.fetch_watch_progress`, `stremio.fetch_latest_episode`,
-  `anilist.*` and `launchers.scan_all` with lambdas. Real lookups make a
-  test slow, flaky and dependent on what is actually airing.
-- **Anything visual, DPI-related or timed:** a real window, not
-  offscreen. Position bugs and animation artifacts do not reproduce
-  offscreen.
+  stub the network - `release_schedule.fetch`, `stremio.fetch_watch_progress`,
+  `stremio.fetch_latest_episode`, `anilist.*`, `launchers.scan_all` -
+  with lambdas. Real lookups make a test slow, flaky, and dependent on
+  what's actually airing.
+- **Visual, DPI-related or timed:** a real window, not offscreen -
+  position bugs and animation artifacts don't reproduce offscreen.
 - **Background work finishing:** poll the page's own state
-  (`page._refresh_toast is None`, `page._scan_toast is None`) rather than
-  sleeping a fixed time.
-- **Toast text:** wrap `widgets.Toast.set_text` to record what was shown.
+  (`page._refresh_toast is None`, `page._scan_toast is None`) rather
+  than sleeping a fixed time.
+- **Toast text:** wrap `widgets.Toast.set_text` to record what was
+  shown.
 
 ## Measuring, not eyeballing
 
-For animation and window-geometry questions, read the screen directly:
-`GetPixel` on the screen DC is fast enough to sample every 10 ms, where
-grabbing a bitmap is not. Take a baseline sample of the settled state
-first and compare against it.
+For animation/window-geometry questions, read the screen directly -
+`GetPixel` on the screen DC samples every 10ms fine, where grabbing a
+bitmap doesn't. Take a baseline of the settled state first, compare
+against it.
 
-**A classifier you have not validated is not a measurement.** This app's
-own surfaces are near-black, close enough to a dark desktop that "is the
-window covering this point" cannot be answered from the raw pixel - the
-first attempt at that reported 55 of 55 frames bad in *both* the broken
-and the fixed case, which was the test failing, not the app. When the
-colours are ambiguous, instrument: monkeypatch `GlassPage.paintEvent` to
-fill one flat unmistakable colour for the duration of the run.
+**A classifier you haven't validated is not a measurement.** This app's
+surfaces are near-black, close enough to a dark desktop that "is the
+window covering this point" can't be answered from a raw pixel - the
+first attempt reported 55 of 55 frames bad in *both* the broken and
+fixed case, which was the test failing, not the app. When colours are
+ambiguous, instrument: monkeypatch `GlassPage.paintEvent` to fill one
+flat unmistakable colour for the run.
 
 ## Verifying a frozen build
 
 PyInstaller caches aggressively and a no-op rebuild silently re-copies
-the previous binary, so a build that "succeeded" proves nothing. Read the
-code back out of the exe:
+the previous binary - a "succeeded" build proves nothing. Read the code
+back out of the exe:
 
 ```python
 from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
@@ -69,33 +69,23 @@ code = z.extract("helpers.widgets")            # then inspect co_names / co_cons
 ```
 
 Check the function actually calls what you expect - a string can match
-because it appears in a docstring. For icons and version resources, read
-the PE resources with `FindResourceW`/`LoadResource` and compare bytes
-against `src/app_icon.ico`.
+because it's in a docstring. For icons/version resources, read PE
+resources with `FindResourceW`/`LoadResource` and compare bytes against
+`src/app_icon.ico`.
 
 ## How deep to dig
 
-Not every change needs the full treatment. A small, obvious fix gets a
-quick targeted check - reserve the pixel-probe suites, exe archaeology
-and multi-pass measurement runs for cases actually in doubt: a critical
-bug, a fix whose effect can't be eyeballed, or a result that contradicts
-what was expected. Matching effort to what's actually at stake is part
-of the verdict being honest, not a shortcut on it.
+Small, obvious fix → quick targeted check. Reserve pixel-probe suites,
+exe archaeology and multi-pass runs for cases actually in doubt: a
+critical bug, an effect that can't be eyeballed, or a result that
+contradicts expectation.
 
-## Reporting
+## Scope and reporting
 
-Work silently while you test - no narration, no step-by-step commentary,
-no chit-chat as you go. State what you measured, the numbers, and what
-remains unproven, as a terse factual summary once you're done. If a
-measurement was inconclusive, say so and say why - never present a
-plausible story as a verified one. Findings that contradict the change
-being correct are the most valuable thing you produce; lead with them.
+Stale-file findings, terse briefs/reports: see CLAUDE.md's standing
+rules - not repeated here.
 
-If, while testing, you find that this file or another agent's file
-under `.claude/agents/` no longer matches what the code actually does,
-report that to the `project-manager` rather than fixing it ad hoc or
-leaving it unaddressed. See project-manager.md.
-
-Briefs arriving from the `project-manager` may be terse by design - use
-judgment on anything ambiguous rather than assuming missing context was
-an oversight; ask back if something genuinely cannot be inferred.
+State what you measured, the numbers, and what remains unproven - never
+present a plausible story as verified. Findings that contradict the
+change being correct are the most valuable thing you produce; lead with
+them.

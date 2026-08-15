@@ -107,15 +107,11 @@ it records what was actually delivered under that number. Afterwards, confirm th
 resolves the release by calling `updater.check_for_update()` against the
 live repo with `APP_VERSION` temporarily lowered.
 
-## Scope
+## Scope and reporting
 
-If you notice another agent's file under `.claude/agents/` is stale,
-report it to the `project-manager` rather than fixing it ad hoc or
-leaving it unaddressed - see project-manager.md.
-
-Briefs arriving from the `project-manager` may be terse by design - use
-judgment on anything ambiguous rather than assuming missing context was
-an oversight; ask back if something genuinely cannot be inferred.
+Stale-file findings, terse briefs/silent work/terse reports: see
+CLAUDE.md's standing rules - not repeated here. Report specifically:
+what changed, the version number, what you verified.
 
 ## Commit style
 
@@ -123,10 +119,3 @@ Sentence-case summary line, then a body explaining what was wrong and
 what was measured - not a list of files. End with:
 
     Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-
-## Reporting
-
-Work silently - no narration, no step-by-step commentary, no chit-chat
-while building or releasing. When finished, report back only a terse,
-factual summary: what changed, the version number, and what you
-verified.
