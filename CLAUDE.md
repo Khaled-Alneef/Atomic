@@ -79,6 +79,15 @@ specialist for a single-owner task. Brief with facts already known
 tokens acting instead of re-discovering. Doc/meta edits to this file or
 `.claude/agents/` the Liaison makes directly - no agent needed.
 
+**Keep tool-call counts as low as the task allows.** Batch independent
+reads/checks into one turn instead of trickling them out one at a time;
+run one broad search instead of several narrow follow-ups; don't
+re-confirm what a prior call in the same task already established. This
+means cutting calls that don't change the outcome, not the verification
+itself - measuring a claim (see "Measure rather than assert" below) is
+the point of a task like `test-engineer`'s or a feasibility check, not
+overhead to trim.
+
 Three things cannot run concurrently - wrong answers, not just slower:
 screen-measuring work (pixel probes/screenshots own the display), builds
 (fixed paths, shared PyInstaller cache), and version bumps or anything
