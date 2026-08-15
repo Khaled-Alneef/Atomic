@@ -1,7 +1,8 @@
 """Settings window: a category sidebar (mirroring the main app window's
 own sidebar) on the left, the selected category's controls on the right.
 
-General: Windows-startup toggle and which sections show up in the main
+General: Windows-startup toggle (plus whether that sign-in launch opens
+full screen), and which sections show up in the main
 sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
 without losing their saved data). Anime & Series: the list of Video
 Websites Anime entries can be set to open on (Stremio is always
@@ -31,7 +32,7 @@ from . import (
     anime_sites, app_settings, launchers, manga_sites, nav_config, startup,
     storage, stremio, theme, uninstall, updater,
 )
-from .widgets import scroll_area, show_toast
+from .widgets import finish_toast, scroll_area, show_toast
 
 CATEGORIES = ["General", "Anime & Series", "Reading", "Games", "Data"]
 
@@ -96,6 +97,9 @@ class SettingsDialog(QDialog):
 
         self._launcher_import_signals = _LauncherImportSignals()
         self._launcher_import_signals.done.connect(self._on_launcher_import_done)
+        # The "Scanning..." toast each in-progress launcher import is
+        # waiting to report into, keyed by launcher.
+        self._scan_toasts = {}
 
         # The update found by the last check, kept so the same button can
         # go on to install it without checking again.
@@ -191,6 +195,21 @@ class SettingsDialog(QDialog):
         hint = QLabel("Starts Atomic automatically when you sign in to Windows.", objectName="Muted")
         hint.setWordWrap(True)
         form.addWidget(hint)
+
+        self.fullscreen_startup_check = QCheckBox("Fullscreen mode when launch on startup")
+        self.fullscreen_startup_check.setChecked(app_settings.get_fullscreen_on_startup())
+        self.fullscreen_startup_check.toggled.connect(self._toggle_fullscreen_on_startup)
+        form.addWidget(self.fullscreen_startup_check)
+
+        fullscreen_hint = QLabel(
+            "Only applies to that sign-in launch - opening Atomic yourself "
+            "still starts it maximized, and F11 or Escape leaves full "
+            "screen either way.",
+            objectName="Muted",
+        )
+        fullscreen_hint.setWordWrap(True)
+        form.addWidget(fullscreen_hint)
+        self._sync_fullscreen_startup_check()
 
         form.addSpacing(24)
         form.addWidget(QLabel("Sections", objectName="SectionTitle"))
@@ -556,7 +575,7 @@ class SettingsDialog(QDialog):
         app_settings.set_launcher_dir(key, path)
         if not path:
             return
-        show_toast(self, "Scanning...")
+        self._scan_toasts[key] = show_toast(self, "Scanning...", duration_ms=None)
         threading.Thread(target=self._import_launcher_worker, args=(key, path), daemon=True).start()
 
     def _import_launcher_worker(self, key, path):
@@ -573,7 +592,11 @@ class SettingsDialog(QDialog):
         if main_window is not None and hasattr(main_window, "refresh_current_page"):
             main_window.refresh_current_page()
         label = next((l for k, l, _s in launchers.LAUNCHERS if k == key), key)
-        show_toast(self, f"{label}: added {added} new game(s)" if added else f"{label}: no new games found")
+        # Same wording as the Games page's own Import button, prefixed
+        # with which launcher this was - several can be scanning at once
+        # here, one per directory the user fills in.
+        finish_toast(self._scan_toasts.pop(key, None), self,
+                     f"{label}: {launchers.import_result_message(added)}")
 
     # ------------------------------------------------------------------
     def _build_data_page(self):
@@ -775,6 +798,26 @@ class SettingsDialog(QDialog):
             self.startup_check.setChecked(not checked)
             self.startup_check.blockSignals(False)
             QMessageBox.critical(self, "Settings", f"Couldn't update startup setting:\n{exc}")
+        # Whichever way that went, the fullscreen option follows the
+        # checkbox's *actual* state - including the rolled-back one above.
+        self._sync_fullscreen_startup_check()
+
+    def _sync_fullscreen_startup_check(self):
+        """"Fullscreen mode when launch on startup" only means anything
+        while there *is* a startup launch, so it greys out with the
+        toggle above it rather than sitting there ticked and inert.
+
+        Its saved value is left alone when it greys out: turning startup
+        off and back on shouldn't quietly lose the choice, and nothing
+        reads the setting unless the app was started by Windows anyway
+        (see main.main)."""
+        enabled = self.startup_check.isChecked()
+        self.fullscreen_startup_check.setEnabled(enabled)
+        self.fullscreen_startup_check.setToolTip(
+            "" if enabled else "Turn on \"Launch on Windows startup\" first.")
+
+    def _toggle_fullscreen_on_startup(self, checked):
+        app_settings.set_fullscreen_on_startup(checked)
 
     def _refresh_stremio_account(self):
         email, auth_key = app_settings.get_stremio_auth()

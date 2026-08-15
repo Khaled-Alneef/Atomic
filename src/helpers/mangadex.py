@@ -198,27 +198,59 @@ def _predict(releases: dict, now: datetime):
     return {"at": when, "chapter": math.floor(max(releases)) + 1, "estimated": True}
 
 
-def fetch_next_chapter(title: str, known_latest_chapter=None, timeout: int = 10):
+def fetch_next_chapter(title: str, known_latest_chapter=None, manga_id=None,
+                       timeout: int = 10):
     """Best estimate of when this title's next chapter lands, from its
-    MangaDex release history. Returns {"at": aware UTC datetime,
-    "chapter": int, "estimated": True} or None when there's no confident
-    answer - no title match, nothing recent enough to extrapolate from,
-    or a release pattern too irregular to call.
+    MangaDex release history.
+
+    Returns (prediction, manga id). The prediction is {"at": aware UTC
+    datetime, "chapter": int, "estimated": True}, or None when there's no
+    confident answer - no title match, nothing recent enough to
+    extrapolate from, or a release pattern too irregular to call. The id
+    is what this title resolved to on MangaDex, for the caller to store
+    and hand back as `manga_id` next time, or None when nothing worth
+    reusing was resolved. The two are independent: a title that resolves
+    cleanly but has no countable rhythm still returns an id.
 
     `known_latest_chapter` is the newest chapter the *user's own* reading
     site has (tracked on the entry already): scanlation sites regularly
     run ahead of MangaDex, and the next chapter number should be the one
     they're actually waiting for, not the one MangaDex happens to be up
-    to. It only ever raises the number, never lowers it."""
+    to. It only ever raises the number, never lowers it.
+
+    `manga_id` skips the search entirely. A title's id on MangaDex never
+    changes, but _search was being re-run for every entry on every single
+    refresh: on the real Reading page that was 8 of 17 requests, and since
+    every request waits _MIN_REQUEST_GAP behind the last one, the wall
+    clock of a refresh is very nearly just the number of requests in it.
+    With ids cached that page drops to 8 requests (measured, one per
+    entry) - the feed still has to be re-read every time, since that's
+    where a new chapter actually shows up."""
     title = (title or "").strip()
-    if not title:
-        return None
-    try:
-        candidates = _search(title, timeout)
-    except Exception:
-        return None
+    if not title and not manga_id:
+        return None, None
+    if manga_id:
+        # Deliberately no re-search fallback when a cached id turns up
+        # nothing usable: that's the answer for a series gone quiet, and
+        # falling back would put the search straight back for exactly the
+        # dormant titles that never stop being dormant. A wrong id can
+        # only come from a title that has since been edited, and that
+        # clears the cached id at the point of the edit.
+        candidates = [{"id": manga_id}]
+    else:
+        try:
+            candidates = _search(title, timeout)
+        except Exception:
+            return None, None
 
     now = datetime.now(timezone.utc)
+    # A search that clears the threshold exactly once has no ambiguity to
+    # resolve - nothing else would ever be tried for it - so its id is
+    # safe to cache even with no prediction to show for it. Only if that
+    # one has a real feed, though: an id with nothing readable behind it
+    # is the shape of a stub listing, and caching that would lock the
+    # entry onto it and stop it ever finding the real one.
+    sole_match = None
     for manga in candidates:
         try:
             by_language = _chapter_feed(manga["id"], timeout)
@@ -227,6 +259,8 @@ def fetch_next_chapter(title: str, known_latest_chapter=None, timeout: int = 10)
         releases = _leading_feed(by_language)
         if not releases:
             continue
+        if len(candidates) == 1:
+            sole_match = manga["id"]
         prediction = _predict(releases, now)
         if prediction:
             try:
@@ -234,5 +268,11 @@ def fetch_next_chapter(title: str, known_latest_chapter=None, timeout: int = 10)
             except (TypeError, ValueError):
                 known = 0.0
             prediction["chapter"] = max(prediction["chapter"], math.floor(known) + 1)
-            return prediction
-    return None
+            # The candidate that actually answered, which is not always the
+            # best-scoring title match: MangaDex carries dead duplicate
+            # listings, and on a real entry here ("The Beginning After The
+            # End") the live one was the second candidate, behind a listing
+            # with no usable feed. Caching the answering id keeps that
+            # resolution instead of re-deciding it every refresh.
+            return prediction, manga["id"]
+    return None, manga_id or sole_match

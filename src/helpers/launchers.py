@@ -230,3 +230,15 @@ def import_scanned_games(found):
         games.extend(new_games)
         storage.save(GAMES_FILE, games)
     return len(new_games)
+
+
+def import_result_message(added: int) -> str:
+    """How an import went, in one sentence. Here rather than at either
+    call site because both the Games page's Import button and Settings'
+    per-launcher auto-import report the same thing and should word it the
+    same way."""
+    if not added:
+        return "No New Games Found"
+    if added == 1:
+        return "1 Game Was Successfully Added"
+    return f"{added} Games Was Successfully Added"

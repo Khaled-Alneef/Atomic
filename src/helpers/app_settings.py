@@ -52,6 +52,24 @@ def set_hide_sections_from_home(enabled: bool):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_fullscreen_on_startup() -> bool:
+    """Whether an Atomic started by Windows' own startup entry opens full
+    screen instead of maximized.
+
+    Only meaningful alongside "launch on Windows startup" (see
+    helpers.startup) - a hand-launched Atomic ignores this entirely, so
+    the setting is stored on its own but only offered while that one is
+    on. Defaults off: this changes how the app looks the moment it
+    opens, which is not something an update should decide for anyone."""
+    return bool(_load().get("fullscreen_on_startup", False))
+
+
+def set_fullscreen_on_startup(enabled: bool):
+    data = _load()
+    data["fullscreen_on_startup"] = bool(enabled)
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 

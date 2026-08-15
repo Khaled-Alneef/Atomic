@@ -29,7 +29,10 @@ from helpers import (
     anilist, anime_sites, app_settings, images, manga_sites, release_schedule,
     storage, stremio, theme,
 )
-from helpers.widgets import Card, GlassPage, scroll_area, show_toast
+from helpers.widgets import (
+    Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
+    scroll_area, show_toast,
+)
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
 
@@ -95,6 +98,23 @@ def _entry_imdb_id(entry):
     a saved stremio:// url for older entries saved before this field
     existed (see _migrate)."""
     return entry.get("imdb_id") or _imdb_id_from_url(entry.get("url"))
+
+
+def _release_content(stored):
+    """What a stored `next_release` says is *coming* - the episode or
+    chapter number - as opposed to when it lands.
+
+    This, and not the whole record, is what decides whether the refresh
+    button turned up anything new. The time on its own can't: the manga
+    estimate is extrapolated from a title's release rhythm (see
+    mangadex._predict), so once a predicted slot has come and gone the
+    next check simply projects the slot after it. That moving timestamp
+    means nothing has happened yet, not that something has - reporting it
+    as an update would make "no new chapter" indistinguishable from a
+    chapter actually landing."""
+    if not isinstance(stored, dict):
+        return None
+    return (stored.get("season"), stored.get("episode"), stored.get("chapter"))
 
 
 def _latest_known_chapter(entry):
@@ -218,6 +238,13 @@ def _migrate(entries, data_file):
                 "Crunchyroll", "https://www.crunchyroll.com/search?q=")["id"]
 
     for entry in entries:
+        if not entry.get("id"):
+            # Everything that touches one entry rather than the whole
+            # list keys off this - update_entry, the background lookups
+            # reporting back, and now drag-to-reorder, which would
+            # otherwise see every id-less entry as the same one.
+            entry["id"] = str(uuid.uuid4())
+            changed = True
         if (crunchyroll_site_id and entry.get("type") == "Anime"
                 and not entry.get("url") and not entry.get("site_id")):
             entry["site_id"] = crunchyroll_site_id
@@ -278,7 +305,11 @@ class _CoverSignals(QObject):
 
 
 class _ScheduleSignals(QObject):
-    resolved = Signal(str, object)  # entry id, next_release dict (or None when nothing's scheduled)
+    # entry id, next_release dict (or None when nothing's scheduled), the
+    # MangaDex id the title resolved to (or None - manga only, see
+    # release_schedule.fetch), and which refresh run asked for it
+    # (0 = none, see TrackerPage._refresh_run)
+    resolved = Signal(str, object, object, int)
 
 
 class TrackerPage(GlassPage):
@@ -307,8 +338,26 @@ class TrackerPage(GlassPage):
         self._sync_signals = _ProgressSyncSignals()
         self._sync_signals.resolved.connect(self._on_progress_synced)
         self._sync_pending = 0
-        self._sync_found_count = 0
-        self._sync_not_found_count = 0
+        self._sync_changed = False
+        self._sync_batch_run = 0
+
+        # The refresh button's run, if one is in progress: the "Updating..."
+        # toast waiting to be told how it went, how many background lookups
+        # are still out, and whether any of them found anything new. Only
+        # ever touched on the UI thread - every lookup reports back through
+        # a signal - so no locking is needed.
+        #
+        # _refresh_run numbers the runs, and every lookup carries the
+        # number of the run that asked for it. The same lookups also run on
+        # their own at page load, and one of those landing mid-refresh
+        # would otherwise be counted as one of the run's own results -
+        # ending it early, on a verdict that came from a different lookup
+        # than the one still out. Carrying the number keeps that exact.
+        self._refresh_run = 0
+        self._refresh_toast = None
+        self._refresh_pending = 0
+        self._refresh_changed = False
+        self._refresh_before = {}
 
         self._cover_signals = _CoverSignals()
         self._cover_signals.ready.connect(self._on_sharper_cover_ready)
@@ -349,6 +398,8 @@ class TrackerPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
+        hint = QLabel("(drag a card to reorder, or right-click it for Move Up/Down)", objectName="Muted")
+        top_row.addWidget(hint)
         top_row.addStretch()
         layout.addLayout(top_row)
 
@@ -357,6 +408,9 @@ class TrackerPage(GlassPage):
         self.grid_layout.setSpacing(14)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(scroll_area(self.grid_body), stretch=1)
+
+        self._drag_reorder = CardDragReorder(
+            self.grid_body, self._begin_custom_order, self._drop_reorder)
 
         self._refresh_grid()
         if self.SUPPORTS_PROGRESS_SYNC:
@@ -369,12 +423,65 @@ class TrackerPage(GlassPage):
         """Header refresh button: re-check what's out there for every
         entry on this page - both your own watched/read progress (where
         the page has a source for it) and when the next episode/chapter
-        is due."""
+        is due.
+
+        Says so while it works, and says how it went when it's finished
+        (see _refresh_step_done) - every lookup runs on its own background
+        thread, so without that the button reads as doing nothing at all
+        for however long the slowest source takes to answer."""
+        if self._refresh_toast is not None:
+            return  # already running - let it finish rather than double it
+        self._refresh_run += 1
+        self._refresh_changed = False
+        # What every entry says right now, to judge the results against.
+        # Against this rather than against whatever is stored by the time
+        # a result lands: the same lookups fire on their own when a page
+        # opens, so one of those finishing first would have already
+        # absorbed the news, and the run would then compare the answer
+        # with itself and report nothing new.
+        self._refresh_before = {
+            entry["id"]: (_release_content(entry.get("next_release")),
+                          entry.get("progress"), entry.get("latest_available"))
+            for entry in self.entries if entry["type"] in self.ENTRY_TYPES
+        }
+        # Starts at one and is released at the end: the lookups below
+        # report back through the event loop, so they cannot land before
+        # this method returns - but a page with nothing to look up would
+        # otherwise sit at zero pending and never report at all.
+        self._refresh_pending = 1
+        self._refresh_toast = show_toast(self, "Updating...", duration_ms=None)
+
         self._refresh_schedules(force=True)
         if self.SUPPORTS_PROGRESS_SYNC:
             self._sync_all_progress()
-        else:
-            show_toast(self, "Re-checking release schedules")
+        self._refresh_step_done(self._refresh_run)
+
+    def _refresh_step_started(self):
+        """Count one more background lookup into the running refresh and
+        return which run it belongs to, for it to report back with. 0 when
+        no refresh is running - the same lookups also happen on page load,
+        where there is nothing to report to."""
+        if self._refresh_toast is None:
+            return 0
+        self._refresh_pending += 1
+        return self._refresh_run
+
+    def _refresh_step_done(self, run, found_something_new=False):
+        """One lookup back. The last one to return reports the verdict.
+
+        Anything from another run (or from no run at all) is ignored
+        rather than counted: it was never counted in, so counting it out
+        would end this run one result early."""
+        if not run or run != self._refresh_run or self._refresh_toast is None:
+            return
+        self._refresh_changed = self._refresh_changed or found_something_new
+        self._refresh_pending -= 1
+        if self._refresh_pending > 0:
+            return
+        toast, self._refresh_toast = self._refresh_toast, None
+        self._refresh_before = {}
+        finish_toast(toast, self, "Updated Successfully" if self._refresh_changed
+                     else "There is No New Update")
 
     def _refresh_schedules(self, force=False):
         """Look up when each entry's next episode/chapter lands, in the
@@ -387,28 +494,44 @@ class TrackerPage(GlassPage):
                 continue
             if not release_schedule.needs_refresh(entry, force):
                 continue
-            threading.Thread(target=self._fetch_schedule, args=(entry,), daemon=True).start()
+            run = self._refresh_step_started()
+            threading.Thread(target=self._fetch_schedule, args=(entry, run), daemon=True).start()
 
-    def _fetch_schedule(self, entry):
+    def _fetch_schedule(self, entry, run=0):
         # Must never raise: an uncaught exception here would kill the
         # background thread silently.
         try:
-            found = release_schedule.fetch(
+            found, manga_id = release_schedule.fetch(
                 self.MEDIUM, entry["title"], imdb_id=_entry_imdb_id(entry),
-                known_latest_chapter=_latest_known_chapter(entry))
+                known_latest_chapter=_latest_known_chapter(entry),
+                manga_id=entry.get("mangadex_id"))
         except Exception:
-            found = None
-        self._schedule_signals.resolved.emit(entry["id"], found)
+            found, manga_id = None, None
+        self._schedule_signals.resolved.emit(entry["id"], found, manga_id, run)
 
-    def _on_schedule_resolved(self, entry_id, found):
+    def _on_schedule_resolved(self, entry_id, found, manga_id=None, run=0):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if not entry:
+            self._refresh_step_done(run)
             return
+        snapshot = self._refresh_before.get(entry_id)
+        before = snapshot[0] if snapshot else _release_content(entry.get("next_release"))
+        self._refresh_step_done(run, _release_content(found) != before)
         # Stored even when nothing was found, so a title with no schedule
         # (finished airing, not on the source) isn't re-looked-up on every
         # single page visit - the timestamp is what needs_refresh rate-
         # limits against.
         fields = {"next_release": found, "next_release_checked_at": storage.now_iso()}
+        # Which MangaDex title this entry is, once it has been worked out:
+        # kept so the next refresh can go straight to the chapter feed
+        # instead of searching for the same title again (the single
+        # biggest cost of a Reading refresh - see mangadex.
+        # fetch_next_chapter). Written, never cleared here: a lookup that
+        # finds nothing says the series is quiet, not that the id went
+        # wrong, and the one thing that can invalidate it - the title being
+        # edited - clears it at the point of the edit (see _on_form_save).
+        if manga_id:
+            fields["mangadex_id"] = manga_id
         entry.update(fields)
         # Just these fields, not a wholesale save of self.entries - Anime
         # and Manga are separate pages backed by the same tracker.json
@@ -513,6 +636,26 @@ class TrackerPage(GlassPage):
         return "<br>".join(rows)
 
     # ------------------------------------------------------------------
+    def _sections(self):
+        """This page's entries grouped into the sections the grid draws,
+        as [(status, [entry, ...]), ...] in the order they appear.
+
+        Split out from _refresh_grid because the drag-to-reorder switch to
+        Custom Order has to save the order that is on screen (see
+        _begin_custom_order), and on this page that is the sections read
+        top to bottom - not what _visible_entries returns, which is one
+        flat list the grouping below then cuts up."""
+        # Grouped into sections by status (Watching/Reading first, same
+        # order as STATUSES_BY_TYPE) instead of one flat mixed grid - the
+        # sort dropdown still controls ordering *within* each section.
+        known_statuses = STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], STATUSES_BY_TYPE["Anime"])
+        grouped = {status: [] for status in known_statuses}
+        for entry in self._visible_entries():
+            grouped.setdefault(entry.get("status") or known_statuses[0], []).append(entry)
+        extra_statuses = [s for s in grouped if s not in known_statuses]
+        return [(status, grouped[status])
+                for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
+
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -520,26 +663,14 @@ class TrackerPage(GlassPage):
             if widget:
                 widget.deleteLater()
 
-        entries = self._visible_entries()
-        if not entries:
+        sections = self._sections()
+        if not sections:
             empty = QLabel(f"No {self.TITLE.lower()} yet - click '+' to create one.", objectName="Muted")
             self.grid_layout.addWidget(empty, 0, 0)
             return
 
-        # Grouped into sections by status (Watching/Reading first, same
-        # order as STATUSES_BY_TYPE) instead of one flat mixed grid - the
-        # sort dropdown still controls ordering *within* each section.
-        known_statuses = STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], STATUSES_BY_TYPE["Anime"])
-        grouped = {status: [] for status in known_statuses}
-        for entry in entries:
-            grouped.setdefault(entry.get("status") or known_statuses[0], []).append(entry)
-        extra_statuses = [s for s in grouped if s not in known_statuses]
-
         row = 0
-        for status in [*known_statuses, *extra_statuses]:
-            group = grouped.get(status) or []
-            if not group:
-                continue
+        for status, group in sections:
             header = QLabel(f"{status} ({len(group)})", objectName="SectionTitle")
             self.grid_layout.addWidget(header, row, 0, 1, GRID_COLS)
             row += 1
@@ -598,6 +729,7 @@ class TrackerPage(GlassPage):
 
         card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
+        self._drag_reorder.attach(card, entry.get("id"))
         return card
 
     def _bump_watched_chapter(self, entry, delta):
@@ -654,8 +786,15 @@ class TrackerPage(GlassPage):
         at once, instead of right-clicking each card individually."""
         targets = [e for e in self.entries if e["type"] in self.ENTRY_TYPES and _entry_imdb_id(e)]
         if not targets:
-            show_toast(self, "Nothing to sync yet - no linked entries")
+            # Only worth saying on its own; during a refresh the verdict
+            # toast covers it, and two toasts share the same corner.
+            if self._refresh_toast is None:
+                show_toast(self, "Nothing to sync yet - no linked entries")
             return
+        # The whole batch counts as one step of the refresh, closed out
+        # when the last of them comes back (see _on_progress_synced) -
+        # they already have _sync_pending counting them individually.
+        self._sync_batch_run = self._refresh_step_started()
         self._sync_pending += len(targets)
         for entry in targets:
             threading.Thread(
@@ -691,12 +830,20 @@ class TrackerPage(GlassPage):
     def _on_progress_synced(self, entry_id, season, episode, found, total_season, total_episode, silent):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if entry:
+            snapshot = self._refresh_before.get(entry_id)
+            before = (snapshot[1:] if snapshot
+                      else (entry.get("progress"), entry.get("latest_available")))
             if found:
                 entry["progress"] = format_episode_progress(season, episode)
                 entry["progress_verified"] = True
                 entry["updated_at"] = storage.now_iso()
             if total_season or total_episode:
                 entry["latest_available"] = format_episode_progress(total_season, total_episode)
+            # Only the bulk path feeds the refresh button's verdict - a
+            # single entry synced by hand from its right-click menu isn't
+            # part of anything being reported on.
+            if silent and (entry.get("progress"), entry.get("latest_available")) != before:
+                self._sync_changed = True
 
         if not silent:
             if not found:
@@ -713,27 +860,18 @@ class TrackerPage(GlassPage):
             self._refresh_grid()
             return
 
-        # Bulk refresh: results trickle in from several background threads,
-        # so only save/redraw/report once they've all come back. Reports a
-        # real breakdown rather than a blanket "Updated" - found=False here
-        # usually means Stremio genuinely has no per-episode history for
-        # that title (see the single-entry message above), not a failure,
-        # but silently doing nothing about it looks exactly like one.
-        if found:
-            self._sync_found_count += 1
-        else:
-            self._sync_not_found_count += 1
+        # Bulk sync: results trickle in from several background threads, so
+        # only save/redraw once they've all come back. Whether any of them
+        # actually moved anything is what the refresh button reports; a
+        # title Stremio has no per-episode history for (see the
+        # single-entry message above) is not a failure, just nothing new.
         self._sync_pending -= 1
         if self._sync_pending <= 0:
             storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
-            found_count, not_found_count = self._sync_found_count, self._sync_not_found_count
-            self._sync_found_count = 0
-            self._sync_not_found_count = 0
-            if not_found_count:
-                show_toast(self, f"Synced {found_count} - no history for {not_found_count}", duration_ms=3500)
-            else:
-                show_toast(self, "Updated")
+            changed, self._sync_changed = self._sync_changed, False
+            run, self._sync_batch_run = self._sync_batch_run, 0
+            self._refresh_step_done(run, changed)
 
     def _move_entry(self, entry, delta):
         idx = self.entries.index(entry)
@@ -742,6 +880,48 @@ class TrackerPage(GlassPage):
             self.entries[idx], self.entries[new_idx] = self.entries[new_idx], self.entries[idx]
             storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
+
+    # ------------------------------------------------------------------
+    def _begin_custom_order(self):
+        """A drag has started, so this page is in Custom Order from here
+        on: any other sort is re-applied on the next redraw and would put
+        the dragged card straight back where it came from.
+
+        The order already on screen is written out as the custom one
+        first, so the switch itself moves nothing and only the drag that
+        follows changes anything. The dropdown is then set with its signal
+        blocked - the grid would only be rebuilt into the arrangement it
+        is already showing, and rebuilding it here would delete the card
+        currently being dragged."""
+        if self.sort_box.currentText() == "Custom Order":
+            return
+        # Section by section, top to bottom - the order the user is
+        # actually looking at, not the flat _visible_entries one.
+        order = [entry.get("id") for _status, group in self._sections() for entry in group]
+        storage.apply_custom_order(self.DATA_FILE, order)
+        # This page's own copy follows, in place rather than reloaded:
+        # every card on screen holds a reference to one of these dicts.
+        storage.order_by_ids(self.entries, order)
+        self.sort_box.blockSignals(True)
+        self.sort_box.setCurrentText("Custom Order")
+        self.sort_box.blockSignals(False)
+
+    def _drop_reorder(self, moved_id, target_id):
+        """The dragged entry takes the dropped-on entry's place in the
+        saved list.
+
+        Against the list, not against grid coordinates: this page draws
+        one section per status, so where a card sits on screen says
+        nothing about where its entry sits in the file. Dropping onto a
+        card in a *different* status section therefore moves the entry in
+        the list without appearing to move it much on screen - it still
+        belongs to its own section. Reordering within a section, which is
+        what the sections are there to make easy, does exactly what it
+        looks like."""
+        if not storage.move_entry(self.DATA_FILE, moved_id, target_id):
+            return
+        storage.move_in_list(self.entries, moved_id, target_id)
+        defer_grid_rebuild(self._refresh_grid)
 
     def _delete_entry(self, entry):
         if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") == QMessageBox.StandardButton.Yes:
@@ -764,8 +944,11 @@ class TrackerPage(GlassPage):
         # A new entry has no schedule yet, and an edited one may have had
         # the title it's looked up by changed out from under the old one -
         # either way the stored lookup is worth redoing, so clear what
-        # rate-limits it before saving.
+        # rate-limits it before saving. The cached MangaDex id goes with
+        # it: it was resolved from the *old* title, and reusing it would
+        # keep answering for the series the user just corrected away from.
         entry.pop("next_release_checked_at", None)
+        entry.pop("mangadex_id", None)
         storage.save(self.DATA_FILE, self.entries)
         self._refresh_grid()
         self._refresh_schedules()

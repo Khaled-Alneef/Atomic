@@ -8,6 +8,7 @@ import ctypes
 import sys
 
 from PIL import Image, ImageDraw
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QFont
 
 from . import storage
@@ -222,6 +223,13 @@ QPushButton#FoldButton:hover {{
     background: {SURFACE};
     color: {TEXT};
 }}
+/* The icon font stack is on the base rule, not only on the collapsed one
+   below, because both states now draw the same gear (see main._style_
+   settings_btn) - expanded used an emoji, which rendered in its own fixed
+   colors and at its own size, so folding the sidebar visibly swapped the
+   symbol. Segoe Fluent Icons carries no Latin letters, so the "Settings"
+   label after the glyph falls through the chain to Segoe UI on its own
+   and looks exactly as it did. */
 QPushButton#NavButton {{
     background: transparent;
     color: {TEXT_MUTED};
@@ -229,6 +237,7 @@ QPushButton#NavButton {{
     border-radius: {RADIUS_SM}px;
     text-align: left;
     padding: 7px 12px;
+    font-family: {FONT_STACK_ICONS};
     font-size: 10.5pt;
     font-weight: 600;
 }}
@@ -516,6 +525,21 @@ QCheckBox::indicator:checked {{
     border: 1px solid {ACCENT};
     image: url({CHECKMARK_PATH});
 }}
+/* Disabled state, for a checkbox that only applies while another one is
+   on (Settings > Startup's fullscreen option follows the Windows-startup
+   toggle above it). Spelled out because the rules above replace Qt's
+   native indicator drawing entirely - including the greying it would
+   otherwise do for free, which left a dead checkbox looking every bit as
+   live as a working one. */
+QCheckBox:disabled {{ color: {TEXT_MUTED}; }}
+QCheckBox::indicator:disabled {{
+    border: 1px solid {BORDER};
+    background: {BG};
+}}
+QCheckBox::indicator:checked:disabled {{
+    background: {ACCENT_SOFT};
+    border: 1px solid {ACCENT_SOFT};
+}}
 
 /* ---- Lists / Trees ------------------------------------------------------ */
 QTreeWidget, QListWidget {{
@@ -629,6 +653,55 @@ def apply_dark_titlebar(widget):
             )
             if result == 0:
                 break
+    except Exception:
+        pass
+
+
+def without_window_animation(widget, action, resume_after_ms=400):
+    """Run `action` (a window state change) with Windows' own open/close/
+    minimize/maximize animation switched off for this window, then switch
+    it back on.
+
+    This is what makes leaving full screen look right. Windows animates a
+    window being maximized by zooming it out from wherever its *restored*
+    size sits - and a window that went full screen from maximized is,
+    underneath, a restored-size window with a full-screen frame on top.
+    So the return trip played that zoom: the window appeared at its small
+    restored size for a moment and then flew back out to full size.
+    Measured, not guessed - reading the screen every 10 ms across the
+    transition, the window failed to cover its own maximized area for
+    about 120 ms of it, and with the animation off, for none of it.
+
+    Restoring the setting afterwards rather than leaving it off keeps the
+    ordinary animations (minimize to the taskbar, restore from it) that
+    the user does still expect to see.
+    """
+    if sys.platform != "win32":
+        action()
+        return
+    handle = None
+    try:
+        handle = ctypes.c_void_p(int(widget.winId()))
+        _set_window_transitions(handle, disabled=True)
+    except Exception:
+        handle = None
+    try:
+        action()
+    finally:
+        if handle is not None:
+            # After the state change has settled, not immediately: the
+            # animation this is suppressing would otherwise still be
+            # queued up and play as soon as it is re-enabled.
+            QTimer.singleShot(resume_after_ms,
+                              lambda: _set_window_transitions(handle, disabled=False))
+
+
+def _set_window_transitions(handle, disabled):
+    try:
+        value = ctypes.c_int(1 if disabled else 0)
+        # 3 = DWMWA_TRANSITIONS_FORCEDISABLED
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            handle, 3, ctypes.byref(value), ctypes.sizeof(value))
     except Exception:
         pass
 
