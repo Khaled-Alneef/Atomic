@@ -26,8 +26,8 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (
-    anilist, anime_sites, app_settings, images, manga_sites, release_schedule,
-    storage, stremio, theme,
+    anilist, anime_sites, app_settings, images, lookup_pool, manga_sites,
+    release_schedule, storage, stremio, theme,
 )
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
@@ -84,19 +84,25 @@ _IMDB_ID_RE = re.compile(r"tt\d+")
 def _imdb_id_from_url(url):
     """Pull the "tt1234567" id back out of a saved stremio:// deep link,
     so a saved entry can be re-queried later without having re-run the
-    original title search."""
-    match = _IMDB_ID_RE.search(url or "")
+    original title search. Only ever applied to a stremio:// url: an
+    Anime entry pointing at a Video Website saves that site's own page
+    url, and a site slug that happens to contain "tt" followed by digits
+    would otherwise read as a Cinemeta id and send every later lookup to
+    the wrong show."""
+    if not (url or "").startswith("stremio://"):
+        return None
+    match = _IMDB_ID_RE.search(url)
     return match.group(0) if match else None
 
 
 def _entry_imdb_id(entry):
     """The Cinemeta id to sync progress against - stored directly on the
     entry (see EntryForm._save) since an Anime entry set to open on a
-    Video Website other than the built-in "Stremio" one deliberately
-    saves no url (see EntryForm._on_suggestion_selected), which would
-    otherwise leave no way to recover it. Falls back to pulling it out of
-    a saved stremio:// url for older entries saved before this field
-    existed (see _migrate)."""
+    Video Website other than the built-in "Stremio" one saves that
+    site's page url instead of a stremio:// link, which would otherwise
+    leave no way to recover it. Falls back to pulling it out of a saved
+    stremio:// url for older entries saved before this field existed
+    (see _migrate)."""
     return entry.get("imdb_id") or _imdb_id_from_url(entry.get("url"))
 
 
@@ -213,9 +219,14 @@ def _open_anime_entry(parent, entry):
         else:
             webbrowser.open(url)
         return True
+    # No saved url means the entry's Video Website couldn't resolve this
+    # title to its own page (no engine for that site, or a genuine
+    # no-match - see anime_sites.resolve_page_url). That site's search
+    # results for the title is all that's left; it's a fallback, never
+    # the intended target.
     site = anime_sites.get_site(entry["site_id"]) if entry.get("site_id") else None
-    if site and site.get("search_url"):
-        webbrowser.open(anime_sites.search_page_url(site["search_url"], entry["title"]))
+    if site and site.get("base_url"):
+        webbrowser.open(anime_sites.search_page_url(site["base_url"], entry["title"]))
         return True
     return False
 
@@ -235,7 +246,7 @@ def _migrate(entries, data_file):
             (s["id"] for s in anime_sites.list_sites() if s["name"] == "Crunchyroll"), None)
         if crunchyroll_site_id is None:
             crunchyroll_site_id = anime_sites.add_site(
-                "Crunchyroll", "https://www.crunchyroll.com/search?q=")["id"]
+                "Crunchyroll", "https://www.crunchyroll.com/")["id"]
 
     for entry in entries:
         if not entry.get("id"):
@@ -273,7 +284,7 @@ def _migrate(entries, data_file):
         # Backfill the id progress-syncing needs from a saved stremio://
         # link, for entries saved before it got its own field (see
         # _entry_imdb_id/EntryForm._save) - a Video-Website Anime entry
-        # has no url to pull this from at all, so those need re-picking
+        # has no stremio:// url to pull this from, so those need re-picking
         # the suggestion once to start syncing, but that's a one-time gap
         # for entries saved in the narrow window before this existed.
         if not entry.get("imdb_id"):
@@ -488,14 +499,19 @@ class TrackerPage(GlassPage):
         background. Cached on the entry (see release_schedule.needs_
         refresh), so a normal page visit usually fires no requests at all
         - only entries with nothing stored, a stale check, or a release
-        time that's already passed get looked up again."""
+        time that's already passed get looked up again.
+
+        Queued onto the bounded pool rather than given a thread each: a
+        first run on a long list needs every entry looked up, and one
+        connection per entry all at once is what slowed the user's whole
+        network down (see lookup_pool)."""
         for entry in self.entries:
             if entry["type"] not in self.ENTRY_TYPES:
                 continue
             if not release_schedule.needs_refresh(entry, force):
                 continue
             run = self._refresh_step_started()
-            threading.Thread(target=self._fetch_schedule, args=(entry, run), daemon=True).start()
+            lookup_pool.submit(self._fetch_schedule, entry, run)
 
     def _fetch_schedule(self, entry, run=0):
         # Must never raise: an uncaught exception here would kill the
@@ -555,8 +571,10 @@ class TrackerPage(GlassPage):
                 continue
             upgraded = manga_sites.upgrade_cover_url(entry.get("cover_url"))
             if upgraded and upgraded != entry.get("cover_url"):
-                threading.Thread(target=self._fetch_sharper_cover,
-                                  args=(entry["id"], upgraded), daemon=True).start()
+                # Bounded, like every other per-entry loop here: this one
+                # downloads a full-size image per entry, so it is the
+                # heaviest of them to fire all at once.
+                lookup_pool.submit(self._fetch_sharper_cover, entry["id"], upgraded)
 
     def _fetch_sharper_cover(self, entry_id, new_url):
         # Must never raise: an uncaught exception here would kill the
@@ -590,10 +608,9 @@ class TrackerPage(GlassPage):
             return
         self._sync_pending += len(targets)
         for entry in targets:
-            threading.Thread(
-                target=self._fetch_real_progress,
-                args=(entry["id"], _entry_imdb_id(entry), entry["title"], entry.get("type") == "Anime", True),
-                daemon=True).start()
+            lookup_pool.submit(
+                self._fetch_real_progress, entry["id"], _entry_imdb_id(entry),
+                entry["title"], entry.get("type") == "Anime", True)
 
     # ------------------------------------------------------------------
     def _visible_entries(self):
@@ -776,6 +793,9 @@ class TrackerPage(GlassPage):
         imdb_id = _entry_imdb_id(entry)
         if not imdb_id:
             return
+        # Its own thread, not the bounded pool: this is one lookup the
+        # user asked for by hand and is watching for, so it must not
+        # queue behind a page-load backfill of every other entry.
         threading.Thread(
             target=self._fetch_real_progress,
             args=(entry["id"], imdb_id, entry["title"], entry.get("type") == "Anime", False),
@@ -797,11 +817,9 @@ class TrackerPage(GlassPage):
         self._sync_batch_run = self._refresh_step_started()
         self._sync_pending += len(targets)
         for entry in targets:
-            threading.Thread(
-                target=self._fetch_real_progress,
-                args=(entry["id"], _entry_imdb_id(entry), entry["title"],
-                      entry.get("type") == "Anime", True),
-                daemon=True).start()
+            lookup_pool.submit(
+                self._fetch_real_progress, entry["id"], _entry_imdb_id(entry),
+                entry["title"], entry.get("type") == "Anime", True)
 
     def _fetch_real_progress(self, entry_id, imdb_id, title, is_anime, silent):
         result = None
@@ -985,6 +1003,7 @@ class _SearchSignals(QObject):
     cover_ready = Signal(str, object)
     manga_details_resolved = Signal(str, str, float)  # page url, cover url, latest chapter
     latest_episode_resolved = Signal(str, int, int)  # identity (stremio url), latest available season/episode
+    video_url_resolved = Signal(str, str, str)  # identity (site id + title), site name, resolved page url ("" = none)
 
 
 class EntryForm(QDialog):
@@ -998,14 +1017,15 @@ class EntryForm(QDialog):
         self.selected_cover_url = entry.get("cover_url") if entry else None
         self.selected_cover_path = entry.get("cover_path") if entry else None
         # The Cinemeta id to sync progress against later, independent of
-        # url (which an Anime entry set to a Video Website other than the
-        # built-in "Stremio" one deliberately leaves blank) - see
-        # _entry_imdb_id/_save.
+        # url (which for an Anime entry set to a Video Website other than
+        # the built-in "Stremio" one holds that site's page, not a
+        # stremio:// link) - see _entry_imdb_id/_save.
         self.selected_imdb_id = entry.get("imdb_id") if entry else None
         self._search_results = {}
         self._search_seq = 0
         self._status_parts = {}  # "cover"/"progress" -> current message, composed onto status_label
         self._pending_episode_identity = None  # tracks staleness for the async episode-progress lookup
+        self._pending_video_identity = None  # same, for the Video Website page-url lookup
         self._latest_available = entry.get("latest_available", "") if entry else ""
         # Whether the season/episode spinners hold *confirmed* progress
         # (fetched from a connected Stremio/AniList account, or typed in
@@ -1026,6 +1046,7 @@ class EntryForm(QDialog):
         self._signals.cover_ready.connect(self._on_cover_downloaded)
         self._signals.manga_details_resolved.connect(self._on_manga_details_resolved)
         self._signals.latest_episode_resolved.connect(self._on_latest_episode_resolved)
+        self._signals.video_url_resolved.connect(self._on_video_url_resolved)
 
         self.setWindowTitle("Edit Entry" if entry else "Add Entry")
         self.setFixedSize(460, 620)
@@ -1180,6 +1201,12 @@ class EntryForm(QDialog):
         self.site_box = QComboBox()
         self._populate_site_options(entry.get("site_id") if entry else None)
         site_layout.addWidget(self.site_box)
+        # Changing the Video Website by hand has to re-resolve the page
+        # url - the one saved belongs to whichever site was picked
+        # before, and opening it would land on the old site. Connected
+        # after the initial populate (and _populate_site_options blocks
+        # signals) so loading an existing entry doesn't fire this.
+        self.site_box.currentIndexChanged.connect(self._on_site_changed)
         form.addWidget(self.site_row)
 
         self._update_url_and_site_visibility()
@@ -1297,6 +1324,15 @@ class EntryForm(QDialog):
         provider = self._provider()
         self.status_label.setText("Searching...")
         threading.Thread(target=self._search_worker, args=(provider, text, seq), daemon=True).start()
+        # The Video Website is searched on its own, off what's typed,
+        # rather than only when a Cinemeta suggestion is picked: the site
+        # knows its own catalogue, and a title Cinemeta spells
+        # differently (or doesn't carry at all) would otherwise fall
+        # through to a search-results page. Also re-blanks a page url
+        # resolved for a title that's since been edited away.
+        site_id = self.site_box.currentData()
+        if self.type_box.currentText() == "Anime" and site_id is not None:
+            self._start_video_site_resolution(site_id, text)
 
     def _search_worker(self, provider, text, seq):
         if provider == "stremio":
@@ -1410,21 +1446,30 @@ class EntryForm(QDialog):
             # of the dropdown silently staying on whatever it last was.
             video_site_id = result.get("_video_site_id")
             if self.type_box.currentText() == "Anime" and "_video_site_id" in result:
+                # Signals blocked because _on_site_changed would re-run
+                # the resolution below off whatever is currently typed;
+                # the explicit call does it with the suggestion's own
+                # (canonical) title instead.
+                self.site_box.blockSignals(True)
                 idx = self.site_box.findData(video_site_id)
                 if idx >= 0:
                     self.site_box.setCurrentIndex(idx)
-            # A site other than the built-in "Stremio" option doesn't get
-            # a stremio:// link saved - open_tracker_entry falls back to
-            # that site's search results for the title instead when
-            # there's no saved url. Explicitly clearing it (not just
-            # skipping the setText below) matters when switching from an
-            # earlier Stremio pick on the same title - otherwise that
-            # leftover deep link stays in the hidden field and wins over
-            # the site on open.
+                self.site_box.blockSignals(False)
+            # A site other than the built-in "Stremio" option never gets
+            # the stremio:// link saved: open_tracker_entry tries url
+            # first, so a leftover deep link from an earlier pick on the
+            # same title would silently win over the site. What goes
+            # there instead is that site's own page for this title,
+            # resolved in the background - explicitly cleared first so
+            # the field is empty (and the entry falls back to the site's
+            # search page) if the resolution finds nothing.
             uses_site = self.type_box.currentText() == "Anime" and video_site_id is not None
             if uses_site:
                 self.url_edit.setText("")
+                self._start_video_site_resolution(video_site_id, result["title"])
             else:
+                self._pending_video_identity = None
+                self._set_status_part("site", "")
                 self.url_edit.setText(result["stremio_url"])
             # Cinemeta's catalog search has no episode data at all (title/
             # poster/year only) - a background lookup fills in the Last
@@ -1491,6 +1536,63 @@ class EntryForm(QDialog):
         elif not self.selected_cover_url:
             self._set_status_part("cover", "")
 
+    # ---- Video Website page-url resolution ---------------------------
+    # The Anime counterpart of manga's "picking a suggestion stores the
+    # real page url". Anime suggestions come from Cinemeta (the only
+    # public anime search API), which knows nothing about the user's
+    # Video Website - so the site's own page for the title is resolved
+    # separately, right here, against that one site. Deliberately lazy:
+    # one lookup for the title actually picked, not a fan-out across
+    # every configured site on every keystroke.
+
+    def _on_site_changed(self, _index):
+        if self.type_box.currentText() != "Anime":
+            return
+        site_id = self.site_box.currentData()
+        title = self.title_combo.currentText().strip()
+        if site_id is None:
+            # Back to the built-in Stremio option - whatever site page
+            # was resolved is wrong for it, and _on_suggestion_selected
+            # is what puts the stremio:// link back.
+            self._pending_video_identity = None
+            self.url_edit.setText("")
+            self._set_status_part("site", "")
+            return
+        self.url_edit.setText("")
+        if title:
+            self._start_video_site_resolution(site_id, title)
+
+    def _start_video_site_resolution(self, site_id, title):
+        site = anime_sites.get_site(site_id)
+        if not site:
+            self._pending_video_identity = None
+            self._set_status_part("site", "")
+            return
+        # Identity, not url_edit's text, tracks staleness here - the
+        # field is empty for the whole duration of the lookup, so it
+        # can't tell one pending lookup from another.
+        identity = f"{site_id}\n{title}"
+        self._pending_video_identity = identity
+        self._set_status_part("site", f"Finding this title on {site['name']}...")
+        threading.Thread(target=self._resolve_video_site_url,
+                          args=(site, title, identity), daemon=True).start()
+
+    def _resolve_video_site_url(self, site, title, identity):
+        # Must never raise: an uncaught exception would kill the thread
+        # silently and leave the dialog stuck on "Finding this title...".
+        try:
+            url = anime_sites.resolve_page_url(site, title)
+        except Exception:
+            url = None
+        self._signals.video_url_resolved.emit(identity, site.get("name", ""), url or "")
+
+    def _on_video_url_resolved(self, identity, site_name, url):
+        if identity != self._pending_video_identity:
+            return  # the user picked a different title or site meanwhile
+        self.url_edit.setText(url)
+        self._set_status_part(
+            "site", "" if url else f"No page found on {site_name} - it'll open that site's search instead")
+
     def _resolve_episode_progress(self, imdb_id, catalog, identity):
         try:
             total = stremio.fetch_latest_episode(imdb_id, catalog)
@@ -1549,7 +1651,10 @@ class EntryForm(QDialog):
         # link left over from an earlier pick or from switching the
         # dropdown by hand after one - open_tracker_entry tries url
         # first, so a stale one there would silently override the site.
-        if is_anime and site_id is not None:
+        # An http(s) url here is the opposite case: it's the page
+        # anime_sites resolved *on that site*, and it's exactly what
+        # should open, instead of the site's search results.
+        if is_anime and site_id is not None and saved_url.startswith("stremio://"):
             saved_url = ""
         self.entry.update(
             title=title,

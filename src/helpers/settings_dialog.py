@@ -754,7 +754,7 @@ class SettingsDialog(QDialog):
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         self.video_sites_list.addItem(item)
         for site in anime_sites.list_sites():
-            item = QListWidgetItem(f"{site['name']}  —  {site['search_url']}")
+            item = QListWidgetItem(f"{site['name']}  —  {site['base_url']}")
             item.setData(Qt.ItemDataRole.UserRole, site["id"])
             self.video_sites_list.addItem(item)
 
@@ -763,8 +763,9 @@ class SettingsDialog(QDialog):
         return items[0].data(Qt.ItemDataRole.UserRole) if items else None
 
     def _add_video_site(self):
-        dialog = SiteForm(self, "Video Website", url_label="Search URL",
-                           url_placeholder="https://example.com/search?q=")
+        # Same plain base URL as a Reading Website now - the per-site
+        # search pattern is worked out in anime_sites, not typed here.
+        dialog = SiteForm(self, "Video Website")
         if dialog.result_data:
             anime_sites.add_site(*dialog.result_data)
             self._refresh_video_sites()
@@ -774,8 +775,7 @@ class SettingsDialog(QDialog):
         if not site_id:
             QMessageBox.information(self, "Video Websites", "Select a website first.")
             return
-        dialog = SiteForm(self, "Video Website", anime_sites.get_site(site_id),
-                           url_label="Search URL", url_placeholder="https://example.com/search?q=")
+        dialog = SiteForm(self, "Video Website", anime_sites.get_site(site_id))
         if dialog.result_data:
             anime_sites.update_site(site_id, *dialog.result_data)
             self._refresh_video_sites()
@@ -869,11 +869,12 @@ class SettingsDialog(QDialog):
 
 class SiteForm(QDialog):
     """Add/edit one site: just a name + URL - shared by Reading Websites
-    (a base URL) and Video Websites (a search-URL prefix). `result_data`
+    and Video Websites, which both store a plain base URL now (video
+    sites used to want a hand-typed "/search?q=" prefix here; the search
+    pattern is derived per site in anime_sites instead). `result_data`
     is a (name, url) tuple after a successful Save, else None."""
 
-    def __init__(self, parent, kind, site=None, url_label="Website URL",
-                 url_placeholder="https://example.com/"):
+    def __init__(self, parent, kind, site=None):
         super().__init__(parent)
         self.result_data = None
         self.setWindowTitle(f"Edit {kind}" if site else f"Add {kind}")
@@ -889,10 +890,9 @@ class SiteForm(QDialog):
         form.addWidget(self.name_edit)
 
         form.addSpacing(8)
-        form.addWidget(QLabel(url_label))
-        initial_url = (site.get("base_url") or site.get("search_url")) if site else ""
-        self.url_edit = QLineEdit(initial_url)
-        self.url_edit.setPlaceholderText(url_placeholder)
+        form.addWidget(QLabel("Website URL"))
+        self.url_edit = QLineEdit(site.get("base_url", "") if site else "")
+        self.url_edit.setPlaceholderText("https://example.com/")
         form.addWidget(self.url_edit)
 
         form.addStretch()
