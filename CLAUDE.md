@@ -35,6 +35,8 @@ root, which updates itself from this repository's GitHub tags.
    - **"Approved, release it"**: skip the `development` push; use the
      `release` skill instead - goes out on `main`, bumping the
      *second* part (1.0 → 1.1), not the third.
+   - **Always report a push as previous → current** (e.g. "1.1.2 →
+     1.1.3"), never the new number alone.
 5. **Never test against real user data** in `%APPDATA%\Atomic`. Copy it
    to a temp directory and point `storage.DATA_DIR` at the copy before
    importing anything - see the `test` skill.
