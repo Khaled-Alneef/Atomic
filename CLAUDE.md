@@ -18,6 +18,10 @@ root, which updates itself from this repository's GitHub tags.
 2. **Work happens on `development`.** `main` holds released versions
    only, as squashed snapshots with no shared ancestry, so a merge
    between them refuses - release by snapshot (`release` skill).
+   **Agents read and operate on `development` only. Never read, diff
+   against, or check out `main` unless the task is explicitly release-
+   related** (the `release-engineer` running the `release` skill) - not
+   even to look something up.
 3. **Implement, then stop.** Finish, rebuild locally (`build` skill),
    leave it for the user to test - don't commit or push on your own
    initiative, however small the change. Testing happens before code
