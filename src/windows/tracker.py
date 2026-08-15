@@ -1138,6 +1138,9 @@ class EntryForm(QDialog):
         # below, wired up only after the initial values are set so
         # loading an existing entry doesn't misread as a fresh edit).
         self._progress_verified = bool(entry and entry.get("progress_verified"))
+        # Set only when this form fills the episode boxes itself from
+        # the latest aired episode - see _on_latest_episode_resolved.
+        self._autofilled_progress = False
         # Whether a suggestion has been applied yet (by click or by exact-
         # title auto-match - see _apply_search_results). Starts True for
         # an existing entry that's already resolved, so re-opening it to
@@ -1735,10 +1738,32 @@ class EntryForm(QDialog):
             # progress, only ever the latest aired episode, so it should
             # never count as verified.
             self._progress_verified = False
+            self._autofilled_progress = True
             self._set_status_part("progress", NOT_YOUR_PROGRESS_HINT)
 
     def _on_progress_hand_edited(self, _value):
         self._progress_verified = True
+
+    def _progress_is_yours(self) -> bool:
+        """Whether the progress being saved should count as really yours,
+        and so actually appear on the card (see _progress_display).
+
+        Changing a spinner already says yes. This covers the case that
+        does not: an entry whose stored progress is right there in the
+        form, that you open and save without nudging anything. Nothing
+        marked it verified, so the card stayed blank however many times
+        you saved it - and the only way out was to change the number and
+        change it back. Pressing Save on a value the form is showing you
+        is an assertion that it is yours.
+
+        The exception is a value this form filled in itself during this
+        session, which is the latest aired episode rather than anything
+        you watched - that keeps its hint and stays unverified."""
+        if self._progress_verified:
+            return True
+        if self._autofilled_progress:
+            return False
+        return bool(self._progress_text())
 
     # ------------------------------------------------------------------
     def _progress_text(self):
@@ -1800,7 +1825,7 @@ class EntryForm(QDialog):
             type=current_type,
             status=self.status_box.currentText(),
             progress=self._progress_text(),
-            progress_verified=self._progress_verified,
+            progress_verified=self._progress_is_yours(),
             latest_available=self._latest_available,
             last_watched_chapter=self.watched_chapter_spin.value() if is_manga else None,
             url=saved_url,
