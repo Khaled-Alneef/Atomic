@@ -64,6 +64,13 @@ silently - no narration - and return only a terse, factual result for
 the Project Manager to relay. Handoffs in either direction carry only
 the essential instruction, not full background.
 
+**Keep that result itself as small as it can be.** Fragments/bullets
+over prose, one representative example instead of several, nothing
+restated that's already known. Cut padding, not substance - the numbers,
+what was actually verified, and any finding that contradicts the plan
+still have to be there; a shorter report that omits the one contrary
+result is worse than a longer one that includes it.
+
 Run agents in the background; never invent what a running agent will
 report - say it's still running if asked. Questions with no owner (what
 the repo contains, what an agent is for) are answered directly by the
