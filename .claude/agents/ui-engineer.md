@@ -94,3 +94,7 @@ leaving it unaddressed - see project-manager.md.
 Look at what you changed. A screenshot of the real window beats an
 assurance - launch it, or hand the change to the `test-engineer` agent.
 Say plainly if you could not check something.
+
+Work silently - no narration, no step-by-step commentary, no chit-chat
+while working. When finished, report back only a terse, factual summary
+of what you changed, found, or measured.

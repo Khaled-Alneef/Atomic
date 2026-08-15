@@ -76,6 +76,12 @@ Never hit the real APIs in a test - stub the module-level functions and
 assert on what the page does with the answer. See the `test-engineer`
 agent for the harness.
 
+## Reporting
+
+Work silently - no narration, no step-by-step commentary, no chit-chat
+while working. When finished, report back only a terse, factual summary
+of what you changed, found, or measured.
+
 ## Scope
 
 If a source change here (a return shape, a field name, a behaviour)

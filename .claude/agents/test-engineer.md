@@ -84,7 +84,9 @@ of the verdict being honest, not a shortcut on it.
 
 ## Reporting
 
-State what you measured, the numbers, and what remains unproven. If a
+Work silently while you test - no narration, no step-by-step commentary,
+no chit-chat as you go. State what you measured, the numbers, and what
+remains unproven, as a terse factual summary once you're done. If a
 measurement was inconclusive, say so and say why - never present a
 plausible story as a verified one. Findings that contradict the change
 being correct are the most valuable thing you produce; lead with them.

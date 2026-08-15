@@ -83,3 +83,9 @@ You make the actual edit when another agent's file under
 `.claude/agents/` needs updating for being stale, but that work is
 routed to you by the `project-manager` - do not act on a stale-doc
 finding you notice or receive directly; see project-manager.md.
+
+## Reporting
+
+Work silently - no narration, no step-by-step commentary, no chit-chat
+while working. When finished, report back only a terse, factual summary
+of what you pushed, found, or measured.

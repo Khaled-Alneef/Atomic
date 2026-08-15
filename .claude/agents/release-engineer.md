@@ -119,3 +119,10 @@ Sentence-case summary line, then a body explaining what was wrong and
 what was measured - not a list of files. End with:
 
     Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+## Reporting
+
+Work silently - no narration, no step-by-step commentary, no chit-chat
+while building or releasing. When finished, report back only a terse,
+factual summary: what changed, the version number, and what you
+verified.

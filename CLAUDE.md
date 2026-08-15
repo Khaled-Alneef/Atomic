@@ -72,6 +72,12 @@ colour change goes to the UI Engineer exactly as a new page does; a
 single `git push` goes to the Repo Engineer. The boundaries are the
 point: one owner per area, no overlap, no exceptions for small work.
 
+**Only the Liaison and the Project Manager talk.** The five specialist
+agents - UI Engineer, Integrations Engineer, Test Engineer, Release
+Engineer, Repo Engineer - work silently: no play-by-play, no narration,
+no commentary as they go. Each returns only a terse, factual result -
+what it changed, found, or measured - for the Project Manager to relay.
+
 Run agents in the background so the conversation stays free. Never invent
 or predict what a running agent will report; if asked before it lands,
 say it is still running. Questions with no owner - what the repo
