@@ -54,7 +54,29 @@ def hold_hover_cursor(widget):
 
 
 def release_hover_cursor(widget):
-    widget.unsetCursor()
+    # The C++ widget can already be gone while this registry still lists
+    # it: a WeakSet drops an entry when the *Python* wrapper dies, and a
+    # wrapper outlives its deleteLater()'d widget for as long as anything
+    # still references it - which the Home carousel's slide labels do
+    # (see home._transition_hero, which deleteLater()s three of them
+    # every 5s while _hero_mid_widget still names one).
+    #
+    # This is what crashed the app. unsetCursor() on a deleted wrapper
+    # raises RuntimeError, and this runs inside the cursor watchdog's
+    # timer slot (main._cursor_watchdog_tick, every 120ms) - PyQt6 turns
+    # an exception that escapes a slot into qFatal(), which is an
+    # immediate abort, not a traceback. Measured: the frozen build died
+    # 20.5s after launch with exit code 0xc0000409 (fastfail, faulting
+    # module Qt6Core.dll) with the pointer simply resting over the hero,
+    # matching the reported "crashes about 20 seconds after opening".
+    #
+    # Unsetting the cursor on a widget that no longer exists is a no-op
+    # worth nothing, so swallow it - but drop it from the registry
+    # either way, which is the part that actually needs doing.
+    try:
+        widget.unsetCursor()
+    except RuntimeError:
+        pass  # already deleted on the C++ side - nothing to unset
     _HOVER_CURSOR_WIDGETS.discard(widget)
 
 
