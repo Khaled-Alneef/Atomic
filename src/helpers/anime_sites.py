@@ -48,11 +48,12 @@ import html
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 
-from . import anilist, storage, title_match
+from . import anilist, storage, title_match, wikidata
 
 SITES_FILE = "anime_sites.json"
 
@@ -751,13 +752,71 @@ def _streaming_normalize(url: str, suffix: str, origin: str, locale_re):
     return origin + path if path else None
 
 
+def _netflix_available(url: str, timeout: int):
+    """True/False for whether Netflix serves this title page here, or
+    None when that couldn't be determined.
+
+    Netflix ids are global but its catalogue is regional, so a perfectly
+    correct id 404s from a country the title isn't licensed in -
+    measured on Frieren, whose id (81726714) is the right one and still
+    404s from here. Saving that would pin the entry to a dead page
+    forever, which is worse than the search page it would otherwise
+    fall back to.
+
+    The body is deliberately never read: Netflix truncates these
+    responses (a plain read raises IncompleteRead on pages that are
+    perfectly fine), and the status line is the whole question."""
+    try:
+        request = urllib.request.Request(url, headers={
+            "Accept": "text/html,*/*",
+            "User-Agent": "Mozilla/5.0 PC-App/1.0",
+        })
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status == 200
+    except urllib.error.HTTPError as exc:
+        return False if exc.code == 404 else None
+    except Exception:
+        return None
+
+
+def _netflix_page_url(title: str, timeout: int):
+    """Netflix's own page for `title`, from Wikidata's published id.
+
+    Asked before AniList, not instead of it. AniList does carry Netflix
+    rows, but it answers 403 to an ordinary connection once it decides
+    the connection has asked too often - for hours, and indistinguishably
+    from "no link exists", because every lookup here fails soft. Wikidata
+    answered for every title tried and is not the same dependency as the
+    rest of the app's anime metadata, so a bad afternoon on one doesn't
+    take the other down with it.
+
+    A confirmed 404 is treated as no answer. Anything else - including a
+    failed check - keeps the link: the id came from a source that says
+    the title is on Netflix, so a transient network error is not reason
+    enough to throw it away."""
+    for variant in _query_variants(title):
+        netflix_id = wikidata.fetch_netflix_id(variant, timeout)
+        if not netflix_id:
+            continue
+        url = wikidata.page_url(netflix_id)
+        if _netflix_available(url, timeout) is False:
+            return None
+        return url
+    return None
+
+
 def _streaming_page_url(row, title: str, timeout: int):
-    """`title`'s own page on one of the _STREAMING_SITES, via AniList's
-    record of it, or None so the caller falls back to that site's search
-    page. The query variants are the same ones the engines get, tried in
-    the same order and only while the previous came back empty, so the
-    ordinary case is one request."""
+    """`title`'s own page on one of the _STREAMING_SITES, via whatever
+    third party publishes the link, or None so the caller falls back to
+    that site's search page. The query variants are the same ones the
+    engines get, tried in the same order and only while the previous
+    came back empty, so the ordinary case is one request."""
     suffix, keyword, origin, locale_re, deprioritize_re, canonical = row
+    if keyword == "netflix":
+        found = _netflix_page_url(title, timeout)
+        if found:
+            return found
+        # else fall through to AniList, which has its own Netflix rows
     for variant in _query_variants(title):
         try:
             urls = anilist.fetch_external_urls(variant, keyword, timeout)

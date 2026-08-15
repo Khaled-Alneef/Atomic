@@ -78,9 +78,23 @@ rebuild that without a real reason to revisit it.
 **AniList rate-limits hard, and fails soft into silence.** Sustained
 querying gets the whole network a `403` on every POST (not a 429),
 which every lookup here swallows and reports as "no result" - so a
-block looks exactly like "this title has no link". When a previously
-working AniList lookup starts returning nothing, check for the 403
-before believing the data changed.
+block looks exactly like "this title has no link". Measured lasting
+over an hour. When a previously working AniList lookup starts returning
+nothing, check for the 403 before believing the data changed.
+
+**Netflix ids come from Wikidata (`wikidata.py`, property P1874), not
+AniList.** Keyless and public, two requests per lookup, and it answered
+for every title tried while AniList was blocked. AniList's Netflix rows
+remain as a fallback. Two traps already paid for:
+- *Many entities share one label.* "Frieren" returns a manga, a
+  character, a painting, a Norwegian TV film and the anime. Label
+  similarity alone cannot separate them; what does is that only the
+  anime carries a Netflix id at all. Don't loosen that to "best label
+  match" - it would pin an entry to a painting.
+- *A correct id can still 404.* Netflix ids are global, its catalogue
+  is regional. Frieren's id is right and 404s from this region, so the
+  resolved URL is probed before being saved and a confirmed 404 is
+  discarded. Only a 404 discards - a failed probe keeps the link.
 
 ## When a lookup looks wrong
 

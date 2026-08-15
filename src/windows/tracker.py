@@ -418,6 +418,11 @@ class TrackerPage(GlassPage):
         self._schedule_signals.resolved.connect(self._on_schedule_resolved)
 
         self.entries = _migrate(storage.load(self.DATA_FILE, []), self.DATA_FILE)
+        # What was on disk when this page loaded. _save_entries needs it
+        # to tell "another page deleted this while I was open" from "I
+        # have just added this and it isn't saved yet" - both look like
+        # an entry of someone else's type that disk doesn't have.
+        self._ids_at_load = {e.get("id") for e in self.entries if e.get("id")}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -633,7 +638,7 @@ class TrackerPage(GlassPage):
             return
         entry["cover_url"] = new_url
         entry["cover_path"] = path
-        storage.save(self.DATA_FILE, self.entries)
+        self._save_entries()
         self._refresh_grid()
 
     def _backfill_missing_latest_available(self):
@@ -794,7 +799,7 @@ class TrackerPage(GlassPage):
         current = entry.get("last_watched_chapter") or 0.0
         entry["last_watched_chapter"] = max(0.0, current + delta)
         entry["updated_at"] = storage.now_iso()
-        storage.save(self.DATA_FILE, self.entries)
+        self._save_entries()
         self._refresh_grid()
 
     def _progress_display(self, entry):
@@ -915,7 +920,7 @@ class TrackerPage(GlassPage):
                     "Stremio itself, not just added it to your library. You can "
                     "still set your progress by hand in Edit.")
                 return
-            storage.save(self.DATA_FILE, self.entries)
+            self._save_entries()
             self._refresh_grid()
             return
 
@@ -926,18 +931,64 @@ class TrackerPage(GlassPage):
         # single-entry message above) is not a failure, just nothing new.
         self._sync_pending -= 1
         if self._sync_pending <= 0:
-            storage.save(self.DATA_FILE, self.entries)
+            self._save_entries()
             self._refresh_grid()
             changed, self._sync_changed = self._sync_changed, False
             run, self._sync_batch_run = self._sync_batch_run, 0
             self._refresh_step_done(run, changed)
+
+    def _save_entries(self):
+        """Write this page's entries back without discarding another
+        page's.
+
+        Anime and Reading are both backed by tracker.json, and each holds
+        its own copy of the *whole* file loaded when it was built. Saving
+        that copy wholesale writes back the other page's entries as they
+        were at build time, so whichever page saved last silently undid
+        the other - a synced episode number reverting the next time the
+        Reading page saved anything, which is what "progress doesn't
+        track" turned out to be. Reproduced end to end before this
+        existed: progress written as S09E99, then back to S01E04 the
+        moment the other page saved.
+
+        So: this page's own entry types come from this page, everything
+        else is re-read from disk, and anything a page added since this
+        one loaded is carried over rather than dropped. `update_entry`
+        remains the right call for a single field on a single entry (see
+        .claude/rules/ui.md); this is for the paths that genuinely
+        rewrite the list, like reordering."""
+        on_disk = storage.load(self.DATA_FILE, [])
+        fresh = {e.get("id"): e for e in on_disk if e.get("id")}
+        merged = []
+        for entry in self.entries:
+            if entry.get("type") in self.ENTRY_TYPES:
+                merged.append(entry)          # mine - this page's copy wins
+                continue
+            other_pages_copy = fresh.get(entry.get("id"))
+            if other_pages_copy is not None:
+                merged.append(other_pages_copy)   # theirs - disk is fresher
+            elif entry.get("id") not in self._ids_at_load:
+                merged.append(entry)          # added here, not saved yet
+            # else: it was there when this page loaded and is gone from
+            # disk now, so another page deleted it - let the delete stand
+        # Anything on disk this page doesn't have: added by another page
+        # since this one loaded, so carry it over - *unless* it is one of
+        # this page's own types, which means this page just deleted it.
+        # Without that distinction a delete is silently undone, because
+        # "someone else added it" and "I removed it" look identical from
+        # here. Caught by test, not by reading it back.
+        known = {e.get("id") for e in merged}
+        merged.extend(e for e in on_disk
+                      if e.get("id") not in known
+                      and e.get("type") not in self.ENTRY_TYPES)
+        storage.save(self.DATA_FILE, merged)
 
     def _move_entry(self, entry, delta):
         idx = self.entries.index(entry)
         new_idx = idx + delta
         if 0 <= new_idx < len(self.entries):
             self.entries[idx], self.entries[new_idx] = self.entries[new_idx], self.entries[idx]
-            storage.save(self.DATA_FILE, self.entries)
+            self._save_entries()
             self._refresh_grid()
 
     # ------------------------------------------------------------------
@@ -985,7 +1036,7 @@ class TrackerPage(GlassPage):
     def _delete_entry(self, entry):
         if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") == QMessageBox.StandardButton.Yes:
             self.entries.remove(entry)
-            storage.save(self.DATA_FILE, self.entries)
+            self._save_entries()
             self._refresh_grid()
 
     # ------------------------------------------------------------------
@@ -1013,7 +1064,7 @@ class TrackerPage(GlassPage):
         # changed *needs* one - the recorded miss was for the old title.
         if not entry.get("url"):
             entry.pop("site_url_checked_at", None)
-        storage.save(self.DATA_FILE, self.entries)
+        self._save_entries()
         self._refresh_grid()
         self._refresh_schedules()
 
@@ -1087,6 +1138,9 @@ class EntryForm(QDialog):
         # below, wired up only after the initial values are set so
         # loading an existing entry doesn't misread as a fresh edit).
         self._progress_verified = bool(entry and entry.get("progress_verified"))
+        # Set only when this form fills the episode boxes itself from
+        # the latest aired episode - see _on_latest_episode_resolved.
+        self._autofilled_progress = False
         # Whether a suggestion has been applied yet (by click or by exact-
         # title auto-match - see _apply_search_results). Starts True for
         # an existing entry that's already resolved, so re-opening it to
@@ -1684,10 +1738,32 @@ class EntryForm(QDialog):
             # progress, only ever the latest aired episode, so it should
             # never count as verified.
             self._progress_verified = False
+            self._autofilled_progress = True
             self._set_status_part("progress", NOT_YOUR_PROGRESS_HINT)
 
     def _on_progress_hand_edited(self, _value):
         self._progress_verified = True
+
+    def _progress_is_yours(self) -> bool:
+        """Whether the progress being saved should count as really yours,
+        and so actually appear on the card (see _progress_display).
+
+        Changing a spinner already says yes. This covers the case that
+        does not: an entry whose stored progress is right there in the
+        form, that you open and save without nudging anything. Nothing
+        marked it verified, so the card stayed blank however many times
+        you saved it - and the only way out was to change the number and
+        change it back. Pressing Save on a value the form is showing you
+        is an assertion that it is yours.
+
+        The exception is a value this form filled in itself during this
+        session, which is the latest aired episode rather than anything
+        you watched - that keeps its hint and stays unverified."""
+        if self._progress_verified:
+            return True
+        if self._autofilled_progress:
+            return False
+        return bool(self._progress_text())
 
     # ------------------------------------------------------------------
     def _progress_text(self):
@@ -1749,7 +1825,7 @@ class EntryForm(QDialog):
             type=current_type,
             status=self.status_box.currentText(),
             progress=self._progress_text(),
-            progress_verified=self._progress_verified,
+            progress_verified=self._progress_is_yours(),
             latest_available=self._latest_available,
             last_watched_chapter=self.watched_chapter_spin.value() if is_manga else None,
             url=saved_url,

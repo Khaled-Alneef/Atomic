@@ -26,6 +26,16 @@ from . import theme, updater
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.3": [
+        "Netflix titles now open on the show's own page instead of "
+        "Netflix's search results.",
+        "A Netflix title that isn't available in your country falls back "
+        "to search rather than opening a dead page.",
+        "Your progress no longer reverts to an older number after "
+        "switching between the Anime and Reading pages.",
+        "An episode number you have typed in yourself now shows on the "
+        "card once you save it.",
+    ],
     "1.2": [
         "Anime and series now open on their own page, instead of dropping "
         "you on the website's search results.",
