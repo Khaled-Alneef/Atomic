@@ -19,7 +19,7 @@ the slide direction immediately too - nothing to keep in sync by hand.
 import sys
 from pathlib import Path
 
-from helpers import app_settings, images, native_cursor, storage, theme
+from helpers import app_settings, images, native_cursor, startup, storage, theme
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -337,8 +337,15 @@ class MainWindow(QMainWindow):
 
     def _style_settings_btn(self):
         collapsed = self._sidebar_collapsed
-        self.settings_btn.setText(theme.SETTINGS_ICON if collapsed else "  ⚙   Settings")
-        self.settings_btn.setFont(theme.icon_font() if collapsed else theme.font())
+        # Same glyph either way. Expanded used to show the ⚙ emoji, which
+        # is a different symbol drawn in its own fixed colors - folding the
+        # sidebar swapped the icon out from under you. SETTINGS_ICON is
+        # monochrome and inherits the button's color, so it works at both
+        # widths; it just renders at the label's 10.5pt here rather than
+        # the collapsed rail's 14pt, matching the size the emoji had.
+        self.settings_btn.setText(
+            theme.SETTINGS_ICON if collapsed else f"  {theme.SETTINGS_ICON}   Settings")
+        self.settings_btn.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
         self.settings_btn.setToolTip("Settings" if collapsed else "")
         # Drives the [collapsed="true"] QSS rule; Qt only re-evaluates
         # property-based selectors after an explicit unpolish/polish.
@@ -538,6 +545,23 @@ class MainWindow(QMainWindow):
         if state == Qt.ApplicationState.ApplicationActive:
             self._drain_override_cursor()
 
+    def start_fullscreen(self):
+        """Open straight into full screen, for a sign-in launch with
+        Settings > Startup > "Fullscreen mode when launch on startup" on.
+
+        _was_maximized is set by hand because nothing set it on the way
+        in: this window has never been shown in another state, and
+        leaving full screen reads that flag to decide what to go back to
+        - left False, F11/Escape would drop the app to the 1280x840
+        restored size it was never actually shown at. Maximized is what
+        every other launch gives you, so that is what it returns to.
+
+        No without_window_animation here, unlike toggle_fullscreen: that
+        one exists for a *visible* window changing between maximized and
+        full screen, and there is nothing on screen yet to animate from."""
+        self._was_maximized = True
+        self.showFullScreen()
+
     def toggle_fullscreen(self):
         if self.isFullScreen():
             self.exit_fullscreen()
@@ -715,7 +739,13 @@ def main():
     theme.apply_theme(app)
 
     window = MainWindow()
-    window.showMaximized()
+    # Full screen only for a launch Windows itself started at sign-in
+    # (the registered command carries startup.STARTUP_FLAG, nothing else
+    # does) - opening the app by hand is unaffected by that setting.
+    if startup.launched_on_startup() and app_settings.get_fullscreen_on_startup():
+        window.start_fullscreen()
+    else:
+        window.showMaximized()
     # Not just shown but actually brought forward. Launched normally this
     # is what already happens; launched by the updater's relaunch it is
     # not, and the window would otherwise sit behind everything blinking

@@ -223,6 +223,13 @@ QPushButton#FoldButton:hover {{
     background: {SURFACE};
     color: {TEXT};
 }}
+/* The icon font stack is on the base rule, not only on the collapsed one
+   below, because both states now draw the same gear (see main._style_
+   settings_btn) - expanded used an emoji, which rendered in its own fixed
+   colors and at its own size, so folding the sidebar visibly swapped the
+   symbol. Segoe Fluent Icons carries no Latin letters, so the "Settings"
+   label after the glyph falls through the chain to Segoe UI on its own
+   and looks exactly as it did. */
 QPushButton#NavButton {{
     background: transparent;
     color: {TEXT_MUTED};
@@ -230,6 +237,7 @@ QPushButton#NavButton {{
     border-radius: {RADIUS_SM}px;
     text-align: left;
     padding: 7px 12px;
+    font-family: {FONT_STACK_ICONS};
     font-size: 10.5pt;
     font-weight: 600;
 }}
@@ -516,6 +524,21 @@ QCheckBox::indicator:checked {{
     background: {ACCENT};
     border: 1px solid {ACCENT};
     image: url({CHECKMARK_PATH});
+}}
+/* Disabled state, for a checkbox that only applies while another one is
+   on (Settings > Startup's fullscreen option follows the Windows-startup
+   toggle above it). Spelled out because the rules above replace Qt's
+   native indicator drawing entirely - including the greying it would
+   otherwise do for free, which left a dead checkbox looking every bit as
+   live as a working one. */
+QCheckBox:disabled {{ color: {TEXT_MUTED}; }}
+QCheckBox::indicator:disabled {{
+    border: 1px solid {BORDER};
+    background: {BG};
+}}
+QCheckBox::indicator:checked:disabled {{
+    background: {ACCENT_SOFT};
+    border: 1px solid {ACCENT_SOFT};
 }}
 
 /* ---- Lists / Trees ------------------------------------------------------ */

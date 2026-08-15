@@ -18,7 +18,9 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import child_process, images, storage, theme
-from helpers.widgets import Card, GlassPage, scroll_area
+from helpers.widgets import (
+    Card, CardDragReorder, GlassPage, defer_grid_rebuild, scroll_area,
+)
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 EXE_FILTER = "Executable / Shortcut (*.exe *.lnk);;All files (*.*)"
@@ -59,6 +61,12 @@ def _migrate_entry(entry):
     existed."""
     if "targets" not in entry:
         entry["targets"] = [{"type": entry.pop("type", "site"), "target": entry.pop("target", "")}]
+    if not entry.get("id"):
+        # Entries saved before ids existed have none, and everything that
+        # touches one entry rather than the whole list works by id -
+        # update_entry, and now drag-to-reorder, which would otherwise
+        # match every id-less card against every other one.
+        entry["id"] = str(uuid.uuid4())
     if "added_at" not in entry:
         entry["added_at"] = storage.now_iso()
     if "last_used" not in entry:
@@ -123,7 +131,7 @@ class LinkGridPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        hint = QLabel("(right-click a card for Move Up/Down while sorted as Custom Order)", objectName="Muted")
+        hint = QLabel("(drag a card to reorder, or right-click it for Move Up/Down)", objectName="Muted")
         top_row.addWidget(hint)
         top_row.addStretch()
         panel_layout.addLayout(top_row)
@@ -134,7 +142,36 @@ class LinkGridPage(GlassPage):
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         panel_layout.addWidget(scroll_area(self.grid_body), stretch=1)
 
+        self._drag_reorder = CardDragReorder(
+            self.grid_body, self._begin_custom_order, self._drop_reorder)
+
         self._refresh_grid()
+
+    # ------------------------------------------------------------------
+    def _begin_custom_order(self):
+        """A drag has started, so this page is in Custom Order from here
+        on - see GamesPage._begin_custom_order, same reasoning: any other
+        sort is re-applied on the next redraw and would undo the drop.
+
+        The order on screen is saved as the custom one before the switch,
+        so the switch itself moves nothing, and the dropdown is set with
+        its signal blocked because a rebuild here would delete the card
+        being dragged."""
+        if self.sort_box.currentText() == "Custom Order":
+            return
+        order = [e.get("id") for e in self._sorted_entries()]
+        storage.apply_custom_order(self.DATA_FILE, order)
+        # In place, not reloaded: the cards on screen hold these dicts.
+        storage.order_by_ids(self.entries, order)
+        self.sort_box.blockSignals(True)
+        self.sort_box.setCurrentText("Custom Order")
+        self.sort_box.blockSignals(False)
+
+    def _drop_reorder(self, moved_id, target_id):
+        if not storage.move_entry(self.DATA_FILE, moved_id, target_id):
+            return
+        storage.move_in_list(self.entries, moved_id, target_id)
+        defer_grid_rebuild(self._refresh_grid)
 
     # ------------------------------------------------------------------
     def _sorted_entries(self):
@@ -189,6 +226,7 @@ class LinkGridPage(GlassPage):
 
         card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
+        self._drag_reorder.attach(card, entry.get("id"))
         return card
 
     def _show_context_menu(self, event, entry):

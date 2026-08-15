@@ -2,9 +2,9 @@
 
 import weakref
 
-from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer
+from PyQt6.QtCore import QEvent, QMimeData, QObject, QPointF, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QColor, QPainter, QRadialGradient
+from PyQt6.QtGui import QColor, QDrag, QPainter, QRadialGradient
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFrame, QLabel, QScrollArea, QToolTip, QWidget,
 )
@@ -109,6 +109,13 @@ class Card(QFrame):
         self.setProperty("hoverable", hoverable)
         self.setProperty("matte", matte)
         self._tooltip_provider = None
+        # All None/False unless enable_drag_reorder is called, which is
+        # what keeps a plain card (Home's, the ones in previews) on the
+        # original click-on-press path untouched.
+        self._drag_id = None
+        self._drag_reorder = None
+        self._press_pos = None
+        self._dragged = False
 
     # A card carries no cursor of its own until the pointer is genuinely
     # inside it. Setting the pointing hand in __init__ instead - which is
@@ -147,12 +154,215 @@ class Card(QFrame):
             return True
         return super().event(event)
 
+    # ---- drag-to-reorder ---------------------------------------------
+    def enable_drag_reorder(self, item_id, reorder):
+        """Let this card be dragged to a new position in its grid.
+
+        Opt-in per card, because it changes when `clicked` fires: a
+        draggable card can't emit on press (which is what the plain card
+        does) - the press that starts a drag would launch the game or
+        open the entry as well as moving it. It emits on release instead,
+        and not at all if the pointer travelled far enough to become a
+        drag."""
+        self._drag_id = item_id
+        self._drag_reorder = reorder
+
+    def drag_id(self):
+        return self._drag_id
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        elif event.button() == Qt.MouseButton.RightButton:
+        if event.button() == Qt.MouseButton.RightButton:
+            # Any half-finished left press is abandoned: the context menu
+            # runs its own event loop, and the release that eventually
+            # arrives should not be read as a click on the card behind it.
+            self._press_pos = None
             self.rightClicked.emit(event)
+        elif event.button() == Qt.MouseButton.LeftButton:
+            if self._drag_reorder is None:
+                self.clicked.emit()
+            else:
+                self._press_pos = event.position().toPoint()
+                self._dragged = False
+                # Accepted explicitly: QFrame's handler ignores the press,
+                # which hands the mouse grab to the parent and means no
+                # further move events arrive here - and a drag that can
+                # never see the pointer move can never start.
+                event.accept()
+                return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (self._drag_reorder is None or self._press_pos is None
+                or not (event.buttons() & Qt.MouseButton.LeftButton)):
+            super().mouseMoveEvent(event)
+            return
+        travelled = (event.position().toPoint() - self._press_pos).manhattanLength()
+        if travelled < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+        self._dragged = True
+        press_pos, self._press_pos = self._press_pos, None
+        # Nothing may touch `self` after this: start_drag runs a nested
+        # event loop for the whole gesture, and the drop that ends it
+        # rebuilds the grid - so this card is on its way out by the time
+        # the call returns.
+        self._drag_reorder.start_drag(self, press_pos)
+
+    def mouseReleaseEvent(self, event):
+        if (self._drag_reorder is not None and event.button() == Qt.MouseButton.LeftButton
+                and self._press_pos is not None and not self._dragged):
+            self._press_pos = None
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+# The dragged card's id, as the drag's payload. A private type rather
+# than text/plain so a stray drag from outside the app - a file, a link -
+# can never be read as one of these.
+CARD_DRAG_MIME = "application/x-atomic-card-id"
+
+# How close to the top/bottom edge of the scroll viewport the pointer has
+# to get before the page starts following it, and how far it moves per
+# drag-move event. Without this a grid taller than the window can only be
+# reordered within the part of it you can already see.
+_AUTOSCROLL_MARGIN = 56
+_AUTOSCROLL_STEP = 18
+
+
+class CardDragReorder(QObject):
+    """Drag-to-reorder for a grid of Cards laid out inside `container`.
+
+    The container is the drop site, not the individual cards: a Card sets
+    no acceptDrops, so Qt walks up the parent chain and delivers every
+    drag event here, to one filter, instead of needing a handler on each
+    of the however-many cards a page just built.
+
+    `on_begin()` fires the moment a drag actually starts - before the
+    drag's own event loop - so the page can switch its sort to Custom
+    Order first. That has to happen at the start and not at the drop:
+    a non-custom sort is re-applied on the next redraw and would put the
+    dragged card straight back where it came from.
+
+    `on_drop(moved_id, target_id)` gets the two card ids and does the
+    reordering; positions are deliberately not passed, since where a card
+    sits in the grid says nothing about where its entry sits in the saved
+    list (Anime/Reading/Series draw one section per status)."""
+
+    def __init__(self, container, on_begin, on_drop):
+        super().__init__(container)
+        self._container = container
+        self._on_begin = on_begin
+        self._on_drop = on_drop
+        container.setAcceptDrops(True)
+        container.installEventFilter(self)
+
+    def attach(self, card, item_id):
+        card.enable_drag_reorder(item_id, self)
+
+    def start_drag(self, card, press_pos):
+        self._on_begin()
+        drag = QDrag(card)
+        mime = QMimeData()
+        mime.setData(CARD_DRAG_MIME, str(card.drag_id()).encode("utf-8"))
+        drag.setMimeData(mime)
+        # grab() already returns a pixmap at the display's devicePixelRatio
+        # with the ratio tagged on it, so the dragged card is as sharp as
+        # the one it was lifted off - the hot spot below is in logical
+        # pixels either way, which is why it can come straight from the
+        # press position.
+        drag.setPixmap(card.grab())
+        drag.setHotSpot(press_pos)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    # ------------------------------------------------------------------
+    def _cards(self):
+        """The cards currently laid out in the container.
+
+        Asked of the container each time rather than kept in a list: the
+        grid is torn down and rebuilt on every sort change and every
+        edit, and a list of cards would be a list of deleted ones.
+
+        Read off the layout rather than off findChildren, because a
+        rebuilt grid's old cards are only takeAt'd and deleteLater'd -
+        they stay children of the container, at their old geometry, until
+        the event loop actually gets to the delete. Found by findChildren
+        they were live drop targets holding stale positions, and a drop
+        could resolve to a card that was no longer on screen."""
+        layout = self._container.layout()
+        if layout is None:
+            return []
+        cards = []
+        for i in range(layout.count()):
+            widget = layout.itemAt(i).widget()
+            if isinstance(widget, Card) and widget.drag_id() is not None:
+                cards.append(widget)
+        return cards
+
+    def _card_at(self, pos):
+        """The card the pointer is over, or - in the gaps between cards,
+        and in the empty space past the end of a row - the nearest one.
+        Nearest rather than nothing, so a drop that lands a few pixels
+        into the 14px gutter still does what it obviously meant."""
+        best, best_distance = None, None
+        for card in self._cards():
+            geometry = card.geometry()
+            if geometry.contains(pos):
+                return card
+            offset = geometry.center() - pos
+            distance = offset.x() ** 2 + offset.y() ** 2
+            if best_distance is None or distance < best_distance:
+                best, best_distance = card, distance
+        return best
+
+    def _autoscroll(self, pos):
+        parent = self._container.parentWidget()
+        area = parent.parentWidget() if parent is not None else None
+        if not isinstance(area, QScrollArea):
+            return
+        bar = area.verticalScrollBar()
+        # Into the viewport's own coordinates. mapToParent walks one step
+        # up the widget tree by widget position - no screen or global
+        # coordinates involved, so nothing here depends on the scale
+        # factor of whichever monitor the window is on.
+        y = self._container.mapToParent(pos).y()
+        if y < _AUTOSCROLL_MARGIN:
+            bar.setValue(bar.value() - _AUTOSCROLL_STEP)
+        elif y > parent.height() - _AUTOSCROLL_MARGIN:
+            bar.setValue(bar.value() + _AUTOSCROLL_STEP)
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            if not event.mimeData().hasFormat(CARD_DRAG_MIME):
+                return False
+            if kind == QEvent.Type.DragMove:
+                self._autoscroll(event.position().toPoint())
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return True
+        if kind == QEvent.Type.Drop:
+            if not event.mimeData().hasFormat(CARD_DRAG_MIME):
+                return False
+            moved_id = bytes(event.mimeData().data(CARD_DRAG_MIME)).decode("utf-8")
+            target = self._card_at(event.position().toPoint())
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            if target is not None and str(target.drag_id()) != moved_id:
+                self._on_drop(moved_id, str(target.drag_id()))
+            return True
+        return False
+
+
+def defer_grid_rebuild(rebuild):
+    """Redraw a grid *after* the drag that changed it has finished.
+
+    Called straight from the drop handler, the rebuild deletes the card
+    the drag is still being carried by - its mouseMoveEvent is sitting
+    underneath the drag's nested event loop, and would return into a
+    widget that no longer exists on the C++ side. A zero-delay timer puts
+    the rebuild back on the outer event loop, after the gesture is fully
+    unwound."""
+    QTimer.singleShot(0, rebuild)
 
 
 def _toast_anchor_window(widget):

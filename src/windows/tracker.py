@@ -29,7 +29,10 @@ from helpers import (
     anilist, anime_sites, app_settings, images, manga_sites, release_schedule,
     storage, stremio, theme,
 )
-from helpers.widgets import Card, GlassPage, finish_toast, scroll_area, show_toast
+from helpers.widgets import (
+    Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
+    scroll_area, show_toast,
+)
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
 
@@ -235,6 +238,13 @@ def _migrate(entries, data_file):
                 "Crunchyroll", "https://www.crunchyroll.com/search?q=")["id"]
 
     for entry in entries:
+        if not entry.get("id"):
+            # Everything that touches one entry rather than the whole
+            # list keys off this - update_entry, the background lookups
+            # reporting back, and now drag-to-reorder, which would
+            # otherwise see every id-less entry as the same one.
+            entry["id"] = str(uuid.uuid4())
+            changed = True
         if (crunchyroll_site_id and entry.get("type") == "Anime"
                 and not entry.get("url") and not entry.get("site_id")):
             entry["site_id"] = crunchyroll_site_id
@@ -388,6 +398,8 @@ class TrackerPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
+        hint = QLabel("(drag a card to reorder, or right-click it for Move Up/Down)", objectName="Muted")
+        top_row.addWidget(hint)
         top_row.addStretch()
         layout.addLayout(top_row)
 
@@ -396,6 +408,9 @@ class TrackerPage(GlassPage):
         self.grid_layout.setSpacing(14)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(scroll_area(self.grid_body), stretch=1)
+
+        self._drag_reorder = CardDragReorder(
+            self.grid_body, self._begin_custom_order, self._drop_reorder)
 
         self._refresh_grid()
         if self.SUPPORTS_PROGRESS_SYNC:
@@ -621,6 +636,26 @@ class TrackerPage(GlassPage):
         return "<br>".join(rows)
 
     # ------------------------------------------------------------------
+    def _sections(self):
+        """This page's entries grouped into the sections the grid draws,
+        as [(status, [entry, ...]), ...] in the order they appear.
+
+        Split out from _refresh_grid because the drag-to-reorder switch to
+        Custom Order has to save the order that is on screen (see
+        _begin_custom_order), and on this page that is the sections read
+        top to bottom - not what _visible_entries returns, which is one
+        flat list the grouping below then cuts up."""
+        # Grouped into sections by status (Watching/Reading first, same
+        # order as STATUSES_BY_TYPE) instead of one flat mixed grid - the
+        # sort dropdown still controls ordering *within* each section.
+        known_statuses = STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], STATUSES_BY_TYPE["Anime"])
+        grouped = {status: [] for status in known_statuses}
+        for entry in self._visible_entries():
+            grouped.setdefault(entry.get("status") or known_statuses[0], []).append(entry)
+        extra_statuses = [s for s in grouped if s not in known_statuses]
+        return [(status, grouped[status])
+                for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
+
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -628,26 +663,14 @@ class TrackerPage(GlassPage):
             if widget:
                 widget.deleteLater()
 
-        entries = self._visible_entries()
-        if not entries:
+        sections = self._sections()
+        if not sections:
             empty = QLabel(f"No {self.TITLE.lower()} yet - click '+' to create one.", objectName="Muted")
             self.grid_layout.addWidget(empty, 0, 0)
             return
 
-        # Grouped into sections by status (Watching/Reading first, same
-        # order as STATUSES_BY_TYPE) instead of one flat mixed grid - the
-        # sort dropdown still controls ordering *within* each section.
-        known_statuses = STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], STATUSES_BY_TYPE["Anime"])
-        grouped = {status: [] for status in known_statuses}
-        for entry in entries:
-            grouped.setdefault(entry.get("status") or known_statuses[0], []).append(entry)
-        extra_statuses = [s for s in grouped if s not in known_statuses]
-
         row = 0
-        for status in [*known_statuses, *extra_statuses]:
-            group = grouped.get(status) or []
-            if not group:
-                continue
+        for status, group in sections:
             header = QLabel(f"{status} ({len(group)})", objectName="SectionTitle")
             self.grid_layout.addWidget(header, row, 0, 1, GRID_COLS)
             row += 1
@@ -706,6 +729,7 @@ class TrackerPage(GlassPage):
 
         card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
+        self._drag_reorder.attach(card, entry.get("id"))
         return card
 
     def _bump_watched_chapter(self, entry, delta):
@@ -856,6 +880,48 @@ class TrackerPage(GlassPage):
             self.entries[idx], self.entries[new_idx] = self.entries[new_idx], self.entries[idx]
             storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
+
+    # ------------------------------------------------------------------
+    def _begin_custom_order(self):
+        """A drag has started, so this page is in Custom Order from here
+        on: any other sort is re-applied on the next redraw and would put
+        the dragged card straight back where it came from.
+
+        The order already on screen is written out as the custom one
+        first, so the switch itself moves nothing and only the drag that
+        follows changes anything. The dropdown is then set with its signal
+        blocked - the grid would only be rebuilt into the arrangement it
+        is already showing, and rebuilding it here would delete the card
+        currently being dragged."""
+        if self.sort_box.currentText() == "Custom Order":
+            return
+        # Section by section, top to bottom - the order the user is
+        # actually looking at, not the flat _visible_entries one.
+        order = [entry.get("id") for _status, group in self._sections() for entry in group]
+        storage.apply_custom_order(self.DATA_FILE, order)
+        # This page's own copy follows, in place rather than reloaded:
+        # every card on screen holds a reference to one of these dicts.
+        storage.order_by_ids(self.entries, order)
+        self.sort_box.blockSignals(True)
+        self.sort_box.setCurrentText("Custom Order")
+        self.sort_box.blockSignals(False)
+
+    def _drop_reorder(self, moved_id, target_id):
+        """The dragged entry takes the dropped-on entry's place in the
+        saved list.
+
+        Against the list, not against grid coordinates: this page draws
+        one section per status, so where a card sits on screen says
+        nothing about where its entry sits in the file. Dropping onto a
+        card in a *different* status section therefore moves the entry in
+        the list without appearing to move it much on screen - it still
+        belongs to its own section. Reordering within a section, which is
+        what the sections are there to make easy, does exactly what it
+        looks like."""
+        if not storage.move_entry(self.DATA_FILE, moved_id, target_id):
+            return
+        storage.move_in_list(self.entries, moved_id, target_id)
+        defer_grid_rebuild(self._refresh_grid)
 
     def _delete_entry(self, entry):
         if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") == QMessageBox.StandardButton.Yes:

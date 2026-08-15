@@ -2,7 +2,8 @@
 once (its icon is picked up automatically), then launch it with one click.
 Shown as a poster-style grid, same as Anime/Reading/Series - right-click a
 card for Edit/Move Up/Move Down/Delete, sort by name/date/last played, or
-reorder manually (Move Up/Down) while sorted as Custom Order.
+reorder by dragging a card onto the slot you want it in (which switches
+the sort to Custom Order as the drag begins).
 """
 
 import subprocess
@@ -18,7 +19,10 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import app_settings, child_process, images, launchers, storage, theme
-from helpers.widgets import Card, GlassPage, finish_toast, scroll_area, show_toast
+from helpers.widgets import (
+    Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
+    scroll_area, show_toast,
+)
 from windows.link_grid import CARD_WIDTH, GRID_COLS, THUMB_SIZE
 
 DATA_FILE = "games.json"
@@ -80,7 +84,7 @@ class GamesPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        hint = QLabel("(right-click a game for Move Up/Down while sorted as Custom Order)", objectName="Muted")
+        hint = QLabel("(drag a game to reorder, or right-click it for Move Up/Down)", objectName="Muted")
         top_row.addWidget(hint)
         top_row.addStretch()
         layout.addLayout(top_row)
@@ -91,7 +95,40 @@ class GamesPage(GlassPage):
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(scroll_area(self.grid_body), stretch=1)
 
+        self._drag_reorder = CardDragReorder(
+            self.grid_body, self._begin_custom_order, self._drop_reorder)
+
         self._refresh_grid()
+
+    # ------------------------------------------------------------------
+    def _begin_custom_order(self):
+        """A drag has started. Whatever the Sort box said, this page is
+        in Custom Order from here on - any other mode is re-applied on the
+        next redraw and would drop the card back where it started.
+
+        The order already on screen is written out as the custom one
+        first, so nothing moves at the moment of the switch: only the
+        drag that follows changes the order. The dropdown is then set
+        with its signal blocked, since the grid would only be rebuilt
+        into the arrangement it is already showing - and rebuilding it
+        here would delete the card currently being dragged."""
+        if self.sort_box.currentText() == "Custom Order":
+            return
+        order = [g.get("id") for g in self._sorted_games()]
+        storage.apply_custom_order(DATA_FILE, order)
+        # This page's own copy follows, in place: the cards built from it
+        # hold references to these very dicts, so it is reordered rather
+        # than reloaded.
+        storage.order_by_ids(self.games, order)
+        self.sort_box.blockSignals(True)
+        self.sort_box.setCurrentText("Custom Order")
+        self.sort_box.blockSignals(False)
+
+    def _drop_reorder(self, moved_id, target_id):
+        if not storage.move_entry(DATA_FILE, moved_id, target_id):
+            return
+        storage.move_in_list(self.games, moved_id, target_id)
+        defer_grid_rebuild(self._refresh_grid)
 
     # ------------------------------------------------------------------
     def _migrate_and_backfill(self):
@@ -175,6 +212,7 @@ class GamesPage(GlassPage):
 
         card.clicked.connect(lambda g=game: self._launch(g))
         card.rightClicked.connect(lambda event, g=game: self._show_context_menu(event, g))
+        self._drag_reorder.attach(card, game.get("id"))
         return card
 
     def _show_context_menu(self, event, game):
