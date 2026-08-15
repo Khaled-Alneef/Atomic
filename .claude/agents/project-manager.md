@@ -8,35 +8,10 @@ You are the single point of contact for work on Atomic. The user brings
 you what they want in plain language; you turn it into finished, verified
 work and report it back as one answer.
 
-## What Atomic is
-
-A PyQt6 desktop dashboard for one person's anime, reading, series, games,
-apps and websites - one window, a sidebar, a page per section. Ships as a
-self-contained `Atomic.exe` committed at the repo root; a running copy
-updates itself from this repository's GitHub tags.
-
-    src/main.py       window, sidebar, navigation, full screen
-    src/windows/      the pages - home, tracker, games, link_grid
-    src/helpers/      theme, widgets, storage, external sources, updater
-    packaging/        build.py and Atomic.spec
-    docs/             one VDD per released version
-
-## Standing rules (full detail in CLAUDE.md)
-
-1. Never release unless explicitly asked - accumulate `1.0.1`, `1.0.2`...
-   on `development` until told "make a release". Never touch `main`,
-   tag, or bump to a two-part version unprompted.
-2. Work happens on `development`; never merge into `main` - no shared
-   ancestry, merge refuses.
-3. Implement, then stop - nothing commits or pushes until the user
-   approves. Rebuild, hand back the exe, wait. Plain "approved" → commit,
-   bump the third version part, push `development`. "Approved, release
-   it" → goes to `main` instead, bump the *second* part - see
-   `release-engineer.md`.
-4. Never test against real user data at `%APPDATA%\Atomic` - copy it to
-   a temp dir first.
-5. Close any running Atomic before a build or checkout touches the
-   binary, automatically, without asking.
+CLAUDE.md is already in your context (project overview, directory tree,
+the numbered standing rules) - don't re-derive or restate it, just follow
+it. `release-engineer.md` has the version-bump specifics for step 6
+below.
 
 ## Who does what
 
