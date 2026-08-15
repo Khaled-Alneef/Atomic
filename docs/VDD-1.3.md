@@ -2,6 +2,15 @@
 
 **Version 1.3** · 15 August 2026
 
+> **Republished.** An earlier 1.3 executable was tagged and pushed
+> before the two tracker-progress defects in §5 were found. It was
+> replaced in place rather than superseded by a 1.4, on the owner's
+> instruction and confirmation that nobody had downloaded it. The
+> figures in §3 describe the executable actually being served; the
+> superseded one had SHA-256 `416b9f9d…`. This is the one exception to
+> the standing rule that a released VDD is never edited, and it is
+> recorded here rather than quietly applied.
+
 ---
 
 ## 1. Identification
@@ -27,8 +36,8 @@ Unchanged from VDD-1.2 §2.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,196,781 bytes. SHA-256 `416b9f9d52e6f4deeb6ee001d5eda0bc2c97b8a2e7222a619f9ac59a8c8809ee` |
-| `src/` | Full Python source, 10,694 lines across 34 modules |
+| `Atomic.exe` | The application. 47,199,263 bytes. SHA-256 `a2fde396911cd633a39843f5ce98a2c0d4462737b63c176eabaacef59d8ea629` |
+| `src/` | Full Python source, 10,760 lines across 34 modules |
 | `packaging/` | `build.py` and `Atomic.spec`, which produce the executable |
 | `docs/VDD-1.3.md` | This document |
 
@@ -74,6 +83,33 @@ per tracked entry.
 
 AniList's Netflix rows remain as a fallback, so the two sources cover
 each other.
+
+### Tracked progress no longer reverts
+
+Anime and Reading are both backed by `tracker.json`, and each page holds
+its own copy of the whole file loaded when that page was built. Seven
+code paths wrote that copy back wholesale, so whichever page saved last
+restored the other's entries as they stood at build time — a synced
+episode number survived exactly until the Reading page saved anything.
+Saves now merge: a page's own entry types come from that page, and
+everything else is re-read from disk.
+
+This is the defect `.claude/rules/ui.md` already records from the games
+page ("reordering a game erased freshly imported games"), recurring in
+`tracker.py` under a different name.
+
+### An episode number you typed in now appears
+
+Anime progress is hidden unless it is marked verified, which is correct:
+an auto-filled number is the latest *aired* episode, not what you
+watched, and a card should not state a guess as fact. But the only thing
+that ever set that flag was a spinner's `valueChanged`, and the stored
+value is loaded into the spinner before that signal is connected — so
+opening an entry whose progress is already correct and pressing Save
+changed no spinner, set no flag, and left the card blank however many
+times it was saved. Saving a value the form is showing now counts as
+asserting it, except for a number the form auto-filled during that same
+session, which keeps its hint and stays unverified.
 
 ---
 
@@ -136,6 +172,11 @@ Unchanged from VDD-1.2 §9.
 - **AniList may still be rate-limited into a `403`**, which affects
   Crunchyroll resolution — that path has no second source. Netflix no
   longer depends on it.
+- **Watch progress on Netflix and Crunchyroll cannot be read at all.**
+  Neither publishes watch history without an authenticated session, so
+  an anime watched there will not advance on its own. Stremio covers
+  what is watched in Stremio; AniList covers anything else, given a
+  configured username; otherwise the number is typed in by hand.
 - **Wikidata coverage is not universal.** A title with no P1874
   recorded resolves through AniList if it has a row there, and
   otherwise falls back to the search page.
@@ -189,6 +230,16 @@ In addition to VDD-1.0 §11, VDD-1.1 §11 and VDD-1.2 §11:
 - The frozen executable was opened and `helpers.wikidata` confirmed
   present with the `P1874` constant baked in, and `APP_VERSION`
   confirmed to read `"1.3"` — not inferred from the build log.
+- The two progress defects were each reproduced against a copy of real
+  user data before being fixed — progress written as `S09E99` and
+  observed reverting to `S01E04` when the other page saved, and a real
+  `EntryForm` saved untouched and observed leaving the card blank. Ten
+  checks cover the merging save, including deletes, additions from
+  another page, and reordering; two defects in the fix itself (a delete
+  being silently undone, and its mirror case) were caught by those
+  checks rather than by review.
+- The frozen executable was confirmed to contain `_save_entries` and
+  `_progress_is_yours`, not merely to have built.
 - The release executable was scanned with Microsoft Defender before
   publication and reported no threats.
 - No test read or wrote the real user data at `%APPDATA%\Atomic`.
