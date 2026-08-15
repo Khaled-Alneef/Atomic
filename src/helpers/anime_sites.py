@@ -46,6 +46,7 @@ import concurrent.futures
 import html
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -172,13 +173,56 @@ def search_page_url(base_url: str, query: str) -> str:
 # Each takes (base_url, query, timeout) and returns a list of
 # {title, url, cover_url}, or raises on network/parse failure.
 
+# A search results page is a few hundred KB. This is the ceiling on what
+# is worth reading from one, and it is a safety limit rather than a
+# tuning knob: everything downstream scans the whole string, so an
+# unbounded body is an unbounded parse, and the parse holds the GIL (see
+# _candidate_urls). Overshooting it means no result from that site, which
+# is a normal outcome here.
+_MAX_RESPONSE_BYTES = 5_000_000
+
+# Small on purpose: read1() returns whatever has arrived rather than
+# waiting to fill the buffer, which is what lets the deadline below be
+# checked while a slow sender is still dribbling.
+_READ_CHUNK = 65536
+
+
+def _read_body(resp, deadline: float) -> str:
+    """The response body, given a size ceiling and a wall-clock deadline.
+
+    `urlopen(timeout=...)` bounds each individual socket operation, not
+    the transfer - so a host that sends one byte every couple of seconds
+    resets that timer forever and `resp.read()` never returns. Measured
+    against exactly that: a local server dribbling a chunked body held a
+    lookup thread for over 180s with no sign of stopping, and four of
+    those would permanently drain lookup_pool's whole worker set.
+
+    read1() rather than read(): read() waits until it has the full amount
+    asked for, so a deadline checked around it is never reached while the
+    dribble continues. read1() comes back with whatever has arrived, so
+    the check below actually gets a turn."""
+    chunks, total = [], 0
+    while True:
+        chunk = resp.read1(_READ_CHUNK)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > _MAX_RESPONSE_BYTES:
+            raise ValueError("response body over the size cap")
+        if time.monotonic() > deadline:
+            raise TimeoutError("response body over the time budget")
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
 def _get(url: str, timeout: int) -> str:
     req = urllib.request.Request(url, headers={
         "Accept": "application/json, text/html, */*",
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
+    deadline = time.monotonic() + timeout
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace")
+        return _read_body(resp, deadline)
 
 
 def _post(url: str, fields: dict, timeout: int) -> str:
@@ -189,8 +233,9 @@ def _post(url: str, fields: dict, timeout: int) -> str:
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
         "X-Requested-With": "XMLHttpRequest",
     })
+    deadline = time.monotonic() + timeout
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace")
+        return _read_body(resp, deadline)
 
 
 # WordPress generates cropped copies of every upload ("cover-231x300.jpg")
@@ -205,8 +250,14 @@ _WP_SIZE_SUFFIX_RE = re.compile(r'-\d{2,4}x\d{2,4}(?=\.[a-zA-Z0-9]+(?:[?#].*)?$)
 # <h3> anchor, and the poster in an <img> that lazy-loads from either
 # data-image or src.
 _A4U_CARD_SPLIT_RE = re.compile(r'anime-card-container', re.IGNORECASE)
+# The {0,400} on the title, rather than a bare `.*?`, is the same
+# unclosed-tag guard _candidate_urls documents at length: a lazy `.*?`
+# looking for a `</a>` that isn't there re-scans to the end of the
+# fragment one character at a time, per <h3>. A card title is a handful
+# of words, so capping the span costs nothing real and stops a card that
+# arrived truncated from turning into a quadratic scan.
 _A4U_TITLE_LINK_RE = re.compile(
-    r'<h3[^>]*>\s*<a[^>]+href=["\'](?P<url>[^"\']+)["\'][^>]*>(?P<title>.*?)</a>',
+    r'<h3[^>]*>\s*<a[^>]+href=["\'](?P<url>[^"\']+)["\'][^>]*>(?P<title>.{0,400}?)</a>',
     re.IGNORECASE | re.DOTALL)
 _A4U_IMG_RE = re.compile(
     r'<img[^>]+(?:data-image|data-src|src)=["\'](?P<img>https?://[^"\']+)["\']',
@@ -278,8 +329,40 @@ _ENGINES = (_search_anime_cards, _search_animeflv_api, _search_madara)
 # and reads the links out of the HTML. It exists so that adding a site
 # nobody has written an engine for still lands on the title's own page.
 
-_ANCHOR_RE = re.compile(r'<a\b(?P<attrs>[^>]*)>(?P<inner>.*?)</a>', re.IGNORECASE | re.DOTALL)
+# Deliberately the *opening tag only*, with the anchor's inner text cut
+# out by hand below rather than by a `(.*?)</a>` in the pattern.
+#
+# That pattern is what froze the whole app. A lazy `.*?` under DOTALL,
+# looking for a `</a>` that never comes, walks to the end of the document
+# one character at a time before giving up - and it does that once per
+# unclosed `<a`, so the cost is quadratic in page size. Measured: 20,000
+# unclosed anchors in a 0.7MB body took 32.4s inside a single
+# `finditer` call. `re` does not release the GIL, so that is not a slow
+# background lookup - it is every Python thread in the process stopped
+# dead, the Qt event loop included. Measured in a real window: 15
+# heartbeats fired where 649 were due, and a Settings click made during
+# the scan sat undelivered for 29.5s, which is the "pressing Settings
+# hangs and crashes it" the user reported (Windows offers to kill a
+# window that stops answering for ~30s).
+#
+# Matching just `<a ...>` cannot backtrack past the tag it is in, so the
+# scan is linear whatever the markup does. An unclosed anchor now still
+# yields its href, its title/alt and its slug - strictly more than the
+# old pattern, which threw the whole anchor away.
+_ANCHOR_OPEN_RE = re.compile(r'<a\b(?P<attrs>[^>]*)>', re.IGNORECASE)
 _HREF_RE = re.compile(r'href\s*=\s*["\'](?P<url>[^"\']+)["\']', re.IGNORECASE)
+
+# How far past an opening tag to look for its `</a>`. A card's anchor can
+# legitimately wrap a poster, a genre list and a whole synopsis (animhq
+# does), so this is well clear of any real one; past it the inner text is
+# a page's worth of markup that could hold no title anyway, since a
+# candidate has to come out under _MAX_TITLE_LEN.
+_MAX_ANCHOR_INNER = 4000
+
+# Anchors examined per page. A real search results page has tens of
+# links, not thousands; this only bites on a page pathological enough
+# that scanning all of it would be the freeze this module just fixed.
+_MAX_ANCHORS = 4000
 # title=/alt= carry the title on themes that show only a poster image.
 _ATTR_TEXT_RE = re.compile(r'(?:title|alt)\s*=\s*["\']([^"\']{2,120})["\']', re.IGNORECASE)
 _HEADING_RE = re.compile(r'<h[1-4][^>]*>(.*?)</h[1-4]>', re.IGNORECASE | re.DOTALL)
@@ -341,10 +424,21 @@ def _candidate_urls(body: str, base_url: str) -> list:
     however good the title inside it was."""
     hosts = _self_hosts(body, base_url)
     candidates = []
-    for anchor in _ANCHOR_RE.finditer(body):
+    for seen, anchor in enumerate(_ANCHOR_OPEN_RE.finditer(body)):
+        if seen >= _MAX_ANCHORS:
+            break
         href = _HREF_RE.search(anchor.group("attrs"))
         if not href:
             continue
+        # The anchor's inner text, found with str.find over a bounded
+        # window instead of by the regex - see _ANCHOR_OPEN_RE for why
+        # the regex must not be the thing looking for `</a>`. An anchor
+        # that is unclosed, or longer than any real card, contributes no
+        # inner text and is scored on its attributes and slug alone.
+        inner_start = anchor.end()
+        close = body.find("</a>", inner_start, inner_start + _MAX_ANCHOR_INNER)
+        inner = body[inner_start:close] if close != -1 else ""
+        after = close + 4 if close != -1 else inner_start
         url = urllib.parse.urljoin(base_url, html.unescape(href.group("url")).strip())
         parts = urllib.parse.urlsplit(url)
         path = parts.path.strip("/")
@@ -358,12 +452,12 @@ def _candidate_urls(body: str, base_url: str) -> list:
         if path.split("/")[0].lower() in _JUNK_SEGMENTS:
             continue
 
-        texts = [_text(anchor.group("inner"))]
+        texts = [_text(inner)]
         texts += _ATTR_TEXT_RE.findall(anchor.group("attrs"))
-        texts += _ATTR_TEXT_RE.findall(anchor.group("inner"))
+        texts += _ATTR_TEXT_RE.findall(inner)
         # Headings after the link, stopping at the next link so one
         # card's title can't be read as its neighbour's.
-        tail = body[anchor.end():anchor.end() + _NEARBY_WINDOW].split("<a ")[0]
+        tail = body[after:after + _NEARBY_WINDOW].split("<a ")[0]
         texts += [_text(h) for h in _HEADING_RE.findall(tail)]
         # ...and before it, for themes that put the heading first.
         head = body[max(0, anchor.start() - _NEARBY_WINDOW):anchor.start()].rsplit("</a>", 1)[-1]
