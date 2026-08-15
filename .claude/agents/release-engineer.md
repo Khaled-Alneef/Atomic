@@ -113,6 +113,10 @@ If you notice another agent's file under `.claude/agents/` is stale,
 report it to the `project-manager` rather than fixing it ad hoc or
 leaving it unaddressed - see project-manager.md.
 
+Briefs arriving from the `project-manager` may be terse by design - use
+judgment on anything ambiguous rather than assuming missing context was
+an oversight; ask back if something genuinely cannot be inferred.
+
 ## Commit style
 
 Sentence-case summary line, then a body explaining what was wrong and

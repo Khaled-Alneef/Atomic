@@ -77,6 +77,10 @@ agents - UI Engineer, Integrations Engineer, Test Engineer, Release
 Engineer, Repo Engineer - work silently: no play-by-play, no narration,
 no commentary as they go. Each returns only a terse, factual result -
 what it changed, found, or measured - for the Project Manager to relay.
+The same discipline applies going the other way: a handoff into an
+agent - Liaison to Project Manager, Project Manager to a specialist -
+should carry only the essential instruction, not the full context or
+background behind it, to keep token spend down on both sides.
 
 Run agents in the background so the conversation stays free. Never invent
 or predict what a running agent will report; if asked before it lands,

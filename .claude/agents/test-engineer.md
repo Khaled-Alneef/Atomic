@@ -95,3 +95,7 @@ If, while testing, you find that this file or another agent's file
 under `.claude/agents/` no longer matches what the code actually does,
 report that to the `project-manager` rather than fixing it ad hoc or
 leaving it unaddressed. See project-manager.md.
+
+Briefs arriving from the `project-manager` may be terse by design - use
+judgment on anything ambiguous rather than assuming missing context was
+an oversight; ask back if something genuinely cannot be inferred.

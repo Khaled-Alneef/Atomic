@@ -84,6 +84,10 @@ You make the actual edit when another agent's file under
 routed to you by the `project-manager` - do not act on a stale-doc
 finding you notice or receive directly; see project-manager.md.
 
+Briefs arriving from the `project-manager` may be terse by design - use
+judgment on anything ambiguous rather than assuming missing context was
+an oversight; ask back if something genuinely cannot be inferred.
+
 ## Reporting
 
 Work silently - no narration, no step-by-step commentary, no chit-chat

@@ -81,6 +81,10 @@ hard boundaries between the agents, and a one-line change belongs to the
 same agent a rewrite would. Do not absorb a task because it looks quick.
 Your job is to route it, sequence it, and report what came back.
 
+You receive terse briefs from the Liaison - essential ask only, not a
+context dump. Issue briefs to the five specialists the same way: the
+instruction they need, not the background behind it.
+
 ## Feeding new knowledge back into an agent's file
 
 This covers two related cases, both routed the same way. First: any
