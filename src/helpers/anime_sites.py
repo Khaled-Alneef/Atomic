@@ -22,9 +22,17 @@ Next.js shell with no results in the body (the only /series/ links there
 are a static promo carousel), and its content API answers 401 without an
 OAuth bearer, so no plain unauthenticated GET can resolve a Crunchyroll
 title to its own page. A site whose results carry no title text near the
-link (an image-only grid with opaque slugs) is the other gap. Both fall
-back to `search_page_url` - a plain on-site search page - which is the
-only honest thing left to do.
+link (an image-only grid with opaque slugs) is the other gap.
+
+Crunchyroll is nonetheless the one site here resolved *without* asking
+it anything, because a third party publishes the answer: AniList records
+each title's Crunchyroll link in `Media.externalLinks`, openly and
+without a key. So a Crunchyroll entry skips every engine above and goes
+to `_crunchyroll_page_url` instead - see it for the URL shapes that come
+back. When AniList has no match or no Crunchyroll link (a Netflix-only
+show has none), and for the image-only-grid case above, both fall back
+to `search_page_url` - a plain on-site search page - which is the only
+honest thing left to do.
 
 Anime *metadata* (covers, imdb id, episode counts) still comes from
 Stremio's Cinemeta, exactly as before - these engines only ever supply
@@ -42,7 +50,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import storage, title_match
+from . import anilist, storage, title_match
 
 SITES_FILE = "anime_sites.json"
 
@@ -489,6 +497,119 @@ def _corroborated(query: str, candidates: list) -> list:
     return kept
 
 
+# ---- Crunchyroll -----------------------------------------------------
+# The one site that can never be scraped (module docstring) and so the
+# one site resolved from somewhere other than itself.
+
+_CRUNCHYROLL_ORIGIN = "https://www.crunchyroll.com"
+
+# A locale segment is assigned per visitor by geo-IP, so it says where
+# *this machine* asked from, not anything about the title. Stripped only
+# when a real content segment follows it, so a title legitimately slugged
+# with two letters isn't beheaded.
+_CR_LOCALE_RE = re.compile(r'^/[a-z]{2}(?:-[a-z]{2})?/(?=series/|watch/)', re.IGNORECASE)
+
+# Crunchyroll lists some shows twice, subbed and dubbed, and AniList
+# records both rows against the one title ("attack-on-titan" alongside
+# "attack-on-titan-dubs" - both observed on Shingeki no Kyojin). They
+# happen to redirect to the same series page today, but the subbed row is
+# the neutral default, so it is preferred rather than left to row order.
+_CR_DUB_RE = re.compile(r'-(?:dub|dubs|dubbed)(?:/|$)', re.IGNORECASE)
+
+
+def _is_crunchyroll(base_url: str) -> bool:
+    host = _host_key(urllib.parse.urlsplit(base_url).netloc)
+    return host == "crunchyroll.com" or host.endswith(".crunchyroll.com")
+
+
+class _StopAtRedirect(urllib.request.HTTPRedirectHandler):
+    """Records the first Location and declines to follow it - returning
+    None from redirect_request is urllib's documented way to stop a
+    chain, and the 3xx then falls through to the default handler, which
+    raises. The caller expects that and reads `location` regardless."""
+
+    location = None
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if self.location is None:
+            self.location = newurl
+        return None
+
+
+def _crunchyroll_normalize(url: str):
+    """One canonical shape out of the several AniList holds. Rows added
+    over the site's lifetime carry plain `http://`, the retired
+    `beta.crunchyroll.com` host, and www-less forms - all still reach the
+    site, but each costs an extra redirect, and a saved link shouldn't
+    depend on those staying in place. Query strings and fragments go too:
+    on these rows they are campaign tracking, never part of the page's
+    identity.
+
+    Anything not on crunchyroll.com returns None. AniList's link rows are
+    user-submitted, so a mislabelled one is possible, and saving some
+    other site's URL onto a Crunchyroll entry would be worse than saving
+    nothing."""
+    parts = urllib.parse.urlsplit((url or "").strip())
+    host = _host_key(parts.netloc)
+    if host != "crunchyroll.com" and not host.endswith(".crunchyroll.com"):
+        return None
+    path = parts.path if parts.path.startswith("/") else "/" + parts.path
+    path = _CR_LOCALE_RE.sub("/", path).rstrip("/")
+    return _CRUNCHYROLL_ORIGIN + path if path else None
+
+
+def _crunchyroll_canonical(url: str, timeout: int) -> str:
+    """A bare-slug link upgraded to the real /series/<id>/<slug> page.
+    AniList holds both shapes - rows written recently carry the full
+    series path, older ones only "/one-piece" - and the bare slug does
+    still work, so this is best-effort: one 301, and on any failure the
+    slug URL comes back unchanged rather than the link being lost.
+
+    Exactly one hop, and only to a Location that is itself a /series/
+    path. Following the chain to the end instead lands on
+    /ar/series/... - measured, from this machine - because Crunchyroll
+    appends the visitor's geo-guessed locale on the *second* hop, and
+    that segment must not be what gets saved onto the entry."""
+    if urllib.parse.urlsplit(url).path.startswith("/series/"):
+        return url
+    handler = _StopAtRedirect()
+    try:
+        request = urllib.request.Request(url, headers={
+            "Accept": "text/html, */*",
+            "User-Agent": "Mozilla/5.0 PC-App/1.0",
+        })
+        try:
+            urllib.request.build_opener(handler).open(request, timeout=timeout).close()
+        except Exception:
+            pass  # the declined 3xx raises; the Location was captured first
+        upgraded = _crunchyroll_normalize(handler.location or "")
+    except Exception:
+        return url
+    if upgraded and urllib.parse.urlsplit(upgraded).path.startswith("/series/"):
+        return upgraded
+    return url
+
+
+def _crunchyroll_page_url(title: str, timeout: int):
+    """`title`'s own page on Crunchyroll, via AniList's record of it, or
+    None so the caller falls back to Crunchyroll's search page. The
+    query variants are the same ones the engines get, tried in the same
+    order and only while the previous came back empty, so the ordinary
+    case is one request."""
+    for variant in _query_variants(title):
+        try:
+            urls = anilist.fetch_crunchyroll_urls(variant, timeout)
+        except Exception:
+            continue
+        normalized = [u for u in (_crunchyroll_normalize(u) for u in urls) if u]
+        if not normalized:
+            continue
+        # Stable, so among equally-subbed rows AniList's own order holds.
+        normalized.sort(key=lambda u: bool(_CR_DUB_RE.search(u)))
+        return _crunchyroll_canonical(normalized[0], timeout)
+    return None
+
+
 def resolve_page_url(site: dict, title: str, timeout: int = 6):
     """The one thing the tracker actually wants: the URL of `title`'s own
     page on `site`, or None if the site can't resolve it. None is the
@@ -500,7 +621,16 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
     them resolved anything does the generic scraper get a turn. A site
     with a real engine therefore never sees the generic path: the
     engine's result set is the site's own answer to the search, which is
-    always better evidence than links read off a page."""
+    always better evidence than links read off a page.
+
+    Crunchyroll takes neither path. Nothing on its search page can be
+    read at all (module docstring), so scraping it would only ever burn
+    two requests to return None; AniList's record of the link is the
+    whole answer there."""
+    base_url = _to_base_url(site or {})
+    if _is_crunchyroll(base_url):
+        return _crunchyroll_page_url(title, timeout)
+
     variants = _query_variants(title)
     for variant in variants:
         results = search_site(site, variant, timeout)
@@ -510,7 +640,6 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
         if match:
             return match["url"]
 
-    base_url = _to_base_url(site or {})
     if not base_url:
         return None
     for variant in variants:

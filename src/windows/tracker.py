@@ -76,6 +76,15 @@ GRID_COLS = 9
 PREVIEW_SIZE = (90, 120)
 SEARCH_DEBOUNCE_MS = 450
 
+# How long Save will hold for the Video Website page-url lookup still in
+# flight behind it. The lookup itself always reports back, success or
+# failure (see _resolve_video_site_url), so this is only a backstop for
+# one whose sockets outlive their own timeouts - measured, a Crunchyroll
+# resolve takes ~1.5s, and the worst case is a variant loop of 6s
+# timeouts. Past this the entry saves without a page url, which is the
+# old behaviour, not a new failure.
+VIDEO_URL_SAVE_WAIT_MS = 20000
+
 _EPISODE_SEASON_RE = re.compile(r"^s(\d+)\s*e(\d+)$", re.IGNORECASE)
 _EPISODE_ONLY_RE = re.compile(r"^e?(\d+)$", re.IGNORECASE)
 _IMDB_ID_RE = re.compile(r"tt\d+")
@@ -219,16 +228,48 @@ def _open_anime_entry(parent, entry):
         else:
             webbrowser.open(url)
         return True
-    # No saved url means the entry's Video Website couldn't resolve this
-    # title to its own page (no engine for that site, or a genuine
-    # no-match - see anime_sites.resolve_page_url). That site's search
-    # results for the title is all that's left; it's a fallback, never
-    # the intended target.
     site = anime_sites.get_site(entry["site_id"]) if entry.get("site_id") else None
-    if site and site.get("base_url"):
-        webbrowser.open(anime_sites.search_page_url(site["base_url"], entry["title"]))
+    if not (site and site.get("base_url")):
+        return False
+    # No saved url, but a site to ask. Two ways an entry gets here
+    # without ever having been asked: saved before the add-form's
+    # background lookup landed, and carried over by _migrate (which sets
+    # site_id off the retired "Anime Opens In" setting and has no url to
+    # set). Both used to mean the search page forever, since nothing
+    # re-resolved one. Ask once - the answer, hit or miss, is recorded on
+    # the entry so a genuine no-match doesn't re-ask on every open.
+    if not entry.get("site_url_checked_at"):
+        threading.Thread(target=_resolve_then_open_anime, args=(entry, site), daemon=True).start()
         return True
-    return False
+    # Asked already and there was no page - that site's search results
+    # for the title is all that's left; a fallback, never the target.
+    webbrowser.open(anime_sites.search_page_url(site["base_url"], entry.get("title", "")))
+    return True
+
+
+def _resolve_then_open_anime(entry, site):
+    """Resolve `entry`'s page on `site`, cache it, and open it - or the
+    site's search page if there is none. Runs on a worker thread and so
+    must never raise: an uncaught exception here would kill the thread
+    and the click would silently open nothing at all."""
+    title = entry.get("title", "")
+    url = None
+    try:
+        url = anime_sites.resolve_page_url(site, title)
+    except Exception:
+        url = None
+    try:
+        fields = {"site_url_checked_at": storage.now_iso()}
+        if url:
+            fields["url"] = url
+        entry.update(fields)  # the in-memory copy this page is holding
+        storage.update_entry(AnimePage.DATA_FILE, entry.get("id"), fields)
+    except Exception:
+        pass  # a page that opens beats a page that saved
+    try:
+        webbrowser.open(url or anime_sites.search_page_url(site["base_url"], title))
+    except Exception:
+        pass
 
 
 def _migrate(entries, data_file):
@@ -967,6 +1008,11 @@ class TrackerPage(GlassPage):
         # keep answering for the series the user just corrected away from.
         entry.pop("next_release_checked_at", None)
         entry.pop("mangadex_id", None)
+        # Same reasoning for the Video Website page lookup: a re-saved
+        # entry deserves a fresh attempt, and one whose title just
+        # changed *needs* one - the recorded miss was for the old title.
+        if not entry.get("url"):
+            entry.pop("site_url_checked_at", None)
         storage.save(self.DATA_FILE, self.entries)
         self._refresh_grid()
         self._refresh_schedules()
@@ -1026,6 +1072,12 @@ class EntryForm(QDialog):
         self._status_parts = {}  # "cover"/"progress" -> current message, composed onto status_label
         self._pending_episode_identity = None  # tracks staleness for the async episode-progress lookup
         self._pending_video_identity = None  # same, for the Video Website page-url lookup
+        # Which identity that lookup last *reported* on. Pending alone
+        # can't answer "is one still in flight" - it stays set after a
+        # result lands - and Save has to know (see _save).
+        self._resolved_video_identity = None
+        self._save_waiting_on_video = False  # a Save is queued behind the lookup
+        self._video_wait_used = False  # ...and Save only ever waits the once
         self._latest_available = entry.get("latest_available", "") if entry else ""
         # Whether the season/episode spinners hold *confirmed* progress
         # (fetched from a connected Stremio/AniList account, or typed in
@@ -1221,10 +1273,10 @@ class EntryForm(QDialog):
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
-        save_btn = QPushButton("Save", objectName="Accent")
-        save_btn.setDefault(True)
-        save_btn.clicked.connect(self._save)
-        btn_row.addWidget(save_btn)
+        self.save_btn = QPushButton("Save", objectName="Accent")
+        self.save_btn.setDefault(True)
+        self.save_btn.clicked.connect(self._save)
+        btn_row.addWidget(self.save_btn)
         form.addLayout(btn_row)
 
         self._update_labels()
@@ -1586,12 +1638,30 @@ class EntryForm(QDialog):
             url = None
         self._signals.video_url_resolved.emit(identity, site.get("name", ""), url or "")
 
+    def _video_lookup_in_flight(self):
+        """True while a Video Website page-url lookup is still running.
+        A stale result reporting in leaves this True, correctly - the
+        newer lookup it was superseded by is the one still out."""
+        return (self._pending_video_identity is not None
+                and self._pending_video_identity != self._resolved_video_identity)
+
     def _on_video_url_resolved(self, identity, site_name, url):
         if identity != self._pending_video_identity:
             return  # the user picked a different title or site meanwhile
+        self._resolved_video_identity = identity
         self.url_edit.setText(url)
         self._set_status_part(
             "site", "" if url else f"No page found on {site_name} - it'll open that site's search instead")
+        if self._save_waiting_on_video:
+            self._save_waiting_on_video = False
+            self._save()
+
+    def _save_after_video_wait(self):
+        """VIDEO_URL_SAVE_WAIT_MS expired with the lookup still out - save
+        without a page url rather than leaving the dialog stuck."""
+        if self._save_waiting_on_video:
+            self._save_waiting_on_video = False
+            self._save()
 
     def _resolve_episode_progress(self, imdb_id, catalog, identity):
         try:
@@ -1636,6 +1706,24 @@ class EntryForm(QDialog):
         title = self.title_combo.currentText().strip()
         if not title:
             QMessageBox.warning(self, "Tracker", "Title can't be empty.")
+            return
+
+        # The Video Website's page for this title is resolved in a
+        # background thread - ~1.5s for Crunchyroll, measured - and Save
+        # is reachable long before it lands. Saving in that window stored
+        # an empty url, and *nothing re-resolved one*, so the entry
+        # opened that site's search page permanently: the reported
+        # "One Piece opens Crunchyroll search" bug, reproduced by picking
+        # the suggestion and saving inside the lookup's own duration. So
+        # hold the save until the lookup reports - it always does, hit or
+        # miss - and let _on_video_url_resolved re-enter here.
+        if (self.type_box.currentText() == "Anime" and not self.url_edit.text().strip()
+                and self._video_lookup_in_flight() and not self._video_wait_used):
+            self._video_wait_used = True
+            self._save_waiting_on_video = True
+            self.save_btn.setEnabled(False)
+            self.save_btn.setText("Finding page...")
+            QTimer.singleShot(VIDEO_URL_SAVE_WAIT_MS, self._save_after_video_wait)
             return
 
         if self.is_new:

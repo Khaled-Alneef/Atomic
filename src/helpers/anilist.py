@@ -1,14 +1,18 @@
 """Minimal client for the public AniList GraphQL API (https://anilist.co) -
-a title search, a public list-progress lookup, and the airing schedule
-for the next episode, no login/API key needed.
+a title search, a public list-progress lookup, the airing schedule for
+the next episode, and a title's Crunchyroll page, no login/API key
+needed.
 
 Unlike Crunchyroll (whose equivalent data lives behind an OAuth-gated,
-Cloudflare-bot-protected API this app won't try to bypass - see
-crunchyroll.py), AniList's is fully open for public profiles: a
-username is enough to read someone's list, no password or token flow.
-Since a lot of people track their watching on AniList regardless of
-which app they actually watch in, this gives real progress for
-Crunchyroll-provider Anime entries too, not just Stremio's.
+Cloudflare-bot-protected API this app won't try to bypass - see the
+Crunchyroll paragraph in anime_sites.py's module docstring), AniList's
+is fully open for public profiles: a username is enough to read
+someone's list, no password or token flow. Since a lot of people track
+their watching on AniList regardless of which app they actually watch
+in, this gives real progress for Crunchyroll-provider Anime entries
+too, not just Stremio's - and `fetch_crunchyroll_urls` is what lets
+those entries resolve to a real Crunchyroll page at all, since
+Crunchyroll itself cannot be asked.
 
 Every lookup fails soft (returns None) so a flaky connection, a private
 list, or no title match never crashes the tracker UI - it just means no
@@ -66,6 +70,24 @@ _PROGRESS_QUERY = """
 query ($userName: String, $mediaId: Int) {
   MediaList(userName: $userName, mediaId: $mediaId, type: ANIME) {
     progress
+  }
+}
+"""
+
+# Paged for the same reason _AIRING_QUERY is: the single-Media search
+# picks one entry, and for a franchise it is routinely the wrong one.
+# Searching "Frieren: Beyond Journey's End" ranks the spin-off "Sousou no
+# Frieren: ●● no Mahou" above the series itself, and only the series
+# carries a Crunchyroll link - so the whole page has to be scored, not
+# just its first row.
+_EXTERNAL_LINKS_QUERY = """
+query ($search: String) {
+  Page(perPage: 10) {
+    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+      title { romaji english native }
+      synonyms
+      externalLinks { site url }
+    }
   }
 }
 """
@@ -158,3 +180,53 @@ def fetch_next_episode(title: str, timeout: int = 8):
         "at": datetime.fromtimestamp(soonest["airingAt"], timezone.utc),
         "episode": soonest.get("episode"),
     }
+
+
+def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
+    """Every Crunchyroll link AniList holds for `title`, in AniList's own
+    order, or [] if nothing matches. Returns the URLs *as stored* - what
+    shape a Crunchyroll URL should end up in is Crunchyroll's business,
+    not this module's, so the caller (anime_sites) normalizes them.
+
+    This exists because Crunchyroll cannot be asked directly: its search
+    page renders client-side and its content API answers 401 without an
+    OAuth bearer (the full reasoning is in anime_sites.py's docstring).
+    AniList publishes the same link as ordinary public data on the
+    key-less endpoint everything else here already uses, which makes it
+    the only unauthenticated route to a real Crunchyroll title page.
+
+    Same matching rule as fetch_next_episode, for the same reason: only
+    entries whose title genuinely matches are considered at all, so a
+    loose search can't hand back some other show's Crunchyroll page -
+    the worst possible outcome, since the entry then silently points at
+    the wrong series forever. Links come back only for the single
+    best-matching entry rather than pooled across hits, because a
+    franchise's spin-offs each carry their own and pooling them would
+    mix a sequel's page in with the base series'."""
+    title = (title or "").strip()
+    if not title:
+        return []
+    try:
+        body = _post(_EXTERNAL_LINKS_QUERY, {"search": title}, timeout)
+    except Exception:
+        return []
+
+    media_list = (((body.get("data") or {}).get("Page") or {}).get("media")) or []
+    scored = []
+    for media in media_list:
+        urls = [link["url"] for link in (media.get("externalLinks") or [])
+                 if link.get("url") and "crunchyroll" in (link.get("site") or "").lower()]
+        if not urls:
+            continue
+        names = _candidate_names(media)
+        score = title_match.best_similarity(title, names)
+        if score < _MATCH_THRESHOLD:
+            continue
+        # Shortest romaji breaks a score tie, the same rule anime_sites
+        # uses on its own results: every cour of a franchise scores
+        # alike, and the shortest name is the base series rather than a
+        # sequel ("Kaijuu 8-gou" over "Kaijuu 8-gou 2nd Season").
+        scored.append((-score, len(title_match.normalize(names[0] or "")), urls))
+    if not scored:
+        return []
+    return min(scored)[2]
