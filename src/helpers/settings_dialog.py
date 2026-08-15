@@ -331,6 +331,17 @@ class SettingsDialog(QDialog):
             return
 
         self.update_status.setText("Verified. Restarting into the new version...")
+        # Recorded before the swap is handed off, because this build is
+        # the only one that knows what version it is - the replacement
+        # starts with no memory of what it replaced, and reads this to
+        # show what changed (helpers.whats_new). Written even though the
+        # swap might still fail: a leftover marker only costs one
+        # summary that lists nothing and is discarded unread, whereas
+        # writing it after apply_update risks the process being gone.
+        try:
+            app_settings.set_updated_from(updater.APP_VERSION)
+        except Exception:
+            pass
         try:
             updater.apply_update(path)
         except updater.UpdateError as exc:

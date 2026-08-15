@@ -65,13 +65,22 @@ Don't loosen these to raise the hit rate.
 Respect throttles: MangaDex is spaced ~0.35s between requests and
 retried once, since the tracker fires one lookup per entry at once.
 
-Crunchyroll can't be scraped directly (JS-rendered search, content API
-401s without OAuth) - resolved instead via AniList's `externalLinks`,
-which needs no Crunchyroll auth at all. An authenticated Crunchyroll
-client (for progress sync) was researched and rejected: dead
-password-login flow, ToS-prohibited scraping of a paid service, and
-redundant with what `anilist.py` already covers. Don't rebuild that
-without a real reason to revisit it.
+Some services can't be scraped at all - Crunchyroll (JS-rendered search,
+content API 401s without OAuth) and Netflix (search behind a sign-in).
+Both resolve via AniList's `externalLinks` instead, which needs no auth
+on either service: `anime_sites._STREAMING_SITES` is the table, and
+adding another such service is a row there, not new code. An
+authenticated Crunchyroll client (for progress sync) was researched and
+rejected: dead password-login flow, ToS-prohibited scraping of a paid
+service, and redundant with what `anilist.py` already covers. Don't
+rebuild that without a real reason to revisit it.
+
+**AniList rate-limits hard, and fails soft into silence.** Sustained
+querying gets the whole network a `403` on every POST (not a 429),
+which every lookup here swallows and reports as "no result" - so a
+block looks exactly like "this title has no link". When a previously
+working AniList lookup starts returning nothing, check for the 403
+before believing the data changed.
 
 ## When a lookup looks wrong
 

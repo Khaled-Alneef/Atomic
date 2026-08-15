@@ -182,29 +182,33 @@ def fetch_next_episode(title: str, timeout: int = 8):
     }
 
 
-def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
-    """Every Crunchyroll link AniList holds for `title`, in AniList's own
-    order, or [] if nothing matches. Returns the URLs *as stored* - what
-    shape a Crunchyroll URL should end up in is Crunchyroll's business,
-    not this module's, so the caller (anime_sites) normalizes them.
+def fetch_external_urls(title: str, site_keyword: str, timeout: int = 8) -> list:
+    """Every link AniList holds for `title` on the streaming site named
+    by `site_keyword` ("crunchyroll", "netflix", ...), matched against
+    AniList's own `site` label, in AniList's order, or [] if nothing
+    matches. Returns the URLs *as stored* - what shape each site's URL
+    should end up in is that site's business, not this module's, so the
+    caller (anime_sites) normalizes them.
 
-    This exists because Crunchyroll cannot be asked directly: its search
-    page renders client-side and its content API answers 401 without an
-    OAuth bearer (the full reasoning is in anime_sites.py's docstring).
-    AniList publishes the same link as ordinary public data on the
-    key-less endpoint everything else here already uses, which makes it
-    the only unauthenticated route to a real Crunchyroll title page.
+    This exists for the sites that cannot be asked directly: their
+    search pages render client-side, and their content APIs want a
+    session the app has no business holding (the full reasoning is in
+    anime_sites.py's docstring). AniList publishes these links as
+    ordinary public data on the key-less endpoint everything else here
+    already uses, which makes it the only unauthenticated route to a
+    real title page on any of them.
 
     Same matching rule as fetch_next_episode, for the same reason: only
     entries whose title genuinely matches are considered at all, so a
-    loose search can't hand back some other show's Crunchyroll page -
-    the worst possible outcome, since the entry then silently points at
-    the wrong series forever. Links come back only for the single
-    best-matching entry rather than pooled across hits, because a
-    franchise's spin-offs each carry their own and pooling them would
-    mix a sequel's page in with the base series'."""
+    loose search can't hand back some other show's page - the worst
+    possible outcome, since the entry then silently points at the wrong
+    series forever. Links come back only for the single best-matching
+    entry rather than pooled across hits, because a franchise's
+    spin-offs each carry their own and pooling them would mix a
+    sequel's page in with the base series'."""
     title = (title or "").strip()
-    if not title:
+    site_keyword = (site_keyword or "").strip().lower()
+    if not title or not site_keyword:
         return []
     try:
         body = _post(_EXTERNAL_LINKS_QUERY, {"search": title}, timeout)
@@ -215,7 +219,7 @@ def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
     scored = []
     for media in media_list:
         urls = [link["url"] for link in (media.get("externalLinks") or [])
-                 if link.get("url") and "crunchyroll" in (link.get("site") or "").lower()]
+                 if link.get("url") and site_keyword in (link.get("site") or "").lower()]
         if not urls:
             continue
         names = _candidate_names(media)
@@ -230,3 +234,9 @@ def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
     if not scored:
         return []
     return min(scored)[2]
+
+
+def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
+    """Crunchyroll's own links for `title` - see fetch_external_urls,
+    which this is the original and most-used case of."""
+    return fetch_external_urls(title, "crunchyroll", timeout)

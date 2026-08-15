@@ -65,19 +65,20 @@ conventions and hard-won traps live in `.claude/rules/` (`ui.md`,
 every context. Step-by-step procedures (build, test, release) live as
 Skills in `.claude/skills/`, loaded only when actually invoked.
 
-**Every task goes to its owner, however small** - a one-line colour
-change goes to the UI Engineer exactly as a new page does; a single
-`git push` goes to the Release Engineer. No overlap, no exceptions.
-**One task, one narrow scope** - a UI dispatch covers one page/dialog/
-area, an integrations dispatch covers one source, not several bundled
-together; a mistake then stays contained and a report stays reviewable.
+**The Manager does the work itself by default.** Every task given -
+implementation, investigation, fixes, pushes - is the Manager's to
+carry out directly, however large. Dispatch to an agent only when the
+user asks for one ("make an agent do it", "stay", or anything similar),
+or when the work genuinely can't be done from this session (it needs
+its own long-running context, or several genuinely independent pieces
+must run at once). Reaching for an agent by default is what this rule
+exists to stop: each dispatch starts cold, re-reads what the Manager
+already knows, and has repeatedly cost more than doing the work here.
 
-**Only spawn an agent when the work actually needs one.** A question
-answerable by reading a file or running one quick command doesn't need
-a dispatch - the Manager answers it directly. Reserve agents for real
-implementation, verification, or domain-specific work; don't delegate a
-simple or sequential step just because a specialist file exists for the
-general area.
+**When an agent is used: one task, one narrow scope** - a UI dispatch
+covers one page/dialog/area, an integrations dispatch covers one
+source, not several bundled together; a mistake then stays contained
+and a report stays reviewable.
 
 **Agents work silently** - no narration - and report back only a
 short, structured result: files changed, result, what was verified,

@@ -20,19 +20,20 @@ if the HTML that arrives has no results in it, there is nothing to
 scrape. Crunchyroll is that case permanently - its search page is a
 Next.js shell with no results in the body (the only /series/ links there
 are a static promo carousel), and its content API answers 401 without an
-OAuth bearer, so no plain unauthenticated GET can resolve a Crunchyroll
-title to its own page. A site whose results carry no title text near the
-link (an image-only grid with opaque slugs) is the other gap.
+OAuth bearer. Netflix is the same shape for a different reason: its
+/search is behind a sign-in, so an unauthenticated GET never reaches a
+result at all. A site whose results carry no title text near the link
+(an image-only grid with opaque slugs) is the other gap.
 
-Crunchyroll is nonetheless the one site here resolved *without* asking
-it anything, because a third party publishes the answer: AniList records
-each title's Crunchyroll link in `Media.externalLinks`, openly and
-without a key. So a Crunchyroll entry skips every engine above and goes
-to `_crunchyroll_page_url` instead - see it for the URL shapes that come
-back. When AniList has no match or no Crunchyroll link (a Netflix-only
-show has none), and for the image-only-grid case above, both fall back
-to `search_page_url` - a plain on-site search page - which is the only
-honest thing left to do.
+Those services are nonetheless resolved *without* asking them anything,
+because a third party publishes the answer: AniList records each title's
+links in `Media.externalLinks`, openly and without a key. An entry on
+one of them skips every engine above and goes to `_streaming_page_url`
+instead - see `_STREAMING_SITES` for the ones covered and the URL shapes
+that come back. When AniList has no match or no link for that service
+(it holds neither for a show the service doesn't carry), and for the
+image-only-grid case above, both fall back to `search_page_url` - a
+plain on-site search page - which is the only honest thing left to do.
 
 Anime *metadata* (covers, imdb id, episode counts) still comes from
 Stremio's Cinemeta, exactly as before - these engines only ever supply
@@ -150,6 +151,12 @@ def remove_site(site_id: str):
 # is right for the WordPress-themed aggregators and harmless elsewhere.
 _SEARCH_PATHS = (
     ("crunchyroll.com", "search?q={q}"),
+    # Netflix's search sits behind a sign-in, so it can't be fetched and
+    # confirmed the way the others were - listed anyway because the
+    # default "?s=" is definitely wrong for it, and this at least lands
+    # a signed-in user on their own results. Only reached when AniList
+    # has no Netflix link for the title (see _STREAMING_SITES).
+    ("netflix.com", "search?q={q}"),
     ("animeflv", "browse?q={q}"),
     ("jkanime", "buscar/{q}/"),
     ("monoschinos", "buscar?q={q}"),
@@ -684,24 +691,93 @@ def _crunchyroll_canonical(url: str, timeout: int) -> str:
     return url
 
 
-def _crunchyroll_page_url(title: str, timeout: int):
-    """`title`'s own page on Crunchyroll, via AniList's record of it, or
-    None so the caller falls back to Crunchyroll's search page. The
-    query variants are the same ones the engines get, tried in the same
-    order and only while the previous came back empty, so the ordinary
-    case is one request."""
+# ---- Streaming services resolved through AniList ---------------------
+# Crunchyroll was the first, and the reasoning in the module docstring
+# applies unchanged to any service built the same way: a search page that
+# renders client-side, and a content API that wants a logged-in session.
+# Netflix is the second - its /search is behind a sign-in, so nothing on
+# it can be read either, while AniList records a plain /title/<id> link
+# for anime it carries. Adding another such service is a row here, not
+# new code.
+#
+# Netflix's country segment (netflix.com/gb/title/...) is the same kind
+# of per-visitor noise as Crunchyroll's locale: it says where the link
+# was written, not anything about the title, and www.netflix.com resolves
+# it per viewer anyway.
+_NETFLIX_LOCALE_RE = re.compile(r'^/[a-z]{2}(?:-[a-z]{2})?/(?=title/|watch/)',
+                                re.IGNORECASE)
+
+_STREAMING_SITES = (
+    # host suffix, AniList's `site` label, canonical origin, locale
+    # segment to strip, rows to deprioritize, extra canonicalizer
+    ("crunchyroll.com", "crunchyroll", _CRUNCHYROLL_ORIGIN, _CR_LOCALE_RE,
+     _CR_DUB_RE, lambda url, timeout: _crunchyroll_canonical(url, timeout)),
+    ("netflix.com", "netflix", "https://www.netflix.com", _NETFLIX_LOCALE_RE,
+     None, None),
+)
+
+
+def _streaming_site_for(base_url: str):
+    """The _STREAMING_SITES row matching this site, or None for an
+    ordinary site that can just be searched."""
+    host = _host_key(urllib.parse.urlsplit(base_url or "").netloc)
+    for row in _STREAMING_SITES:
+        suffix = row[0]
+        if host == suffix or host.endswith("." + suffix):
+            return row
+    return None
+
+
+def _streaming_normalize(url: str, suffix: str, origin: str, locale_re):
+    """One canonical shape out of the several AniList holds. Rows added
+    over a site's lifetime carry plain `http://`, retired hosts (Crunchy-
+    roll's `beta.`), and www-less forms - all still reach the site, but
+    each costs an extra redirect, and a saved link shouldn't depend on
+    those staying in place. Query strings and fragments go too: on these
+    rows they are campaign tracking, never part of the page's identity.
+
+    Anything off the expected host returns None. AniList's link rows are
+    user-submitted, so a mislabelled one is possible, and saving some
+    other site's URL onto this entry would be worse than saving
+    nothing."""
+    parts = urllib.parse.urlsplit((url or "").strip())
+    host = _host_key(parts.netloc)
+    if host != suffix and not host.endswith("." + suffix):
+        return None
+    path = parts.path if parts.path.startswith("/") else "/" + parts.path
+    if locale_re is not None:
+        path = locale_re.sub("/", path)
+    path = path.rstrip("/")
+    return origin + path if path else None
+
+
+def _streaming_page_url(row, title: str, timeout: int):
+    """`title`'s own page on one of the _STREAMING_SITES, via AniList's
+    record of it, or None so the caller falls back to that site's search
+    page. The query variants are the same ones the engines get, tried in
+    the same order and only while the previous came back empty, so the
+    ordinary case is one request."""
+    suffix, keyword, origin, locale_re, deprioritize_re, canonical = row
     for variant in _query_variants(title):
         try:
-            urls = anilist.fetch_crunchyroll_urls(variant, timeout)
+            urls = anilist.fetch_external_urls(variant, keyword, timeout)
         except Exception:
             continue
-        normalized = [u for u in (_crunchyroll_normalize(u) for u in urls) if u]
+        normalized = [u for u in
+                      (_streaming_normalize(u, suffix, origin, locale_re) for u in urls) if u]
         if not normalized:
             continue
-        # Stable, so among equally-subbed rows AniList's own order holds.
-        normalized.sort(key=lambda u: bool(_CR_DUB_RE.search(u)))
-        return _crunchyroll_canonical(normalized[0], timeout)
+        if deprioritize_re is not None:
+            # Stable, so among equally-preferred rows AniList's own order holds.
+            normalized.sort(key=lambda u: bool(deprioritize_re.search(u)))
+        return canonical(normalized[0], timeout) if canonical else normalized[0]
     return None
+
+
+def _crunchyroll_page_url(title: str, timeout: int):
+    """Kept as the name the Crunchyroll path has always had; the work is
+    the shared one now that a second service resolves the same way."""
+    return _streaming_page_url(_STREAMING_SITES[0], title, timeout)
 
 
 def resolve_page_url(site: dict, title: str, timeout: int = 6):
@@ -717,13 +793,14 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
     engine's result set is the site's own answer to the search, which is
     always better evidence than links read off a page.
 
-    Crunchyroll takes neither path. Nothing on its search page can be
-    read at all (module docstring), so scraping it would only ever burn
-    two requests to return None; AniList's record of the link is the
-    whole answer there."""
+    The _STREAMING_SITES take neither path. Nothing on their search
+    pages can be read at all (module docstring), so scraping one would
+    only ever burn two requests to return None; AniList's record of the
+    link is the whole answer there."""
     base_url = _to_base_url(site or {})
-    if _is_crunchyroll(base_url):
-        return _crunchyroll_page_url(title, timeout)
+    streaming = _streaming_site_for(base_url)
+    if streaming is not None:
+        return _streaming_page_url(streaming, title, timeout)
 
     variants = _query_variants(title)
     for variant in variants:
