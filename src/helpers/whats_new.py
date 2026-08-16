@@ -26,6 +26,31 @@ from . import theme, updater
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.4": [
+        "Films are tracked alongside your shows - the page is now "
+        "Movies & Series, and searching in Add or Edit finds films too.",
+        "Netflix is now offered on installs that already had video "
+        "websites saved, and any watched type can be pinned to it - not "
+        "just anime.",
+        "Watch progress now comes from Stremio and nothing else. The "
+        "Crunchyroll and AniList progress settings are gone: each was "
+        "silently wrong often enough to be worse than no number at all.",
+        "A filter button beside each tracker's search box narrows the "
+        "grid by status, and by type where there is a choice of them.",
+        "Hovering a card now says Last Released, and the boxes you type "
+        "in say Last Watched - the two used to share one label.",
+        "A tick in Add and Edit chooses whether an entry shows a "
+        "last-watched number, which brings back the + and - buttons on "
+        "the entries you keep by hand.",
+        "Opening a page refreshes it. The refresh button and its long "
+        "\"Updating...\" toast are gone; results land on the cards as "
+        "they arrive.",
+        "Move Up and Move Down are gone from every page - drag a card "
+        "onto the slot you want instead.",
+        "A sequel no longer opens its predecessor's page, and the "
+        "garbled characters on the Last Season box, the website dropdown "
+        "and the Settings site list are gone.",
+    ],
     "1.3": [
         "Netflix titles now open on the show's own page instead of "
         "Netflix's search results.",

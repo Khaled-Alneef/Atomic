@@ -58,20 +58,41 @@ def _migrate_entry(entry):
     entry; fold that into the new `targets` list so existing data keeps
     working. Also backfills added_at/last_used (added once sorting/Move
     Up-Down was added, matching Games) for entries saved before either
-    existed."""
+    existed.
+
+    Returns True when it actually changed the entry, so the caller can
+    tell a real migration (which has to be written) from the ordinary
+    case of already-current data (which must not be)."""
+    changed = False
     if "targets" not in entry:
         entry["targets"] = [{"type": entry.pop("type", "site"), "target": entry.pop("target", "")}]
+        changed = True
     if not entry.get("id"):
         # Entries saved before ids existed have none, and everything that
         # touches one entry rather than the whole list works by id -
         # update_entry, and now drag-to-reorder, which would otherwise
         # match every id-less card against every other one.
         entry["id"] = str(uuid.uuid4())
+        changed = True
     if "added_at" not in entry:
         entry["added_at"] = storage.now_iso()
+        changed = True
     if "last_used" not in entry:
         entry["last_used"] = None
-    return entry
+        changed = True
+    return changed
+
+
+def _migrate_entries(entries):
+    """(migrated list, did anything change). Applied to whatever was just
+    read off disk - including inside _mutate, because a list re-read there
+    can be older than the one this page was built from (Settings > Clear
+    Data writes these files too), and an un-migrated entry has no id for
+    update_entry or drag-reorder to work by."""
+    changed = False
+    for entry in entries:
+        changed |= _migrate_entry(entry)
+    return list(entries), changed
 
 
 class LinkGridPage(GlassPage):
@@ -95,10 +116,18 @@ class LinkGridPage(GlassPage):
         self.app = app
 
         entries = storage.load(self.DATA_FILE, None)
-        if entries is None:
+        fresh = entries is None
+        if fresh:
             entries = self.DEFAULT_ENTRIES
-        self.entries = [_migrate_entry(e) for e in entries]
-        storage.save(self.DATA_FILE, self.entries)
+        self.entries, migrated = _migrate_entries(entries)
+        # Only written when the migration actually changed something, or
+        # there was no file yet. This used to write the whole list back on
+        # every single visit to the page - a whole-list save off a
+        # just-loaded snapshot is harmless in itself, but it meant the one
+        # save shape this file is being fixed for ran every time the user
+        # clicked Apps or Websites in the sidebar.
+        if fresh or migrated:
+            storage.save(self.DATA_FILE, self.entries)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -239,18 +268,46 @@ class LinkGridPage(GlassPage):
         menu.exec(event.globalPosition().toPoint())
 
     # ------------------------------------------------------------------
+    def _mutate(self, apply_change):
+        """Apply a change to the saved list and redraw - GamesPage._mutate,
+        same reasoning and same shape.
+
+        Re-reads the file and works on that rather than saving this page's
+        own `self.entries`: Home holds its own copy of apps.json and
+        websites.json, and Settings > Clear Data can empty either one
+        while this page sits open behind the dialog (main.py's
+        refresh_current_page names that exact race). Writing back the
+        snapshot this page was built from would roll all of that back -
+        which is how reordering one game once erased a whole batch of
+        freshly imported ones."""
+        self.entries, _ = _migrate_entries(storage.load(self.DATA_FILE, []))
+        apply_change(self.entries)
+        storage.save(self.DATA_FILE, self.entries)
+        self._refresh_grid()
+
+    @staticmethod
+    def _index_of(entries, entry):
+        return next((i for i, e in enumerate(entries) if e.get("id") == entry.get("id")), None)
+
     def _open_entry(self, entry):
         open_link_entry(self, entry, self.TITLE)
         entry["last_used"] = storage.now_iso()
-        storage.save(self.DATA_FILE, self.entries)
+        # One field on one entry, so no whole-list write and no redraw of
+        # cards the user is still looking at.
+        storage.update_entry(self.DATA_FILE, entry.get("id"), {"last_used": entry["last_used"]})
         if self.sort_box.currentText() == "Last Used":
             self._refresh_grid()
 
     def _remove_entry(self, entry):
-        if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") == QMessageBox.StandardButton.Yes:
-            self.entries.remove(entry)
-            storage.save(self.DATA_FILE, self.entries)
-            self._refresh_grid()
+        if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") != QMessageBox.StandardButton.Yes:
+            return
+
+        def apply_change(entries):
+            idx = self._index_of(entries, entry)
+            if idx is not None:
+                entries.pop(idx)
+
+        self._mutate(apply_change)
 
     def _open_add_form(self):
         EntryForm(self, None, on_save=self._on_form_save)
@@ -262,8 +319,15 @@ class LinkGridPage(GlassPage):
         if is_new:
             entry["added_at"] = storage.now_iso()
             entry["last_used"] = None
-            self.entries.append(entry)
-        storage.save(self.DATA_FILE, self.entries)
+            self._mutate(lambda entries: entries.append(entry))
+            return
+        # An edit touches only this entry's own fields; update_entry
+        # merges them into the file as it stands now. The form has
+        # already applied them to the dict the cards hold, so the page
+        # only needs the redraw.
+        storage.update_entry(self.DATA_FILE, entry.get("id"), {
+            "name": entry["name"], "targets": entry["targets"], "image": entry.get("image"),
+        })
         self._refresh_grid()
 
 
