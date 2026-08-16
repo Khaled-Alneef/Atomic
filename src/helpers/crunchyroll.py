@@ -36,6 +36,7 @@ than looking like "you haven't watched anything".
 """
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -78,6 +79,11 @@ _HEADERS = {
 _MATCH_THRESHOLD = 0.8
 
 _HISTORY_PAGE_SIZE = 100
+
+# The token as it appears in whatever the user copied out of devtools.
+# The character class is what a JWT is made of, which is also what stops
+# the match running past the value into the rest of the JSON.
+_TOKEN_IN_JSON_RE = re.compile(r'access_token"?\s*[:=]\s*"?([A-Za-z0-9._\-]+)')
 
 
 class CrunchyrollError(Exception):
@@ -282,10 +288,21 @@ def session_from_token(access_token: str, timeout: int = 15) -> dict:
     faith: a mistyped or half-copied token would otherwise sit in
     Settings looking connected and quietly fail on every card."""
     access_token = (access_token or "").strip()
-    # People paste the whole header value; take the token out of it
-    # rather than making that their problem.
+    # Whatever shape it arrives in. People paste the whole header value,
+    # or the quoted JSON value straight out of the Response tab, or a
+    # `"access_token": "..."` fragment - all of which are the right
+    # token wearing punctuation, and none of which should be the user's
+    # problem to strip by hand.
     if access_token.lower().startswith("bearer "):
         access_token = access_token[7:].strip()
+    if "access_token" in access_token:
+        # Quoted key or bare (devtools' Response tab shows the tree form
+        # `access_token: "eyJ..."`, the raw tab shows `"access_token":
+        # "eyJ..."`, and people copy either.
+        found = _TOKEN_IN_JSON_RE.search(access_token)
+        if found:
+            access_token = found.group(1)
+    access_token = access_token.strip().strip('",').strip()
     if not access_token:
         raise CrunchyrollError("Paste your Crunchyroll token first.")
     return {"access_token": access_token,

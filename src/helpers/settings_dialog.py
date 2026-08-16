@@ -503,14 +503,20 @@ class SettingsDialog(QDialog):
         self.crunchyroll_status.setWordWrap(True)
         form.addWidget(self.crunchyroll_status)
 
+        # These steps were wrong once and cost the owner a confused
+        # evening: the `token` request's *request* headers carry Basic
+        # (Crunchyroll's own client credential), not Bearer. The value
+        # wanted is in that request's **response**. Bearer appears only
+        # on content/v2 requests. Don't "simplify" this back to
+        # "click any row".
         crunchyroll_steps = QLabel(
             "<b>How to get your token</b><br>"
             "1. Open <b>crunchyroll.com</b> in your browser and sign in.<br>"
             "2. Press <b>F12</b>, then click the <b>Network</b> tab.<br>"
-            "3. Press <b>F5</b> to reload the page.<br>"
-            "4. Click any row in the list, then find "
-            "<b>Request Headers &gt; authorization</b>.<br>"
-            "5. Copy the long text after the word <b>Bearer</b> and paste it below."
+            "3. Type <b>token</b> in the filter box, then press <b>F5</b>.<br>"
+            "4. Click the <b>token</b> row, then open the <b>Response</b> tab.<br>"
+            "5. Copy the long value after <b>\"access_token\"</b> (it starts "
+            "with <b>eyJ</b>) and paste it below."
         )
         crunchyroll_steps.setWordWrap(True)
         crunchyroll_steps.setTextFormat(Qt.TextFormat.RichText)
