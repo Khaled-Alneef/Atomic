@@ -845,9 +845,9 @@ class TrackerPage(GlassPage):
         used = sorted({providers[e["site_id"]] for e in entries
                        if e.get("site_id") in providers})
         if "crunchyroll" in used and not app_settings.get_crunchyroll_token():
-            lines.append("Crunchyroll entries can read your real progress once "
-                         "you paste your Crunchyroll token under Settings > "
-                         "Crunchyroll Account.")
+            lines.append("Crunchyroll can't be read directly - Settings > "
+                         "Crunchyroll Progress has the 5 steps to keep AniList "
+                         "updated for you instead.")
             used = [p for p in used if p != "crunchyroll"]
         if used:
             names = " and ".join(_UNREADABLE_NAMES.get(p, p.title()) for p in used)
@@ -1043,10 +1043,10 @@ class TrackerPage(GlassPage):
         if REASON_NO_CRUNCHYROLL_ACCOUNT in codes:
             provider = provider or "crunchyroll"
             parts.append(
-                "This entry is on Crunchyroll, and no Crunchyroll token is "
-                "saved - so the one source that knows what you actually "
-                "watched there wasn't asked. Settings > Crunchyroll Account "
-                "has the five steps to get one.")
+                "This entry is on Crunchyroll, which publishes nothing about "
+                "what you've watched. The fix that lasts is letting your "
+                "browser keep AniList updated as you watch - Settings > "
+                "Crunchyroll Progress has the 5 steps.")
         elif provider:
             name = _UNREADABLE_NAMES.get(provider, provider.title())
             parts.append(

@@ -85,18 +85,31 @@ Don't loosen these to raise the hit rate.
 Respect throttles: MangaDex is spaced ~0.35s between requests and
 retried once, since the tracker fires one lookup per entry at once.
 
-**Crunchyroll progress now comes from Crunchyroll** (`crunchyroll.py`),
-with the owner's own account - the earlier "researched and rejected"
-note below is superseded, on the owner's explicit instruction after
-AniList kept reporting a different episode than Crunchyroll's own
-history. Email+password sign-in, only the refresh token stored (never
-the password), same shape as `stremio.login`. Two things to know before
-touching it: **it needs a client credential Crunchyroll issues to
-nobody**, kept in settings.json (`crunchyroll_client_id`/`_secret`) and
-deactivated by Crunchyroll from time to time - `client_inactive` is a
-dead credential, not a bug - and using it at all is against their ToS,
-which is the account holder's call and was made. One shared history
-fetch serves a whole page (`cached_history`); don't make it per entry.
+**The supported route for Crunchyroll progress is MAL-Sync → AniList.**
+The browser extension updates the user's AniList list as they watch, and
+`anilist.py` reads it - nothing in Atomic to break when Crunchyroll
+changes anything. Settings > Crunchyroll Progress carries the five
+steps. Reach for this before proposing any direct Crunchyroll work.
+
+**Reading Crunchyroll directly still exists, and is second on purpose**
+(`crunchyroll.py`),
+with a token pasted from the browser session. It is exact and immediate,
+which is the one thing MAL-Sync is not - and it **expires inside an
+hour**, which is why it is offered as a one-off read rather than an
+account. Never present it as "connected".
+
+Two measured facts, so they are not rediscovered: **email/password
+cannot work** - minting a token needs a client credential Crunchyroll
+issues to no third party, and the published one answers
+`auth.obtain_access_token.client_inactive` on both hosts (`login`/
+`refresh` remain, unreachable, and would work if a live credential were
+put in settings.json). And **the token lives in the `token` request's
+*response*** - that request's own headers carry `Basic`, not `Bearer`;
+`Bearer` appears only on `content/v2` requests. Wrong instructions here
+already cost the owner an evening. One shared history fetch serves a
+whole page (`cached_history`); don't make it per entry. Using it at all
+is against Crunchyroll's ToS, which is the account holder's call and was
+made.
 
 Some services can't be *scraped* at all - Crunchyroll (JS-rendered
 search, content API 401s without OAuth) and Netflix (search behind a

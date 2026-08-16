@@ -497,33 +497,54 @@ class SettingsDialog(QDialog):
         form.addWidget(stremio_account_hint)
 
         form.addSpacing(24)
-        form.addWidget(QLabel("Crunchyroll Account", objectName="SectionTitle"))
+        form.addWidget(QLabel("Crunchyroll Progress", objectName="SectionTitle"))
 
-        self.crunchyroll_status = QLabel("", objectName="Muted")
-        self.crunchyroll_status.setWordWrap(True)
-        form.addWidget(self.crunchyroll_status)
-
-        # These steps were wrong once and cost the owner a confused
-        # evening: the `token` request's *request* headers carry Basic
-        # (Crunchyroll's own client credential), not Bearer. The value
-        # wanted is in that request's **response**. Bearer appears only
-        # on content/v2 requests. Don't "simplify" this back to
-        # "click any row".
+        # The recommended route, first and in full, because the direct
+        # one below it is a trap dressed as a feature: Crunchyroll tokens
+        # expire inside an hour, so an account that looks connected stops
+        # answering without saying anything. MAL-Sync is set up once and
+        # then keeps AniList - which this app already reads - correct by
+        # itself, and survives Crunchyroll changing their API.
         crunchyroll_steps = QLabel(
-            "<b>How to get your token</b><br>"
-            "1. Open <b>crunchyroll.com</b> in your browser and sign in.<br>"
-            "2. Press <b>F12</b>, then click the <b>Network</b> tab.<br>"
-            "3. Type <b>token</b> in the filter box, then press <b>F5</b>.<br>"
-            "4. Click the <b>token</b> row, then open the <b>Response</b> tab.<br>"
-            "5. Copy the long value after <b>\"access_token\"</b> (it starts "
-            "with <b>eyJ</b>) and paste it below."
+            "Crunchyroll doesn't let other apps read what you've watched. "
+            "The way around it is to let your browser keep AniList up to "
+            "date, which Atomic already reads:<br><br>"
+            "1. Install the <b>MAL-Sync</b> extension in your browser "
+            "(Chrome or Firefox).<br>"
+            "2. Open it, choose <b>AniList</b>, and log in once.<br>"
+            "3. Watch on Crunchyroll as normal - it updates AniList by "
+            "itself.<br>"
+            "4. Put your AniList username in the box below.<br>"
+            "5. Press <b>⟳</b> on the Anime page to pull it in."
         )
         crunchyroll_steps.setWordWrap(True)
         crunchyroll_steps.setTextFormat(Qt.TextFormat.RichText)
         form.addWidget(crunchyroll_steps)
 
+        self.crunchyroll_status = QLabel("", objectName="Muted")
+        self.crunchyroll_status.setWordWrap(True)
+        form.addWidget(self.crunchyroll_status)
+
+        # Kept, not advertised. It works, and it is the only way to get an
+        # exact number without waiting for a sync - but it is second
+        # because a token dies within the hour and the steps to fetch one
+        # involve devtools. The earlier version of this section led with
+        # it and cost the owner an evening.
+        self.crunchyroll_advanced = QLabel(
+            "<b>Or read Crunchyroll directly, once</b> - exact, but the token "
+            "expires within the hour and has to be fetched again: on "
+            "crunchyroll.com press <b>F12</b> → <b>Network</b>, type "
+            "<b>token</b> in the filter, press <b>F5</b>, click the "
+            "<b>token</b> row → <b>Response</b>, and copy the value after "
+            "<b>\"access_token\"</b>."
+        )
+        self.crunchyroll_advanced.setWordWrap(True)
+        self.crunchyroll_advanced.setTextFormat(Qt.TextFormat.RichText)
+        form.addWidget(self.crunchyroll_advanced)
+
         self.crunchyroll_token_edit = QLineEdit()
-        self.crunchyroll_token_edit.setPlaceholderText("Paste your Crunchyroll token")
+        self.crunchyroll_token_edit.setPlaceholderText(
+            "Optional - paste a Crunchyroll token for one exact read")
         form.addWidget(self.crunchyroll_token_edit)
 
         crunchyroll_btn_row = QHBoxLayout()
@@ -536,14 +557,11 @@ class SettingsDialog(QDialog):
         form.addLayout(crunchyroll_btn_row)
 
         crunchyroll_hint = QLabel(
-            "Reads your real progress from Crunchyroll itself, for entries "
-            "whose Video Website is Crunchyroll - so they stop borrowing a "
-            "number from Stremio.\n\n"
-            "A token, not a password: Crunchyroll gives other apps no way to "
-            "sign in, so this reuses the session your browser already has. "
-            "Tokens expire after a while - when progress stops updating, "
-            "paste a fresh one. Using this is against Crunchyroll's terms of "
-            "service.",
+            "Only applies to entries whose Video Website is Crunchyroll, and "
+            "only until the token expires - after that the Anime page falls "
+            "back to AniList, which is why step 1 above is worth doing "
+            "regardless. Reading Crunchyroll this way is against their terms "
+            "of service.",
             objectName="Muted",
         )
         crunchyroll_hint.setWordWrap(True)
@@ -557,10 +575,9 @@ class SettingsDialog(QDialog):
         form.addWidget(self.anilist_username_edit)
 
         anilist_hint = QLabel(
-            "A second, independent source for real Anime progress - tried "
-            "for Anime (not Series/Reading) if a Stremio match doesn't "
-            "have your progress, so it also covers Crunchyroll-provider "
-            "entries. Just your public username, no login: your AniList "
+            "Where Crunchyroll progress arrives once MAL-Sync is set up "
+            "above, and the source for any Anime entry Stremio can't "
+            "answer for. Just your public username, no login: your AniList "
             "profile's list visibility has to be set to public for this "
             "to see anything. Leave blank to skip.",
             objectName="Muted",
@@ -1034,9 +1051,14 @@ class SettingsDialog(QDialog):
 
     def _refresh_crunchyroll_account(self):
         connected = bool(app_settings.get_crunchyroll_token())
+        # Never says "connected" flatly: the token behind it expires
+        # within the hour, and a status that outlives what it describes
+        # is how this section misled its way through two rewrites.
         self.crunchyroll_status.setText(
-            "Connected - reading your Crunchyroll history" if connected
-            else "Not connected")
+            "A Crunchyroll token is saved - it will stop working within the "
+            "hour, then AniList takes over" if connected else "")
+        self.crunchyroll_status.setVisible(connected)
+        self.crunchyroll_advanced.setVisible(not connected)
         self.crunchyroll_token_edit.setVisible(not connected)
         self.crunchyroll_connect_btn.setVisible(not connected)
         self.crunchyroll_disconnect_btn.setVisible(connected)
