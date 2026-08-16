@@ -23,8 +23,9 @@ from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
-    QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
 from helpers import (
@@ -55,6 +56,11 @@ MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
 # here because the rule used to be spelled `== "Anime"` in a dozen
 # places, which is why Series could never open on a chosen site.
 VIDEO_TYPES = ("Anime", "Series", "Movie")
+
+# How a type reads as a section heading, where a page draws one row per
+# type. Only where the plural isn't the word itself ("Series" already is
+# one, and heading a row "Seriess" is how that goes wrong).
+SECTION_TYPE_PLURAL = {"Movie": "Movies"}
 
 # Status wording differs by content type: you "watch" Anime/Series/Movie
 # but "read" Manga/Manhwa/Manhua.
@@ -130,7 +136,6 @@ FILTER_ICON = "filter_icon.png"
 FILTER_ICON_HEIGHT = 18
 
 POSTER_SIZE = (160, 216)
-GRID_COLS = 9
 PREVIEW_SIZE = (90, 120)
 SEARCH_DEBOUNCE_MS = 450
 
@@ -495,6 +500,11 @@ class TrackerPage(GlassPage):
     TITLE = "Anime"
     TYPE_OPTIONS = ["Anime", "Manga"]
     PROGRESS_COLUMNS = ["Last Released Season", "Last Released Episode"]
+    # Whether a status section is drawn as one row per entry type. Only
+    # the films-and-shows page wants it: Anime/Reading hold one kind of
+    # thing each, and splitting Manga from Manhwa would be three rows of
+    # the same shape saying nothing.
+    SPLIT_SECTIONS_BY_TYPE = False
     # Manga has no Stremio presence to sync progress against.
     SUPPORTS_PROGRESS_SYNC = True
     # Which release-schedule source the hover tooltip's "next episode/
@@ -633,9 +643,15 @@ class TrackerPage(GlassPage):
         layout.addLayout(top_row)
 
         self.grid_body = QWidget()
-        self.grid_layout = QGridLayout(self.grid_body)
-        self.grid_layout.setSpacing(14)
-        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # One row per section, each scrolling sideways on its own, rather
+        # than one grid wrapping at a fixed column count. That grid cut
+        # its 9th card
+        # of a row off the right edge with no way to reach it: the page's
+        # scroll area has its horizontal bar switched off, so anything
+        # past the viewport simply wasn't there.
+        self.grid_layout = QVBoxLayout(self.grid_body)
+        self.grid_layout.setSpacing(18)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(scroll_area(self.grid_body), stretch=1)
 
         self._drag_reorder = CardDragReorder(
@@ -1032,8 +1048,23 @@ class TrackerPage(GlassPage):
         for entry in self._visible_entries():
             grouped.setdefault(entry.get("status") or known_statuses[0], []).append(entry)
         extra_statuses = [s for s in grouped if s not in known_statuses]
-        return [(status, grouped[status])
-                for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
+        sections = [(status, grouped[status])
+                    for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
+        if not self.SPLIT_SECTIONS_BY_TYPE:
+            return sections
+        # Films and shows share every status but nothing else - one is a
+        # single sitting, the other is a season and an episode number -
+        # so "Watching" holding both put two unlike things on one row.
+        split = []
+        for status, group in sections:
+            by_type = {entry_type: [] for entry_type in self.ENTRY_TYPES}
+            for entry in group:
+                by_type.setdefault(entry.get("type") or self.ENTRY_TYPES[0], []).append(entry)
+            for entry_type, entries in by_type.items():
+                if entries:
+                    split.append((f"{status} · {SECTION_TYPE_PLURAL.get(entry_type, entry_type)}",
+                                  entries))
+        return split
 
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
@@ -1061,15 +1092,44 @@ class TrackerPage(GlassPage):
             self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
-        row = 0
         for status, group in sections:
-            header = QLabel(f"{status} ({len(group)})", objectName="SectionTitle")
-            self.grid_layout.addWidget(header, row, 0, 1, GRID_COLS)
-            row += 1
-            for index, entry in enumerate(group):
-                card = self._build_card(entry)
-                self.grid_layout.addWidget(card, row + index // GRID_COLS, index % GRID_COLS)
-            row += (len(group) + GRID_COLS - 1) // GRID_COLS
+            self.grid_layout.addWidget(
+                QLabel(f"{status} ({len(group)})", objectName="SectionTitle"))
+            self.grid_layout.addWidget(self._build_section_strip(group))
+
+    def _build_section_strip(self, group):
+        """One section's cards on a single line that scrolls sideways.
+
+        Its own scroll area per section, not one for the page: sections
+        are different lengths, and a shared sideways scroll would drag a
+        short section off screen to reach the end of a long one.
+
+        Vertical wheel is left alone (the bar is off, so Qt hands the
+        event up to the page, which is what should scroll); Shift+wheel
+        and the bar itself move the row."""
+        strip = QWidget(objectName="Bare")
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
+        strip_layout.setSpacing(14)
+        for entry in group:
+            strip_layout.addWidget(self._build_card(entry))
+        strip_layout.addStretch()
+
+        area = QScrollArea(objectName="Bare")
+        area.setWidget(strip)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.viewport().setAutoFillBackground(False)
+        strip.setAutoFillBackground(False)
+        # Height is the cards' own, plus room for the bar when it appears.
+        # Without a fixed height the area claims the whole page and one
+        # section fills the window.
+        strip.adjustSize()
+        area.setFixedHeight(strip.sizeHint().height()
+                            + area.horizontalScrollBar().sizeHint().height())
+        return area
 
     def _build_card(self, entry):
         card = Card(hoverable=True)
@@ -1523,6 +1583,7 @@ class MangaPage(TrackerPage):
 class SeriesPage(TrackerPage):
     DATA_FILE = "series.json"
     ENTRY_TYPES = ("Series", "Movie")
+    SPLIT_SECTIONS_BY_TYPE = True
     TITLE = "Movies & Series"
     TYPE_OPTIONS = ["Series", "Movie"]
     MEDIUM = release_schedule.MEDIUM_SERIES

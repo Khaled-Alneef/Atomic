@@ -58,6 +58,7 @@ clever one, and leave a working path working.
 | 33 | Say how many matches, not what to do about them | ui-engineer | contained | **landed 1.4.6** - owner-raised |
 | 34 | Show Last Watched must not open on borrowed numbers | ui-engineer | contained | **landed 1.4.6** - owner-raised |
 | 35 | A suggestion's chapter number outliving the suggestion | ui-engineer | contained | **landed 1.4.6** - owner-reported |
+| 36 | Cards past the 8th were unreachable; films shared a row with shows | ui-engineer | contained | **landed 1.4.7** - owner-reported |
 | 29 | Let the "what's new" dialog scroll | ui-engineer | contained | todo - found landing #4 |
 | 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | todo - found landing #2 |
 | 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | todo |
@@ -704,6 +705,27 @@ late still loses, as before. Measured against the real pages (798 and
 884 both fetched live), and the **control run with the fix removed
 reproduces the reported 798** - so the harness measures the defect
 rather than passing either way.
+
+### 36. Cards past the 8th were unreachable; films shared a row with shows
+
+**What** - Owner-reported. Tracker pages drew one grid wrapping at 9
+columns, inside a scroll area whose horizontal bar is switched off - so
+the 9th card of a row sat past the viewport with no way to reach it, on
+every tracker page. The owner also asked for films and shows to stop
+sharing a row even when they share a status.
+**Owner** - ui-engineer
+**Landed** (1.4.7) - each status section is now its own row that scrolls
+sideways on its own, rather than one grid for the page: sections are
+different lengths, and a shared sideways scroll would drag a short
+section off screen to reach the end of a long one. Vertical wheel is
+untouched, so the page still scrolls as before. On Movies & Series each
+status splits by type ("Watching · Series", "Watching · Movies");
+Anime and Reading are unchanged, since splitting Manga from Manhwa would
+be three rows of the same shape. Measured in a real window at 1280px: 20
+cards want 3866px against a 1167px viewport, the last card sits at
+x=3686 at rest and x=987 after scrolling to the end, a section shorter
+than the viewport grows no bar, and scrolling one row leaves the others
+where they were.
 
 ### 29. Let the "what's new" dialog scroll
 
