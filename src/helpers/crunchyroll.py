@@ -15,22 +15,24 @@ and without documentation. Accessing it with a third-party client is
 against their terms of service; that is the account holder's decision to
 make, and this module exists because the owner made it explicitly.
 
-**The password grant needs a client credential, and that is the single
-point of failure.** `/auth/v1/token` answers
-`invalid_client / missing_client_credentials` without an Authorization
-Basic header, and Crunchyroll periodically *deactivates* the credentials
-third-party clients use - the resulting error is
-`auth.obtain_access_token.client_inactive`. When that happens nothing
-here is broken; the credential is. It is one constant (CLIENT_ID /
-CLIENT_SECRET), overridable from settings.json without a rebuild, and
-`login` reports the server's own error code so the cause is legible
-rather than "login failed".
+**No password, and no minting of tokens.** The primary path is a token
+copied out of the browser session the user is already signed into. That
+needs nothing from Crunchyroll that they don't already hand the browser,
+and it is the only route that works: minting a token from an email and
+password requires a client credential Crunchyroll issues to no third
+party, and the published one is **measured dead** - both
+`www.crunchyroll.com` and `beta-api.crunchyroll.com` answer
+`auth.obtain_access_token.client_inactive` to it, which a login rejects
+before it ever looks at an account.
 
-**The password is never stored.** You type it once, it is exchanged for
-a refresh token, and only that token is saved - the same shape as the
-Stremio account this app already has (see stremio.login), and the reason
-`.claude/rules/integrations.md` allows a first-party session token while
-banning stored keys.
+`login`/`refresh` below still implement that grant, because it costs
+nothing to keep and starts working the moment a live client credential
+is put in settings.json. Nothing in the UI reaches them today.
+
+**A pasted token is short-lived** - Crunchyroll's own session token,
+minutes to an hour. So this is a "press sync when you want it" source,
+not a background one, and an expired token has to say so plainly rather
+than looking like "you haven't watched anything".
 """
 
 import json
@@ -158,11 +160,11 @@ def _from_http_error(exc):
             "Crunchyroll has deactivated the client credential this app signs "
             "in with. Nothing is wrong with your account or password - the "
             "credential in settings.json has to be replaced.", code=code)
-    if exc.code == 401:
+    if exc.code in (401, 403):
         return CrunchyrollError(
-            "Crunchyroll rejected the sign-in. Check the email and password, "
-            f"and that the account isn't a Google/Facebook login.{' ' + detail if detail else ''}",
-            code=code or "unauthorized")
+            "Crunchyroll rejected that token. They expire quickly - copy a "
+            "fresh one from the browser and paste it again (Settings has the "
+            "steps).", code=code or "unauthorized")
     if exc.code == 429:
         return CrunchyrollError("Crunchyroll is rate-limiting this connection; "
                                 "try again in a few minutes.", code="rate_limited")
@@ -273,13 +275,35 @@ _history_cache = None
 _history_at = 0.0
 
 
-def active_session(timeout: int = 15):
-    """A signed-in session with a live access token, or None when no
-    Crunchyroll account is connected. Raises CrunchyrollError if the
-    stored token no longer works, so the caller can say why.
+def session_from_token(access_token: str, timeout: int = 15) -> dict:
+    """A usable session from a token pasted out of the browser.
 
-    Refreshed at most once per token lifetime rather than per lookup."""
+    Checked immediately against /accounts/v1/me rather than stored on
+    faith: a mistyped or half-copied token would otherwise sit in
+    Settings looking connected and quietly fail on every card."""
+    access_token = (access_token or "").strip()
+    # People paste the whole header value; take the token out of it
+    # rather than making that their problem.
+    if access_token.lower().startswith("bearer "):
+        access_token = access_token[7:].strip()
+    if not access_token:
+        raise CrunchyrollError("Paste your Crunchyroll token first.")
+    return {"access_token": access_token,
+            "account_id": _account_id(access_token, timeout)}
+
+
+def active_session(timeout: int = 15):
+    """A session for the connected account, or None if there isn't one.
+
+    The pasted token is used directly - no refreshing, because refreshing
+    is the part that needs the client credential Crunchyroll won't give
+    out. An expired token surfaces as a CrunchyrollError saying to paste
+    a new one."""
     from . import app_settings
+    token = app_settings.get_crunchyroll_token()
+    if token:
+        return {"access_token": token,
+                "account_id": app_settings.get_crunchyroll_account_id()}
     stored = app_settings.get_crunchyroll_session()
     if not stored:
         return None

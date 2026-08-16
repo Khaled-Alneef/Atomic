@@ -151,6 +151,31 @@ def clear_stremio_auth():
     set_stremio_auth("", "")
 
 
+def get_crunchyroll_token() -> str:
+    """The Crunchyroll session token copied out of the browser.
+
+    A token rather than a password because Crunchyroll issues no client
+    credential to other apps, so there is no way to turn an email and
+    password into a token at all - the published one is deactivated. The
+    browser already holds a valid token; this is that one."""
+    return _load().get("crunchyroll_token", "")
+
+
+def get_crunchyroll_account_id() -> str:
+    return _load().get("crunchyroll_account_id", "")
+
+
+def set_crunchyroll_token(token: str, account_id: str):
+    data = _load()
+    data["crunchyroll_token"] = (token or "").strip()
+    data["crunchyroll_account_id"] = account_id or ""
+    storage.save(SETTINGS_FILE, data)
+
+
+def clear_crunchyroll_token():
+    set_crunchyroll_token("", "")
+
+
 def get_crunchyroll_session():
     """The connected Crunchyroll account as {email, refresh_token,
     account_id}, or None.

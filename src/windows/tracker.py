@@ -844,9 +844,10 @@ class TrackerPage(GlassPage):
         providers = anime_sites.streaming_provider_map()
         used = sorted({providers[e["site_id"]] for e in entries
                        if e.get("site_id") in providers})
-        if "crunchyroll" in used and not app_settings.get_crunchyroll_session():
+        if "crunchyroll" in used and not app_settings.get_crunchyroll_token():
             lines.append("Crunchyroll entries can read your real progress once "
-                         "you sign in under Settings > Crunchyroll Account.")
+                         "you paste your Crunchyroll token under Settings > "
+                         "Crunchyroll Account.")
             used = [p for p in used if p != "crunchyroll"]
         if used:
             names = " and ".join(_UNREADABLE_NAMES.get(p, p.title()) for p in used)
@@ -1042,10 +1043,10 @@ class TrackerPage(GlassPage):
         if REASON_NO_CRUNCHYROLL_ACCOUNT in codes:
             provider = provider or "crunchyroll"
             parts.append(
-                "This entry is on Crunchyroll, and no Crunchyroll account is "
-                "connected - so the one source that knows what you actually "
-                "watched there wasn't asked. Sign in under Settings > "
-                "Crunchyroll Account.")
+                "This entry is on Crunchyroll, and no Crunchyroll token is "
+                "saved - so the one source that knows what you actually "
+                "watched there wasn't asked. Settings > Crunchyroll Account "
+                "has the five steps to get one.")
         elif provider:
             name = _UNREADABLE_NAMES.get(provider, provider.title())
             parts.append(

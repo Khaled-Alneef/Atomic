@@ -851,14 +851,26 @@ Verified against a local stand-in speaking Crunchyroll's response shapes
 from Crunchyroll**; 14/14 checks including that the password never
 reaches settings.json.
 
-**Untested: the live sign-in.** It needs the owner's real account, and a
-client credential **Crunchyroll issues to no third party**. That
-credential is deliberately left empty rather than guessed
-(`crunchyroll_client_id`/`_secret` in settings.json) - a wrong value
-baked in would make every sign-in fail in a way that reads as "your
-password is wrong". Crunchyroll deactivates these periodically; the
-resulting `client_inactive` is reported as its own message, distinct
-from a rejected password, and both are tested.
+**The email/password sign-in was built, then measured dead, then
+replaced by a pasted token.** The password grant needs a client
+credential Crunchyroll issues to no third party. The published one (from
+the archived `crunchyroll-go`) was tested without any account - a login
+with deliberately fake details separates `invalid_grant` (credential
+alive, login wrong) from `client_inactive` (credential dead) - and
+**both `www.crunchyroll.com` and `beta-api.crunchyroll.com` answered
+`auth.obtain_access_token.client_inactive`**. No password can work
+through it, for anyone.
+
+So Settings now takes **the token from the browser session the user is
+already signed into**, with five numbered steps in the dialog. That
+needs no client credential and no password at all. `login`/`refresh`
+remain in the module, unreachable from the UI, and start working if a
+live credential is ever put in settings.json.
+
+**Still untested: a real Crunchyroll token**, which needs the owner's
+own browser. Everything up to that boundary is verified against a local
+stand-in speaking Crunchyroll's shapes, including that an expired token
+says to paste a fresh one rather than looking like "nothing watched".
 
 **Known cost, accepted by the owner**: using Crunchyroll's internal API
 is against their terms of service, and it will break whenever they

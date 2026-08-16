@@ -57,7 +57,7 @@ class _StremioLoginSignals(QObject):
 
 
 class _CrunchyrollSignals(QObject):
-    done = Signal(str, str, str, str)  # email, refresh token, account id, error
+    done = Signal(str, str, str)  # token, account id, error (one side is always "")
 
 
 class _SiteProbeSignals(QObject):
@@ -503,17 +503,25 @@ class SettingsDialog(QDialog):
         self.crunchyroll_status.setWordWrap(True)
         form.addWidget(self.crunchyroll_status)
 
-        self.crunchyroll_email_edit = QLineEdit()
-        self.crunchyroll_email_edit.setPlaceholderText("Email")
-        form.addWidget(self.crunchyroll_email_edit)
+        crunchyroll_steps = QLabel(
+            "<b>How to get your token</b><br>"
+            "1. Open <b>crunchyroll.com</b> in your browser and sign in.<br>"
+            "2. Press <b>F12</b>, then click the <b>Network</b> tab.<br>"
+            "3. Press <b>F5</b> to reload the page.<br>"
+            "4. Click any row in the list, then find "
+            "<b>Request Headers &gt; authorization</b>.<br>"
+            "5. Copy the long text after the word <b>Bearer</b> and paste it below."
+        )
+        crunchyroll_steps.setWordWrap(True)
+        crunchyroll_steps.setTextFormat(Qt.TextFormat.RichText)
+        form.addWidget(crunchyroll_steps)
 
-        self.crunchyroll_password_edit = QLineEdit()
-        self.crunchyroll_password_edit.setPlaceholderText("Password")
-        self.crunchyroll_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addWidget(self.crunchyroll_password_edit)
+        self.crunchyroll_token_edit = QLineEdit()
+        self.crunchyroll_token_edit.setPlaceholderText("Paste your Crunchyroll token")
+        form.addWidget(self.crunchyroll_token_edit)
 
         crunchyroll_btn_row = QHBoxLayout()
-        self.crunchyroll_connect_btn = QPushButton("Sign In")
+        self.crunchyroll_connect_btn = QPushButton("Use Token")
         self.crunchyroll_connect_btn.clicked.connect(self._connect_crunchyroll)
         crunchyroll_btn_row.addWidget(self.crunchyroll_connect_btn)
         self.crunchyroll_disconnect_btn = QPushButton("Disconnect", objectName="Danger")
@@ -522,16 +530,14 @@ class SettingsDialog(QDialog):
         form.addLayout(crunchyroll_btn_row)
 
         crunchyroll_hint = QLabel(
-            "Reads your real Crunchyroll progress from Crunchyroll itself, "
-            "for entries whose Video Website is Crunchyroll - so they no "
-            "longer borrow a number from Stremio or wait on AniList. Your "
-            "password is sent once to Crunchyroll's own sign-in and never "
-            "stored; only the session token is saved.\n\n"
-            "Crunchyroll publishes no public API and issues no key to other "
-            "apps, so signing in needs a client credential set in "
-            "settings.json (crunchyroll_client_id / crunchyroll_client_secret). "
-            "Without one this will say so rather than fail vaguely. Using it "
-            "is against Crunchyroll's terms of service.",
+            "Reads your real progress from Crunchyroll itself, for entries "
+            "whose Video Website is Crunchyroll - so they stop borrowing a "
+            "number from Stremio.\n\n"
+            "A token, not a password: Crunchyroll gives other apps no way to "
+            "sign in, so this reuses the session your browser already has. "
+            "Tokens expire after a while - when progress stops updating, "
+            "paste a fresh one. Using this is against Crunchyroll's terms of "
+            "service.",
             objectName="Muted",
         )
         crunchyroll_hint.setWordWrap(True)
@@ -1021,54 +1027,52 @@ class SettingsDialog(QDialog):
         self._refresh_stremio_account()
 
     def _refresh_crunchyroll_account(self):
-        session = app_settings.get_crunchyroll_session()
-        connected = bool(session)
+        connected = bool(app_settings.get_crunchyroll_token())
         self.crunchyroll_status.setText(
-            f"Connected as {session['email']}" if connected else "Not connected")
-        self.crunchyroll_email_edit.setVisible(not connected)
-        self.crunchyroll_password_edit.setVisible(not connected)
+            "Connected - reading your Crunchyroll history" if connected
+            else "Not connected")
+        self.crunchyroll_token_edit.setVisible(not connected)
         self.crunchyroll_connect_btn.setVisible(not connected)
         self.crunchyroll_disconnect_btn.setVisible(connected)
 
     def _connect_crunchyroll(self):
-        email = self.crunchyroll_email_edit.text().strip()
-        password = self.crunchyroll_password_edit.text()
-        if not email or not password:
+        token = self.crunchyroll_token_edit.text().strip()
+        if not token:
             QMessageBox.warning(self, "Crunchyroll Account",
-                                "Email and password are required.")
+                                "Paste your Crunchyroll token first.")
             return
         self.crunchyroll_connect_btn.setEnabled(False)
-        self.crunchyroll_status.setText("Signing in...")
-        threading.Thread(target=self._crunchyroll_login_worker,
-                         args=(email, password), daemon=True).start()
+        self.crunchyroll_status.setText("Checking the token...")
+        threading.Thread(target=self._crunchyroll_token_worker,
+                         args=(token,), daemon=True).start()
 
-    def _crunchyroll_login_worker(self, email, password):
-        # Must never raise - a dead thread leaves "Signing in..." forever.
-        # The password stays in this frame and is never handed to the
-        # signal, so it cannot reach anything that persists.
+    def _crunchyroll_token_worker(self, token):
+        # Must never raise - a dead thread leaves "Checking..." forever.
+        # Checked against the account endpoint before it is stored, so a
+        # half-copied token is rejected here rather than looking
+        # connected and failing on every card.
         try:
-            session = crunchyroll.login(email, password)
+            session = crunchyroll.session_from_token(token)
             self._crunchyroll_signals.done.emit(
-                email, session.get("refresh_token", ""),
-                str(session.get("account_id", "")), "")
+                session["access_token"], str(session.get("account_id", "")), "")
         except Exception as exc:
-            self._crunchyroll_signals.done.emit("", "", "", str(exc))
+            self._crunchyroll_signals.done.emit("", "", str(exc))
 
-    def _on_crunchyroll_login_done(self, email, refresh_token, account_id, error):
+    def _on_crunchyroll_login_done(self, token, account_id, error):
         self.crunchyroll_connect_btn.setEnabled(True)
-        self.crunchyroll_password_edit.clear()
         if error:
             self.crunchyroll_status.setText("Not connected")
             QMessageBox.critical(self, "Crunchyroll Account",
-                                 f"Couldn't sign in:\n{error}")
+                                 f"That token didn't work:\n{error}")
             return
-        app_settings.set_crunchyroll_session(email, refresh_token, account_id)
+        app_settings.set_crunchyroll_token(token, account_id)
         crunchyroll.forget_cached_history()
-        self.crunchyroll_email_edit.clear()
+        self.crunchyroll_token_edit.clear()
         self._refresh_crunchyroll_account()
 
     def _disconnect_crunchyroll(self):
-        app_settings.clear_crunchyroll_session()
+        app_settings.clear_crunchyroll_token()
+        crunchyroll.forget_cached_history()
         self._refresh_crunchyroll_account()
 
     def _save_anilist_username(self):
