@@ -76,6 +76,12 @@ def update_site(site_id: str, name: str, base_url: str):
     storage.save(SITES_FILE, sites)
 
 
+def record_resolution(site_id: str, resolves: str):
+    """Remember what probe_site found, on the site itself. update_entry
+    rather than writing the whole list back - see .claude/rules/ui.md."""
+    storage.update_entry(SITES_FILE, site_id, {"resolves": resolves})
+
+
 def remove_site(site_id: str):
     sites = [s for s in _load() if s["id"] != site_id]
     storage.save(SITES_FILE, sites)
@@ -329,22 +335,67 @@ def _search_ajax_html(base_url: str, query: str, timeout: int) -> list:
 _ENGINES = (_search_madara, _search_ajaxy, _search_v2_api, _search_ajax_html)
 
 
-def search_site(site: dict, query: str, timeout: int = 6) -> list:
+def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list:
     """Try each known engine against one site, stopping at the first that
     returns anything. Returns [] if the site matches no known shape, has
-    no matches, or is unreachable."""
+    no matches, or is unreachable.
+
+    `deadline` bounds the whole sequence rather than each engine in it -
+    four engines at 6s each is 24s against a dead host. Same shape and
+    the same reasoning as anime_sites.search_site; None keeps the old
+    per-engine behaviour for existing callers."""
     query = (query or "").strip()
     base_url = site.get("base_url")
     if not query or not base_url:
         return []
     for engine in _ENGINES:
+        step = net.step_timeout(deadline, timeout)
+        if step is None:
+            break
         try:
-            results = engine(base_url, query, timeout)
+            results = engine(base_url, query, step)
         except Exception:
             results = []
         if results:
             return results
     return []
+
+
+# What a site is probed with. A title essentially every catalogue
+# carries, so "no results" means the engine didn't match the site's
+# shape rather than that the site simply doesn't have this one.
+PROBE_TITLE = "One Piece"
+
+RESOLVES_ENGINE = "engine"
+RESOLVES_SEARCH_ONLY = "search-only"
+RESOLVES_UNREACHABLE = "unreachable"
+RESOLVES_UNKNOWN = "unknown"
+
+
+def probe_site(site: dict, timeout: int = 6) -> str:
+    """Whether this site will resolve to per-title pages, or only ever
+    fall back to a search link.
+
+    Asked once when a site is added, because until now the only way to
+    find out was to add it, use it, and notice which kind of link it
+    produced - days later, on an entry that quietly points at a search
+    page."""
+    base_url = site.get("base_url")
+    if not base_url:
+        return RESOLVES_UNREACHABLE
+    deadline = net.deadline_in(timeout * 3)
+    if search_site(site, PROBE_TITLE, timeout, deadline=deadline):
+        return RESOLVES_ENGINE
+    step = net.step_timeout(deadline, timeout)
+    if step is None:
+        return RESOLVES_UNKNOWN
+    try:
+        _get(base_url, step)
+        # Answers, but no engine here recognises its search: usable, and
+        # every link will be a search link.
+        return RESOLVES_SEARCH_ONLY
+    except Exception:
+        return RESOLVES_UNREACHABLE
 
 
 def search_all(query: str, timeout: int = 6) -> list:

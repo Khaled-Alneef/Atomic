@@ -56,6 +56,24 @@ class _StremioLoginSignals(QObject):
     done = Signal(str, str, str)  # email, auth key, error message (one is always "")
 
 
+class _SiteProbeSignals(QObject):
+    done = Signal(str, str)  # which list ("reading"/"video"), site name
+
+
+# What probe_site's verdicts mean to someone looking at the list. The
+# distinction that matters: a site with a known engine opens straight to
+# a title's own page, everything else only ever opens that site's search.
+_RESOLVES_LABELS = {
+    "engine": "opens title pages",
+    "generic": "opens title pages (read off its search page)",
+    "streaming": "opens title pages",
+    "search-only": "search links only - no title pages",
+    "unreachable": "didn't answer when checked",
+    "unknown": "couldn't be checked",
+    "checking": "checking...",
+}
+
+
 class _LauncherImportSignals(QObject):
     done = Signal(str, int)  # launcher key, number of games added
 
@@ -94,6 +112,12 @@ class SettingsDialog(QDialog):
 
         self._login_signals = _StremioLoginSignals()
         self._login_signals.done.connect(self._on_stremio_login_done)
+
+        self._site_probe_signals = _SiteProbeSignals()
+        self._site_probe_signals.done.connect(self._on_site_probed)
+        # Sites currently being checked, so the list can say so instead of
+        # showing nothing for the ~10s a probe can take.
+        self._probing_sites = set()
 
         self._launcher_import_signals = _LauncherImportSignals()
         self._launcher_import_signals.done.connect(self._on_launcher_import_done)
@@ -419,6 +443,11 @@ class SettingsDialog(QDialog):
         edit_video_site_btn = QPushButton("Edit...")
         edit_video_site_btn.clicked.connect(self._edit_video_site)
         video_sites_btn_row.addWidget(edit_video_site_btn)
+        check_video_site_btn = QPushButton("Check")
+        check_video_site_btn.setToolTip("Search this site for a known title to see "
+                                        "whether it opens title pages or only search links")
+        check_video_site_btn.clicked.connect(self._check_video_site)
+        video_sites_btn_row.addWidget(check_video_site_btn)
         remove_video_site_btn = QPushButton("Remove", objectName="Danger")
         remove_video_site_btn.clicked.connect(self._remove_video_site)
         video_sites_btn_row.addWidget(remove_video_site_btn)
@@ -511,6 +540,11 @@ class SettingsDialog(QDialog):
         edit_site_btn = QPushButton("Edit...")
         edit_site_btn.clicked.connect(self._edit_site)
         sites_btn_row.addWidget(edit_site_btn)
+        check_site_btn = QPushButton("Check")
+        check_site_btn.setToolTip("Search this site for a known title to see "
+                                  "whether it opens title pages or only search links")
+        check_site_btn.clicked.connect(self._check_site)
+        sites_btn_row.addWidget(check_site_btn)
         remove_site_btn = QPushButton("Remove", objectName="Danger")
         remove_site_btn.clicked.connect(self._remove_site)
         sites_btn_row.addWidget(remove_site_btn)
@@ -721,10 +755,56 @@ class SettingsDialog(QDialog):
         QApplication.instance().quit()
 
     # ------------------------------------------------------------------
+    def _site_label(self, site) -> str:
+        """One row of a websites list, with what the site can actually
+        do. Without this the only way to learn that a site never resolves
+        to title pages was to use it for a while and notice that every
+        entry opened a search page."""
+        label = f"{site['name']}  —  {site['base_url']}"
+        state = "checking" if site["id"] in self._probing_sites else site.get("resolves")
+        note = _RESOLVES_LABELS.get(state)
+        return f"{label}   ·   {note}" if note else label
+
+    def _probe_site_async(self, which: str, site_id: str):
+        """Check what a site resolves to, in the background - it makes
+        real requests and takes seconds."""
+        module = manga_sites if which == "reading" else anime_sites
+        site = module.get_site(site_id)
+        if not site:
+            return
+        self._probing_sites.add(site_id)
+        if which == "reading":
+            self._refresh_sites()
+        else:
+            self._refresh_video_sites()
+        threading.Thread(target=self._probe_site_worker,
+                         args=(which, site_id, dict(site)), daemon=True).start()
+
+    def _probe_site_worker(self, which, site_id, site):
+        # Must never raise - a dead thread would leave the row stuck on
+        # "checking..." forever.
+        module = manga_sites if which == "reading" else anime_sites
+        try:
+            verdict = module.probe_site(site)
+        except Exception:
+            verdict = module.RESOLVES_UNKNOWN
+        try:
+            module.record_resolution(site_id, verdict)
+        except Exception:
+            pass
+        self._site_probe_signals.done.emit(which, site_id)
+
+    def _on_site_probed(self, which, site_id):
+        self._probing_sites.discard(site_id)
+        if which == "reading":
+            self._refresh_sites()
+        else:
+            self._refresh_video_sites()
+
     def _refresh_sites(self):
         self.sites_list.clear()
         for site in manga_sites.list_sites():
-            item = QListWidgetItem(f"{site['name']}  —  {site['base_url']}")
+            item = QListWidgetItem(self._site_label(site))
             item.setData(Qt.ItemDataRole.UserRole, site["id"])
             self.sites_list.addItem(item)
 
@@ -735,8 +815,9 @@ class SettingsDialog(QDialog):
     def _add_site(self):
         dialog = SiteForm(self, "Website")
         if dialog.result_data:
-            manga_sites.add_site(*dialog.result_data)
+            site = manga_sites.add_site(*dialog.result_data)
             self._refresh_sites()
+            self._probe_site_async("reading", site["id"])
 
     def _edit_site(self):
         site_id = self._selected_site_id()
@@ -747,6 +828,15 @@ class SettingsDialog(QDialog):
         if dialog.result_data:
             manga_sites.update_site(site_id, *dialog.result_data)
             self._refresh_sites()
+            # Re-checked, not kept: the URL may be the thing that changed.
+            self._probe_site_async("reading", site_id)
+
+    def _check_site(self):
+        site_id = self._selected_site_id()
+        if not site_id:
+            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            return
+        self._probe_site_async("reading", site_id)
 
     def _remove_site(self):
         site_id = self._selected_site_id()
@@ -765,7 +855,7 @@ class SettingsDialog(QDialog):
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         self.video_sites_list.addItem(item)
         for site in anime_sites.list_sites():
-            item = QListWidgetItem(f"{site['name']}  —  {site['base_url']}")
+            item = QListWidgetItem(self._site_label(site))
             item.setData(Qt.ItemDataRole.UserRole, site["id"])
             self.video_sites_list.addItem(item)
 
@@ -778,8 +868,9 @@ class SettingsDialog(QDialog):
         # search pattern is worked out in anime_sites, not typed here.
         dialog = SiteForm(self, "Video Website")
         if dialog.result_data:
-            anime_sites.add_site(*dialog.result_data)
+            site = anime_sites.add_site(*dialog.result_data)
             self._refresh_video_sites()
+            self._probe_site_async("video", site["id"])
 
     def _edit_video_site(self):
         site_id = self._selected_video_site_id()
@@ -790,6 +881,15 @@ class SettingsDialog(QDialog):
         if dialog.result_data:
             anime_sites.update_site(site_id, *dialog.result_data)
             self._refresh_video_sites()
+            # Re-checked, not kept: the URL may be the thing that changed.
+            self._probe_site_async("video", site_id)
+
+    def _check_video_site(self):
+        site_id = self._selected_video_site_id()
+        if not site_id:
+            QMessageBox.information(self, "Video Websites", "Select a website first.")
+            return
+        self._probe_site_async("video", site_id)
 
     def _remove_video_site(self):
         site_id = self._selected_video_site_id()

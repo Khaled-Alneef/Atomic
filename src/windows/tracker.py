@@ -36,6 +36,11 @@ from helpers.widgets import (
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
 
+_REORDER_HINT = "(drag a card to reorder, or right-click it for Move Up/Down)"
+# Dragging is off while a search hides part of the grid - a drop writes
+# the order that is on screen, which isn't the whole order then.
+_SEARCHING_HINT = "(clear the search to drag cards into a new order)"
+
 # Manga/Manhwa/Manhua are just regional flavors of the same reading
 # medium - same statuses, same search/open behavior - so they're treated
 # as one group everywhere except the Type dropdown itself.
@@ -355,10 +360,36 @@ class _ProgressSyncSignals(QObject):
     resolved = Signal(str, int, int, bool, int, int, bool, str)
 
 
+# Why a sync found nothing, when that is known. Several causes look
+# identical on screen - no progress - and the user reads all of them as
+# "the app is broken", which is exactly what happened: an empty AniList
+# username silently meant nothing could ever sync, and nothing said so.
+#
 # AniList refused the connection rather than answering. Nothing about
 # this title is known either way, so it must not be reported as "not on
-# your list" - that reading is what had the app looking broken.
+# your list".
 REASON_ANILIST_RATE_LIMITED = "anilist_rate_limited"
+
+# The one setting Anime progress depends on is blank. The most useful
+# thing the app can say, because it is the one the user can act on.
+REASON_NO_ANILIST_USERNAME = "no_anilist_username"
+
+# The entry sits on a service whose watch history cannot be read by
+# anything, ever, without the user's own login - carried as
+# "site_unreadable:netflix" so the message can name it.
+REASON_SITE_UNREADABLE = "site_unreadable"
+
+# Kept in one place so the wording is the same in the dialog, the
+# tooltip and the page notice.
+_UNREADABLE_NAMES = {"netflix": "Netflix", "crunchyroll": "Crunchyroll"}
+
+
+def _reason_provider(reason: str):
+    """The service named in a REASON_SITE_UNREADABLE reason, if present."""
+    for part in (reason or "").split(","):
+        if part.startswith(REASON_SITE_UNREADABLE + ":"):
+            return part.split(":", 1)[1]
+    return None
 
 
 class _CoverSignals(QObject):
@@ -464,10 +495,36 @@ class TrackerPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        hint = QLabel("(drag a card to reorder, or right-click it for Move Up/Down)", objectName="Muted")
-        top_row.addWidget(hint)
+        self.reorder_hint = QLabel(_REORDER_HINT, objectName="Muted")
+        top_row.addWidget(self.reorder_hint)
         top_row.addStretch()
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search titles...")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setFixedWidth(220)
+        # Debounced rather than filtering on every keystroke: each redraw
+        # rebuilds every card from scratch (pages hold no state - see
+        # .claude/rules/ui.md), so typing six characters would otherwise
+        # rebuild the whole grid six times.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._refresh_grid)
+        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
+        top_row.addWidget(self.search_box)
         layout.addLayout(top_row)
+
+        # Why progress isn't syncing, said once for the whole page rather
+        # than on every card. The user spent a long time believing the app
+        # was broken when the real answers were "no AniList username is
+        # set" and "Netflix/Crunchyroll publish no watch history at all" -
+        # neither of which is deducible from a card that simply shows
+        # nothing. Filled in by _update_sync_notice, hidden when there is
+        # nothing to say.
+        self.sync_notice = QLabel(objectName="Muted")
+        self.sync_notice.setWordWrap(True)
+        self.sync_notice.hide()
+        layout.addWidget(self.sync_notice)
 
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
@@ -668,8 +725,21 @@ class TrackerPage(GlassPage):
                 entry["title"], entry.get("type") == "Anime", True)
 
     # ------------------------------------------------------------------
+    def _search_query(self) -> str:
+        # getattr because _refresh_grid can run before the box exists on
+        # a page still being built.
+        box = getattr(self, "search_box", None)
+        return box.text().strip().lower() if box else ""
+
     def _visible_entries(self):
         entries = [e for e in self.entries if e["type"] in self.ENTRY_TYPES]
+        query = self._search_query()
+        if query:
+            # Plain case-insensitive substring, not a fuzzy match: the
+            # user is looking for a title they know is there, and a fuzzy
+            # rank that quietly includes near-misses would make a short
+            # query look like it had failed to filter at all.
+            entries = [e for e in entries if query in (e.get("title") or "").lower()]
         mode = self.sort_box.currentText()
         if mode == "Name (A-Z)":
             entries = sorted(entries, key=lambda e: e["title"].lower())
@@ -696,15 +766,23 @@ class TrackerPage(GlassPage):
             return ["", text]  # legacy freeform text that doesn't parse - keep it visible
         return [str(season) if season else "", str(episode) if episode else ""]
 
-    def _tooltip_html(self, entry):
+    def _tooltip_html(self, entry, provider=None):
         """Built fresh on every hover (see _build_card) rather than once
         per card, because the countdown at the end of it is only right at
-        the moment it's shown."""
+        the moment it's shown.
+
+        `provider` is passed in rather than looked up here: this runs on
+        every hover, and resolving it reads the saved sites file."""
         rows = [f"<b>{entry['title']}</b>", entry["status"]]
         for label, value in zip(self.PROGRESS_COLUMNS, self._progress_columns(entry)):
             if value:
                 rows.append(f"{label}: {value}")
         rows.extend(release_schedule.tooltip_lines(entry, self.MEDIUM))
+        # Only while there is nothing real to show: once progress is
+        # confirmed this is just noise on a card that works.
+        if provider and not entry.get("progress_verified"):
+            name = _UNREADABLE_NAMES.get(provider, provider.title())
+            rows.append(f"<i>{name} can't report watch progress - set it by hand</i>")
         return "<br>".join(rows)
 
     # ------------------------------------------------------------------
@@ -728,6 +806,30 @@ class TrackerPage(GlassPage):
         return [(status, grouped[status])
                 for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
 
+    def _update_sync_notice(self):
+        """The standing reasons this page can't sync progress, if any.
+
+        Recomputed on every redraw rather than cached: the AniList
+        username can be filled in from Settings while the page is open,
+        and a site can be changed on any entry."""
+        if not self.SUPPORTS_PROGRESS_SYNC:
+            return
+        entries = [e for e in self.entries if e["type"] in self.ENTRY_TYPES]
+        lines = []
+        if any(e["type"] == "Anime" for e in entries) and not app_settings.get_anilist_username():
+            lines.append("No AniList username is set, so Anime progress has "
+                         "nothing to sync from - add it in Settings.")
+        providers = anime_sites.streaming_provider_map()
+        used = sorted({providers[e["site_id"]] for e in entries
+                       if e.get("site_id") in providers})
+        if used:
+            names = " and ".join(_UNREADABLE_NAMES.get(p, p.title()) for p in used)
+            lines.append(f"{names} don't publish watch history, so progress for "
+                         f"entries there can only be set by hand - that's not a "
+                         f"fault, there is nothing for any app to read.")
+        self.sync_notice.setText("  •  ".join(lines))
+        self.sync_notice.setVisible(bool(lines))
+
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -735,10 +837,22 @@ class TrackerPage(GlassPage):
             if widget:
                 widget.deleteLater()
 
+        self._update_sync_notice()
+        self._card_providers = anime_sites.streaming_provider_map()
+
+        # Dragging is disabled while a search is narrowing the grid: a
+        # drop writes the order that is on screen (see
+        # _begin_custom_order), and the order on screen is not the whole
+        # order while entries are hidden.
+        searching = bool(self._search_query())
+        self.reorder_hint.setText(_SEARCHING_HINT if searching else _REORDER_HINT)
+
         sections = self._sections()
         if not sections:
-            empty = QLabel(f"No {self.TITLE.lower()} yet - click '+' to create one.", objectName="Muted")
-            self.grid_layout.addWidget(empty, 0, 0)
+            message = (f"Nothing here matches '{self.search_box.text().strip()}'."
+                       if searching else
+                       f"No {self.TITLE.lower()} yet - click '+' to create one.")
+            self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
         row = 0
@@ -754,7 +868,8 @@ class TrackerPage(GlassPage):
     def _build_card(self, entry):
         card = Card(hoverable=True)
         card.setFixedWidth(POSTER_SIZE[0] + 20)
-        card.set_tooltip_provider(lambda en=entry: self._tooltip_html(en))
+        provider = getattr(self, "_card_providers", {}).get(entry.get("site_id"))
+        card.set_tooltip_provider(lambda en=entry, pv=provider: self._tooltip_html(en, pv))
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(8, 10, 8, 10)
         card_layout.setSpacing(6)
@@ -784,25 +899,59 @@ class TrackerPage(GlassPage):
             card_layout.addWidget(progress_label)
 
         if entry["type"] in MANGA_TYPES:
-            controls = QHBoxLayout()
-            controls.setContentsMargins(0, 0, 0, 0)
-            minus_btn = QPushButton("-", objectName="Icon")
-            minus_btn.setFixedSize(46, 46)
-            minus_btn.setToolTip("Last Watched Chapter -1")
-            minus_btn.clicked.connect(lambda checked=False, en=entry: self._bump_watched_chapter(en, -1))
-            controls.addWidget(minus_btn)
-            controls.addStretch()
-            plus_btn = QPushButton("+", objectName="Icon")
-            plus_btn.setFixedSize(46, 46)
-            plus_btn.setToolTip("Last Watched Chapter +1")
-            plus_btn.clicked.connect(lambda checked=False, en=entry: self._bump_watched_chapter(en, 1))
-            controls.addWidget(plus_btn)
-            card_layout.addLayout(controls)
+            card_layout.addLayout(self._bump_controls(
+                entry, "Last Watched Chapter", self._bump_watched_chapter))
+        else:
+            # Same control Manga has always had, for episodes. Without it
+            # the only way to move progress by one was the whole Edit
+            # dialog - and on these two types that dialog is also where
+            # the search/cover/link machinery lives, so it is a heavy way
+            # to say "watched one more".
+            card_layout.addLayout(self._bump_controls(
+                entry, "Episode", self._bump_episode))
 
         card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
-        self._drag_reorder.attach(card, entry.get("id"))
+        if not self._search_query():
+            self._drag_reorder.attach(card, entry.get("id"))
         return card
+
+    def _bump_controls(self, entry, label, handler):
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        for sign, delta in (("-", -1), ("+", 1)):
+            button = QPushButton(sign, objectName="Icon")
+            button.setFixedSize(46, 46)
+            button.setToolTip(f"{label} {delta:+d}")
+            button.clicked.connect(
+                lambda checked=False, en=entry, d=delta: handler(en, d))
+            if sign == "+":
+                controls.addStretch()
+            controls.addWidget(button)
+        return controls
+
+    def _bump_episode(self, entry, delta):
+        """Move episode progress by one from the card.
+
+        Never rolls a season over: nothing here knows how many episodes a
+        season has (latest_available is the newest episode *out*, not a
+        season length), so guessing would silently put progress in the
+        wrong season. The season only changes in Edit, where it is typed.
+
+        Marks the progress verified, exactly as editing the spinner by
+        hand does (EntryForm._on_progress_hand_edited) - pressing +1 is
+        the same assertion that this is really your progress, and without
+        it the card would keep showing nothing after being clicked."""
+        text = (entry.get("progress") or "").strip()
+        season, episode = parse_episode_progress(text)
+        if text and not season and not episode:
+            return  # freeform note from an old entry - don't overwrite it
+        episode = max(0, episode + delta)
+        entry["progress"] = format_episode_progress(season, episode)
+        entry["progress_verified"] = True
+        entry["updated_at"] = storage.now_iso()
+        self._save_entries()
+        self._refresh_grid()
 
     def _bump_watched_chapter(self, entry, delta):
         current = entry.get("last_watched_chapter") or 0.0
@@ -839,6 +988,57 @@ class TrackerPage(GlassPage):
         menu.addAction("Delete", lambda: self._delete_entry(entry))
         menu.exec(event.globalPosition().toPoint())
 
+    def _not_found_message(self, reason: str) -> str:
+        """What to say when a sync found no progress.
+
+        Four different situations used to share one message that began
+        "No real progress found for this title" - including the two the
+        user cannot possibly deduce: a service that publishes no watch
+        history at all, and an AniList username that was never filled in.
+        Reading "not found" in those cases is what made the app look
+        broken rather than unconfigured."""
+        codes = set((reason or "").split(","))
+        if REASON_ANILIST_RATE_LIMITED in codes:
+            # Its own message, not a line added to the others: nothing
+            # was learned about this title at all, so anything else said
+            # here would be a guess.
+            return ("AniList is refusing requests from this connection right "
+                    "now (it answers 403 once it decides a connection has "
+                    "asked too often, and that can last an hour or more). "
+                    "This says nothing about whether the title is on your "
+                    "list - try again later.")
+
+        parts = []
+        provider = _reason_provider(reason)
+        if provider:
+            name = _UNREADABLE_NAMES.get(provider, provider.title())
+            parts.append(
+                f"{name} doesn't publish what you've watched. There is no way "
+                f"for Atomic - or any other app - to read your {name} progress "
+                f"without your account login, so this entry will never fill "
+                f"itself in: set it by hand in Edit.")
+        if REASON_NO_ANILIST_USERNAME in codes:
+            parts.append(
+                "No AniList username is set. Anime progress syncs from your "
+                "Stremio account or your public AniList list, and with that "
+                "field blank in Settings there is nothing to read - which is "
+                "why nothing has been syncing.")
+        if not parts:
+            parts.append(
+                "No real progress found for this title. Either it's not in "
+                "your Stremio library (or, for Anime, your AniList list), or "
+                "Stremio has no specific episode recorded for it - that only "
+                "happens once you've actually pressed play on one through "
+                "Stremio itself, not just added it to your library. You can "
+                "still set your progress by hand in Edit.")
+        return "\n\n".join(parts)
+
+    def _entry_provider(self, entry):
+        """The unreadable-service name for this entry, or None. Read here
+        on the UI thread rather than in the worker - it reads the saved
+        sites file."""
+        return anime_sites.streaming_provider(entry.get("site_id"))
+
     def _sync_progress(self, entry):
         """Re-fetch this one entry's *real* progress (your connected
         Stremio account, or - for Anime - your AniList username) and
@@ -853,7 +1053,8 @@ class TrackerPage(GlassPage):
         # queue behind a page-load backfill of every other entry.
         threading.Thread(
             target=self._fetch_real_progress,
-            args=(entry["id"], imdb_id, entry["title"], entry.get("type") == "Anime", False),
+            args=(entry["id"], imdb_id, entry["title"], entry.get("type") == "Anime", False,
+                  self._entry_provider(entry)),
             daemon=True).start()
 
     def _sync_all_progress(self):
@@ -876,9 +1077,13 @@ class TrackerPage(GlassPage):
                 self._fetch_real_progress, entry["id"], _entry_imdb_id(entry),
                 entry["title"], entry.get("type") == "Anime", True)
 
-    def _fetch_real_progress(self, entry_id, imdb_id, title, is_anime, silent):
+    def _fetch_real_progress(self, entry_id, imdb_id, title, is_anime, silent,
+                             provider=None):
+        """`provider` is the entry's streaming service when it is one that
+        can't be read (see anime_sites.streaming_provider) - worked out on
+        the UI thread by the caller, since it reads the saved sites."""
         result = None
-        reason = ""
+        reasons = []
         _, auth_key = app_settings.get_stremio_auth()
         if auth_key:
             try:
@@ -894,9 +1099,13 @@ class TrackerPage(GlassPage):
                     # Deliberately not folded into the except below: the
                     # whole point is that this is not a no-match.
                     result = None
-                    reason = REASON_ANILIST_RATE_LIMITED
+                    reasons.append(REASON_ANILIST_RATE_LIMITED)
                 except Exception:
                     result = None
+            else:
+                reasons.append(REASON_NO_ANILIST_USERNAME)
+        if not result and provider in _UNREADABLE_NAMES:
+            reasons.append(f"{REASON_SITE_UNREADABLE}:{provider}")
         try:
             total = stremio.fetch_latest_episode(imdb_id, "series")
         except Exception:
@@ -905,7 +1114,7 @@ class TrackerPage(GlassPage):
         total_season, total_episode = total or (0, 0)
         self._sync_signals.resolved.emit(
             entry_id, season, episode, result is not None, total_season, total_episode,
-            silent, reason)
+            silent, ",".join(reasons))
 
     def _on_progress_synced(self, entry_id, season, episode, found, total_season,
                             total_episode, silent, reason=""):
@@ -927,24 +1136,9 @@ class TrackerPage(GlassPage):
                 self._sync_changed = True
 
         if not silent:
-            if not found and reason == REASON_ANILIST_RATE_LIMITED:
-                QMessageBox.information(
-                    self, "Sync Progress",
-                    "AniList is refusing requests from this connection right "
-                    "now (it answers 403 once it decides a connection has "
-                    "asked too often, and that can last an hour or more). "
-                    "This says nothing about whether the title is on your "
-                    "list - try again later.")
-                return
             if not found:
-                QMessageBox.information(
-                    self, "Sync Progress",
-                    "No real progress found for this title. Either it's not in "
-                    "your Stremio library (or, for Anime, your AniList list), or "
-                    "Stremio has no specific episode recorded for it - that only "
-                    "happens once you've actually pressed play on one through "
-                    "Stremio itself, not just added it to your library. You can "
-                    "still set your progress by hand in Edit.")
+                QMessageBox.information(self, "Sync Progress",
+                                        self._not_found_message(reason))
                 return
             self._save_entries()
             self._refresh_grid()

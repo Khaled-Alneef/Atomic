@@ -68,3 +68,24 @@ def deadline_in(timeout: float) -> float:
     """The wall-clock deadline `timeout` seconds from now. Named so call
     sites read as a budget rather than a bare arithmetic expression."""
     return time.monotonic() + timeout
+
+
+# Below this there is no point starting another request: DNS plus a TCP
+# handshake to a host that has already proven slow will not finish, and
+# the attempt still costs a connection. Give up honestly instead.
+MIN_STEP_SECONDS = 1.0
+
+
+def step_timeout(deadline, timeout: float):
+    """The timeout for the next request in a chain, or None when the
+    chain's own deadline leaves too little to bother.
+
+    `deadline` of None means an uncapped caller - the old behaviour, one
+    full timeout per request. This is what makes "three engines at 6s
+    each" a 6s-ish bound rather than an 18s one."""
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining < MIN_STEP_SECONDS:
+        return None
+    return min(timeout, remaining)

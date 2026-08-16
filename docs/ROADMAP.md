@@ -18,14 +18,14 @@ defects, usability gaps, the Amazon Prime coverage note):
 | 6 | Back up settings/entries before an overwrite, and stop swallowing a corrupt file silently | ui-engineer | spans modules | done |
 | 7 | Tell AniList's rate-limit apart from "no result" | integrations-engineer | contained | done |
 | 8 | Investigate a second source for Crunchyroll | integrations-engineer | shape unknown - investigate first | done |
-| 9 | Say so when Netflix/Crunchyroll watch progress can't be read | ui-engineer | spans modules | todo |
-| 10 | Surface a missing AniList username where it actually matters | ui-engineer | spans modules | todo |
-| 11 | Search and filter on tracker pages | ui-engineer | spans modules | todo |
-| 12 | Show whether an added site will resolve to title pages or only ever fall back to search | integrations-engineer | spans modules | todo |
-| 13 | Quick +1 for Anime/Series progress | ui-engineer | contained | todo |
-| 14 | Investigate Amazon Prime coverage before building it | integrations-engineer | shape unknown - investigate first | todo |
-| 15 | Investigate startup and page-rebuild performance | test-engineer | shape unknown - investigate first | todo |
-| 16 | Investigate code signing to stop the antivirus false positive | release-engineer | shape unknown - investigate first | todo |
+| 9 | Say so when Netflix/Crunchyroll watch progress can't be read | ui-engineer | spans modules | done |
+| 10 | Surface a missing AniList username where it actually matters | ui-engineer | spans modules | done |
+| 11 | Search and filter on tracker pages | ui-engineer | spans modules | done |
+| 12 | Show whether an added site will resolve to title pages or only ever fall back to search | integrations-engineer | spans modules | done |
+| 13 | Quick +1 for Anime/Series progress | ui-engineer | contained | done |
+| 14 | Investigate Amazon Prime coverage before building it | integrations-engineer | shape unknown - investigate first | done - **not building it** |
+| 15 | Investigate startup and page-rebuild performance | test-engineer | shape unknown - investigate first | done - **nothing to fix** |
+| 16 | Investigate code signing to stop the antivirus false positive | release-engineer | shape unknown - investigate first | done - **decision needed from the user** |
 | 17 | Investigate Kitsu as a second source for watch progress | integrations-engineer | shape unknown - investigate first | todo |
 
 Items 1-8 landed together as the correctness pass. Each block below
@@ -357,6 +357,26 @@ Netflix**: Crunchyroll answers **200 to a deliberately bogus id**
 up, and the strict Wikidata title match carries the weight instead. A
 loose free-text P11330 value is rejected by shape.
 
+*Correction, from item #14's measurement.* The "4 of 6" above is real
+but was measured on headline titles. Against the owner's **actual**
+three tracked titles the same lookup answers **0 of 3** - Wikidata
+carries no Crunchyroll id for any of them (see item #14). The fallback
+is still worth having and costs nothing when it misses, but it will
+rarely fire on this library: AniList remains the practical source.
+
+*A wrong-show bug this investigation found, and fixed.* Asking Wikidata
+with `_query_variants`' subtitle-stripped head matched the **parent
+franchise**: "Bleach: Thousand-Year Blood War" has no id of its own, so
+the fallback asked for "Bleach", scored the 2004 series at 1.00, and
+returned Crunchyroll `G63VGG2NY` and Netflix `70204957` - both the wrong
+show, saved onto the entry permanently. **This affected Netflix too and
+predates this month's work** (the Netflix path shipped in 1.3 with the
+same loop). Both now ask with the full title only: a knowledge base's
+labels are canonical titles, so the shorter string finds the franchise
+rather than the season. Frieren still resolves on its full title, so
+nothing was lost; Bleach TYBW now correctly returns nothing and falls
+through to AniList and then to a search page.
+
 *The progress (moved to item #17).* AniList remains the only source
 wired up. The keyless candidate is **Kitsu** - its public JSON:API
 answered without any key on both a user lookup and an anime search
@@ -405,6 +425,15 @@ differs from a plain "not synced" entry on an ordinary site.
 **Risk** - none of this is network-dependent, so no "service says no"
 case beyond what #7/#8 already cover - this item is purely about
 surfacing information the app already has.
+**Landed** - in three places, deliberately not on the card face.
+`anime_sites.streaming_provider`/`streaming_provider_map` make the
+private `_streaming_site_for` askable from a page; the Sync Progress
+dialog now names the service and says progress there has to be set by
+hand; the hover tooltip says the same, and only while progress is
+unverified. **The card label was left alone on purpose** - a permanent
+"can't be read" line under every Crunchyroll cover is clutter on cards
+that are otherwise working, and the page-level notice from #10 covers
+the same ground once instead of per card.
 
 ### 10. Surface a missing AniList username where it actually matters
 
@@ -442,6 +471,16 @@ isn't on the list.
 the same `_on_progress_synced` message-building code, and doing them in
 two uncoordinated passes risks one overwriting the other's branch. Best
 done by the same person in one pass, or explicitly sequenced.
+**Landed** - done in one pass with #9, as that risk line suggested. The
+several not-found causes are now separate `REASON_*` codes carried on
+the `resolved` signal and turned into text by `_not_found_message`; a
+blank username produces its own paragraph naming the setting, and an
+entry that is *both* on an unreadable service and missing a username
+says both rather than picking one. Above that sits a page-level notice
+under the sort row (`_update_sync_notice`), recomputed on every redraw
+so filling the username in from Settings clears it without a restart -
+that notice is the part that answers "why is nothing happening?" without
+the user having to sync an entry first to find out.
 
 ### 11. Search and filter on tracker pages
 
@@ -468,6 +507,15 @@ per the comment at ~706-709) - make sure an active filter doesn't let a
 drag-reorder silently drop the hidden entries' saved order. Worth an
 explicit check: filter active, reorder, clear filter, confirm nothing
 moved unexpectedly.
+**Landed** - search box in the sort row, narrowing `_visible_entries`
+before `_sections` groups it, so all three pages get it from the shared
+base. Debounced at 150ms because every redraw rebuilds every card from
+scratch. **The reorder risk was resolved by removing the combination
+rather than reconciling it**: cards are not draggable while a search is
+active (`_build_card` skips attaching the handler) and the hint text
+says why. Reconciling a partial on-screen order with the saved one is
+solvable but it is the kind of subtlety that ships as a data bug, and
+"clear the search to reorder" costs the user nothing.
 
 ### 12. Show whether an added site will resolve to title pages or only ever fall back to search
 
@@ -498,6 +546,18 @@ resolving (host changed) isn't required to re-flag itself automatically
 **Risk** - depends on #4 landing first (or at least being sized) so the
 probe itself doesn't cost another 24s per site added; sequence this
 after #4.
+**Landed** - `probe_site` in both `anime_sites` and `manga_sites`
+searches the site for a title every catalogue carries ("One Piece") and
+reports `engine` / `generic` / `search-only` / `unreachable` /
+`streaming`; Settings stores it on the site and shows it in the list
+("opens title pages", "search links only - no title pages", "didn't
+answer when checked"). Runs on add, on edit (the URL may be what
+changed), and from a new **Check** button so sites added before this
+existed can be checked too. Verified against local servers of each
+shape: engine, search-only and unreachable all classified correctly,
+four probes in 10.3s total. Depended on #4 as predicted - and needed the
+same deadline in `manga_sites.search_site`, which didn't have one, so
+`net.step_timeout` is now shared by both.
 
 ### 13. Quick +1 for Anime/Series progress
 
@@ -525,6 +585,16 @@ level as typing it into Edit today - check what Edit currently sets
 like manga chapters - +1 needs to roll over correctly at a season
 boundary using the existing `format_episode_progress`/
 `parse_episode_progress` helpers rather than naive integer increment.
+**Landed** - `_bump_episode`, sharing one `_bump_controls` builder with
+the Manga path so both rows stay identical. It sets `progress_verified`,
+matching what a hand edit in the form does - without that the card would
+still show nothing after being clicked. **It deliberately does not roll
+a season over**, contrary to the risk line above: nothing in the app
+knows how many episodes a season has (`latest_available` is the newest
+episode *out*, not a season length), so a rollover would be a guess that
+silently files progress under the wrong season. The season is changed in
+Edit, where it is typed. A freeform legacy note is left untouched rather
+than overwritten, and -1 stops at zero.
 
 ### 14. Investigate Amazon Prime coverage before building it
 
@@ -556,6 +626,33 @@ already does: search-page fallback, not an error.
 **Risk** - this is explicitly investigate-before-build per
 `planning.md`; don't let "P8055 works for one title I tried" stand in
 for measuring the real sample.
+
+**Landed - measured, and the answer is no. Not building it.**
+
+Measured against the owner's *actual* tracked titles (read from a copy
+of `%APPDATA%\Atomic`, never the live data). Three Anime/Series entries:
+*The Angel Next Door Spoils Me Rotten*, *Bleach: Thousand-Year Blood
+War*, *Wistoria: Wand and Sword*.
+
+| Property | Service | Hits |
+|---|---|---|
+| P8055 | Prime (US) | **0 / 3** |
+| P14440 | Prime | **0 / 3** |
+| P1874 | Netflix | 0 / 3 |
+| P11330 | Crunchyroll | 0 / 3 |
+
+The entities exist on Wikidata with exact 1.00 label matches - they
+simply carry **no streaming ids of any kind**. This is not a Prime
+problem, it is a coverage cliff: Wikidata's streaming ids are on older
+and headline titles (*Bleach* 2004 has both Crunchyroll and Netflix ids;
+*Bleach: Thousand-Year Blood War* 2022 has neither), and a library of
+current seasonal anime falls entirely outside it. Building Prime on top
+of P8055 would resolve nothing for this user, and there is no second
+public source for Prime ids the way AniList backs Netflix.
+
+**Revisit only with new evidence** - a materially larger tracked library
+whose titles do carry these ids, or Wikidata coverage visibly improving.
+"Prime would be nice" is not new evidence.
 
 ### 15. Investigate startup and page-rebuild performance
 
@@ -594,6 +691,36 @@ frame broken in both the broken and fixed case because it wasn't
 validated first; don't repeat that shape here with an unvalidated
 timing method.
 
+**Landed - measured. There is no performance problem to fix.**
+
+Cold start of the frozen exe, launch to a visible window, three runs
+with `%APPDATA%` redirected to a copy: **1.42s / 1.29s / 1.57s**. In
+process, the phases behind that are app-module imports 137ms, PyQt6
+import 23ms, `MainWindow()` 32ms, `apply_theme` under 1ms - so most of
+the wall clock is PyInstaller's onefile unpack and Qt's own
+initialisation, neither of which is application code.
+
+Tracker page redraw, which was the other suspect:
+
+| Entries | First build | Redraw | Per card |
+|---|---|---|---|
+| 10 | 39ms | 4ms | 0.4ms |
+| 50 | 58ms | 17ms | 0.3ms |
+| 200 | 197ms | 66ms | 0.3ms |
+| 500 | 412ms | 164ms | 0.3ms |
+
+Linear, and 500 entries is over a hundred times this library. **Covers
+were the named suspect and are not the cost**: repeating the run with a
+real 800x1200 PNG on every card moved it from 0.3 to 0.4ms per card
+(200 entries: 66ms → 77ms), because scaled pixmaps are already cached.
+
+**No follow-up item.** The only lever that would move the 1.3s is a
+onedir build instead of onefile, which trades away the single-file
+distribution the whole update mechanism is built on - a bad trade for
+about a second. Rebuilding pages from scratch on every visit stays as
+it is; `.claude/rules/ui.md` requires it, and it costs 4ms at this
+library's size.
+
 ### 16. Investigate code signing to stop the antivirus false positive
 
 **What** - The release build has been flagged by Microsoft Defender as
@@ -621,6 +748,37 @@ specific option, that becomes next month's implementation item.
 purchase step, which stays gated behind explicit user approval per the
 standing purchase-permission rule regardless of what this investigation
 finds.
+
+**Landed - researched. Nothing bought; this is a decision for the user.**
+
+The landscape moved since this defect was first written down, and it
+moved in our favour:
+
+| Option | Cost | Hardware | Notes |
+|---|---|---|---|
+| **Azure Artifact Signing** (was Trusted Signing) | **$9.99/mo** Basic, 5,000 signatures | none - cloud HSM | Open to *individual* developers after identity validation; GA in US/Canada/Europe |
+| EV certificate (Sectigo/SSL.com/DigiCert) | ~$249-325/yr | USB token or HSM **mandatory** | 1-year terms as of Feb 2026 |
+| OV certificate | ~$200-300/yr | same hardware rule | |
+
+**The reason to buy EV specifically is gone.** Since March 2024 EV no
+longer grants an instant SmartScreen pass; EV and OV now build
+reputation the same way, by download volume. Paying triple for the token
+ceremony buys nothing this project needs.
+
+**Recommendation: Azure Artifact Signing, ~$120/year.** Cheapest, no
+hardware token to plug in before a release, and it fits the existing
+`build`/`release` pipeline as a signing step rather than a manual one.
+
+**Two things to confirm before committing**, neither of which an agent
+can settle: whether the owner's identity validation passes (individuals
+need verifiable history), and whether it is offered in the owner's
+region - GA is listed for US/Canada/Europe.
+
+**Honest caveat**: signing makes a heuristic flag much less likely and
+gives a real identity to appeal with, but no signature *guarantees*
+Defender never flags a build again. The bisection already proved 1.2's
+flag was a false positive on an unsigned, reputation-less binary; that
+is the condition signing removes.
 
 ### 17. Investigate Kitsu as a second source for watch progress
 
@@ -670,9 +828,10 @@ rather than discovering it as a bug later.
   Prime is the one the owner already flagged as worth investigating;
   anything past it (Hulu, Disney+, etc.) is a new investigation with its
   own coverage question, not assumed to follow the same pattern.
-- **Not implementing Amazon Prime this month, only investigating it**
-  (item #14) - coverage is unmeasured and `planning.md` is explicit that
-  measuring comes before building.
+- **Not implementing Amazon Prime - now measured, not merely deferred**
+  (item #14). 0 of 3 real tracked titles carry P8055 or P14440, and 0 of
+  3 carry a Netflix or Crunchyroll id either. The feature would resolve
+  nothing for this library. Revisit only on new evidence.
 - **Not purchasing a code-signing certificate** (item #16 is research
   and a recommendation only) - a purchase needs the user's explicit
   approval per the standing purchase-permission rule, and pricing has

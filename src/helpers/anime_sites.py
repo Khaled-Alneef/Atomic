@@ -141,6 +141,12 @@ def update_site(site_id: str, name: str, base_url: str):
     storage.save(SITES_FILE, sites)
 
 
+def record_resolution(site_id: str, resolves: str):
+    """Remember what probe_site found, on the site itself. update_entry
+    rather than writing the whole list back - see .claude/rules/ui.md."""
+    storage.update_entry(SITES_FILE, site_id, {"resolves": resolves})
+
+
 def remove_site(site_id: str):
     sites = [s for s in _load() if s["id"] != site_id]
     storage.save(SITES_FILE, sites)
@@ -463,25 +469,6 @@ def _search_generic_html(base_url: str, query: str, timeout: int) -> list:
     return _candidate_urls(_get(search_page_url(base_url, query), timeout), base_url)
 
 
-# Below this there is no point starting another request: DNS plus a TCP
-# handshake to a host that has already proven slow will not finish, and
-# the attempt still costs a connection. Give up honestly instead.
-_MIN_STEP_SECONDS = 1.0
-
-
-def _step_timeout(deadline, timeout: int):
-    """The timeout for the next request in a chain, or None when the
-    chain's own deadline leaves too little to bother. `deadline` of None
-    means an uncapped caller - the old behaviour, one full timeout per
-    request."""
-    if deadline is None:
-        return timeout
-    remaining = deadline - time.monotonic()
-    if remaining < _MIN_STEP_SECONDS:
-        return None
-    return min(timeout, remaining)
-
-
 def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list:
     """Try each known engine against one site, stopping at the first that
     returns anything. Returns [] if the site matches no known shape, has
@@ -495,7 +482,7 @@ def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list
     if not query or not base_url:
         return []
     for engine in _ENGINES:
-        step = _step_timeout(deadline, timeout)
+        step = net.step_timeout(deadline, timeout)
         if step is None:
             break
         try:
@@ -727,6 +714,33 @@ def _streaming_site_for(base_url: str):
     return None
 
 
+def streaming_provider(site_id: str):
+    """"crunchyroll"/"netflix" if this saved site is one of the services
+    that cannot be read at all, else None.
+
+    Public because the tracker has to tell the user *why* an entry on one
+    of them never syncs: neither publishes watch history without a login,
+    so an entry there shows no progress forever and that is indis-
+    tinguishable on screen from a bug. Reaching into _streaming_site_for
+    from a page would be reaching into a private."""
+    if not site_id:
+        return None
+    row = _streaming_site_for(_to_base_url(get_site(site_id) or {}))
+    return row[1] if row else None
+
+
+def streaming_provider_map() -> dict:
+    """{site_id: provider} for every saved site that is one. One read of
+    the sites file rather than one per entry - a tracker page asks this
+    for its whole list every time it redraws."""
+    found = {}
+    for site in _load():
+        row = _streaming_site_for(_to_base_url(site))
+        if row and site.get("id"):
+            found[site["id"]] = row[1]
+    return found
+
+
 def _streaming_normalize(url: str, suffix: str, origin: str, locale_re):
     """One canonical shape out of the several AniList holds. Rows added
     over a site's lifetime carry plain `http://`, retired hosts (Crunchy-
@@ -791,16 +805,36 @@ def _netflix_page_url(title: str, timeout: int):
     A confirmed 404 is treated as no answer. Anything else - including a
     failed check - keeps the link: the id came from a source that says
     the title is on Netflix, so a transient network error is not reason
-    enough to throw it away."""
-    for variant in _query_variants(title):
-        netflix_id = wikidata.fetch_netflix_id(variant, timeout)
-        if not netflix_id:
-            continue
-        url = wikidata.netflix_page_url(netflix_id)
-        if _netflix_available(url, timeout) is False:
-            return None
-        return url
-    return None
+    enough to throw it away.
+
+    The full title only - see the note above _crunchyroll_wikidata_url."""
+    netflix_id = wikidata.fetch_netflix_id(title, timeout)
+    if not netflix_id:
+        return None
+    url = wikidata.netflix_page_url(netflix_id)
+    if _netflix_available(url, timeout) is False:
+        return None
+    return url
+
+
+# Why these two ask Wikidata with the full title and never with
+# _query_variants' subtitle-stripped head:
+#
+# The head variant exists because *sites* index a show under its romaji
+# ("Sousou no Frieren" where the tracker says "Frieren: Beyond Journey's
+# End"), so searching the shorter string finds it. Wikidata is not a
+# site search - its labels are the canonical English titles - and there
+# the shorter string finds the *parent franchise* instead.
+#
+# Measured: "Bleach: Thousand-Year Blood War" has no streaming id of its
+# own, so the fallback asked for "Bleach" and matched the 2004 series at
+# 1.00, returning Crunchyroll G63VGG2NY and Netflix 70204957 - both the
+# wrong show, saved onto the entry permanently. "Frieren: Beyond
+# Journey's End" resolves on its full title alone, so the variant buys
+# nothing even where it looked useful. A missing link falls through to
+# AniList and then to a search page, which is the honest outcome;
+# pinning a sequel to its predecessor's page is the failure mode this
+# codebase treats as the worst one.
 
 
 def _crunchyroll_wikidata_url(title: str, timeout: int):
@@ -818,12 +852,10 @@ def _crunchyroll_wikidata_url(title: str, timeout: int):
     200 to everything, measured - a deliberately bogus GZZZZZZZZ returned
     200 exactly like the four real ids tried. So a probe here would only
     ever confirm "the site is up", and the strict Wikidata title match is
-    what has to carry the weight."""
-    for variant in _query_variants(title):
-        series_id = wikidata.fetch_crunchyroll_id(variant, timeout)
-        if series_id:
-            return wikidata.crunchyroll_page_url(series_id)
-    return None
+    what has to carry the weight - which is also why this asks with the
+    full title only (see the note above)."""
+    series_id = wikidata.fetch_crunchyroll_id(title, timeout)
+    return wikidata.crunchyroll_page_url(series_id) if series_id else None
 
 
 def _streaming_page_url(row, title: str, timeout: int):
@@ -916,7 +948,7 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
     if not base_url:
         return None
     for variant in variants:
-        step = _step_timeout(deadline, timeout)
+        step = net.step_timeout(deadline, timeout)
         if step is None:
             break
         try:
@@ -928,6 +960,59 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
         if match:
             return match["url"]
     return None
+
+
+# What a site is probed with. A title essentially every catalogue
+# carries, so "no results" means the engine didn't match the site's
+# shape rather than that the site simply doesn't have this one.
+PROBE_TITLE = "One Piece"
+
+RESOLVES_STREAMING = "streaming"
+RESOLVES_ENGINE = "engine"
+RESOLVES_GENERIC = "generic"
+RESOLVES_SEARCH_ONLY = "search-only"
+RESOLVES_UNREACHABLE = "unreachable"
+RESOLVES_UNKNOWN = "unknown"
+
+
+def probe_site(site: dict, timeout: int = 6) -> str:
+    """Whether this site will resolve to per-title pages, or only ever
+    fall back to a search link.
+
+    Asked once when a site is added. Until now the only way to find out
+    was to add it, use it, and eventually notice which kind of link the
+    entries got - and a site that only ever falls back to search is not
+    broken, it just can't do the thing the user probably expected, which
+    is worth knowing at the moment they add it rather than weeks later.
+
+    Bounded by one deadline across all of it (see search_site) - a dead
+    host must not make adding a site look like a hang."""
+    base_url = _to_base_url(site or {})
+    if not base_url:
+        return RESOLVES_UNREACHABLE
+    if _streaming_site_for(base_url) is not None:
+        # Never searched at all: these resolve from Wikidata/AniList, so
+        # they always produce a real title page when the title is known.
+        return RESOLVES_STREAMING
+    deadline = net.deadline_in(timeout * 3)
+    if search_site(site, PROBE_TITLE, timeout, deadline=deadline):
+        return RESOLVES_ENGINE
+    step = net.step_timeout(deadline, timeout)
+    if step is not None:
+        try:
+            if _search_generic_html(base_url, PROBE_TITLE, step):
+                return RESOLVES_GENERIC
+        except Exception:
+            pass
+    step = net.step_timeout(deadline, timeout)
+    if step is None:
+        return RESOLVES_UNKNOWN
+    try:
+        _get(base_url, step)
+        # Answers, but nothing here can read its search results.
+        return RESOLVES_SEARCH_ONLY
+    except Exception:
+        return RESOLVES_UNREACHABLE
 
 
 def search_all(query: str, timeout: int = 6) -> list:

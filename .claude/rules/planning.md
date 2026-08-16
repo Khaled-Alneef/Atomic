@@ -60,13 +60,27 @@ id**. Don't re-derive this.
   only ever fall back to search.
 - Bumping progress needs the Edit dialog; no quick +1.
 
-**Amazon Prime, if it comes up.** Wikidata property **P8055** ("Amazon
-Prime Video ID", US) exists and works - *The Boys* → `B07QQQ52B3`; a
-newer **P14440** ("Prime Video ID") also exists. But coverage for anime
-looks thin: Hunter x Hunter and Vinland Saga both carry a Netflix id
-(P1874) and **no** Prime id. Measure coverage across real tracked titles
-before committing to the feature; the Netflix pattern in
-`helpers/wikidata.py` is what to copy if it holds up.
+**Amazon Prime: measured and rejected, do not re-propose.** Coverage was
+measured across the owner's real tracked titles (roadmap #14): **0 of 3**
+carry P8055 or P14440 - and 0 of 3 carry a Netflix or Crunchyroll id
+either, though all three exist on Wikidata with exact label matches.
+Wikidata's streaming ids sit on headline and older titles; a library of
+current seasonal anime falls outside them entirely. Building Prime would
+resolve nothing here, and unlike Netflix there is no second public
+source. Revisit only on new evidence - a materially different library,
+or visibly improved coverage. "Prime would be nice" is not evidence.
+
+**Performance: measured, nothing to fix** (roadmap #15). Frozen exe cold
+start 1.29-1.57s, mostly PyInstaller unpack and Qt init; tracker redraw
+0.3-0.4ms per card, linear to 500 entries; covers are not a cost
+(pixmaps are cached). Don't open a performance item without a new
+measurement contradicting this.
+
+**Code signing: priced, awaiting the owner's decision** (roadmap #16).
+Azure Artifact Signing is ~$9.99/mo with no hardware token and is open
+to individuals; EV certs are ~$249-325/yr and, since March 2024, no
+longer grant the instant SmartScreen pass that was their whole point.
+The purchase itself is the owner's to make.
 
 ## Depending on someone else's service
 

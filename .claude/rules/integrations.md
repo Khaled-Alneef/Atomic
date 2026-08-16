@@ -115,6 +115,26 @@ probe proves only that the site is up - the strict Wikidata title match
 is the whole safeguard, and a free-text P11330 value is rejected by
 shape first.
 
+**Ask Wikidata with the full title only - never a shortened variant.**
+`_query_variants`' subtitle-stripped head exists for *site* searches
+that index romaji; a knowledge base's labels are canonical titles, so
+the short form matches the **parent franchise**. Measured: "Bleach:
+Thousand-Year Blood War" has no id of its own, so asking for "Bleach"
+scored the 2004 series at 1.00 and returned that show's Crunchyroll and
+Netflix pages, saved onto the entry permanently. Frieren resolves on its
+full title alone, so the variant buys nothing even where it looked
+useful.
+
+**Wikidata's streaming-id coverage has a cliff, and current seasonal
+anime is on the wrong side of it.** Measured over the owner's real
+tracked titles: **0 of 3** carry a Crunchyroll (P11330), Netflix
+(P1874) or Prime (P8055/P14440) id, though all three exist as entities
+with exact label matches. Headline and older titles carry them; the
+current season does not. So the Wikidata path is a genuine fallback, not
+a replacement for AniList - and **Amazon Prime was measured and rejected
+on exactly this** (roadmap #14). Don't propose a new streaming service
+without measuring coverage over real entries first.
+
 **Watch progress is not a Wikidata problem.** It is personal history;
 only a list service the user keeps can answer it. AniList is the only
 one wired up. Kitsu's public API answers keyless (candidate, roadmap
