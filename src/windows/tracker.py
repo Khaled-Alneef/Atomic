@@ -14,6 +14,7 @@ listed there.
 
 import re
 import threading
+import time
 import uuid
 import webbrowser
 
@@ -475,12 +476,10 @@ class TrackerPage(GlassPage):
         header = QHBoxLayout()
         header.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
         header.addStretch()
-        refresh_btn = QPushButton("⟳", objectName="AccentIcon")
-        refresh_btn.setFixedSize(40, 40)
-        refresh_btn.setToolTip("Refresh progress from Stremio and re-check release schedules"
-                               if self.SUPPORTS_PROGRESS_SYNC else "Re-check release schedules")
-        refresh_btn.clicked.connect(self._refresh_everything)
-        header.addWidget(refresh_btn)
+        # No refresh button: opening the page is the refresh (see
+        # _auto_refresh). A button that had to be pressed, and then sat
+        # on "Updating..." for as long as the slowest source took, was
+        # asking the user to do the app's job and wait for it.
         add_btn = QPushButton("+", objectName="AccentIcon")
         add_btn.setFixedSize(40, 40)
         add_btn.setToolTip("Add Entry")
@@ -539,18 +538,49 @@ class TrackerPage(GlassPage):
             self._backfill_missing_latest_available()
         self._backfill_sharper_covers()
         self._refresh_schedules()
+        self._auto_refresh()
 
     # ------------------------------------------------------------------
+    # How long after an automatic sync the page will leave it alone.
+    # Opening a page is now the refresh, and a page can be opened several
+    # times a minute while navigating - without this, that is one Stremio
+    # request per entry every time.
+    _AUTO_SYNC_INTERVAL = 10 * 60
+
+    def _auto_refresh(self):
+        """Refresh on arrival, quietly.
+
+        The schedules already refresh themselves on page load and are
+        cached for 12h (release_schedule.needs_refresh), so what this
+        adds is the progress sync - throttled, because navigating back
+        and forth would otherwise re-ask Stremio about every entry each
+        time.
+
+        Deliberately silent: no "Updating..." toast. The old button
+        showed one and then held it for as long as the slowest source
+        took, which is what made a refresh feel like something the user
+        was waiting on rather than something already done. Results land
+        on the cards as they arrive."""
+        if not self.SUPPORTS_PROGRESS_SYNC:
+            return
+        _, auth_key = app_settings.get_stremio_auth()
+        if not auth_key:
+            return  # nothing to sync from - the page notice says so
+        now = time.time()
+        if now - app_settings.get_last_auto_sync(self.DATA_FILE) < self._AUTO_SYNC_INTERVAL:
+            return
+        app_settings.set_last_auto_sync(self.DATA_FILE, now)
+        self._sync_all_progress()
+
     def _refresh_everything(self):
-        """Header refresh button: re-check what's out there for every
-        entry on this page - both your own watched/read progress (where
-        the page has a source for it) and when the next episode/chapter
-        is due.
+        """Re-check everything on this page - progress and release dates
+        - and say how it went. Kept for anything that asks for a full
+        refresh explicitly; the page itself uses _auto_refresh.
 
         Says so while it works, and says how it went when it's finished
         (see _refresh_step_done) - every lookup runs on its own background
-        thread, so without that the button reads as doing nothing at all
-        for however long the slowest source takes to answer."""
+        thread, so without that it reads as doing nothing at all for
+        however long the slowest source takes to answer."""
         if self._refresh_toast is not None:
             return  # already running - let it finish rather than double it
         self._refresh_run += 1
@@ -825,6 +855,13 @@ class TrackerPage(GlassPage):
         if entries and not auth_key:
             lines.append("No Stremio account is connected, so nothing can sync "
                          "on its own - connect one in Settings.")
+        else:
+            # Said even when everything is working, because the thing the
+            # user cannot tell by looking is which entries will keep
+            # themselves up to date. An entry on Crunchyroll or Netflix
+            # looks identical to one Stremio knows about.
+            lines.append("Only Stremio tracks your progress automatically - "
+                         "entries you watch elsewhere keep whatever you set.")
         providers = anime_sites.streaming_provider_map()
         used = sorted({providers[e["site_id"]] for e in entries
                        if e.get("site_id") in providers})
@@ -1011,13 +1048,14 @@ class TrackerPage(GlassPage):
             daemon=True).start()
 
     def _sync_all_progress(self):
-        """Header refresh button: re-sync every linked entry on this page
-        at once, instead of right-clicking each card individually."""
+        """Re-sync every linked entry on this page at once, instead of
+        right-clicking each card individually."""
         targets = [e for e in self.entries if e["type"] in self.ENTRY_TYPES and _entry_imdb_id(e)]
         if not targets:
-            # Only worth saying on its own; during a refresh the verdict
-            # toast covers it, and two toasts share the same corner.
-            if self._refresh_toast is None:
+            # Only said during an explicit refresh. On arrival there is
+            # nothing to report - a page opening with nothing to sync is
+            # the ordinary case, not news.
+            if self._refresh_toast is not None:
                 show_toast(self, "Nothing to sync yet - no linked entries")
             return
         # The whole batch counts as one step of the refresh, closed out
@@ -1480,6 +1518,15 @@ class EntryForm(QDialog):
         # after the initial populate (and _populate_site_options blocks
         # signals) so loading an existing entry doesn't fire this.
         self.site_box.currentIndexChanged.connect(self._on_site_changed)
+        # Right under the dropdown, because this is the moment the
+        # expectation forms: picking Netflix or Crunchyroll here looks
+        # exactly like picking Stremio, and only one of them will ever
+        # fill the progress in by itself.
+        self.site_sync_hint = QLabel(
+            "Only Stremio tracks your progress automatically.",
+            objectName="Muted")
+        self.site_sync_hint.setWordWrap(True)
+        site_layout.addWidget(self.site_sync_hint)
         form.addWidget(self.site_row)
 
         self._update_url_and_site_visibility()
@@ -1522,9 +1569,13 @@ class EntryForm(QDialog):
             self.url_label.setText("Stremio link (opens Stremio on double-click)")
         else:
             self.title_label.setText("Title (type to search your reading websites)")
+        is_video = self.type_box.currentText() in VIDEO_TYPES
         self.site_label.setText(
-            "Video Website (opens directly on double-click)" if self.type_box.currentText() in VIDEO_TYPES
+            "Video Website (opens directly on double-click)" if is_video
             else "Reading Website (opens directly on double-click)")
+        # Reading has no automatic source at all, so the line would only
+        # raise a question it then fails to answer.
+        self.site_sync_hint.setVisible(is_video)
 
     def _status_options(self):
         return STATUSES_BY_TYPE.get(self.type_box.currentText(), STATUSES_BY_TYPE["Anime"])

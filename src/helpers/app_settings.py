@@ -151,6 +151,33 @@ def clear_stremio_auth():
     set_stremio_auth("", "")
 
 
+def get_seeded_default_sites() -> list:
+    """Names of the built-in video websites already offered to this
+    install. Lets a *new* default (Netflix, added after Crunchyroll) show
+    up for someone who already had a sites file, without it coming back
+    every launch once they delete it - see anime_sites._add_new_defaults."""
+    return _load().get("seeded_default_sites", [])
+
+
+def set_seeded_default_sites(names: list):
+    data = _load()
+    data["seeded_default_sites"] = list(names)
+    storage.save(SETTINGS_FILE, data)
+
+
+def get_last_auto_sync(key: str) -> float:
+    """When this page last synced progress on its own, as a timestamp."""
+    return float((_load().get("last_auto_sync") or {}).get(key) or 0)
+
+
+def set_last_auto_sync(key: str, when: float):
+    data = _load()
+    stamps = data.get("last_auto_sync") or {}
+    stamps[key] = when
+    data["last_auto_sync"] = stamps
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_launcher_dirs() -> dict:
     """{"steam": "G:\\Steam", ...} for whichever game launchers have a
     directory configured in Settings > Games - see helpers.launchers."""

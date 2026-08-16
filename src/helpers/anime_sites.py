@@ -117,6 +117,38 @@ def _load():
         sites = [{"id": s.get("id") or str(uuid.uuid4()), "name": s.get("name", ""),
                    "base_url": _to_base_url(s)} for s in sites]
         storage.save(SITES_FILE, sites)
+    return _add_new_defaults(sites)
+
+
+def _add_new_defaults(sites: list) -> list:
+    """Give an existing install the defaults added since it was set up.
+
+    DEFAULT_SITES only ever seeded an *empty* file, so adding Netflix to
+    that list did nothing for anyone who already had Crunchyroll saved -
+    which is everyone. Each new default is added once, tracked by name in
+    settings, so deleting one afterwards makes it stay deleted rather
+    than reappearing on the next launch."""
+    from . import app_settings
+
+    seeded = set(app_settings.get_seeded_default_sites())
+    hosts = {_host_key(urllib.parse.urlsplit(s.get("base_url") or "").netloc)
+             for s in sites}
+    added = False
+    for default in DEFAULT_SITES:
+        name = default["name"]
+        if name in seeded:
+            continue
+        seeded.add(name)
+        host = _host_key(urllib.parse.urlsplit(default["base_url"]).netloc)
+        if host in hosts:
+            continue  # already there under some name of the user's own
+        sites.append({"id": str(uuid.uuid4()), "name": name,
+                       "base_url": default["base_url"]})
+        added = True
+    if added or set(app_settings.get_seeded_default_sites()) != seeded:
+        app_settings.set_seeded_default_sites(sorted(seeded))
+    if added:
+        storage.save(SITES_FILE, sites)
     return sites
 
 
