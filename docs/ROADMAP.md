@@ -63,6 +63,7 @@ clever one, and leave a working path working.
 | 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | **landed 1.4.9** |
 | 37 | Opening an app whose target is gone still shows a raw OS error | ui-engineer | contained | todo - found landing #16 |
 | 38 | Home's Apps preview doesn't show a missing target | ui-engineer | contained | **landed 1.4.10** |
+| 39 | An empty tracker page crashed the app | ui-engineer | contained | **landed 1.4.11** - regression from #36 |
 | 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | **landed 1.4.8** |
 | 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | **landed 1.4.8** |
 | 13 | Check for updates in the background, not only on demand | ui-engineer | contained | **landed 1.4.8** |
@@ -747,6 +748,25 @@ cards want 3866px against a 1167px viewport, the last card sits at
 x=3686 at rest and x=987 after scrolling to the end, a section shorter
 than the viewport grows no bar, and scrolling one row leaves the others
 where they were.
+
+### 39. An empty tracker page crashed the app
+
+**What** - Regression I shipped in #36 (1.4.7). Turning the tracker grid
+into per-section rows changed `grid_layout` from a `QGridLayout` to a
+`QVBoxLayout`, but the empty-state branch still called
+`addWidget(label, 0, 0)` with grid row/column arguments. Every path that
+draws it - a page with no entries, a search matching nothing, a filter
+matching nothing - raised `TypeError` inside a slot, which takes the
+process down rather than showing an error.
+**Why it survived four versions** - the harness written for #36 built
+pages *with* entries, because that was what the item was about. Nothing
+exercised the one branch the conversion had missed.
+**Owner** - ui-engineer
+**Landed** (1.4.11) - one line, plus the three empty states added to the
+#36 harness so the branch is covered from now on.
+**Risk** - none in the fix. The lesson is the harness: a layout
+conversion has to be checked against the states that draw *nothing*, not
+only the ones that draw the thing being changed.
 
 ### 29. Let the "what's new" dialog scroll
 

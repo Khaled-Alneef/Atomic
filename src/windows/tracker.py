@@ -1136,7 +1136,14 @@ class TrackerPage(GlassPage):
                 message = "Nothing matches the filter - clear it from the filter button."
             else:
                 message = f"No {self.TITLE.lower()} yet - click '+' to create one."
-            self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
+            # No row/column arguments: this layout became a QVBoxLayout
+            # when sections turned into sideways-scrolling rows, and the
+            # grid form left here raised TypeError on the one path that
+            # still used it - an empty page, or a search matching
+            # nothing. Raised inside a slot, which takes the process down
+            # rather than showing an error.
+            self.grid_layout.addWidget(QLabel(message, objectName="Muted"))
+            self.grid_layout.addStretch()
             return
 
         for status, group in sections:
