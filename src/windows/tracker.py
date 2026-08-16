@@ -475,7 +475,7 @@ class TrackerPage(GlassPage):
         header = QHBoxLayout()
         header.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
         header.addStretch()
-        refresh_btn = QPushButton("âŸ³", objectName="AccentIcon")
+        refresh_btn = QPushButton("⟳", objectName="AccentIcon")
         refresh_btn.setFixedSize(40, 40)
         refresh_btn.setToolTip("Refresh progress from Stremio and re-check release schedules"
                                if self.SUPPORTS_PROGRESS_SYNC else "Re-check release schedules")
@@ -833,7 +833,7 @@ class TrackerPage(GlassPage):
             lines.append(f"{names} publishes nothing about what you've watched, "
                          f"so entries opened there only sync what Stremio itself "
                          f"knows about them.")
-        self.sync_notice.setText("  â€¢  ".join(lines))
+        self.sync_notice.setText("  •  ".join(lines))
         self.sync_notice.setVisible(bool(lines))
 
     def _refresh_grid(self, *_args):
@@ -1425,7 +1425,7 @@ class EntryForm(QDialog):
         season_col.addWidget(QLabel("Last Season"))
         self.season_spin = QSpinBox()
         self.season_spin.setRange(0, 99)
-        self.season_spin.setSpecialValueText("â€”")
+        self.season_spin.setSpecialValueText("—")
         self.season_spin.setValue(season0)
         season_col.addWidget(self.season_spin)
         episode_layout.addLayout(season_col)
@@ -1511,7 +1511,7 @@ class EntryForm(QDialog):
         other's (e.g. "Loading cover..." stomping the "not your progress"
         hint, or vice versa)."""
         self._status_parts[key] = text
-        self.status_label.setText(" Â· ".join(p for p in self._status_parts.values() if p))
+        self.status_label.setText(" · ".join(p for p in self._status_parts.values() if p))
 
     def _provider(self):
         return SEARCH_PROVIDER_BY_TYPE.get(self.type_box.currentText(), "manga_sites")
@@ -1571,7 +1571,7 @@ class EntryForm(QDialog):
             self.site_box.addItem("Stremio", None)
             sites = anime_sites.list_sites()
         else:
-            self.site_box.addItem("â€” None â€”", None)
+            self.site_box.addItem("— None —", None)
             sites = manga_sites.list_sites()
         for site in sites:
             self.site_box.addItem(site["name"], site["id"])
@@ -1647,7 +1647,6 @@ class EntryForm(QDialog):
         if provider == "stremio" and self.type_box.currentText() in VIDEO_TYPES:
             results = self._expand_for_video_sites(results)
 
-        source_name = "Stremio" if provider == "stremio" else "your manga websites"
         self._search_results = {}
         labels = []
         for r in results:
@@ -1666,11 +1665,15 @@ class EntryForm(QDialog):
         self.title_combo.setCurrentText(current_text)
         self.title_combo.blockSignals(False)
 
+        # Deliberately not naming the source. Which service was searched
+        # is an implementation detail of the Type dropdown, and spelling
+        # it out ("No matches from Stremio", "...from your manga
+        # websites") only invited the question of why that one was asked.
         if labels:
-            self.status_label.setText(f"{len(labels)} match(es) from {source_name} - pick one below")
+            self.status_label.setText(f"{len(labels)} match(es) - pick one below")
             self.title_combo.showPopup()
         else:
-            self.status_label.setText(f"No matches from {source_name} - you can still save this title as-is")
+            self.status_label.setText("No matches - you can still save this title as-is")
 
         # If what's typed already exactly matches one of the results (not
         # a suffixed dupe label, the actual title), apply it automatically

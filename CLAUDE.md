@@ -131,6 +131,13 @@ a body explaining what was wrong and what was measured - not a file
 list. One commit per change on `development`; the executable is only
 committed on `main`, at a release.
 
+**Never edit a source file through PowerShell's `Get-Content`/
+`Set-Content`.** It reads in the system codepage and writes UTF-8, so
+every non-ASCII character in the file is silently mangled - `—` became
+`â€”` and `⟳` became `âŸ³` across two files, and it reached the user's
+screen. Use the Edit/Write tools, or Python with an explicit
+`encoding="utf-8"`.
+
 Measure rather than assert. Things here look correct and aren't - a
 toast positioned with `mapToGlobal` on mixed-DPI displays, a build
 PyInstaller silently re-copied from cache, a pixel classifier that

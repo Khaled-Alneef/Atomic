@@ -753,10 +753,10 @@ class SettingsDialog(QDialog):
         do. Without this the only way to learn that a site never resolves
         to title pages was to use it for a while and notice that every
         entry opened a search page."""
-        label = f"{site['name']}  â€”  {site['base_url']}"
+        label = f"{site['name']}  —  {site['base_url']}"
         state = "checking" if site["id"] in self._probing_sites else site.get("resolves")
         note = _RESOLVES_LABELS.get(state)
-        return f"{label}   Â·   {note}" if note else label
+        return f"{label}   ·   {note}" if note else label
 
     def _probe_site_async(self, which: str, site_id: str):
         """Check what a site resolves to, in the background - it makes
@@ -844,7 +844,7 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     def _refresh_video_sites(self):
         self.video_sites_list.clear()
-        item = QListWidgetItem("Stremio  â€”  built-in, always available")
+        item = QListWidgetItem("Stremio  —  built-in, always available")
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         self.video_sites_list.addItem(item)
         for site in anime_sites.list_sites():
