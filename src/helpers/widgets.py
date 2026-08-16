@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QApplication, QDialog, QFrame, QLabel, QScrollArea, QToolTip, QWidget,
 )
 
-from . import theme
+from . import logs, theme
 
 
 class GlassPage(QWidget):
@@ -545,7 +545,16 @@ class UndoToast(Toast):
         # rebuilds a page, which spins the event loop, and a second click
         # arriving in there would put the same entry back twice.
         self._spent = True
-        message = self._on_undo()
+        try:
+            message = self._on_undo()
+        except Exception:
+            # Never let this out. An exception escaping a reimplemented
+            # event handler is not a traceback in PyQt6, it is an abort -
+            # the same failure mode release_hover_cursor above is written
+            # around. A failed undo has to read as a failed undo, not as
+            # the app vanishing while the user watches.
+            logs.exception("undo failed")
+            message = "Couldn't Undo That"
         self.set_text(message or "Restored", 2600)
 
 

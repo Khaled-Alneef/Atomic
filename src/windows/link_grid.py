@@ -287,6 +287,15 @@ class LinkGridPage(GlassPage):
         title_box.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
         header.addLayout(title_box)
         header.addStretch()
+        # Pages that can discover their own entries put the button here,
+        # left of Add - Games has had one since it could read a
+        # launcher's library, and Apps can read the Start menu. Empty by
+        # default: Websites has nothing to scan.
+        for label, tooltip, handler in self._discovery_actions():
+            discover_btn = QPushButton(label)
+            discover_btn.setToolTip(tooltip)
+            discover_btn.clicked.connect(handler)
+            header.addWidget(discover_btn, alignment=Qt.AlignmentFlag.AlignTop)
         add_btn = QPushButton("+", objectName="AccentIcon")
         add_btn.setFixedSize(40, 40)
         add_btn.setToolTip("Add")
@@ -542,6 +551,12 @@ class LinkGridPage(GlassPage):
 
         self._mutate(apply_change)
         return f"Restored '{entry['name']}'"
+
+    def _discovery_actions(self):
+        """(button label, tooltip, handler) for anything this page can
+        find on its own. None by default - a subclass with a source of
+        entries overrides it (see windows.apps)."""
+        return []
 
     def _open_add_form(self):
         EntryForm(self, None, on_save=self._on_form_save)

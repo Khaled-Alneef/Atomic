@@ -61,7 +61,7 @@ clever one, and leave a working path working.
 | 36 | Cards past the 8th were unreachable; films shared a row with shows | ui-engineer | contained | **landed 1.4.7** - owner-reported |
 | 29 | Let the "what's new" dialog scroll | ui-engineer | contained | **landed 1.4.9** |
 | 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | **landed 1.4.9** |
-| 37 | Opening an app whose target is gone still shows a raw OS error | ui-engineer | contained | todo - found landing #16 |
+| 37 | Opening an app whose target is gone still shows a raw OS error | ui-engineer | contained | **landed 1.4.12** |
 | 38 | Home's Apps preview doesn't show a missing target | ui-engineer | contained | **landed 1.4.10** |
 | 39 | An empty tracker page crashed the app | ui-engineer | contained | **landed 1.4.11** - regression from #36 |
 | 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | **landed 1.4.8** |
@@ -71,12 +71,12 @@ clever one, and leave a working path working.
 | 15 | Give Settings some structure before it grows further | ui-engineer | shape unknown - investigate first | todo |
 | 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | **landed 1.4.9** |
 | 17 | Keyboard shortcut to jump to a page's search box | ui-engineer | contained | todo |
-| 18 | Bring Apps to parity with Games' "Import from Launchers" | ui-engineer | spans modules | todo |
+| 18 | Bring Apps to parity with Games' "Import from Launchers" | ui-engineer | spans modules | **landed 1.4.12** |
 | 19 | Check every configured site at once, not one at a time | ui-engineer | contained | **landed 1.4.10** |
 | 20 | Back up all tracked data from Settings | ui-engineer | contained | **landed 1.4.10** |
 | 21 | Restore tracked data from a backup archive | ui-engineer | spans modules | **landed 1.4.10** |
 | 22 | Multi-select bulk status change on tracker cards | ui-engineer | shape unknown - investigate first | todo |
-| 23 | Undo the last removal, via a toast | ui-engineer | spans modules | todo |
+| 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | shape unknown - investigate first | todo |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
 
@@ -1062,6 +1062,14 @@ the check.
 app's own words, through a toast, and does not raise.
 **Risk** - low. Keep it a message, not a dialog (`ui.md`), and don't
 change what a *working* target does.
+**Landed** (1.4.12) - `open_link_entry` asks `missing_app_targets` (the
+same call the card badge and Home's row use) and skips those targets, so
+`cwd=Path(target).parent` is never reached. All targets gone: nothing
+launches, no dialog, "Can't Open 'X' - Not Found on This PC". One of
+two gone: the working one still launches and the toast says "1 of 2 Not
+Found", the same words as the badge. A target that exists but won't
+start now reports its `OSError` in a toast rather than a modal dialog.
+Home shares the function, so it shares the behaviour.
 
 ### 38. Home's Apps preview doesn't show a missing target
 
@@ -1148,6 +1156,15 @@ and adds them in one pass, mirroring Games' toast-driven flow
 `launchers.py`, not just UI wiring, since apps and games are discovered
 from different places on disk. Size it as its own investigation if the
 Start Menu approach doesn't cleanly generalize once started.
+**Landed** (1.4.12) - the Start menu, not a walk of Program Files: an
+installer writes exactly one shortcut, already named the way its author
+meant it and pointing at the right executable with the right arguments,
+where walking install folders means `_pick_game_exe`'s guesswork all
+over again. Measured on this machine: 141 shortcuts, **70 kept** after
+dropping uninstallers, readmes, "on the web" links and Windows' own
+tool folders, icons extracted for all of them, and a second import adds
+nothing. The button hangs off a new `_discovery_actions` hook on
+`LinkGridPage`, so Websites - which has nothing to scan - shows none.
 
 ### 19. Check every configured site at once, not one at a time
 
@@ -1308,6 +1325,18 @@ final, as today.
 link_grid don't share a base class) - a fix landed in one and not the
 others leaves an inconsistent app where undo works on some pages and
 not others; treat as one item covering all three, not three small ones.
+**Landed** (1.4.12) - all three, through one `UndoToast` in
+`widgets.py`. That placement is forced rather than chosen: an ordinary
+toast is built `WA_TransparentForMouseEvents`, and Qt folds that into
+`Qt::WindowTransparentForInput` when the native window is created, so a
+clickable toast has to be built without it from the start - which means
+`Toast.__init__`, not a subclass clearing it later. Verified with real
+OS-level clicks on a real window, per page family: the entry comes back
+at its original index with every field intact (tracker's cached
+schedule and imdb_id included), letting the offer expire leaves the
+removal final, navigating away withdraws the offer rather than
+restoring onto a page that no longer shows it, and a second click on a
+spent toast restores nothing.
 
 ### 24. One search across every page, not just the tracker family
 
