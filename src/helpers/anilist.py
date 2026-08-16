@@ -22,10 +22,11 @@ progress shows up.
 import json
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import title_match
+from . import net, title_match
 
 API_URL = "https://graphql.anilist.co"
 
@@ -93,6 +94,22 @@ query ($search: String) {
 """
 
 
+class RateLimited(Exception):
+    """AniList is refusing this connection outright, which is a different
+    fact from "this title isn't on the list".
+
+    Sustained querying gets a **403 on every POST** - not the 429 the API
+    documents - and it lasts: measured at over an hour. Every lookup here
+    fails soft, so until this had its own type a block was indis-
+    tinguishable from a genuine no-match, and the user was left looking
+    at an app that appeared to have quietly stopped working."""
+
+
+# 429 is what the documentation promises and 403 is what actually
+# arrives; both mean the same thing to a caller.
+_RATE_LIMIT_CODES = (403, 429)
+
+
 def _post(query: str, variables: dict, timeout: int):
     global _last_request_at
     payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
@@ -106,8 +123,16 @@ def _post(query: str, variables: dict, timeout: int):
         if wait > 0:
             time.sleep(wait)
         _last_request_at = time.monotonic()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    # After the throttle sleep, not before it: the budget is for the
+    # request, and the gap above can be most of a second on its own.
+    deadline = net.deadline_in(timeout)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(net.read_text(resp, deadline))
+    except urllib.error.HTTPError as exc:
+        if exc.code in _RATE_LIMIT_CODES:
+            raise RateLimited(f"AniList answered {exc.code}") from exc
+        raise
 
 
 def fetch_watch_progress(title: str, username: str, timeout: int = 6):
@@ -133,6 +158,13 @@ def fetch_watch_progress(title: str, username: str, timeout: int = 6):
         if progress is None:
             return None
         return 0, int(progress)
+    except RateLimited:
+        # The one lookup here that does not fail soft. This is the answer
+        # the user reads as "the app is broken", so the caller has to be
+        # able to say which of the two happened; the schedule lookups
+        # below stay soft, because a missing countdown on a card has
+        # nowhere to say it and no one waiting on it.
+        raise
     except Exception:
         return None
 

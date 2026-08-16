@@ -11,6 +11,8 @@ import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 
+from . import net
+
 BASE_URL = "https://v3-cinemeta.strem.io"
 API_URL = "https://api.strem.io/api"
 
@@ -31,8 +33,9 @@ def search(query_text: str, content_type: str = "series", timeout: int = 6):
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
     try:
+        deadline = net.deadline_in(timeout)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+            body = json.loads(net.read_text(resp, deadline))
     except Exception:
         return []
 
@@ -85,8 +88,9 @@ def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: in
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
     try:
+        deadline = net.deadline_in(timeout)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+            body = json.loads(net.read_text(resp, deadline))
     except Exception:
         return None
 
@@ -113,8 +117,9 @@ def _api_post(path: str, payload: dict, timeout: int):
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
+    deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(net.read_text(resp, deadline))
 
 
 def login(email: str, password: str, timeout: int = 10) -> str:

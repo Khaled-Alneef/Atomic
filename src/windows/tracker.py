@@ -348,8 +348,17 @@ class _ProgressSyncSignals(QObject):
     # entry id, progress season/episode, whether a real (not estimated)
     # progress result was found, total available season/episode, whether
     # this came from the bulk "refresh all" (vs one entry's right-click
-    # Sync Progress) - silent ones skip the per-entry not-found popup.
-    resolved = Signal(str, int, int, bool, int, int, bool)
+    # Sync Progress) - silent ones skip the per-entry not-found popup -
+    # and why nothing was found, when that is known ("" when it isn't).
+    # Not-found has several causes that look identical on screen and the
+    # user has to be able to tell them apart; see REASON_* below.
+    resolved = Signal(str, int, int, bool, int, int, bool, str)
+
+
+# AniList refused the connection rather than answering. Nothing about
+# this title is known either way, so it must not be reported as "not on
+# your list" - that reading is what had the app looking broken.
+REASON_ANILIST_RATE_LIMITED = "anilist_rate_limited"
 
 
 class _CoverSignals(QObject):
@@ -869,6 +878,7 @@ class TrackerPage(GlassPage):
 
     def _fetch_real_progress(self, entry_id, imdb_id, title, is_anime, silent):
         result = None
+        reason = ""
         _, auth_key = app_settings.get_stremio_auth()
         if auth_key:
             try:
@@ -880,6 +890,11 @@ class TrackerPage(GlassPage):
             if anilist_username:
                 try:
                     result = anilist.fetch_watch_progress(title, anilist_username)
+                except anilist.RateLimited:
+                    # Deliberately not folded into the except below: the
+                    # whole point is that this is not a no-match.
+                    result = None
+                    reason = REASON_ANILIST_RATE_LIMITED
                 except Exception:
                     result = None
         try:
@@ -889,9 +904,11 @@ class TrackerPage(GlassPage):
         season, episode = result or (0, 0)
         total_season, total_episode = total or (0, 0)
         self._sync_signals.resolved.emit(
-            entry_id, season, episode, result is not None, total_season, total_episode, silent)
+            entry_id, season, episode, result is not None, total_season, total_episode,
+            silent, reason)
 
-    def _on_progress_synced(self, entry_id, season, episode, found, total_season, total_episode, silent):
+    def _on_progress_synced(self, entry_id, season, episode, found, total_season,
+                            total_episode, silent, reason=""):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if entry:
             snapshot = self._refresh_before.get(entry_id)
@@ -910,6 +927,15 @@ class TrackerPage(GlassPage):
                 self._sync_changed = True
 
         if not silent:
+            if not found and reason == REASON_ANILIST_RATE_LIMITED:
+                QMessageBox.information(
+                    self, "Sync Progress",
+                    "AniList is refusing requests from this connection right "
+                    "now (it answers 403 once it decides a connection has "
+                    "asked too often, and that can last an hour or more). "
+                    "This says nothing about whether the title is on your "
+                    "list - try again later.")
+                return
             if not found:
                 QMessageBox.information(
                     self, "Sync Progress",
@@ -1680,8 +1706,12 @@ class EntryForm(QDialog):
         identity = f"{site_id}\n{title}"
         self._pending_video_identity = identity
         self._set_status_part("site", f"Finding this title on {site['name']}...")
-        threading.Thread(target=self._resolve_video_site_url,
-                          args=(site, title, identity), daemon=True).start()
+        # Not a bare thread: this fires per debounced keystroke, so
+        # typing a title used to start one unbounded resolution after
+        # another, each opening its own connections while its result was
+        # already stale. submit_latest keeps only the newest.
+        lookup_pool.submit_latest("video-site", self._resolve_video_site_url,
+                                  site, title, identity)
 
     def _resolve_video_site_url(self, site, title, identity):
         # Must never raise: an uncaught exception would kill the thread

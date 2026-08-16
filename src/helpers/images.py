@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from PyQt6.QtGui import QImage, QPixmap
 
-from . import icon_extract, storage, theme
+from . import icon_extract, net, storage, theme
 
 CACHE_DIR = storage.DATA_DIR / "image_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -40,8 +40,9 @@ def download(url: str, timeout: int = 8):
         req = urllib.request.Request(
             url, headers={"User-Agent": "Mozilla/5.0 PC-App/1.0"}
         )
+        deadline = net.deadline_in(timeout)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
+            data = net.read_bytes(resp, deadline)
         path.write_bytes(data)
         return path
     except Exception:

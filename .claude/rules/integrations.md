@@ -38,6 +38,26 @@ first-party login token, not a key, and is the one accepted exception).
   whether to look again (12h TTL, or immediately once the stored
   release time has passed). A normal page visit fires no requests at
   all.
+- **Read bodies through `net.read_text`/`net.read_bytes`, never
+  `resp.read()`.** `urlopen(timeout=)` bounds each socket operation, not
+  the transfer: a host sending one byte a second resets that timer
+  forever and the read never returns. `helpers/net.py` is the single
+  implementation (size cap + wall-clock deadline) - do not copy it into
+  a new module, which is exactly how five files were missed the first
+  time. Compute the deadline *after* any throttle sleep.
+- **Bound a chain, not just its steps.** Three engines at 6s each is not
+  a 6s bound. `anime_sites.search_site`/`resolve_page_url` take a
+  `deadline` and give each request `min(timeout, remaining)`
+  (`_step_timeout`), giving up below 1s rather than opening a connection
+  that cannot finish. Budget is 2x the per-request timeout: less would
+  mean one dead engine ahead of the right one turns a real hit into a
+  saved "no page found".
+- **Work fired by typing goes to `lookup_pool.submit_latest`, not
+  `submit`.** Every debounced keystroke but the last is stale before it
+  answers; `submit_latest` replaces a queued job under the same key and
+  runs one at a time. Not the shared queue - that is drained by
+  page-load backfill, and a lookup the user is watching would wait
+  behind all of it.
 - **Cap concurrency - never one thread per entry.** `lookup_pool.py` is
   a shared 4-worker queue used by every per-entry background lookup in
   `tracker.py`. Shipped bug: unbounded per-entry threads on page load
@@ -75,12 +95,30 @@ rejected: dead password-login flow, ToS-prohibited scraping of a paid
 service, and redundant with what `anilist.py` already covers. Don't
 rebuild that without a real reason to revisit it.
 
-**AniList rate-limits hard, and fails soft into silence.** Sustained
-querying gets the whole network a `403` on every POST (not a 429),
-which every lookup here swallows and reports as "no result" - so a
-block looks exactly like "this title has no link". Measured lasting
-over an hour. When a previously working AniList lookup starts returning
-nothing, check for the 403 before believing the data changed.
+**AniList rate-limits hard, and used to fail soft into silence.**
+Sustained querying gets the whole network a `403` on every POST (not a
+429). Measured lasting over an hour. `_post` now raises
+`anilist.RateLimited` for 403/429 and `fetch_watch_progress` lets it
+propagate - the schedule lookups still fail soft on purpose - so the
+tracker can say so instead of reporting "not on your list".
+`tracker.REASON_ANILIST_RATE_LIMITED` on the `resolved` signal is the
+mechanism; extend that `reason` field rather than inventing another.
+When a previously working AniList lookup starts returning nothing, check
+for the 403 before believing the data changed.
+
+**Crunchyroll ids come from Wikidata too, property P11330**
+("Crunchyroll series ID" - not P4110, which Wikidata deprecates). Asked
+before AniList, same shape as Netflix; coverage measured at 4 of 6 real
+titles, the rest fall through to AniList. **Not probed before saving,
+unlike Netflix: Crunchyroll answers 200 to a bogus id** (measured), so a
+probe proves only that the site is up - the strict Wikidata title match
+is the whole safeguard, and a free-text P11330 value is rejected by
+shape first.
+
+**Watch progress is not a Wikidata problem.** It is personal history;
+only a list service the user keeps can answer it. AniList is the only
+one wired up. Kitsu's public API answers keyless (candidate, roadmap
+#17); MyAnimeList v2 403s without a client id.
 
 **Netflix ids come from Wikidata (`wikidata.py`, property P1874), not
 AniList.** Keyless and public, two requests per lookup, and it answered

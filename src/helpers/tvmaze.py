@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-from . import title_match
+from . import net, title_match
 
 BASE_URL = "https://api.tvmaze.com"
 
@@ -43,8 +43,10 @@ def _get(url: str, timeout: int):
         if wait > 0:
             time.sleep(wait)
         _last_request_at = time.monotonic()
+    # After the throttle sleep, not before it - see anilist._post.
+    deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(net.read_text(resp, deadline))
 
 
 def _find_show(imdb_id: str, title: str, timeout: int):

@@ -19,8 +19,8 @@ the slide direction immediately too - nothing to keep in sync by hand.
 import sys
 from pathlib import Path
 
-from helpers import (app_settings, images, native_cursor, startup, storage,
-                     theme, whats_new)
+from helpers import (app_settings, images, logs, native_cursor, startup,
+                     storage, theme, whats_new)
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -733,6 +733,11 @@ def _prewarm_image_specs():
 
 
 def main():
+    # Before QApplication, because an exception raised anywhere after this
+    # point - in a slot, in a paint event, during startup - otherwise
+    # takes the whole process down through qFatal with no traceback
+    # anywhere. See helpers/logs.py.
+    logs.install_excepthook()
     app = QApplication(sys.argv)
     icon_path = APP_DIR / "app_icon.ico"
     if icon_path.exists():

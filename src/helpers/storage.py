@@ -2,9 +2,12 @@
 
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from . import logs
 
 
 def _default_data_dir() -> Path:
@@ -39,20 +42,76 @@ def now_iso() -> str:
 
 
 def load(filename: str, default):
+    """The saved file, or `default` when there isn't one.
+
+    "utf-8-sig" rather than "utf-8": a byte-order mark at the start of
+    the file is invisible to a text editor and makes json.load fail on
+    the first character. That is not hypothetical - a BOM'd settings.json
+    is exactly how a stored AniList username was lost. utf-8-sig strips a
+    BOM if one is there and is otherwise identical, so the app now reads
+    a file it used to declare unreadable.
+
+    An unreadable file is moved aside rather than left in place, because
+    the next save would otherwise overwrite it with whatever `default`
+    the caller got here - which is how the file's contents were destroyed
+    rather than merely unread."""
     path = DATA_DIR / filename
     if not path.exists():
         return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
+        logs.exception(f"Could not read {filename}; quarantining it and "
+                       f"starting from the default")
+        _quarantine(path)
         return default
 
 
+def _quarantine(path: Path):
+    """Move an unreadable file to <name>.corrupt so the next save can't
+    silently overwrite it. Kept, not deleted: it is the only copy of
+    whatever it holds, and hand-repairing one stray byte is a real
+    recovery path. Any previous quarantine is replaced - the readable
+    copy worth keeping is the .bak that save() leaves."""
+    try:
+        os.replace(path, path.with_name(path.name + ".corrupt"))
+    except OSError:
+        logs.exception(f"Could not quarantine {path.name}")
+
+
 def save(filename: str, data):
+    """Write `data`, keeping the previous contents recoverable.
+
+    Two failures this shape rules out, both of which have real cost here:
+
+      * A crash or a full disk part-way through a write used to leave a
+        truncated file that no longer parses - and an unparseable file
+        used to read back as "empty", which the next save then made true.
+        Writing a temp file and renaming it into place means the visible
+        file is only ever a complete one.
+      * Everything the app saves is small (kilobytes of JSON), so keeping
+        one .bak of the previous contents costs nothing measurable and
+        turns "the file is wrong now" from permanent into a rename.
+
+    Deliberately *not* refusing to write an empty list over a full one:
+    emptying a page is something the user is allowed to do, and a rule
+    that guesses at intent would eventually block a legitimate save. The
+    .bak covers the accident without ever standing in the way."""
     path = DATA_DIR / filename
-    with open(path, "w", encoding="utf-8") as f:
+    temp_path = path.with_name(path.name + ".tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    if path.exists():
+        try:
+            shutil.copy2(path, path.with_name(path.name + ".bak"))
+        except OSError:
+            # Not fatal: losing the safety copy is worse than not having
+            # it, but refusing the save the user asked for is worse still.
+            logs.exception(f"Could not back up {filename} before saving")
+    os.replace(temp_path, path)
 
 
 def update_entry(filename: str, entry_id, fields: dict, id_key: str = "id") -> bool:

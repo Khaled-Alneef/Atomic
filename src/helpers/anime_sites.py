@@ -53,7 +53,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import anilist, storage, title_match, wikidata
+from . import anilist, net, storage, title_match, wikidata
 
 SITES_FILE = "anime_sites.json"
 
@@ -187,50 +187,18 @@ def search_page_url(base_url: str, query: str) -> str:
 # unbounded body is an unbounded parse, and the parse holds the GIL (see
 # _candidate_urls). Overshooting it means no result from that site, which
 # is a normal outcome here.
-_MAX_RESPONSE_BYTES = 5_000_000
-
-# Small on purpose: read1() returns whatever has arrived rather than
-# waiting to fill the buffer, which is what lets the deadline below be
-# checked while a slow sender is still dribbling.
-_READ_CHUNK = 65536
-
-
-def _read_body(resp, deadline: float) -> str:
-    """The response body, given a size ceiling and a wall-clock deadline.
-
-    `urlopen(timeout=...)` bounds each individual socket operation, not
-    the transfer - so a host that sends one byte every couple of seconds
-    resets that timer forever and `resp.read()` never returns. Measured
-    against exactly that: a local server dribbling a chunked body held a
-    lookup thread for over 180s with no sign of stopping, and four of
-    those would permanently drain lookup_pool's whole worker set.
-
-    read1() rather than read(): read() waits until it has the full amount
-    asked for, so a deadline checked around it is never reached while the
-    dribble continues. read1() comes back with whatever has arrived, so
-    the check below actually gets a turn."""
-    chunks, total = [], 0
-    while True:
-        chunk = resp.read1(_READ_CHUNK)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > _MAX_RESPONSE_BYTES:
-            raise ValueError("response body over the size cap")
-        if time.monotonic() > deadline:
-            raise TimeoutError("response body over the time budget")
-    return b"".join(chunks).decode("utf-8", "replace")
-
-
 def _get(url: str, timeout: int) -> str:
     req = urllib.request.Request(url, headers={
         "Accept": "application/json, text/html, */*",
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
-    deadline = time.monotonic() + timeout
+    # The bounded read this module used to define itself now lives in
+    # net.py: it had to reach anilist/stremio/tvmaze/mangadex/images too,
+    # and copying it once already (into manga_sites) is how those five
+    # were missed.
+    deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return _read_body(resp, deadline)
+        return net.read_text(resp, deadline)
 
 
 def _post(url: str, fields: dict, timeout: int) -> str:
@@ -241,9 +209,13 @@ def _post(url: str, fields: dict, timeout: int) -> str:
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
         "X-Requested-With": "XMLHttpRequest",
     })
-    deadline = time.monotonic() + timeout
+    # The bounded read this module used to define itself now lives in
+    # net.py: it had to reach anilist/stremio/tvmaze/mangadex/images too,
+    # and copying it once already (into manga_sites) is how those five
+    # were missed.
+    deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return _read_body(resp, deadline)
+        return net.read_text(resp, deadline)
 
 
 # WordPress generates cropped copies of every upload ("cover-231x300.jpg")
@@ -491,17 +463,43 @@ def _search_generic_html(base_url: str, query: str, timeout: int) -> list:
     return _candidate_urls(_get(search_page_url(base_url, query), timeout), base_url)
 
 
-def search_site(site: dict, query: str, timeout: int = 6) -> list:
+# Below this there is no point starting another request: DNS plus a TCP
+# handshake to a host that has already proven slow will not finish, and
+# the attempt still costs a connection. Give up honestly instead.
+_MIN_STEP_SECONDS = 1.0
+
+
+def _step_timeout(deadline, timeout: int):
+    """The timeout for the next request in a chain, or None when the
+    chain's own deadline leaves too little to bother. `deadline` of None
+    means an uncapped caller - the old behaviour, one full timeout per
+    request."""
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining < _MIN_STEP_SECONDS:
+        return None
+    return min(timeout, remaining)
+
+
+def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list:
     """Try each known engine against one site, stopping at the first that
     returns anything. Returns [] if the site matches no known shape, has
-    no matches, or is unreachable."""
+    no matches, or is unreachable.
+
+    `deadline` bounds the *whole* sequence rather than each engine in it
+    - without it a dead host costs one full timeout per engine, three
+    times over, before the caller even reaches its fallback."""
     query = (query or "").strip()
     base_url = _to_base_url(site or {})
     if not query or not base_url:
         return []
     for engine in _ENGINES:
+        step = _step_timeout(deadline, timeout)
+        if step is None:
+            break
         try:
-            results = engine(base_url, query, timeout)
+            results = engine(base_url, query, step)
         except Exception:
             results = []
         if results:
@@ -798,10 +796,33 @@ def _netflix_page_url(title: str, timeout: int):
         netflix_id = wikidata.fetch_netflix_id(variant, timeout)
         if not netflix_id:
             continue
-        url = wikidata.page_url(netflix_id)
+        url = wikidata.netflix_page_url(netflix_id)
         if _netflix_available(url, timeout) is False:
             return None
         return url
+    return None
+
+
+def _crunchyroll_wikidata_url(title: str, timeout: int):
+    """Crunchyroll's own page for `title`, from Wikidata's published
+    series id (P11330), or None.
+
+    Asked before AniList for the same reason Netflix is - AniList answers
+    403 to an ordinary connection for hours at a time and reports it as
+    "no link" - and this is the more important of the two, because until
+    now Crunchyroll had *no* second source at all: AniList going quiet
+    meant Crunchyroll entries simply stopped resolving to a page.
+
+    Deliberately not probed the way Netflix is. Netflix 404s an id its
+    region doesn't carry, which is real information; Crunchyroll answers
+    200 to everything, measured - a deliberately bogus GZZZZZZZZ returned
+    200 exactly like the four real ids tried. So a probe here would only
+    ever confirm "the site is up", and the strict Wikidata title match is
+    what has to carry the weight."""
+    for variant in _query_variants(title):
+        series_id = wikidata.fetch_crunchyroll_id(variant, timeout)
+        if series_id:
+            return wikidata.crunchyroll_page_url(series_id)
     return None
 
 
@@ -812,11 +833,18 @@ def _streaming_page_url(row, title: str, timeout: int):
     engines get, tried in the same order and only while the previous
     came back empty, so the ordinary case is one request."""
     suffix, keyword, origin, locale_re, deprioritize_re, canonical = row
+    # Wikidata first for both, AniList as the fallback below - see
+    # wikidata.py. A title Wikidata doesn't carry (Vinland Saga and
+    # Kaiju No. 8 have no P11330, measured) is exactly the case AniList
+    # still answers.
     if keyword == "netflix":
         found = _netflix_page_url(title, timeout)
         if found:
             return found
-        # else fall through to AniList, which has its own Netflix rows
+    elif keyword == "crunchyroll":
+        found = _crunchyroll_wikidata_url(title, timeout)
+        if found:
+            return found
     for variant in _query_variants(title):
         try:
             urls = anilist.fetch_external_urls(variant, keyword, timeout)
@@ -861,9 +889,24 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
     if streaming is not None:
         return _streaming_page_url(streaming, title, timeout)
 
+    # One deadline for everything below, because "6s each" is not a
+    # bound: three engines and the generic scraper, tried per query
+    # variant, is 6s x 3 x variants plus 6s x variants - a dead host cost
+    # ~24s for a single variant and twice that for a title with a
+    # subtitle, all of it on a lookup_pool worker that nothing else can
+    # use meanwhile.
+    #
+    # Two full timeouts rather than the tighter number this could be: a
+    # real hit needs one request to complete, and that request is itself
+    # allowed the full `timeout`. Any budget under 2x would mean one dead
+    # engine ahead of the right one turns a slow-but-real answer into a
+    # miss - and a wrong "no page found" is saved on the entry, while
+    # slowness is only ever slowness.
+    deadline = net.deadline_in(timeout * 2)
+
     variants = _query_variants(title)
     for variant in variants:
-        results = search_site(site, variant, timeout)
+        results = search_site(site, variant, timeout, deadline=deadline)
         if not results:
             continue
         match = _best_match(variant, results)
@@ -873,8 +916,11 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
     if not base_url:
         return None
     for variant in variants:
+        step = _step_timeout(deadline, timeout)
+        if step is None:
+            break
         try:
-            candidates = _search_generic_html(base_url, variant, timeout)
+            candidates = _search_generic_html(base_url, variant, step)
         except Exception:
             continue
         match = _best_match(variant, _corroborated(variant, candidates),

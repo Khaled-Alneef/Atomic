@@ -10,14 +10,14 @@ defects, usability gaps, the Amazon Prime coverage note):
 
 | # | Item | Owner | Size | Status |
 |---|---|---|---|---|
-| 1 | Survive an exception in a Qt slot, and log something | ui-engineer | spans modules | todo |
-| 2 | Bound manga_sites' regex and reads | integrations-engineer | contained | todo |
-| 3 | Bound `resp.read()` on every page-load lookup | integrations-engineer | spans modules | todo |
-| 4 | Give a dead host a deadline across the whole resolve chain | integrations-engineer | contained | todo |
-| 5 | Route video-site resolution through `lookup_pool` | integrations-engineer | contained | todo |
-| 6 | Back up settings/entries before an overwrite, and stop swallowing a corrupt file silently | ui-engineer | spans modules | todo |
-| 7 | Tell AniList's rate-limit apart from "no result" | integrations-engineer | contained | todo |
-| 8 | Investigate a second source for Crunchyroll progress | integrations-engineer | shape unknown - investigate first | todo |
+| 1 | Survive an exception in a Qt slot, and log something | ui-engineer | spans modules | done |
+| 2 | Bound manga_sites' regex and reads | integrations-engineer | contained | done |
+| 3 | Bound `resp.read()` on every page-load lookup | integrations-engineer | spans modules | done |
+| 4 | Give a dead host a deadline across the whole resolve chain | integrations-engineer | contained | done |
+| 5 | Route video-site resolution through `lookup_pool` | integrations-engineer | contained | done |
+| 6 | Back up settings/entries before an overwrite, and stop swallowing a corrupt file silently | ui-engineer | spans modules | done |
+| 7 | Tell AniList's rate-limit apart from "no result" | integrations-engineer | contained | done |
+| 8 | Investigate a second source for Crunchyroll | integrations-engineer | shape unknown - investigate first | done |
 | 9 | Say so when Netflix/Crunchyroll watch progress can't be read | ui-engineer | spans modules | todo |
 | 10 | Surface a missing AniList username where it actually matters | ui-engineer | spans modules | todo |
 | 11 | Search and filter on tracker pages | ui-engineer | spans modules | todo |
@@ -26,6 +26,11 @@ defects, usability gaps, the Amazon Prime coverage note):
 | 14 | Investigate Amazon Prime coverage before building it | integrations-engineer | shape unknown - investigate first | todo |
 | 15 | Investigate startup and page-rebuild performance | test-engineer | shape unknown - investigate first | todo |
 | 16 | Investigate code signing to stop the antivirus false positive | release-engineer | shape unknown - investigate first | todo |
+| 17 | Investigate Kitsu as a second source for watch progress | integrations-engineer | shape unknown - investigate first | todo |
+
+Items 1-8 landed together as the correctness pass. Each block below
+records what was actually built and what it measured - which in several
+cases is not what the item originally assumed.
 
 Antivirus false positive (defect #8) is listed at #16, ordered last of
 the investigate-first items: it's the one item on this list resting on
@@ -67,6 +72,14 @@ importing it offscreen.
 crash that should actually stop the app (e.g. corrupted Qt state);
 scope it to log-and-continue for slot exceptions specifically, not a
 blanket catch-all around the event loop.
+**Landed** - `src/helpers/logs.py` (rotating file log at
+`DATA_DIR/atomic.log`, 512KB x 2) plus `logs.install_excepthook()` as
+the first line of `main.main()`, before `QApplication`. Verified with a
+real Qt event loop and a button whose slot raises: with the hook the app
+survives and the traceback is in the log; the **control run without it
+died with exit `0xC0000409`** - the same code the original crash
+reported, which is what makes the passing run meaningful rather than
+self-confirming. KeyboardInterrupt still goes to the default hook.
 
 ### 2. Bound manga_sites' regex and reads
 
@@ -86,6 +99,17 @@ host returns inside the timeout, and the existing search results for
 the known reading-site shapes are byte-identical to before.
 **Risk** - the parity check is the point: these engines are the only
 thing standing between a reading site and no suggestions at all.
+**Landed** - and the fix went further than the item asked. Capping the
+lazy body (`.{0,2000}?`) alone still measured **224ms** on a 1MB
+fragment with 20k unclosed anchors, because the scan is quadratic in the
+number of anchors, not just in body length - so the cap shrinks the
+constant without removing the class of bug. `_ajax_search_cards` now
+splits on `</a>` and matches each piece from its last opening anchor
+(`str.split`/`rfind`, both linear and in C), with the cap kept as a
+second line of defence: **224ms -> 0ms**. `_MADARA_COVER_RE` took the
+cap alone (3ms). Reads went to `net.read_text` with item #3. Parity
+checked against well-formed samples of both markup shapes - captures
+identical to the old patterns.
 
 ### 3. Bound `resp.read()` on every page-load lookup
 
@@ -110,6 +134,18 @@ instead of hanging, verified per file.
 partial fix (four done, one missed) still leaves the pool as
 exploitable as before, so treat this as one item, not five, and don't
 call it done until all five are verified.
+**Landed** - as one shared `src/helpers/net.py` (`read_bytes`,
+`read_text`, `deadline_in`) rather than a sixth copy of the pattern -
+copying it once already (anime_sites -> manga_sites) is exactly how
+these five were missed. `anime_sites._read_body` and `wikidata._get_json`
+now delegate to it too, so there is one implementation left, not four.
+Two extra call sites were bounded beyond the item's list: **stremio's
+account API** (`_api_post`, which `login` uses) and **`updater._get_json`**
+- the update check the user actually waits on, where an endless body
+would have hung the Settings dialog. Verified against a local server
+dribbling one byte per second forever (the shape a socket timeout never
+catches): every one of the seven returned or raised in **6.0s**, where
+the old code never returned at all. Size cap verified separately.
 
 ### 4. Give a dead host a deadline across the whole resolve chain
 
@@ -130,6 +166,19 @@ measured against a real dead host, not asserted.
 **Risk** - cutting the deadline too aggressively could turn a slow-but-
 real hit into a false miss; measure real engine response times for
 working hosts first so the shared deadline doesn't undercut them.
+**Landed** - one deadline for the whole chain, threaded through
+`search_site(..., deadline=)` so it bounds the three engines too, not
+just the loop over them; `_step_timeout` gives each request
+`min(timeout, remaining)` and gives up below 1s rather than opening a
+connection that cannot finish. **Budget is 2x timeout (12s), not the 8s
+the item suggested**, and deliberately: a real hit needs one request
+that is itself allowed the full 6s, so anything under 2x means one dead
+engine ahead of the right one turns a slow-but-real answer into a miss -
+and a wrong "no page found" gets saved on the entry, while slowness is
+only ever slowness. Measured against a host that accepts and never
+answers: **12.0s, previously ~24s** for one query variant and twice that
+for a title with a subtitle. `deadline=None` keeps every other caller's
+behaviour unchanged.
 
 ### 5. Route video-site resolution through `lookup_pool`
 
@@ -152,6 +201,17 @@ just reading the diff).
 search box still feels responsive (results still land before the user
 moves on) after routing through the shared queue, not just that the
 thread count is bounded.
+**Landed** - **not on the shared queue**, and that risk line is why. The
+shared pool is drained by page-load backfill of every tracked entry, so
+a lookup the user is watching a status line for would have waited behind
+it - the same reason `_sync_progress` deliberately keeps its own thread
+(tracker.py ~842). `lookup_pool.submit_latest(key, ...)` instead: one
+dedicated worker, and a newer request under the same key *replaces* a
+queued older one, which is right because every debounced keystroke but
+the last is already stale by the time it answers. Caps this path at one
+connection - tighter than the pool's four. Measured over 60 rapid
+submissions: peak in flight **1**, **1 of 60** actually ran, and the
+newest always ran.
 
 ### 6. Back up settings/entries before an overwrite, and stop swallowing a corrupt file silently
 
@@ -184,6 +244,22 @@ never real user data.
 cost the user real data once; don't scope it down to "just add
 logging" - the backup-before-overwrite half is what actually prevents
 recurrence.
+**Landed** - four changes, and one of them fixes the original incident
+outright: `load` now reads **utf-8-sig**, so a BOM'd `settings.json` -
+the exact file that lost the AniList username - parses instead of being
+declared unreadable. Beyond that: a file that genuinely can't be parsed
+is moved to `<name>.corrupt` rather than left for the next `save` to
+overwrite; `save` writes a temp file and `os.replace`s it into place, so
+a crash mid-write can no longer leave a truncated file (which read back
+as "empty" and was then made empty for real); and the previous contents
+are kept as `<name>.bak`. Every failure is logged through item #1.
+**Deliberately not done**: refusing to write an empty list over a full
+one. Emptying a page is something the user is allowed to do, and a rule
+guessing at intent would eventually block a legitimate save - the `.bak`
+covers the accident without ever standing in the way. Verified on a
+temp copy: BOM'd file reads, truncated file quarantined with its bytes
+intact after a following save, `.bak` present, no `.tmp` left behind,
+`update_entry` still round-trips.
 
 ### 7. Tell AniList's rate-limit apart from "no result"
 
@@ -213,6 +289,17 @@ instead of "no real progress found."
 `None`) for a genuine no-match; this item only makes the *rate-limited*
 case distinguishable from that, it doesn't add a fallback - there isn't
 one for Crunchyroll (see #8).
+**Landed** - `anilist.RateLimited`, raised by `_post` for 403 **and**
+429 (the documented code and the one that actually arrives), propagated
+out of `fetch_watch_progress` only - the schedule lookups stay soft,
+because a missing countdown on a card has nowhere to say why and nobody
+waiting on it. `tracker._fetch_real_progress` catches it and carries a
+`reason` string on the `resolved` signal, which the Sync Progress dialog
+turns into "AniList is refusing requests from this connection right now
+... this says nothing about whether the title is on your list". That
+`reason` field is the mechanism items #9 and #10 should extend rather
+than reinvent. Verified with a stubbed 403 (raises `RateLimited`) and a
+stubbed 404 (still fails soft, returns None).
 
 ### 8. Investigate a second source for Crunchyroll progress
 
@@ -246,6 +333,37 @@ every other fail-soft path in this codebase - not a half-built partial
 fix.
 **Risk** - this is research first, implementation second; don't let the
 research half get skipped in favor of guessing at a property id.
+
+**Landed - and the item as written conflated two different things.**
+Netflix's Wikidata fix solved *link resolution*, not *progress*. No
+public knowledge base can hold personal watch history, so "a second
+source for Crunchyroll **progress**" via Wikidata was never possible in
+principle. Both halves were answered separately:
+
+*The link (done).* **P11330 "Crunchyroll series ID" exists** and is
+live - `crunchyroll.com/series/<id>`. P4110 is the older slug form and
+Wikidata marks it deprecated; it is not used. Implemented as
+`wikidata.fetch_crunchyroll_id` / `crunchyroll_page_url`, asked before
+AniList exactly like Netflix, with `wikidata.py` generalized to one
+`_fetch_id` rather than a Netflix copy (`page_url` is now
+`netflix_page_url`). Coverage measured over six real titles: Frieren,
+Jujutsu Kaisen, One Piece and Hunter x Hunter carry one; Vinland Saga
+and Kaiju No. 8 don't and fall through to AniList as before. **End to
+end with AniList stubbed to 403 on every request: 4 of 6 resolved,
+where previously all 6 would have resolved to nothing** - Crunchyroll
+had no second source at all. **Not probed before saving, unlike
+Netflix**: Crunchyroll answers **200 to a deliberately bogus id**
+(measured, `GZZZZZZZZ`), so a probe there proves only that the site is
+up, and the strict Wikidata title match carries the weight instead. A
+loose free-text P11330 value is rejected by shape.
+
+*The progress (moved to item #17).* AniList remains the only source
+wired up. The keyless candidate is **Kitsu** - its public JSON:API
+answered without any key on both a user lookup and an anime search
+during this investigation. MyAnimeList's v2 API **403s without a client
+id** and is therefore out. That is a new integration plus a Settings
+field, not a correctness fix, so it is item #17 rather than something
+smuggled into this one.
 
 ### 9. Say so when Netflix/Crunchyroll watch progress can't be read
 
@@ -503,6 +621,37 @@ specific option, that becomes next month's implementation item.
 purchase step, which stays gated behind explicit user approval per the
 standing purchase-permission rule regardless of what this investigation
 finds.
+
+### 17. Investigate Kitsu as a second source for watch progress
+
+**What** - A second place a user's own episode progress can be read
+from, so AniList is not the only one. Fell out of item #8: watch history
+is personal data, so no knowledge base can supply it - only another list
+service the user keeps.
+**Why now** - AniList is currently a single point of failure for every
+Anime entry's progress, and it fails *silently* for an hour at a time
+(item #7 now names that, but naming it doesn't sync anything). Kitsu is
+the only keyless candidate found: its public JSON:API answered a user
+lookup and an anime search with no key during item #8's research.
+MyAnimeList's v2 API 403s without a client id, so it is out.
+**Owner** - integrations-engineer
+**Where to start** - `helpers/anilist.py` `fetch_watch_progress` is the
+shape to match (username in, `(season, episode)` out, fails soft).
+Kitsu needs `users?filter[name]=` then that user's `libraryEntries` with
+the anime included; confirm a *public* profile is readable without auth
+before anything else, since that is the whole premise.
+**Done when** - either progress for a real title reads back from a
+public Kitsu profile and is wired in as a fallback beside AniList (with
+a username field in Settings, which makes item #10's "no username set"
+messaging cover two services, not one), or the investigation records
+that public profiles aren't readable without auth and that's the end of
+it.
+**What happens when the service says no** - it is a *fallback*: no Kitsu
+username, no match, or a refusal all fall through to exactly today's
+behaviour. It must never replace AniList as the primary.
+**Risk** - two sources can disagree about the same title. Decide the
+rule before writing the code (highest progress wins is the obvious one)
+rather than discovering it as a bug later.
 
 ---
 
