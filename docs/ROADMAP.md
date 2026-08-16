@@ -42,17 +42,17 @@ clever one, and leave a working path working.
 
 | # | Item | Owner | Size | Status |
 |---|---|---|---|---|
-| 1 | Tell a dead/expired Stremio session apart from "nothing to sync" | integrations-engineer | contained | todo |
-| 2 | Stop Apps/Websites saving a stale whole list on every change | ui-engineer | contained | todo |
-| 3 | Tie the released exe to the source tree it was built from | release-engineer | spans modules | todo |
-| 4 | Write 1.4's missing "what's new" notes | ui-engineer | contained | todo |
+| 1 | Tell a dead/expired Stremio session apart from "nothing to sync" | integrations-engineer | contained | **landed 1.4.3** |
+| 2 | Stop Apps/Websites saving a stale whole list on every change | ui-engineer | contained | **landed 1.4.2** |
+| 3 | Tie the released exe to the source tree it was built from | release-engineer | spans modules | **landed 1.4.5** |
+| 4 | Write 1.4's missing "what's new" notes | ui-engineer | contained | **landed 1.4.2** |
 | 5 | Make a future release unable to ship without its notes | release-engineer | contained | **landed 1.4.9** |
-| 6 | Stop the sidebar Add menu positioning with `mapToGlobal` | ui-engineer | contained | todo |
-| 7 | Route entry-search suggestions through `lookup_pool` | integrations-engineer | contained | todo |
-| 8 | Retire or rebuild `diagnose_anilist.py` - it calls functions that no longer exist | integrations-engineer | contained | todo |
+| 6 | Stop the sidebar Add menu positioning with `mapToGlobal` | ui-engineer | contained | **landed 1.4.5** |
+| 7 | Route entry-search suggestions through `lookup_pool` | integrations-engineer | contained | **landed 1.4.5** |
+| 8 | Retire or rebuild `diagnose_anilist.py` - it calls functions that no longer exist | integrations-engineer | contained | **landed 1.4.5** |
 | 10 | Show a Stremio connection that has gone bad, in Settings itself | ui-engineer | contained | **landed 1.4.9** |
-| 27 | Say what a site's check verdict actually means | ui-engineer | contained | todo - **owner-raised** |
-| 28 | Clear site check verdicts when the app restarts | ui-engineer | contained | todo - **owner-raised** |
+| 27 | Say what a site's check verdict actually means | ui-engineer | contained | **landed 1.4.6** |
+| 28 | Clear site check verdicts when the app restarts | ui-engineer | contained | **landed 1.4.6** |
 | 31 | The owner's own wording for the check verdicts, with a line saying what each means | ui-engineer | contained | **landed 1.4.6** |
 | 32 | Every explanation in Settings down to two lines | ui-engineer | contained | **landed 1.4.6** |
 | 33 | Say how many matches, not what to do about them | ui-engineer | contained | **landed 1.4.6** - owner-raised |
@@ -68,7 +68,7 @@ clever one, and leave a working path working.
 | 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | **landed 1.4.8** |
 | 13 | Check for updates in the background, not only on demand | ui-engineer | contained | **landed 1.4.8** |
 | 14 | Remember window size and position across launches | ui-engineer | contained | **landed 1.4.9** |
-| 15 | Give Settings some structure before it grows further | ui-engineer | shape unknown - investigate first | todo |
+| 15 | Give Settings some structure before it grows further | ui-engineer | shape unknown - investigate first | **closed 1.4.14 - no restructure needed** |
 | 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | **landed 1.4.9** |
 | 17 | Keyboard shortcut to jump to a page's search box | ui-engineer | contained | **landed 1.4.13** |
 | 18 | Bring Apps to parity with Games' "Import from Launchers" | ui-engineer | spans modules | **landed 1.4.12** |
