@@ -75,7 +75,8 @@ clever one, and leave a working path working.
 | 19 | Check every configured site at once, not one at a time | ui-engineer | contained | **landed 1.4.10** |
 | 20 | Back up all tracked data from Settings | ui-engineer | contained | **landed 1.4.10** |
 | 21 | Restore tracked data from a backup archive | ui-engineer | spans modules | **landed 1.4.10** |
-| 22 | Multi-select bulk status change on tracker cards | ui-engineer | shape unknown - investigate first | todo |
+| 22 | Multi-select bulk status change on tracker cards | ui-engineer | spans modules | **landed 1.4.15** |
+| 40 | Drag-to-reorder stopped working on tracker pages | ui-engineer | contained | **landed 1.4.15** - regression from #36 |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
@@ -1358,6 +1359,55 @@ one and sizing it before building it.
 when the harder part is how selection interacts with drag-reorder,
 search/filter, and per-status sectioning (`_sections`) that already
 exist. Size it honestly once the shape is chosen, don't guess.
+**Landed** (1.4.15) - a **Select mode**, not a modifier or a permanent
+checkbox. A left click on a card already means "open this", the page's
+primary gesture; Ctrl+click would have meant reworking the click path
+every page shares, and nothing on screen would ever have advertised it.
+A mode announces itself - the button reads Select then Done, an action
+bar appears, every card gains a mark - and confines the change in what a
+click means to while it is on.
+
+Two coexistence rules, both recorded in the code. **Only what is on
+screen can be selected**: the selection is pruned to the visible entries
+on every redraw, so a search, a filter, a re-sort or a status change can
+never leave something selected that the user cannot see, and Select All
+means what is in front of them. A narrowed grid is *safe* here in a way
+it is not for dragging - a drop rewrites the whole saved order from a
+partial view, while this writes only the entries actually picked, so
+"filter to Plan to Watch, select all, mark Dropped" is the feature
+rather than a hazard. **Dragging is off while selecting**, since both
+want the same left press.
+
+After applying, entries move section (or leave the view entirely under a
+status filter), the selection clears and the mode stays on for a second
+batch - the toast is what reports the count, which matters exactly when
+the cards have just left the view. Undo restores each entry's previous
+status *and* its previous `updated_at`, through #23's toast. Saving is
+one `storage.update_entry` per entry; another page's write to the shared
+tracker.json between page load and apply was verified to survive. 54
+checks offscreen plus real OS-level clicks on a real window.
+
+### 40. Drag-to-reorder stopped working on tracker pages
+
+**What** - Second regression from #36 (1.4.7), found while building #22.
+`CardDragReorder._cards()` reads cards off the container's own layout,
+and that layout stopped holding cards when sections became per-status
+scrolling strips - it holds a title and a `QScrollArea` per section now.
+Measured `_cards() == []`, so no drop ever resolved a target. Cards
+still enabled dragging, so a drag *started*, silently switched the sort
+to Custom Order, and then dropped nothing.
+**Owner** - ui-engineer
+**Landed** (1.4.15) - the walk is recursive now, through nested layouts
+and through a scroll area's own widget, and `_card_at` compares in the
+*container's* coordinates: a card inside a strip has a geometry relative
+to that strip, so the old comparison would have matched the wrong card
+even once they were found. Verified on a real page: six cards across two
+sections found, a drop on the third resolves to the third, and a drop in
+the gutter resolves to its neighbour.
+**Risk** - the docstring's original warning still holds and is kept:
+read the layout, never `findChildren`, because a rebuilt grid's old
+cards linger as children until the event loop deletes them and would be
+live drop targets at stale positions.
 
 ### 23. Undo the last removal, via a toast
 

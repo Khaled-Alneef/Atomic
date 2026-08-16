@@ -2,7 +2,8 @@
 
 import weakref
 
-from PyQt6.QtCore import QEvent, QMimeData, QObject, QPointF, Qt, QTimer
+from PyQt6.QtCore import (QEvent, QMimeData, QObject, QPoint, QPointF, QRect,
+                          Qt, QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QDrag, QPainter, QRadialGradient
 from PyQt6.QtWidgets import (
@@ -309,15 +310,32 @@ class CardDragReorder(QObject):
         they stay children of the container, at their old geometry, until
         the event loop actually gets to the delete. Found by findChildren
         they were live drop targets holding stale positions, and a drop
-        could resolve to a card that was no longer on screen."""
-        layout = self._container.layout()
+        could resolve to a card that was no longer on screen.
+
+        Walked recursively, through nested layouts and through a
+        QScrollArea's own widget, because a container's layout no longer
+        holds cards directly on every page: the tracker draws a section
+        title and a sideways-scrolling strip per status, so a flat read
+        of the top layout found no cards at all and drag-to-reorder
+        silently stopped working there - a drag would start, switch the
+        sort to Custom Order, and drop nothing."""
+        return self._cards_in(self._container.layout())
+
+    def _cards_in(self, layout):
         if layout is None:
             return []
         cards = []
         for i in range(layout.count()):
-            widget = layout.itemAt(i).widget()
+            item = layout.itemAt(i)
+            widget = item.widget()
             if isinstance(widget, Card) and widget.drag_id() is not None:
                 cards.append(widget)
+            elif isinstance(widget, QScrollArea) and widget.widget() is not None:
+                cards.extend(self._cards_in(widget.widget().layout()))
+            elif widget is not None and widget.layout() is not None:
+                cards.extend(self._cards_in(widget.layout()))
+            elif item.layout() is not None:
+                cards.extend(self._cards_in(item.layout()))
         return cards
 
     def _card_at(self, pos):
@@ -327,7 +345,11 @@ class CardDragReorder(QObject):
         into the 14px gutter still does what it obviously meant."""
         best, best_distance = None, None
         for card in self._cards():
-            geometry = card.geometry()
+            # In the container's coordinates, not the card's parent's: a
+            # card inside a section strip has a geometry relative to that
+            # strip, and comparing it against a pointer position measured
+            # on the container matched the wrong card (or none).
+            geometry = QRect(card.mapTo(self._container, QPoint(0, 0)), card.size())
             if geometry.contains(pos):
                 return card
             offset = geometry.center() - pos

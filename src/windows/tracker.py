@@ -1,4 +1,4 @@
-﻿"""Anime & Manga & Series tracker: three pages sharing this list-widget
+"""Anime & Manga & Series tracker: three pages sharing this list-widget
 implementation. Anime/Manga share one data file split by the entry's
 `type` field (so you can reclassify one into the other); Series has its
 own file since it's a different domain entirely.
@@ -583,6 +583,19 @@ class TrackerPage(GlassPage):
         # ticks can be re-read off the sets while the menu is still open.
         self._filter_actions = []
 
+        # Multi-select state - see the block above _build_selection_bar
+        # for the shape and the two rules it rests on. Ids rather than
+        # entries: a page rebuilds every card from scratch on every
+        # redraw, so anything holding widgets or dicts across one is
+        # holding what has just been deleted.
+        self._select_mode = False
+        self._selected_ids = set()
+        # entry id -> (card, badge) for the cards currently drawn, so a
+        # click can repaint one mark instead of rebuilding the grid.
+        # Rebuilt by _refresh_grid, which is also what makes it safe:
+        # nothing in here outlives the redraw that filled it.
+        self._selection_cards = {}
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
 
@@ -660,7 +673,19 @@ class TrackerPage(GlassPage):
         self._filter_menu.aboutToShow.connect(self._build_filter_menu)
         self.filter_btn.setMenu(self._filter_menu)
         top_row.addWidget(self.filter_btn)
+        # Selection mode's switch. Its label is the state - "Select" when
+        # off, "Done" when on - rather than a checkable button: theme.py
+        # gives a plain QPushButton no :checked rule, so a ticked one
+        # would look identical to an unticked one, and a mode nobody can
+        # see they are in is the whole failure this is written around.
+        self.select_btn = QPushButton("Select")
+        self.select_btn.setFixedHeight(40)
+        self.select_btn.setToolTip("Pick several entries and change their status at once")
+        self.select_btn.clicked.connect(self._toggle_select_mode)
+        top_row.addWidget(self.select_btn)
         layout.addLayout(top_row)
+
+        layout.addWidget(self._build_selection_bar())
 
         self.grid_body = QWidget()
         # One row per section, each scrolling sideways on its own, rather
@@ -960,7 +985,7 @@ class TrackerPage(GlassPage):
                     lambda checked, n=name: self._toggle_filter(self._type_filter, n, checked))
                 self._filter_actions.append((action, "type", name))
         menu.addSeparator()
-        for status in STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], _WATCHING_STATUSES):
+        for status in self._page_statuses():
             action = menu.addAction(status)
             action.setCheckable(True)
             action.triggered.connect(
@@ -999,6 +1024,239 @@ class TrackerPage(GlassPage):
         self._remember_view_state()
         self._refresh_grid()
 
+    def _page_statuses(self):
+        """The statuses this page's entries can hold.
+
+        One list per page, not per entry: a page's types are either all
+        watched or all read (VIDEO_TYPES vs MANGA_TYPES), so Series and
+        Movie share a list and Manga/Manhwa/Manhua share the other. The
+        filter menu has always assumed this; the bulk status menu below
+        relies on the same thing, which is what lets a mixed Series/Movie
+        selection be given one status."""
+        return STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], _WATCHING_STATUSES)
+
+    # ------------------------------------------------------------------
+    # Multi-select: a mode, not a modifier.
+    #
+    # A left click on a card opens the entry - it is the page's primary
+    # gesture - so selection cannot share it. Ctrl+click was the obvious
+    # alternative and was rejected twice over: nothing on screen would
+    # ever say the page could do this, and `Card.clicked` carries no
+    # modifiers, so it would have meant reworking the click path every
+    # page in the app uses. A mode announces itself (the button reads
+    # "Done", a bar appears, every card carries a mark) and confines the
+    # change in what a click means to while it is switched on.
+    #
+    # Two rules decide how it coexists with what is already here:
+    #
+    # * **Only what is on screen can be selected.** The selection is
+    #   pruned to the visible entries on every redraw (_refresh_grid), so
+    #   a search, a filter or a status change can never leave an entry
+    #   selected that the user cannot see, and "Select All" means the
+    #   ones in front of them. A narrowed grid is *safe* here in a way it
+    #   is not for dragging: a drop rewrites the whole saved order from a
+    #   partial view (see _grid_is_narrowed), while a bulk status change
+    #   writes only the entries actually picked, one
+    #   storage.update_entry each. Filter to Plan to Watch, Select All,
+    #   set Dropped is the point of this feature rather than a hazard.
+    # * **Dragging is off while selecting.** Both want the same press,
+    #   and drag-reorder is already off whenever the grid is narrowed -
+    #   this is the same switch with one more reason in it.
+    #
+    # Changing a status moves those entries to another section, or out of
+    # the view entirely under a status filter. So the selection is
+    # cleared once the change lands and the mode stays on: keeping cards
+    # selected across a move would mean a selection scattered over
+    # sections the user never picked from, and dropping out of the mode
+    # would fight the common case of doing a second batch. The toast is
+    # what says how many moved, which matters exactly when they left the
+    # view and there is nothing on screen to show for it.
+    #
+    # The mode is deliberately not remembered across a page visit the way
+    # search and filter are (_SESSION_VIEW_STATE): arriving on a page
+    # where clicking a card silently fails to open it would read as the
+    # app being broken.
+    def _build_selection_bar(self):
+        """The row that appears under the toolbar while selecting.
+
+        Built once and hidden, not built on entering the mode: it sits in
+        the page's layout above the grid, and adding it later would push
+        every section down by its height at the moment the mode is
+        switched on."""
+        bar = QWidget(objectName="Bare")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        self.selection_label = QLabel("", objectName="Muted")
+        row.addWidget(self.selection_label)
+        row.addStretch()
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.clicked.connect(self._select_all_visible)
+        row.addWidget(self.select_all_btn)
+        self.clear_selection_btn = QPushButton("Clear")
+        self.clear_selection_btn.clicked.connect(self._clear_selection)
+        row.addWidget(self.clear_selection_btn)
+        self.bulk_status_btn = QPushButton("Set Status", objectName="Accent")
+        # setMenu rather than exec'ing at a computed point: Qt places it
+        # against the button itself, so there is no mapToGlobal to get
+        # wrong across two monitors at different scale factors (see
+        # .claude/rules/ui.md), the same reasoning as the filter button.
+        self._bulk_status_menu = QMenu(self)
+        for status in self._page_statuses():
+            self._bulk_status_menu.addAction(
+                status, lambda checked=False, s=status: self._apply_bulk_status(s))
+        self.bulk_status_btn.setMenu(self._bulk_status_menu)
+        row.addWidget(self.bulk_status_btn)
+        bar.setVisible(False)
+        self.selection_bar = bar
+        return bar
+
+    @staticmethod
+    def _entry_count(count) -> str:
+        return f"{count} entry" if count == 1 else f"{count} entries"
+
+    def _update_selection_bar(self):
+        # getattr because _refresh_grid can run before the bar exists on
+        # a page still being built, the same reason _search_query guards
+        # its own box.
+        label = getattr(self, "selection_label", None)
+        if label is None:
+            return
+        count = len(self._selected_ids)
+        label.setText(f"{self._entry_count(count)} selected" if count
+                      else "Click cards to pick them")
+        self.bulk_status_btn.setEnabled(count > 0)
+        self.clear_selection_btn.setEnabled(count > 0)
+
+    def _toggle_select_mode(self):
+        self._set_select_mode(not self._select_mode)
+
+    def _set_select_mode(self, on, first_id=None):
+        self._select_mode = on
+        self._selected_ids = {first_id} if on and first_id else set()
+        self.select_btn.setText("Done" if on else "Select")
+        self.selection_bar.setVisible(on)
+        # A full rebuild, unlike picking a card below: every card has to
+        # gain or lose its mark, and what its click does changes with it.
+        self._refresh_grid()
+
+    def _toggle_selected(self, entry_id):
+        """Pick or unpick one card, repainting that card alone.
+
+        Not _refresh_grid: each section is its own sideways-scrolling
+        strip (see _build_section_strip), and rebuilding the grid puts
+        every one of them back to scroll position 0 - so picking the
+        twelfth card in a row would scroll the row away from under the
+        pointer before the next click."""
+        if entry_id in self._selected_ids:
+            self._selected_ids.discard(entry_id)
+        else:
+            self._selected_ids.add(entry_id)
+        drawn = self._selection_cards.get(entry_id)
+        if drawn:
+            self._paint_selection(*drawn, entry_id in self._selected_ids)
+        self._update_selection_bar()
+
+    def _select_all_visible(self):
+        # _selection_cards is exactly the cards currently drawn, which is
+        # the whole point: under a search or a filter this picks what is
+        # on screen and nothing else.
+        self._selected_ids = {entry_id for entry_id in self._selection_cards if entry_id}
+        self._repaint_all_selection()
+
+    def _clear_selection(self):
+        self._selected_ids.clear()
+        self._repaint_all_selection()
+
+    def _repaint_all_selection(self):
+        for entry_id, (card, badge) in self._selection_cards.items():
+            self._paint_selection(card, badge, entry_id in self._selected_ids)
+        self._update_selection_bar()
+
+    def _paint_selection(self, card, badge, selected):
+        """Mark or unmark one card.
+
+        The badge over the poster's corner is the mark that decides it;
+        the accent border is only there so a picked tile reads as picked
+        from across the page. Measured, and the reason round that way: an
+        accent border is exactly what theme.py's #Card:hover rule already
+        draws, so the card under the pointer looks bordered whether or
+        not it is picked - the badge is what tells them apart. No glyph
+        in it, because the filter button's "▽" rendered as a sliver of a
+        missing-glyph box (see the comment on filter_btn) and a filled
+        accent disc needs no font at all.
+
+        Border stays 1px in both states: QSS border width comes out of
+        the widget's content rect, so a thicker one would shift every
+        label inside the card by a pixel the moment it was picked."""
+        badge.setStyleSheet(
+            f"background: {theme.ACCENT if selected else theme.BG}; "
+            f"border: 2px solid {theme.TEXT if selected else theme.TEXT_MUTED}; "
+            f"border-radius: 11px;")
+        # Scoped to QFrame#Card so it cannot reach the labels inside the
+        # card, and naming only `border` so the app stylesheet's gradient
+        # fill still paints - a widget stylesheet is merged with the
+        # application one property by property, not instead of it.
+        card.setStyleSheet(f"QFrame#Card {{ border: 1px solid {theme.ACCENT}; }}"
+                           if selected else "")
+
+    def _apply_bulk_status(self, status):
+        """Give every picked entry the same status.
+
+        One storage.update_entry per entry, never a whole-list write:
+        Anime and Reading are both backed by tracker.json and each page
+        holds its own copy loaded when it was built, so writing the list
+        back would restore the other page's entries as they were then
+        (.claude/rules/ui.md, and see _save_entries for the defect that
+        rule came from)."""
+        if not self._selected_ids:
+            return
+        stamp = storage.now_iso()
+        previous = []   # (id, status, updated_at) as they were, for undo
+        for entry in self.entries:
+            entry_id = entry.get("id")
+            if entry_id not in self._selected_ids or entry.get("status") == status:
+                continue
+            before = (entry_id, entry.get("status"), entry.get("updated_at"))
+            # Disk first, memory second. A False here means the entry is
+            # no longer in the file - another page deleted it while this
+            # one was open - and changing this page's copy anyway would
+            # show a status that nothing on disk agrees with.
+            if not storage.update_entry(self.DATA_FILE, entry_id,
+                                        {"status": status, "updated_at": stamp}):
+                continue
+            entry["status"] = status
+            entry["updated_at"] = stamp
+            previous.append(before)
+        self._selected_ids.clear()
+        self._refresh_grid()
+        if not previous:
+            show_toast(self, f"Already {status}")
+            return
+        show_undo_toast(
+            self, f"Moved {self._entry_count(len(previous))} to {status} - Click to Undo",
+            lambda: self._undo_bulk_status(previous))
+
+    def _undo_bulk_status(self, previous):
+        by_id = {e.get("id"): e for e in self.entries}
+        restored = 0
+        for entry_id, status, updated_at in previous:
+            fields = {"status": status}
+            # Only when there was one: an entry saved before updated_at
+            # existed has no such field, and writing None back would put
+            # one there that the app never wrote.
+            if updated_at is not None:
+                fields["updated_at"] = updated_at
+            if not storage.update_entry(self.DATA_FILE, entry_id, fields):
+                continue
+            entry = by_id.get(entry_id)
+            if entry is not None:
+                entry.update(fields)
+            restored += 1
+        self._refresh_grid()
+        return f"Restored {self._entry_count(restored)}"
+
+    # ------------------------------------------------------------------
     def _grid_is_narrowed(self) -> bool:
         """Whether the grid is showing less than the whole page.
 
@@ -1119,6 +1377,11 @@ class TrackerPage(GlassPage):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+        # Emptied here, before the cards it names are deleted: every
+        # entry in it points at a widget this loop has just taken out of
+        # the layout, and repainting one of those afterwards is a call
+        # into a C++ object that is on its way out.
+        self._selection_cards = {}
 
         self._card_providers = anime_sites.streaming_provider_map()
 
@@ -1129,6 +1392,15 @@ class TrackerPage(GlassPage):
         narrowed = self._grid_is_narrowed()
 
         sections = self._sections()
+        # The selection can only ever hold what is on screen. A search, a
+        # filter, a re-sort or a status change that moved an entry out of
+        # the view all arrive here, and each drops whatever it hid - so
+        # "3 entries selected" always names three cards the user can see
+        # and check before pressing Set Status.
+        visible_ids = {entry.get("id") for _status, group in sections for entry in group}
+        self._selected_ids &= visible_ids
+        self._update_selection_bar()
+
         if not sections:
             if self._search_query():
                 message = f"Nothing here matches '{self.search_box.text().strip()}'."
@@ -1206,6 +1478,21 @@ class TrackerPage(GlassPage):
         cover.setPixmap(images.thumbnail_or_avatar(entry.get("cover_path"), entry["title"], POSTER_SIZE))
         card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
+        if self._select_mode:
+            # A child of the cover at a fixed corner offset, not a row in
+            # the card's layout: a layout row would make every card taller
+            # the moment the mode came on, so entering selection would
+            # reflow the whole page under the pointer.
+            badge = QLabel(cover)
+            badge.setFixedSize(22, 22)
+            badge.move(8, 8)
+            # The card is what handles the click; a badge that took the
+            # press would leave a 22px hole in the middle of its own
+            # target.
+            badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            self._selection_cards[entry.get("id")] = (card, badge)
+            self._paint_selection(card, badge, entry.get("id") in self._selected_ids)
+
         title = QLabel(entry["title"], objectName="CardTitle")
         title.setWordWrap(True)
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -1238,9 +1525,15 @@ class TrackerPage(GlassPage):
                 card_layout.addLayout(self._bump_controls(
                     entry, "Last Watched Episode", self._bump_watched_episode))
 
-        card.clicked.connect(lambda en=entry: self._open_entry(en))
+        if self._select_mode:
+            card.clicked.connect(lambda en_id=entry.get("id"): self._toggle_selected(en_id))
+        else:
+            card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
-        if not self._grid_is_narrowed():
+        # Dragging is off while selecting as well as while the grid is
+        # narrowed: both a drag and a pick want the same left press, and
+        # attaching the drag also moves `clicked` from press to release.
+        if not self._grid_is_narrowed() and not self._select_mode:
             self._drag_reorder.attach(card, entry.get("id"))
         return card
 
@@ -1306,6 +1599,11 @@ class TrackerPage(GlassPage):
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_form(edit=True, entry=entry))
+        # The second way into selection mode, from the card the user is
+        # already pointing at - the toolbar button alone means noticing a
+        # word at the far end of the row before knowing to look for it.
+        if not self._select_mode:
+            menu.addAction("Select", lambda: self._set_select_mode(True, entry.get("id")))
         if entry.get("type") in ("Anime", "Series") and _entry_imdb_id(entry):
             menu.addAction("Sync Progress", lambda: self._sync_progress(entry))
         # No Move Up/Move Down: every page reorders by dragging a card,
