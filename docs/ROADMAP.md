@@ -1,1035 +1,983 @@
 # Roadmap
 
-Written from released version **1.3** on `development`. Covers roughly
-the next month of work. Format and update rules: `.claude/skills/roadmap`.
-Ordering rules and the standing facts this plan draws on (8 diagnosed
-defects, usability gaps, the Amazon Prime coverage note):
+Written from released version **1.4** on `development` (re-cut 2026-08-16,
+`development` at `50ef1c5`). Covers roughly the next month of work.
+Format and update rules: `.claude/skills/roadmap`. Ordering rules and
+the standing facts this plan draws on (already-fixed defects 1-8,
+usability gaps, the Amazon Prime/performance/code-signing verdicts):
 `.claude/rules/planning.md`.
+
+This is a full replan, not a continuation. The pre-1.4 roadmap's items
+1-20 are gone from this file, not carried forward as a block: 1-16 and
+18-20 landed (several differently than planned - the correctness pass,
+the Crunchyroll saga, the "Stremio only" decision); 17 (Kitsu as a
+second progress source) is **superseded**, not merely stale - 1.4's own
+decision was "one source, deliberately," made after four alternatives
+were tried and each shipped a silently-wrong number. Proposing a fifth
+source would contradict that decision rather than complete it. See
+*Deliberately not doing* at the bottom.
+
+Every item below was found by reading 1.4's actual code, not by
+re-deriving the old list. `docs/VDD-1.4.md` records what 1.4 shipped in
+prose; this file is only the open work.
+
+`docs/ROADMAP.md` itself is development-only from now on and is being
+kept off `main` by the user directly - not an item here.
+
+**Revised by the owner, 16 August 2026.** Items **9** (code signing) and
+**25** (cap the on-disk cover cache) were struck out; both are recorded
+under *Deliberately not doing* so they aren't re-proposed. Items **27**
+and **28** are new, from the owner's own notes, and #17 and #24 gained
+requirements from the same notes. **Numbers are never reused and never
+renumbered** - every "item #N" reference in this file, in commits, and
+in agent handoffs keeps meaning the same thing, which is worth more than
+a gapless list. Work order is the index table's order, not the numbers'.
+
+The owner's standing note, which outranks any single item here: *"we
+have a good stable app now - be more careful of adding, removing and
+changing in the app backend."* Prefer the contained change over the
+clever one, and leave a working path working.
 
 ## Index
 
 | # | Item | Owner | Size | Status |
 |---|---|---|---|---|
-| 1 | Survive an exception in a Qt slot, and log something | ui-engineer | spans modules | done |
-| 2 | Bound manga_sites' regex and reads | integrations-engineer | contained | done |
-| 3 | Bound `resp.read()` on every page-load lookup | integrations-engineer | spans modules | done |
-| 4 | Give a dead host a deadline across the whole resolve chain | integrations-engineer | contained | done |
-| 5 | Route video-site resolution through `lookup_pool` | integrations-engineer | contained | done |
-| 6 | Back up settings/entries before an overwrite, and stop swallowing a corrupt file silently | ui-engineer | spans modules | done |
-| 7 | Tell AniList's rate-limit apart from "no result" | integrations-engineer | contained | done |
-| 8 | Investigate a second source for Crunchyroll | integrations-engineer | shape unknown - investigate first | done |
-| 9 | Say so when Netflix/Crunchyroll watch progress can't be read | ui-engineer | spans modules | done |
-| 10 | Surface a missing AniList username where it actually matters | ui-engineer | spans modules | done |
-| 11 | Search and filter on tracker pages | ui-engineer | spans modules | done |
-| 12 | Show whether an added site will resolve to title pages or only ever fall back to search | integrations-engineer | spans modules | done |
-| 13 | Quick +1 for Anime/Series progress | ui-engineer | contained | done |
-| 14 | Investigate Amazon Prime coverage before building it | integrations-engineer | shape unknown - investigate first | done - **not building it** |
-| 15 | Investigate startup and page-rebuild performance | test-engineer | shape unknown - investigate first | done - **nothing to fix** |
-| 16 | Investigate code signing to stop the antivirus false positive | release-engineer | shape unknown - investigate first | done - **decision needed from the user** |
-| 17 | Investigate Kitsu as a second source for watch progress | integrations-engineer | shape unknown - investigate first | todo |
-| 18 | Read Crunchyroll progress from Crunchyroll, and stop Stremio answering for entries watched elsewhere | integrations-engineer | spans modules | done - direct reading later **removed**, see #19 |
-| 19 | Route Crunchyroll through MAL-Sync → AniList, and read AniList per season | integrations-engineer | spans modules | **superseded by #20** |
-| 20 | One progress source (Stremio), Movies alongside Series, Netflix as a default site | ui-engineer | spans modules | done |
+| 1 | Tell a dead/expired Stremio session apart from "nothing to sync" | integrations-engineer | contained | todo |
+| 2 | Stop Apps/Websites saving a stale whole list on every change | ui-engineer | contained | todo |
+| 3 | Tie the released exe to the source tree it was built from | release-engineer | spans modules | todo |
+| 4 | Write 1.4's missing "what's new" notes | ui-engineer | contained | todo |
+| 5 | Make a future release unable to ship without its notes | release-engineer | contained | todo |
+| 6 | Stop the sidebar Add menu positioning with `mapToGlobal` | ui-engineer | contained | todo |
+| 7 | Route entry-search suggestions through `lookup_pool` | integrations-engineer | contained | todo |
+| 8 | Retire or rebuild `diagnose_anilist.py` - it calls functions that no longer exist | integrations-engineer | contained | todo |
+| 10 | Show a Stremio connection that has gone bad, in Settings itself | ui-engineer | contained | todo |
+| 27 | Say what a site's check verdict actually means | ui-engineer | contained | todo - **owner-raised** |
+| 28 | Clear site check verdicts when the app restarts | ui-engineer | contained | todo - **owner-raised** |
+| 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | todo |
+| 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | todo |
+| 13 | Check for updates in the background, not only on demand | ui-engineer | contained | todo |
+| 14 | Remember window size and position across launches | ui-engineer | contained | todo |
+| 15 | Give Settings some structure before it grows further | ui-engineer | shape unknown - investigate first | todo |
+| 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | todo |
+| 17 | Keyboard shortcut to jump to a page's search box | ui-engineer | contained | todo |
+| 18 | Bring Apps to parity with Games' "Import from Launchers" | ui-engineer | spans modules | todo |
+| 19 | Check every configured site at once, not one at a time | ui-engineer | contained | todo |
+| 20 | Back up all tracked data from Settings | ui-engineer | contained | todo |
+| 21 | Restore tracked data from a backup archive | ui-engineer | spans modules | todo |
+| 22 | Multi-select bulk status change on tracker cards | ui-engineer | shape unknown - investigate first | todo |
+| 23 | Undo the last removal, via a toast | ui-engineer | spans modules | todo |
+| 24 | One search across every page, not just the tracker family | ui-engineer | shape unknown - investigate first | todo |
+| 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | shape unknown - investigate first | todo |
 
-Items 1-8 landed together as the correctness pass. Each block below
-records what was actually built and what it measured - which in several
-cases is not what the item originally assumed.
-
-Antivirus false positive (defect #8) is listed at #16, ordered last of
-the investigate-first items: it's the one item on this list resting on
-a purchase decision the agent cannot make (a code-signing certificate
-costs money), so the most useful thing an agent can do this month is
-price it out and hand the user a decision, not implement anything.
+Ordered correctness-first, worst blast-radius first: a confidently
+wrong number (#1) outranks a data-loss *pattern* not yet triggered (#2),
+which outranks a release-integrity gap already triggered once (#3),
+which outranks two release-communication gaps (#4, #5), a cosmetic
+positioning bug (#6), an internal consistency gap (#7), and dead dev
+tooling (#8) - all real, in descending severity. Usability (#10, #27,
+#28, #11-19), features (#20-24) and optimization (#26) follow, each
+internally ordered by how directly it follows from something already in
+the app versus how much shape it still needs. The two owner-raised items
+sit at the front of the usability block: they are the only ones on this
+list reported from actually using the app rather than from reading it.
 
 ---
 
-### 1. Survive an exception in a Qt slot, and log something
+### 1. Tell a dead/expired Stremio session apart from "nothing to sync"
 
-**What** - Any exception escaping a Qt slot currently kills the whole
-process (`qFatal`, exit `0xc0000409`, no traceback), and the app has no
-logging at all - not even to a file - so a crash like this leaves no
-evidence of what happened.
-**Why now** - Correctness/stability outranks every feature on this
-list. A single bad response from any of five external services, or one
-bug in any slot, currently means a silent full-app kill with nothing to
-diagnose it from afterward. This is defect #5 in `planning.md`, already
-diagnosed - a ~20s startup crash was one measured instance.
-**Owner** - ui-engineer (main.py owns app startup/shell; the exception
-guard has to wrap the whole Qt event loop, and the file-logging setup
-belongs next to it).
-**Where** - `src/main.py`: `main()` at line 735, `QApplication(sys.argv)`
-at line 736, `if __name__ == "__main__":` at line 767. No existing
-`sys.excepthook` or logging import anywhere in the file today (checked
-`main.py`; grep for `except Exception`/`qFatal`/`logging` returns
-nothing). Add a `sys.excepthook` that logs the traceback to a file under
-`storage.DATA_DIR` (never `%APPDATA%\Atomic` directly in a test - see
-`.claude/rules/testing.md`) before Qt tears the process down, and audit
-call sites feeding into slots for bare re-raises.
-**Done when** - an exception deliberately raised inside a connected slot
-(e.g. a test button wired to `raise ValueError`) no longer crashes the
-window, and a log file exists afterward with the traceback in it.
-Existing behaviour (every other slot, startup, navigation) is
-unaffected - regression-checked by running the app end to end, not just
-importing it offscreen.
-**Risk** - a `sys.excepthook` that swallows *too much* would hide a
-crash that should actually stop the app (e.g. corrupted Qt state);
-scope it to log-and-continue for slot exceptions specifically, not a
-blanket catch-all around the event loop.
-**Landed** - `src/helpers/logs.py` (rotating file log at
-`DATA_DIR/atomic.log`, 512KB x 2) plus `logs.install_excepthook()` as
-the first line of `main.main()`, before `QApplication`. Verified with a
-real Qt event loop and a button whose slot raises: with the hook the app
-survives and the traceback is in the log; the **control run without it
-died with exit `0xC0000409`** - the same code the original crash
-reported, which is what makes the passing run meaningful rather than
-self-confirming. KeyboardInterrupt still goes to the default hook.
-
-### 2. Bound manga_sites' regex and reads
-
-**What** - `manga_sites.py` can freeze the whole app on a malformed
-search result, the same way `anime_sites.py` could before 1.3.
-**Why now** - Python's regex engine holds the GIL, so this stops every
-thread including the UI. `anime_sites.py` measured 32.5s on a 0.7MB
-page before its fix; Windows offers to kill a window unresponsive for
-~30s. Reachable from the Add/Edit form. Diagnosed defect #1.
+**What** - Since 1.4, Stremio is the *only* watch-progress source
+(`tracker._fetch_real_progress`, `.claude/rules/integrations.md`: "this
+is settled"). If the stored `auth_key` is ever revoked or expires -
+password change, "log out everywhere" on Stremio, anything -
+`stremio.fetch_watch_progress` raises, and the catch at
+`tracker.py:1253` (`except Exception: result = None`) makes that look
+exactly like "not in your library yet." Every entry would quietly stop
+syncing, forever, with nothing on screen saying why.
+**Why now** - This is the identical shape of defect already fixed for
+AniList (`anilist.RateLimited`, roadmap item #7 in the pre-1.4 plan) -
+except AniList back then was one of several sources, and Stremio today
+is the *only* one. The project's own stated failure mode ("a source
+that is silently wrong is worse than no source... a card once showed
+episode 7 for a show its owner had watched two episodes of," VDD-1.4
+§5) is exactly what an unnoticed auth failure reproduces, just via
+silence instead of a wrong number - nothing syncs and nothing says why,
+so the owner has no way to tell "not on Stremio yet" from "your sign-in
+broke three weeks ago."
 **Owner** - integrations-engineer
-**Where** - `src/helpers/manga_sites.py`: `_AJAX_SEARCH_CARD_RE` (~252),
-the `.*?` at ~102, `resp.read()` at ~184/194. Copy the fixed pattern
-from `anime_sites._read_body` (read1 + size cap + wall-clock deadline) -
-that fix already shipped and is the reference implementation.
-**Done when** - a malformed 2MB page parses in under 0.1s, a slow-drip
-host returns inside the timeout, and the existing search results for
-the known reading-site shapes are byte-identical to before.
-**Risk** - the parity check is the point: these engines are the only
-thing standing between a reading site and no suggestions at all.
-**Landed** - and the fix went further than the item asked. Capping the
-lazy body (`.{0,2000}?`) alone still measured **224ms** on a 1MB
-fragment with 20k unclosed anchors, because the scan is quadratic in the
-number of anchors, not just in body length - so the cap shrinks the
-constant without removing the class of bug. `_ajax_search_cards` now
-splits on `</a>` and matches each piece from its last opening anchor
-(`str.split`/`rfind`, both linear and in C), with the cap kept as a
-second line of defence: **224ms -> 0ms**. `_MADARA_COVER_RE` took the
-cap alone (3ms). Reads went to `net.read_text` with item #3. Parity
-checked against well-formed samples of both markup shapes - captures
-identical to the old patterns.
+**Where** - `src/helpers/stremio.py`: `fetch_watch_progress` (~141-178)
+wraps `_api_post` in a bare `except Exception: return None` (~155-156).
+`src/windows/tracker.py`: `_fetch_real_progress` (~1235-1265) catches
+again the same way (~1253-1254) and only ever appends
+`REASON_NO_STREMIO_ACCOUNT` (~1256) - there is no reason code for "have
+an account, but it stopped answering." Follow the `anilist.RateLimited`
+shape (`src/helpers/anilist.py` ~84-121): raise a distinguishable
+exception for an auth-shaped failure (401/403 from `_api_post`) instead
+of swallowing everything, and add a `REASON_STREMIO_AUTH_*` the
+existing `reason` plumbing on the `resolved` signal already carries.
+**Done when** - a stubbed 401/403 from Stremio's account API surfaces
+through `_on_progress_synced`/`_not_found_message` as its own message
+("your Stremio sign-in needs refreshing"), distinct from both "not on
+your list yet" and a plain network failure; a stubbed genuine 404/empty
+library still reads as "nothing to sync" unchanged.
+**What happens when the service says no** - unchanged for every other
+failure shape (no account, title not found, network down): still fails
+soft to "nothing to sync." Only the auth-specific case gets a new,
+distinguishable message - this does not add a fallback source, because
+there isn't one and the project has explicitly rejected adding one.
+**Risk** - don't let this drift into "add a second progress source" -
+that question is closed (see *Deliberately not doing*). The fix is
+purely making one specific failure mode of the one existing source
+speak instead of going quiet.
 
-### 3. Bound `resp.read()` on every page-load lookup
+### 2. Stop Apps/Websites saving a stale whole list on every change
 
-**What** - An unbounded `resp.read()` on the page-load path means a
-slow-drip host never returns, and since `lookup_pool` has only 4
-workers, 4 stuck lookups drain it completely - every other entry's
-lookup queues behind them indefinitely.
-**Why now** - This is the same class of bug as #2 but on the hot path
-(every tracker page visit that needs a refresh), not just the Add/Edit
-form. Diagnosed defect #2.
-**Owner** - integrations-engineer
-**Where** - `anilist.py` ~110 (`_post`, the `with urlopen(...) as resp:
-return json.loads(resp.read()...)` shared by every AniList call),
-`stremio.py` ~35/89/117, `tvmaze.py` ~47, `mangadex.py` ~94,
-`images.py` ~44. Five files, one shared fix shape (size cap + deadline,
-same as #2's reference).
-**Done when** - each of the five sites has a bounded read with a size
-cap and wall-clock deadline; a synthetic slow-drip response (a socket
-that sends 1 byte/sec) returns or raises inside the stated timeout
-instead of hanging, verified per file.
-**Risk** - touches five files feeding the shared `lookup_pool` - a
-partial fix (four done, one missed) still leaves the pool as
-exploitable as before, so treat this as one item, not five, and don't
-call it done until all five are verified.
-**Landed** - as one shared `src/helpers/net.py` (`read_bytes`,
-`read_text`, `deadline_in`) rather than a sixth copy of the pattern -
-copying it once already (anime_sites -> manga_sites) is exactly how
-these five were missed. `anime_sites._read_body` and `wikidata._get_json`
-now delegate to it too, so there is one implementation left, not four.
-Two extra call sites were bounded beyond the item's list: **stremio's
-account API** (`_api_post`, which `login` uses) and **`updater._get_json`**
-- the update check the user actually waits on, where an endless body
-would have hung the Settings dialog. Verified against a local server
-dribbling one byte per second forever (the shape a socket timeout never
-catches): every one of the seven returned or raised in **6.0s**, where
-the old code never returned at all. Size cap verified separately.
-
-### 4. Give a dead host a deadline across the whole resolve chain
-
-**What** - Resolving a video site currently tries 3 engines plus a
-generic scraper in sequence, each with its own independent 6s timeout
-and no deadline across the whole chain - a dead host costs roughly 24s
-per resolve.
-**Why now** - Diagnosed defect #3, and it compounds with #12 below:
-until this is fixed, the "will this site resolve" signal a user gets
-by adding one is "wait 24 seconds and see."
-**Owner** - integrations-engineer
-**Where** - `src/helpers/anime_sites.py`, `resolve_page_url` (the
-per-engine loop that tries each of the 3 engines then the generic
-fallback).
-**Done when** - a dead host's total resolve time is bounded by one
-overall deadline (e.g. 8s) shared across all engines, not per-engine;
-measured against a real dead host, not asserted.
-**Risk** - cutting the deadline too aggressively could turn a slow-but-
-real hit into a false miss; measure real engine response times for
-working hosts first so the shared deadline doesn't undercut them.
-**Landed** - one deadline for the whole chain, threaded through
-`search_site(..., deadline=)` so it bounds the three engines too, not
-just the loop over them; `_step_timeout` gives each request
-`min(timeout, remaining)` and gives up below 1s rather than opening a
-connection that cannot finish. **Budget is 2x timeout (12s), not the 8s
-the item suggested**, and deliberately: a real hit needs one request
-that is itself allowed the full 6s, so anything under 2x means one dead
-engine ahead of the right one turns a slow-but-real answer into a miss -
-and a wrong "no page found" gets saved on the entry, while slowness is
-only ever slowness. Measured against a host that accepts and never
-answers: **12.0s, previously ~24s** for one query variant and twice that
-for a title with a subtitle. `deadline=None` keeps every other caller's
-behaviour unchanged.
-
-### 5. Route video-site resolution through `lookup_pool`
-
-**What** - Typing in the Video Website search box fires a bare
-`threading.Thread` per debounced keystroke, outside the shared 4-worker
-`lookup_pool` - so this path has no concurrency cap at all.
-**Why now** - This is the exact shape of bug that already shipped once
-(up to 651 simultaneous connections measured, saturating the user's home
-network) - `lookup_pool.py` exists specifically to prevent it, and this
-call site doesn't use it. Diagnosed defect #4.
-**Owner** - integrations-engineer (background threading is this role's
-scope per `CLAUDE.md`, even though the call site lives in a UI page
-file).
-**Where** - `src/windows/tracker.py`, `_start_video_site_resolution`.
-**Done when** - typing quickly in the Video Website search box never
-opens more than `lookup_pool`'s worker count in flight simultaneously
-(verified by counting live threads/connections during rapid typing, not
-just reading the diff).
-**Risk** - debounce timing interacts with pool queueing; verify the
-search box still feels responsive (results still land before the user
-moves on) after routing through the shared queue, not just that the
-thread count is bounded.
-**Landed** - **not on the shared queue**, and that risk line is why. The
-shared pool is drained by page-load backfill of every tracked entry, so
-a lookup the user is watching a status line for would have waited behind
-it - the same reason `_sync_progress` deliberately keeps its own thread
-(tracker.py ~842). `lookup_pool.submit_latest(key, ...)` instead: one
-dedicated worker, and a newer request under the same key *replaces* a
-queued older one, which is right because every debounced keystroke but
-the last is already stale by the time it answers. Caps this path at one
-connection - tighter than the pool's four. Measured over 60 rapid
-submissions: peak in flight **1**, **1 of 60** actually ran, and the
-newest always ran.
-
-### 6. Back up settings/entries before an overwrite, and stop swallowing a corrupt file silently
-
-**What** - `storage.load` returns `{}` on any `JSONDecodeError` or
-`OSError` with no logging, and the very next `storage.save` overwrites
-the file with that empty default - silently destroying whatever was
-there. This already happened for real: a BOM'd `settings.json` failed
-to parse and the app overwrote it, destroying the stored AniList
-username (this is *why* the username is empty right now, per this
-month's other two usability items).
-**Why now** - Data loss outranks every feature on this list. Diagnosed
-defect #6, and its blast radius is anything in `%APPDATA%\Atomic` - not
-just settings.
-**Owner** - ui-engineer (storage.py is shared plumbing with no other
-clear owner; closest to the pages/dialogs that call it, and pairs
-naturally with the logging added in item #1).
-**Where** - `src/helpers/storage.py`: `load` (~41-49) and `save`
-(~52-55). Add: (a) on a parse failure, log it (via #1's logging setup)
-instead of failing silently; (b) before `save` overwrites a file, copy
-the existing file to a `.bak` alongside it, so a bad write is
-recoverable; (c) consider refusing to overwrite a real file with an
-empty/near-empty default when the existing file was non-trivial, since
-that's the exact shape of the destructive case already hit.
-**Done when** - a deliberately corrupted `settings.json` (BOM'd or
-truncated) logs the parse failure instead of silently returning `{}`,
-and a `.bak` of the pre-overwrite file exists after the next save;
-tested against a temp-directory copy per `.claude/rules/testing.md`,
-never real user data.
-**Risk** - this is the highest-value item on the list given it already
-cost the user real data once; don't scope it down to "just add
-logging" - the backup-before-overwrite half is what actually prevents
-recurrence.
-**Landed** - four changes, and one of them fixes the original incident
-outright: `load` now reads **utf-8-sig**, so a BOM'd `settings.json` -
-the exact file that lost the AniList username - parses instead of being
-declared unreadable. Beyond that: a file that genuinely can't be parsed
-is moved to `<name>.corrupt` rather than left for the next `save` to
-overwrite; `save` writes a temp file and `os.replace`s it into place, so
-a crash mid-write can no longer leave a truncated file (which read back
-as "empty" and was then made empty for real); and the previous contents
-are kept as `<name>.bak`. Every failure is logged through item #1.
-**Deliberately not done**: refusing to write an empty list over a full
-one. Emptying a page is something the user is allowed to do, and a rule
-guessing at intent would eventually block a legitimate save - the `.bak`
-covers the accident without ever standing in the way. Verified on a
-temp copy: BOM'd file reads, truncated file quarantined with its bytes
-intact after a following save, `.bak` present, no `.tmp` left behind,
-`update_entry` still round-trips.
-
-### 7. Tell AniList's rate-limit apart from "no result"
-
-**What** - AniList returns a `403` on every POST (not a `429`) when
-rate-limited, lasting over an hour by measurement. Every AniList call in
-`anilist.py` uses a bare `except Exception: return None`, so a block is
-indistinguishable from "this title genuinely has no AniList entry" -
-both look like silence to the user and to the code calling it.
-**Why now** - Diagnosed defect #7's first half (the second half, no
-alternate Crunchyroll source, is item #8 below - investigation, not a
-fix). This part is a contained, mechanical fix: catch the specific
-error instead of everything.
-**Owner** - integrations-engineer
-**Where** - `src/helpers/anilist.py`: `_post` (~96-110) is the one
-shared HTTP call every public function routes through
-(`fetch_watch_progress` ~113-137, `fetch_next_episode` ~146-164, and one
-more ~215). Catch `urllib.error.HTTPError` with `code == 403`
-specifically in `_post` (or let it propagate a distinguishable
-exception type) instead of blending into the general `except Exception`
-in each caller.
-**Done when** - a simulated 403 response (stub the socket layer, not a
-live rate-limit) surfaces as a distinct condition to
-`tracker._fetch_real_progress`, which is where the Sync Progress message
-from items #9/#10 can then say "AniList looks rate-limited right now"
-instead of "no real progress found."
-**What happens when AniList says no** - already fails soft (returns
-`None`) for a genuine no-match; this item only makes the *rate-limited*
-case distinguishable from that, it doesn't add a fallback - there isn't
-one for Crunchyroll (see #8).
-**Landed** - `anilist.RateLimited`, raised by `_post` for 403 **and**
-429 (the documented code and the one that actually arrives), propagated
-out of `fetch_watch_progress` only - the schedule lookups stay soft,
-because a missing countdown on a card has nowhere to say why and nobody
-waiting on it. `tracker._fetch_real_progress` catches it and carries a
-`reason` string on the `resolved` signal, which the Sync Progress dialog
-turns into "AniList is refusing requests from this connection right now
-... this says nothing about whether the title is on your list". That
-`reason` field is the mechanism items #9 and #10 should extend rather
-than reinvent. Verified with a stubbed 403 (raises `RateLimited`) and a
-stubbed 404 (still fails soft, returns None).
-
-### 8. Investigate a second source for Crunchyroll progress
-
-**What** - Crunchyroll-provider progress sync has exactly one source
-(AniList) and no fallback; when AniList is rate-limited or a title
-simply isn't on a public AniList list, Crunchyroll progress cannot sync
-at all. Netflix had the identical problem and was solved by moving to
-Wikidata (`wikidata.py`, property P1874) as a keyless, public second
-source - the question is whether an equivalent property exists for
-Crunchyroll.
-**Why now** - Diagnosed defect #7's second half. Not attempted yet
-because it needs the same kind of research Netflix's fix needed
-(finding and validating a Wikidata property, or another keyless
-source) before any code gets written.
-**Owner** - integrations-engineer
-**Where to start** - `src/helpers/wikidata.py` (the Netflix pattern to
-copy if a Crunchyroll property is found and holds up); check Wikidata
-for a Crunchyroll-series-id property analogous to P1874, and validate
-it the same way Netflix's was validated (does a real tracked title
-resolve; is the id specific enough to not collide across a shared
-label, the exact trap `wikidata.py`'s docstring already records for
-Netflix).
-**Done when** - either a working property is found, validated against
-several real tracked titles, and implemented following the Netflix
-shape (probe-before-save, confirmed-404-only-discards), or the
-investigation concludes no usable property exists and that's recorded
-here so it isn't re-investigated next month.
-**What happens when the service says no** - if no such property exists,
-this item ends in "not possible today," same honest-negative shape as
-every other fail-soft path in this codebase - not a half-built partial
-fix.
-**Risk** - this is research first, implementation second; don't let the
-research half get skipped in favor of guessing at a property id.
-
-**Landed - and the item as written conflated two different things.**
-Netflix's Wikidata fix solved *link resolution*, not *progress*. No
-public knowledge base can hold personal watch history, so "a second
-source for Crunchyroll **progress**" via Wikidata was never possible in
-principle. Both halves were answered separately:
-
-*The link (done).* **P11330 "Crunchyroll series ID" exists** and is
-live - `crunchyroll.com/series/<id>`. P4110 is the older slug form and
-Wikidata marks it deprecated; it is not used. Implemented as
-`wikidata.fetch_crunchyroll_id` / `crunchyroll_page_url`, asked before
-AniList exactly like Netflix, with `wikidata.py` generalized to one
-`_fetch_id` rather than a Netflix copy (`page_url` is now
-`netflix_page_url`). Coverage measured over six real titles: Frieren,
-Jujutsu Kaisen, One Piece and Hunter x Hunter carry one; Vinland Saga
-and Kaiju No. 8 don't and fall through to AniList as before. **End to
-end with AniList stubbed to 403 on every request: 4 of 6 resolved,
-where previously all 6 would have resolved to nothing** - Crunchyroll
-had no second source at all. **Not probed before saving, unlike
-Netflix**: Crunchyroll answers **200 to a deliberately bogus id**
-(measured, `GZZZZZZZZ`), so a probe there proves only that the site is
-up, and the strict Wikidata title match carries the weight instead. A
-loose free-text P11330 value is rejected by shape.
-
-*Correction, from item #14's measurement.* The "4 of 6" above is real
-but was measured on headline titles. Against the owner's **actual**
-three tracked titles the same lookup answers **0 of 3** - Wikidata
-carries no Crunchyroll id for any of them (see item #14). The fallback
-is still worth having and costs nothing when it misses, but it will
-rarely fire on this library: AniList remains the practical source.
-
-*A wrong-show bug this investigation found, and fixed.* Asking Wikidata
-with `_query_variants`' subtitle-stripped head matched the **parent
-franchise**: "Bleach: Thousand-Year Blood War" has no id of its own, so
-the fallback asked for "Bleach", scored the 2004 series at 1.00, and
-returned Crunchyroll `G63VGG2NY` and Netflix `70204957` - both the wrong
-show, saved onto the entry permanently. **This affected Netflix too and
-predates this month's work** (the Netflix path shipped in 1.3 with the
-same loop). Both now ask with the full title only: a knowledge base's
-labels are canonical titles, so the shorter string finds the franchise
-rather than the season. Frieren still resolves on its full title, so
-nothing was lost; Bleach TYBW now correctly returns nothing and falls
-through to AniList and then to a search page.
-
-*The progress (moved to item #17).* AniList remains the only source
-wired up. The keyless candidate is **Kitsu** - its public JSON:API
-answered without any key on both a user lookup and an anime search
-during this investigation. MyAnimeList's v2 API **403s without a client
-id** and is therefore out. That is a new integration plus a Settings
-field, not a correctness fix, so it is item #17 rather than something
-smuggled into this one.
-
-### 9. Say so when Netflix/Crunchyroll watch progress can't be read
-
-**What** - Neither Netflix nor Crunchyroll publishes watch history
-without an authenticated session (no public API, login/ToS wall), so an
-anime watched there never advances progress on its own. Today this is
-invisible: an Anime entry sitting on Netflix/Crunchyroll with no
-Stremio/AniList match just shows no progress, identical in appearance
-to "not synced yet" or "nothing to show." The owner kept believing the
-app itself was broken.
-**Why now** - Named explicitly by the owner as a problem this month.
-It's a correctness-adjacent usability gap: the app has complete
-information (it knows the entry's site is Netflix or Crunchyroll) and
-is choosing not to use it.
+**What** - `ui.md`'s standing rule, written after a real incident
+("reordering a game erased freshly imported games"), is: save one
+entry with `storage.update_entry(file, id, fields)`, never the whole
+list back from a page, because another page or a background job can
+hold a snapshot that's gone stale by the time this page's copy is
+written back. `games.py` was fixed to this shape (`_mutate` reloads
+from disk immediately before applying and saving, at
+`src/windows/games.py:157-160`; single-field bumps use
+`storage.update_entry`, e.g. `games.py:280`, `288`). `link_grid.py` -
+the shared base for **both** the Apps and Websites pages - was never
+migrated: every one of its four save sites still writes
+`storage.save(self.DATA_FILE, self.entries)` off the in-memory list
+loaded once in `__init__`.
+**Why now** - This is not a hypothetical parallel to the fixed defect,
+it's the same defect, unfixed in a sibling file. `main.py`'s own
+`refresh_current_page` docstring (~434+) already names the exact race -
+"Settings > Clear Data, wiping a category out from under a page that's
+already open behind the dialog" - as something this app has to guard
+against. `link_grid.py` doesn't: open Websites, open Settings behind it
+and clear/import something touching `websites.json`, then remove one
+entry on the still-open Websites page - the removal's whole-list save
+overwrites whatever changed in the meantime.
 **Owner** - ui-engineer
-**Where** - `src/windows/tracker.py`: the "no real progress found"
-message at `_on_progress_synced` (~912-922, the single-entry Sync
-Progress dialog) is the primary spot - branch it: if the entry's site
-resolves to Netflix or Crunchyroll, say plainly that these sites don't
-publish watch history and progress has to be set by hand, instead of
-the generic "no real progress found" wording. Also add the same
-distinction to the always-visible card state (`_progress_display`
-~805-816, currently returns `""` whenever `progress_verified` is
-false - indistinguishable from "not checked yet") and to the hover
-tooltip (`_tooltip_html` ~690-699 /
-`release_schedule.tooltip_lines`). To detect the site: `anime_sites.py`
-has `_streaming_site_for(base_url)` (~721-729, currently private) and
-the `_STREAMING_SITES` table (~711-718) with `"crunchyroll"`/`"netflix"`
-keywords already defined - add a public wrapper (e.g.
-`anime_sites.streaming_provider(site_id)`) rather than reaching into the
-underscore-prefixed function from `tracker.py`.
-**Done when** - an Anime entry on a Crunchyroll or Netflix site with no
-verified progress shows a distinct, honest message (in the Sync
-Progress dialog at minimum; card/tooltip if it fits without cluttering
-the always-visible label) saying these sites can't be read
-automatically - verified by building an entry with a Crunchyroll
-`site_id` and no Stremio/AniList match, and confirming the message
-differs from a plain "not synced" entry on an ordinary site.
-**Risk** - none of this is network-dependent, so no "service says no"
-case beyond what #7/#8 already cover - this item is purely about
-surfacing information the app already has.
-**Landed** - in three places, deliberately not on the card face.
-`anime_sites.streaming_provider`/`streaming_provider_map` make the
-private `_streaming_site_for` askable from a page; the Sync Progress
-dialog now names the service and says progress there has to be set by
-hand; the hover tooltip says the same, and only while progress is
-unverified. **The card label was left alone on purpose** - a permanent
-"can't be read" line under every Crunchyroll cover is clutter on cards
-that are otherwise working, and the page-level notice from #10 covers
-the same ground once instead of per card.
+**Where** - `src/windows/link_grid.py`: `storage.save(self.DATA_FILE,
+self.entries)` at line 101 (post-migration write), 245 (`_open_entry`'s
+`last_used` bump), 252 (`_remove_entry`), and 266 (`_on_form_save`,
+add/edit). Reference fix shape: `games.py`'s `_mutate`
+(reload-then-apply-then-save) for the ones that touch more than one
+field, `storage.update_entry` directly for single-field bumps like
+`_open_entry`'s `last_used`.
+**Done when** - all four sites either call `storage.update_entry` for a
+single field or reload from disk immediately before mutating and
+saving the full list, matching `games.py`'s pattern; a scripted
+race (mutate the file from outside the page's snapshot, then trigger
+each save path) no longer loses the outside change, verified for Apps
+and Websites both since they share this class.
+**Risk** - this is the same class of bug the project has already been
+burned by once; a partial fix (three of four sites migrated) leaves the
+page exactly as exploitable as before on the missed one, so treat it as
+one item covering all four sites, not four small ones.
 
-### 10. Surface a missing AniList username where it actually matters
+### 3. Tie the released exe to the source tree it was built from
 
-**What** - The AniList username field in Settings is currently the
-*only* place that says anything about it; leaving it blank silently
-skips AniList sync with no indication anywhere else in the app that
-this is why Anime progress isn't tracking. The owner's own username was
-empty (destroyed by the storage.py bug in item #6) and nothing told
-them this was the cause - they kept believing the app itself was
-broken.
-**Why now** - Named explicitly by the owner. Directly follows from #6:
-fixing the data-loss bug prevents a recurrence, but doesn't help anyone
-notice *this* time that it happened.
-**Owner** - ui-engineer
-**Where** - `src/helpers/settings_dialog.py` ~463-479 is the existing
-(buried) hint text - leave it, but don't rely on it being found. Add
-the missing-username case to the same places as item #9, since they
-share the exact same code paths: `tracker.py`'s single-entry Sync
-Progress message (~912-922) - for an Anime entry with no Stremio match
-and no AniList username configured, say specifically "no AniList
-username is set in Settings" rather than the generic "no real progress
-found"; and consider a one-line note on the Anime tracker page itself
-(e.g. near the refresh button, or as an empty-state note when the first
-few Anime entries all have unverified progress) pointing at Settings.
-Reuses `app_settings.get_anilist_username()` (already called at
-`tracker.py` ~879) - the check just needs its own branch in the
-messaging instead of being folded into the same "not found" bucket as
-every other miss.
-**Done when** - an Anime entry synced with no Stremio match and a blank
-AniList username produces a message that names the blank username
-specifically (not the generic message), and that message differs
-visibly from the case where a username *is* set but the title genuinely
-isn't on the list.
-**Risk** - coordinate with item #9 if picked up separately - both touch
-the same `_on_progress_synced` message-building code, and doing them in
-two uncoordinated passes risks one overwriting the other's branch. Best
-done by the same person in one pass, or explicitly sequenced.
-**Landed** - done in one pass with #9, as that risk line suggested. The
-several not-found causes are now separate `REASON_*` codes carried on
-the `resolved` signal and turned into text by `_not_found_message`; a
-blank username produces its own paragraph naming the setting, and an
-entry that is *both* on an unreadable service and missing a username
-says both rather than picking one. Above that sits a page-level notice
-under the sort row (`_update_sync_notice`), recomputed on every redraw
-so filling the username in from Settings clears it without a restart -
-that notice is the part that answers "why is nothing happening?" without
-the user having to sync an entry first to find out.
-
-### 11. Search and filter on tracker pages
-
-**What** - Anime/Reading/Series pages have no way to search or filter -
-sorting only changes order, not what's shown. A long list has no way to
-jump to one title.
-**Why now** - Named usability gap in `planning.md`; grows more painful
-the larger a tracked list gets, and none of this month's other items
-touch it, so it's a clean independent slice of value.
-**Owner** - ui-engineer
-**Where** - `src/windows/tracker.py`: `_visible_entries` (~662-671, the
-existing sort dropdown lives here) and `_sections`/`_refresh_grid`
-(~702-744, where the grid is actually built) are the two places a
-filter has to plug into - a search box narrowing `_visible_entries`'
-output before it's grouped into sections is the natural shape, since
-`_sections` already re-groups whatever list it's given.
-**Done when** - typing in a new search field narrows the visible grid to
-matching titles (case-insensitive substring match, minimum) across all
-three tracker pages (Anime/Reading/Series share this same base), and
-clearing it restores the full list without needing a page revisit.
-**Risk** - `_sections` groups by status and the drag-to-reorder Custom
-Order path saves whatever order is on screen (`_begin_custom_order`,
-per the comment at ~706-709) - make sure an active filter doesn't let a
-drag-reorder silently drop the hidden entries' saved order. Worth an
-explicit check: filter active, reorder, clear filter, confirm nothing
-moved unexpectedly.
-**Landed** - search box in the sort row, narrowing `_visible_entries`
-before `_sections` groups it, so all three pages get it from the shared
-base. Debounced at 150ms because every redraw rebuilds every card from
-scratch. **The reorder risk was resolved by removing the combination
-rather than reconciling it**: cards are not draggable while a search is
-active (`_build_card` skips attaching the handler) and the hint text
-says why. Reconciling a partial on-screen order with the saved one is
-solvable but it is the kind of subtlety that ships as a data bug, and
-"clear the search to reorder" costs the user nothing.
-
-### 12. Show whether an added site will resolve to title pages or only ever fall back to search
-
-**What** - Adding a Video/Reading site gives no signal about whether it
-will actually resolve to per-title pages or just fall back to a search
-link every time - the user finds out only by trying it later.
-**Why now** - Named usability gap in `planning.md`. Directly related to
-item #4 (the 24s dead-host cost) - together they're the difference
-between "adding a site is informative" and "adding a site is a 24-second
-guess."
-**Owner** - integrations-engineer (determining resolution capability
-needs the actual engine-detection logic; a UI-only badge without real
-detection behind it would be worse than nothing - it would assert
-something unverified).
-**Where** - `src/helpers/anime_sites.py` and `src/helpers/manga_sites.py`
-own the per-engine detection (the 3 engines + generic fallback
-`resolve_page_url` touches, see item #4). The site-adding UI lives in
-`src/windows/tracker.py` around `_populate_site_options`/site dialog
-(~1400+) and the equivalent in `websites.py`/`link_grid.py` for the
-generic site list - check which of those actually own "add a site" for
-Video Websites specifically before starting.
-**Done when** - adding a site runs a one-time resolution probe against
-a known title (or the site's own homepage/search shape) and records
-whether it hit a real engine or fell through to generic-search-only,
-surfaced as a label/icon in the site list; a site that later stops
-resolving (host changed) isn't required to re-flag itself automatically
-- only the at-add-time signal is in scope this month.
-**Risk** - depends on #4 landing first (or at least being sized) so the
-probe itself doesn't cost another 24s per site added; sequence this
-after #4.
-**Landed** - `probe_site` in both `anime_sites` and `manga_sites`
-searches the site for a title every catalogue carries ("One Piece") and
-reports `engine` / `generic` / `search-only` / `unreachable` /
-`streaming`; Settings stores it on the site and shows it in the list
-("opens title pages", "search links only - no title pages", "didn't
-answer when checked"). Runs on add, on edit (the URL may be what
-changed), and from a new **Check** button so sites added before this
-existed can be checked too. Verified against local servers of each
-shape: engine, search-only and unreachable all classified correctly,
-four probes in 10.3s total. Depended on #4 as predicted - and needed the
-same deadline in `manga_sites.search_site`, which didn't have one, so
-`net.step_timeout` is now shared by both.
-
-### 13. Quick +1 for Anime/Series progress
-
-**What** - Manga/Reading entries already have +/-1 chapter buttons
-directly on the card (`_bump_watched_chapter`); Anime/Series has no
-equivalent - bumping episode progress by hand requires opening the full
-Edit dialog.
-**Why now** - Named usability gap in `planning.md`. The Manga pattern
-already exists and works; this is extending a proven shape to the other
-two entry types, not inventing one.
-**Owner** - ui-engineer
-**Where** - `src/windows/tracker.py`: `_build_card` (~745-796) currently
-gates the +/-1 control row behind `if entry["type"] in MANGA_TYPES:`
-(~777); `_bump_watched_chapter` (~798-803) is the pattern to mirror for
-episode progress, writing to `entry["progress"]` via
-`format_episode_progress`/`parse_episode_progress` instead of
-`last_watched_chapter`.
-**Done when** - an Anime/Series card has a working +1 control that bumps
-the episode number, saves via `storage.update_entry` (never a whole-list
-write - see `.claude/rules/ui.md`), and sets `progress_verified`
-correctly (a hand-bumped number is the user's own input, same trust
-level as typing it into Edit today - check what Edit currently sets
-`progress_verified` to and match it, don't invent a new rule here).
-**Risk** - Anime/Series progress is season+episode, not a flat number
-like manga chapters - +1 needs to roll over correctly at a season
-boundary using the existing `format_episode_progress`/
-`parse_episode_progress` helpers rather than naive integer increment.
-**Landed** - `_bump_episode`, sharing one `_bump_controls` builder with
-the Manga path so both rows stay identical. It sets `progress_verified`,
-matching what a hand edit in the form does - without that the card would
-still show nothing after being clicked. **It deliberately does not roll
-a season over**, contrary to the risk line above: nothing in the app
-knows how many episodes a season has (`latest_available` is the newest
-episode *out*, not a season length), so a rollover would be a guess that
-silently files progress under the wrong season. The season is changed in
-Edit, where it is typed. A freeform legacy note is left untouched rather
-than overwritten, and -1 stops at zero.
-
-### 14. Investigate Amazon Prime coverage before building it
-
-**What** - Whether Amazon Prime can be added as a tracked source the
-same way Netflix was, via Wikidata.
-**Why now** - Requested capability, but `planning.md` already flags the
-open question: Wikidata property P8055 ("Amazon Prime Video ID", US)
-works in isolation (*The Boys* → `B07QQQ52B3`), and a newer P14440
-exists too, but anime coverage looks thin - Hunter x Hunter and Vinland
-Saga both carry a Netflix id (P1874) and neither carries a Prime id.
-Building the feature before knowing coverage risks shipping something
-that resolves for almost nothing.
-**Owner** - integrations-engineer
-**Where to start** - `src/helpers/wikidata.py` is the pattern to copy if
-coverage holds up (same probe-before-save shape Netflix uses,
-`_netflix_available`/`_netflix_page_url` in `anime_sites.py` ~755-806).
-Before writing any of that: query P8055 and P14440 for a real sample of
-the owner's actually-tracked Anime entries (not a cherry-picked few),
-and record the hit rate.
-**Done when** - either the measured hit rate across real tracked titles
-is high enough to justify building it (implemented following the
-Netflix shape, added as a row-equivalent to how Netflix/Crunchyroll are
-special-cased in `anime_sites.py`), or the investigation concludes
-coverage is too thin and that conclusion is recorded here so it isn't
-re-investigated next month without new evidence.
-**What happens when the service says no** - no P8055/P14440 recorded
-for a title falls back exactly like Netflix's missing-P1874 case
-already does: search-page fallback, not an error.
-**Risk** - this is explicitly investigate-before-build per
-`planning.md`; don't let "P8055 works for one title I tried" stand in
-for measuring the real sample.
-
-**Landed - measured, and the answer is no. Not building it.**
-
-Measured against the owner's *actual* tracked titles (read from a copy
-of `%APPDATA%\Atomic`, never the live data). Three Anime/Series entries:
-*The Angel Next Door Spoils Me Rotten*, *Bleach: Thousand-Year Blood
-War*, *Wistoria: Wand and Sword*.
-
-| Property | Service | Hits |
-|---|---|---|
-| P8055 | Prime (US) | **0 / 3** |
-| P14440 | Prime | **0 / 3** |
-| P1874 | Netflix | 0 / 3 |
-| P11330 | Crunchyroll | 0 / 3 |
-
-The entities exist on Wikidata with exact 1.00 label matches - they
-simply carry **no streaming ids of any kind**. This is not a Prime
-problem, it is a coverage cliff: Wikidata's streaming ids are on older
-and headline titles (*Bleach* 2004 has both Crunchyroll and Netflix ids;
-*Bleach: Thousand-Year Blood War* 2022 has neither), and a library of
-current seasonal anime falls entirely outside it. Building Prime on top
-of P8055 would resolve nothing for this user, and there is no second
-public source for Prime ids the way AniList backs Netflix.
-
-**Revisit only with new evidence** - a materially larger tracked library
-whose titles do carry these ids, or Wikidata coverage visibly improving.
-"Prime would be nice" is not new evidence.
-
-### 15. Investigate startup and page-rebuild performance
-
-**What** - No performance measurement exists yet beyond the
-already-diagnosed threading defects (#3/#4/#5 above, which are
-correctness bugs with a performance symptom, not a general profile).
-This item is the general question: where does Atomic actually spend
-time on startup and on a tracker page visit, and is any of it worth
-fixing beyond what's already queued.
-**Why now** - Requested this month ("app efficiency/performance") but
-has no diagnosed cause yet - unlike everything above it, this is
-genuinely unknown shape. Pages intentionally rebuild from scratch on
-every visit (`.claude/rules/ui.md` - "never keep state in a widget that
-must survive"), so a chunk of any measured cost may be by design, not a
-bug; profiling has to happen before anything gets changed so a
-deliberate design choice doesn't get "fixed" into a data-loss bug like
-the ones `ui.md` already warns about.
-**Owner** - test-engineer (measurement first, per
-`.claude/rules/testing.md` - "a classifier you haven't validated is not
-a measurement"; hand findings to ui-engineer or integrations-engineer
-once a real cause is identified).
-**Where to start** - cold-start time to first paint (`main.py`
-`main()`), and per-visit cost of `tracker.py`'s `_refresh_grid` /
-`_build_card` on a large real-sized entry list (image
-loading/`images.py` is a candidate - it's already on the unbounded-read
-list at item #3).
-**Done when** - a measured breakdown exists (startup: N seconds to
-first paint; tracker page visit: N ms to rebuild for a list of realistic
-size) with the top 1-2 costs identified by name, not guessed. Whether
-anything gets *fixed* this month depends on what's found - this item's
-"done" is the measurement and a follow-up item (or explicit "not worth
-fixing") for whatever it finds, not a performance improvement itself.
-**Risk** - the real risk is skipping measurement and guessing - this
-codebase has already shipped a pixel-classifier that reported every
-frame broken in both the broken and fixed case because it wasn't
-validated first; don't repeat that shape here with an unvalidated
-timing method.
-
-**Landed - measured. There is no performance problem to fix.**
-
-Cold start of the frozen exe, launch to a visible window, three runs
-with `%APPDATA%` redirected to a copy: **1.42s / 1.29s / 1.57s**. In
-process, the phases behind that are app-module imports 137ms, PyQt6
-import 23ms, `MainWindow()` 32ms, `apply_theme` under 1ms - so most of
-the wall clock is PyInstaller's onefile unpack and Qt's own
-initialisation, neither of which is application code.
-
-Tracker page redraw, which was the other suspect:
-
-| Entries | First build | Redraw | Per card |
-|---|---|---|---|
-| 10 | 39ms | 4ms | 0.4ms |
-| 50 | 58ms | 17ms | 0.3ms |
-| 200 | 197ms | 66ms | 0.3ms |
-| 500 | 412ms | 164ms | 0.3ms |
-
-Linear, and 500 entries is over a hundred times this library. **Covers
-were the named suspect and are not the cost**: repeating the run with a
-real 800x1200 PNG on every card moved it from 0.3 to 0.4ms per card
-(200 entries: 66ms → 77ms), because scaled pixmaps are already cached.
-
-**No follow-up item.** The only lever that would move the 1.3s is a
-onedir build instead of onefile, which trades away the single-file
-distribution the whole update mechanism is built on - a bad trade for
-about a second. Rebuilding pages from scratch on every visit stays as
-it is; `.claude/rules/ui.md` requires it, and it costs 4ms at this
-library's size.
-
-### 16. Investigate code signing to stop the antivirus false positive
-
-**What** - The release build has been flagged by Microsoft Defender as
-`Trojan:Win32/Wacatac.B!ml`, proven a false positive by bisection (1.0
-through 1.1.5 scanned clean; 1.2 - differing by exactly one line, the
-version string - was flagged). Unsigned executables with no download
-reputation are what these heuristics are tuned to distrust. Diagnosed
-defect #8; durable fix is a code-signing certificate.
-**Why now** - Lowest-cost thing that can happen this month on this item
-is pricing it out, since a certificate is a real purchase the agent
-cannot make on its own (see `CLAUDE.md`'s purchase-permission rule) -
-put the decision in front of the user with real numbers instead of
-leaving it as a permanently-known-but-untouched defect.
+**What** - 1.4 was tagged once, then re-cut before anyone had it: the
+first `Atomic.exe` was built from a stale PyInstaller cache and was
+missing `src/filter_icon.png` (173 archive entries against the 174 a
+real build of that tree produces), and still had Home's row labelled
+"Series" rather than "Movies & Series" (VDD-1.4 §3). Nothing in the
+build or release path would have caught this without someone manually
+counting archive entries after the fact.
+**Why now** - This shipped once already, on the very release this
+roadmap is written after. `packaging/build.py` copies whatever
+PyInstaller produces with no verification step at all; the `build`
+skill's step 4 already *says* "don't trust the build log... confirm it
+with the test skill's frozen-build extraction" for exactly this
+reason, but that's a instruction for a human/agent to remember to run
+by hand, not something the build itself enforces.
 **Owner** - release-engineer
-**Where to start** - research code-signing certificate options
-(standard vs. EV, typical first-year cost, issuance turnaround, and
-whether Microsoft's SmartScreen reputation-building applies
-differently to each) and how the signing step would fit into the
-existing `build`/`release` skills' pipeline.
-**Done when** - a short comparison (options, cost, what changes in the
-release process) is written up and put in front of the user as a
-decision - not purchased, not implemented. If the user approves a
-specific option, that becomes next month's implementation item.
-**Risk** - none from investigating; the risk is entirely in the
-purchase step, which stays gated behind explicit user approval per the
-standing purchase-permission rule regardless of what this investigation
-finds.
+**Where** - `packaging/build.py` (64 lines total - `main()` at
+17-60 runs PyInstaller and copies the result with no check beyond
+"does `Atomic.exe` exist"). `packaging/Atomic.spec`'s `datas=[...]`
+(line 79) is the authoritative list of what must end up bundled. The
+`test` skill already has the frozen-archive-extraction snippet this
+should reuse rather than reinvent.
+**Done when** - `build.py` (or a step it calls) fails loudly - not a
+silent success - when the produced exe's bundled archive doesn't
+contain every file `Atomic.spec`'s `datas` lists, or when PyInstaller's
+own cache appears to have skipped a real rebuild (e.g. compare the
+work directory's timestamp against the newest file under `src/`).
+Verified by deliberately staging a stale-cache build (skip clean,
+remove a bundled asset from disk, rebuild) and confirming the check
+catches it rather than producing a silently-broken exe.
+**Risk** - the failure mode here is a check that's *technically*
+correct but too easy to skip under release pressure (the same way the
+existing "read the test skill" instruction was skipped once already) -
+wire it into `build.py` itself, or the `release` skill's procedure,
+not just into documentation that has to be remembered.
 
-**Landed - researched. Nothing bought; this is a decision for the user.**
+### 4. Write 1.4's missing "what's new" notes
 
-The landscape moved since this defect was first written down, and it
-moved in our favour:
-
-| Option | Cost | Hardware | Notes |
-|---|---|---|---|
-| **Azure Artifact Signing** (was Trusted Signing) | **$9.99/mo** Basic, 5,000 signatures | none - cloud HSM | Open to *individual* developers after identity validation; GA in US/Canada/Europe |
-| EV certificate (Sectigo/SSL.com/DigiCert) | ~$249-325/yr | USB token or HSM **mandatory** | 1-year terms as of Feb 2026 |
-| OV certificate | ~$200-300/yr | same hardware rule | |
-
-**The reason to buy EV specifically is gone.** Since March 2024 EV no
-longer grants an instant SmartScreen pass; EV and OV now build
-reputation the same way, by download volume. Paying triple for the token
-ceremony buys nothing this project needs.
-
-**Recommendation: Azure Artifact Signing, ~$120/year.** Cheapest, no
-hardware token to plug in before a release, and it fits the existing
-`build`/`release` pipeline as a signing step rather than a manual one.
-
-**Two things to confirm before committing**, neither of which an agent
-can settle: whether the owner's identity validation passes (individuals
-need verifiable history), and whether it is offered in the owner's
-region - GA is listed for US/Canada/Europe.
-
-**Honest caveat**: signing makes a heuristic flag much less likely and
-gives a real identity to appeal with, but no signature *guarantees*
-Defender never flags a build again. The bisection already proved 1.2's
-flag was a false positive on an unsigned, reputation-less binary; that
-is the condition signing removes.
-
-### 17. Investigate Kitsu as a second source for watch progress
-
-**What** - A second place a user's own episode progress can be read
-from, so AniList is not the only one. Fell out of item #8: watch history
-is personal data, so no knowledge base can supply it - only another list
-service the user keeps.
-**Why now** - AniList is currently a single point of failure for every
-Anime entry's progress, and it fails *silently* for an hour at a time
-(item #7 now names that, but naming it doesn't sync anything). Kitsu is
-the only keyless candidate found: its public JSON:API answered a user
-lookup and an anime search with no key during item #8's research.
-MyAnimeList's v2 API 403s without a client id, so it is out.
-**Owner** - integrations-engineer
-**Where to start** - `helpers/anilist.py` `fetch_watch_progress` is the
-shape to match (username in, `(season, episode)` out, fails soft).
-Kitsu needs `users?filter[name]=` then that user's `libraryEntries` with
-the anime included; confirm a *public* profile is readable without auth
-before anything else, since that is the whole premise.
-**Done when** - either progress for a real title reads back from a
-public Kitsu profile and is wired in as a fallback beside AniList (with
-a username field in Settings, which makes item #10's "no username set"
-messaging cover two services, not one), or the investigation records
-that public profiles aren't readable without auth and that's the end of
-it.
-**What happens when the service says no** - it is a *fallback*: no Kitsu
-username, no match, or a refusal all fall through to exactly today's
-behaviour. It must never replace AniList as the primary.
-**Risk** - two sources can disagree about the same title. Decide the
-rule before writing the code (highest progress wins is the obvious one)
-rather than discovering it as a bug later.
-
-### 18. Read Crunchyroll progress from Crunchyroll itself
-
-**What** - Two faults the owner hit on one card. One-Punch Man showed
-S01E07 while Crunchyroll's own history said E2, because Stremio was
-asked first for *every* entry and whatever it answered won - for an
-entry watched on Crunchyroll that is a different viewing entirely. And
-the only Anime source besides Stremio was AniList, which knows only what
-some other tracker wrote to it.
-**Why now** - Reported directly, with the evidence: crunchyroll.com/
-history showing E2 next to a card claiming E7. A confidently wrong
-number is worse than a blank one, and nothing on the card said where it
-came from.
-**Owner** - integrations-engineer
-**Where** - `src/helpers/crunchyroll.py` (new), `app_settings`,
-`settings_dialog` (Crunchyroll Account section), `tracker.
-_fetch_real_progress`.
-**Done when** - a Crunchyroll entry reads Crunchyroll's own number, and
-never Stremio's.
-**What happens when the service says no** - Crunchyroll → AniList →
-nothing. Never Stremio for an entry watched elsewhere, which was the
-whole defect.
-
-**Landed, with one part that could not be tested here.**
-
-Source order is now decided by where the entry is actually watched.
-Crunchyroll entries ask Crunchyroll (signed in), then AniList; ordinary
-entries still ask Stremio first, unchanged. Every synced number now
-carries the source that gave it (`progress_source`), shown on hover -
-"Progress from Crunchyroll" / "from AniList" / "set by you" - because an
-episode number the user disagrees with is unarguable while it is
-anonymous.
-
-Sign-in follows `stremio.login`: password sent once, **only the refresh
-token stored**. One shared history fetch serves a page of cards.
-Verified against a local stand-in speaking Crunchyroll's response shapes
-- with Stremio saying E7 and AniList saying E4, the entry reads **S01E02
-from Crunchyroll**; 14/14 checks including that the password never
-reaches settings.json.
-
-**The email/password sign-in was built, then measured dead, then
-replaced by a pasted token.** The password grant needs a client
-credential Crunchyroll issues to no third party. The published one (from
-the archived `crunchyroll-go`) was tested without any account - a login
-with deliberately fake details separates `invalid_grant` (credential
-alive, login wrong) from `client_inactive` (credential dead) - and
-**both `www.crunchyroll.com` and `beta-api.crunchyroll.com` answered
-`auth.obtain_access_token.client_inactive`**. No password can work
-through it, for anyone.
-
-So Settings now takes **the token from the browser session the user is
-already signed into**, with five numbered steps in the dialog. That
-needs no client credential and no password at all. `login`/`refresh`
-remain in the module, unreachable from the UI, and start working if a
-live credential is ever put in settings.json.
-
-**Still untested: a real Crunchyroll token**, which needs the owner's
-own browser. Everything up to that boundary is verified against a local
-stand-in speaking Crunchyroll's shapes, including that an expired token
-says to paste a fresh one rather than looking like "nothing watched".
-
-**Known cost, accepted by the owner**: using Crunchyroll's internal API
-is against their terms of service, and it will break whenever they
-change it. The MAL-Sync route (Crunchyroll → AniList, then AniList as
-today) was offered as the durable alternative and declined.
-
-### 19. Crunchyroll through MAL-Sync, and AniList read per season
-
-**What** - Two things, found by the owner actually using #18. Reading
-Crunchyroll directly could not be made to last: the password grant is
-impossible and a browser token dies inside an hour, so the section
-promised an account and delivered something that stopped answering
-silently. And once progress *did* arrive from AniList, a One-Punch Man
-card sat at E12 while its owner was part-way through season 2.
-**Why now** - The second one is the more important bug of the two, and
-it was invisible until the first was out of the way. AniList files each
-season as its own work and counts episodes from 1 within it; Crunchyroll
-and this app's cards use one title with a season number. Asking AniList
-about "One-Punch Man" therefore answers about season 1 forever.
-**Owner** - integrations-engineer
-**Where** - `helpers/anilist.py` (`fetch_season_progress`),
-`helpers/settings_dialog.py`, `helpers/crunchyroll.py` (deleted).
-**Done when** - a franchise reports the season you are on, and Settings
-explains the MAL-Sync route step by step.
-**What happens when the service says no** - unchanged: AniList → nothing,
-and the +1 button on the card is always there.
-
-**Landed.**
-
-*Direct Crunchyroll reading removed entirely* - `crunchyroll.py`, its
-settings section, its stored token and its diagnostic are gone. The
-rules file records the three dead ends so it isn't rebuilt a third time.
-
-*Settings > Crunchyroll Progress* now carries six steps matching
-MAL-Sync's real install flow, including the two that are easy to get
-wrong: tick **AniList** (not MyAnimeList - Atomic can't read MAL), and
-it only saves after **85%** of an episode.
-
-*AniList is read per season.* `fetch_season_progress` collects a
-franchise's seasons, prefers the season number written in the title over
-release order, and reports the furthest one actually started - so season
-1 finished plus season 2 at episode 5 reads **S02E05**. A single-season
-show keeps the flat `E12` shape.
-
-Two traps found by querying the live API rather than reasoning about it:
-**a 1-episode short (*Go! Saitama*) carried the franchise name only as a
-synonym** and took season 3's slot, pushing the real season 3 to 4 - so
-matching uses an entry's own titles and never its synonyms. And **a cour
-split ("Season 3 Part 2") is still season 3**, which is why the season
-regex deliberately doesn't match "Part". 12/12 verified, including a
-live query confirming the four real One-Punch Man entries in order.
-
-**Known limit**: a franchise that numbers nothing in its titles falls
-back to release order, which is only as good as AniList's dates.
-
-### 20. One progress source, Movies alongside Series, Netflix by default
-
-**What** - Five changes the owner asked for after living with the
-alternatives: Netflix as a default video website, films tracked next to
-series, progress from Stremio only, no Crunchyroll progress settings,
-and no +/- on watched types.
-**Why now** - Items #7 through #19 chased watch progress across four
-services. Each one worked in isolation and none was reliable: an
-authenticated Crunchyroll client (impossible - no client credential), a
-pasted token (dies in an hour), AniList by username (only knows what
-another tracker wrote), MAL-Sync feeding AniList (needs the episode
-finished, and a manual match per new show). Stremio was correct the
-whole time. **This item is the decision to stop.**
+**What** - `helpers/whats_new.py`'s `NOTES` dict (lines 28-55) has
+entries for `"1.3"`, `"1.2"`, `"1.1"` - nothing for `"1.4"`. This
+dialog exists specifically so "updating from Settings... otherwise
+gives no sign of what actually changed" (the module's own docstring).
+Right now, anyone updating from 1.3 to 1.4 - the release that changed
+the most of anything since 1.0 - gets the dialog's silent-failure path:
+`notes_between` finds no `"1.4"` key, returns `[]`, the dialog shows
+nothing, and `set_last_seen_version` still records 1.4 as seen -
+permanently. There is no second chance; that user will never see 1.4's
+notes through this mechanism.
+**Why now** - This is live right now, not theoretical: the app is
+already at 1.4 and real updates are landing. Every day this stays
+unfixed is a user who updates and gets nothing.
 **Owner** - ui-engineer
-**Where** - `windows/tracker.py` (VIDEO_TYPES, SeriesPage),
-`helpers/anilist.py`, `helpers/settings_dialog.py`,
-`helpers/app_settings.py`, `helpers/anime_sites.py`,
-`helpers/nav_config.py`.
-**Done when** - a film can be tracked, Netflix is offered without adding
-it by hand, and nothing but Stremio ever writes a progress number.
-**What happens when the service says no** - no Stremio account means the
-page says so plainly and nothing syncs. There is no fallback by design.
+**Where** - `src/helpers/whats_new.py`, `NOTES` dict (28-55). Write a
+`"1.4"` entry in the same voice as the existing ones (user-facing
+language, no module names - see the docstring's own rule, lines 8-12):
+Movies tracked alongside Series, Netflix on by default, one progress
+source (Stremio) instead of several, the filter button, quick +/-
+restored for hand-set entries, opening a page being the refresh. Draw
+the actual list from `docs/VDD-1.4.md` §5, translated into the
+user-facing voice the existing entries use - not copied verbatim, which
+would reintroduce internal wording the docstring explicitly forbids.
+**Done when** - `notes_between("1.3", "1.4")` returns the new section,
+and `UpdateSummaryDialog` shows it end to end for a simulated 1.3->1.4
+upgrade (stub `take_updated_from`/`get_last_seen_version` to return
+`"1.3"`).
+**Risk** - low; this is a data-only fix. The process gap that let it
+happen in the first place is item #5, sequenced right after this one on
+purpose.
 
-**Landed.** 26/26 verified.
+### 5. Make a future release unable to ship without its notes
 
-*One source.* `_fetch_real_progress` asks Stremio and stops.
-`anilist.py` lost every progress function and kept schedules and link
-resolution; the AniList username setting and all Crunchyroll progress
-settings are gone, as is `crunchyroll.py`.
+**What** - Item #4 fixes 1.4's specific gap; this stops the next
+release from having the same one. Nothing today ties `whats_new.NOTES`
+to the release process - the `release` skill's procedure has no step
+that checks a new version's notes were written before tagging.
+**Why now** - Directly caused item #4. A one-off content fix without
+this is a bug that will recur at the next release, silently, exactly
+the same way.
+**Owner** - release-engineer
+**Where** - `src/helpers/whats_new.py` (`NOTES`, `current_release_notes`
+at 139-148 - a function already built for "this build has no notes"
+detection, just not used as a release gate). The natural hook is a
+check the `release` skill's procedure runs before tagging: does
+`NOTES` contain a key matching the version about to ship.
+**Done when** - tagging a release whose version has no `NOTES` entry
+either fails the release step or produces an explicit, impossible-to-miss
+warning the release-engineer has to act on - not a silent gap
+discoverable only by a user updating and seeing nothing.
+**Risk** - keep this cheap. A hard failure that blocks tagging is fine
+since notes should always exist by release time; the risk is building
+something heavier (a whole content-authoring workflow) when a single
+presence check at tag time is all item #4's actual failure needed.
 
-*Movies & Series.* `Movie` is a tracked type with watching statuses,
-searched against **Cinemeta's movie catalog** rather than the series one
-- a film searched against `series` finds nothing at all, verified live
-("Spirited Away" returns 3 movie results, "The Boys" 8 series results).
-The page key stays `series` so saved nav order and `series.json` are
-untouched; only the label changed.
+### 6. Stop the sidebar Add menu positioning with `mapToGlobal`
 
-*Netflix by default*, alongside Crunchyroll, and both resolve to real
-title pages via Wikidata/AniList rather than a search.
+**What** - `main.py`'s `_show_add_menu` (418-425) opens its popup menu
+with `menu.exec(anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft()))`
+- the exact trap `ui.md` documents: "On two monitors at different scale
+factors it returns coordinates divided by the *other* screen's scale
+factor - toasts landed 200px off." The tracker's own filter button hit
+this same class of decision and was deliberately built with
+`setMenu` instead (VDD-1.4 §6: "there is no `mapToGlobal` here to
+return coordinates divided by the other screen's scale factor"). Every
+other popup menu in the app (`games.py:225`, `link_grid.py:239`,
+`tracker.py:1166`) already uses `event.globalPosition().toPoint()` from
+the real mouse event, or `setMenu`. The Add menu is the one place still
+doing it the old, documented-broken way.
+**Why now** - This is a live, unfixed instance of a defect class this
+project has already paid to diagnose (toast positions) and already
+fixed once in a sibling case (the filter button). It's cheap to fix and
+easy to miss precisely because it still runs without visibly erroring -
+it just lands wrong, on the hardware that exposes it.
+**Owner** - ui-engineer
+**Where** - `src/main.py`, `_show_add_menu` (418-425).
+**Done when** - the Add menu opens anchored to the button correctly;
+verified either on a real mixed-DPI multi-monitor setup (per
+`.claude/rules/testing.md` - visual/DPI work needs a real window, not
+offscreen) or by switching to `anchor_btn.setMenu(menu)` the same way
+the filter button did, which sidesteps the trap by construction rather
+than by careful math.
+**Risk** - none beyond the usual DPI-testing caveat: this class of bug
+is invisible on a single-monitor 100%-scale dev machine, so "looks
+fine" here proves nothing - match it against the filter button's fix or
+measure on real mixed-DPI hardware.
 
-*Video sites for all watched types.* The rule was spelled `== "Anime"`
-in twelve places, which is why a Series could never be pinned to a site;
-it is now `VIDEO_TYPES` in one place.
+### 7. Route entry-search suggestions through `lookup_pool`
 
-*No +/- on Anime, Series or Movie.* Stremio is authoritative and
-overwrites a hand-set number on the next refresh, so the button competed
-with the sync rather than helping. Reading keeps its +/-, having no such
-source.
+**What** - `tracker.py`'s Add/Edit title-search suggestions
+(`_trigger_search` ~1871, `_search_worker` ~1914-1924) fire a bare
+`threading.Thread` per debounce pause, not through
+`lookup_pool.submit_latest`. `integrations.md`'s standing rule is
+explicit: "Work fired by typing goes to `lookup_pool.submit_latest`,
+not `submit`" - and this predates the item that fixed video-site
+resolution the same way (`_start_video_site_resolution`, old roadmap
+item #5).
+**Why now** - Lower stakes than the originally diagnosed instance (a
+`QTimer` debounce already prevents one thread per keystroke, so this
+isn't the "651 simultaneous connections" shape), but it's a real,
+measurable gap against the project's own written rule, and 1.4 made it
+worse in one respect: `_search_catalogs` (1896-1912) now asks *two*
+Cinemeta catalogs per search when both Series and Movie are offered, so
+a thread that outlives its debounce window now costs two requests, not
+one. Typing fast enough to outrun one lookup before the next debounce
+fires runs two of these concurrently with nothing capping it.
+**Owner** - integrations-engineer
+**Where** - `src/windows/tracker.py`: `_trigger_search` (~1871-1885,
+the `threading.Thread(target=self._search_worker, ...).start()` at
+1884-1885). `lookup_pool.submit_latest` (`src/helpers/lookup_pool.py`)
+is the existing pattern to route through - same as
+`_start_video_site_resolution` a few hundred lines below it in the same
+file.
+**Done when** - typing rapidly in the Add/Edit title field never runs
+more than one `_search_worker` at a time (measured by counting live
+threads/in-flight requests during rapid typing, the same method used to
+verify the video-site fix); the `seq`-based stale-result discard stays
+in place unchanged as the second line of defence.
+**Risk** - low; this mirrors an already-landed fix in the same file, not
+new design. Verify debounced search still feels responsive after
+routing through the shared single-worker key, same check the original
+fix made.
+
+### 8. Retire or rebuild `diagnose_anilist.py` - it calls functions that no longer exist
+
+**What** - `packaging/diagnose_anilist.py` is a standalone diagnostic
+script for troubleshooting "why isn't my progress syncing," written
+for the AniList-username/MAL-Sync era. It calls
+`app_settings.get_anilist_username()` and
+`anilist.fetch_watch_progress()` - **both removed** in 1.4's "Stremio
+only" change (confirmed: `grep` for either name across `src/` returns
+nothing outside this file). Running it today raises `AttributeError` on
+line 24, before it prints anything useful. Its own docstring and output
+text describe a refresh button that no longer exists and a
+Crunchyroll-token-priority rule that was removed with the rest of
+Crunchyroll progress reading.
+**Why now** - This is exactly the tool someone would reach for the next
+time Stremio progress looks wrong (see item #1) - and it will crash
+immediately instead of helping, at precisely the moment it's needed.
+Dead code describing a removed design is actively misleading, not
+merely unused.
+**Owner** - integrations-engineer
+**Where** - `packaging/diagnose_anilist.py` (71 lines, the whole file).
+**Done when** - either the file is deleted (nothing in `build`/`release`
+skills references it, confirmed by grep), or it's rewritten as
+`diagnose_stremio.py` following the same shape - read the stored
+`auth_key`, call `stremio.fetch_watch_progress` per tracked title, and
+report which of the real failure links broke (no account connected, the
+API call itself failing per item #1's new distinguishable error, or the
+title genuinely absent from the library) - and runs to completion
+without raising against a real or stubbed Stremio response.
+**Risk** - none; this is dev tooling, not shipped in the exe
+(`Atomic.spec`'s `Analysis` only starts from `src/main.py`), so nothing
+about the running app depends on this either way.
+
+---
+
+### 10. Show a Stremio connection that has gone bad, in Settings itself
+
+**What** - Once connected, Settings' Stremio Account section
+(`settings_dialog.py` ~930-937, `_refresh_stremio_account`) shows
+"Connected as {email}" forever - there's no re-check of whether the
+stored `auth_key` still works. Item #1 makes a broken session
+*syncable-distinguishable* in the tracker's own messaging; this is the
+companion piece that surfaces the same fact where the user would
+naturally look to fix it.
+**Why now** - Directly follows #1 - once the sync path can tell "auth
+is broken" apart from "nothing found," Settings should be able to say
+so too, rather than showing a connected-looking status that's quietly
+false. Sequencing matters: this needs #1's distinguishable failure to
+exist before it has anything real to display.
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`: `_refresh_stremio_account`
+(~930-937) and the status label `self.stremio_account_status` (~461).
+Depends on item #1's new failure signal existing to check against.
+**Done when** - after item #1 lands, a stubbed-broken `auth_key` shown
+in Settings reads something other than a plain "Connected as X" -
+e.g. "Connected as X - last sync failed to authenticate" - distinct
+from both "Not connected" and a healthy connection.
+**Risk** - avoid firing a network probe just to *render* Settings (that
+would add a request cost to opening a dialog); piggyback on the reason
+already carried back from the tracker's own last sync attempt rather
+than probing independently.
+
+### 27. Say what a site's check verdict actually means
+
+**What** - Owner-raised, verbatim: *"make the checking status more clear
+in the settings (what do you mean by: search links only - no title
+pages? and (opens title pages))"*. The verdict a site's **Check** button
+produces is rendered through `_RESOLVES_LABELS`
+(`settings_dialog.py:65-73`) as one of "opens title pages", "opens title
+pages (read off its search page)", "search links only - no title pages",
+"didn't answer when checked", "couldn't be checked". Those phrases
+describe the *resolver's* internal distinction, not anything the owner
+can act on, and the person who uses this app every day could not tell
+what they meant.
+**Why now** - This is the only class of report on this list that comes
+from using the app rather than reading it, and the feature it describes
+(pre-1.4 item #12) exists precisely so the owner can tell a good site
+from a useless one. A verdict nobody can interpret does not do that job,
+so the feature is currently not delivering what it was built for.
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`: `_RESOLVES_LABELS` (65-73)
+and `_site_note` (~757-763), plus the two Check buttons' tooltips
+("whether it opens title pages or only search links", lines ~450, ~542).
+The underlying distinction to express in the owner's terms: a site that
+**opens the exact title you clicked** versus one that can only **drop
+you on its search results, where you still have to find the title
+yourself**. `anime_sites.probe_site` (~1014-1051) is where each verdict
+comes from - the wording must stay true to what was actually measured,
+including `generic`, which does open title pages but reads the link off
+a search page and is therefore likelier to break.
+**Done when** - each verdict reads as a plain sentence about what will
+happen when the owner clicks a title on that site, with no resolver
+vocabulary ("engine", "generic", "resolves", "title page" used as jargon)
+- checked by reading the five strings cold and asking whether the answer
+to "so what happens when I click?" is obvious from each one. No change
+to `probe_site`'s verdicts themselves.
+**Risk** - the temptation is to collapse `engine` and `generic` into one
+label because they both open title pages; don't. `generic` is the
+fragile path (it scrapes the site's own search results) and losing that
+distinction would hide exactly the case that breaks first. Say it in
+plain words instead.
+
+### 28. Clear site check verdicts when the app restarts
+
+**What** - Owner-raised, verbatim: *"make the check status in the
+settings clear each time the app closes and re-opens"*. Today a verdict
+is written onto the site record (`anime_sites.record_resolution`
+line 180-183, `manga_sites.record_resolution` 79-82, stored as
+`"resolves"`) and shown forever after, with nothing recording *when* it
+was measured - so a check run once, weeks ago, still reads as the site's
+current state.
+**Why now** - Directly requested, and it is the honest behaviour: the
+verdict is a measurement of a remote site at one moment, not a property
+of the site. A stale "opens title pages" is a claim the app cannot
+stand behind after a restart, which is the same shape as every other
+silently-wrong-answer defect this project has fixed.
+**Owner** - ui-engineer
+**Where** - The stored `resolves` field is **display-only** - grep
+confirms its single reader is `settings_dialog._site_note` (~761), so
+clearing it changes nothing about how sites are searched or opened. The
+contained shape is to drop the field at startup (or ignore any verdict
+not recorded this run) rather than to stop persisting it: `src/main.py`
+at launch, or a load-time filter in `settings_dialog`.
+**Done when** - opening Settings after a fresh launch shows every site
+with no verdict until it is checked again; checking one within the same
+run still shows its result until the app closes. Verified against a
+temp `DATA_DIR` copy, never real user data.
+**Risk** - low, and deliberately kept low: do not take this as licence
+to change what `probe_site` writes or how sites resolve. Per the owner's
+standing note, this is a display-lifetime change, not a backend one.
+
+### 11. Remember a tracker page's search/filter across a revisit, for the session
+
+**What** - Documented as a known limitation in VDD-1.4 §10: "Filter
+selections do not persist. Pages rebuild from scratch on every visit,
+so a filter is cleared by navigating away." Typing a search term,
+navigating to Home and back, and finding the search box empty again is
+the concrete shape of this.
+**Why now** - Named directly in 1.4's own known-limitations list, not
+speculative - a search/filter this month made routine navigation lossy
+in a way it wasn't before the feature existed.
+**Owner** - ui-engineer
+**Where** - `src/windows/tracker.py`: `TrackerPage.__init__` builds
+`self.search_box`/`self._filter_menu` fresh every time (~569-611,
+~469+). `ui.md`'s rule ("pages rebuild from scratch... state lives in
+the saved JSON or it doesn't exist") rules out writing this to disk -
+the fix is an **in-memory, per-page-name** cache that outlives one
+page instance but not the app itself (e.g. a small dict held by
+`main.py` or a module-level store in `tracker.py`, read on construction
+and written on change), not a new JSON field.
+**Done when** - searching/filtering on Anime, navigating to Home, and
+returning to Anime shows the same search text and filter ticks still
+applied; quitting and relaunching the app starts blank, confirming
+nothing was written to disk.
+**Risk** - keep this session-only and explicitly not persisted - a
+filter silently narrowing the grid after a restart, with no visible
+reason why some entries are "missing," would be worse than today's
+"always resets."
+
+### 12. Bring search to Games, Apps and Websites
+
+**What** - Item #11 (old roadmap) gave Anime/Reading/Series a search
+box; Games, Apps and Websites have none - `grep` for `search` across
+`games.py`/`link_grid.py` returns nothing. There's no status/type
+concept on these pages (they're flat lists), so this is search only,
+not the fuller filter-by-status the tracker pages have.
+**Why now** - Same proven, low-risk pattern already shipped once
+(debounced text box narrowing a grid before it's laid out); the
+remaining three pages are the ones it was never extended to.
+**Owner** - ui-engineer
+**Where** - `src/windows/games.py` (`_refresh_grid` ~178) and
+`src/windows/link_grid.py` (`_refresh_grid` ~187, shared by
+`AppsPage`/`WebsitesPage`) - both have a `top_row` sort control (
+`link_grid.py` ~128-137) that a search box slots into the same way
+`tracker.py`'s did.
+**Done when** - a search box on each of Games/Apps/Websites narrows the
+grid by case-insensitive substring match on name; clearing it restores
+the full list.
+**Risk** - Games and Apps/Websites both support drag-to-reorder; per
+the precedent already set for the tracker pages (item #11, old
+roadmap), disable dragging while a search is active on these pages too
+rather than reconciling a partial on-screen order with the saved one.
+
+### 13. Check for updates in the background, not only on demand
+
+**What** - `updater.check_for_update()` is only ever called from
+`settings_dialog.py`'s `_on_update_clicked` (280-290), fired by a
+button press. There is no startup or periodic check anywhere -
+`grep`ping `main.py` for `updater` finds nothing. A user who doesn't
+think to open Settings never learns a new version exists.
+**Why now** - The app already ships a complete, verified update
+mechanism (hash-checked download, atomic swap) - the only missing piece
+is *telling* the user one is available, rather than requiring them to
+go looking. Low cost given everything else already exists.
+**Owner** - ui-engineer
+**Where** - `src/main.py` (owns app startup, per item #1's precedent in
+the pre-1.4 plan) is where a background check on launch belongs, using
+the existing `updater.check_for_update()` unchanged - this item does
+not touch the updater's GitHub API contract. Surface via
+`widgets.show_toast`/a sidebar badge rather than a dialog (per `ui.md`:
+dialogs are for what the user must decide or not miss; "a new version
+exists" isn't that).
+**Done when** - launching the app with a newer release actually
+published shows a passive notice (toast/badge) without any click, and
+launching when already current shows nothing; the check runs at most
+once per launch (or on a long interval) so it never competes with
+`lookup_pool`'s own traffic.
+**What happens when the service says no** - unchanged: GitHub
+rate-limiting or no network already fails soft inside
+`check_for_update` (returns/raises readable errors); a background check
+failing should do nothing visible at all, not surface an error for a
+check the user didn't ask for.
+**Risk** - don't make this naggy - once per launch (or longer) and
+dismissible, not a recurring interruption.
+
+### 14. Remember window size and position across launches
+
+**What** - `MainWindow.__init__` (`src/main.py:153`) always calls
+`self.resize(1280, 840)` - there is no `saveGeometry`/`restoreGeometry`
+anywhere in the file (confirmed by grep). Resizing or moving the window
+- to a second monitor, to a preferred size - is lost on every restart.
+**Why now** - A daily-use desktop app resetting its own window every
+launch is a small but constant friction the owner has had no reason to
+mention explicitly because there's nothing to compare it against - it's
+simply how the app has always behaved. Cheap, contained, no dependency
+on anything else in this plan.
+**Owner** - ui-engineer
+**Where** - `src/main.py`, `MainWindow.__init__` (~150-153). Save via
+`app_settings` (a new key, following the existing pattern in
+`helpers/app_settings.py`) on close/move/resize, restore before
+`self.show()`.
+**Done when** - resizing/moving the window, closing, and relaunching
+restores the same size and position; a first-ever launch (no saved
+geometry) still falls back to `1280x840` unchanged.
+**Risk** - clamp the restored geometry to the current available screen
+- a size/position saved on a monitor that's no longer connected must
+not open the window off-screen with no way to reach it.
+
+### 15. Give Settings some structure before it grows further
+
+**What** - `settings_dialog.py` is 1,024 lines of one long scrolling
+form - Nav order, Stremio Account, Video/Reading Websites, Startup,
+Manga Music, Clear Data, Uninstall, Update, all in sequence with no
+sections/tabs to jump between. The pre-1.4 roadmap's own item #10
+called out "the existing (buried) hint text" in this file as something
+not to rely on being found - a symptom of the same underlying shape.
+Items #10, #19, #20/#21 in this plan all add more controls to this same
+dialog.
+**Why now** - Every settings item this plan adds makes the existing
+problem worse, not better - the dialog only grows. Better to size the
+restructuring question now than let four more sections get buried
+behind it.
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`, the whole file - shape
+genuinely unknown (a `QTabWidget`? a sidebar-nav within the dialog?
+collapsible sections?) until someone looks at what groups naturally and
+what a fixed-height dialog vs. a taller one costs visually.
+**Done when** - not a specific layout, but a decision: either a
+restructuring is scoped and sized as a concrete follow-up item, or the
+investigation concludes the current single-scroll form is fine at this
+size and says why (e.g. "everything is reachable within N scrolls, not
+worth the risk of breaking a working dialog").
+**Risk** - this is investigate-before-build; a bad restructuring that
+breaks a currently-working, if unstructured, dialog is worse than
+leaving it alone. Don't let "it's long" alone justify a rewrite without
+sizing the actual cost/benefit.
+
+### 16. Flag an App/Website entry whose target has disappeared
+
+**What** - An Apps entry launches a local `.exe`/`.lnk` path; nothing
+checks whether that path still exists before offering to launch it (an
+uninstalled or moved program just fails silently or with a raw OS
+error when clicked). This is the cheap, local half of the same
+"does this thing still work" question `probe_site` already answers for
+Video/Reading websites (pre-1.4 roadmap item #12) - checking a local
+path needs no network at all.
+**Why now** - Programs get uninstalled/moved far more often than a
+tracked website disappears, and unlike a network probe this is an
+instant, free `Path.exists()` check - one of the cheapest items on this
+whole list relative to its value.
+**Owner** - ui-engineer
+**Where** - `src/windows/link_grid.py` (`AppsPage`'s entries carry a
+local path via `TARGET_KIND = "app"`, `apps.py:10`) - check at grid-
+build time (`_refresh_grid` ~187) or lazily on open, and surface as a
+small badge/greyed state on the card, mirroring `probe_site`'s verdict
+labels in Settings' site list.
+**Done when** - an Apps entry whose target path no longer exists shows
+a visible "target not found" state on its card, verified by pointing an
+entry at a path and deleting it.
+**Risk** - keep this local-only for now (no network dependency, no
+flakiness to fail soft around); a Websites-URL liveness equivalent
+would need the same deadline/probe discipline as `probe_site` and is
+explicitly out of scope here - don't fold it in without separately
+sizing that cost.
+
+### 17. Keyboard shortcut to jump to a page's search box
+
+**What** - Once items #11/#12 land, every card-grid page has a search
+box, but reaching it always means a mouse click first. A single
+shortcut (e.g. `Ctrl+F`) focusing the current page's search box, and
+`Esc` clearing/leaving it, is a small, standard, low-risk addition on
+top of infrastructure this plan already adds.
+**Why now** - Cheap follow-on once #11/#12 exist; not worth its own
+investigation, but also not worth doing before the search boxes it
+targets exist on every page.
+**Owner** - ui-engineer
+**Where** - Wherever `search_box`/the Games/Apps/Websites equivalent
+already sit after #11/#12 land; a `QShortcut` per page, or one handled
+centrally in `main.py` dispatched to whichever page is current.
+**Owner's addition** - *"add more shortcuts like Ctrl+Z and Ctrl+Y and
+more of your choice."* So this item is no longer only `Ctrl+F`: it owns
+the app's keyboard map as a whole. `Ctrl+Z`/`Ctrl+Y` are undo/redo of
+the last destructive action, which means this item **depends on #23**
+(undo the last removal) for anything to undo - build #23's undo record
+first, then bind the keys to it rather than inventing a second undo
+mechanism. The rest are the Manager's/UI engineer's choice; keep them
+conventional (`Ctrl+N` add, `Ctrl+,` settings, `F5` refresh, `Ctrl+1..7`
+pages, `Esc` close) rather than clever, and write them down somewhere
+the owner can see them - a shortcut nobody can discover is not a
+feature.
+**Done when** - `Ctrl+F` focuses the visible page's search box from
+anywhere on that page and `Esc` clears it and returns focus to the grid;
+`Ctrl+Z` undoes the last removal (and `Ctrl+Y` redoes it) through #23's
+record, on every page family that supports removal; the full list is
+discoverable from within the app, not only from this file.
+**Risk** - low per shortcut, but the set is where it goes wrong:
+`Ctrl+Z` must not appear to work while doing nothing (bind it only where
+#23 actually has a record), and nothing here may shadow a shortcut Qt
+already binds inside a text field - verify by typing in the Add/Edit
+dialogs with every new binding live.
+
+### 18. Bring Apps to parity with Games' "Import from Launchers"
+
+**What** - Games has a one-click "Import from Launchers" scan
+(`games.py:239` `_import_from_launchers`, backed by `helpers/
+launchers.py`'s `scan_all`/`import_scanned_games`) that finds installed
+games automatically. Apps (`windows/apps.py`, a 10-line subclass of
+`LinkGridPage`) has no equivalent - every app has to be added one at a
+time via the file picker (`_open_add_form` -> `QFileDialog`), despite
+being conceptually the same kind of entry (a local executable).
+**Why now** - The exact infrastructure this needs already exists and
+works (`launchers.py`'s scanning, `app_settings.get_launcher_dirs`/
+`set_launcher_dir`) - this is extending a proven pattern to a page it
+was never pointed at, not building new scanning logic from scratch.
+**Owner** - ui-engineer
+**Where** - `src/helpers/launchers.py` (currently game-shaped:
+`scan_all`/`import_scanned_games` assume a games library layout, e.g.
+Steam/Epic install directories) needs a parallel path for general
+Windows apps - likely Start Menu `.lnk` shortcuts rather than a game
+launcher's library format, which is a different data source, not a
+reuse of the existing scan. `src/windows/apps.py` gains the button and
+wiring `games.py` already has (`_import_from_launchers`-equivalent,
+`_scan_worker`, `_on_scan_done`).
+**Done when** - an "Import" action on the Apps page finds Start Menu
+shortcuts (or another well-defined common source) not already tracked
+and adds them in one pass, mirroring Games' toast-driven flow
+("Scanning..." -> result count).
+**Risk** - genuinely spans modules: this needs a new scan source in
+`launchers.py`, not just UI wiring, since apps and games are discovered
+from different places on disk. Size it as its own investigation if the
+Start Menu approach doesn't cleanly generalize once started.
+
+### 19. Check every configured site at once, not one at a time
+
+**What** - `probe_site` (pre-1.4 roadmap item #12) added a "Check"
+button per Video/Reading website in Settings (`settings_dialog.py`
+~448, ~540, `_check_site`/`_probe_site_async` ~765-889) - one at a
+time. With several sites configured, re-verifying all of them after,
+say, a host outage means clicking Check on each individually.
+**Why now** - Small, low-risk extension of an already-shipped,
+already-verified feature; modest value on its own, but nearly free
+given `_probe_site_async` already exists and just needs to run over a
+list instead of one id.
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`: `_probe_site_async`
+(~765-780) already takes one `site_id`; add a "Check All" button beside
+the existing per-site ones on both the Video and Reading site lists
+that loops it (through `lookup_pool`, not a bare loop of threads, to
+stay within the existing concurrency cap).
+**Done when** - one click re-probes every configured site on that list
+and updates each verdict as it comes back, without spawning more
+concurrent requests than `lookup_pool`'s existing cap allows.
+**Risk** - minimal; route through the shared pool rather than firing N
+bare threads, or this reintroduces the exact concurrency-cap bug this
+project has already fixed once (pre-1.4 item #4/#5).
+
+---
+
+### 20. Back up all tracked data from Settings
+
+**What** - The only safety net today is the per-save `.bak` (item #6,
+pre-1.4 plan) - one file, one version back, automatic and invisible.
+There's no way for the owner to take a point-in-time copy of everything
+(`tracker.json`, `series.json`, `games.json`, `apps.json`,
+`websites.json`, settings) before, say, a risky manual edit or moving
+machines.
+**Why now** - This project has already lost real data once (the BOM'd
+`settings.json` incident, item #6). The automatic `.bak` covers "the
+last save went wrong"; it doesn't cover "I want a copy before I do
+something risky," which is a different, still-unmet need on an app
+whose stated philosophy is "data loss outranks every feature."
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`'s "Clear Data" section
+(~650+) is the natural neighbor - a "Back Up Data" action alongside it
+that zips everything under `storage.DATA_DIR` (the JSON files;
+`atomic.log` and `image_cache/` are reasonable to exclude, per item
+#25, as regenerable/bulky) to a location the user picks via
+`QFileDialog`.
+**Done when** - clicking Back Up produces a zip containing every
+tracked-data JSON file, verified by re-reading it back with `storage`'s
+own loaders against a throwaway directory.
+**Risk** - low; this is a read-only export, nothing it does can lose
+data on its own. Sequenced before item #21 (restore), which is the
+higher-risk half.
+
+### 21. Restore tracked data from a backup archive
+
+**What** - The counterpart to item #20: load a previously-exported
+backup back into `storage.DATA_DIR`, for a fresh install or recovering
+from a bad edit.
+**Why now** - A backup nobody can restore from is not actually a safety
+net - this completes item #20 rather than standing alone.
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`, beside item #20's button.
+`src/helpers/storage.py`'s existing quarantine-on-parse-failure and
+`.bak`-before-overwrite behavior (item #6, pre-1.4) is exactly the
+safety this should route through rather than writing new
+overwrite-handling logic - a restore is, mechanically, a batch of
+saves.
+**Done when** - restoring a backup produced by item #20 into a clean
+temp `DATA_DIR` reproduces the original data exactly; restoring a
+*corrupted* backup (truncated zip, a JSON file inside it that won't
+parse) is rejected with a clear message and **does not partially
+overwrite** real data - verified by testing a bad archive against a
+temp copy per `.claude/rules/testing.md`, never real user data.
+**Risk** - this is the item on this list closest in shape to the
+original data-loss incident (item #6, pre-1.4) - a botched restore is
+itself a data-loss vector. Confirm-before-overwrite (matching the
+"Clear Data" confirmation pattern already in this dialog) and validate
+every file in the archive before touching anything on disk, not
+file-by-file as it goes.
+
+### 22. Multi-select bulk status change on tracker cards
+
+**What** - Changing several entries' status at once (e.g. marking a
+batch "Dropped") needs opening Edit on each one individually - there's
+no multi-select on tracker grids today.
+**Why now** - Named as a plausible usability win, not a diagnosed gap
+the owner has raised - flagged as lower-confidence than the items
+above it for exactly that reason. Real value grows with library size;
+`.claude/rules/testing.md`'s performance numbers (500 entries, 0.3ms/
+card) show the grids already scale, so this isn't blocked on anything
+else.
+**Owner** - ui-engineer
+**Where** - `src/windows/tracker.py`: `Card`/`CardDragReorder`
+(`helpers/widgets.py`) have no selection concept at all today - this is
+new interaction, not an extension of an existing one. Has to reconcile
+with the already-existing drag-to-reorder and the search/filter-active
+states (items #11/#7's precedent: dragging is already disabled while
+filtering, per VDD-1.4 §5 - a multi-select mode likely needs the same
+treatment).
+**Done when** - not prescribed; this is genuinely open on interaction
+shape (click-to-toggle vs. a dedicated "select" mode, a bulk action bar
+vs. a context menu) - the investigation half of this item is choosing
+one and sizing it before building it.
+**Risk** - the real risk is under-scoping this as "just add checkboxes"
+when the harder part is how selection interacts with drag-reorder,
+search/filter, and per-status sectioning (`_sections`) that already
+exist. Size it honestly once the shape is chosen, don't guess.
+
+### 23. Undo the last removal, via a toast
+
+**What** - Removing an entry/game/app/website asks "Remove 'X'?" (a
+`QMessageBox.question`, e.g. `games.py:295`, `link_grid.py:250`,
+tracker's equivalent) and then it's gone - no undo beyond manually
+re-adding it. The confirmation dialog is the only safety net.
+**Why now** - Small, cheap, standard pattern (`widgets.show_toast`
+already exists and is used for exactly this "here's what just happened,
+briefly" shape elsewhere) - a natural complement to the confirmation
+dialog rather than a replacement for it.
+**Owner** - ui-engineer
+**Where** - `src/windows/games.py:294` (`_remove`), `src/windows/
+link_grid.py:249` (`_remove_entry`), and tracker's own entry-removal
+path each need to keep the removed record and offer it back via a
+toast with an action, using `widgets.show_toast`/`finish_toast`
+(`helpers/widgets.py`).
+**Done when** - removing an entry shows a toast with an "Undo" action
+that, clicked within the toast's dwell time, restores the exact entry
+removed (same id, same fields) on all three page families
+(tracker/games/link_grid); letting the toast expire leaves the removal
+final, as today.
+**Risk** - spans the three separate removal code paths (tracker, games,
+link_grid don't share a base class) - a fix landed in one and not the
+others leaves an inconsistent app where undo works on some pages and
+not others; treat as one item covering all three, not three small ones.
+
+### 24. One search across every page, not just the tracker family
+
+**What** - Once items #11/#12 give every page family its own search
+box, a natural next question is a single search reachable from
+anywhere (Home, or the sidebar) that looks across Anime/Reading/Movies
+& Series/Games/Apps/Websites at once, rather than six separate boxes.
+**Why now** - Lower-confidence, larger-shape item, explicitly sequenced
+after #11/#12: building a global search before every page family has
+its own would mean building the underlying "search everything" logic
+twice. Real value here scales with how many pages/entries the owner
+actually has - genuinely unproven need, flagged honestly as such.
+**Owner** - ui-engineer
+**Where** - `src/windows/home.py` (already reads every data file, see
+its own docstring) is the natural home for an entry point; shape of
+the results UI (a dropdown, a dedicated results page, inline
+navigation to the matched page) is undecided.
+**Owner's addition** - *"the global search idea is great, but make sure
+that it has a very very good location and size based on other famous
+apps using it."* That moves this item from "is it worth building" to
+"build it, and get the placement right": the investigation is now about
+**where it lives and how big it is**, measured against how apps the
+owner already uses do it (a top-centre command bar, a persistent sidebar
+field, a `Ctrl+K` overlay), not about whether to have one.
+**Done when** - a global search exists, reachable from every page, at a
+position and size argued from named real-world examples rather than
+chosen ad hoc - the comparison written down in the item's landing note
+so the choice can be reviewed. Per-page searches (#11/#12) stay; this
+sits above them, not instead of them.
+**Risk** - don't build this before #11/#12 land; it would either
+duplicate their filtering logic or leave two inconsistent search
+implementations side by side.
+
+---
+
+### 26. Audit what PyInstaller actually bundles into `Atomic.exe`
+
+**What** - `packaging/Atomic.spec` sets `hiddenimports=[]` and
+`excludes=[]` (lines 80, 84) - no PyInstaller excludes at all. PyQt6's
+default hook is notoriously inclusive; nothing has ever been checked
+for whether unused Qt submodules, translation files, or other
+transitively-pulled dependencies are being bundled unexamined.
+`.claude/rules/testing.md`'s own performance work (pre-1.4 item #15)
+found cold start is "mostly PyInstaller's onefile unpack" and explicitly
+rejected switching to onedir as not worth losing single-file
+distribution - this is a *different* lever on the same cost: same
+onefile format, smaller payload, if there's unused weight to trim.
+**Why now** - Unmeasured, so explicitly investigate-first, not a
+build-it item. Given the exe is already a 47.7MB self-contained
+download that gets re-fetched on every update (item #13 above makes
+update-checking more visible, which makes download size marginally more
+salient), and the file is already under antivirus scrutiny (item #9) -
+a smaller, more deliberately-scoped bundle is a plausible win on both
+counts, but only if real unused weight is actually found.
+**Owner** - release-engineer
+**Where** - `packaging/Atomic.spec` (`Analysis(...)`, 65-87) - compare
+its output's bundled-package list (PyInstaller can report this) against
+what `src/` actually imports; likely candidates given nothing has ever
+been excluded: unused Qt modules (QtNetwork, QtSql, QtTest, QtQml if
+pulled by the PyQt6 hook despite not being used - `main.py`/`windows/`/
+`helpers/` use only QtCore/QtGui/QtWidgets, confirmed by grep for
+`from PyQt6` imports), and Pillow's less-common format plugins.
+**Done when** - a measured before/after exe size and cold-start time
+(same method as pre-1.4 item #15: three runs, `%APPDATA%` redirected to
+a copy) with a concrete list of what was excluded and confirmation the
+app still runs correctly end to end - not a guess at what's safe to
+drop. If nothing meaningful is found, that's a valid, recorded
+conclusion too, same as item #15's "nothing to fix" verdict.
+**Risk** - excluding something actually needed silently breaks a
+feature that isn't covered by a quick smoke test (a rarely-used Qt
+submodule, an image format plugin only one site's covers happen to use)
+- verify broadly, not just "the app launches," before trusting an
+exclude list.
 
 ---
 
 ## Deliberately not doing
 
-- **Not touching `manga_sites.py`/`anime_sites.py`/etc. beyond the
-  listed defects.** Both modules have working engines for their known
-  site shapes; this plan bounds the failure modes, it doesn't refactor
-  the scraping logic itself.
-- **Not building an authenticated Crunchyroll client.** Already
-  researched and rejected per `.claude/rules/integrations.md`: dead
-  password-login flow, ToS-prohibited scraping of a paid service, and
-  redundant with what `anilist.py` already covers. Item #8 looks for a
-  *keyless* second source instead - not this.
-- **Not adding new streaming services beyond Amazon Prime this month.**
-  Prime is the one the owner already flagged as worth investigating;
-  anything past it (Hulu, Disney+, etc.) is a new investigation with its
-  own coverage question, not assumed to follow the same pattern.
-- **Not implementing Amazon Prime - now measured, not merely deferred**
-  (item #14). 0 of 3 real tracked titles carry P8055 or P14440, and 0 of
-  3 carry a Netflix or Crunchyroll id either. The feature would resolve
-  nothing for this library. Revisit only on new evidence.
-- **Not purchasing a code-signing certificate** (item #16 is research
-  and a recommendation only) - a purchase needs the user's explicit
-  approval per the standing purchase-permission rule, and pricing has
-  to exist before that approval can be meaningfully asked for.
-- **Not re-litigating what "done" means for AniList/Stremio failing
-  soft in general** - the fail-soft behavior itself is correct and
-  deliberate (`.claude/rules/integrations.md`); items #7/#9/#10 only
-  make specific already-silent cases *say why*, they don't change
-  anything about when a lookup gives up.
-- **Not chasing general performance work beyond item #15's
-  measurement** - without a profile, "make it faster" has no target;
-  next month's plan can size real fixes once #15 reports what's
-  actually slow.
-- **Not touching `home.py`, `games.py`, `apps.py`, `link_grid.py`,
-  `websites.py` this month** - no diagnosed defect or named gap points
-  at them; pulling them in would be scope without a stated cost, which
-  `.claude/rules/planning.md` rules out ("an item whose cost can't be
-  stated doesn't belong").
+- **Not adding a second watch-progress source (Kitsu or otherwise).**
+  This is the pre-1.4 plan's item #17, and it is superseded, not
+  merely stale: 1.4's "Stremio only" decision (VDD-1.4 §5) was made
+  *after* four alternatives were tried and removed, each because a
+  source that's silently wrong is worse than no source, and with more
+  than one there's no way to tell which is right. `integrations.md` is
+  explicit: "this is settled; do not add a second source without a way
+  to tell which one is right." Item #1 above makes the *existing* single
+  source fail more honestly; it does not reopen this question.
+- **Not touching Amazon Prime, general performance, or code-signing's
+  purchase decision beyond tracking it (item #9).** All three are
+  measured/priced standing facts per `planning.md` - Prime rejected on
+  0/3 real-title coverage, performance found nothing to fix, signing
+  priced and awaiting the owner. Re-investigating any of them without
+  new evidence would contradict work already done; item #26 is a
+  narrower, different question (bundle contents, not general perf) and
+  says so explicitly.
+- **Not tracking code signing any more (struck-out item #9).** The
+  owner removed it from this plan on 16 August 2026. The research stands
+  and does not need redoing: Azure Artifact Signing ~$9.99/mo with no
+  hardware token, EV certificates ~$249-325/yr and no longer worth it
+  since March 2024 (`planning.md`'s standing facts). The Defender
+  false-positive it addressed is real but has been lived with since 1.2.
+  Raise it again only if the owner asks.
+- **Not capping the on-disk cover cache (struck-out item #25).** Also
+  removed by the owner. The finding stands - `images.py`'s `CACHE_DIR`
+  grows without limit, unlike the in-memory pixmap cache which is
+  bounded at 512 - and it costs disk, never correctness, which is why it
+  was last on the list before being cut. Worth re-raising only if the
+  cache is ever measured large enough to matter.
+- **Not adding a light theme.** `ui.md`: six of the app's colors are
+  "fixed by the app's colour spec" - this is a deliberate, singular
+  design, not an oversight, and nothing in this session's reading of
+  the app or its rules suggested otherwise.
+- **Not building a Websites-URL liveness check to match item #16's
+  local App-path check.** A network probe needs the same
+  deadline/fail-soft discipline `probe_site` already has (pre-1.4 item
+  #12) - real cost, not free the way `Path.exists()` is. Worth sizing
+  on its own if wanted, not folded into #16 for free.
+- **Not scoping items #22 (bulk actions) and #24 (global search)
+  beyond "investigate first."** Both are genuine, reasonable ideas with
+  unproven real-world need on this specific library and real
+  interaction-design questions (selection vs. drag-reorder; one search
+  box vs. six) that a plan shouldn't guess the answer to. Sizing them
+  further now would be inventing a shape rather than discovering one.
+- **Not touching `home.py`'s carousel/hero mechanics, `theme.py`'s
+  palette, or any of the already-fixed DPI/cursor traps.** No new
+  defect or gap was found in any of them this session - `native_cursor.py`,
+  `widgets.py`'s toast/Card, `title_match.py`, `release_schedule.py`,
+  `wikidata.py`, `updater.py` and `uninstall.py` were all read and are
+  in good shape; re-touching them without a finding would be scope
+  without a stated cost, which `planning.md` rules out.
 - **Not releasing.** Everything above lands on `development` as normal
   patch bumps per `CLAUDE.md` rule 4; nothing here is a release
-  decision, and no item should be read as one.
+  decision.
 
 ## Could not settle
 
-- **Item #16's actual dollar cost** - genuinely requires live research
-  (current certificate vendor pricing) that wasn't done as part of
-  writing this plan; the item is scoped as the investigation itself for
-  that reason.
-- **Whether items #9 and #10 should ship as one combined change or
-  two** - they touch the identical code (`tracker.py`'s
-  `_on_progress_synced` message block) and are almost certainly cheaper
-  done together in one pass than sequenced; left both items in place
-  with an explicit cross-reference rather than merging them, since the
-  owner named them as two separate points and a future reader should be
-  able to tell both are covered.
+- **Exact item count.** 26 items after the owner's revision - 24 from
+  the replan (26 written, #9 and #25 struck out) plus #27 and #28 raised
+  by the owner. The replan was asked for 28-32 and stopped at 26 because
+  every item here was found by reading real code (file/line citations
+  throughout); reaching the target would have meant items without a
+  stated cost, which `planning.md` explicitly rules out ("an item whose
+  cost can't be stated doesn't belong... a plan containing everything is
+  not a plan"). Flagged rather than silently padded.
+- **Item #15's actual shape** (Settings restructuring) - genuinely
+  can't be sized further without someone looking at the dialog's actual
+  groupings and a taller-dialog-vs-tabs tradeoff, which is why it's
+  investigate-first rather than a concrete redesign.
+- **Whether #18 (Apps import parity) reduces to a small change or a
+  real new scanning module** - depends entirely on whether Start Menu
+  `.lnk` scanning turns out as clean as Games' launcher-library scanning
+  was; sized as "spans modules" on the assumption it's the latter, but
+  could turn out smaller.

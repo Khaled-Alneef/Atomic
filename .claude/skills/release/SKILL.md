@@ -31,9 +31,20 @@ Set `APP_VERSION` to the two-part number and rebuild **first** (see the
 holds, executable included, so a stale dev-numbered exe would ship as
 the release.
 
+The exe is gitignored on `development`, so `read-tree` carries no
+executable and the checkout deletes any untracked one sitting in the
+tree - build the release exe *on `main`*, from the source the release
+actually contains (`docs/RELEASING.md` is the long form).
+`docs/ROADMAP.md` is development-only and never ships: drop it from
+every snapshot.
+
 ```
+rm -f Atomic.exe                        # untracked here; checkout refuses otherwise
 git checkout main
 git read-tree -u --reset development    # main's tree becomes development's
+python packaging/build.py               # build the release exe from that source
+git add -f Atomic.exe                   # gitignored, so -f is required
+git rm --cached docs/ROADMAP.md && rm -f docs/ROADMAP.md
 git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"
 git push origin main && git push origin v1.1
@@ -42,6 +53,19 @@ git checkout development
 
 `main` and `development` share no ancestry (`main` was restarted at 1.0
 as a single squashed commit) - never merge, always snapshot.
+
+**Prove the exe belongs to the tree you are tagging, before pushing.**
+1.4 shipped an executable built before the last two commits - it was
+missing `src/filter_icon.png` entirely, and the VDD's size and hash
+described a build that was never the one committed. Nothing in this
+procedure caught it, because a "succeeded" build log doesn't mean
+PyInstaller rebuilt anything. Read the bundled files back out of the
+archive and compare against the source tree (`test` skill), then take
+the VDD's size and SHA-256 from that same file:
+
+```
+python -c "from PyInstaller.archive.readers import CArchiveReader; print(sorted(CArchiveReader('Atomic.exe').toc))"
+```
 
 ## The VDD
 

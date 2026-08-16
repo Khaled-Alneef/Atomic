@@ -95,6 +95,8 @@ git checkout main
 git read-tree -u --reset development    # main's tree becomes development's
 python packaging/build.py               # build the release exe from that source
 git add -f Atomic.exe                   # -f: gitignored, and tracked only here
+git rm --cached docs/ROADMAP.md         # development-only; never ships
+rm -f docs/ROADMAP.md
 git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"
 git push origin main && git push origin v1.1
@@ -107,6 +109,19 @@ Check the release commit actually contains the executable before pushing
 — `git ls-tree main -- Atomic.exe` — because a release without one leaves
 `contents/Atomic.exe?ref=v1.1` returning nothing and every update
 attempt failing.
+
+Then check it is the *right* executable. 1.4 first shipped a binary
+built before the last two commits: it was missing `src/filter_icon.png`
+altogether (173 bundled entries against the 174 that tree produces), and
+the VDD recorded the size and hash of a build that was never the one
+committed. A "succeeded" build log proves nothing — PyInstaller caches,
+and a no-op rebuild silently re-copies the previous binary. Read the
+bundle back out and compare it against the source tree, and take the
+VDD's numbers from that same file:
+
+```
+python -c "from PyInstaller.archive.readers import CArchiveReader; print(sorted(CArchiveReader('Atomic.exe').toc))"
+```
 
 ### Marker tags
 
