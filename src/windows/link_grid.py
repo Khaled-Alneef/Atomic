@@ -6,15 +6,17 @@ TARGET_KIND, not a per-target Website/App choice)."""
 
 import subprocess
 import threading
+import time
 import uuid
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, Qt, QTimer
+from PyQt6.QtCore import QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from helpers import child_process, images, storage, theme
@@ -30,9 +32,64 @@ CARD_WIDTH = 120
 THUMB_SIZE = (44, 44)
 GRID_COLS = 13
 
+# Shared by Apps, Websites and Games so the three grids stay identical
+# and CARD_TEXT_WIDTH below can't drift out of step with the margins it
+# is derived from.
+CARD_MARGINS = (8, 10, 8, 10)
+# The width a card's text actually gets on screen: the fixed card width
+# less the card layout's own left/right margins. The QSS border is not
+# subtracted - measured, a 120px card lays its contents out across 104px.
+CARD_TEXT_WIDTH = CARD_WIDTH - CARD_MARGINS[0] - CARD_MARGINS[2]
+
 # Same shape as Games' SORT_OPTIONS ("Last Played" here is "Last Used" -
 # whenever an entry's targets were last opened, see _open_entry).
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Used"]
+
+
+class CardTextLabel(QLabel):
+    """A word-wrapped line of text on a card, sized honestly for the
+    width it will actually be given.
+
+    A plain wrapped QLabel is not, and that clipped the second line of
+    every long card name on Apps, Websites and Games. Two Qt behaviours
+    combine to do it:
+
+    * `QLabel.sizeHint()` for a wrapped label is a heuristic - it picks a
+      wrap width it thinks looks balanced rather than the one it will be
+      laid out at, and reports the height *that* width needs. Measured on
+      "A Really Long Missing Application Name": a sizeHint wide enough
+      for two lines, in a card that only ever offers 104px, where the
+      same text needs three.
+    * A QBoxLayout with an alignment set (these cards centre their
+      contents) lays itself out inside `alignmentRect`, which clamps the
+      layout's *width* to what the card has - but keeps the height the
+      too-wide sizeHint asked for. So the label is narrowed without ever
+      being asked how tall it now needs to be.
+
+    Fixing the width and answering sizeHint from `heightForWidth` at that
+    same width removes both halves: the layout cannot narrow it further,
+    and the height it reports is the height the text really occupies.
+    Deliberately lazy rather than measured in `__init__` - the fonts here
+    come from QSS (#CardTitle's weight, the badge's 8pt), which is not
+    applied to a widget until it is polished, some time after it is
+    built."""
+
+    def __init__(self, text, width=CARD_TEXT_WIDTH, parent=None):
+        super().__init__(text, parent)
+        self._text_width = width
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.setFixedWidth(width)
+
+    def sizeHint(self):
+        return QSize(self._text_width, self.heightForWidth(self._text_width))
+
+    def minimumSizeHint(self):
+        # Same answer as sizeHint: QLabel's own minimumSizeHint for
+        # wrapped text is another heuristic, and a minimum shorter than
+        # the real height is all a grid row needs to squeeze the last
+        # line back off the card.
+        return self.sizeHint()
 
 
 def open_link_entry(parent, entry, label="Links"):
@@ -51,6 +108,47 @@ def open_link_entry(parent, entry, label="Links"):
                 QMessageBox.critical(parent, label, f"Couldn't launch '{t['target']}':\n{exc}")
         else:
             webbrowser.open(t["target"])
+
+
+# A stat on a local disk is microseconds, but a path on a disconnected
+# network share or an unplugged drive can block for seconds - and this
+# grid is rebuilt from scratch on every visit, every sort change and
+# every debounced search keystroke, so one uninstalled app on a dead
+# drive would otherwise be paid for again on each redraw. Answers are
+# reused for a few seconds: long enough that typing a query costs one
+# check per path instead of one per rebuild, short enough that
+# installing or removing a program while Atomic is open shows up on the
+# next visit rather than needing a restart.
+_EXISTS_TTL = 5.0
+_exists_cache = {}
+
+
+def _target_exists(path: str) -> bool:
+    now = time.monotonic()
+    cached = _exists_cache.get(path)
+    if cached is not None and now - cached[0] < _EXISTS_TTL:
+        return cached[1]
+    # Path.exists() answers False rather than raising for a path Windows
+    # can't even parse (illegal characters, a drive letter that isn't
+    # mounted), which is the answer wanted here anyway.
+    exists = Path(path).exists()
+    _exists_cache[path] = (now, exists)
+    return exists
+
+
+def missing_app_targets(entry) -> list:
+    """The entry's app targets whose path no longer exists - an
+    uninstalled or moved program.
+
+    App targets only. A "site" target is a URL, and asking the same
+    question of one means a network probe with all of probe_site's
+    deadline discipline; that is deliberately out of scope (roadmap
+    #16), which is also why this needs no per-page special-casing -
+    Websites entries carry no "app" target, so they simply never
+    match."""
+    return [t["target"] for t in entry.get("targets", [])
+            if t.get("type") == "app" and t.get("target")
+            and not _target_exists(t["target"])]
 
 
 def _migrate_entry(entry):
@@ -285,17 +383,42 @@ class LinkGridPage(GlassPage):
         card.setFixedWidth(CARD_WIDTH)
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.setContentsMargins(8, 10, 8, 10)
+        layout.setContentsMargins(*CARD_MARGINS)
+
+        missing = missing_app_targets(entry)
 
         icon = QLabel()
         icon.setFixedSize(*THUMB_SIZE)
         icon.setPixmap(images.thumbnail_or_avatar(entry.get("image"), entry["name"], THUMB_SIZE))
+        if missing:
+            # Dimmed rather than swapped for a warning glyph: the icon is
+            # how a card is picked out of a grid at a glance, and losing
+            # it would make the row harder to read, not clearer. The
+            # badge below is what actually states the verdict.
+            faded = QGraphicsOpacityEffect(icon)
+            faded.setOpacity(0.3)
+            icon.setGraphicsEffect(faded)
         layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        name = QLabel(entry["name"], objectName="CardTitle")
-        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        name.setWordWrap(True)
+        name = CardTextLabel(entry["name"])
+        name.setObjectName("CardTitle")
         layout.addWidget(name)
+
+        if missing:
+            total = len([t for t in entry.get("targets", []) if t.get("target")])
+            # "Not found" only when nothing on this card can launch; an
+            # entry that opens three programs and lost one still works,
+            # and saying otherwise would be wrong rather than cautious.
+            text = ("Not found" if len(missing) >= total
+                    else f"{len(missing)} of {total} not found")
+            badge = CardTextLabel(text)
+            badge.setStyleSheet(
+                f"color: {theme.DANGER}; font-weight: 700; font-size: 8pt; background: transparent;")
+            layout.addWidget(badge)
+            # The card itself carries the paths - the badge has room for
+            # a verdict, not for a path, and "which one?" is the next
+            # question on an entry that launches more than one.
+            card.setToolTip("No longer on disk:\n" + "\n".join(missing))
 
         card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))

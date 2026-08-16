@@ -46,11 +46,11 @@ clever one, and leave a working path working.
 | 2 | Stop Apps/Websites saving a stale whole list on every change | ui-engineer | contained | todo |
 | 3 | Tie the released exe to the source tree it was built from | release-engineer | spans modules | todo |
 | 4 | Write 1.4's missing "what's new" notes | ui-engineer | contained | todo |
-| 5 | Make a future release unable to ship without its notes | release-engineer | contained | todo |
+| 5 | Make a future release unable to ship without its notes | release-engineer | contained | **landed 1.4.9** |
 | 6 | Stop the sidebar Add menu positioning with `mapToGlobal` | ui-engineer | contained | todo |
 | 7 | Route entry-search suggestions through `lookup_pool` | integrations-engineer | contained | todo |
 | 8 | Retire or rebuild `diagnose_anilist.py` - it calls functions that no longer exist | integrations-engineer | contained | todo |
-| 10 | Show a Stremio connection that has gone bad, in Settings itself | ui-engineer | contained | todo |
+| 10 | Show a Stremio connection that has gone bad, in Settings itself | ui-engineer | contained | **landed 1.4.9** |
 | 27 | Say what a site's check verdict actually means | ui-engineer | contained | todo - **owner-raised** |
 | 28 | Clear site check verdicts when the app restarts | ui-engineer | contained | todo - **owner-raised** |
 | 31 | The owner's own wording for the check verdicts, with a line saying what each means | ui-engineer | contained | **landed 1.4.6** |
@@ -59,14 +59,16 @@ clever one, and leave a working path working.
 | 34 | Show Last Watched must not open on borrowed numbers | ui-engineer | contained | **landed 1.4.6** - owner-raised |
 | 35 | A suggestion's chapter number outliving the suggestion | ui-engineer | contained | **landed 1.4.6** - owner-reported |
 | 36 | Cards past the 8th were unreachable; films shared a row with shows | ui-engineer | contained | **landed 1.4.7** - owner-reported |
-| 29 | Let the "what's new" dialog scroll | ui-engineer | contained | todo - found landing #4 |
-| 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | todo - found landing #2 |
+| 29 | Let the "what's new" dialog scroll | ui-engineer | contained | **landed 1.4.9** |
+| 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | **landed 1.4.9** |
+| 37 | Opening an app whose target is gone still shows a raw OS error | ui-engineer | contained | todo - found landing #16 |
+| 38 | Home's Apps preview doesn't show a missing target | ui-engineer | contained | todo - found landing #16 |
 | 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | **landed 1.4.8** |
 | 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | **landed 1.4.8** |
 | 13 | Check for updates in the background, not only on demand | ui-engineer | contained | **landed 1.4.8** |
-| 14 | Remember window size and position across launches | ui-engineer | contained | todo |
+| 14 | Remember window size and position across launches | ui-engineer | contained | **landed 1.4.9** |
 | 15 | Give Settings some structure before it grows further | ui-engineer | shape unknown - investigate first | todo |
-| 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | todo |
+| 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | **landed 1.4.9** |
 | 17 | Keyboard shortcut to jump to a page's search box | ui-engineer | contained | todo |
 | 18 | Bring Apps to parity with Games' "Import from Launchers" | ui-engineer | spans modules | todo |
 | 19 | Check every configured site at once, not one at a time | ui-engineer | contained | todo |
@@ -75,7 +77,7 @@ clever one, and leave a working path working.
 | 22 | Multi-select bulk status change on tracker cards | ui-engineer | shape unknown - investigate first | todo |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | todo |
 | 24 | One search across every page, not just the tracker family | ui-engineer | shape unknown - investigate first | todo |
-| 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | shape unknown - investigate first | todo |
+| 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
 
 Ordered correctness-first, worst blast-radius first: a confidently
 wrong number (#1) outranks a data-loss *pattern* not yet triggered (#2),
@@ -317,6 +319,15 @@ discoverable only by a user updating and seeing nothing.
 since notes should always exist by release time; the risk is building
 something heavier (a whole content-authoring workflow) when a single
 presence check at tag time is all item #4's actual failure needed.
+**Landed** (1.4.9) - `packaging/check_release_notes.py`, wired into both
+the release skill and RELEASING.md next to the build's own verification,
+so it runs rather than being remembered. One trap found and fixed before
+it shipped: the first version always computed "the next release" from
+`APP_VERSION`, but the release procedure sets that to the two-part
+number *first*, so during a real release it would have demanded notes
+for 1.6 while shipping 1.5 - blocking every release. Two-part now means
+"this is the release", three-part means "heading for the next one",
+checked over 1.4.8, 1.5, 1.4 and 2.0.3.
 
 ### 6. Stop the sidebar Add menu positioning with `mapToGlobal`
 
@@ -480,6 +491,16 @@ from both "Not connected" and a healthy connection.
 would add a request cost to opening a dialog); piggyback on the reason
 already carried back from the tracker's own last sync attempt rather
 than probing independently.
+**Landed** (1.4.9) - three states where there were two: "Not connected",
+"Connected as X", and "Connected as X - but Stremio is refusing this
+sign-in, so no watch progress is syncing", in `theme.WARNING` rather
+than muted grey. Read from the tracker's own last attempt through
+`sys.modules`, never re-measured, so opening Settings still costs no
+request and `helpers` still doesn't import `windows`. The sign-in form
+comes back for a rejected session - telling someone to sign in again
+while hiding the form behind Disconnect would be the same defect one
+step on - and a fresh sign-in clears the verdict, which is otherwise
+sticky for the life of the process.
 
 ### 27. Say what a site's check verdict actually means
 
@@ -749,6 +770,13 @@ within the available screen height and scrolls to reach the rest;
 needed.
 **Risk** - low. Don't solve it by truncating the notes - the whole point
 of the dialog is that the user sees what changed.
+**Landed** (1.4.9) - the notes scroll, the heading and button don't.
+Height is set explicitly rather than left to Qt, because `QScrollArea`'s
+own sizeHint is bounded at 24 line-heights whatever it holds, which
+would have made today's nine notes scroll when they fit perfectly well.
+Measured on this desktop's 1104px work area: nine notes 696px with no
+scrollbar at all, a 1.2-1.4 update 1008px and scrolling, forty notes
+1008px and scrolling.
 
 ### 30. Stop a two-line card name being clipped on Apps/Websites
 
@@ -772,6 +800,15 @@ Apps and Websites; single-line cards are unchanged.
 **Risk** - low, but it is a layout change on a shipped page: check a
 mixed grid (short and long names together) rather than one card in
 isolation, or rows end up ragged.
+**Landed** (1.4.9) - the cause was `QLabel.sizeHint()` for wrapped text:
+it picks a wrap width it thinks looks balanced, reports the height
+*that* width would need, and the grid then narrows the label to the card
+without revisiting the height. A `CardTextLabel` with a fixed width,
+answering both `sizeHint` and `minimumSizeHint` from `heightForWidth` at
+that width, reports the height the text actually occupies. Games shared
+the defect through the same constants and is fixed with it. Verified on
+a mixed grid including the tallest case there is now - a wrapped name
+above a "Not found" badge - with nothing clipped.
 
 ### 11. Remember a tracker page's search/filter across a revisit, for the session
 
@@ -905,6 +942,16 @@ geometry) still falls back to `1280x840` unchanged.
 **Risk** - clamp the restored geometry to the current available screen
 - a size/position saved on a monitor that's no longer connected must
 not open the window off-screen with no way to reach it.
+**Landed** (1.4.9) - plain numbers in settings rather than Qt's opaque
+`saveGeometry` blob, precisely so they can be clamped against the
+monitors that exist *now*. Measured in a real window: a geometry saved
+at 6000,3000 reopens fully on a real screen with its title bar
+reachable, a 40x30 save is refused as corrupt and falls back to the
+built-in size, maximized reopens maximized, and a move is written after
+its debounce. The title-bar allowance is why the clamp uses
+`availableGeometry` and leaves room above the client rectangle - the
+frame lives above `geometry()`, so clamping to the bare work area is
+what would push the title bar off the top.
 
 ### 15. Give Settings some structure before it grows further
 
@@ -971,6 +1018,44 @@ flakiness to fail soft around); a Websites-URL liveness equivalent
 would need the same deadline/probe discipline as `probe_site` and is
 explicitly out of scope here - don't fold it in without separately
 sizing that cost.
+**Landed** (1.4.9) - a dimmed icon plus a red badge reading "Not found",
+or "2 of 3 not found" when only some targets are gone, with the missing
+paths in the card's tooltip. URL targets are never stat'd, so Websites
+is untouched by construction rather than by a page check. Path checks
+are memoised for 5s: the grid rebuilds on every visit, sort change and
+debounced keystroke, and a path on a dead network or removable drive
+would otherwise be re-stat'd - and block - on each rebuild. Measured 8
+stats on the first build and 0 on an immediate rebuild. Turned up items
+#37 and #38.
+
+### 37. Opening an app whose target is gone still shows a raw OS error
+
+**What** - Found landing #16. The card now says the target is missing,
+but clicking it anyway still calls `open_link_entry`, which raises
+`OSError` out of `cwd=Path(target).parent` and puts the raw message in a
+`QMessageBox`. The card is honest and the click is not.
+**Owner** - ui-engineer
+**Where** - `open_link_entry` (shared with Home, so fixing it fixes both
+callers). Reuse `link_grid.missing_app_targets` rather than re-deriving
+the check.
+**Done when** - clicking an entry whose target is gone says so in the
+app's own words, through a toast, and does not raise.
+**Risk** - low. Keep it a message, not a dialog (`ui.md`), and don't
+change what a *working* target does.
+
+### 38. Home's Apps preview doesn't show a missing target
+
+**What** - Found landing #16. Home builds its own quick-list rows, so
+the "Not found" state added to the Apps page doesn't appear there - the
+same entry reads fine on Home and broken on Apps.
+**Owner** - ui-engineer
+**Where** - `home.py`'s `_build_quick_list`; the check itself is already
+`link_grid.missing_app_targets`.
+**Done when** - an app whose target is gone reads the same on Home as it
+does on the Apps page.
+**Risk** - low, but Home's rows are much smaller than a card - a badge
+that fits a 120px card may not fit a list row; a dimmed row plus the
+tooltip may be all that fits.
 
 ### 17. Keyboard shortcut to jump to a page's search box
 
@@ -1245,6 +1330,16 @@ feature that isn't covered by a quick smoke test (a rarely-used Qt
 submodule, an image format plugin only one site's covers happen to use)
 - verify broadly, not just "the app launches," before trusting an
 exclude list.
+**Closed** (1.4.9) - **investigated, nothing adopted**, and the numbers
+are why. Excluding all 47 PyQt6 bindings `src/` never imports changed
+the executable by **167 bytes** (47,720,280 -> 47,720,113): the bindings
+are small and the Qt DLLs underneath them are the payload. Deleting
+those DLLs by hand *does* pay - `Qt6Network`, `Qt6Pdf` and `Qt6Svg` took
+it to 44,216,577, about 7% - but a plugin whose dependency has been
+deleted fails at load, wherever that plugin happens to be needed, which
+"the app starts" does not disprove. So the saving that exists is the one
+that can't be verified here, and the spec is left at `excludes=[]`.
+Reopen only with a way to prove the Qt plugin set is unaffected.
 
 ---
 

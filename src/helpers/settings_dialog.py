@@ -17,6 +17,7 @@ at a time, or uninstall the app entirely (every saved file plus the app
 itself).
 """
 
+import sys
 import threading
 
 from PyQt6.QtCore import QObject, Qt
@@ -104,6 +105,35 @@ _VERDICT_LEGEND = (
 # level rather than on SettingsDialog because the dialog is rebuilt on
 # every open and the lifetime wanted is the process, not the dialog.
 _CHECKED_THIS_RUN = set()
+
+# Set once the user signs in again from this dialog, to stop the marker
+# below - which is sticky for the life of the process - from calling a
+# brand new session rejected. Module level for the same reason as the set
+# above: the dialog is rebuilt on every open, the fact is not.
+_STREMIO_SIGNED_IN_HERE = False
+
+
+def _stremio_sign_in_rejected() -> bool:
+    """Whether the tracker's last progress sync was turned away by
+    Stremio, meaning the saved session is dead and nothing is syncing.
+
+    Read, never measured: asking Stremio whether the key still works
+    would put a network request behind merely opening this dialog. The
+    tracker has already asked, on every page arrival, and records the
+    answer - windows.tracker._auth_warning_shown goes True the first time
+    a bulk sync comes back REASON_STREMIO_AUTH_FAILED (see
+    TrackerPage._warn_stremio_auth_once). That marker is once-per-run by
+    design and never resets, so this reads exactly as often as the
+    tracker's own toast says it: a dead key stays dead until reconnected.
+
+    sys.modules rather than an import, on purpose - helpers must not
+    depend on windows (see CLEAR_CATEGORIES above for the same call), and
+    a run in which no tracker page was ever built then reads as "nothing
+    known" rather than dragging the whole page module in to find out."""
+    if _STREMIO_SIGNED_IN_HERE:
+        return False
+    tracker = sys.modules.get("windows.tracker")
+    return bool(tracker is not None and getattr(tracker, "_auth_warning_shown", False))
 
 
 def _verdict_legend(kind: str) -> QLabel:
@@ -488,6 +518,10 @@ class SettingsDialog(QDialog):
         form.addWidget(QLabel("Stremio Account", objectName="SectionTitle"))
 
         self.stremio_account_status = QLabel("", objectName="Muted")
+        # Wraps because the rejected-session wording is longer than one
+        # line at this width; kept to two rendered lines like every other
+        # hint on this page (measured at the dialog's 920px, 688px pane).
+        self.stremio_account_status.setWordWrap(True)
         form.addWidget(self.stremio_account_status)
 
         self.stremio_email_edit = QLineEdit()
@@ -956,13 +990,38 @@ class SettingsDialog(QDialog):
         app_settings.set_fullscreen_on_startup(checked)
 
     def _refresh_stremio_account(self):
+        """Three states, not two. "Connected as X" used to be shown for
+        the whole life of a saved key, including after Stremio had begun
+        refusing it - the account page said connected while every sync
+        silently returned nothing, which is the one place the user would
+        come to fix it. The third state is read off the tracker's last
+        attempt (see _stremio_sign_in_rejected), never re-measured."""
         email, auth_key = app_settings.get_stremio_auth()
         connected = bool(auth_key)
-        self.stremio_account_status.setText(f"Connected as {email}" if connected else "Not connected")
-        self.stremio_email_edit.setVisible(not connected)
-        self.stremio_password_edit.setVisible(not connected)
-        self.stremio_connect_btn.setVisible(not connected)
+        rejected = connected and _stremio_sign_in_rejected()
+        if not connected:
+            self.stremio_account_status.setText("Not connected")
+        elif rejected:
+            self.stremio_account_status.setText(
+                f"Connected as {email} — but Stremio is refusing this sign-in, "
+                "so no watch progress is syncing. Sign in again below.")
+        else:
+            self.stremio_account_status.setText(f"Connected as {email}")
+        # Muted grey is right for a status nobody needs to act on and
+        # wrong for this one; the colour comes from theme so it follows
+        # the palette rather than pinning a literal here.
+        self.stremio_account_status.setStyleSheet(
+            f"color: {theme.WARNING}; background: transparent;" if rejected else "")
+        # The sign-in fields come back for a rejected session: telling
+        # someone to sign in again while hiding the form behind Disconnect
+        # is the same defect one step further on. Disconnect stays too -
+        # there is still a stored key, and clearing it is a valid answer.
+        self.stremio_email_edit.setVisible(not connected or rejected)
+        self.stremio_password_edit.setVisible(not connected or rejected)
+        self.stremio_connect_btn.setVisible(not connected or rejected)
         self.stremio_disconnect_btn.setVisible(connected)
+        if rejected and not self.stremio_email_edit.text():
+            self.stremio_email_edit.setText(email)
 
     def _connect_stremio(self):
         email = self.stremio_email_edit.text().strip()
@@ -988,12 +1047,23 @@ class SettingsDialog(QDialog):
             self.stremio_account_status.setText("Not connected")
             QMessageBox.critical(self, "Stremio Account", f"Couldn't sign in:\n{error}")
             return
+        global _STREMIO_SIGNED_IN_HERE
         app_settings.set_stremio_auth(email, auth_key)
+        # Stremio just issued this key, so whatever the tracker's earlier
+        # attempt found is about a key that no longer exists. Without
+        # this, the marker's once-per-run stickiness would leave a fresh
+        # sign-in reading as rejected until the app restarted.
+        _STREMIO_SIGNED_IN_HERE = True
         self.stremio_email_edit.clear()
         self._refresh_stremio_account()
 
     def _disconnect_stremio(self):
+        global _STREMIO_SIGNED_IN_HERE
         app_settings.clear_stremio_auth()
+        # Nothing stored, nothing rejected - and the next sign-in from
+        # here would otherwise inherit the old verdict.
+        _STREMIO_SIGNED_IN_HERE = True
+        self.stremio_email_edit.clear()
         self._refresh_stremio_account()
 
     def _save_manga_music_url(self):

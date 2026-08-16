@@ -23,7 +23,9 @@ from helpers.widgets import (
     Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
     scroll_area, show_toast,
 )
-from windows.link_grid import CARD_WIDTH, GRID_COLS, THUMB_SIZE
+from windows.link_grid import (
+    CARD_MARGINS, CARD_WIDTH, GRID_COLS, THUMB_SIZE, CardTextLabel,
+)
 
 DATA_FILE = "games.json"
 CARD_ICON_SIZE = THUMB_SIZE  # match the Apps/Websites card image size
@@ -241,16 +243,17 @@ class GamesPage(GlassPage):
         card.setToolTip(game["name"])
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.setContentsMargins(8, 10, 8, 10)
+        layout.setContentsMargins(*CARD_MARGINS)
 
         icon = QLabel()
         icon.setFixedSize(*CARD_ICON_SIZE)
         icon.setPixmap(images.thumbnail_or_avatar(game.get("icon"), game["name"], CARD_ICON_SIZE))
         layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        name = QLabel(game["name"], objectName="CardTitle")
-        name.setWordWrap(True)
-        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # Same clipped-second-line defect as Apps/Websites - this grid is
+        # built from the same constants, so it had it identically.
+        name = CardTextLabel(game["name"])
+        name.setObjectName("CardTitle")
         layout.addWidget(name)
 
         card.clicked.connect(lambda g=game: self._launch(g))

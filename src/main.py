@@ -30,6 +30,7 @@ from PyQt6.QtCore import (
     QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
+    QRect,
     QSize,
     Qt,
     QTimer,
@@ -120,6 +121,24 @@ UPDATE_CHECK_DELAY_MS = 4000
 UPDATE_DOT_SIZE = 8
 UPDATE_DOT_MARGIN = 5
 
+# How long the window has to sit still before its size/position is
+# written out. A resize or a drag emits a continuous stream of events -
+# saving on each one would rewrite settings.json dozens of times per
+# gesture - and nothing reads the value again until the next launch, so
+# there is no reason to be prompt. closeEvent flushes whatever is still
+# pending, so a window closed mid-gesture loses nothing.
+GEOMETRY_SAVE_DELAY_MS = 400
+
+# Room kept above a restored window's client area when clamping it onto
+# a screen. geometry() is the client rectangle, so the title bar lives
+# *above* its top edge: clamping straight to available.y() would push
+# that bar off the screen and leave nothing to drag the window by, which
+# is the exact failure the clamp exists to prevent. Measured 31px on
+# this Windows 11 machine at 100% scale; 48 leaves headroom for larger
+# scale factors, and it only ever applies to a window being rescued from
+# off-screen coordinates.
+TITLE_BAR_ALLOWANCE = 48
+
 SIDEBAR_WIDTH = 220
 # Wide enough for the nav bullets and the +/gear buttons once the text
 # labels are dropped (see _set_sidebar_collapsed).
@@ -172,10 +191,57 @@ class NavListWidget(QListWidget):
         pass
 
 
+def _fit_to_available_screen(rect):
+    """`rect` moved, and shrunk if it has to be, until it sits wholly
+    inside the usable area of a screen that exists right now.
+
+    A geometry saved on a monitor that has since been unplugged is what
+    this is for: the coordinates still describe a perfectly valid
+    rectangle, just one nobody can see or reach, and restoring it as-is
+    opens Atomic somewhere off the desktop with no title bar to drag it
+    back by. The screen chosen is whichever one the saved rectangle
+    overlaps most, so a window that merely straddled a monitor edge stays
+    where the user put it; with no overlap anywhere - the unplugged
+    monitor - the primary screen takes it.
+
+    availableGeometry(), not geometry(): the taskbar's strip is not
+    somewhere a window should be restored underneath.
+    """
+    best = None
+    best_area = 0
+    for screen in QApplication.screens():
+        overlap = screen.availableGeometry().intersected(rect)
+        area = overlap.width() * overlap.height()
+        if area > best_area:
+            best, best_area = screen, area
+    if best is None:
+        best = QApplication.primaryScreen()
+    if best is None:
+        # No screens at all is not a real desktop state, but reporting a
+        # rectangle is still better than raising during startup.
+        return QRect(rect)
+    available = best.availableGeometry()
+    width = min(rect.width(), available.width())
+    height = min(rect.height(), available.height() - TITLE_BAR_ALLOWANCE)
+    x = min(max(rect.x(), available.x()), available.right() - width + 1)
+    y = min(max(rect.y(), available.y() + TITLE_BAR_ALLOWANCE),
+            available.bottom() - height + 1)
+    return QRect(x, y, width, height)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Atomic")
+        # Before the first resize()/setGeometry() below, because both
+        # deliver events that move/resizeEvent answer by starting this
+        # timer - built any later and startup raises AttributeError.
+        self._geometry_save_timer = QTimer(self)
+        self._geometry_save_timer.setSingleShot(True)
+        self._geometry_save_timer.timeout.connect(self._save_window_geometry)
+        # The size a profile with nothing saved opens at - see
+        # _restore_window_geometry, which overrides it for every launch
+        # after the first.
         self.resize(1280, 840)
         # The window explicitly owns the plain arrow, rather than leaving
         # it as "no cursor set". Without an explicit cursor anywhere in
@@ -211,6 +277,9 @@ class MainWindow(QMainWindow):
 
         self._update_signals = _UpdateCheckSignals()
         self._update_signals.found.connect(self._on_update_found)
+
+        self._restore_rect = None
+        self._open_maximized = self._restore_window_geometry()
 
         self._show_page("home", animate=False)
 
@@ -677,6 +746,138 @@ class MainWindow(QMainWindow):
         if state == Qt.ApplicationState.ApplicationActive:
             self._drain_override_cursor()
 
+    # ------------------------------------------------------------------
+    def _restore_window_geometry(self):
+        """Put the window back at the size and position it was last left
+        at, and answer whether it should open maximized.
+
+        True when nothing has been saved: opening maximized is what every
+        launch did before this existed, so a first-ever run is unchanged
+        (1280x840 restored size, shown maximized).
+
+        The saved rectangle is never trusted as-is - see
+        _fit_to_available_screen for why the monitor it was saved on may
+        not be there any more."""
+        saved = app_settings.get_window_geometry()
+        if not saved:
+            self._restore_rect = None
+            return True
+        self._restore_rect = _fit_to_available_screen(
+            QRect(saved["x"], saved["y"], saved["width"], saved["height"]))
+        # Applied here so the window is never painted at a default
+        # position first; show_remembered applies it a second time, which
+        # is the pass that actually lands exactly - see there.
+        self.setGeometry(self._restore_rect)
+        return saved["maximized"]
+
+    def _save_window_geometry(self):
+        """Write the restored size/position plus whether the window is
+        maximized, for the next launch to reopen with.
+
+        Only a window that is genuinely normal reports a rectangle worth
+        storing. While maximized, the restored rectangle is Windows'
+        own bookkeeping rather than anything that was asked for, and on
+        a fractional-scale display it reads back a few pixels off what
+        was restored into it - re-saving it each launch is how a
+        deliberate 900x700 walked down to 895x682 in three launches
+        (measured). So a maximized window updates the flag and keeps the
+        size it was last given by hand.
+
+        Nothing at all is written while minimized or full screen:
+        neither is a size anyone chose, and what is already stored is. A
+        minimized window reports an off-screen position on Windows, and
+        full screen is an F11 mode rather than a shape to reopen at."""
+        if self.isMinimized() or self.isFullScreen():
+            return
+        if self.isMaximized():
+            saved = app_settings.get_window_geometry()
+            if saved:
+                kept = self._restored_rect_for_current_screen(
+                    QRect(saved["x"], saved["y"],
+                          saved["width"], saved["height"]))
+                if saved["maximized"] and kept == QRect(
+                        saved["x"], saved["y"], saved["width"], saved["height"]):
+                    return  # nothing has changed - don't rewrite the file
+                app_settings.set_window_geometry(kept.x(), kept.y(),
+                                                 kept.width(), kept.height(),
+                                                 True)
+                return
+            # Nothing stored yet - a first-ever launch, which opens
+            # maximized. Its restored rectangle is the 1280x840 fallback
+            # and is worth keeping, so un-maximizing later has somewhere
+            # sensible to go.
+            rect = self.normalGeometry()
+        else:
+            # geometry(), the rectangle setGeometry takes back unchanged
+            # (measured: stable across four apply-and-read cycles on both
+            # monitors). normalGeometry matches it exactly here anyway.
+            rect = self.geometry()
+        # Invalid until the window has been laid out once; a save fired
+        # in that window would store an empty box that
+        # get_window_geometry then has to throw away.
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        app_settings.set_window_geometry(rect.x(), rect.y(),
+                                         rect.width(), rect.height(),
+                                         self.isMaximized())
+
+    def _restored_rect_for_current_screen(self, rect):
+        """`rect` centred on the screen this window is actually on, if it
+        describes somewhere else entirely.
+
+        A maximized window has no position of its own worth storing, so
+        the stored restored rectangle is also what decides which monitor
+        the next launch maximizes onto (showMaximized fills the screen
+        the window is already on). Left alone, maximizing on the second
+        monitor and relaunching reopened on the first."""
+        screen = self.screen()
+        if screen is None:
+            return rect
+        available = screen.availableGeometry()
+        if available.intersects(rect):
+            return rect
+        moved = QRect(rect)
+        moved.moveCenter(available.center())
+        return _fit_to_available_screen(moved)
+
+    def show_remembered(self):
+        """Open the window the way it was last left - maximized, or at
+        the restored size and position saved from the last session.
+
+        The geometry is applied a second time here, after show(), on
+        purpose. A rectangle set on a window with no native frame yet
+        comes back changed: measured on this two-monitor setup (125%
+        primary, 100% secondary), asking for 300,200 900x700 before
+        show() put 301,206 898x694 on screen - and since what is on
+        screen is what gets saved, every launch nudged the window 6px
+        further down and 6px smaller, reaching 895x682 by the third.
+        The same call once the window exists is exact and stays exact
+        when repeated.
+
+        Plain showMaximized() rather than theme.without_window_animation:
+        that guard is for a *visible* window changing state, where
+        Windows zooms the maximize out from the restored size and briefly
+        paints it. Nothing is on screen yet to zoom from - the same
+        reasoning start_fullscreen records."""
+        if self._open_maximized:
+            self.showMaximized()
+            return
+        self.show()
+        if self._restore_rect is not None:
+            self.setGeometry(self._restore_rect)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
+
+    def closeEvent(self, event):
+        # Flush rather than wait: the debounce is still pending after a
+        # window that was dragged or resized and then closed straight
+        # away, and there is no later chance to write it.
+        self._geometry_save_timer.stop()
+        self._save_window_geometry()
+        super().closeEvent(event)
+
     def start_fullscreen(self):
         """Open straight into full screen, for a sign-in launch with
         Settings > Startup > "Fullscreen mode when launch on startup" on.
@@ -831,6 +1032,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_current_page()
+        self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
 
 
 def _prewarm_image_specs():
@@ -882,7 +1084,7 @@ def main():
     if startup.launched_on_startup() and app_settings.get_fullscreen_on_startup():
         window.start_fullscreen()
     else:
-        window.showMaximized()
+        window.show_remembered()
     # Not just shown but actually brought forward. Launched normally this
     # is what already happens; launched by the updater's relaunch it is
     # not, and the window would otherwise sit behind everything blinking
