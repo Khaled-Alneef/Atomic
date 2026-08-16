@@ -1,31 +1,33 @@
 """Minimal client for the public AniList GraphQL API (https://anilist.co) -
-a title search, a public list-progress lookup, the airing schedule for
-the next episode, and a title's Crunchyroll page, no login/API key
-needed.
+the airing schedule for the next episode, and a title's page on a
+streaming service AniList records a link for. No login or API key.
 
-Unlike Crunchyroll (whose equivalent data lives behind an OAuth-gated,
-Cloudflare-bot-protected API this app won't try to bypass - see the
-Crunchyroll paragraph in anime_sites.py's module docstring), AniList's
-is fully open for public profiles: a username is enough to read
-someone's list, no password or token flow. Since a lot of people track
-their watching on AniList regardless of which app they actually watch
-in, this gives real progress for Crunchyroll-provider Anime entries
-too, not just Stremio's - and `fetch_crunchyroll_urls` is what lets
-those entries resolve to a real Crunchyroll page at all, since
-Crunchyroll itself cannot be asked.
+**Not watch progress.** AniList used to answer that too, and it was
+removed: it only ever knew what some other tracker had written to it, so
+a card could state an episode its owner had never reached, confidently
+and with nothing to say where the number came from. Progress now comes
+from the user's Stremio account or from nowhere - see
+tracker._fetch_real_progress. Don't reintroduce a second source here
+without a way to tell which one is right.
 
-Every lookup fails soft (returns None) so a flaky connection, a private
-list, or no title match never crashes the tracker UI - it just means no
-progress shows up.
+`fetch_external_urls` is what lets a Crunchyroll or Netflix entry
+resolve to a real title page at all, since neither service can be
+searched (see anime_sites.py's module docstring).
+
+Every lookup fails soft (returns None/[]), so a flaky connection or no
+title match never crashes the tracker UI - it just means no schedule or
+no link.
 """
 
 import json
+import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import title_match
+from . import net, title_match
 
 API_URL = "https://graphql.anilist.co"
 
@@ -66,20 +68,6 @@ query ($search: String) {
 }
 """
 
-_PROGRESS_QUERY = """
-query ($userName: String, $mediaId: Int) {
-  MediaList(userName: $userName, mediaId: $mediaId, type: ANIME) {
-    progress
-  }
-}
-"""
-
-# Paged for the same reason _AIRING_QUERY is: the single-Media search
-# picks one entry, and for a franchise it is routinely the wrong one.
-# Searching "Frieren: Beyond Journey's End" ranks the spin-off "Sousou no
-# Frieren: ●● no Mahou" above the series itself, and only the series
-# carries a Crunchyroll link - so the whole page has to be scored, not
-# just its first row.
 _EXTERNAL_LINKS_QUERY = """
 query ($search: String) {
   Page(perPage: 10) {
@@ -91,6 +79,22 @@ query ($search: String) {
   }
 }
 """
+
+
+class RateLimited(Exception):
+    """AniList is refusing this connection outright, which is a different
+    fact from "this title isn't on the list".
+
+    Sustained querying gets a **403 on every POST** - not the 429 the API
+    documents - and it lasts: measured at over an hour. Every lookup here
+    fails soft, so until this had its own type a block was indis-
+    tinguishable from a genuine no-match, and the user was left looking
+    at an app that appeared to have quietly stopped working."""
+
+
+# 429 is what the documentation promises and 403 is what actually
+# arrives; both mean the same thing to a caller.
+_RATE_LIMIT_CODES = (403, 429)
 
 
 def _post(query: str, variables: dict, timeout: int):
@@ -106,35 +110,16 @@ def _post(query: str, variables: dict, timeout: int):
         if wait > 0:
             time.sleep(wait)
         _last_request_at = time.monotonic()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def fetch_watch_progress(title: str, username: str, timeout: int = 6):
-    """Your real AniList progress for the anime matching `title`, from
-    `username`'s list - AniList's profile privacy has to allow public
-    list viewing for this to work; there's no login here, just their
-    username. Returns (season, episode) - season is always 0 since
-    AniList tracks a flat episode count, not per-season numbering like
-    Stremio - or None if there's no title match, the list/entry is
-    private, or the lookup fails."""
-    title = (title or "").strip()
-    username = (username or "").strip()
-    if not title or not username:
-        return None
+    # After the throttle sleep, not before it: the budget is for the
+    # request, and the gap above can be most of a second on its own.
+    deadline = net.deadline_in(timeout)
     try:
-        search_body = _post(_SEARCH_QUERY, {"search": title}, timeout)
-        media_id = ((search_body.get("data") or {}).get("Media") or {}).get("id")
-        if not media_id:
-            return None
-        body = _post(_PROGRESS_QUERY, {"userName": username, "mediaId": media_id}, timeout)
-        entry = (body.get("data") or {}).get("MediaList")
-        progress = entry.get("progress") if entry else None
-        if progress is None:
-            return None
-        return 0, int(progress)
-    except Exception:
-        return None
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(net.read_text(resp, deadline))
+    except urllib.error.HTTPError as exc:
+        if exc.code in _RATE_LIMIT_CODES:
+            raise RateLimited(f"AniList answered {exc.code}") from exc
+        raise
 
 
 def _candidate_names(media: dict):

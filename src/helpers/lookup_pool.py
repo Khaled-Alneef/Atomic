@@ -54,6 +54,52 @@ def _ensure_workers():
             _workers.append(worker)
 
 
+_latest_jobs = {}
+_latest_ready = threading.Condition()
+_latest_worker = None
+
+
+def submit_latest(key: str, fn, *args, **kwargs):
+    """Queue one lookup of which only the newest matters, replacing any
+    earlier one under the same `key` that hasn't started yet.
+
+    For work fired by typing: the Video Website field starts a resolution
+    per debounced keystroke, and every one of those but the last is
+    already stale by the time it answers - the dialog throws the result
+    away on an identity mismatch. Previously each got a bare
+    threading.Thread with no ceiling of any kind, which is the exact
+    shape that once put 651 connections in flight at once.
+
+    Deliberately *not* the shared queue above: this is a lookup the user
+    is watching a status line for, and behind a page-load backfill of
+    every tracked entry it would wait minutes. One dedicated worker
+    instead - which caps this path at a single connection, tighter than
+    the shared pool - and superseded jobs are dropped before they ever
+    run rather than raced."""
+    global _latest_worker
+    with _latest_ready:
+        _latest_jobs[key] = (fn, args, kwargs)
+        if _latest_worker is None:
+            _latest_worker = threading.Thread(target=_run_latest_forever,
+                                              name="lookup-latest", daemon=True)
+            _latest_worker.start()
+        _latest_ready.notify()
+
+
+def _run_latest_forever():
+    # Must never raise, for the same reason _run_forever must not.
+    while True:
+        with _latest_ready:
+            while not _latest_jobs:
+                _latest_ready.wait()
+            key = next(iter(_latest_jobs))
+            fn, args, kwargs = _latest_jobs.pop(key)
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            pass
+
+
 def _run_forever():
     # Must never raise: an uncaught exception would kill this worker for
     # good, and unlike a one-shot thread it takes every lookup still

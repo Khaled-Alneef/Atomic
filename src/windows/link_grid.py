@@ -76,7 +76,7 @@ def _migrate_entry(entry):
 
 class LinkGridPage(GlassPage):
     """Base for a customizable icon+name grid of sites/apps. Subclasses
-    just set DATA_FILE/TITLE/SUBTITLE/DEFAULT_ENTRIES/TARGET_KIND.
+    just set DATA_FILE/TITLE/DEFAULT_ENTRIES/TARGET_KIND.
 
     TARGET_KIND fixes what every target on this page's entries is - "site"
     (a URL, opened in the browser) or "app" (an executable/shortcut,
@@ -87,7 +87,6 @@ class LinkGridPage(GlassPage):
 
     DATA_FILE = "links.json"
     TITLE = "Links"
-    SUBTITLE = ""
     DEFAULT_ENTRIES = []
     TARGET_KIND = "site"
 
@@ -110,12 +109,13 @@ class LinkGridPage(GlassPage):
         panel_layout.setContentsMargins(24, 20, 24, 24)
         panel_layout.setSpacing(14)
 
+        # Title only. The subtitle under it ("Sites you open all the time")
+        # described what the page obviously was, and no other page carries
+        # one - the mechanism goes with it rather than sitting unused.
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         title_box.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
-        if self.SUBTITLE:
-            title_box.addWidget(QLabel(self.SUBTITLE, objectName="PanelSubtitle"))
         header.addLayout(title_box)
         header.addStretch()
         add_btn = QPushButton("+", objectName="AccentIcon")
@@ -131,8 +131,8 @@ class LinkGridPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        hint = QLabel("(drag a card to reorder, or right-click it for Move Up/Down)", objectName="Muted")
-        top_row.addWidget(hint)
+        # No drag hint here any more: it named a right-click Move Up/Down
+        # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
         panel_layout.addLayout(top_row)
 
@@ -232,9 +232,9 @@ class LinkGridPage(GlassPage):
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_edit_form(entry))
-        if self.sort_box.currentText() == "Custom Order":
-            menu.addAction("Move Up", lambda: self._move_entry(entry, -1))
-            menu.addAction("Move Down", lambda: self._move_entry(entry, 1))
+        # No Move Up/Move Down: these cards reorder by dragging, same as
+        # every other page, and the menu items only appeared under one sort
+        # mode - a second, worse way to do the same thing.
         menu.addAction("Delete", lambda: self._remove_entry(entry))
         menu.exec(event.globalPosition().toPoint())
 
@@ -244,17 +244,6 @@ class LinkGridPage(GlassPage):
         entry["last_used"] = storage.now_iso()
         storage.save(self.DATA_FILE, self.entries)
         if self.sort_box.currentText() == "Last Used":
-            self._refresh_grid()
-
-    def _move_entry(self, entry, delta):
-        if self.sort_box.currentText() != "Custom Order":
-            QMessageBox.information(self, self.TITLE, "Switch Sort to 'Custom Order' to reorder manually.")
-            return
-        idx = self.entries.index(entry)
-        new_idx = idx + delta
-        if 0 <= new_idx < len(self.entries):
-            self.entries[idx], self.entries[new_idx] = self.entries[new_idx], self.entries[idx]
-            storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
 
     def _remove_entry(self, entry):

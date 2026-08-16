@@ -48,13 +48,13 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from . import child_process
+from . import child_process, net
 
 # What this build is. Three parts while the work is in progress on
 # `development`, counting up from the last release; two parts on a build
 # that is being released, bumped in the same commit that tags it - or the
 # new build goes on offering itself an update.
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 # What counts as a release: exactly two numeric parts, with or without the
 # leading v. Development builds are tagged (if at all) with three, and are
@@ -79,8 +79,13 @@ class UpdateError(Exception):
 
 def _get_json(url, timeout):
     request = urllib.request.Request(url, headers=_HEADERS)
+    # Bounded like every other lookup (net.read_text): this one runs on
+    # the update check the user is actually waiting on, so a host that
+    # dribbles a body forever would hang the Settings dialog rather than
+    # a background worker.
+    deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return json.loads(net.read_text(response, deadline))
 
 
 def parse_version(text):

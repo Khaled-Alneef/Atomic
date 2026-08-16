@@ -7,6 +7,5 @@ from windows.link_grid import LinkGridPage
 class WebsitesPage(LinkGridPage):
     DATA_FILE = "websites.json"
     TITLE = "Websites"
-    SUBTITLE = "Sites you open all the time"
     DEFAULT_ENTRIES = []
     TARGET_KIND = "site"

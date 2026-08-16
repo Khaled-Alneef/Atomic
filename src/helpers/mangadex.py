@@ -38,7 +38,7 @@ import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from . import title_match
+from . import net, title_match
 
 BASE_URL = "https://api.mangadex.org"
 
@@ -90,8 +90,11 @@ def _get(url: str, timeout: int, retries: int = 1):
                 time.sleep(wait)
             _last_request_at = time.monotonic()
         try:
+            # Per attempt, not per call: a retry gets its own full budget,
+            # the same way it gets its own socket timeout.
+            deadline = net.deadline_in(timeout)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                return json.loads(net.read_text(resp, deadline))
         except Exception:
             if attempt == retries:
                 raise

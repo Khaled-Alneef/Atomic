@@ -1,4 +1,4 @@
-"""Settings window: a category sidebar (mirroring the main app window's
+﻿"""Settings window: a category sidebar (mirroring the main app window's
 own sidebar) on the left, the selected category's controls on the right.
 
 General: Windows-startup toggle (plus whether that sign-in launch opens
@@ -7,9 +7,8 @@ sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
 without losing their saved data). Anime & Series: the list of Video
 Websites Anime entries can be set to open on (Stremio is always
 available as a built-in option; Crunchyroll and any others are
-addable/editable, the same way Reading sites work), the connected
-Stremio account and/or AniList username used to pull in real watch
-progress. Reading: the list of manga/manhwa/manhua reading sites the
+addable/editable, the same way Reading sites work) and the connected
+Stremio account used to pull in real watch progress. Reading: the list of manga/manhwa/manhua reading sites the
 Reading page can search and open to, plus an optional music/ambience URL.
 Games: each game launcher's install directory, so the Games page can
 bulk-import every game it finds there (see helpers.launchers) instead of
@@ -56,6 +55,24 @@ class _StremioLoginSignals(QObject):
     done = Signal(str, str, str)  # email, auth key, error message (one is always "")
 
 
+class _SiteProbeSignals(QObject):
+    done = Signal(str, str)  # which list ("reading"/"video"), site name
+
+
+# What probe_site's verdicts mean to someone looking at the list. The
+# distinction that matters: a site with a known engine opens straight to
+# a title's own page, everything else only ever opens that site's search.
+_RESOLVES_LABELS = {
+    "engine": "opens title pages",
+    "generic": "opens title pages (read off its search page)",
+    "streaming": "opens title pages",
+    "search-only": "search links only - no title pages",
+    "unreachable": "didn't answer when checked",
+    "unknown": "couldn't be checked",
+    "checking": "checking...",
+}
+
+
 class _LauncherImportSignals(QObject):
     done = Signal(str, int)  # launcher key, number of games added
 
@@ -94,6 +111,12 @@ class SettingsDialog(QDialog):
 
         self._login_signals = _StremioLoginSignals()
         self._login_signals.done.connect(self._on_stremio_login_done)
+
+        self._site_probe_signals = _SiteProbeSignals()
+        self._site_probe_signals.done.connect(self._on_site_probed)
+        # Sites currently being checked, so the list can say so instead of
+        # showing nothing for the ~10s a probe can take.
+        self._probing_sites = set()
 
         self._launcher_import_signals = _LauncherImportSignals()
         self._launcher_import_signals.done.connect(self._on_launcher_import_done)
@@ -225,7 +248,11 @@ class SettingsDialog(QDialog):
         hidden = set(app_settings.get_hidden_sections())
         self.section_checks = {}
         for name, page_name in nav_config.ordered_nav_items():
-            cb = QCheckBox(name)
+            # "&&", not the name as stored: QCheckBox reads a single "&"
+            # as a mnemonic marker and swallows it, so "Movies & Series"
+            # drew as "Movies  Series" with a hole where the ampersand
+            # should be. Doubling it escapes it, and is undone on screen.
+            cb = QCheckBox(name.replace("&", "&&"))
             cb.setChecked(page_name not in hidden)
             cb.toggled.connect(lambda checked, p=page_name: self._toggle_section_visibility(p, checked))
             form.addWidget(cb)
@@ -399,9 +426,8 @@ class SettingsDialog(QDialog):
             "this app won't try to bypass). Either way, suggestions/"
             "covers while adding an entry still come from Stremio's "
             "public metadata, and the auto-filled Last Season/Episode "
-            "below comes from your connected Stremio account and/or "
-            "AniList username further down - both work no matter which "
-            "site the entry actually opens on.",
+            "below comes from your connected Stremio account further "
+            "down - which works no matter which site the entry opens on.",
             objectName="Muted",
         )
         video_sites_hint.setWordWrap(True)
@@ -419,6 +445,11 @@ class SettingsDialog(QDialog):
         edit_video_site_btn = QPushButton("Edit...")
         edit_video_site_btn.clicked.connect(self._edit_video_site)
         video_sites_btn_row.addWidget(edit_video_site_btn)
+        check_video_site_btn = QPushButton("Check")
+        check_video_site_btn.setToolTip("Search this site for a known title to see "
+                                        "whether it opens title pages or only search links")
+        check_video_site_btn.clicked.connect(self._check_video_site)
+        video_sites_btn_row.addWidget(check_video_site_btn)
         remove_video_site_btn = QPushButton("Remove", objectName="Danger")
         remove_video_site_btn.clicked.connect(self._remove_video_site)
         video_sites_btn_row.addWidget(remove_video_site_btn)
@@ -460,23 +491,18 @@ class SettingsDialog(QDialog):
         form.addWidget(stremio_account_hint)
 
         form.addSpacing(24)
-        form.addWidget(QLabel("AniList Username", objectName="SectionTitle"))
-        self.anilist_username_edit = QLineEdit(app_settings.get_anilist_username())
-        self.anilist_username_edit.setPlaceholderText("Your AniList username")
-        self.anilist_username_edit.editingFinished.connect(self._save_anilist_username)
-        form.addWidget(self.anilist_username_edit)
-
-        anilist_hint = QLabel(
-            "A second, independent source for real Anime progress - tried "
-            "for Anime (not Series/Reading) if a Stremio match doesn't "
-            "have your progress, so it also covers Crunchyroll-provider "
-            "entries. Just your public username, no login: your AniList "
-            "profile's list visibility has to be set to public for this "
-            "to see anything. Leave blank to skip.",
+        progress_note = QLabel(
+            "Watch progress comes from your Stremio account and nowhere "
+            "else. Crunchyroll, Netflix and the rest publish nothing about "
+            "what you've watched without a login they grant no app, and the "
+            "list services only knew what some other tracker had written to "
+            "them - which is how a card once showed an episode its owner "
+            "had never reached. Entries opened on those sites still open "
+            "there; they just don't claim a progress number.",
             objectName="Muted",
         )
-        anilist_hint.setWordWrap(True)
-        form.addWidget(anilist_hint)
+        progress_note.setWordWrap(True)
+        form.addWidget(progress_note)
 
         form.addStretch()
         return page
@@ -511,6 +537,11 @@ class SettingsDialog(QDialog):
         edit_site_btn = QPushButton("Edit...")
         edit_site_btn.clicked.connect(self._edit_site)
         sites_btn_row.addWidget(edit_site_btn)
+        check_site_btn = QPushButton("Check")
+        check_site_btn.setToolTip("Search this site for a known title to see "
+                                  "whether it opens title pages or only search links")
+        check_site_btn.clicked.connect(self._check_site)
+        sites_btn_row.addWidget(check_site_btn)
         remove_site_btn = QPushButton("Remove", objectName="Danger")
         remove_site_btn.clicked.connect(self._remove_site)
         sites_btn_row.addWidget(remove_site_btn)
@@ -721,10 +752,56 @@ class SettingsDialog(QDialog):
         QApplication.instance().quit()
 
     # ------------------------------------------------------------------
+    def _site_label(self, site) -> str:
+        """One row of a websites list, with what the site can actually
+        do. Without this the only way to learn that a site never resolves
+        to title pages was to use it for a while and notice that every
+        entry opened a search page."""
+        label = f"{site['name']}  —  {site['base_url']}"
+        state = "checking" if site["id"] in self._probing_sites else site.get("resolves")
+        note = _RESOLVES_LABELS.get(state)
+        return f"{label}   ·   {note}" if note else label
+
+    def _probe_site_async(self, which: str, site_id: str):
+        """Check what a site resolves to, in the background - it makes
+        real requests and takes seconds."""
+        module = manga_sites if which == "reading" else anime_sites
+        site = module.get_site(site_id)
+        if not site:
+            return
+        self._probing_sites.add(site_id)
+        if which == "reading":
+            self._refresh_sites()
+        else:
+            self._refresh_video_sites()
+        threading.Thread(target=self._probe_site_worker,
+                         args=(which, site_id, dict(site)), daemon=True).start()
+
+    def _probe_site_worker(self, which, site_id, site):
+        # Must never raise - a dead thread would leave the row stuck on
+        # "checking..." forever.
+        module = manga_sites if which == "reading" else anime_sites
+        try:
+            verdict = module.probe_site(site)
+        except Exception:
+            verdict = module.RESOLVES_UNKNOWN
+        try:
+            module.record_resolution(site_id, verdict)
+        except Exception:
+            pass
+        self._site_probe_signals.done.emit(which, site_id)
+
+    def _on_site_probed(self, which, site_id):
+        self._probing_sites.discard(site_id)
+        if which == "reading":
+            self._refresh_sites()
+        else:
+            self._refresh_video_sites()
+
     def _refresh_sites(self):
         self.sites_list.clear()
         for site in manga_sites.list_sites():
-            item = QListWidgetItem(f"{site['name']}  —  {site['base_url']}")
+            item = QListWidgetItem(self._site_label(site))
             item.setData(Qt.ItemDataRole.UserRole, site["id"])
             self.sites_list.addItem(item)
 
@@ -735,8 +812,9 @@ class SettingsDialog(QDialog):
     def _add_site(self):
         dialog = SiteForm(self, "Website")
         if dialog.result_data:
-            manga_sites.add_site(*dialog.result_data)
+            site = manga_sites.add_site(*dialog.result_data)
             self._refresh_sites()
+            self._probe_site_async("reading", site["id"])
 
     def _edit_site(self):
         site_id = self._selected_site_id()
@@ -747,6 +825,15 @@ class SettingsDialog(QDialog):
         if dialog.result_data:
             manga_sites.update_site(site_id, *dialog.result_data)
             self._refresh_sites()
+            # Re-checked, not kept: the URL may be the thing that changed.
+            self._probe_site_async("reading", site_id)
+
+    def _check_site(self):
+        site_id = self._selected_site_id()
+        if not site_id:
+            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            return
+        self._probe_site_async("reading", site_id)
 
     def _remove_site(self):
         site_id = self._selected_site_id()
@@ -765,7 +852,7 @@ class SettingsDialog(QDialog):
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         self.video_sites_list.addItem(item)
         for site in anime_sites.list_sites():
-            item = QListWidgetItem(f"{site['name']}  —  {site['base_url']}")
+            item = QListWidgetItem(self._site_label(site))
             item.setData(Qt.ItemDataRole.UserRole, site["id"])
             self.video_sites_list.addItem(item)
 
@@ -778,8 +865,9 @@ class SettingsDialog(QDialog):
         # search pattern is worked out in anime_sites, not typed here.
         dialog = SiteForm(self, "Video Website")
         if dialog.result_data:
-            anime_sites.add_site(*dialog.result_data)
+            site = anime_sites.add_site(*dialog.result_data)
             self._refresh_video_sites()
+            self._probe_site_async("video", site["id"])
 
     def _edit_video_site(self):
         site_id = self._selected_video_site_id()
@@ -790,6 +878,15 @@ class SettingsDialog(QDialog):
         if dialog.result_data:
             anime_sites.update_site(site_id, *dialog.result_data)
             self._refresh_video_sites()
+            # Re-checked, not kept: the URL may be the thing that changed.
+            self._probe_site_async("video", site_id)
+
+    def _check_video_site(self):
+        site_id = self._selected_video_site_id()
+        if not site_id:
+            QMessageBox.information(self, "Video Websites", "Select a website first.")
+            return
+        self._probe_site_async("video", site_id)
 
     def _remove_video_site(self):
         site_id = self._selected_video_site_id()
@@ -870,9 +967,6 @@ class SettingsDialog(QDialog):
     def _disconnect_stremio(self):
         app_settings.clear_stremio_auth()
         self._refresh_stremio_account()
-
-    def _save_anilist_username(self):
-        app_settings.set_anilist_username(self.anilist_username_edit.text().strip())
 
     def _save_manga_music_url(self):
         app_settings.set_manga_music_url(self.manga_music_edit.text().strip())

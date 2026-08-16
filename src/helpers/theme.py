@@ -480,6 +480,10 @@ QPushButton#Icon {{
     font-weight: 700;
 }}
 QPushButton#Icon:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; border: 1px solid {ACCENT}; }}
+/* A button carrying a menu (the tracker's filter) gets Qt's own little
+   down-arrow drawn into it, beside the icon it already has. Nothing here
+   wants two glyphs, so it is removed rather than styled. */
+QPushButton::menu-indicator {{ image: none; width: 0px; height: 0px; }}
 
 QPushButton#Flat {{
     background: transparent;

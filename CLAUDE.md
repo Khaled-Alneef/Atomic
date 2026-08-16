@@ -54,6 +54,7 @@ back - one answer, not a transcript. Everything else is an agent in
 
 | Role | Agent | Owns |
 |---|---|---|
+| Architect | `architect` | What gets built next and in what order - writes `docs/ROADMAP.md`, implements nothing |
 | UI Engineer | `ui-engineer` | Anything visible - pages, cards, dialogs, sidebar, theme, layout, animation, DPI |
 | Integrations Engineer | `integrations-engineer` | AniList, TVMaze, MangaDex, Stremio, reading/anime sites, background threading |
 | Test Engineer | `test-engineer` | Proving a change works - harnesses, measurement, reading code out of the exe |
@@ -61,9 +62,18 @@ back - one answer, not a transcript. Everything else is an agent in
 
 Each agent's own file carries only what's specific to it; domain
 conventions and hard-won traps live in `.claude/rules/` (`ui.md`,
-`integrations.md`, `testing.md`) and get read on demand, not carried in
-every context. Step-by-step procedures (build, test, release) live as
-Skills in `.claude/skills/`, loaded only when actually invoked.
+`integrations.md`, `testing.md`, `planning.md`) and get read on demand,
+not carried in every context. Step-by-step procedures (build, test,
+release, roadmap) live as Skills in `.claude/skills/`, loaded only when
+actually invoked.
+
+`docs/ROADMAP.md` is what the Architect maintains and what the rest
+work from: it names the owner, the files, and the "done when" for each
+item, so picking up a task doesn't start with rediscovering it. Whoever
+lands an item marks it done in the same commit - a plan nobody updates
+stops being one. **The Architect is dispatched only when the user asks
+for planning**; otherwise the roadmap is read, not rewritten, and a
+diagnosed bug goes straight to its owner rather than through a plan.
 
 **The Manager does the work itself by default.** Every task given -
 implementation, investigation, fixes, pushes - is the Manager's to
@@ -120,6 +130,13 @@ measured; match that. Commit messages: sentence-case summary line, then
 a body explaining what was wrong and what was measured - not a file
 list. One commit per change on `development`; the executable is only
 committed on `main`, at a release.
+
+**Never edit a source file through PowerShell's `Get-Content`/
+`Set-Content`.** It reads in the system codepage and writes UTF-8, so
+every non-ASCII character in the file is silently mangled - `—` became
+`â€”` and `⟳` became `âŸ³` across two files, and it reached the user's
+screen. Use the Edit/Write tools, or Python with an explicit
+`encoding="utf-8"`.
 
 Measure rather than assert. Things here look correct and aren't - a
 toast positioned with `mapToGlobal` on mixed-DPI displays, a build

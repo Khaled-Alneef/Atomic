@@ -38,6 +38,26 @@ first-party login token, not a key, and is the one accepted exception).
   whether to look again (12h TTL, or immediately once the stored
   release time has passed). A normal page visit fires no requests at
   all.
+- **Read bodies through `net.read_text`/`net.read_bytes`, never
+  `resp.read()`.** `urlopen(timeout=)` bounds each socket operation, not
+  the transfer: a host sending one byte a second resets that timer
+  forever and the read never returns. `helpers/net.py` is the single
+  implementation (size cap + wall-clock deadline) - do not copy it into
+  a new module, which is exactly how five files were missed the first
+  time. Compute the deadline *after* any throttle sleep.
+- **Bound a chain, not just its steps.** Three engines at 6s each is not
+  a 6s bound. `anime_sites.search_site`/`resolve_page_url` take a
+  `deadline` and give each request `min(timeout, remaining)`
+  (`_step_timeout`), giving up below 1s rather than opening a connection
+  that cannot finish. Budget is 2x the per-request timeout: less would
+  mean one dead engine ahead of the right one turns a real hit into a
+  saved "no page found".
+- **Work fired by typing goes to `lookup_pool.submit_latest`, not
+  `submit`.** Every debounced keystroke but the last is stale before it
+  answers; `submit_latest` replaces a queued job under the same key and
+  runs one at a time. Not the shared queue - that is drained by
+  page-load backfill, and a lookup the user is watching would wait
+  behind all of it.
 - **Cap concurrency - never one thread per entry.** `lookup_pool.py` is
   a shared 4-worker queue used by every per-entry background lookup in
   `tracker.py`. Shipped bug: unbounded per-entry threads on page load
@@ -65,22 +85,98 @@ Don't loosen these to raise the hit rate.
 Respect throttles: MangaDex is spaced ~0.35s between requests and
 retried once, since the tracker fires one lookup per entry at once.
 
-Some services can't be scraped at all - Crunchyroll (JS-rendered search,
-content API 401s without OAuth) and Netflix (search behind a sign-in).
+**Watch progress comes from Stremio and nowhere else.** This is settled;
+do not add a second source without a way to tell which one is right.
+Every alternative was tried and removed in turn - an authenticated
+Crunchyroll client (twice), a pasted Crunchyroll token, AniList by
+username, and MAL-Sync feeding AniList. The failure they shared: a
+source that is silently wrong is worse than no source, and with two
+sources there is no way to know which is which. A card once showed
+episode 7 for a show its owner had watched two episodes of.
+
+`anilist.py` keeps only the airing schedule and streaming-link
+resolution. It has no progress functions; that is deliberate.
+
+**Reading Crunchyroll directly was built, shipped, and removed. Do not
+rebuild it.** Three measured dead ends, in the order they were hit:
+
+1. **Email/password cannot work.** Minting a token needs a client
+   credential Crunchyroll issues to no third party, and the published
+   one answers `auth.obtain_access_token.client_inactive` on both
+   `www.crunchyroll.com` and `beta-api.crunchyroll.com`.
+2. **A pasted browser token works but expires inside an hour**, so an
+   account that looked connected quietly stopped answering. (For the
+   record, since it is not guessable: the token is in the `token`
+   request's *response* - that request's own headers carry `Basic`, not
+   `Bearer`, and `Bearer` appears only on `content/v2` requests.)
+3. It is against Crunchyroll's ToS, and it broke twice in one day.
+
+Revisit only if Crunchyroll publishes an actual API.
+
+Some services can't be *scraped* at all - Crunchyroll (JS-rendered
+search, content API 401s without OAuth) and Netflix (search behind a
+sign-in).
 Both resolve via AniList's `externalLinks` instead, which needs no auth
 on either service: `anime_sites._STREAMING_SITES` is the table, and
 adding another such service is a row there, not new code. An
-authenticated Crunchyroll client (for progress sync) was researched and
-rejected: dead password-login flow, ToS-prohibited scraping of a paid
-service, and redundant with what `anilist.py` already covers. Don't
-rebuild that without a real reason to revisit it.
+authenticated Crunchyroll client was tried twice and removed both times
+(see above); AniList, kept current by MAL-Sync, is what answers instead.
 
-**AniList rate-limits hard, and fails soft into silence.** Sustained
-querying gets the whole network a `403` on every POST (not a 429),
-which every lookup here swallows and reports as "no result" - so a
-block looks exactly like "this title has no link". Measured lasting
-over an hour. When a previously working AniList lookup starts returning
-nothing, check for the 403 before believing the data changed.
+**AniList files each season as its own work; this app's cards do not.**
+`fetch_season_progress` finds a franchise's seasons, prefers the season
+number written in the title over release order, and reports the furthest
+one actually started - so "One-Punch Man" reads S02E05 rather than
+sitting at E12 forever. Two traps already paid for, both measured live:
+a 1-episode short (*Go! Saitama*) carried the franchise name **only as a
+synonym** and took season 3's slot, which is why matching uses the
+entry's own titles and never its synonyms; and a cour split
+("Season 3 Part 2") is still season 3, which is why `_SEASON_NUMBER_RE`
+deliberately does not match "Part".
+
+**AniList rate-limits hard, and used to fail soft into silence.**
+Sustained querying gets the whole network a `403` on every POST (not a
+429). Measured lasting over an hour. `_post` now raises
+`anilist.RateLimited` for 403/429 and `fetch_watch_progress` lets it
+propagate - the schedule lookups still fail soft on purpose - so the
+tracker can say so instead of reporting "not on your list".
+`tracker.REASON_ANILIST_RATE_LIMITED` on the `resolved` signal is the
+mechanism; extend that `reason` field rather than inventing another.
+When a previously working AniList lookup starts returning nothing, check
+for the 403 before believing the data changed.
+
+**Crunchyroll ids come from Wikidata too, property P11330**
+("Crunchyroll series ID" - not P4110, which Wikidata deprecates). Asked
+before AniList, same shape as Netflix; coverage measured at 4 of 6 real
+titles, the rest fall through to AniList. **Not probed before saving,
+unlike Netflix: Crunchyroll answers 200 to a bogus id** (measured), so a
+probe proves only that the site is up - the strict Wikidata title match
+is the whole safeguard, and a free-text P11330 value is rejected by
+shape first.
+
+**Ask Wikidata with the full title only - never a shortened variant.**
+`_query_variants`' subtitle-stripped head exists for *site* searches
+that index romaji; a knowledge base's labels are canonical titles, so
+the short form matches the **parent franchise**. Measured: "Bleach:
+Thousand-Year Blood War" has no id of its own, so asking for "Bleach"
+scored the 2004 series at 1.00 and returned that show's Crunchyroll and
+Netflix pages, saved onto the entry permanently. Frieren resolves on its
+full title alone, so the variant buys nothing even where it looked
+useful.
+
+**Wikidata's streaming-id coverage has a cliff, and current seasonal
+anime is on the wrong side of it.** Measured over the owner's real
+tracked titles: **0 of 3** carry a Crunchyroll (P11330), Netflix
+(P1874) or Prime (P8055/P14440) id, though all three exist as entities
+with exact label matches. Headline and older titles carry them; the
+current season does not. So the Wikidata path is a genuine fallback, not
+a replacement for AniList - and **Amazon Prime was measured and rejected
+on exactly this** (roadmap #14). Don't propose a new streaming service
+without measuring coverage over real entries first.
+
+**Watch progress is not a Wikidata problem.** It is personal history;
+only a list service the user keeps can answer it. AniList is the only
+one wired up. Kitsu's public API answers keyless (candidate, roadmap
+#17); MyAnimeList v2 403s without a client id.
 
 **Netflix ids come from Wikidata (`wikidata.py`, property P1874), not
 AniList.** Keyless and public, two requests per lookup, and it answered

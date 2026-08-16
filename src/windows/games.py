@@ -1,9 +1,9 @@
 """Games page: a small local launcher. Add a game's executable/shortcut
 once (its icon is picked up automatically), then launch it with one click.
 Shown as a poster-style grid, same as Anime/Reading/Series - right-click a
-card for Edit/Move Up/Move Down/Delete, sort by name/date/last played, or
-reorder by dragging a card onto the slot you want it in (which switches
-the sort to Custom Order as the drag begins).
+card for Edit/Delete, sort by name/date/last played, or reorder by
+dragging a card onto the slot you want it in (which switches the sort to
+Custom Order as the drag begins).
 """
 
 import subprocess
@@ -84,8 +84,8 @@ class GamesPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        hint = QLabel("(drag a game to reorder, or right-click it for Move Up/Down)", objectName="Muted")
-        top_row.addWidget(hint)
+        # No drag hint here any more: it named a right-click Move Up/Down
+        # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
         layout.addLayout(top_row)
 
@@ -219,9 +219,8 @@ class GamesPage(GlassPage):
         menu = QMenu(self)
         menu.addAction("Launch", lambda: self._launch(game))
         menu.addAction("Edit", lambda: self._edit(game))
-        if self.sort_box.currentText() == "Custom Order":
-            menu.addAction("Move Up", lambda: self._move(game, -1))
-            menu.addAction("Move Down", lambda: self._move(game, 1))
+        # No Move Up/Move Down: dragging a card reorders it on every page,
+        # and these only appeared under one sort mode anyway.
         menu.addAction("Delete", lambda: self._remove(game))
         menu.exec(event.globalPosition().toPoint())
 
@@ -291,18 +290,6 @@ class GamesPage(GlassPage):
         })
         self._refresh_grid()
 
-    def _move(self, game, delta):
-        if self.sort_box.currentText() != "Custom Order":
-            QMessageBox.information(self, "Games", "Switch Sort to 'Custom Order' to reorder manually.")
-            return
-
-        def apply_change(games):
-            idx = self._index_of(games, game)
-            new_idx = idx + delta if idx is not None else None
-            if new_idx is not None and 0 <= new_idx < len(games):
-                games[idx], games[new_idx] = games[new_idx], games[idx]
-
-        self._mutate(apply_change)
 
     def _remove(self, game):
         if QMessageBox.question(self, "Remove Game", f"Remove '{game['name']}' from the list?") != QMessageBox.StandardButton.Yes:

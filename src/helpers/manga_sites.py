@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import storage
+from . import net, storage
 
 SITES_FILE = "manga_sites.json"
 
@@ -76,6 +76,12 @@ def update_site(site_id: str, name: str, base_url: str):
     storage.save(SITES_FILE, sites)
 
 
+def record_resolution(site_id: str, resolves: str):
+    """Remember what probe_site found, on the site itself. update_entry
+    rather than writing the whole list back - see .claude/rules/ui.md."""
+    storage.update_entry(SITES_FILE, site_id, {"resolves": resolves})
+
+
 def remove_site(site_id: str):
     sites = [s for s in _load() if s["id"] != site_id]
     storage.save(SITES_FILE, sites)
@@ -98,8 +104,16 @@ _OG_IMAGE_RE = re.compile(
 # over og:image, which WordPress crops to a wide 1200x630 social-share
 # shape (fitting that into the app's portrait poster boxes zooms in on the
 # middle of the image instead of showing the actual cover).
+# The {0,2000} rather than a bare `.*?` is the guard anime_sites already
+# carries (see _A4U_TITLE_LINK_RE): a lazy `.*?` hunting for an `<img>`
+# that isn't there re-scans to the end of the page one character at a
+# time, per `summary_image` on it - and the regex engine holds the GIL
+# while it does, so the whole app freezes, not just this lookup. Measured
+# at 32.5s on a 0.7MB page in the anime_sites case; Windows offers to
+# kill a window unresponsive for ~30s. The wrapper markup between the two
+# is a few hundred characters on every real Madara page.
 _MADARA_COVER_RE = re.compile(
-    r'class=["\']summary_image["\'][^>]*>.*?<img[^>]+src=["\']([^"\']+)["\']',
+    r'class=["\']summary_image["\'][^>]*>.{0,2000}?<img[^>]+src=["\']([^"\']+)["\']',
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -180,8 +194,9 @@ def _post_json(url: str, fields: dict, timeout: int):
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
+    deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return json.loads(net.read_text(resp, deadline))
 
 
 def _get(url: str, timeout: int, extra_headers: dict = None) -> str:
@@ -190,8 +205,9 @@ def _get(url: str, timeout: int, extra_headers: dict = None) -> str:
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
         **(extra_headers or {}),
     })
+    deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8")
+        return net.read_text(resp, deadline)
 
 
 def _search_madara(base_url: str, query: str, timeout: int) -> list:
@@ -249,7 +265,12 @@ def _search_v2_api(base_url: str, query: str, timeout: int) -> list:
     return results
 
 
-_AJAX_SEARCH_CARD_RE = re.compile(r'<a\s+href="(?P<url>[^"]+)"[^>]*>(?P<body>.*?)</a>', re.DOTALL)
+# Anchored with match(), never search()/finditer() - see _ajax_search_cards
+# for why, and for the {0,2000} on the body.
+# \Z, not $: $ also matches just before a trailing newline, which would
+# silently drop the last character of a card body that ends in one.
+_AJAX_SEARCH_CARD_RE = re.compile(r'<a\s+href="(?P<url>[^"]+)"[^>]*>(?P<body>.{0,2000}?)\Z',
+                                  re.DOTALL)
 _AJAX_SEARCH_IMG_RE = re.compile(r'<img[^>]*src="(?P<img>[^"]+)"[^>]*alt="(?P<title>[^"]+)"')
 _AJAX_SEARCH_CHAPTER_RE = re.compile(r'([0-9]+(?:\.[0-9]+)?)\s*(?:فصل|chapters?)', re.IGNORECASE)
 
@@ -257,6 +278,35 @@ _AJAX_SEARCH_CHAPTER_RE = re.compile(r'([0-9]+(?:\.[0-9]+)?)\s*(?:فصل|chapter
 # the plain "<name>" at the same path is the real cover, 5-10x the pixel
 # dimensions (verified against several live results).
 _TEAMX_THUMBNAIL_PREFIX_RE = re.compile(r'/thumbnail_(?=[^/]+$)')
+
+
+def _ajax_search_cards(body: str):
+    """Each <a href="...">...</a> result card in an HTML fragment.
+
+    Split on the closing tag and match each piece from its last opening
+    anchor, rather than letting one regex hunt for pairs across the whole
+    document. A lazy `.*?` looking for a `</a>` that isn't there re-scans
+    to the end once per anchor on the page, and Python's regex engine
+    holds the GIL while it does - so a malformed page freezes the entire
+    app, not just this lookup. Measured on a 1MB fragment with 20k
+    unclosed anchors: 224ms even with the body capped, against 3ms this
+    way; uncapped it is the 32.5s class of freeze anime_sites already had
+    to fix. Windows offers to kill a window unresponsive for ~30s.
+
+    split() and rfind() are linear and run in C. The cap on the body is
+    then belt-and-braces: one malformed piece can no longer cost more
+    than one bounded match.
+
+    Innermost anchor rather than outermost, which is what changes if a
+    card ever nests one <a> inside another: cards from these endpoints
+    don't, and nested anchors aren't valid HTML anyway."""
+    for piece in body.split("</a>")[:-1]:
+        start = piece.rfind("<a ")
+        if start == -1:
+            continue
+        match = _AJAX_SEARCH_CARD_RE.match(piece, start)
+        if match:
+            yield match
 
 
 def _search_ajax_html(base_url: str, query: str, timeout: int) -> list:
@@ -267,7 +317,7 @@ def _search_ajax_html(base_url: str, query: str, timeout: int) -> list:
     body = _get(f"{base_url}ajax/search?keyword={urllib.parse.quote(query)}", timeout,
                 extra_headers={"X-Requested-With": "XMLHttpRequest"})
     results = []
-    for card in _AJAX_SEARCH_CARD_RE.finditer(body):
+    for card in _ajax_search_cards(body):
         img_match = _AJAX_SEARCH_IMG_RE.search(card.group("body"))
         if not img_match:
             continue
@@ -285,22 +335,67 @@ def _search_ajax_html(base_url: str, query: str, timeout: int) -> list:
 _ENGINES = (_search_madara, _search_ajaxy, _search_v2_api, _search_ajax_html)
 
 
-def search_site(site: dict, query: str, timeout: int = 6) -> list:
+def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list:
     """Try each known engine against one site, stopping at the first that
     returns anything. Returns [] if the site matches no known shape, has
-    no matches, or is unreachable."""
+    no matches, or is unreachable.
+
+    `deadline` bounds the whole sequence rather than each engine in it -
+    four engines at 6s each is 24s against a dead host. Same shape and
+    the same reasoning as anime_sites.search_site; None keeps the old
+    per-engine behaviour for existing callers."""
     query = (query or "").strip()
     base_url = site.get("base_url")
     if not query or not base_url:
         return []
     for engine in _ENGINES:
+        step = net.step_timeout(deadline, timeout)
+        if step is None:
+            break
         try:
-            results = engine(base_url, query, timeout)
+            results = engine(base_url, query, step)
         except Exception:
             results = []
         if results:
             return results
     return []
+
+
+# What a site is probed with. A title essentially every catalogue
+# carries, so "no results" means the engine didn't match the site's
+# shape rather than that the site simply doesn't have this one.
+PROBE_TITLE = "One Piece"
+
+RESOLVES_ENGINE = "engine"
+RESOLVES_SEARCH_ONLY = "search-only"
+RESOLVES_UNREACHABLE = "unreachable"
+RESOLVES_UNKNOWN = "unknown"
+
+
+def probe_site(site: dict, timeout: int = 6) -> str:
+    """Whether this site will resolve to per-title pages, or only ever
+    fall back to a search link.
+
+    Asked once when a site is added, because until now the only way to
+    find out was to add it, use it, and notice which kind of link it
+    produced - days later, on an entry that quietly points at a search
+    page."""
+    base_url = site.get("base_url")
+    if not base_url:
+        return RESOLVES_UNREACHABLE
+    deadline = net.deadline_in(timeout * 3)
+    if search_site(site, PROBE_TITLE, timeout, deadline=deadline):
+        return RESOLVES_ENGINE
+    step = net.step_timeout(deadline, timeout)
+    if step is None:
+        return RESOLVES_UNKNOWN
+    try:
+        _get(base_url, step)
+        # Answers, but no engine here recognises its search: usable, and
+        # every link will be a search link.
+        return RESOLVES_SEARCH_ONLY
+    except Exception:
+        return RESOLVES_UNREACHABLE
 
 
 def search_all(query: str, timeout: int = 6) -> list:
