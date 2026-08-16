@@ -59,18 +59,35 @@ class _SiteProbeSignals(QObject):
     done = Signal(str, str)  # which list ("reading"/"video"), site name
 
 
-# What probe_site's verdicts mean to someone looking at the list. The
-# distinction that matters: a site with a known engine opens straight to
-# a title's own page, everything else only ever opens that site's search.
+# What probe_site's verdicts mean to someone looking at the list, said
+# as what happens when they open an entry on that site. The previous
+# wording described the resolver instead ("opens title pages", "search
+# links only - no title pages") and the owner, who uses this daily, had
+# to ask what it meant - so each line is now a plain sentence.
+#
+# engine/streaming and generic all land on the entry's own page, but
+# generic gets there by reading the site's own search results, which is
+# the first thing to break when a site is redesigned. Kept as separate
+# lines on purpose: collapsing them would hide the fragile case.
 _RESOLVES_LABELS = {
-    "engine": "opens title pages",
-    "generic": "opens title pages (read off its search page)",
-    "streaming": "opens title pages",
-    "search-only": "search links only - no title pages",
-    "unreachable": "didn't answer when checked",
-    "unknown": "couldn't be checked",
+    "engine": "opens each entry's own page",
+    "generic": "opens each entry's own page, if its search still works",
+    "streaming": "opens each entry's own page",
+    "search-only": "only opens its search - you pick the entry yourself",
+    "unreachable": "the site didn't answer when checked",
+    "unknown": "the check didn't finish - try Check again",
     "checking": "checking...",
 }
+
+# Site ids whose verdict was actually measured during this run of the
+# app. A verdict is a measurement of a remote site at one moment, not a
+# property of the site, and nothing on the record says when it was taken
+# - so a check run weeks ago read as current forever. The stored
+# "resolves" field is still written (probe_site is unchanged) and still
+# read; it is just not shown until this run measured it again. Module
+# level rather than on SettingsDialog because the dialog is rebuilt on
+# every open and the lifetime wanted is the process, not the dialog.
+_CHECKED_THIS_RUN = set()
 
 
 class _LauncherImportSignals(QObject):
@@ -420,10 +437,11 @@ class SettingsDialog(QDialog):
             "click, picked per-entry (Add/Edit Entry > Video Website) the "
             "same way Reading Websites work for Manga. \"Stremio\" is "
             "always available and gets a direct deep link straight to the "
-            "title; Crunchyroll and anything else you add here open a "
-            "search on that site instead, since their search isn't "
-            "something this app can query safely (behind bot protection "
-            "this app won't try to bypass). Either way, suggestions/"
+            "title; Crunchyroll and Netflix open the title's own page too, "
+            "found through public databases rather than their own search, "
+            "which this app can't query safely (bot protection it won't "
+            "try to bypass). Anything else you add here depends on its own "
+            "search - use Check to see what it opens. Either way, suggestions/"
             "covers while adding an entry still come from Stremio's "
             "public metadata, and the auto-filled Last Season/Episode "
             "below comes from your connected Stremio account further "
@@ -446,8 +464,12 @@ class SettingsDialog(QDialog):
         edit_video_site_btn.clicked.connect(self._edit_video_site)
         video_sites_btn_row.addWidget(edit_video_site_btn)
         check_video_site_btn = QPushButton("Check")
-        check_video_site_btn.setToolTip("Search this site for a known title to see "
-                                        "whether it opens title pages or only search links")
+        check_video_site_btn.setToolTip(
+            "Searches this site for a title it should have, then says what "
+            "you'd get by opening an entry there: the entry's own page, or "
+            "only this site's search results to pick from. A site whose "
+            "pages are found through its own search works, but is the first "
+            "to break when the site changes.")
         check_video_site_btn.clicked.connect(self._check_video_site)
         video_sites_btn_row.addWidget(check_video_site_btn)
         remove_video_site_btn = QPushButton("Remove", objectName="Danger")
@@ -538,8 +560,12 @@ class SettingsDialog(QDialog):
         edit_site_btn.clicked.connect(self._edit_site)
         sites_btn_row.addWidget(edit_site_btn)
         check_site_btn = QPushButton("Check")
-        check_site_btn.setToolTip("Search this site for a known title to see "
-                                  "whether it opens title pages or only search links")
+        check_site_btn.setToolTip(
+            "Searches this site for a title it should have, then says what "
+            "you'd get by opening an entry there: the entry's own page, or "
+            "only this site's search results to pick from. A site whose "
+            "pages are found through its own search works, but is the first "
+            "to break when the site changes.")
         check_site_btn.clicked.connect(self._check_site)
         sites_btn_row.addWidget(check_site_btn)
         remove_site_btn = QPushButton("Remove", objectName="Danger")
@@ -756,9 +782,18 @@ class SettingsDialog(QDialog):
         """One row of a websites list, with what the site can actually
         do. Without this the only way to learn that a site never resolves
         to title pages was to use it for a while and notice that every
-        entry opened a search page."""
+        entry opened a search page.
+
+        A verdict shows only while it is this run's own measurement (see
+        _CHECKED_THIS_RUN) - a stale one is a claim the app cannot stand
+        behind after a restart."""
         label = f"{site['name']}  —  {site['base_url']}"
-        state = "checking" if site["id"] in self._probing_sites else site.get("resolves")
+        if site["id"] in self._probing_sites:
+            state = "checking"
+        elif site["id"] in _CHECKED_THIS_RUN:
+            state = site.get("resolves")
+        else:
+            state = None
         note = _RESOLVES_LABELS.get(state)
         return f"{label}   ·   {note}" if note else label
 
@@ -788,7 +823,14 @@ class SettingsDialog(QDialog):
         try:
             module.record_resolution(site_id, verdict)
         except Exception:
+            # Only a verdict that reached the record is shown - if the
+            # write failed, what is on disk is some older run's answer,
+            # which is exactly what is being kept off the screen. set.add
+            # off the UI thread is fine (atomic); the redraw itself still
+            # goes through the signal below.
             pass
+        else:
+            _CHECKED_THIS_RUN.add(site_id)
         self._site_probe_signals.done.emit(which, site_id)
 
     def _on_site_probed(self, which, site_id):

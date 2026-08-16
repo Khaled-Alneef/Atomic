@@ -467,6 +467,17 @@ label because they both open title pages; don't. `generic` is the
 fragile path (it scrapes the site's own search results) and losing that
 distinction would hide exactly the case that breaks first. Say it in
 plain words instead.
+**Landed** (1.4.4) - "opens each entry's own page" / "...if its search
+still works" / "only opens its search - you pick the entry yourself" /
+"the site didn't answer when checked" / "the check didn't finish - try
+Check again". `generic` kept its own line, with the measured reason
+stated rather than hidden. Both Check tooltips carry the longer
+explanation. Measured in a real dialog seeded with one site per verdict:
+every realistic row fits at the dialog's default 920px without eliding
+(longest 603px). Two things left alone on purpose: at the dialog's
+*minimum* width most rows elide, which predates this and needs a layout
+change, not a wording one; and `probe_site`'s verdicts themselves are
+untouched.
 
 ### 28. Clear site check verdicts when the app restarts
 
@@ -496,6 +507,18 @@ temp `DATA_DIR` copy, never real user data.
 **Risk** - low, and deliberately kept low: do not take this as licence
 to change what `probe_site` writes or how sites resolve. Per the owner's
 standing note, this is a display-lifetime change, not a backend one.
+**Landed** (1.4.4) - a module-level `_CHECKED_THIS_RUN` set of site ids,
+consulted by the one reader (`_site_label`). Nothing on disk is cleared
+and `record_resolution` still writes exactly as before; a verdict simply
+isn't shown unless it was measured this run. Module level rather than on
+the dialog, because the dialog is rebuilt on every open and the lifetime
+wanted is the process. A site whose `record_resolution` write *fails*
+stays hidden too - what's on disk is then an older run's answer, which
+is the thing being hidden in the first place. Verified against a temp
+copy: stored verdicts survive on disk while showing nothing, appear
+after a real probe, and disappear again when the run resets. The stale
+Video Websites hint went with it - Crunchyroll and Netflix open title
+pages via public databases, and it said they only opened a search.
 
 ### 29. Let the "what's new" dialog scroll
 
