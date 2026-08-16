@@ -53,6 +53,8 @@ clever one, and leave a working path working.
 | 10 | Show a Stremio connection that has gone bad, in Settings itself | ui-engineer | contained | todo |
 | 27 | Say what a site's check verdict actually means | ui-engineer | contained | todo - **owner-raised** |
 | 28 | Clear site check verdicts when the app restarts | ui-engineer | contained | todo - **owner-raised** |
+| 29 | Let the "what's new" dialog scroll | ui-engineer | contained | todo - found landing #4 |
+| 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | todo - found landing #2 |
 | 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | todo |
 | 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | todo |
 | 13 | Check for updates in the background, not only on demand | ui-engineer | contained | todo |
@@ -128,6 +130,24 @@ there isn't one and the project has explicitly rejected adding one.
 that question is closed (see *Deliberately not doing*). The fix is
 purely making one specific failure mode of the one existing source
 speak instead of going quiet.
+**Landed** (1.4.3) - and the item's premise was wrong in a way worth
+recording: `api.strem.io` does **not** raise or answer 401 on a dead
+key. It answers **HTTP 200 with `{"error": {...}}`** (confirmed against
+Stremio's own `stremio-core` `APIResult::Ok|Err` and their JS client,
+which tests `resp.status !== 200` and `body.error` separately), so the
+old code never raised at all - it fell through to "no items" and
+returned `None`. A fix that only converted 401/403, as written above,
+would have shipped and never fired once. Both shapes are handled;
+`stremio.AuthFailed` + `tracker.REASON_STREMIO_AUTH_FAILED`. Auth is
+matched on message keywords because Stremio publishes no error-code
+list and neither of their own clients branches on one; an unrecognised
+error still fails soft, since a false "your sign-in is broken" is the
+same bug pointing the other way. The exact message string is inferred,
+not measured - a real key could not be revoked to see it. Scope grew
+by one deliberate step: the "done when" covered only the right-click
+path, but the failure actually happens on the silent arrival sync and
+the page-load backfill, which had no dialog and no toast at all, so
+those now raise one toast per app run.
 
 ### 2. Stop Apps/Websites saving a stale whole list on every change
 
@@ -171,6 +191,14 @@ and Websites both since they share this class.
 burned by once; a partial fix (three of four sites migrated) leaves the
 page exactly as exploitable as before on the missed one, so treat it as
 one item covering all four sites, not four small ones.
+**Landed** (1.4.2) - all four sites: `storage.update_entry` for
+`last_used` and for an edit's own fields, `games.py`'s reload-then-apply
+`_mutate` for add and remove. The `__init__` write now fires only when
+the migration actually changed something, instead of rewriting the whole
+list on every visit to Apps or Websites. Harness drives all four paths
+after changing the file from outside the page's snapshot: 22 checks
+pass, and 7 per page fail against the pre-change file - so it measures
+the defect rather than passing either way.
 
 ### 3. Tie the released exe to the source tree it was built from
 
@@ -241,6 +269,11 @@ upgrade (stub `take_updated_from`/`get_last_seen_version` to return
 **Risk** - low; this is a data-only fix. The process gap that let it
 happen in the first place is item #5, sequenced right after this one on
 purpose.
+**Landed** (1.4.2) - nine notes, written from VDD-1.4 §5 into the
+dialog's own voice. `notes_between("1.3", "1.4.1")` returns them (the
+live three-part version still matches the "1.4" key), ordering across
+1.1-1.4 intact, and the dialog renders end to end for a simulated
+1.3 -> 1.4 upgrade. Turned up item #29 on the way.
 
 ### 5. Make a future release unable to ship without its notes
 
@@ -463,6 +496,52 @@ temp `DATA_DIR` copy, never real user data.
 **Risk** - low, and deliberately kept low: do not take this as licence
 to change what `probe_site` writes or how sites resolve. Per the owner's
 standing note, this is a display-lifetime change, not a backend one.
+
+### 29. Let the "what's new" dialog scroll
+
+**What** - Found while landing #4: `UpdateSummaryDialog` has no scroll
+area, so its height is however tall its notes make it. 1.4's nine notes
+measure **714px**. Fine on the owner's display; on a laptop screen, or
+at a future release with more notes, the bottom simply runs off the
+desktop with no way to reach it.
+**Why now** - #4 just tripled the length of the longest entry the dialog
+has ever shown, so the gap moved from theoretical to one release away
+from biting. Cheap now, and it is the kind of thing only noticed on the
+machine where it breaks.
+**Owner** - ui-engineer
+**Where** - `src/helpers/whats_new.py`, `UpdateSummaryDialog`. Wrap the
+notes in `widgets.scroll_area` (the app's own helper, already used by
+every page) with a maximum dialog height, rather than capping the number
+of notes shown.
+**Done when** - a dialog built from a deliberately long notes list stays
+within the available screen height and scrolls to reach the rest;
+1.4's nine notes still show without a scrollbar appearing where none is
+needed.
+**Risk** - low. Don't solve it by truncating the notes - the whole point
+of the dialog is that the user sees what changed.
+
+### 30. Stop a two-line card name being clipped on Apps/Websites
+
+**What** - Found while landing #2, and confirmed pre-existing (it
+reproduces on the untouched build path with a stock file): a card whose
+name wraps to two lines has its second line clipped, taking the "Added
+Just Now" line with it. `QGridLayout` sizes the row before the
+word-wrapped label reports its height-for-width.
+**Why now** - It is a visible defect on two shipped pages, and it was
+measured rather than guessed - a screenshot on the pre-change build
+shows it. Not urgent (long names are uncommon), but it costs nothing to
+carry.
+**Owner** - ui-engineer
+**Where** - `src/windows/link_grid.py`'s card construction and the grid
+in `_refresh_grid`. The usual causes are a fixed card height, or a
+wrapped `QLabel` inside a layout that never gets told its height depends
+on its width.
+**Done when** - a card with a name long enough to wrap shows both lines
+and its "Added"/"Last used" line, at the same card width as today, on
+Apps and Websites; single-line cards are unchanged.
+**Risk** - low, but it is a layout change on a shipped page: check a
+mixed grid (short and long names together) rather than one card in
+isolation, or rows end up ragged.
 
 ### 11. Remember a tracker page's search/filter across a revisit, for the session
 

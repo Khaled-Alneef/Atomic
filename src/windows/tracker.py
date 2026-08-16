@@ -426,9 +426,25 @@ class _ProgressSyncSignals(QObject):
 SOURCE_STREMIO = "Stremio"
 SOURCE_MANUAL = "you"
 
-# The one thing that can stop a sync and that the user can fix - no
-# Stremio account connected. Everything else is a genuine no-match.
+# The two things that can stop a sync and that the user can fix - no
+# Stremio account connected, or one whose saved session Stremio no longer
+# accepts. Everything else is a genuine no-match.
 REASON_NO_STREMIO_ACCOUNT = "no_stremio_account"
+# A connected account that has stopped answering (stremio.AuthFailed).
+# Separate from the one above because the fix is different - reconnect,
+# not connect - and separate from a no-match because Stremio is the only
+# progress source there is: when the key dies, *nothing* syncs, and the
+# whole point of this code is that the app says that out loud rather than
+# reporting "not in your library" about every entry forever.
+REASON_STREMIO_AUTH_FAILED = "stremio_auth_failed"
+
+# Said once per app run, not once per page arrival. The arrival sync is
+# deliberately silent (see TrackerPage._auto_refresh), so this is the only
+# way the silent path can speak at all - but a dead key stays dead, and
+# walking between Anime and Series would otherwise repeat the same warning
+# every few seconds.
+_auth_warning_shown = False
+_STREMIO_AUTH_TOAST = "Stremio Sign-In Needs Refreshing - Reconnect In Settings"
 
 # Services whose watch history no app can read. Kept only to explain why
 # an entry on one of them never fills itself in; nothing tries to sync
@@ -512,6 +528,11 @@ class TrackerPage(GlassPage):
         self._refresh_pending = 0
         self._refresh_changed = False
         self._refresh_before = {}
+        # Set by any result in the current batch that came back
+        # REASON_STREMIO_AUTH_FAILED, read once when the batch finishes.
+        # A batch is one verdict, and one dead key fails all of it, so the
+        # message is said once rather than per entry.
+        self._stremio_auth_broken = False
 
         self._cover_signals = _CoverSignals()
         self._cover_signals.ready.connect(self._on_sharper_cover_ready)
@@ -719,6 +740,13 @@ class TrackerPage(GlassPage):
             return
         toast, self._refresh_toast = self._refresh_toast, None
         self._refresh_before = {}
+        if self._stremio_auth_broken:
+            # Outranks both ordinary verdicts: with the session rejected,
+            # no progress was read at all, so "There is No New Update" is
+            # true and useless - it is the sentence that hid this bug.
+            self._stremio_auth_broken = False
+            self._warn_stremio_auth_once(toast)
+            return
         finish_toast(toast, self, "Updated Successfully" if self._refresh_changed
                      else "There is No New Update")
 
@@ -1168,11 +1196,20 @@ class TrackerPage(GlassPage):
     def _not_found_message(self, reason: str) -> str:
         """What to say when a sync found no progress.
 
-        The one cause the user can act on is a Stremio account that was
+        The causes the user can act on are a Stremio account that was
         never connected - saying "not found" for that made the app look
         broken rather than unconfigured, which cost its owner a long
-        time before anyone worked it out."""
-        if REASON_NO_STREMIO_ACCOUNT in set((reason or "").split(",")):
+        time before anyone worked it out - and one that was connected and
+        has since been rejected, which reads identically on screen and is
+        worse, because it starts working and then stops."""
+        codes = set((reason or "").split(","))
+        if REASON_STREMIO_AUTH_FAILED in codes:
+            return ("Stremio rejected the saved sign-in, so it can't be asked "
+                    "what you've watched - this is not about this title. It "
+                    "happens after a password change or a \"log out "
+                    "everywhere\". Reconnect the account in Settings > "
+                    "Stremio Account and sync again.")
+        if REASON_NO_STREMIO_ACCOUNT in codes:
             return ("No Stremio account is connected, so there is nothing to "
                     "read your progress from. Connect one in Settings > "
                     "Stremio Account - it's the only service that publishes "
@@ -1250,6 +1287,14 @@ class TrackerPage(GlassPage):
             try:
                 result = stremio.fetch_watch_progress(imdb_id, auth_key)
                 source = SOURCE_STREMIO if result else ""
+            except stremio.AuthFailed:
+                # The saved key is dead, not the title missing. This used
+                # to land in the bare except below and read as "not in
+                # your library" - for every entry, indefinitely, because
+                # Stremio is the only source and nothing retries a wrong
+                # answer that never looked wrong.
+                reasons.append(REASON_STREMIO_AUTH_FAILED)
+                result = None
             except Exception:
                 result = None
         else:
@@ -1284,6 +1329,9 @@ class TrackerPage(GlassPage):
             if silent and (entry.get("progress"), entry.get("latest_available")) != before:
                 self._sync_changed = True
 
+        if silent and REASON_STREMIO_AUTH_FAILED in set((reason or "").split(",")):
+            self._stremio_auth_broken = True
+
         if not silent:
             if not found:
                 QMessageBox.information(self, "Sync Progress",
@@ -1304,7 +1352,31 @@ class TrackerPage(GlassPage):
             self._refresh_grid()
             changed, self._sync_changed = self._sync_changed, False
             run, self._sync_batch_run = self._sync_batch_run, 0
+            # A refresh has a toast of its own to say this through, and
+            # two toasts share one corner - so only the arrival sync,
+            # which has none, raises its own here.
+            if self._stremio_auth_broken and self._refresh_toast is None:
+                self._stremio_auth_broken = False
+                self._warn_stremio_auth_once()
             self._refresh_step_done(run, changed)
+
+    def _warn_stremio_auth_once(self, toast=None):
+        """Say that the saved Stremio session has stopped being accepted.
+
+        Given a live "Updating..." toast, it finishes into that one - the
+        refresh was asked for, so it answers every time and must not leave
+        the sticky toast up. On the silent arrival path there is nothing
+        to finish, so a fresh toast is raised, once per app run (see
+        _auth_warning_shown)."""
+        global _auth_warning_shown
+        if toast is not None:
+            _auth_warning_shown = True
+            finish_toast(toast, self, _STREMIO_AUTH_TOAST, 6000)
+            return
+        if _auth_warning_shown:
+            return
+        _auth_warning_shown = True
+        show_toast(self, _STREMIO_AUTH_TOAST, 6000)
 
     def _save_entries(self):
         """Write this page's entries back without discarding another
