@@ -27,13 +27,21 @@ Unchanged from VDD-1.2 §2.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 46,714,549 bytes. SHA-256 `b71b19a85f72a65cae9dbb6e3cff68aafe6c5b7b45ead5b70098deba54d1a94c` |
+| `Atomic.exe` | The application. 47,696,627 bytes. SHA-256 `9d228b0c25f1574362850243b4e1f5f2ff80e11b9dbd48f3dc17a93e4501c445` |
 | `src/` | Full Python source, 12,036 lines across 36 modules (10,774 across 34 at 1.3) |
 | `src/filter_icon.png` | The tracker filter button's icon, bundled into the executable |
 | `packaging/` | `build.py` and `Atomic.spec`, which produce the executable |
 | `docs/VDD-1.4.md` | This document |
 
 Build environment unchanged from VDD-1.1 §3.
+
+1.4 was re-cut after first being tagged, before anyone had it. The
+binary tagged initially was built before `src/filter_icon.png` was
+bundled — 173 archive entries against the 174 a build of this tree
+produces — and Home still headed its films-and-series row "Series"
+rather than "Movies & Series". The size and hash above are the re-cut
+binary's; the first ones described a build that was never the one
+committed.
 
 Sixteen development builds (1.3.1–1.3.14, plus two re-releases of the
 same numbers) stand between 1.3 and this release. Line counts here are

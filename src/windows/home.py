@@ -250,7 +250,7 @@ class HomePage(GlassPage):
         if series_recent:
             pos = nav_config.nav_position("series")
             sections.append((pos, self._build_section(
-                "Series", self._build_poster_grid(series_recent))))
+                "Movies & Series", self._build_poster_grid(series_recent))))
 
         recent_games = [] if "games" in hidden else self._recent_games()
         if recent_games:
