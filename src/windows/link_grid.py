@@ -131,8 +131,8 @@ class LinkGridPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        hint = QLabel("(drag a card to reorder, or right-click it for Move Up/Down)", objectName="Muted")
-        top_row.addWidget(hint)
+        # No drag hint here any more: it named a right-click Move Up/Down
+        # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
         panel_layout.addLayout(top_row)
 
