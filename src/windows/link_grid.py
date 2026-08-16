@@ -76,7 +76,7 @@ def _migrate_entry(entry):
 
 class LinkGridPage(GlassPage):
     """Base for a customizable icon+name grid of sites/apps. Subclasses
-    just set DATA_FILE/TITLE/SUBTITLE/DEFAULT_ENTRIES/TARGET_KIND.
+    just set DATA_FILE/TITLE/DEFAULT_ENTRIES/TARGET_KIND.
 
     TARGET_KIND fixes what every target on this page's entries is - "site"
     (a URL, opened in the browser) or "app" (an executable/shortcut,
@@ -87,7 +87,6 @@ class LinkGridPage(GlassPage):
 
     DATA_FILE = "links.json"
     TITLE = "Links"
-    SUBTITLE = ""
     DEFAULT_ENTRIES = []
     TARGET_KIND = "site"
 
@@ -110,12 +109,13 @@ class LinkGridPage(GlassPage):
         panel_layout.setContentsMargins(24, 20, 24, 24)
         panel_layout.setSpacing(14)
 
+        # Title only. The subtitle under it ("Sites you open all the time")
+        # described what the page obviously was, and no other page carries
+        # one - the mechanism goes with it rather than sitting unused.
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         title_box.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
-        if self.SUBTITLE:
-            title_box.addWidget(QLabel(self.SUBTITLE, objectName="PanelSubtitle"))
         header.addLayout(title_box)
         header.addStretch()
         add_btn = QPushButton("+", objectName="AccentIcon")
