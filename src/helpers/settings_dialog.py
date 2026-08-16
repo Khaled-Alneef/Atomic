@@ -1,12 +1,12 @@
-﻿"""Settings window: a category sidebar (mirroring the main app window's
+"""Settings window: a category sidebar (mirroring the main app window's
 own sidebar) on the left, the selected category's controls on the right.
 
 General: Windows-startup toggle (plus whether that sign-in launch opens
 full screen), and which sections show up in the main
 sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
-without losing their saved data). Anime & Series: the list of Video
-Websites Anime entries can be set to open on (Stremio is always
-available as a built-in option; Crunchyroll and any others are
+without losing their saved data). Watching: the list of Video
+Websites anime, film and series entries can be set to open on (Stremio is
+always available as a built-in option; Crunchyroll and any others are
 addable/editable, the same way Reading sites work) and the connected
 Stremio account used to pull in real watch progress. Reading: the list of manga/manhwa/manhua reading sites the
 Reading page can search and open to, plus an optional music/ambience URL.
@@ -38,7 +38,16 @@ from . import (
 )
 from .widgets import finish_toast, scroll_area, show_toast
 
-CATEGORIES = ["General", "Anime & Series", "Reading", "Games", "Data"]
+# "Watching", not "Anime & Series": that name predates films being tracked,
+# and the Video Websites and Stremio account on this page serve all three
+# media. The literal "Anime, Movies & Series" was measured against this
+# sidebar and does not fit - it needs 192px of the list's 182px and elides
+# to "Anime, Movies & Seri..." (Segoe UI 10.5 at 125% scaling; "Anime,
+# Films & Series" clears it by 3px, which is no margin at all on a
+# different font or scale factor). "Watching" needs 104px, cannot read as
+# excluding films, and pairs with "Reading" one row below - the two things
+# the tracker does.
+CATEGORIES = ["General", "Watching", "Reading", "Games", "Data"]
 
 # (display name, data file, predicate). A predicate of None means "clear
 # the whole file" (Series/Games/Apps/Websites each hold only their own
@@ -573,6 +582,9 @@ class SettingsDialog(QDialog):
             main_window.refresh_current_page()
 
     # ------------------------------------------------------------------
+    # The "Watching" category (see CATEGORIES) - the method keeps its
+    # older name because the page it builds is unchanged; what it holds
+    # always served films and series as well as anime.
     def _build_anime_page(self):
         page = QWidget()
         form = QVBoxLayout(page)
