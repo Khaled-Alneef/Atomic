@@ -18,12 +18,13 @@ import time
 import uuid
 import webbrowser
 
-from PyQt6.QtCore import QObject, Qt, QTimer
+from PyQt6.QtCore import QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
+    QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from helpers import (
@@ -37,10 +38,12 @@ from helpers.widgets import (
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
 
-_REORDER_HINT = "(drag a card to reorder, or right-click it for Move Up/Down)"
-# Dragging is off while a search or filter hides part of the grid - a drop
-# writes the order that is on screen, which isn't the whole order then.
-_SEARCHING_HINT = "(clear the search or filter to drag cards into a new order)"
+# No on-screen hint about dragging any more: it named a right-click
+# Move Up/Down that no longer exists, and every page is draggable, so the
+# line was explaining the ordinary case at the cost of a row of text on
+# every page. Dragging is still off while a search or filter hides part of
+# the grid (see _grid_is_narrowed) - a drop writes the order that is on
+# screen, which isn't the whole order then.
 
 # Manga/Manhwa/Manhua are just regional flavors of the same reading
 # medium - same statuses, same search/open behavior - so they're treated
@@ -119,6 +122,12 @@ SEARCH_PROVIDER_BY_TYPE = {**{t: "stremio" for t in VIDEO_TYPES},
 # Cinemeta keeps films in their own catalog, so a Movie searched against
 # the series catalog finds nothing at all.
 STREMIO_CATALOG_BY_TYPE = {"Anime": "series", "Series": "series", "Movie": "movie"}
+
+# Bundled with the exe by Atomic.spec's `datas` - a file that only exists
+# next to main.py in the source tree is absent from the frozen build (the
+# same trap app_icon.ico is commented for in the spec).
+FILTER_ICON = "filter_icon.png"
+FILTER_ICON_HEIGHT = 18
 
 POSTER_SIZE = (160, 216)
 GRID_COLS = 9
@@ -439,6 +448,24 @@ class _ScheduleSignals(QObject):
     resolved = Signal(str, object, object, int)
 
 
+class _StayOpenMenu(QMenu):
+    """A menu that stays open while its checkable items are ticked.
+
+    Ticking one filter used to close the whole menu, so choosing two
+    statuses meant opening it twice and the grid only ever changed after
+    the menu had vanished. Qt closes on mouse release; for a checkable
+    item this triggers the action itself - which is what redraws the grid,
+    so the change lands while the menu is still up - and returns before
+    the base class can dismiss it."""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isEnabled() and action.isCheckable():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class TrackerPage(GlassPage):
     """Base for the Anime/Manga/Series pages. Subclasses set
     DATA_FILE/ENTRY_TYPES/TITLE/TYPE_OPTIONS/PROGRESS_COLUMNS.
@@ -505,6 +532,9 @@ class TrackerPage(GlassPage):
         # as entries having gone missing. Empty means "everything".
         self._status_filter = set()
         self._type_filter = set()
+        # (action, kind, value) for every item in the filter menu, so the
+        # ticks can be re-read off the sets while the menu is still open.
+        self._filter_actions = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -535,8 +565,6 @@ class TrackerPage(GlassPage):
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
-        self.reorder_hint = QLabel(_REORDER_HINT, objectName="Muted")
-        top_row.addWidget(self.reorder_hint)
         top_row.addStretch()
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search titles...")
@@ -558,10 +586,26 @@ class TrackerPage(GlassPage):
         # against the button itself and there is no mapToGlobal to get
         # wrong across two monitors at different scale factors (see
         # .claude/rules/ui.md).
-        self.filter_btn = QPushButton("▽", objectName="Icon")
+        # A real icon, no text: "▽" rendered as a thin sliver of a
+        # missing-glyph box on the left of the button, beside Qt's own
+        # menu arrow. Both are gone - the arrow via QSS (theme.py), the
+        # sliver by the button having no text at all. Tinted to match the
+        # "+" beside it, with a brighter pixmap for hover, since the PNG
+        # is white and would otherwise sit brighter than its neighbours.
+        self.filter_btn = QPushButton(objectName="Icon")
         self.filter_btn.setFixedSize(40, 40)
         self.filter_btn.setToolTip("Filter")
-        self._filter_menu = QMenu(self)
+        dpr = QApplication.primaryScreen().devicePixelRatio()
+        filter_icon = QIcon()
+        filter_icon.addPixmap(
+            images.tinted_asset(FILTER_ICON, theme.TEXT_MUTED, FILTER_ICON_HEIGHT, dpr),
+            QIcon.Mode.Normal)
+        filter_icon.addPixmap(
+            images.tinted_asset(FILTER_ICON, theme.TEXT, FILTER_ICON_HEIGHT, dpr),
+            QIcon.Mode.Active)
+        self.filter_btn.setIcon(filter_icon)
+        self.filter_btn.setIconSize(QSize(FILTER_ICON_HEIGHT, FILTER_ICON_HEIGHT))
+        self._filter_menu = _StayOpenMenu(self)
         self._filter_menu.aboutToShow.connect(self._build_filter_menu)
         self.filter_btn.setMenu(self._filter_menu)
         top_row.addWidget(self.filter_btn)
@@ -805,15 +849,17 @@ class TrackerPage(GlassPage):
         return box.text().strip().lower() if box else ""
 
     def _build_filter_menu(self):
-        """Rebuilt every time it opens rather than kept in sync: the ticks
-        have to agree with _status_filter/_type_filter, and rebuilding is
-        the only way to be sure they do."""
+        """Built once per opening. The ticks are then kept right by
+        _sync_filter_menu_checks rather than by rebuilding, because the
+        menu stays open while they are used and clearing its contents
+        under a visible popup would dismiss it."""
         menu = self._filter_menu
         menu.clear()
+        self._filter_actions = []
         everything = menu.addAction("All")
         everything.setCheckable(True)
-        everything.setChecked(not self._status_filter and not self._type_filter)
         everything.triggered.connect(self._clear_filters)
+        self._filter_actions.append((everything, "all", None))
         # Only where there is a choice - Anime has one type, so a type
         # section there would be a single tick that can't be turned off.
         if len(self.TYPE_OPTIONS) > 1:
@@ -821,27 +867,45 @@ class TrackerPage(GlassPage):
             for name in self.TYPE_OPTIONS:
                 action = menu.addAction(name)
                 action.setCheckable(True)
-                action.setChecked(name in self._type_filter)
                 action.triggered.connect(
                     lambda checked, n=name: self._toggle_filter(self._type_filter, n, checked))
+                self._filter_actions.append((action, "type", name))
         menu.addSeparator()
         for status in STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], _WATCHING_STATUSES):
             action = menu.addAction(status)
             action.setCheckable(True)
-            action.setChecked(status in self._status_filter)
             action.triggered.connect(
                 lambda checked, s=status: self._toggle_filter(self._status_filter, s, checked))
+            self._filter_actions.append((action, "status", status))
+        self._sync_filter_menu_checks()
+
+    def _sync_filter_menu_checks(self):
+        """Tick states read back off the filter sets, without touching the
+        menu's contents. Needed while it is open: choosing All has to
+        un-tick everything else there and then, and All itself has to go
+        back on when the last individual tick comes off."""
+        for action, kind, value in self._filter_actions:
+            if kind == "all":
+                action.setChecked(not self._status_filter and not self._type_filter)
+            elif kind == "type":
+                action.setChecked(value in self._type_filter)
+            else:
+                action.setChecked(value in self._status_filter)
 
     def _toggle_filter(self, selected, value, checked):
         if checked:
             selected.add(value)
         else:
             selected.discard(value)
+        self._sync_filter_menu_checks()
         self._refresh_grid()
 
-    def _clear_filters(self):
+    def _clear_filters(self, *_args):
+        # *_args because this is wired to triggered(bool) as well as being
+        # called directly.
         self._status_filter.clear()
         self._type_filter.clear()
+        self._sync_filter_menu_checks()
         self._refresh_grid()
 
     def _grid_is_narrowed(self) -> bool:
@@ -957,7 +1021,6 @@ class TrackerPage(GlassPage):
         # _begin_custom_order), and the order on screen is not the whole
         # order while entries are hidden.
         narrowed = self._grid_is_narrowed()
-        self.reorder_hint.setText(_SEARCHING_HINT if narrowed else _REORDER_HINT)
 
         sections = self._sections()
         if not sections:
@@ -1096,9 +1159,9 @@ class TrackerPage(GlassPage):
         menu.addAction("Edit", lambda: self._open_form(edit=True, entry=entry))
         if entry.get("type") in ("Anime", "Series") and _entry_imdb_id(entry):
             menu.addAction("Sync Progress", lambda: self._sync_progress(entry))
-        if self.sort_box.currentText() == "Custom Order":
-            menu.addAction("Move Up", lambda: self._move_entry(entry, -1))
-            menu.addAction("Move Down", lambda: self._move_entry(entry, 1))
+        # No Move Up/Move Down: every page reorders by dragging a card,
+        # and two menu items that only appeared under one sort mode were
+        # a second way to do the same thing, worse.
         menu.addAction("Delete", lambda: self._delete_entry(entry))
         menu.exec(event.globalPosition().toPoint())
 
@@ -1288,14 +1351,6 @@ class TrackerPage(GlassPage):
                       if e.get("id") not in known
                       and e.get("type") not in self.ENTRY_TYPES)
         storage.save(self.DATA_FILE, merged)
-
-    def _move_entry(self, entry, delta):
-        idx = self.entries.index(entry)
-        new_idx = idx + delta
-        if 0 <= new_idx < len(self.entries):
-            self.entries[idx], self.entries[new_idx] = self.entries[new_idx], self.entries[idx]
-            self._save_entries()
-            self._refresh_grid()
 
     # ------------------------------------------------------------------
     def _begin_custom_order(self):

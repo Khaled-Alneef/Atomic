@@ -232,9 +232,9 @@ class LinkGridPage(GlassPage):
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_edit_form(entry))
-        if self.sort_box.currentText() == "Custom Order":
-            menu.addAction("Move Up", lambda: self._move_entry(entry, -1))
-            menu.addAction("Move Down", lambda: self._move_entry(entry, 1))
+        # No Move Up/Move Down: these cards reorder by dragging, same as
+        # every other page, and the menu items only appeared under one sort
+        # mode - a second, worse way to do the same thing.
         menu.addAction("Delete", lambda: self._remove_entry(entry))
         menu.exec(event.globalPosition().toPoint())
 
@@ -244,17 +244,6 @@ class LinkGridPage(GlassPage):
         entry["last_used"] = storage.now_iso()
         storage.save(self.DATA_FILE, self.entries)
         if self.sort_box.currentText() == "Last Used":
-            self._refresh_grid()
-
-    def _move_entry(self, entry, delta):
-        if self.sort_box.currentText() != "Custom Order":
-            QMessageBox.information(self, self.TITLE, "Switch Sort to 'Custom Order' to reorder manually.")
-            return
-        idx = self.entries.index(entry)
-        new_idx = idx + delta
-        if 0 <= new_idx < len(self.entries):
-            self.entries[idx], self.entries[new_idx] = self.entries[new_idx], self.entries[idx]
-            storage.save(self.DATA_FILE, self.entries)
             self._refresh_grid()
 
     def _remove_entry(self, entry):

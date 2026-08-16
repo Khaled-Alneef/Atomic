@@ -6,13 +6,15 @@ result is converted to a QPixmap right before it's handed to a Qt widget.
 """
 
 import hashlib
+import sys
 import threading
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 
 from . import icon_extract, net, storage, theme
 
@@ -20,6 +22,43 @@ CACHE_DIR = storage.DATA_DIR / "image_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _AVATAR_COLORS = [theme.ACCENT, "#2e86de", "#10ac84", "#ee5253", "#8e44ad", "#e67e22", "#0abde3"]
+
+
+def _asset_dir() -> Path:
+    """Where images shipped *with the app* live (as opposed to downloaded
+    covers): src/ when running from source, the unpacked bundle root when
+    frozen, since Atomic.spec copies them to '.'.
+
+    sys._MEIPASS rather than __file__: PyInstaller points __file__ inside
+    the archive for a module in the PYZ, which is not a directory anything
+    can be read out of."""
+    base = getattr(sys, "_MEIPASS", None)
+    return Path(base) if base else Path(__file__).resolve().parent.parent
+
+
+def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixmap:
+    """A bundled image recoloured to `color`, scaled for `dpr` and tagged
+    with it so it isn't blurry on a non-100% display (same reason as the
+    sidebar logo in main.py).
+
+    Recoloured rather than shipped in the right colour: every other glyph
+    on these buttons is text drawn from theme's palette, so a white PNG
+    stayed white while its neighbours sat dimmer. SourceIn replaces colour
+    and keeps alpha, so the shape and its antialiased edges survive.
+
+    Scaled before it is filled - filling first would leave a flat block of
+    colour for the scaler to blur."""
+    source = QPixmap(str(_asset_dir() / name))
+    if source.isNull():
+        return source  # missing asset: an empty icon, not a crash
+    scaled = source.scaledToHeight(max(1, int(height * dpr)),
+                                   Qt.TransformationMode.SmoothTransformation)
+    painter = QPainter(scaled)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(scaled.rect(), QColor(color))
+    painter.end()
+    scaled.setDevicePixelRatio(dpr)
+    return scaled
 
 
 def cache_path_for_url(url: str) -> Path:
