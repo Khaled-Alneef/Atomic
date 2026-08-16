@@ -151,6 +151,48 @@ def clear_stremio_auth():
     set_stremio_auth("", "")
 
 
+def get_crunchyroll_session():
+    """The connected Crunchyroll account as {email, refresh_token,
+    account_id}, or None.
+
+    Only the refresh token is kept - the password is used for the one
+    sign-in request and never written down, exactly as the Stremio
+    account above works. Crunchyroll is the only source that can answer
+    "what have I actually watched on Crunchyroll"; AniList only ever
+    knew what some other tracker put on it."""
+    data = _load()
+    if not data.get("crunchyroll_refresh_token"):
+        return None
+    return {
+        "email": data.get("crunchyroll_email") or "",
+        "refresh_token": data["crunchyroll_refresh_token"],
+        "account_id": data.get("crunchyroll_account_id") or "",
+    }
+
+
+def set_crunchyroll_session(email: str, refresh_token: str, account_id: str):
+    data = _load()
+    data["crunchyroll_email"] = email or ""
+    data["crunchyroll_refresh_token"] = refresh_token or ""
+    data["crunchyroll_account_id"] = account_id or ""
+    storage.save(SETTINGS_FILE, data)
+
+
+def clear_crunchyroll_session():
+    set_crunchyroll_session("", "", "")
+
+
+def get_crunchyroll_client_id() -> str:
+    """Crunchyroll issues no client credential to third parties, so the
+    one this signs in with lives in settings.json and can be replaced
+    when Crunchyroll deactivates it - see helpers/crunchyroll.py."""
+    return _load().get("crunchyroll_client_id", "")
+
+
+def get_crunchyroll_client_secret() -> str:
+    return _load().get("crunchyroll_client_secret", "")
+
+
 def get_anilist_username() -> str:
     return _load().get("anilist_username", "")
 

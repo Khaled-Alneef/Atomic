@@ -27,6 +27,7 @@ defects, usability gaps, the Amazon Prime coverage note):
 | 15 | Investigate startup and page-rebuild performance | test-engineer | shape unknown - investigate first | done - **nothing to fix** |
 | 16 | Investigate code signing to stop the antivirus false positive | release-engineer | shape unknown - investigate first | done - **decision needed from the user** |
 | 17 | Investigate Kitsu as a second source for watch progress | integrations-engineer | shape unknown - investigate first | todo |
+| 18 | Read Crunchyroll progress from Crunchyroll, and stop Stremio answering for entries watched elsewhere | integrations-engineer | spans modules | done - **sign-in untested** |
 
 Items 1-8 landed together as the correctness pass. Each block below
 records what was actually built and what it measured - which in several
@@ -810,6 +811,59 @@ behaviour. It must never replace AniList as the primary.
 **Risk** - two sources can disagree about the same title. Decide the
 rule before writing the code (highest progress wins is the obvious one)
 rather than discovering it as a bug later.
+
+### 18. Read Crunchyroll progress from Crunchyroll itself
+
+**What** - Two faults the owner hit on one card. One-Punch Man showed
+S01E07 while Crunchyroll's own history said E2, because Stremio was
+asked first for *every* entry and whatever it answered won - for an
+entry watched on Crunchyroll that is a different viewing entirely. And
+the only Anime source besides Stremio was AniList, which knows only what
+some other tracker wrote to it.
+**Why now** - Reported directly, with the evidence: crunchyroll.com/
+history showing E2 next to a card claiming E7. A confidently wrong
+number is worse than a blank one, and nothing on the card said where it
+came from.
+**Owner** - integrations-engineer
+**Where** - `src/helpers/crunchyroll.py` (new), `app_settings`,
+`settings_dialog` (Crunchyroll Account section), `tracker.
+_fetch_real_progress`.
+**Done when** - a Crunchyroll entry reads Crunchyroll's own number, and
+never Stremio's.
+**What happens when the service says no** - Crunchyroll → AniList →
+nothing. Never Stremio for an entry watched elsewhere, which was the
+whole defect.
+
+**Landed, with one part that could not be tested here.**
+
+Source order is now decided by where the entry is actually watched.
+Crunchyroll entries ask Crunchyroll (signed in), then AniList; ordinary
+entries still ask Stremio first, unchanged. Every synced number now
+carries the source that gave it (`progress_source`), shown on hover -
+"Progress from Crunchyroll" / "from AniList" / "set by you" - because an
+episode number the user disagrees with is unarguable while it is
+anonymous.
+
+Sign-in follows `stremio.login`: password sent once, **only the refresh
+token stored**. One shared history fetch serves a page of cards.
+Verified against a local stand-in speaking Crunchyroll's response shapes
+- with Stremio saying E7 and AniList saying E4, the entry reads **S01E02
+from Crunchyroll**; 14/14 checks including that the password never
+reaches settings.json.
+
+**Untested: the live sign-in.** It needs the owner's real account, and a
+client credential **Crunchyroll issues to no third party**. That
+credential is deliberately left empty rather than guessed
+(`crunchyroll_client_id`/`_secret` in settings.json) - a wrong value
+baked in would make every sign-in fail in a way that reads as "your
+password is wrong". Crunchyroll deactivates these periodically; the
+resulting `client_inactive` is reported as its own message, distinct
+from a rejected password, and both are tested.
+
+**Known cost, accepted by the owner**: using Crunchyroll's internal API
+is against their terms of service, and it will break whenever they
+change it. The MAL-Sync route (Crunchyroll → AniList, then AniList as
+today) was offered as the durable alternative and declined.
 
 ---
 

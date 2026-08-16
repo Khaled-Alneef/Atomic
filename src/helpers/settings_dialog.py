@@ -29,8 +29,8 @@ from PyQt6.QtWidgets import (
 )
 
 from . import (
-    anime_sites, app_settings, launchers, manga_sites, nav_config, startup,
-    storage, stremio, theme, uninstall, updater,
+    anime_sites, app_settings, crunchyroll, launchers, manga_sites, nav_config,
+    startup, storage, stremio, theme, uninstall, updater,
 )
 from .widgets import finish_toast, scroll_area, show_toast
 
@@ -54,6 +54,10 @@ CLEAR_CATEGORIES = [
 
 class _StremioLoginSignals(QObject):
     done = Signal(str, str, str)  # email, auth key, error message (one is always "")
+
+
+class _CrunchyrollSignals(QObject):
+    done = Signal(str, str, str, str)  # email, refresh token, account id, error
 
 
 class _SiteProbeSignals(QObject):
@@ -113,6 +117,9 @@ class SettingsDialog(QDialog):
         self._login_signals = _StremioLoginSignals()
         self._login_signals.done.connect(self._on_stremio_login_done)
 
+        self._crunchyroll_signals = _CrunchyrollSignals()
+        self._crunchyroll_signals.done.connect(self._on_crunchyroll_login_done)
+
         self._site_probe_signals = _SiteProbeSignals()
         self._site_probe_signals.done.connect(self._on_site_probed)
         # Sites currently being checked, so the list can say so instead of
@@ -154,6 +161,7 @@ class SettingsDialog(QDialog):
         body.addWidget(content_wrap, stretch=1)
 
         self._refresh_stremio_account()
+        self._refresh_crunchyroll_account()
         self._refresh_video_sites()
         self._refresh_sites()
 
@@ -487,6 +495,47 @@ class SettingsDialog(QDialog):
         )
         stremio_account_hint.setWordWrap(True)
         form.addWidget(stremio_account_hint)
+
+        form.addSpacing(24)
+        form.addWidget(QLabel("Crunchyroll Account", objectName="SectionTitle"))
+
+        self.crunchyroll_status = QLabel("", objectName="Muted")
+        self.crunchyroll_status.setWordWrap(True)
+        form.addWidget(self.crunchyroll_status)
+
+        self.crunchyroll_email_edit = QLineEdit()
+        self.crunchyroll_email_edit.setPlaceholderText("Email")
+        form.addWidget(self.crunchyroll_email_edit)
+
+        self.crunchyroll_password_edit = QLineEdit()
+        self.crunchyroll_password_edit.setPlaceholderText("Password")
+        self.crunchyroll_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addWidget(self.crunchyroll_password_edit)
+
+        crunchyroll_btn_row = QHBoxLayout()
+        self.crunchyroll_connect_btn = QPushButton("Sign In")
+        self.crunchyroll_connect_btn.clicked.connect(self._connect_crunchyroll)
+        crunchyroll_btn_row.addWidget(self.crunchyroll_connect_btn)
+        self.crunchyroll_disconnect_btn = QPushButton("Disconnect", objectName="Danger")
+        self.crunchyroll_disconnect_btn.clicked.connect(self._disconnect_crunchyroll)
+        crunchyroll_btn_row.addWidget(self.crunchyroll_disconnect_btn)
+        form.addLayout(crunchyroll_btn_row)
+
+        crunchyroll_hint = QLabel(
+            "Reads your real Crunchyroll progress from Crunchyroll itself, "
+            "for entries whose Video Website is Crunchyroll - so they no "
+            "longer borrow a number from Stremio or wait on AniList. Your "
+            "password is sent once to Crunchyroll's own sign-in and never "
+            "stored; only the session token is saved.\n\n"
+            "Crunchyroll publishes no public API and issues no key to other "
+            "apps, so signing in needs a client credential set in "
+            "settings.json (crunchyroll_client_id / crunchyroll_client_secret). "
+            "Without one this will say so rather than fail vaguely. Using it "
+            "is against Crunchyroll's terms of service.",
+            objectName="Muted",
+        )
+        crunchyroll_hint.setWordWrap(True)
+        form.addWidget(crunchyroll_hint)
 
         form.addSpacing(24)
         form.addWidget(QLabel("AniList Username", objectName="SectionTitle"))
@@ -970,6 +1019,57 @@ class SettingsDialog(QDialog):
     def _disconnect_stremio(self):
         app_settings.clear_stremio_auth()
         self._refresh_stremio_account()
+
+    def _refresh_crunchyroll_account(self):
+        session = app_settings.get_crunchyroll_session()
+        connected = bool(session)
+        self.crunchyroll_status.setText(
+            f"Connected as {session['email']}" if connected else "Not connected")
+        self.crunchyroll_email_edit.setVisible(not connected)
+        self.crunchyroll_password_edit.setVisible(not connected)
+        self.crunchyroll_connect_btn.setVisible(not connected)
+        self.crunchyroll_disconnect_btn.setVisible(connected)
+
+    def _connect_crunchyroll(self):
+        email = self.crunchyroll_email_edit.text().strip()
+        password = self.crunchyroll_password_edit.text()
+        if not email or not password:
+            QMessageBox.warning(self, "Crunchyroll Account",
+                                "Email and password are required.")
+            return
+        self.crunchyroll_connect_btn.setEnabled(False)
+        self.crunchyroll_status.setText("Signing in...")
+        threading.Thread(target=self._crunchyroll_login_worker,
+                         args=(email, password), daemon=True).start()
+
+    def _crunchyroll_login_worker(self, email, password):
+        # Must never raise - a dead thread leaves "Signing in..." forever.
+        # The password stays in this frame and is never handed to the
+        # signal, so it cannot reach anything that persists.
+        try:
+            session = crunchyroll.login(email, password)
+            self._crunchyroll_signals.done.emit(
+                email, session.get("refresh_token", ""),
+                str(session.get("account_id", "")), "")
+        except Exception as exc:
+            self._crunchyroll_signals.done.emit("", "", "", str(exc))
+
+    def _on_crunchyroll_login_done(self, email, refresh_token, account_id, error):
+        self.crunchyroll_connect_btn.setEnabled(True)
+        self.crunchyroll_password_edit.clear()
+        if error:
+            self.crunchyroll_status.setText("Not connected")
+            QMessageBox.critical(self, "Crunchyroll Account",
+                                 f"Couldn't sign in:\n{error}")
+            return
+        app_settings.set_crunchyroll_session(email, refresh_token, account_id)
+        crunchyroll.forget_cached_history()
+        self.crunchyroll_email_edit.clear()
+        self._refresh_crunchyroll_account()
+
+    def _disconnect_crunchyroll(self):
+        app_settings.clear_crunchyroll_session()
+        self._refresh_crunchyroll_account()
 
     def _save_anilist_username(self):
         app_settings.set_anilist_username(self.anilist_username_edit.text().strip())

@@ -85,15 +85,29 @@ Don't loosen these to raise the hit rate.
 Respect throttles: MangaDex is spaced ~0.35s between requests and
 retried once, since the tracker fires one lookup per entry at once.
 
-Some services can't be scraped at all - Crunchyroll (JS-rendered search,
-content API 401s without OAuth) and Netflix (search behind a sign-in).
+**Crunchyroll progress now comes from Crunchyroll** (`crunchyroll.py`),
+with the owner's own account - the earlier "researched and rejected"
+note below is superseded, on the owner's explicit instruction after
+AniList kept reporting a different episode than Crunchyroll's own
+history. Email+password sign-in, only the refresh token stored (never
+the password), same shape as `stremio.login`. Two things to know before
+touching it: **it needs a client credential Crunchyroll issues to
+nobody**, kept in settings.json (`crunchyroll_client_id`/`_secret`) and
+deactivated by Crunchyroll from time to time - `client_inactive` is a
+dead credential, not a bug - and using it at all is against their ToS,
+which is the account holder's call and was made. One shared history
+fetch serves a whole page (`cached_history`); don't make it per entry.
+
+Some services can't be *scraped* at all - Crunchyroll (JS-rendered
+search, content API 401s without OAuth) and Netflix (search behind a
+sign-in).
 Both resolve via AniList's `externalLinks` instead, which needs no auth
 on either service: `anime_sites._STREAMING_SITES` is the table, and
 adding another such service is a row there, not new code. An
-authenticated Crunchyroll client (for progress sync) was researched and
-rejected: dead password-login flow, ToS-prohibited scraping of a paid
-service, and redundant with what `anilist.py` already covers. Don't
-rebuild that without a real reason to revisit it.
+authenticated Crunchyroll client was once rejected as redundant with
+`anilist.py` - **that turned out to be wrong and it now exists** (see
+above). AniList only knows what some other tracker wrote to it, so an
+entry watched to episode 2 on Crunchyroll sat there reading episode 7.
 
 **AniList rate-limits hard, and used to fail soft into silence.**
 Sustained querying gets the whole network a `403` on every POST (not a

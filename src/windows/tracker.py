@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (
-    anilist, anime_sites, app_settings, images, lookup_pool, manga_sites,
+    anilist, anime_sites, app_settings, crunchyroll, images, lookup_pool, manga_sites,
     release_schedule, storage, stremio, theme,
 )
 from helpers.widgets import (
@@ -354,10 +354,25 @@ class _ProgressSyncSignals(QObject):
     # progress result was found, total available season/episode, whether
     # this came from the bulk "refresh all" (vs one entry's right-click
     # Sync Progress) - silent ones skip the per-entry not-found popup -
-    # and why nothing was found, when that is known ("" when it isn't).
-    # Not-found has several causes that look identical on screen and the
-    # user has to be able to tell them apart; see REASON_* below.
-    resolved = Signal(str, int, int, bool, int, int, bool, str)
+    # why nothing was found, when that is known ("" when it isn't) -
+    # not-found has several causes that look identical on screen and the
+    # user has to be able to tell them apart, see REASON_* below - and
+    # which source the number that *was* found came from, so a wrong one
+    # is never anonymous again (see SOURCE_* below).
+    resolved = Signal(str, int, int, bool, int, int, bool, str, str)
+
+
+# Where a synced number came from. Stored on the entry and shown on
+# hover: a progress number the user disagrees with is unarguable until
+# it says who said it.
+SOURCE_STREMIO = "Stremio"
+SOURCE_ANILIST = "AniList"
+SOURCE_CRUNCHYROLL = "Crunchyroll"
+SOURCE_MANUAL = "you"
+
+# The entry is on Crunchyroll and no Crunchyroll account is connected -
+# so the one source that could answer for it wasn't asked.
+REASON_NO_CRUNCHYROLL_ACCOUNT = "no_crunchyroll_account"
 
 
 # Why a sync found nothing, when that is known. Several causes look
@@ -778,6 +793,13 @@ class TrackerPage(GlassPage):
             if value:
                 rows.append(f"{label}: {value}")
         rows.extend(release_schedule.tooltip_lines(entry, self.MEDIUM))
+        # Who said so. A number the user disagrees with ("I'm on episode
+        # 2, why does this say 7?") is unarguable while it is anonymous -
+        # naming the source is what turns it into something checkable.
+        source = entry.get("progress_source")
+        if source and entry.get("progress_verified"):
+            rows.append("Progress set by you" if source == SOURCE_MANUAL
+                        else f"Progress from {source}")
         # Only while there is nothing real to show: once progress is
         # confirmed this is just noise on a card that works.
         if provider and not entry.get("progress_verified"):
@@ -822,11 +844,15 @@ class TrackerPage(GlassPage):
         providers = anime_sites.streaming_provider_map()
         used = sorted({providers[e["site_id"]] for e in entries
                        if e.get("site_id") in providers})
+        if "crunchyroll" in used and not app_settings.get_crunchyroll_session():
+            lines.append("Crunchyroll entries can read your real progress once "
+                         "you sign in under Settings > Crunchyroll Account.")
+            used = [p for p in used if p != "crunchyroll"]
         if used:
             names = " and ".join(_UNREADABLE_NAMES.get(p, p.title()) for p in used)
-            lines.append(f"{names} don't publish watch history, so progress for "
-                         f"entries there can only be set by hand - that's not a "
-                         f"fault, there is nothing for any app to read.")
+            lines.append(f"{names} doesn't publish watch history to anyone who "
+                         f"isn't signed in, so progress for entries there is set "
+                         f"by hand.")
         self.sync_notice.setText("  •  ".join(lines))
         self.sync_notice.setVisible(bool(lines))
 
@@ -949,6 +975,9 @@ class TrackerPage(GlassPage):
         episode = max(0, episode + delta)
         entry["progress"] = format_episode_progress(season, episode)
         entry["progress_verified"] = True
+        # Yours now, whatever a sync said before - and the next sync from
+        # a source that disagrees will say so by name.
+        entry["progress_source"] = SOURCE_MANUAL
         entry["updated_at"] = storage.now_iso()
         self._save_entries()
         self._refresh_grid()
@@ -1010,13 +1039,29 @@ class TrackerPage(GlassPage):
 
         parts = []
         provider = _reason_provider(reason)
-        if provider:
+        if REASON_NO_CRUNCHYROLL_ACCOUNT in codes:
+            provider = provider or "crunchyroll"
+            parts.append(
+                "This entry is on Crunchyroll, and no Crunchyroll account is "
+                "connected - so the one source that knows what you actually "
+                "watched there wasn't asked. Sign in under Settings > "
+                "Crunchyroll Account.")
+        elif provider:
             name = _UNREADABLE_NAMES.get(provider, provider.title())
             parts.append(
-                f"{name} doesn't publish what you've watched. There is no way "
-                f"for Atomic - or any other app - to read your {name} progress "
-                f"without your account login, so this entry will never fill "
-                f"itself in: set it by hand in Edit.")
+                f"{name} doesn't publish what you've watched to anyone who "
+                f"isn't signed in, so this entry can't fill itself in: set it "
+                f"by hand in Edit, or with the +1 button on the card.")
+        if provider:
+            # Said in both cases above. It is the half the user cannot
+            # deduce - the old behaviour silently showed Stremio's number
+            # here, which is a different viewing and was simply wrong.
+            name = _UNREADABLE_NAMES.get(provider, provider.title())
+            parts.append(
+                f"Your Stremio progress is deliberately not used for this "
+                f"entry - you watch it on {name}, so Stremio's number would be "
+                f"a different viewing, and showing it here stated the wrong "
+                f"episode as fact.")
         if REASON_NO_ANILIST_USERNAME in codes:
             parts.append(
                 "No AniList username is set. Anime progress syncs from your "
@@ -1048,6 +1093,10 @@ class TrackerPage(GlassPage):
         imdb_id = _entry_imdb_id(entry)
         if not imdb_id:
             return
+        # Asked by hand, usually right after watching something - so the
+        # shared history from a minute ago is exactly the stale answer
+        # the user is trying to get past.
+        crunchyroll.forget_cached_history()
         # Its own thread, not the bounded pool: this is one lookup the
         # user asked for by hand and is watching for, so it must not
         # queue behind a page-load backfill of every other entry.
@@ -1083,28 +1132,68 @@ class TrackerPage(GlassPage):
         can't be read (see anime_sites.streaming_provider) - worked out on
         the UI thread by the caller, since it reads the saved sites."""
         result = None
+        source = ""
         reasons = []
         _, auth_key = app_settings.get_stremio_auth()
-        if auth_key:
+        anilist_username = app_settings.get_anilist_username() if is_anime else ""
+
+        # Which source is asked depends on where the entry is actually
+        # watched, and that is not a preference - it was a wrong number
+        # on the card.
+        #
+        # Stremio used to be asked first for everything, and whatever it
+        # answered won. For an entry pinned to Crunchyroll that is a
+        # different viewing entirely: One-Punch Man read S01E07 from
+        # Stremio while Crunchyroll's own history said E2, and the card
+        # stated the wrong one as fact with nothing to say where it came
+        # from. So an entry the user watches on Crunchyroll or Netflix
+        # does not take Stremio's number at all - their own AniList list
+        # is the only source that can speak for it.
+        watches_elsewhere = provider in _UNREADABLE_NAMES
+
+        # Crunchyroll itself, first, when the entry lives there and an
+        # account is connected. It is the only source that knows what was
+        # actually watched on Crunchyroll - AniList only ever knows what
+        # some other tracker wrote to it, which is why an entry watched
+        # to episode 2 could sit there reading episode 7.
+        crunchyroll_asked = False
+        if provider == "crunchyroll":
+            try:
+                session = crunchyroll.active_session()
+                if session:
+                    crunchyroll_asked = True
+                    result = crunchyroll.watch_progress(session, title)
+                    source = SOURCE_CRUNCHYROLL if result else ""
+                else:
+                    reasons.append(REASON_NO_CRUNCHYROLL_ACCOUNT)
+            except Exception:
+                # Fails soft like every other lookup: a Crunchyroll that
+                # is down, rate-limiting, or signed out must not stop
+                # AniList below from answering.
+                result = None
+
+        if not result and not watches_elsewhere and auth_key:
             try:
                 result = stremio.fetch_watch_progress(imdb_id, auth_key)
+                source = SOURCE_STREMIO if result else ""
             except Exception:
                 result = None
-        if not result and is_anime:
-            anilist_username = app_settings.get_anilist_username()
-            if anilist_username:
-                try:
-                    result = anilist.fetch_watch_progress(title, anilist_username)
-                except anilist.RateLimited:
-                    # Deliberately not folded into the except below: the
-                    # whole point is that this is not a no-match.
-                    result = None
-                    reasons.append(REASON_ANILIST_RATE_LIMITED)
-                except Exception:
-                    result = None
-            else:
-                reasons.append(REASON_NO_ANILIST_USERNAME)
-        if not result and provider in _UNREADABLE_NAMES:
+        if not result and anilist_username:
+            try:
+                result = anilist.fetch_watch_progress(title, anilist_username)
+                source = SOURCE_ANILIST if result else ""
+            except anilist.RateLimited:
+                # Deliberately not folded into the except below: the
+                # whole point is that this is not a no-match.
+                result = None
+                reasons.append(REASON_ANILIST_RATE_LIMITED)
+            except Exception:
+                result = None
+        if not result and is_anime and not anilist_username:
+            reasons.append(REASON_NO_ANILIST_USERNAME)
+        # Not said when Crunchyroll itself was asked and simply had
+        # nothing for this title - "can't be read" would then be false.
+        if not result and provider in _UNREADABLE_NAMES and not crunchyroll_asked:
             reasons.append(f"{REASON_SITE_UNREADABLE}:{provider}")
         try:
             total = stremio.fetch_latest_episode(imdb_id, "series")
@@ -1114,10 +1203,10 @@ class TrackerPage(GlassPage):
         total_season, total_episode = total or (0, 0)
         self._sync_signals.resolved.emit(
             entry_id, season, episode, result is not None, total_season, total_episode,
-            silent, ",".join(reasons))
+            silent, ",".join(reasons), source)
 
     def _on_progress_synced(self, entry_id, season, episode, found, total_season,
-                            total_episode, silent, reason=""):
+                            total_episode, silent, reason="", source=""):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if entry:
             snapshot = self._refresh_before.get(entry_id)
@@ -1126,6 +1215,7 @@ class TrackerPage(GlassPage):
             if found:
                 entry["progress"] = format_episode_progress(season, episode)
                 entry["progress_verified"] = True
+                entry["progress_source"] = source
                 entry["updated_at"] = storage.now_iso()
             if total_season or total_episode:
                 entry["latest_available"] = format_episode_progress(total_season, total_episode)
