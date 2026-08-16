@@ -487,6 +487,18 @@ class _StayOpenMenu(QMenu):
         super().mouseReleaseEvent(event)
 
 
+# Each page's search text and filter ticks, keyed by page class name,
+# for as long as the process lives. Pages rebuild from scratch on every
+# visit (.claude/rules/ui.md), so without this a search typed on Anime
+# was gone the moment you looked at Home and came back.
+#
+# Deliberately in memory and never written to storage: a filter narrowing
+# the grid on a fresh launch, with nothing on screen saying why entries
+# are missing, is worse than today's reset. Quitting clears it, which is
+# the visible escape hatch.
+_SESSION_VIEW_STATE = {}
+
+
 class TrackerPage(GlassPage):
     """Base for the Anime/Manga/Series pages. Subclasses set
     DATA_FILE/ENTRY_TYPES/TITLE/TYPE_OPTIONS/PROGRESS_COLUMNS.
@@ -557,12 +569,15 @@ class TrackerPage(GlassPage):
         # an entry of someone else's type that disk doesn't have.
         self._ids_at_load = {e.get("id") for e in self.entries if e.get("id")}
 
-        # Filter selections last only as long as the page does. Pages
-        # rebuild from scratch on every visit (.claude/rules/ui.md), and a
-        # filter still narrowing the grid from a previous visit would read
-        # as entries having gone missing. Empty means "everything".
-        self._status_filter = set()
-        self._type_filter = set()
+        # Filter selections last as long as the app run, not as long as
+        # the page: restored here from _SESSION_VIEW_STATE and written
+        # back on every change, so navigating away and returning shows
+        # what was left on screen. Copied out of the store rather than
+        # aliased, so a half-applied filter can't leak between page
+        # instances. Empty means "everything".
+        remembered = _SESSION_VIEW_STATE.get(self._view_state_key(), {})
+        self._status_filter = set(remembered.get("status", ()))
+        self._type_filter = set(remembered.get("type", ()))
         # (action, kind, value) for every item in the filter menu, so the
         # ticks can be re-read off the sets while the menu is still open.
         self._filter_actions = []
@@ -601,6 +616,10 @@ class TrackerPage(GlassPage):
         self.search_box.setPlaceholderText("Search titles...")
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setFixedWidth(220)
+        # Restored before textChanged is wired up, not after: setText
+        # fires it, which would start the debounce timer for a redraw the
+        # _refresh_grid at the end of __init__ is about to do anyway.
+        self.search_box.setText(remembered.get("search", ""))
         # Debounced rather than filtering on every keystroke: each redraw
         # rebuilds every card from scratch (pages hold no state - see
         # .claude/rules/ui.md), so typing six characters would otherwise
@@ -609,7 +628,7 @@ class TrackerPage(GlassPage):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
         self._search_timer.timeout.connect(self._refresh_grid)
-        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
+        self.search_box.textChanged.connect(self._on_search_text_changed)
         top_row.addWidget(self.search_box)
         # Symbol only, no label - it sits beside a search box that already
         # says what this row is for. The menu is attached with setMenu
@@ -886,6 +905,31 @@ class TrackerPage(GlassPage):
                 entry["title"], True)
 
     # ------------------------------------------------------------------
+    @classmethod
+    def _view_state_key(cls) -> str:
+        """Which slot of _SESSION_VIEW_STATE this page owns.
+
+        The class name, not TITLE: AnimePage inherits TITLE from the base
+        class, so two pages could end up sharing one slot if the titles
+        were ever made to collide."""
+        return cls.__name__
+
+    def _remember_view_state(self):
+        """Write the current search text and ticks to the session store.
+
+        Called on every change rather than on teardown - a page is
+        replaced, not closed, and there is no hook that reliably runs
+        before it goes."""
+        _SESSION_VIEW_STATE[self._view_state_key()] = {
+            "search": self.search_box.text(),
+            "status": set(self._status_filter),
+            "type": set(self._type_filter),
+        }
+
+    def _on_search_text_changed(self, _text):
+        self._remember_view_state()
+        self._search_timer.start()
+
     def _search_query(self) -> str:
         # getattr because _refresh_grid can run before the box exists on
         # a page still being built.
@@ -942,6 +986,7 @@ class TrackerPage(GlassPage):
         else:
             selected.discard(value)
         self._sync_filter_menu_checks()
+        self._remember_view_state()
         self._refresh_grid()
 
     def _clear_filters(self, *_args):
@@ -950,6 +995,7 @@ class TrackerPage(GlassPage):
         self._status_filter.clear()
         self._type_filter.clear()
         self._sync_filter_menu_checks()
+        self._remember_view_state()
         self._refresh_grid()
 
     def _grid_is_narrowed(self) -> bool:
@@ -1096,6 +1142,13 @@ class TrackerPage(GlassPage):
             self.grid_layout.addWidget(
                 QLabel(f"{status} ({len(group)})", objectName="SectionTitle"))
             self.grid_layout.addWidget(self._build_section_strip(group))
+        # Somewhere for the leftover height to go. The page's scroll area
+        # resizes this widget to the viewport, and with nothing elastic in
+        # the layout that spare height is handed to whatever can take it -
+        # measured: one section on a full-height page stretched its own
+        # header from 23px to 272px, leaving the row stranded mid-page.
+        # Two sections hid it, because there was no spare height left.
+        self.grid_layout.addStretch()
 
     def _build_section_strip(self, group):
         """One section's cards on a single line that scrolls sideways.

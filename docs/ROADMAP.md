@@ -61,9 +61,9 @@ clever one, and leave a working path working.
 | 36 | Cards past the 8th were unreachable; films shared a row with shows | ui-engineer | contained | **landed 1.4.7** - owner-reported |
 | 29 | Let the "what's new" dialog scroll | ui-engineer | contained | todo - found landing #4 |
 | 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | todo - found landing #2 |
-| 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | todo |
-| 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | todo |
-| 13 | Check for updates in the background, not only on demand | ui-engineer | contained | todo |
+| 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | **landed 1.4.8** |
+| 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | **landed 1.4.8** |
+| 13 | Check for updates in the background, not only on demand | ui-engineer | contained | **landed 1.4.8** |
 | 14 | Remember window size and position across launches | ui-engineer | contained | todo |
 | 15 | Give Settings some structure before it grows further | ui-engineer | shape unknown - investigate first | todo |
 | 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | todo |
@@ -800,6 +800,14 @@ nothing was written to disk.
 filter silently narrowing the grid after a restart, with no visible
 reason why some entries are "missing," would be worse than today's
 "always resets."
+**Landed** (1.4.8) - a module-level dict keyed by page *class* name, not
+TITLE (AnimePage inherits TITLE from the base and would have collided).
+Restored before `textChanged` is connected, so the restore doesn't kick
+the debounce for a redraw the constructor is about to do anyway. Nothing
+touches storage. "Relaunching starts blank" was verified across a real
+process boundary - one process sets a search, a second starts empty -
+rather than inferred, and the page returned to after Home is
+pixel-indistinguishable from the one navigated away from.
 
 ### 12. Bring search to Games, Apps and Websites
 
@@ -824,6 +832,13 @@ the full list.
 the precedent already set for the tracker pages (item #11, old
 roadmap), disable dragging while a search is active on these pages too
 rather than reconciling a partial on-screen order with the saved one.
+**Landed** (1.4.8) - the tracker's own shape: 150ms debounce, clear
+button, right of the sort row. Draggability was *measured* rather than
+assumed - N of N cards draggable unfiltered, 0 while a query is active,
+N again after clearing - and the debounce was driven with real
+keystrokes in a real window (grid unchanged immediately after typing,
+correct 400ms later), so the test isn't just calling the redraw itself.
+The four save paths from item #2 were re-checked and still hold.
 
 ### 13. Check for updates in the background, not only on demand
 
@@ -856,6 +871,17 @@ failing should do nothing visible at all, not surface an error for a
 check the user didn't ask for.
 **Risk** - don't make this naggy - once per launch (or longer) and
 dismissible, not a recurring interruption.
+**Landed** (1.4.8) - toast plus an accent dot on the Settings button, no
+dialog. Naggyness is handled by version, not by launch: the toast shows
+once per *available version* (`notified_update_version` in settings),
+and someone who isn't ready to update gets the silent dot from then on
+rather than the same toast every launch. Runs 4s after the window is up,
+last of everything at startup, so it isn't competing with the image
+prewarm or a page's own backfill; skipped entirely when not frozen, and
+a failed check shows nothing at all. The real "an update exists" path
+can only be stubbed here - the newest release is v1.4 and this build
+sorts above it - but the network call itself is `check_for_update`
+untouched, which Settings already exercises.
 
 ### 14. Remember window size and position across launches
 

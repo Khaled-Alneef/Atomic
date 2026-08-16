@@ -17,20 +17,23 @@ the slide direction immediately too - nothing to keep in sync by hand.
 """
 
 import sys
+import threading
 from pathlib import Path
 
 from helpers import (app_settings, images, logs, native_cursor, startup,
-                     storage, theme, whats_new)
+                     storage, theme, updater, whats_new)
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
+    QObject,
     QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
     QSize,
     Qt,
     QTimer,
+    pyqtSignal as Signal,
 )
 from PyQt6.QtGui import QCursor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
@@ -49,7 +52,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import release_stale_hover_cursors, use_hover_cursor
+from helpers.widgets import (release_stale_hover_cursors, show_toast,
+                             use_hover_cursor)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -101,11 +105,33 @@ ADD_ITEMS = [
 ANIM_DURATION_MS = 220
 LOGO_HEIGHT = 120
 
+# How long after the window is up the startup update check waits before
+# asking GitHub. Launch is already the busiest moment this app has - the
+# image prewarm is decoding covers and whichever page is showing may be
+# firing its own backfill through lookup_pool - and nobody is waiting on
+# this answer, so it goes last rather than competing for the connection.
+UPDATE_CHECK_DELAY_MS = 4000
+
+# The accent dot drawn over the Settings button while an update is
+# waiting, and how far in from the button's top-right corner it sits.
+# 5, not 7: the collapsed rail is only 36px of button, and at 7 the dot
+# landed on the gear glyph's top-right edge rather than beside it
+# (measured off a grab of the folded sidebar).
+UPDATE_DOT_SIZE = 8
+UPDATE_DOT_MARGIN = 5
+
 SIDEBAR_WIDTH = 220
 # Wide enough for the nav bullets and the +/gear buttons once the text
 # labels are dropped (see _set_sidebar_collapsed).
 SIDEBAR_COLLAPSED_WIDTH = 68
 SIDEBAR_ANIM_MS = 180
+
+
+class _UpdateCheckSignals(QObject):
+    # The startup check runs off the UI thread; this carries its answer
+    # back onto it. Nothing but the update dict (or None) crosses - a
+    # failed check has nothing to say (see _update_check_worker).
+    found = Signal(object)
 
 
 class NavListWidget(QListWidget):
@@ -183,6 +209,9 @@ class MainWindow(QMainWindow):
         self._cursor_watchdog.timeout.connect(self._cursor_watchdog_tick)
         self._cursor_watchdog.start(CURSOR_WATCHDOG_MS)
 
+        self._update_signals = _UpdateCheckSignals()
+        self._update_signals.found.connect(self._on_update_found)
+
         self._show_page("home", animate=False)
 
         # Application-wide, so it sees the container's own resize events
@@ -196,6 +225,9 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(SIDEBAR_WIDTH)
         self.sidebar = sidebar
         self._sidebar_collapsed = False
+        # Set before anything styles the Settings button, which reads it
+        # for its tooltip. Filled in by the startup update check.
+        self._pending_update_version = ""
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 20, 16, 16)
         layout.setSpacing(4)
@@ -319,7 +351,32 @@ class MainWindow(QMainWindow):
         self._style_settings_btn()
         layout.addWidget(self.settings_btn)
 
+        # The "an update is waiting" marker: a plain accent dot in the
+        # button's corner, hidden until the startup check finds one. A
+        # child widget rather than a character appended to the button's
+        # text, because that text is drawn in the Segoe icon font at both
+        # sidebar widths and a dot glyph there is one more codepoint that
+        # can come out as a missing-glyph box on a machine without it.
+        # Transparent to the mouse so the button underneath keeps its own
+        # hover highlight and hand cursor (.claude/rules/ui.md - never
+        # leave a cursor set on something that isn't handling the click).
+        self._update_dot = QLabel(self.settings_btn)
+        self._update_dot.setFixedSize(UPDATE_DOT_SIZE, UPDATE_DOT_SIZE)
+        self._update_dot.setStyleSheet(
+            f"background: {theme.ACCENT}; border-radius: {UPDATE_DOT_SIZE // 2}px;")
+        self._update_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._update_dot.hide()
+
         return sidebar
+
+    def _position_update_dot(self):
+        """Top-right corner of the Settings button. Re-run on every resize
+        of that button (see eventFilter) rather than placed once: folding
+        the sidebar animates its width from 220 to 68, and a dot placed at
+        the old width would sit outside the collapsed rail."""
+        button = self.settings_btn
+        self._update_dot.move(
+            button.width() - UPDATE_DOT_SIZE - UPDATE_DOT_MARGIN, UPDATE_DOT_MARGIN)
 
     # ------------------------------------------------------------------
     def _style_nav_item(self, item, name, page_name):
@@ -355,7 +412,15 @@ class MainWindow(QMainWindow):
         self.settings_btn.setText(
             theme.SETTINGS_ICON if collapsed else f"  {theme.SETTINGS_ICON}   Settings")
         self.settings_btn.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
-        self.settings_btn.setToolTip("Settings" if collapsed else "")
+        # A waiting update outranks the usual tooltip at either width -
+        # the dot says something is there, this says what. Expanded, the
+        # button already reads "Settings", so there is otherwise nothing
+        # to add and the tooltip stays empty.
+        if self._pending_update_version:
+            self.settings_btn.setToolTip(
+                f"Atomic {self._pending_update_version} is available")
+        else:
+            self.settings_btn.setToolTip("Settings" if collapsed else "")
         # Drives the [collapsed="true"] QSS rule; Qt only re-evaluates
         # property-based selectors after an explicit unpolish/polish.
         self.settings_btn.setProperty("collapsed", collapsed)
@@ -441,6 +506,60 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         SettingsDialog(self)
 
+    # ---- Startup update check -----------------------------------------
+    def schedule_update_check(self):
+        """Ask GitHub once per launch whether a newer release exists.
+
+        Until now check_for_update() was reachable only from Settings'
+        button, so anyone who never opened Settings never learned a new
+        version had shipped (roadmap #13). This changes nothing about
+        *how* the check is made - same function, same API contract - only
+        that something asks it without being told to.
+
+        Not while running from source: there is no executable to replace
+        (updater.is_frozen), so the offer would lead to Settings saying
+        exactly that. Called after the window is showing, and after the
+        what's-new dialog has been dismissed - that one is modal, and a
+        timer started before it would fire into its nested event loop and
+        drop a toast on top of the dialog."""
+        if not updater.is_frozen():
+            return
+        QTimer.singleShot(UPDATE_CHECK_DELAY_MS, self._start_update_check)
+
+    def _start_update_check(self):
+        threading.Thread(target=self._update_check_worker, daemon=True).start()
+
+    def _update_check_worker(self):
+        """Off the UI thread, and silent on failure. The user did not ask
+        for this check, so no network, a rate-limited GitHub or a
+        malformed answer must produce nothing visible at all - the
+        Settings button still reports properly when it *is* asked. Broad
+        except on purpose: an uncaught exception in a worker dies silently
+        and would leave the signal unemitted."""
+        try:
+            found = updater.check_for_update()
+        except Exception:
+            found = None
+        self._update_signals.found.emit(found)
+
+    def _on_update_found(self, found):
+        if not found:
+            return
+        version = found.get("version") or ""
+        self._pending_update_version = version
+        self._update_dot.show()
+        self._position_update_dot()
+        self._style_settings_btn()
+        # The toast is the once-per-*version* half, not once-per-launch:
+        # the dot is what persists, and repeating "there's an update" at
+        # every launch until it is taken is the naggy failure this item
+        # was explicitly told to avoid. A toast rather than a dialog -
+        # nothing here has to be decided (.claude/rules/ui.md).
+        if app_settings.get_notified_update_version() == version:
+            return
+        app_settings.set_notified_update_version(version)
+        show_toast(self, f"Atomic {version} Is Available - Install It in Settings", 6000)
+
     def refresh_current_page(self):
         """Re-create whichever page is currently showing, fresh from
         disk - each page only loads its saved entries once, in __init__,
@@ -463,6 +582,8 @@ class MainWindow(QMainWindow):
         # looking like a second sidebar had appeared out of nowhere.
         if obj is self.container and event.type() == QEvent.Type.Resize:
             self._fit_current_page()
+        if obj is self.settings_btn and event.type() == QEvent.Type.Resize:
+            self._position_update_dot()
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.BackButton:
                 self.go_back()
@@ -776,6 +897,10 @@ def main():
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())
+    # Last, and on its own delay: the one thing here nobody is waiting
+    # for. After whats_new deliberately - that dialog is modal, so a
+    # timer armed before it would tick inside its nested event loop.
+    window.schedule_update_check()
     sys.exit(app.exec())
 
 

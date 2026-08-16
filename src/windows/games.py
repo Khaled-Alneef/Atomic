@@ -11,7 +11,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, Qt
+from PyQt6.QtCore import QObject, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -87,6 +87,21 @@ class GamesPage(GlassPage):
         # No drag hint here any more: it named a right-click Move Up/Down
         # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search games...")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setFixedWidth(220)
+        # Debounced rather than filtering on every keystroke: each redraw
+        # rebuilds every card from scratch (pages hold no state - see
+        # .claude/rules/ui.md), so typing six characters would otherwise
+        # rebuild the whole grid six times. Same 150ms as the tracker
+        # pages, which this is the extension of.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._refresh_grid)
+        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
+        top_row.addWidget(self.search_box)
         layout.addLayout(top_row)
 
         self.grid_body = QWidget()
@@ -174,6 +189,28 @@ class GamesPage(GlassPage):
             return sorted(self.games, key=lambda g: g.get("last_played") or "", reverse=True)
         return self.games
 
+    def _search_query(self) -> str:
+        # getattr because _refresh_grid can run before the box exists on a
+        # page still being built.
+        box = getattr(self, "search_box", None)
+        return box.text().strip().lower() if box else ""
+
+    def _visible_games(self):
+        """What the grid draws: the sorted list narrowed by the search box.
+
+        Deliberately not folded into _sorted_games - that one is what
+        _begin_custom_order writes out as the custom order, and it has to
+        stay the whole list even if a query were somehow active."""
+        query = self._search_query()
+        games = self._sorted_games()
+        if not query:
+            return games
+        # Plain case-insensitive substring, not a fuzzy match: same
+        # reasoning as the tracker pages - the user is looking for a name
+        # they know is there, and near-misses quietly included make a
+        # short query look like it failed to filter at all.
+        return [g for g in games if query in (g.get("name") or "").lower()]
+
     # ------------------------------------------------------------------
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
@@ -182,17 +219,23 @@ class GamesPage(GlassPage):
             if widget:
                 widget.deleteLater()
 
-        games = self._sorted_games()
+        # Dragging is off while a search is narrowing the grid: a drop
+        # writes the order that is on screen (see _begin_custom_order),
+        # and that isn't the whole order while cards are hidden.
+        narrowed = bool(self._search_query())
+
+        games = self._visible_games()
         if not games:
-            empty = QLabel("No games yet - click '+' to add one.", objectName="Muted")
-            self.grid_layout.addWidget(empty, 0, 0)
+            message = (f"Nothing here matches '{self.search_box.text().strip()}'."
+                       if narrowed else "No games yet - click '+' to add one.")
+            self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
         for index, game in enumerate(games):
-            card = self._build_card(game)
+            card = self._build_card(game, draggable=not narrowed)
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
-    def _build_card(self, game):
+    def _build_card(self, game, draggable=True):
         card = Card(hoverable=True, matte=True)
         card.setFixedWidth(CARD_WIDTH)
         card.setToolTip(game["name"])
@@ -212,7 +255,8 @@ class GamesPage(GlassPage):
 
         card.clicked.connect(lambda g=game: self._launch(g))
         card.rightClicked.connect(lambda event, g=game: self._show_context_menu(event, g))
-        self._drag_reorder.attach(card, game.get("id"))
+        if draggable:
+            self._drag_reorder.attach(card, game.get("id"))
         return card
 
     def _show_context_menu(self, event, game):

@@ -122,6 +122,23 @@ def has_run_before() -> bool:
                  if k not in ("updated_from", "last_seen_version")})
 
 
+def get_notified_update_version() -> str:
+    """The version the startup update check has already announced, or ""
+    if it never has.
+
+    Stored so the toast is shown once *per version*, not once per launch:
+    someone who isn't ready to update shouldn't be told again every time
+    they open the app. The sidebar's dot stays regardless - it is a
+    marker, not an interruption."""
+    return _load().get("notified_update_version") or ""
+
+
+def set_notified_update_version(version: str):
+    data = _load()
+    data["notified_update_version"] = version or ""
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 
