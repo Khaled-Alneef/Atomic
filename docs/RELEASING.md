@@ -112,16 +112,13 @@ attempt failing.
 
 Then check it is the *right* executable. 1.4 first shipped a binary
 built before the last two commits: it was missing `src/filter_icon.png`
-altogether (173 bundled entries against the 174 that tree produces), and
-the VDD recorded the size and hash of a build that was never the one
-committed. A "succeeded" build log proves nothing — PyInstaller caches,
-and a no-op rebuild silently re-copies the previous binary. Read the
-bundle back out and compare it against the source tree, and take the
-VDD's numbers from that same file:
-
-```
-python -c "from PyInstaller.archive.readers import CArchiveReader; print(sorted(CArchiveReader('Atomic.exe').toc))"
-```
+altogether. This is now caught automatically: `packaging/build.py`
+verifies the produced exe contains every file listed in `Atomic.spec`'s
+`datas` and fails loudly if not. It also warns if PyInstaller's work
+directory is older than the source tree (a sign of cache no-op). A
+"succeeded" build log proves nothing — PyInstaller caches, and a no-op
+rebuild silently re-copies the previous binary, but the build script
+catches this.
 
 ### Marker tags
 

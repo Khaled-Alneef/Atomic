@@ -56,16 +56,11 @@ as a single squashed commit) - never merge, always snapshot.
 
 **Prove the exe belongs to the tree you are tagging, before pushing.**
 1.4 shipped an executable built before the last two commits - it was
-missing `src/filter_icon.png` entirely, and the VDD's size and hash
-described a build that was never the one committed. Nothing in this
-procedure caught it, because a "succeeded" build log doesn't mean
-PyInstaller rebuilt anything. Read the bundled files back out of the
-archive and compare against the source tree (`test` skill), then take
-the VDD's size and SHA-256 from that same file:
-
-```
-python -c "from PyInstaller.archive.readers import CArchiveReader; print(sorted(CArchiveReader('Atomic.exe').toc))"
-```
+missing `src/filter_icon.png` entirely. This is now caught automatically:
+`packaging/build.py` verifies the produced exe contains every file
+listed in `Atomic.spec`'s `datas` and fails loudly if the build is stale
+or incomplete. A "succeeded" build log proves nothing — PyInstaller
+caches aggressively — but the build script now enforces verification.
 
 ## The VDD
 

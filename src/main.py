@@ -299,7 +299,15 @@ class MainWindow(QMainWindow):
         self.add_btn.setFixedHeight(34)
         self.add_btn.setToolTip("Add")
         use_hover_cursor(self.add_btn)
-        self.add_btn.clicked.connect(lambda: self._show_add_menu(self.add_btn))
+        # setMenu, not clicked -> menu.exec(...): Qt then places the popup
+        # itself, on the screen the button is actually on. Positioning it
+        # by hand means mapToGlobal, which returns coordinates divided by
+        # the *other* screen's scale factor on a mixed-DPI pair - the same
+        # trap that once put toasts 200px off (.claude/rules/ui.md). The
+        # tracker's filter button is built this way for the same reason.
+        self._add_menu = QMenu(self)
+        self._add_menu.aboutToShow.connect(self._build_add_menu)
+        self.add_btn.setMenu(self._add_menu)
         layout.addWidget(self.add_btn)
 
         self.settings_btn = QPushButton(objectName="NavButton")
@@ -415,14 +423,16 @@ class MainWindow(QMainWindow):
         ]
         app_settings.set_nav_order(order)
 
-    def _show_add_menu(self, anchor_btn):
+    def _build_add_menu(self):
+        """Rebuilt every time it opens, not once at startup: hiding a
+        section in Settings has to drop it from here without a restart,
+        the way it already does from the sidebar."""
+        self._add_menu.clear()
         hidden = set(app_settings.get_hidden_sections())
-        menu = QMenu(self)
         for label, page_name, action in ADD_ITEMS:
             if page_name in hidden:
                 continue
-            menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
-        menu.exec(anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft()))
+            self._add_menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
 
     def _add_via(self, page_name, action):
         self.navigate_to(page_name, animate=False)

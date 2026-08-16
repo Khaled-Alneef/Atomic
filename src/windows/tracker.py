@@ -1953,8 +1953,16 @@ class EntryForm(QDialog):
         # a background thread (.claude/rules/integrations.md).
         catalogs = self._search_catalogs()
         self._searched_several_types = len(catalogs) > 1
-        threading.Thread(target=self._search_worker,
-                         args=(provider, text, seq, catalogs), daemon=True).start()
+        # Not a bare thread, for the same reason the Video Website lookup
+        # below isn't one: this fires per debounce pause, so typing faster
+        # than a search answers used to run several concurrently with
+        # nothing capping them - and a dual-catalog video search
+        # (_search_catalogs) is two Cinemeta requests each, not one.
+        # submit_latest drops a superseded search before it ever runs; the
+        # seq check in _apply_search_results stays as the second line of
+        # defence for the one that was already running.
+        lookup_pool.submit_latest("entry-search", self._search_worker,
+                                  provider, text, seq, catalogs)
         # The Video Website is searched on its own, off what's typed,
         # rather than only when a Cinemeta suggestion is picked: the site
         # knows its own catalogue, and a title Cinemeta spells
@@ -1984,15 +1992,23 @@ class EntryForm(QDialog):
         return [(t, STREMIO_CATALOG_BY_TYPE.get(t, "series")) for t in types]
 
     def _search_worker(self, provider, text, seq, catalogs=()):
-        if provider == "stremio":
+        # Must never raise. On a bare thread a failure only lost this one
+        # search; on the shared submit_latest worker it would also be the
+        # last thing this dialog said, leaving "Searching..." on screen
+        # forever. Emit an empty result instead - the status line then
+        # reads "No matches", which is both true and dismissable.
+        try:
+            if provider == "stremio":
+                results = []
+                for entry_type, catalog in catalogs:
+                    # Each result remembers which catalog answered, because
+                    # that is what the entry's Type has to become.
+                    results.extend({**r, "_entry_type": entry_type}
+                                   for r in stremio.search(text, catalog))
+            else:
+                results = manga_sites.search_all(text)
+        except Exception:
             results = []
-            for entry_type, catalog in catalogs:
-                # Each result remembers which catalog answered, because
-                # that is what the entry's Type has to become.
-                results.extend({**r, "_entry_type": entry_type}
-                               for r in stremio.search(text, catalog))
-        else:
-            results = manga_sites.search_all(text)
         self._signals.results.emit(provider, results, seq)
 
     def _video_site_options(self):

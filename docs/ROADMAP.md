@@ -236,6 +236,19 @@ correct but too easy to skip under release pressure (the same way the
 existing "read the test skill" instruction was skipped once already) -
 wire it into `build.py` itself, or the `release` skill's procedure,
 not just into documentation that has to be remembered.
+**Landed** (1.4.5) - in `build.py`, so it runs on every build rather
+than being remembered. Two gates: every file `Atomic.spec`'s `datas`
+promises must be in the archive **and byte-identical to the file on
+disk** (a cached build carries the *previous* copy under the right
+name, which a presence-only check passes), and PyInstaller's work
+directory must not be older than `src/`. The spec is read with `ast`,
+not a regex - a pattern that stops matching would leave every build
+"verified" against an empty list, which is worse than no check, so an
+unreadable spec fails instead. Proved against the real thing: the exe
+1.4 first shipped is **rejected** ("filter_icon.png is missing"), a
+deliberately mismatched file is rejected on content, and the current
+build passes at 174 entries. RELEASING.md and the `release` skill now
+point at this instead of describing a manual check.
 
 ### 4. Write 1.4's missing "what's new" notes
 
@@ -330,6 +343,19 @@ than by careful math.
 is invisible on a single-monitor 100%-scale dev machine, so "looks
 fine" here proves nothing - match it against the filter button's fix or
 measure on real mixed-DPI hardware.
+**Landed** (1.4.5) - `setMenu`, matching the filter button, with the
+menu rebuilt on `aboutToShow` so a section hidden in Settings drops out
+without a restart. This was the **last live `mapToGlobal` in `src/`**;
+the only remaining occurrence is the comment explaining why not to use
+it. Both behaviour risks of `setMenu` were checked rather than assumed:
+`theme.py:486` already suppresses `QPushButton::menu-indicator`
+globally (measured - no chevron), and opening on press shows the
+existing `:pressed` accent, which is correct feedback. Verified in a
+real window: anchored flush to the button (x delta 0), and Qt placed it
+*above* the button because 224px didn't fit below - its own screen-aware
+placement, which is the whole point of the change. Mixed-DPI hardware
+still not available; the argument is by construction plus the filter
+button's shipped precedent, which is what this item accepts.
 
 ### 7. Route entry-search suggestions through `lookup_pool`
 
@@ -366,6 +392,15 @@ in place unchanged as the second line of defence.
 new design. Verify debounced search still feels responsive after
 routing through the shared single-worker key, same check the original
 fix made.
+**Landed** (1.4.5) - `lookup_pool.submit_latest("entry-search", ...)`,
+alongside the video-site lookup that already used it. `_search_worker`
+also had to stop being able to raise: on a bare thread a failure lost
+one search, but on a shared worker it would be the last thing the
+dialog said, leaving "Searching..." on screen forever. It now emits an
+empty result, which reads as "No matches". Verified both paths - a
+raising Cinemeta emits `("stremio", [], seq)` instead of propagating,
+and a dual-catalog search still returns one result per catalog tagged
+with the type that answered.
 
 ### 8. Retire or rebuild `diagnose_anilist.py` - it calls functions that no longer exist
 
@@ -398,6 +433,18 @@ without raising against a real or stubbed Stremio response.
 **Risk** - none; this is dev tooling, not shipped in the exe
 (`Atomic.spec`'s `Analysis` only starts from `src/main.py`), so nothing
 about the running app depends on this either way.
+**Landed** (1.4.5) - rewritten as `packaging/diagnose_stremio.py`; the
+AniList one is deleted. It walks the five links in order (account
+connected, Stremio reachable, session still accepted, entry carries a
+Cinemeta id, title actually has progress) and stops at the first break,
+which item #1's `AuthFailed` is what makes possible - links 3 and 5 were
+indistinguishable before it. It cannot write to the data directory:
+`storage.save`, `storage._quarantine` and the logger are all neutered
+first, because merely *reading* a damaged file would otherwise quarantine
+it. The session key is never printed, only its length. Verified over six
+stubbed cases (healthy, rejected session, no account, nothing tracked,
+an unparseable file, and in-library-but-unwatched); each exits with the
+code its output claims.
 
 ---
 

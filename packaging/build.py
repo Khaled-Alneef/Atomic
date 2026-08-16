@@ -6,8 +6,19 @@ taskbar/title-bar icon comes up blank at runtime). Installs PyInstaller
 first if it isn't already available. PyInstaller's own work/dist folders
 are kept inside this packaging/ directory; the finished exe is then
 copied to the project root so Atomic.exe stays the one loose file there.
+
+Then it proves the exe belongs to the source tree it was built from,
+because a build log that says "completed successfully" does not. 1.4 was
+tagged with an executable built before its own last two commits: it was
+missing src/filter_icon.png outright (173 bundled entries where the tree
+produces 174), and the release notes recorded the size and hash of a
+build that was never the one committed. Nothing failed at the time -
+PyInstaller re-copied a cached binary and reported success. Both checks
+below exist for that one incident.
 """
 
+import ast
+import os
 import shutil
 import subprocess
 import sys
@@ -30,6 +41,135 @@ def _ensure_pyinstaller():
         subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller>=6.0"], check=True)
 
 
+def _resolve(node, known):
+    """A spec-file expression as a string, or None if it isn't one this
+    understands - a literal, a name assigned earlier, or os.path.join of
+    those."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return known.get(node.id)
+    if isinstance(node, ast.Call) and _is_path_join(node.func) and node.args:
+        parts = [_resolve(arg, known) for arg in node.args]
+        if all(part is not None for part in parts):
+            return os.path.join(*parts)
+    return None
+
+
+def _is_path_join(func):
+    """os.path.join specifically. The spec calls other functions of its
+    own (_write_version_resource), and treating any call as a join turns
+    those into a crash rather than a "not a path"."""
+    return (isinstance(func, ast.Attribute) and func.attr == "join"
+            and isinstance(func.value, ast.Attribute) and func.value.attr == "path")
+
+
+def _required_datas():
+    """What Atomic.spec promises to bundle, as (name inside the archive,
+    file on disk).
+
+    Read with `ast` rather than by matching the spec's text. The spec
+    names its files through variables, and a regex over the source finds
+    nothing at all the moment one of them is spelled differently - which
+    would leave this returning an empty list and every build "verified"
+    against nothing. A check that passes because it looked at nothing is
+    worse than no check, so an unreadable spec raises instead.
+    """
+    tree = ast.parse(SPEC_FILE.read_text(encoding="utf-8"))
+
+    # SPECPATH is injected by PyInstaller; the spec resolves every path
+    # from it, so it has to be seeded here the same way.
+    known = {"SPECPATH": str(PACKAGING_DIR)}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name):
+            value = _resolve(node.value, known)
+            if value is not None:
+                known[node.targets[0].id] = value
+
+    datas = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Analysis":
+            datas = next((kw.value for kw in node.keywords if kw.arg == "datas"), None)
+    if not isinstance(datas, ast.List):
+        raise SystemExit(f"Couldn't read datas=[...] out of {SPEC_FILE.name} - "
+                         "the bundle check has nothing to verify against.")
+
+    required = []
+    for element in datas.elts:
+        source = _resolve(element.elts[0], known)
+        dest = _resolve(element.elts[1], known)
+        if source is None or dest is None:
+            raise SystemExit(f"Couldn't resolve a datas entry in {SPEC_FILE.name}: "
+                             f"{ast.dump(element)}")
+        name = os.path.basename(source) if dest == "." else f"{dest}/{os.path.basename(source)}"
+        required.append((name, Path(source).resolve()))
+    return required
+
+
+def _verify_bundle(exe_path):
+    """Every promised file is in the exe, and is the file that is on disk
+    now.
+
+    Byte-comparing rather than checking the name is present: a cached
+    build carries the *previous* copy of an asset under the right name,
+    which is the failure that would otherwise still get through.
+    """
+    from PyInstaller.archive.readers import CArchiveReader
+
+    archive = CArchiveReader(str(exe_path))
+    bundled = set(archive.toc)
+
+    problems = []
+    for name, source in _required_datas():
+        if name not in bundled:
+            problems.append(f"{name} is missing from the executable")
+            continue
+        if archive.extract(name) != source.read_bytes():
+            problems.append(f"{name} in the executable differs from {source}")
+
+    if problems:
+        sys.exit("\nBUILD REJECTED - the executable does not match the source tree:\n  "
+                 + "\n  ".join(problems)
+                 + f"\n\nThis is what shipped in 1.4. Clean and build again:\n"
+                   f"  rmdir /s /q \"{WORK_DIR}\" \"{DIST_DIR}\"\n"
+                   f"  python packaging/build.py\n")
+
+    print(f"Bundle verified: {len(bundled)} entries, "
+          f"{len(_required_datas())} bundled files byte-identical to src/.")
+
+
+def _verify_not_cached():
+    """PyInstaller rebuilt something, rather than re-copying a cached
+    binary.
+
+    The signal is its own work directory: a real build rewrites the toc,
+    PYZ and PKG files in there, so the newest file under packaging/build
+    ends up newer than the newest file under src/. When PyInstaller
+    decides nothing changed it leaves them alone, and a source file
+    edited since the last build sorts above them. False alarms are
+    possible (editing a file the app never imports) and are deliberately
+    left as failures: cleaning and rebuilding costs 20 seconds, and
+    shipping the wrong binary cost a release.
+    """
+    if not WORK_DIR.exists():
+        return
+    newest_work = max((path.stat().st_mtime for path in WORK_DIR.rglob("*") if path.is_file()),
+                      default=0)
+    newest_src = max((path.stat().st_mtime for path in SRC_DIR.rglob("*") if path.is_file()),
+                     default=0)
+    # Only "source is newer than the build" fails. Building twice with
+    # nothing changed in between legitimately writes nothing, and the
+    # binary from it is correct - rejecting that would train whoever
+    # releases to ignore this check, which is how the 1.4 one was missed.
+    if newest_work < newest_src:
+        sys.exit("\nBUILD REJECTED - PyInstaller wrote nothing new under "
+                 f"{WORK_DIR.name}, so this build is its cache rather than "
+                 "your source.\n"
+                 f"  rmdir /s /q \"{WORK_DIR}\" \"{DIST_DIR}\"\n"
+                 "  python packaging/build.py\n")
+
+
 def main():
     if not ICON_FILE.exists():
         sys.exit(f"Missing {ICON_FILE.name} in {SRC_DIR} - put the icon there before building.")
@@ -37,6 +177,9 @@ def main():
         sys.exit(f"Missing {SPEC_FILE.name} in {PACKAGING_DIR}.")
 
     _ensure_pyinstaller()
+    # Read before building: a spec this can't parse is a problem to hear
+    # about now, not after a two-minute build.
+    _required_datas()
 
     print(f"Building from {SPEC_FILE.name}...")
     result = subprocess.run(
@@ -54,6 +197,9 @@ def main():
     built_exe = DIST_DIR / "Atomic.exe"
     if not built_exe.exists():
         sys.exit(f"\nBuild finished, but {built_exe} wasn't found - check the log above.")
+
+    _verify_not_cached()
+    _verify_bundle(built_exe)
 
     final_exe = PROJECT_ROOT / "Atomic.exe"
     shutil.copy2(built_exe, final_exe)
