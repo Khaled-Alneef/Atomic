@@ -59,25 +59,41 @@ class _SiteProbeSignals(QObject):
     done = Signal(str, str)  # which list ("reading"/"video"), site name
 
 
-# What probe_site's verdicts mean to someone looking at the list, said
-# as what happens when they open an entry on that site. The previous
-# wording described the resolver instead ("opens title pages", "search
-# links only - no title pages") and the owner, who uses this daily, had
-# to ask what it meant - so each line is now a plain sentence.
+# A verdict per row, in the owner's own words - they wrote these after
+# reading the previous two attempts. The first described the resolver
+# ("opens title pages", "search links only") and had to be explained; the
+# second explained itself on every row, which said the same thing five
+# times over. A row now carries the verdict alone and _VERDICT_LEGEND
+# below says what each one means, once, under the buttons.
 #
 # engine/streaming and generic all land on the entry's own page, but
 # generic gets there by reading the site's own search results, which is
-# the first thing to break when a site is redesigned. Kept as separate
-# lines on purpose: collapsing them would hide the fragile case.
+# the first thing to break when a site is redesigned - hence "may break"
+# rather than a fifth way of saying "works". Collapsing it into
+# "Works perfectly" would hide the case that fails first.
 _RESOLVES_LABELS = {
-    "engine": "opens each entry's own page",
-    "generic": "opens each entry's own page, if its search still works",
-    "streaming": "opens each entry's own page",
-    "search-only": "only opens its search - you pick the entry yourself",
-    "unreachable": "the site didn't answer when checked",
-    "unknown": "the check didn't finish - try Check again",
+    "engine": "Works perfectly",
+    "generic": "Works, but may break",
+    "streaming": "Works perfectly",
+    "search-only": "Works, but directed to search page",
+    "unreachable": "Site not responding",
+    "unknown": "Check failed",
     "checking": "checking...",
 }
+
+# The same verdicts spelled out once, under the buttons, rather than
+# repeated on every row - a row says which verdict, this says what the
+# verdict means. {kind} is the medium the list is for, so it reads as
+# the thing being tracked there rather than as "content".
+_VERDICT_LEGEND = (
+    "<b>Works perfectly</b>: you'll be taken to the added {kind} page.<br>"
+    "<b>Works, but may break</b>: same, but the page is found through the "
+    "site's own search - it stops working when that changes.<br>"
+    "<b>Works, but directed to search page</b>: you'll be taken to the "
+    "site's {kind} search page and pick it yourself.<br>"
+    "<b>Site not responding</b>: nothing answered - the site may be down.<br>"
+    "<b>Check failed</b>: the check didn't finish - try Check again."
+)
 
 # Site ids whose verdict was actually measured during this run of the
 # app. A verdict is a measurement of a remote site at one moment, not a
@@ -88,6 +104,12 @@ _RESOLVES_LABELS = {
 # level rather than on SettingsDialog because the dialog is rebuilt on
 # every open and the lifetime wanted is the process, not the dialog.
 _CHECKED_THIS_RUN = set()
+
+
+def _verdict_legend(kind: str) -> QLabel:
+    label = QLabel(_VERDICT_LEGEND.format(kind=kind), objectName="Muted")
+    label.setWordWrap(True)
+    return label
 
 
 class _LauncherImportSignals(QObject):
@@ -218,8 +240,8 @@ class SettingsDialog(QDialog):
         form.addLayout(version_row)
 
         self.update_status = QLabel(
-            "Updates come straight from the project's GitHub repository - no "
-            "reinstalling, and your saved entries are left alone.",
+            "Downloads and replaces the app itself. Your entries are left "
+            "alone.",
             objectName="Muted",
         )
         self.update_status.setWordWrap(True)
@@ -242,9 +264,7 @@ class SettingsDialog(QDialog):
         form.addWidget(self.fullscreen_startup_check)
 
         fullscreen_hint = QLabel(
-            "Only applies to that sign-in launch - opening Atomic yourself "
-            "still starts it maximized, and F11 or Escape leaves full "
-            "screen either way.",
+            "Only that sign-in launch. F11 leaves full screen either way.",
             objectName="Muted",
         )
         fullscreen_hint.setWordWrap(True)
@@ -254,9 +274,7 @@ class SettingsDialog(QDialog):
         form.addSpacing(24)
         form.addWidget(QLabel("Sections", objectName="SectionTitle"))
         sections_hint = QLabel(
-            "Choose which sections show up in the app. Hidden sections "
-            "keep their saved entries - toggle one back on any time to "
-            "bring it back.",
+            "Which sections show in the sidebar. Hidden ones keep their entries.",
             objectName="Muted",
         )
         sections_hint.setWordWrap(True)
@@ -282,10 +300,7 @@ class SettingsDialog(QDialog):
         form.addWidget(self.hide_from_home_check)
 
         home_hint = QLabel(
-            "Off by default, where unticking a section above only drops "
-            "its sidebar entry and Home still previews it. Tick this to "
-            "leave hidden sections off Home as well - their preview row, "
-            "quick list, and any \"Continue\" slides all go with them.",
+            "Also keeps hidden sections off the Home page.",
             objectName="Muted",
         )
         home_hint.setWordWrap(True)
@@ -433,22 +448,16 @@ class SettingsDialog(QDialog):
 
         form.addWidget(QLabel("Video Websites", objectName="SectionTitle"))
         video_sites_hint = QLabel(
-            "Which app/site an Anime entry can be set to open on double-"
-            "click, picked per-entry (Add/Edit Entry > Video Website) the "
-            "same way Reading Websites work for Manga. \"Stremio\" is "
-            "always available and gets a direct deep link straight to the "
-            "title; Crunchyroll and Netflix open the title's own page too, "
-            "found through public databases rather than their own search, "
-            "which this app can't query safely (bot protection it won't "
-            "try to bypass). Anything else you add here depends on its own "
-            "search - use Check to see what it opens. Either way, suggestions/"
-            "covers while adding an entry still come from Stremio's "
-            "public metadata, and the auto-filled Last Season/Episode "
-            "below comes from your connected Stremio account further "
-            "down - which works no matter which site the entry opens on.",
+            "Where entries open on double-click, chosen per entry in Add/Edit.",
             objectName="Muted",
         )
         video_sites_hint.setWordWrap(True)
+        video_sites_hint.setToolTip(
+            "Stremio is always available and opens the title directly. Crunchyroll "
+            "and Netflix open the title's own page too, found through public "
+            "databases. Anything else you add depends on its own search - Check "
+            "says which. Suggestions, covers and watch progress come from Stremio "
+            "either way, whichever site an entry opens on.")
         form.addWidget(video_sites_hint)
 
         self.video_sites_list = QListWidget()
@@ -465,17 +474,15 @@ class SettingsDialog(QDialog):
         video_sites_btn_row.addWidget(edit_video_site_btn)
         check_video_site_btn = QPushButton("Check")
         check_video_site_btn.setToolTip(
-            "Searches this site for a title it should have, then says what "
-            "you'd get by opening an entry there: the entry's own page, or "
-            "only this site's search results to pick from. A site whose "
-            "pages are found through its own search works, but is the first "
-            "to break when the site changes.")
+            "Searches this site for a title it should have, then says which "
+            "of the verdicts below you would get by opening an entry here.")
         check_video_site_btn.clicked.connect(self._check_video_site)
         video_sites_btn_row.addWidget(check_video_site_btn)
         remove_video_site_btn = QPushButton("Remove", objectName="Danger")
         remove_video_site_btn.clicked.connect(self._remove_video_site)
         video_sites_btn_row.addWidget(remove_video_site_btn)
         form.addLayout(video_sites_btn_row)
+        form.addWidget(_verdict_legend("anime/movies/series"))
 
         form.addSpacing(24)
         form.addWidget(QLabel("Stremio Account", objectName="SectionTitle"))
@@ -502,11 +509,7 @@ class SettingsDialog(QDialog):
         form.addLayout(stremio_account_btn_row)
 
         stremio_account_hint = QLabel(
-            "Lets Anime/Series entries auto-fill with your real watch "
-            "progress (not just the newest episode out) when you pick a "
-            "Stremio match, for anything already in your Stremio library. "
-            "Your password is sent once to Stremio's own sign-in and "
-            "never stored - only the resulting session stays saved.",
+            "Fills in how far you have watched. Your password is never stored.",
             objectName="Muted",
         )
         stremio_account_hint.setWordWrap(True)
@@ -514,13 +517,7 @@ class SettingsDialog(QDialog):
 
         form.addSpacing(24)
         progress_note = QLabel(
-            "Watch progress comes from your Stremio account and nowhere "
-            "else. Crunchyroll, Netflix and the rest publish nothing about "
-            "what you've watched without a login they grant no app, and the "
-            "list services only knew what some other tracker had written to "
-            "them - which is how a card once showed an episode its owner "
-            "had never reached. Entries opened on those sites still open "
-            "there; they just don't claim a progress number.",
+            "Only Stremio can report watch progress - nobody else publishes it.",
             objectName="Muted",
         )
         progress_note.setWordWrap(True)
@@ -538,10 +535,7 @@ class SettingsDialog(QDialog):
 
         form.addWidget(QLabel("Reading Websites", objectName="SectionTitle"))
         sites_hint = QLabel(
-            "Sites the Reading page searches for direct links and can open "
-            "entries straight to, the way Stremio does for Anime/Series. "
-            "Most manga/manhwa/manhua sites work automatically - just add "
-            "the name and URL.",
+            "Sites reading entries are searched on and opened to. Add name and URL.",
             objectName="Muted",
         )
         sites_hint.setWordWrap(True)
@@ -561,17 +555,15 @@ class SettingsDialog(QDialog):
         sites_btn_row.addWidget(edit_site_btn)
         check_site_btn = QPushButton("Check")
         check_site_btn.setToolTip(
-            "Searches this site for a title it should have, then says what "
-            "you'd get by opening an entry there: the entry's own page, or "
-            "only this site's search results to pick from. A site whose "
-            "pages are found through its own search works, but is the first "
-            "to break when the site changes.")
+            "Searches this site for a title it should have, then says which "
+            "of the verdicts below you would get by opening an entry here.")
         check_site_btn.clicked.connect(self._check_site)
         sites_btn_row.addWidget(check_site_btn)
         remove_site_btn = QPushButton("Remove", objectName="Danger")
         remove_site_btn.clicked.connect(self._remove_site)
         sites_btn_row.addWidget(remove_site_btn)
         form.addLayout(sites_btn_row)
+        form.addWidget(_verdict_legend("reading"))
 
         form.addSpacing(24)
         form.addWidget(QLabel("Reading Music URL", objectName="SectionTitle"))
@@ -581,9 +573,8 @@ class SettingsDialog(QDialog):
         form.addWidget(self.manga_music_edit)
 
         manga_music_hint = QLabel(
-            "Opened alongside a reading page whenever you double-click an "
-            "entry - handy for a music/ambience site to play while you "
-            "read. Leave blank to skip.",
+            "Opens alongside a reading entry, for music while you read. "
+            "Leave blank to skip.",
             objectName="Muted",
         )
         manga_music_hint.setWordWrap(True)
@@ -601,17 +592,15 @@ class SettingsDialog(QDialog):
 
         form.addWidget(QLabel("Game Launcher Directories", objectName="SectionTitle"))
         hint = QLabel(
-            "Point at each launcher's install folder - for Steam, the "
-            r"folder containing steamapps (e.g. G:\Steam); for the "
-            "others, the folder each game gets its own subfolder under - "
-            "and every game found there is added to the Games page "
-            "automatically, the moment you set or change it. Games "
-            "already there (matched by path) are never duplicated, so "
-            "it's safe to re-check any time new games are installed. "
-            "Leave blank to skip a launcher.",
+            "Point at each launcher's folder - Steam's is the one with steamapps.",
             objectName="Muted",
         )
         hint.setWordWrap(True)
+        # The detail that no longer fits the two-line hint: it imports
+        # on the spot, and re-checking later is safe.
+        hint.setToolTip("Every game found there is added to the Games page as soon as you "
+                        "set this. Games already listed are matched by path and never "
+                        "added twice, so it is safe to set again after installing more.")
         form.addWidget(hint)
 
         self.launcher_dir_edits = {}
@@ -675,9 +664,7 @@ class SettingsDialog(QDialog):
 
         form.addWidget(QLabel("Clear Data", objectName="SectionTitle"))
         clear_hint = QLabel(
-            "Check one or more categories, then Clear Selected to wipe "
-            "just their saved entries. Site lists (Video/Reading Websites) "
-            "and the rest of Settings are untouched. This cannot be undone.",
+            "Wipes the ticked categories' entries. This cannot be undone.",
             objectName="Muted",
         )
         clear_hint.setWordWrap(True)
@@ -702,9 +689,8 @@ class SettingsDialog(QDialog):
         form.addSpacing(28)
         form.addWidget(QLabel("Uninstall", objectName="SectionTitle"))
         uninstall_hint = QLabel(
-            "Deletes every saved Atomic file on this PC - all entries, "
-            "site lists, and settings - and removes the app itself. This "
-            "cannot be undone, and the app closes immediately after.",
+            "Deletes every entry, site list and setting, then removes the "
+            "app. This cannot be undone.",
             objectName="Muted",
         )
         uninstall_hint.setWordWrap(True)

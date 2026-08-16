@@ -1676,6 +1676,17 @@ class EntryForm(QDialog):
         # on - see shows_last_watched.
         self.show_watched_check.setChecked(shows_last_watched(entry) if entry else False)
         self.show_watched_check.toggled.connect(self._update_progress_visibility)
+        # Ticking it on starts the numbers at zero. The spinners below are
+        # seeded from the entry's stored progress, which for an entry that
+        # was *not* already showing a last-watched number is the released
+        # figure the app filled in on its own - so ticking the box used to
+        # reveal "S2 E12" as if it were how far you had watched, and
+        # saving straight after would have written that down as yours.
+        # Zeroed only while the seeded numbers are still that borrowed
+        # kind: once they have been shown or typed, they are answers and
+        # this leaves them alone.
+        self._watched_seeded_from_release = not (shows_last_watched(entry) if entry else False)
+        self.show_watched_check.toggled.connect(self._zero_unowned_watched_values)
         form.addWidget(self.show_watched_check)
 
         self.chapter_row = QWidget()
@@ -2070,7 +2081,11 @@ class EntryForm(QDialog):
         # it out ("No matches from Stremio", "...from your manga
         # websites") only invited the question of why that one was asked.
         if labels:
-            self.search_status_label.setText(f"{len(labels)} match(es) - pick one below")
+            # "1 Match found" / "4 Matches found". The dropdown opens on
+            # its own right below, so the old "- pick one below" was
+            # telling the user what they were already looking at.
+            noun = "Match" if len(labels) == 1 else "Matches"
+            self.search_status_label.setText(f"{len(labels)} {noun} found")
             self.title_combo.showPopup()
         else:
             self.search_status_label.setText("No matches - you can still save this title as-is")
@@ -2112,6 +2127,17 @@ class EntryForm(QDialog):
         self.selected_cover_path = None
 
         if result.get("_provider") == "manga_sites":
+            # A different page than the number on screen came from means
+            # that number belongs to a different manga. Measured: typing
+            # "Kingdom (WAN)" auto-applies plain "Kingdom" the moment the
+            # first word is a full match, whose page lookup then wrote 798
+            # into the field; the real pick (884) arrived after and was
+            # refused by the "don't overwrite what's already there" rule
+            # below, so the entry read 798 for a manga on chapter 884.
+            # Cleared here so the lookup for the page actually picked has
+            # somewhere to land.
+            if result["url"] != self.url_edit.text():
+                self.chapter_spin.setValue(0)
             self.url_edit.setText(result["url"])
             idx = self.site_box.findData(result["site_id"])
             if idx >= 0:
@@ -2278,10 +2304,11 @@ class EntryForm(QDialog):
         # can't tell one pending lookup from another.
         identity = f"{site_id}\n{title}"
         self._pending_video_identity = identity
-        # Doesn't name the site: which one is being asked is already in the
-        # dropdown right there, and naming it made the line different for
-        # every site while saying the same thing.
-        self._set_status_part("site", "Searching...")
+        # Nothing on screen while it runs. The line used to say
+        # "Searching...", which added a second thing moving under a field
+        # the user isn't waiting on - the page url fills itself in, and
+        # only its *failure* is worth a word (see _on_video_url_resolved).
+        self._set_status_part("site", "")
         # Not a bare thread: this fires per debounced keystroke, so
         # typing a title used to start one unbounded resolution after
         # another, each opening its own connections while its result was
@@ -2345,6 +2372,20 @@ class EntryForm(QDialog):
             # never count as verified.
             self._progress_verified = False
             self._autofilled_progress = True
+
+    def _zero_unowned_watched_values(self, checked):
+        """First tick of Show Last Watched clears the borrowed numbers.
+
+        Blocked signals: these spinners report a hand edit by their
+        valueChanged, and zeroing them is not the user saying they have
+        watched nothing - it is the form admitting it does not know."""
+        if not checked or not self._watched_seeded_from_release:
+            return
+        self._watched_seeded_from_release = False
+        for spin in (self.season_spin, self.episode_spin, self.watched_chapter_spin):
+            spin.blockSignals(True)
+            spin.setValue(0)
+            spin.blockSignals(False)
 
     def _on_progress_hand_edited(self, _value):
         self._progress_verified = True

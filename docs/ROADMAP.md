@@ -53,6 +53,11 @@ clever one, and leave a working path working.
 | 10 | Show a Stremio connection that has gone bad, in Settings itself | ui-engineer | contained | todo |
 | 27 | Say what a site's check verdict actually means | ui-engineer | contained | todo - **owner-raised** |
 | 28 | Clear site check verdicts when the app restarts | ui-engineer | contained | todo - **owner-raised** |
+| 31 | The owner's own wording for the check verdicts, with a line saying what each means | ui-engineer | contained | **landed 1.4.6** |
+| 32 | Every explanation in Settings down to two lines | ui-engineer | contained | **landed 1.4.6** |
+| 33 | Say how many matches, not what to do about them | ui-engineer | contained | **landed 1.4.6** - owner-raised |
+| 34 | Show Last Watched must not open on borrowed numbers | ui-engineer | contained | **landed 1.4.6** - owner-raised |
+| 35 | A suggestion's chapter number outliving the suggestion | ui-engineer | contained | **landed 1.4.6** - owner-reported |
 | 29 | Let the "what's new" dialog scroll | ui-engineer | contained | todo - found landing #4 |
 | 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | todo - found landing #2 |
 | 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | todo |
@@ -567,6 +572,139 @@ after a real probe, and disappear again when the run resets. The stale
 Video Websites hint went with it - Crunchyroll and Netflix open title
 pages via public databases, and it said they only opened a search.
 
+### 31. The owner's own wording for the check verdicts, with a line saying what each means
+
+**What** - Second pass over #27, dictated by the owner after reading the
+first one. The verdict is a short verdict, and the sentence explaining
+it goes underneath:
+
+| verdict | reads | explanation under it |
+|---|---|---|
+| `engine` / `streaming` | **Works perfectly** | you will be directed to the added reading page (anime/movies/series on the video list) |
+| `search-only` | **Works, but directed to search page** | you will be directed to the added reading search page (likewise) |
+| `unreachable` | **Site not responding** | |
+| `unknown` | **Check failed** | |
+
+The explanation names the *medium the list is for* - "reading" on the
+Reading Websites list, "anime/movies/series" on the Video one - so it
+reads as the thing the owner actually tracks there.
+**Why now** - #27 replaced jargon with a plain sentence; the owner read
+it and wrote what they'd rather see. That is the shortest feedback loop
+this list has and it costs almost nothing to honour.
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`: `_RESOLVES_LABELS` and
+`_site_label`. The explanation line is new UI - it belongs with the
+verdict, not in the section hint, and must stay inside item #32's
+two-line budget.
+**Open question, decide when building it** - the table above has no row
+for `generic`, the site whose title page is found by reading its own
+search results. It is not "works perfectly" (it breaks first when the
+site changes) and not "directed to search page" (it does open the
+title's own page). Keep it a fifth verdict in the owner's voice -
+something like **Works, but may break** - rather than folding it into
+either neighbour; #27's landing note explains why that distinction is
+worth keeping. Flag the wording to the owner rather than deciding it
+silently.
+**Done when** - the four dictated strings appear exactly as written,
+each carries its one-line explanation, the explanation names the right
+medium per list, and `generic` still has a verdict of its own.
+**Risk** - low, wording only; `probe_site` is untouched. The one trap is
+letting the explanation grow into a paragraph - it is subject to #32.
+**Landed** (1.4.6) - the four dictated verdicts, plus **"Works, but may
+break"** for `generic`, which the owner's table had no row for: it does
+open the entry's own page, but finds it by reading the site's own search
+results, so it is the one that stops working when a site changes. The
+explanations moved *under the buttons* rather than onto each row, at the
+owner's direction - a row says which verdict, the legend says what the
+verdicts mean, once, naming "reading" or "anime/movies/series" per
+list.
+
+### 32. Every explanation in Settings down to two lines
+
+**What** - Owner-raised: *"make the explanation in the settings like the
+under Video Websites much smaller and easy to understand (maximum 2
+lines), apply to all settings comments/explanation."* Roughly a dozen
+`objectName="Muted"` hint labels in `settings_dialog.py` currently run
+to four, five, six lines each - Video Websites, Sections, Home, Stremio
+Account, the progress note, Reading Websites, Reading Music, Game
+Launcher Directories, Clear Data, Uninstall, full screen, startup.
+**Why now** - Settings is the app's densest screen and the owner says
+the wall of prose is what makes it hard to use. It also has to happen
+*before* #15 restructures the dialog: shortening the text first tells us
+how much dialog there actually is to restructure, and restructuring
+first would mean laying out text that is about to be cut.
+**Owner** - ui-engineer
+**Where** - `src/helpers/settings_dialog.py`, every `QLabel(...,
+objectName="Muted")` hint. Two lines at the dialog's default width is
+the budget - measure it, don't guess by character count.
+**Done when** - no hint in Settings exceeds two rendered lines at the
+default dialog width, and each still answers "what does this control do"
+for someone who has never seen it. Anything that genuinely needs more
+than two lines becomes a tooltip on the control, not a longer label.
+**Landed** (1.4.6) - all thirteen, **measured rather than counted in
+characters**: each label is laid out at its real width (627px in the
+dialog at its default size) and its line count read back. That mattered
+- the font is wider than it looks, so the budget is about 85 characters,
+and a first pass that "looked short" still rendered eight of them at
+three lines. Two facts that could not fit moved onto tooltips rather
+than being dropped: that launcher directories import on the spot without
+duplicating, and what Stremio/Crunchyroll/Netflix each do.
+**Risk** - real, and the reason this is its own item: some of these
+hints carry facts that were expensive to learn (why watch progress has
+one source, what Clear Data actually deletes, that an uninstall removes
+saved data). Shorten the *wording*, don't drop the *fact* - if a fact
+won't fit, it moves to a tooltip rather than disappearing.
+
+### 33. Say how many matches, not what to do about them
+
+**What** - Owner-raised. The Add/Edit search line read
+`3 match(es) - pick one below`. It now reads **"1 Match found"** or
+**"4 Matches found"**; the no-match line is untouched. The Video Website
+line no longer says "Searching..." at all - it is blank while the lookup
+runs, and speaks only when the lookup finds nothing.
+**Owner** - ui-engineer
+**Landed** (1.4.6) - `_apply_search_results` and
+`_start_video_site_resolution` in `tracker.py`. Verified on both a video
+page and a reading page: one result, four results, and none.
+
+### 34. Show Last Watched must not open on borrowed numbers
+
+**What** - Owner-raised: ticking **Show Last Watched** should start at
+zero. It didn't - the season/episode spinners are seeded from the
+entry's stored progress, which for an entry not already showing a
+last-watched number is the *released* figure the app filled in itself.
+Ticking the box revealed "S2 E12" as though it were how far the owner
+had watched, and saving straight after would have written it down as
+theirs.
+**Owner** - ui-engineer
+**Landed** (1.4.6) - zeroed on the first tick only, and only while the
+seeded numbers are still that borrowed kind; a number already shown or
+typed is an answer and is left alone. Verified: a seeded entry reads
+S2 E12, ticking the box gives 0/0/0, and a typed 7 survives an off/on.
+
+### 35. A suggestion's chapter number outliving the suggestion
+
+**What** - Owner-reported, with the case: searching "Kingdom (WAN)" on
+3asq filled in **798**, which is the chapter count of the *other*
+Kingdom on that site, for a manga on **884**. Typing passes through
+"Kingdom", which exactly matches a real result, so the form auto-applies
+it and looks its page up; that answer (798) landed in Last Released
+Chapter, and when the real pick's answer (884) arrived the "never
+overwrite what is already there" rule refused it.
+**Why it matters beyond the one title** - the field is the site's own
+number and nothing about it says which page it came from, so any search
+whose first exact match is the wrong series leaves a confident wrong
+number behind. The owner's own diagnosis was the fix: refresh it when
+the picked suggestion changes.
+**Owner** - ui-engineer
+**Landed** (1.4.6) - applying a suggestion whose page differs from the
+one on screen clears the field first, so the lookup for the page
+actually picked has somewhere to land; a superseded lookup reporting in
+late still loses, as before. Measured against the real pages (798 and
+884 both fetched live), and the **control run with the fix removed
+reproduces the reported 798** - so the harness measures the defect
+rather than passing either way.
+
 ### 29. Let the "what's new" dialog scroll
 
 **What** - Found while landing #4: `UpdateSummaryDialog` has no scroll
@@ -744,6 +882,15 @@ restructuring is scoped and sized as a concrete follow-up item, or the
 investigation concludes the current single-scroll form is fine at this
 size and says why (e.g. "everything is reachable within N scrolls, not
 worth the risk of breaking a working dialog").
+**Owner's addition** - group **Movies with Anime and Series**: the
+current "Anime & Series" category predates films being tracked, and the
+Video Websites it holds serve all three. "Anime, Movies & Series" is the
+literal reading; a shorter one that stays true (the sidebar page is
+"Movies & Series", so "Watching" covers the lot) is welcome if it reads
+better - the point is that films must not look excluded.
+**Sequencing** - after #32. Shortening the hints first shows how much
+dialog there is to restructure; restructuring first means laying out
+text about to be cut.
 **Risk** - this is investigate-before-build; a bad restructuring that
 breaks a currently-working, if unstructured, dialog is worse than
 leaving it alone. Don't let "it's long" alone justify a rewrite without
