@@ -85,31 +85,26 @@ Don't loosen these to raise the hit rate.
 Respect throttles: MangaDex is spaced ~0.35s between requests and
 retried once, since the tracker fires one lookup per entry at once.
 
-**The supported route for Crunchyroll progress is MAL-Sync → AniList.**
+**Crunchyroll progress comes from MAL-Sync → AniList, and nothing else.**
 The browser extension updates the user's AniList list as they watch, and
-`anilist.py` reads it - nothing in Atomic to break when Crunchyroll
-changes anything. Settings > Crunchyroll Progress carries the five
-steps. Reach for this before proposing any direct Crunchyroll work.
+`anilist.py` reads it - nothing in Atomic is in the path when Crunchyroll
+changes anything. Settings > Crunchyroll Progress carries the six steps.
 
-**Reading Crunchyroll directly still exists, and is second on purpose**
-(`crunchyroll.py`),
-with a token pasted from the browser session. It is exact and immediate,
-which is the one thing MAL-Sync is not - and it **expires inside an
-hour**, which is why it is offered as a one-off read rather than an
-account. Never present it as "connected".
+**Reading Crunchyroll directly was built, shipped, and removed. Do not
+rebuild it.** Three measured dead ends, in the order they were hit:
 
-Two measured facts, so they are not rediscovered: **email/password
-cannot work** - minting a token needs a client credential Crunchyroll
-issues to no third party, and the published one answers
-`auth.obtain_access_token.client_inactive` on both hosts (`login`/
-`refresh` remain, unreachable, and would work if a live credential were
-put in settings.json). And **the token lives in the `token` request's
-*response*** - that request's own headers carry `Basic`, not `Bearer`;
-`Bearer` appears only on `content/v2` requests. Wrong instructions here
-already cost the owner an evening. One shared history fetch serves a
-whole page (`cached_history`); don't make it per entry. Using it at all
-is against Crunchyroll's ToS, which is the account holder's call and was
-made.
+1. **Email/password cannot work.** Minting a token needs a client
+   credential Crunchyroll issues to no third party, and the published
+   one answers `auth.obtain_access_token.client_inactive` on both
+   `www.crunchyroll.com` and `beta-api.crunchyroll.com`.
+2. **A pasted browser token works but expires inside an hour**, so an
+   account that looked connected quietly stopped answering. (For the
+   record, since it is not guessable: the token is in the `token`
+   request's *response* - that request's own headers carry `Basic`, not
+   `Bearer`, and `Bearer` appears only on `content/v2` requests.)
+3. It is against Crunchyroll's ToS, and it broke twice in one day.
+
+Revisit only if Crunchyroll publishes an actual API.
 
 Some services can't be *scraped* at all - Crunchyroll (JS-rendered
 search, content API 401s without OAuth) and Netflix (search behind a
@@ -117,10 +112,19 @@ sign-in).
 Both resolve via AniList's `externalLinks` instead, which needs no auth
 on either service: `anime_sites._STREAMING_SITES` is the table, and
 adding another such service is a row there, not new code. An
-authenticated Crunchyroll client was once rejected as redundant with
-`anilist.py` - **that turned out to be wrong and it now exists** (see
-above). AniList only knows what some other tracker wrote to it, so an
-entry watched to episode 2 on Crunchyroll sat there reading episode 7.
+authenticated Crunchyroll client was tried twice and removed both times
+(see above); AniList, kept current by MAL-Sync, is what answers instead.
+
+**AniList files each season as its own work; this app's cards do not.**
+`fetch_season_progress` finds a franchise's seasons, prefers the season
+number written in the title over release order, and reports the furthest
+one actually started - so "One-Punch Man" reads S02E05 rather than
+sitting at E12 forever. Two traps already paid for, both measured live:
+a 1-episode short (*Go! Saitama*) carried the franchise name **only as a
+synonym** and took season 3's slot, which is why matching uses the
+entry's own titles and never its synonyms; and a cour split
+("Season 3 Part 2") is still season 3, which is why `_SEASON_NUMBER_RE`
+deliberately does not match "Part".
 
 **AniList rate-limits hard, and used to fail soft into silence.**
 Sustained querying gets the whole network a `403` on every POST (not a

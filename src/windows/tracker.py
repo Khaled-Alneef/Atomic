@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (
-    anilist, anime_sites, app_settings, crunchyroll, images, lookup_pool, manga_sites,
+    anilist, anime_sites, app_settings, images, lookup_pool, manga_sites,
     release_schedule, storage, stremio, theme,
 )
 from helpers.widgets import (
@@ -367,12 +367,7 @@ class _ProgressSyncSignals(QObject):
 # it says who said it.
 SOURCE_STREMIO = "Stremio"
 SOURCE_ANILIST = "AniList"
-SOURCE_CRUNCHYROLL = "Crunchyroll"
 SOURCE_MANUAL = "you"
-
-# The entry is on Crunchyroll and no Crunchyroll account is connected -
-# so the one source that could answer for it wasn't asked.
-REASON_NO_CRUNCHYROLL_ACCOUNT = "no_crunchyroll_account"
 
 
 # Why a sync found nothing, when that is known. Several causes look
@@ -844,9 +839,9 @@ class TrackerPage(GlassPage):
         providers = anime_sites.streaming_provider_map()
         used = sorted({providers[e["site_id"]] for e in entries
                        if e.get("site_id") in providers})
-        if "crunchyroll" in used and not app_settings.get_crunchyroll_token():
+        if "crunchyroll" in used:
             lines.append("Crunchyroll can't be read directly - Settings > "
-                         "Crunchyroll Progress has the 5 steps to keep AniList "
+                         "Crunchyroll Progress has the 6 steps to keep AniList "
                          "updated for you instead.")
             used = [p for p in used if p != "crunchyroll"]
         if used:
@@ -1040,19 +1035,14 @@ class TrackerPage(GlassPage):
 
         parts = []
         provider = _reason_provider(reason)
-        if REASON_NO_CRUNCHYROLL_ACCOUNT in codes:
-            provider = provider or "crunchyroll"
-            parts.append(
-                "This entry is on Crunchyroll, which publishes nothing about "
-                "what you've watched. The fix that lasts is letting your "
-                "browser keep AniList updated as you watch - Settings > "
-                "Crunchyroll Progress has the 5 steps.")
-        elif provider:
+        if provider:
             name = _UNREADABLE_NAMES.get(provider, provider.title())
             parts.append(
-                f"{name} doesn't publish what you've watched to anyone who "
-                f"isn't signed in, so this entry can't fill itself in: set it "
-                f"by hand in Edit, or with the +1 button on the card.")
+                f"{name} publishes nothing about what you've watched, so this "
+                f"entry can't fill itself in on its own. The fix that lasts is "
+                f"letting your browser keep AniList updated as you watch - "
+                f"Settings > Crunchyroll Progress has the 6 steps. Or set it "
+                f"by hand with the +1 button on the card.")
         if provider:
             # Said in both cases above. It is the half the user cannot
             # deduce - the old behaviour silently showed Stremio's number
@@ -1094,10 +1084,6 @@ class TrackerPage(GlassPage):
         imdb_id = _entry_imdb_id(entry)
         if not imdb_id:
             return
-        # Asked by hand, usually right after watching something - so the
-        # shared history from a minute ago is exactly the stale answer
-        # the user is trying to get past.
-        crunchyroll.forget_cached_history()
         # Its own thread, not the bounded pool: this is one lookup the
         # user asked for by hand and is watching for, so it must not
         # queue behind a page-load backfill of every other entry.
@@ -1157,23 +1143,7 @@ class TrackerPage(GlassPage):
         # actually watched on Crunchyroll - AniList only ever knows what
         # some other tracker wrote to it, which is why an entry watched
         # to episode 2 could sit there reading episode 7.
-        crunchyroll_asked = False
-        if provider == "crunchyroll":
-            try:
-                session = crunchyroll.active_session()
-                if session:
-                    crunchyroll_asked = True
-                    result = crunchyroll.watch_progress(session, title)
-                    source = SOURCE_CRUNCHYROLL if result else ""
-                else:
-                    reasons.append(REASON_NO_CRUNCHYROLL_ACCOUNT)
-            except Exception:
-                # Fails soft like every other lookup: a Crunchyroll that
-                # is down, rate-limiting, or signed out must not stop
-                # AniList below from answering.
-                result = None
-
-        if not result and not watches_elsewhere and auth_key:
+        if not watches_elsewhere and auth_key:
             try:
                 result = stremio.fetch_watch_progress(imdb_id, auth_key)
                 source = SOURCE_STREMIO if result else ""
@@ -1192,9 +1162,7 @@ class TrackerPage(GlassPage):
                 result = None
         if not result and is_anime and not anilist_username:
             reasons.append(REASON_NO_ANILIST_USERNAME)
-        # Not said when Crunchyroll itself was asked and simply had
-        # nothing for this title - "can't be read" would then be false.
-        if not result and provider in _UNREADABLE_NAMES and not crunchyroll_asked:
+        if not result and provider in _UNREADABLE_NAMES:
             reasons.append(f"{REASON_SITE_UNREADABLE}:{provider}")
         try:
             total = stremio.fetch_latest_episode(imdb_id, "series")

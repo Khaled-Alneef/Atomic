@@ -27,7 +27,8 @@ defects, usability gaps, the Amazon Prime coverage note):
 | 15 | Investigate startup and page-rebuild performance | test-engineer | shape unknown - investigate first | done - **nothing to fix** |
 | 16 | Investigate code signing to stop the antivirus false positive | release-engineer | shape unknown - investigate first | done - **decision needed from the user** |
 | 17 | Investigate Kitsu as a second source for watch progress | integrations-engineer | shape unknown - investigate first | todo |
-| 18 | Read Crunchyroll progress from Crunchyroll, and stop Stremio answering for entries watched elsewhere | integrations-engineer | spans modules | done - **sign-in untested** |
+| 18 | Read Crunchyroll progress from Crunchyroll, and stop Stremio answering for entries watched elsewhere | integrations-engineer | spans modules | done - direct reading later **removed**, see #19 |
+| 19 | Route Crunchyroll through MAL-Sync → AniList, and read AniList per season | integrations-engineer | spans modules | done |
 
 Items 1-8 landed together as the correctness pass. Each block below
 records what was actually built and what it measured - which in several
@@ -876,6 +877,55 @@ says to paste a fresh one rather than looking like "nothing watched".
 is against their terms of service, and it will break whenever they
 change it. The MAL-Sync route (Crunchyroll → AniList, then AniList as
 today) was offered as the durable alternative and declined.
+
+### 19. Crunchyroll through MAL-Sync, and AniList read per season
+
+**What** - Two things, found by the owner actually using #18. Reading
+Crunchyroll directly could not be made to last: the password grant is
+impossible and a browser token dies inside an hour, so the section
+promised an account and delivered something that stopped answering
+silently. And once progress *did* arrive from AniList, a One-Punch Man
+card sat at E12 while its owner was part-way through season 2.
+**Why now** - The second one is the more important bug of the two, and
+it was invisible until the first was out of the way. AniList files each
+season as its own work and counts episodes from 1 within it; Crunchyroll
+and this app's cards use one title with a season number. Asking AniList
+about "One-Punch Man" therefore answers about season 1 forever.
+**Owner** - integrations-engineer
+**Where** - `helpers/anilist.py` (`fetch_season_progress`),
+`helpers/settings_dialog.py`, `helpers/crunchyroll.py` (deleted).
+**Done when** - a franchise reports the season you are on, and Settings
+explains the MAL-Sync route step by step.
+**What happens when the service says no** - unchanged: AniList → nothing,
+and the +1 button on the card is always there.
+
+**Landed.**
+
+*Direct Crunchyroll reading removed entirely* - `crunchyroll.py`, its
+settings section, its stored token and its diagnostic are gone. The
+rules file records the three dead ends so it isn't rebuilt a third time.
+
+*Settings > Crunchyroll Progress* now carries six steps matching
+MAL-Sync's real install flow, including the two that are easy to get
+wrong: tick **AniList** (not MyAnimeList - Atomic can't read MAL), and
+it only saves after **85%** of an episode.
+
+*AniList is read per season.* `fetch_season_progress` collects a
+franchise's seasons, prefers the season number written in the title over
+release order, and reports the furthest one actually started - so season
+1 finished plus season 2 at episode 5 reads **S02E05**. A single-season
+show keeps the flat `E12` shape.
+
+Two traps found by querying the live API rather than reasoning about it:
+**a 1-episode short (*Go! Saitama*) carried the franchise name only as a
+synonym** and took season 3's slot, pushing the real season 3 to 4 - so
+matching uses an entry's own titles and never its synonyms. And **a cour
+split ("Season 3 Part 2") is still season 3**, which is why the season
+regex deliberately doesn't match "Part". 12/12 verified, including a
+live query confirming the four real One-Punch Man entries in order.
+
+**Known limit**: a franchise that numbers nothing in its titles falls
+back to release order, which is only as good as AniList's dates.
 
 ---
 
