@@ -248,7 +248,11 @@ class SettingsDialog(QDialog):
         hidden = set(app_settings.get_hidden_sections())
         self.section_checks = {}
         for name, page_name in nav_config.ordered_nav_items():
-            cb = QCheckBox(name)
+            # "&&", not the name as stored: QCheckBox reads a single "&"
+            # as a mnemonic marker and swallows it, so "Movies & Series"
+            # drew as "Movies  Series" with a hole where the ampersand
+            # should be. Doubling it escapes it, and is undone on screen.
+            cb = QCheckBox(name.replace("&", "&&"))
             cb.setChecked(page_name not in hidden)
             cb.toggled.connect(lambda checked, p=page_name: self._toggle_section_visibility(p, checked))
             form.addWidget(cb)

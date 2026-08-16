@@ -21,9 +21,9 @@ import webbrowser
 from PyQt6.QtCore import QObject, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QAbstractSpinBox, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from helpers import (
@@ -62,6 +62,47 @@ STATUSES_BY_TYPE = {
     **{t: _READING_STATUSES for t in MANGA_TYPES},
 }
 IN_PROGRESS_STATUSES = {"Watching", "Reading"}
+
+# A film is one video: there is no episode to be on, so nothing about
+# progress applies to it - no number on the card, no season/episode in
+# Add/Edit, no Stremio sync. Asked as a question here rather than spelled
+# `!= "Movie"` wherever it matters, which is the mistake `== "Anime"` was
+# before VIDEO_TYPES existed.
+UNTRACKED_TYPES = ("Movie",)
+
+
+def tracks_progress(entry_type) -> bool:
+    return entry_type not in UNTRACKED_TYPES
+
+
+def shows_last_watched(entry) -> bool:
+    """Whether this entry's own last-watched number is on show, per the
+    "Show Last Watched" tick in Add/Edit.
+
+    Defaults on for an entry saved before that tick existed: those
+    already displayed their progress, and defaulting off would read as
+    the app having lost it."""
+    if not tracks_progress(entry.get("type")):
+        return False
+    stored = entry.get("show_last_watched")
+    return True if stored is None else bool(stored)
+
+
+def last_watched_is_editable(entry) -> bool:
+    """Whether that number is yours to set by hand - the spinners in
+    Add/Edit, and the +/- on the card.
+
+    Stremio owns it on a Stremio entry and overwrites it on the next
+    sync, so editing there fights the sync; that is why the +/- buttons
+    were removed outright once, and the fix is per-entry rather than none
+    at all. An entry pinned to Netflix or Crunchyroll has no source that
+    can ever fill it in, and Manga has none whatsoever, so on those the
+    number has to be yours."""
+    if not shows_last_watched(entry):
+        return False
+    if entry.get("type") in MANGA_TYPES:
+        return True
+    return entry.get("site_id") is not None
 
 # Older saves used one shared "Watching/Reading"-style status list; this
 # maps those legacy values onto the new per-type wording during migration.
@@ -416,7 +457,7 @@ class TrackerPage(GlassPage):
     ENTRY_TYPES = ("Anime",)
     TITLE = "Anime"
     TYPE_OPTIONS = ["Anime", "Manga"]
-    PROGRESS_COLUMNS = ["Last Season", "Last Episode"]
+    PROGRESS_COLUMNS = ["Last Released Season", "Last Released Episode"]
     # Manga has no Stremio presence to sync progress against.
     SUPPORTS_PROGRESS_SYNC = True
     # Which release-schedule source the hover tooltip's "next episode/
@@ -511,18 +552,6 @@ class TrackerPage(GlassPage):
         self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
         top_row.addWidget(self.search_box)
         layout.addLayout(top_row)
-
-        # Why progress isn't syncing, said once for the whole page rather
-        # than on every card. The user spent a long time believing the app
-        # was broken when the real answers were "no account is connected"
-        # and "Netflix/Crunchyroll publish no watch history at all" -
-        # neither of which is deducible from a card that simply shows
-        # nothing. Filled in by _update_sync_notice, hidden when there is
-        # nothing to say.
-        self.sync_notice = QLabel(objectName="Muted")
-        self.sync_notice.setWordWrap(True)
-        self.sync_notice.hide()
-        layout.addWidget(self.sync_notice)
 
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
@@ -739,12 +768,13 @@ class TrackerPage(GlassPage):
     def _backfill_missing_latest_available(self):
         """Entries saved before latest_available was tracked (or from a
         pick where the background lookup didn't finish/land) leave the
-        Last Season/Last Episode tooltip permanently blank otherwise -
+        Last Released Season/Episode tooltip permanently blank otherwise -
         nothing else ever re-fetches it later. Silently top those up in
         the background on load, the same way Sync Progress would for one
         entry by hand, instead of leaving the user to notice and fix it."""
         targets = [e for e in self.entries
-                   if e["type"] in self.ENTRY_TYPES and not e.get("latest_available") and _entry_imdb_id(e)]
+                   if e["type"] in self.ENTRY_TYPES and tracks_progress(e["type"])
+                   and not e.get("latest_available") and _entry_imdb_id(e)]
         if not targets:
             return
         self._sync_pending += len(targets)
@@ -785,6 +815,10 @@ class TrackerPage(GlassPage):
         season/episode available out there (how far the release currently
         goes) rather than what you've watched - that's the always-visible
         label under the cover already, see _progress_display."""
+        # A film has no episode to be on, so neither column means
+        # anything - zip() in _tooltip_html drops the labels with it.
+        if not tracks_progress(entry["type"]):
+            return []
         if entry["type"] in MANGA_TYPES:
             text = entry.get("progress") or ""
             value = parse_chapter_progress(text)
@@ -842,37 +876,6 @@ class TrackerPage(GlassPage):
         return [(status, grouped[status])
                 for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
 
-    def _update_sync_notice(self):
-        """The standing reasons this page can't sync progress, if any.
-
-        Recomputed on every redraw rather than cached: the Stremio
-        account can be connected from Settings while the page is open."""
-        if not self.SUPPORTS_PROGRESS_SYNC:
-            return
-        entries = [e for e in self.entries if e["type"] in self.ENTRY_TYPES]
-        lines = []
-        _, auth_key = app_settings.get_stremio_auth()
-        if entries and not auth_key:
-            lines.append("No Stremio account is connected, so nothing can sync "
-                         "on its own - connect one in Settings.")
-        else:
-            # Said even when everything is working, because the thing the
-            # user cannot tell by looking is which entries will keep
-            # themselves up to date. An entry on Crunchyroll or Netflix
-            # looks identical to one Stremio knows about.
-            lines.append("Only Stremio tracks your progress automatically - "
-                         "entries you watch elsewhere keep whatever you set.")
-        providers = anime_sites.streaming_provider_map()
-        used = sorted({providers[e["site_id"]] for e in entries
-                       if e.get("site_id") in providers})
-        if used:
-            names = " and ".join(_UNREADABLE_NAMES.get(p, p.title()) for p in used)
-            lines.append(f"{names} publishes nothing about what you've watched, "
-                         f"so entries opened there only sync what Stremio itself "
-                         f"knows about them.")
-        self.sync_notice.setText("  •  ".join(lines))
-        self.sync_notice.setVisible(bool(lines))
-
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -880,7 +883,6 @@ class TrackerPage(GlassPage):
             if widget:
                 widget.deleteLater()
 
-        self._update_sync_notice()
         self._card_providers = anime_sites.streaming_provider_map()
 
         # Dragging is disabled while a search is narrowing the grid: a
@@ -941,14 +943,18 @@ class TrackerPage(GlassPage):
                 f"color: {theme.ACCENT}; font-weight: 700; font-size: 9pt; background: transparent;")
             card_layout.addWidget(progress_label)
 
-        # Reading only. Anime/Series/Movie progress comes from Stremio,
-        # which is authoritative and updates itself - a +1 there competed
-        # with the sync rather than helping it, and a hand-set number
-        # would be overwritten by the next refresh anyway. Chapters have
-        # no such source, so they keep theirs.
-        if entry["type"] in MANGA_TYPES:
-            card_layout.addLayout(self._bump_controls(
-                entry, "Last Watched Chapter", self._bump_watched_chapter))
+        # Only where the number is actually yours to set - see
+        # last_watched_is_editable. On a Stremio entry the next sync
+        # overwrites whatever the button did, which is why these were
+        # removed wholesale once; an entry pinned to Netflix, or any
+        # Manga, has no such source and needs them.
+        if last_watched_is_editable(entry):
+            if entry["type"] in MANGA_TYPES:
+                card_layout.addLayout(self._bump_controls(
+                    entry, "Last Watched Chapter", self._bump_watched_chapter))
+            else:
+                card_layout.addLayout(self._bump_controls(
+                    entry, "Last Watched Episode", self._bump_watched_episode))
 
         card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
@@ -977,7 +983,28 @@ class TrackerPage(GlassPage):
         self._save_entries()
         self._refresh_grid()
 
+    def _bump_watched_episode(self, entry, delta):
+        """Moves the episode and never the season: season lengths differ
+        per show, so there is no arithmetic that finds a season boundary -
+        guessing one would put the card on an episode that doesn't exist.
+        The season is set in Edit, where it can be typed."""
+        season, episode = parse_episode_progress(entry.get("progress"))
+        entry["progress"] = format_episode_progress(season, max(0, episode + delta))
+        # A number you pressed a button to set is confirmed by definition.
+        # Without this the card would go on hiding it (_progress_display
+        # shows nothing unverified) and the button would look broken.
+        entry["progress_verified"] = True
+        entry["progress_source"] = SOURCE_MANUAL
+        entry["updated_at"] = storage.now_iso()
+        self._save_entries()
+        self._refresh_grid()
+
     def _progress_display(self, entry):
+        # Hidden by the entry's own "Show Last Watched" tick, and always
+        # for a film - the +/- above go with it, so the card doesn't keep
+        # buttons for a number it no longer shows.
+        if not shows_last_watched(entry):
+            return ""
         if entry["type"] in MANGA_TYPES:
             watched = entry.get("last_watched_chapter")
             return f"Ch {format_chapter_progress(watched)}" if watched else ""
@@ -1050,7 +1077,11 @@ class TrackerPage(GlassPage):
     def _sync_all_progress(self):
         """Re-sync every linked entry on this page at once, instead of
         right-clicking each card individually."""
-        targets = [e for e in self.entries if e["type"] in self.ENTRY_TYPES and _entry_imdb_id(e)]
+        # Films are skipped: nothing displays their progress now, so
+        # syncing one would be a request per film for a number no card
+        # ever shows.
+        targets = [e for e in self.entries if e["type"] in self.ENTRY_TYPES
+                   and tracks_progress(e["type"]) and _entry_imdb_id(e)]
         if not targets:
             # Only said during an explicit refresh. On arrival there is
             # nothing to report - a page opening with nothing to sync is
@@ -1287,7 +1318,7 @@ class MangaPage(TrackerPage):
     ENTRY_TYPES = MANGA_TYPES
     TITLE = "Reading"
     TYPE_OPTIONS = list(MANGA_TYPES)
-    PROGRESS_COLUMNS = ["Last Chapter"]
+    PROGRESS_COLUMNS = ["Last Released Chapter"]
     SUPPORTS_PROGRESS_SYNC = False
     MEDIUM = release_schedule.MEDIUM_MANGA
 
@@ -1422,6 +1453,19 @@ class EntryForm(QDialog):
         self._original_progress = entry.get("progress", "") if entry else ""
 
         form.addSpacing(8)
+        # Per-entry, because whether a last-watched number belongs on the
+        # card depends on the entry and not the page: a film has none, a
+        # Stremio entry keeps its own up to date, and one pinned to
+        # Netflix only ever has whatever you put there. Ticking it off
+        # hides the spinners here *and* the +/- on the card together - a
+        # tick that left the buttons behind would be worse than no tick.
+        # "&&" and not "&": QCheckBox reads a single one as a mnemonic
+        # marker and swallows it, which is what drew "Movies  Series".
+        self.show_watched_check = QCheckBox("Show Last Watched Season && Episode")
+        self.show_watched_check.setChecked(shows_last_watched(entry) if entry else True)
+        self.show_watched_check.toggled.connect(self._update_progress_visibility)
+        form.addWidget(self.show_watched_check)
+
         self.chapter_row = QWidget()
         chapter_layout = QHBoxLayout(self.chapter_row)
         chapter_layout.setContentsMargins(0, 0, 0, 0)
@@ -1429,19 +1473,32 @@ class EntryForm(QDialog):
 
         available_col = QVBoxLayout()
         available_col.setSpacing(2)
-        available_col.addWidget(QLabel("Last Chapter"))
+        available_col.addWidget(QLabel("Last Released Chapter"))
         self.chapter_spin = QDoubleSpinBox()
         self.chapter_spin.setRange(0, 99999)
         self.chapter_spin.setDecimals(1)
         self.chapter_spin.setValue(parse_chapter_progress(self._original_progress))
+        # Read-only: this is the reading site's latest release, never
+        # anything you set. Named "Last Chapter" and editable, it read as
+        # "the chapter I'm on", so a hand-typed number sat in the one
+        # field the site's next lookup overwrites - the number you meant
+        # belongs in Last Watched Chapter beside it. The arrows go too, or
+        # a spinner that ignores clicks still invites them.
+        self.chapter_spin.setReadOnly(True)
+        self.chapter_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         available_col.addWidget(self.chapter_spin)
         chapter_layout.addLayout(available_col)
 
-        # Unlike Last Chapter above (auto-filled from the reading site's
-        # latest release), this is never auto-filled - only you know what
+        # Unlike Last Released Chapter above (auto-filled from the reading
+        # site's latest release), this is yours to set - only you know what
         # you've actually read, same as Anime/Series' real Stremio
         # progress. Shown on the card and adjustable there via +/-.
-        watched_col = QVBoxLayout()
+        # Its own widget rather than a bare layout, so the tick can hide
+        # this half while Last Released Chapter beside it stays: that one
+        # is the site's number, and the tick is only about yours.
+        self.watched_chapter_widget = QWidget()
+        watched_col = QVBoxLayout(self.watched_chapter_widget)
+        watched_col.setContentsMargins(0, 0, 0, 0)
         watched_col.setSpacing(2)
         watched_col.addWidget(QLabel("Last Watched Chapter"))
         self.watched_chapter_spin = QDoubleSpinBox()
@@ -1449,7 +1506,7 @@ class EntryForm(QDialog):
         self.watched_chapter_spin.setDecimals(1)
         self.watched_chapter_spin.setValue((entry or {}).get("last_watched_chapter") or 0.0)
         watched_col.addWidget(self.watched_chapter_spin)
-        chapter_layout.addLayout(watched_col)
+        chapter_layout.addWidget(self.watched_chapter_widget)
 
         form.addWidget(self.chapter_row)
 
@@ -1460,7 +1517,7 @@ class EntryForm(QDialog):
         season0, episode0 = parse_episode_progress(self._original_progress)
         season_col = QVBoxLayout()
         season_col.setSpacing(2)
-        season_col.addWidget(QLabel("Last Season"))
+        season_col.addWidget(QLabel("Last Watched Season"))
         self.season_spin = QSpinBox()
         self.season_spin.setRange(0, 99)
         self.season_spin.setSpecialValueText("—")
@@ -1469,7 +1526,7 @@ class EntryForm(QDialog):
         episode_layout.addLayout(season_col)
         episode_col = QVBoxLayout()
         episode_col.setSpacing(2)
-        episode_col.addWidget(QLabel("Last Episode"))
+        episode_col.addWidget(QLabel("Last Watched Episode"))
         self.episode_spin = QSpinBox()
         self.episode_spin.setRange(0, 9999)
         self.episode_spin.setValue(episode0)
@@ -1606,10 +1663,36 @@ class EntryForm(QDialog):
         self.url_row.setVisible(not has_site)
         self.site_row.setVisible(has_site)
 
-    def _update_progress_visibility(self):
-        is_manga = self.type_box.currentText() in MANGA_TYPES
+    def _update_progress_visibility(self, *_args):
+        current_type = self.type_box.currentText()
+        is_manga = current_type in MANGA_TYPES
+        tracked = tracks_progress(current_type)
+        show_watched = tracked and self.show_watched_check.isChecked()
+        # The tick goes too for a film, rather than being left on screen
+        # controlling nothing.
+        self.show_watched_check.setVisible(tracked)
+        self.show_watched_check.setText(
+            "Show Last Watched Chapter" if is_manga
+            else "Show Last Watched Season && Episode")
+        # Manga's row holds Last Released Chapter as well, which is the
+        # site's number and stays regardless - only its watched half
+        # answers to the tick.
         self.chapter_row.setVisible(is_manga)
-        self.episode_row.setVisible(not is_manga)
+        self.watched_chapter_widget.setVisible(show_watched)
+        self.episode_row.setVisible(not is_manga and show_watched)
+        self._update_watched_editability()
+
+    def _update_watched_editability(self):
+        """Stremio entries show the number they sync but don't hand it
+        over to be edited - see last_watched_is_editable. Re-run on both
+        Type and Video Website changes, since either can flip which case
+        this entry is in while the dialog is open."""
+        editable = (self.type_box.currentText() in MANGA_TYPES
+                    or self.site_box.currentData() is not None)
+        for spin in (self.season_spin, self.episode_spin):
+            spin.setReadOnly(not editable)
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows if editable
+                                  else QAbstractSpinBox.ButtonSymbols.NoButtons)
 
     def _refresh_preview(self):
         title = self.title_combo.currentText() or "?"
@@ -1873,6 +1956,11 @@ class EntryForm(QDialog):
     # every configured site on every keystroke.
 
     def _on_site_changed(self, _index):
+        # Which site this is decides whether the last-watched spinners are
+        # yours to edit at all (Stremio syncs its own), so that moves with
+        # the dropdown - ahead of the early returns below, every one of
+        # which still leaves the site changed.
+        self._update_watched_editability()
         if self.type_box.currentText() not in VIDEO_TYPES:
             return
         site_id = self.site_box.currentData()
@@ -2053,6 +2141,8 @@ class EntryForm(QDialog):
             progress_verified=self._progress_is_yours(),
             latest_available=self._latest_available,
             last_watched_chapter=self.watched_chapter_spin.value() if is_manga else None,
+            show_last_watched=(self.show_watched_check.isChecked()
+                               if tracks_progress(current_type) else False),
             url=saved_url,
             cover_url=self.selected_cover_url,
             cover_path=self.selected_cover_path,

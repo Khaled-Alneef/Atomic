@@ -24,7 +24,10 @@ from helpers.widgets import (
     Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
 )
 from windows.link_grid import open_link_entry
-from windows.tracker import IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress, open_tracker_entry
+from windows.tracker import (
+    IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress,
+    open_tracker_entry, shows_last_watched,
+)
 
 GREETING_REFRESH_MS = 60_000
 
@@ -311,6 +314,11 @@ class HomePage(GlassPage):
         the verified watch progress for anime/series. Shared by the
         poster grid and the hero peeks, which both show this under a
         title rather than the hero's own fuller "Chapter N" phrasing."""
+        # An entry whose "Show Last Watched" tick is off hides the number
+        # here too - Home showing what the tracker page deliberately
+        # doesn't would read as one of the two being broken.
+        if not shows_last_watched(entry):
+            return ""
         if entry["type"] in MANGA_TYPES:
             watched = entry.get("last_watched_chapter")
             return f"Ch {format_chapter_progress(watched)}" if watched else entry["type"]
@@ -473,7 +481,9 @@ class HomePage(GlassPage):
         # connected account, or typed in by hand) - shown only once
         # verified, same rule as the Anime/Reading pages themselves,
         # rather than stating a guess as fact.
-        if entry["type"] in MANGA_TYPES:
+        if not shows_last_watched(entry):
+            progress_text = ""  # tick off, or a film - see shows_last_watched
+        elif entry["type"] in MANGA_TYPES:
             watched = entry.get("last_watched_chapter")
             progress_text = f"Chapter {format_chapter_progress(watched)}" if watched else entry["status"]
         elif entry.get("progress_verified") and entry.get("progress"):
