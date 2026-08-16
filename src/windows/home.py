@@ -23,7 +23,7 @@ from helpers import child_process, images, launchers, nav_config, storage, theme
 from helpers.widgets import (
     Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
 )
-from windows.link_grid import open_link_entry
+from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
     IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress,
     open_tracker_entry, shows_last_watched,
@@ -758,6 +758,19 @@ class HomePage(GlassPage):
             row_layout.addWidget(icon)
             row_layout.addWidget(QLabel(entry["name"]))
             row_layout.addStretch()
+
+            # An app whose program has been uninstalled or moved reads as
+            # broken on the Apps page and read as fine here, on the page
+            # it is most likely to be clicked from. A row is a fraction
+            # of a card's height, so it gets the short form of the same
+            # answer: the word, in the same colour, with the paths in the
+            # tooltip.
+            missing = missing_app_targets(entry)
+            if missing:
+                flag = QLabel("Not found")
+                flag.setStyleSheet(f"color: {theme.DANGER}; background: transparent;")
+                row_layout.addWidget(flag)
+                row.setToolTip("Not found:\n" + "\n".join(missing))
 
             row.clicked.connect(lambda en=entry, df=data_file, es=entries: self._open_quick_link(en, title, df, es))
             layout.addWidget(row)

@@ -417,12 +417,21 @@ class Toast(QLabel):
     background job runs, then hand it its result with set_text (see
     finish_toast, which is what callers should actually use)."""
 
-    def __init__(self, anchor, text, duration_ms=2000):
+    def __init__(self, anchor, text, duration_ms=2000, clickable=False):
         window = _toast_anchor_window(anchor)
         super().__init__(text, window)
         self._anchor_window = window
         self.setWindowFlags(Qt.WindowType.ToolTip)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        if not clickable:
+            # Transparent to the mouse so a message sitting in the corner
+            # can never swallow a click meant for the page underneath.
+            # Set here rather than cleared later by the clickable
+            # subclass: Qt folds this attribute into
+            # Qt::WindowTransparentForInput when it creates the native
+            # window, which has happened by the time __init__ returns
+            # (see show() below), and clearing the attribute afterwards
+            # leaves the real window still transparent to input.
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setStyleSheet(
             f"background: {theme.SURFACE}; color: {theme.TEXT}; "
@@ -505,6 +514,54 @@ def finish_toast(toast, anchor, text, duration_ms=2600):
     except RuntimeError:
         pass  # already closed and deleted on the C++ side
     show_toast(anchor, text, duration_ms)
+
+
+# How long an undo offer stays up. Deliberately longer than the 2s a
+# plain confirmation gets: that one only has to be noticed, this one has
+# to be read and acted on. Letting it expire is the "no" answer - the
+# removal is then as final as it was before undo existed.
+UNDO_TOAST_MS = 8000
+
+
+class UndoToast(Toast):
+    """A toast offering back what was just removed. Clicking it anywhere
+    undoes the removal; ignoring it lets the removal stand.
+
+    The whole box is the button rather than a small "Undo" word inside
+    it: a toast is a ToolTip-flagged window with no layout of its own,
+    and a 40px target in the corner of the screen is worse to hit than
+    the box that is already there and already says what it does."""
+
+    def __init__(self, anchor, text, on_undo, duration_ms=UNDO_TOAST_MS):
+        super().__init__(anchor, text, duration_ms, clickable=True)
+        self._on_undo = on_undo
+        self._spent = False
+        use_hover_cursor(self)
+
+    def mousePressEvent(self, event):
+        if self._spent:
+            return
+        # Marked spent before the callback runs, not after: restoring
+        # rebuilds a page, which spins the event loop, and a second click
+        # arriving in there would put the same entry back twice.
+        self._spent = True
+        message = self._on_undo()
+        self.set_text(message or "Restored", 2600)
+
+
+def show_undo_toast(page, text, on_undo, duration_ms=UNDO_TOAST_MS):
+    """Offer back the removal `page` just made. `on_undo` does the
+    restoring and returns the message to replace the offer with.
+
+    The offer is withdrawn when the page that made it is destroyed:
+    navigating away builds the next page from scratch and deletes this
+    one (main._show_page), so an undo clicked afterwards would write the
+    entry back to disk behind a page that had already loaded the list
+    without it - correct on disk, wrong on screen, with nothing to
+    prompt a redraw."""
+    toast = UndoToast(page, text, on_undo, duration_ms)
+    page.destroyed.connect(toast.close)
+    return toast
 
 
 def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:

@@ -62,7 +62,7 @@ clever one, and leave a working path working.
 | 29 | Let the "what's new" dialog scroll | ui-engineer | contained | **landed 1.4.9** |
 | 30 | Stop a two-line card name being clipped on Apps/Websites | ui-engineer | contained | **landed 1.4.9** |
 | 37 | Opening an app whose target is gone still shows a raw OS error | ui-engineer | contained | todo - found landing #16 |
-| 38 | Home's Apps preview doesn't show a missing target | ui-engineer | contained | todo - found landing #16 |
+| 38 | Home's Apps preview doesn't show a missing target | ui-engineer | contained | **landed 1.4.10** |
 | 11 | Remember a tracker page's search/filter across a revisit, for the session | ui-engineer | contained | **landed 1.4.8** |
 | 12 | Bring search to Games, Apps and Websites | ui-engineer | contained | **landed 1.4.8** |
 | 13 | Check for updates in the background, not only on demand | ui-engineer | contained | **landed 1.4.8** |
@@ -71,9 +71,9 @@ clever one, and leave a working path working.
 | 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | **landed 1.4.9** |
 | 17 | Keyboard shortcut to jump to a page's search box | ui-engineer | contained | todo |
 | 18 | Bring Apps to parity with Games' "Import from Launchers" | ui-engineer | spans modules | todo |
-| 19 | Check every configured site at once, not one at a time | ui-engineer | contained | todo |
-| 20 | Back up all tracked data from Settings | ui-engineer | contained | todo |
-| 21 | Restore tracked data from a backup archive | ui-engineer | spans modules | todo |
+| 19 | Check every configured site at once, not one at a time | ui-engineer | contained | **landed 1.4.10** |
+| 20 | Back up all tracked data from Settings | ui-engineer | contained | **landed 1.4.10** |
+| 21 | Restore tracked data from a backup archive | ui-engineer | spans modules | **landed 1.4.10** |
 | 22 | Multi-select bulk status change on tracker cards | ui-engineer | shape unknown - investigate first | todo |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | todo |
 | 24 | One search across every page, not just the tracker family | ui-engineer | shape unknown - investigate first | todo |
@@ -1056,6 +1056,11 @@ does on the Apps page.
 **Risk** - low, but Home's rows are much smaller than a card - a badge
 that fits a 120px card may not fit a list row; a dimmed row plus the
 tooltip may be all that fits.
+**Landed** (1.4.10) - the short form of the same answer: "Not found" in
+`theme.DANGER` at the end of the row, with the missing paths in the
+row's tooltip, reusing `link_grid.missing_app_targets` rather than
+re-deriving the check. Verified that a live app and a website row are
+left alone and only the missing one is flagged.
 
 ### 17. Keyboard shortcut to jump to a page's search box
 
@@ -1147,6 +1152,13 @@ concurrent requests than `lookup_pool`'s existing cap allows.
 **Risk** - minimal; route through the shared pool rather than firing N
 bare threads, or this reintroduces the exact concurrency-cap bug this
 project has already fixed once (pre-1.4 item #4/#5).
+**Landed** (1.4.10) - and the per-site probe moved onto `lookup_pool`
+with it, since it was a bare thread per click and Check All would have
+been one connection per configured site. Measured with six sites and a
+stubbed probe: all six checked, peak concurrency 4, which is the pool's
+cap. Worth more than the roadmap credited it, now that #28 clears
+verdicts on restart: the whole list starts blank every run, and this is
+what fills it back in.
 
 ---
 
@@ -1176,6 +1188,11 @@ own loaders against a throwaway directory.
 **Risk** - low; this is a read-only export, nothing it does can lose
 data on its own. Sequenced before item #21 (restore), which is the
 higher-risk half.
+**Landed** (1.4.10) - a Backup section above Clear Data, since taking a
+copy is what precedes clearing. Every live JSON file, and nothing else:
+covers (19MB on the real install), the log and storage's own
+`.bak`/`.tmp`/`.corrupt` files stay out. Verified by reading the archive
+back through `storage`'s own loaders into a throwaway directory.
 
 ### 21. Restore tracked data from a backup archive
 
@@ -1203,6 +1220,20 @@ itself a data-loss vector. Confirm-before-overwrite (matching the
 "Clear Data" confirmation pattern already in this dialog) and validate
 every file in the archive before touching anything on disk, not
 file-by-file as it goes.
+**Landed** (1.4.10) - whole-archive validation before anything is
+written, and the rejection happens *before* the confirmation prompt.
+Ten bad archives were tried and all rejected with nothing written: a
+truncated zip, a member failing its CRC, unparseable JSON, a BOM'd bad
+member, a bare scalar, a zip with no JSON at all, a `../../evil.json`
+traversal member, a non-zip file, an empty file, and a half-good archive
+whose *valid* member also did not land. Restoring routes through
+`storage.save`, so every overwritten file leaves its `.bak`. The dialog
+closes afterwards on purpose - every control in it was built from the
+settings.json just replaced, so leaving it open means the next toggle
+writes a pre-restore value back over the restore. Testing also caught a
+process-killer: `zipfile.testzip()` on a truncated archive raises
+`zlib.error`, which is neither `BadZipFile` nor `OSError` and would have
+escaped a Qt slot.
 
 ### 22. Multi-select bulk status change on tracker cards
 

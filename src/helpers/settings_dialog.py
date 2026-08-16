@@ -12,13 +12,17 @@ Stremio account used to pull in real watch progress. Reading: the list of manga/
 Reading page can search and open to, plus an optional music/ambience URL.
 Games: each game launcher's install directory, so the Games page can
 bulk-import every game it finds there (see helpers.launchers) instead of
-adding each one by hand. Data: wipe one content category's saved entries
-at a time, or uninstall the app entirely (every saved file plus the app
-itself).
+adding each one by hand. Data: take a zip backup of everything saved and
+restore one again, wipe one content category's saved entries at a time,
+or uninstall the app entirely (every saved file plus the app itself).
 """
 
+import json
 import sys
 import threading
+import zipfile
+from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
@@ -29,8 +33,8 @@ from PyQt6.QtWidgets import (
 )
 
 from . import (
-    anime_sites, app_settings, launchers, manga_sites, nav_config, startup,
-    storage, stremio, theme, uninstall, updater,
+    anime_sites, app_settings, launchers, logs, lookup_pool, manga_sites,
+    nav_config, startup, storage, stremio, theme, uninstall, updater,
 )
 from .widgets import finish_toast, scroll_area, show_toast
 
@@ -50,6 +54,105 @@ CLEAR_CATEGORIES = [
     ("Apps", "apps.json", None),
     ("Websites", "websites.json", None),
 ]
+
+
+# What a backup is made of: the live JSON files at the top of DATA_DIR.
+# Deliberately not the whole folder - image_cache/ measured 19MB of
+# re-downloadable covers on the owner's own install, atomic.log is a
+# diagnostic rather than data, and ui_assets/checkmark.png is written by
+# theme.py at startup. storage's own .bak/.tmp/.corrupt copies are left
+# out as well: a backup is a snapshot of the data, not of the recovery
+# copies sitting behind it. This glob already excludes all of them - a
+# "tracker.json.bak" ends in .bak, not .json.
+_BACKUP_GLOB = "*.json"
+
+# Nothing Atomic saves is remotely near this (settings.json is under 1KB,
+# the largest - tracker.json - about 10KB). It's here so a zip claiming a
+# gigabyte-sized member is refused *before* being read into memory rather
+# than after, since the file being restored is one the user picked off
+# disk and nothing guarantees this app wrote it.
+_MAX_BACKUP_MEMBER_BYTES = 32 * 1024 * 1024
+
+
+class _BackupError(Exception):
+    """A backup that must not be restored, carrying the reason in words
+    the owner can act on. Every message says nothing was changed, because
+    that is the point of raising instead of writing: this is only ever
+    raised before the first byte is written."""
+
+
+def _read_backup(path: Path) -> dict:
+    """Every data file in the archive, parsed, keyed by filename - or
+    _BackupError naming what is wrong with it.
+
+    The whole archive is read and parsed here, before the caller writes
+    anything at all. A restore that validated file-by-file as it went
+    would half-overwrite real data on a truncated zip and leave the rest
+    behind, which is the pre-1.4 data-loss incident with a wider blast
+    radius: an unreadable file read back as "empty", and the next save
+    made that true. A backup is either wholly restorable or refused.
+
+    Members are matched the way `load` reads a saved file - utf-8-sig,
+    since a BOM is invisible in an editor and is exactly what cost a
+    stored setting once - and a member name has to be a plain filename:
+    a zip is free to carry "..\\..\\anything.json", and joining that onto
+    DATA_DIR would write outside it."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            # Checks every member's CRC, which is what catches a zip that
+            # opened cleanly but was truncated or corrupted mid-member.
+            damaged = archive.testzip()
+            if damaged is not None:
+                raise _BackupError(
+                    f"This backup is damaged - {damaged} did not read back "
+                    f"correctly. Nothing was changed.")
+
+            members = [info for info in archive.infolist()
+                       if not info.is_dir()
+                       and info.filename.lower().endswith(".json")
+                       and info.filename == Path(info.filename).name]
+            if not members:
+                raise _BackupError(
+                    "There is no Atomic data in this zip. Pick a backup made "
+                    "with Back Up Data. Nothing was changed.")
+
+            restored = {}
+            for info in members:
+                if info.file_size > _MAX_BACKUP_MEMBER_BYTES:
+                    raise _BackupError(
+                        f"{info.filename} in this backup is far too large to "
+                        f"be Atomic data. Nothing was changed.")
+                try:
+                    data = json.loads(archive.read(info).decode("utf-8-sig"))
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                    raise _BackupError(
+                        f"{info.filename} in this backup is unreadable, so the "
+                        f"backup can't be trusted. Nothing was changed.")
+                if not isinstance(data, (list, dict)):
+                    # Every file this app writes is a list of entries or a
+                    # settings object. A bare number restored into
+                    # tracker.json would parse and then break every page
+                    # that reads it.
+                    raise _BackupError(
+                        f"{info.filename} in this backup isn't in Atomic's "
+                        f"format. Nothing was changed.")
+                restored[info.filename] = data
+            return restored
+    except _BackupError:
+        raise
+    except Exception:
+        # Deliberately everything, not (BadZipFile, OSError): a zip whose
+        # central directory is intact but whose compressed bytes are
+        # truncated fails inside zlib, and `zlib.error` is neither of
+        # those. Measured - a 60%-truncated copy of a real backup raised
+        # zlib.error "invalid distances set" straight out of testzip(),
+        # and an exception escaping a Qt slot takes the process with it
+        # (pre-1.4 item #5). Anything this file can throw means the same
+        # thing to the user either way: don't restore from it.
+        logs.exception(f"Could not read the backup at {path}")
+        raise _BackupError(
+            "This file isn't a backup Atomic can read - it may be damaged or "
+            "only partly downloaded. Nothing was changed.")
 
 
 class _StremioLoginSignals(QObject):
@@ -508,6 +611,12 @@ class SettingsDialog(QDialog):
             "of the verdicts below you would get by opening an entry here.")
         check_video_site_btn.clicked.connect(self._check_video_site)
         video_sites_btn_row.addWidget(check_video_site_btn)
+        check_all_video_btn = QPushButton("Check All")
+        check_all_video_btn.setToolTip("Check every site in this list. Verdicts clear "
+                                       "when Atomic restarts, so this is how to fill "
+                                       "them back in.")
+        check_all_video_btn.clicked.connect(lambda: self._check_all_sites("video"))
+        video_sites_btn_row.addWidget(check_all_video_btn)
         remove_video_site_btn = QPushButton("Remove", objectName="Danger")
         remove_video_site_btn.clicked.connect(self._remove_video_site)
         video_sites_btn_row.addWidget(remove_video_site_btn)
@@ -593,6 +702,12 @@ class SettingsDialog(QDialog):
             "of the verdicts below you would get by opening an entry here.")
         check_site_btn.clicked.connect(self._check_site)
         sites_btn_row.addWidget(check_site_btn)
+        check_all_sites_btn = QPushButton("Check All")
+        check_all_sites_btn.setToolTip("Check every site in this list. Verdicts clear "
+                                       "when Atomic restarts, so this is how to fill "
+                                       "them back in.")
+        check_all_sites_btn.clicked.connect(lambda: self._check_all_sites("reading"))
+        sites_btn_row.addWidget(check_all_sites_btn)
         remove_site_btn = QPushButton("Remove", objectName="Danger")
         remove_site_btn.clicked.connect(self._remove_site)
         sites_btn_row.addWidget(remove_site_btn)
@@ -696,6 +811,45 @@ class SettingsDialog(QDialog):
         form.setContentsMargins(4, 4, 12, 4)
         form.setSpacing(6)
 
+        # First on the page, ahead of the two destructive sections: taking
+        # a copy is the thing to do *before* clearing something, and
+        # restoring is what you look for after clearing the wrong one.
+        form.addWidget(QLabel("Backup", objectName="SectionTitle"))
+        backup_hint = QLabel(
+            "Saves everything you have added to one zip file you choose.",
+            objectName="Muted",
+        )
+        backup_hint.setWordWrap(True)
+        # The detail that doesn't fit the two-line hint.
+        backup_hint.setToolTip(
+            "Every entry, site list and setting goes in. Covers and the log "
+            "file don't - they are rebuilt on their own and would make the "
+            "file large. Keep it somewhere else if it is meant to survive "
+            "this PC.")
+        form.addWidget(backup_hint)
+
+        backup_btn_row = QHBoxLayout()
+        backup_btn = QPushButton("Back Up Data...")
+        backup_btn.clicked.connect(self._backup_data)
+        backup_btn_row.addWidget(backup_btn)
+        restore_btn = QPushButton("Restore Data...")
+        restore_btn.setToolTip(
+            "Replaces what is saved now with the contents of a backup. You "
+            "are asked to confirm first, and a backup that won't read is "
+            "refused before anything is changed.")
+        restore_btn.clicked.connect(self._restore_data)
+        backup_btn_row.addWidget(restore_btn)
+        backup_btn_row.addStretch()
+        form.addLayout(backup_btn_row)
+
+        restore_hint = QLabel(
+            "Restoring replaces what is saved now with the backup's contents.",
+            objectName="Muted",
+        )
+        restore_hint.setWordWrap(True)
+        form.addWidget(restore_hint)
+
+        form.addSpacing(28)
         form.addWidget(QLabel("Clear Data", objectName="SectionTitle"))
         clear_hint = QLabel(
             "Wipes the ticked categories' entries. This cannot be undone.",
@@ -735,6 +889,99 @@ class SettingsDialog(QDialog):
 
         form.addStretch()
         return page
+
+    def _backup_data(self):
+        """Zip every saved data file to a location the user picks.
+
+        Not threaded, unlike the launcher import next door: the whole of
+        DATA_DIR's JSON measured about 23KB on the owner's install, so the
+        zip is written well inside a frame and a background thread would
+        only add a way for the result to arrive after this dialog is
+        gone."""
+        files = sorted(p for p in storage.DATA_DIR.glob(_BACKUP_GLOB) if p.is_file())
+        if not files:
+            QMessageBox.information(
+                self, "Back Up Data",
+                "There is nothing saved to back up yet.")
+            return
+
+        suggested = str(Path.home() / f"Atomic Backup {datetime.now():%Y-%m-%d}.zip")
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Back Up Data", suggested, "Zip archive (*.zip)")
+        if not path:
+            return
+
+        try:
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for data_file in files:
+                    # arcname is the bare filename on purpose: a restore
+                    # matches members against DATA_DIR by name, and a
+                    # stored path would put the file somewhere else.
+                    archive.write(data_file, data_file.name)
+        except (OSError, zipfile.BadZipFile):
+            logs.exception(f"Could not write a backup to {path}")
+            # A dialog rather than a toast: a backup the user believes
+            # they have and doesn't is the failure this whole feature is
+            # meant to prevent.
+            QMessageBox.warning(
+                self, "Back Up Data",
+                "Could not write the backup there. Try another folder - a "
+                "system folder or a full drive will refuse.")
+            return
+
+        show_toast(self, f"Backed Up {len(files)} Files")
+
+    def _restore_data(self):
+        """Replace saved data with an archive's contents, all of it or
+        none of it.
+
+        Order is the whole safety here: read and validate every member
+        (_read_backup), then confirm, then write. Each file goes through
+        storage.save, so each one leaves the .bak the rest of the app
+        relies on - a restore is mechanically a batch of saves, and this
+        deliberately doesn't grow its own overwrite handling beside it."""
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self, "Restore Data", str(Path.home()), "Zip archive (*.zip)")
+        if not path:
+            return
+
+        try:
+            restored = _read_backup(Path(path))
+        except _BackupError as exc:
+            QMessageBox.warning(self, "Restore Data", str(exc))
+            return
+
+        names = ", ".join(sorted(restored))
+        # Defaulting to No, like Uninstall and unlike Clear Data: this one
+        # overwrites files the user did not name, and the accidental
+        # Return keypress must not be the one that does it.
+        if QMessageBox.warning(
+            self, "Restore Data",
+            f"Replace what is saved now with this backup?\n\n{names}\n\n"
+            f"Everything currently in those files is overwritten. This "
+            f"cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        for name, data in sorted(restored.items()):
+            storage.save(name, data)
+
+        main_window = self.parent()
+        # Sidebar and page first - a restored settings.json can change
+        # which sections exist, and a restored tracker.json changes what
+        # the page behind this dialog is showing.
+        self._apply_section_visibility()
+        # Anchored to the main window, not to this dialog: the dialog is
+        # closing on the next line and its toast would go with it.
+        show_toast(main_window or self, f"Restored {len(restored)} Files")
+        # Closing is part of restoring, not something after it. Every
+        # control in this dialog was built from the settings.json that has
+        # just been replaced, so leaving it open means the next toggle
+        # writes a pre-restore value straight back over what was restored.
+        # The dialog is rebuilt from saved state on every open anyway.
+        self.accept()
 
     def _toggle_all_clear_checks(self, checked):
         for cb in self.clear_checks:
@@ -829,8 +1076,12 @@ class SettingsDialog(QDialog):
             self._refresh_sites()
         else:
             self._refresh_video_sites()
-        threading.Thread(target=self._probe_site_worker,
-                         args=(which, site_id, dict(site)), daemon=True).start()
+        # The shared pool rather than a thread of its own: Check All fires
+        # one of these per configured site, and a bare thread each is the
+        # shape that once put 651 simultaneous connections on this user's
+        # network (.claude/rules/integrations.md). The pool caps it at 4
+        # and the rest queue.
+        lookup_pool.submit(self._probe_site_worker, which, site_id, dict(site))
 
     def _probe_site_worker(self, which, site_id, site):
         # Must never raise - a dead thread would leave the row stuck on
@@ -889,6 +1140,20 @@ class SettingsDialog(QDialog):
             self._refresh_sites()
             # Re-checked, not kept: the URL may be the thing that changed.
             self._probe_site_async("reading", site_id)
+
+    def _check_all_sites(self, which: str):
+        """Re-probe every site in one list.
+
+        Worth having because a verdict now only shows while the run that
+        measured it is still going (see _CHECKED_THIS_RUN), so after a
+        restart the whole list is blank and clicking Check once per site
+        is the only way back. Already-running probes are skipped rather
+        than queued twice."""
+        module = manga_sites if which == "reading" else anime_sites
+        sites = [site for site in module.list_sites()
+                 if site["id"] not in self._probing_sites]
+        for site in sites:
+            self._probe_site_async(which, site["id"])
 
     def _check_site(self):
         site_id = self._selected_site_id()

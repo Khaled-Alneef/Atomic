@@ -6,6 +6,7 @@ dragging a card onto the slot you want it in (which switches the sort to
 Custom Order as the drag begins).
 """
 
+import copy
 import subprocess
 import threading
 import uuid
@@ -21,7 +22,7 @@ from PyQt6.QtWidgets import (
 from helpers import app_settings, child_process, images, launchers, storage, theme
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
-    scroll_area, show_toast,
+    scroll_area, show_toast, show_undo_toast,
 )
 from windows.link_grid import (
     CARD_MARGINS, CARD_WIDTH, GRID_COLS, THUMB_SIZE, CardTextLabel,
@@ -342,12 +343,34 @@ class GamesPage(GlassPage):
         if QMessageBox.question(self, "Remove Game", f"Remove '{game['name']}' from the list?") != QMessageBox.StandardButton.Yes:
             return
 
+        # Copied whole before the removal - _mutate re-reads the file into
+        # fresh dicts and the card holding this one is torn down, so this
+        # is the only surviving copy of the record undo has to restore
+        # (icon path and added_at included, not just the name and path).
+        removed = copy.deepcopy(game)
+        removed_at = []
+
         def apply_change(games):
             idx = self._index_of(games, game)
             if idx is not None:
                 games.pop(idx)
+                # Its place in the saved list, so undo under Custom Order
+                # puts it back where it was rather than at the end.
+                removed_at.append(idx)
 
         self._mutate(apply_change)
+        show_undo_toast(self, f"Removed '{removed['name']}' - Click to Undo",
+                        lambda: self._restore(removed, removed_at))
+
+    def _restore(self, game, removed_at):
+        def apply_change(games):
+            # Clamped: the file is re-read here, and Settings' launcher
+            # import (or Clear Data) can have changed its length since.
+            index = removed_at[0] if removed_at else len(games)
+            games.insert(min(index, len(games)), game)
+
+        self._mutate(apply_change)
+        return f"Restored '{game['name']}'"
 
 
 class EditGameForm(QDialog):

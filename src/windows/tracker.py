@@ -12,6 +12,7 @@ jumps straight there. You can also just type your own title if it's not
 listed there.
 """
 
+import copy
 import re
 import threading
 import time
@@ -34,7 +35,7 @@ from helpers import (
 )
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
-    scroll_area, show_toast,
+    scroll_area, show_toast, show_undo_toast,
 )
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
@@ -1580,10 +1581,34 @@ class TrackerPage(GlassPage):
         defer_grid_rebuild(self._refresh_grid)
 
     def _delete_entry(self, entry):
-        if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") == QMessageBox.StandardButton.Yes:
-            self.entries.remove(entry)
-            self._save_entries()
-            self._refresh_grid()
+        if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") != QMessageBox.StandardButton.Yes:
+            return
+        # By id, not list.remove(): two entries compare equal to Python
+        # the moment their fields match, and the index is wanted anyway so
+        # undo can put this one back where it was rather than at the end.
+        index = next((i for i, e in enumerate(self.entries)
+                      if e.get("id") == entry.get("id")), None)
+        if index is None:
+            return
+        # The whole record, copied before it goes: an entry carries far
+        # more than the form shows - cover, link, the cached schedule and
+        # its checked-at stamp, the resolved MangaDex/site ids - and undo
+        # has to give all of it back, not just re-add a title.
+        removed = copy.deepcopy(self.entries.pop(index))
+        self._save_entries()
+        self._refresh_grid()
+        show_undo_toast(self, f"Deleted '{removed['title']}' - Click to Undo",
+                        lambda: self._restore_entry(removed, index))
+
+    def _restore_entry(self, entry, index):
+        # _save_entries re-reads the file and lets this page's own copy
+        # win for its own entry types, so putting the record back into
+        # self.entries is what writes it back - and it lands in the list
+        # where it was, which is the order the grid draws.
+        self.entries.insert(min(index, len(self.entries)), entry)
+        self._save_entries()
+        self._refresh_grid()
+        return f"Restored '{entry['title']}'"
 
     # ------------------------------------------------------------------
     def _open_form(self, edit=False, entry=None):

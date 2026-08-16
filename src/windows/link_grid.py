@@ -4,6 +4,7 @@ entry can launch up to 3 targets together at once - URLs for Websites,
 executables/shortcuts for Apps (each page is single-purpose via its own
 TARGET_KIND, not a per-target Website/App choice)."""
 
+import copy
 import subprocess
 import threading
 import time
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
 from helpers import child_process, images, storage, theme
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, defer_grid_rebuild, scroll_area,
+    show_toast, show_undo_toast,
 )
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
@@ -94,20 +96,60 @@ class CardTextLabel(QLabel):
 
 def open_link_entry(parent, entry, label="Links"):
     """Launch every target (site/app) attached to a Websites/Apps entry.
-    Shared by LinkGridPage and the Home dashboard's preview lists."""
+    Shared by LinkGridPage and the Home dashboard's preview lists.
+
+    A target whose program is no longer on disk is skipped rather than
+    attempted: `cwd=` below raises `OSError` before the launch is even
+    tried, and that used to reach the user as a modal dialog quoting the
+    raw OS message - on a card that had just told them, in the app's own
+    words, that the program is missing. The check here is
+    `missing_app_targets`, the same call the card badge and Home's row
+    read, so the click and the badge cannot disagree.
+
+    `label` is the calling page's title. It named the dialog that is now
+    a toast, and toasts carry no title; the parameter stays so the two
+    call sites (this page's and Home's) don't have to change together.
+    """
+    missing = set(missing_app_targets(entry))
+    launched = 0
+    failures = []
     for t in entry.get("targets", []):
-        if not t.get("target"):
+        target = t.get("target")
+        if not target or target in missing:
             continue
         if t["type"] == "app":
             try:
-                subprocess.Popen([t["target"]], shell=True,
-                                  cwd=str(Path(t["target"]).parent),
+                subprocess.Popen([target], shell=True,
+                                  cwd=str(Path(target).parent),
                                   env=child_process.clean_env(),
                                   creationflags=child_process.flags())
             except OSError as exc:
-                QMessageBox.critical(parent, label, f"Couldn't launch '{t['target']}':\n{exc}")
+                failures.append(exc)
+                continue
         else:
-            webbrowser.open(t["target"])
+            webbrowser.open(target)
+        launched += 1
+
+    if not missing and not failures:
+        return
+    # One message for the whole entry, never one per target: toasts all
+    # stack in the same corner, so three broken targets would put three
+    # boxes on top of each other.
+    total = len([t for t in entry.get("targets", []) if t.get("target")])
+    if failures:
+        # On disk and still refusing to start - a corrupt shortcut, a
+        # permissions problem. Nothing the app can do about it, so it is
+        # a message rather than a dialog to click away (rules/ui.md).
+        reason = getattr(failures[0], "strerror", None) or "It Wouldn't Start"
+        text = f"Couldn't Open '{entry['name']}' - {reason}"
+    elif launched:
+        # Same words as the card's badge, which is what the user just
+        # read: an entry that opens three programs and lost one still
+        # did something, and saying "can't open" would be wrong.
+        text = f"Opened '{entry['name']}' - {len(missing)} of {total} Not Found"
+    else:
+        text = f"Can't Open '{entry['name']}' - Not Found on This PC"
+    show_toast(parent, text, 5000)
 
 
 # A stat on a local disk is microseconds, but a path on a disconnected
@@ -470,12 +512,36 @@ class LinkGridPage(GlassPage):
         if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") != QMessageBox.StandardButton.Yes:
             return
 
+        # The whole record, copied before it is dropped: the cards holding
+        # this dict are about to be torn down and _mutate re-reads the
+        # file into fresh dicts, so nothing else keeps it alive. Deep,
+        # because `targets` is a list of dicts and undo has to put back
+        # the entry that was removed, not a shell of it.
+        removed = copy.deepcopy(entry)
+        removed_at = []
+
         def apply_change(entries):
             idx = self._index_of(entries, entry)
             if idx is not None:
                 entries.pop(idx)
+                # Where it sat in the saved list, so undo restores its
+                # place under Custom Order and not just its existence.
+                removed_at.append(idx)
 
         self._mutate(apply_change)
+        show_undo_toast(self, f"Removed '{removed['name']}' - Click to Undo",
+                        lambda: self._restore_entry(removed, removed_at))
+
+    def _restore_entry(self, entry, removed_at):
+        def apply_change(entries):
+            # Clamped rather than trusted: the file is re-read here, and
+            # another page (or Settings > Clear Data) can have shortened
+            # the list since the removal.
+            index = removed_at[0] if removed_at else len(entries)
+            entries.insert(min(index, len(entries)), entry)
+
+        self._mutate(apply_change)
+        return f"Restored '{entry['name']}'"
 
     def _open_add_form(self):
         EntryForm(self, None, on_save=self._on_form_save)
