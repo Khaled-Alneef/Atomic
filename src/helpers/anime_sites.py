@@ -59,6 +59,10 @@ SITES_FILE = "anime_sites.json"
 
 DEFAULT_SITES = [
     {"name": "Crunchyroll", "base_url": "https://www.crunchyroll.com/"},
+    # Alongside Crunchyroll because it is the other service this app can
+    # resolve to real title pages without being able to search it (see
+    # _STREAMING_SITES), and it carries films and series as well as anime.
+    {"name": "Netflix", "base_url": "https://www.netflix.com/"},
 ]
 
 # How confident the fuzzy title match has to be before a resolved page

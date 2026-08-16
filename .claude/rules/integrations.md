@@ -85,10 +85,17 @@ Don't loosen these to raise the hit rate.
 Respect throttles: MangaDex is spaced ~0.35s between requests and
 retried once, since the tracker fires one lookup per entry at once.
 
-**Crunchyroll progress comes from MAL-Sync → AniList, and nothing else.**
-The browser extension updates the user's AniList list as they watch, and
-`anilist.py` reads it - nothing in Atomic is in the path when Crunchyroll
-changes anything. Settings > Crunchyroll Progress carries the six steps.
+**Watch progress comes from Stremio and nowhere else.** This is settled;
+do not add a second source without a way to tell which one is right.
+Every alternative was tried and removed in turn - an authenticated
+Crunchyroll client (twice), a pasted Crunchyroll token, AniList by
+username, and MAL-Sync feeding AniList. The failure they shared: a
+source that is silently wrong is worse than no source, and with two
+sources there is no way to know which is which. A card once showed
+episode 7 for a show its owner had watched two episodes of.
+
+`anilist.py` keeps only the airing schedule and streaming-link
+resolution. It has no progress functions; that is deliberate.
 
 **Reading Crunchyroll directly was built, shipped, and removed. Do not
 rebuild it.** Three measured dead ends, in the order they were hit:

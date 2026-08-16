@@ -1,4 +1,4 @@
-"""Settings window: a category sidebar (mirroring the main app window's
+﻿"""Settings window: a category sidebar (mirroring the main app window's
 own sidebar) on the left, the selected category's controls on the right.
 
 General: Windows-startup toggle (plus whether that sign-in launch opens
@@ -7,9 +7,8 @@ sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
 without losing their saved data). Anime & Series: the list of Video
 Websites Anime entries can be set to open on (Stremio is always
 available as a built-in option; Crunchyroll and any others are
-addable/editable, the same way Reading sites work), the connected
-Stremio account and/or AniList username used to pull in real watch
-progress. Reading: the list of manga/manhwa/manhua reading sites the
+addable/editable, the same way Reading sites work) and the connected
+Stremio account used to pull in real watch progress. Reading: the list of manga/manhwa/manhua reading sites the
 Reading page can search and open to, plus an optional music/ambience URL.
 Games: each game launcher's install directory, so the Games page can
 bulk-import every game it finds there (see helpers.launchers) instead of
@@ -423,9 +422,8 @@ class SettingsDialog(QDialog):
             "this app won't try to bypass). Either way, suggestions/"
             "covers while adding an entry still come from Stremio's "
             "public metadata, and the auto-filled Last Season/Episode "
-            "below comes from your connected Stremio account and/or "
-            "AniList username further down - both work no matter which "
-            "site the entry actually opens on.",
+            "below comes from your connected Stremio account further "
+            "down - which works no matter which site the entry opens on.",
             objectName="Muted",
         )
         video_sites_hint.setWordWrap(True)
@@ -489,64 +487,18 @@ class SettingsDialog(QDialog):
         form.addWidget(stremio_account_hint)
 
         form.addSpacing(24)
-        form.addWidget(QLabel("Crunchyroll Progress", objectName="SectionTitle"))
-
-        # The recommended route, first and in full, because the direct
-        # one below it is a trap dressed as a feature: Crunchyroll tokens
-        # expire inside an hour, so an account that looks connected stops
-        # answering without saying anything. MAL-Sync is set up once and
-        # then keeps AniList - which this app already reads - correct by
-        # itself, and survives Crunchyroll changing their API.
-        crunchyroll_steps = QLabel(
-            "Crunchyroll doesn't let other apps read what you've watched. "
-            "The way around it is to let your browser keep AniList up to "
-            "date, which Atomic already reads:<br><br>"
-            "1. Install <b>MAL-Sync</b> from the Chrome or Firefox store. "
-            "Its setup opens by itself - click <b>Next</b> through the "
-            "briefing.<br>"
-            "2. At <b>Choose preferred quicklinks</b>, tick "
-            "<b>Crunchyroll</b>.<br>"
-            "3. At <b>Select which anime database</b>, tick <b>AniList</b> "
-            "- not MyAnimeList, that's the one Atomic can't read.<br>"
-            "4. If it says <b>Missing permissions detected</b>, press "
-            "<b>Add</b>, then <b>Allow</b> in Chrome's popup.<br>"
-            "5. Press <b>Authenticate</b> → <b>Start Authentication</b> → "
-            "<b>Allow</b>, until it greets you by name.<br>"
-            "6. Watch on Crunchyroll as normal. It saves your progress "
-            "after <b>85%</b> of an episode - not when you open it.<br><br>"
-            "Then put your AniList username below and press <b>⟳</b> on the "
-            "Anime page."
-        )
-        crunchyroll_steps.setWordWrap(True)
-        crunchyroll_steps.setTextFormat(Qt.TextFormat.RichText)
-        form.addWidget(crunchyroll_steps)
-
-        crunchyroll_hint = QLabel(
-            "Reading Crunchyroll directly was tried and removed: it needs a "
-            "token that expires within the hour, so it stopped answering "
-            "without saying so. This route keeps working.",
+        progress_note = QLabel(
+            "Watch progress comes from your Stremio account and nowhere "
+            "else. Crunchyroll, Netflix and the rest publish nothing about "
+            "what you've watched without a login they grant no app, and the "
+            "list services only knew what some other tracker had written to "
+            "them - which is how a card once showed an episode its owner "
+            "had never reached. Entries opened on those sites still open "
+            "there; they just don't claim a progress number.",
             objectName="Muted",
         )
-        crunchyroll_hint.setWordWrap(True)
-        form.addWidget(crunchyroll_hint)
-
-        form.addSpacing(24)
-        form.addWidget(QLabel("AniList Username", objectName="SectionTitle"))
-        self.anilist_username_edit = QLineEdit(app_settings.get_anilist_username())
-        self.anilist_username_edit.setPlaceholderText("Your AniList username")
-        self.anilist_username_edit.editingFinished.connect(self._save_anilist_username)
-        form.addWidget(self.anilist_username_edit)
-
-        anilist_hint = QLabel(
-            "Where Crunchyroll progress arrives once MAL-Sync is set up "
-            "above, and the source for any Anime entry Stremio can't "
-            "answer for. Just your public username, no login: your AniList "
-            "profile's list visibility has to be set to public for this "
-            "to see anything. Leave blank to skip.",
-            objectName="Muted",
-        )
-        anilist_hint.setWordWrap(True)
-        form.addWidget(anilist_hint)
+        progress_note.setWordWrap(True)
+        form.addWidget(progress_note)
 
         form.addStretch()
         return page
@@ -801,10 +753,10 @@ class SettingsDialog(QDialog):
         do. Without this the only way to learn that a site never resolves
         to title pages was to use it for a while and notice that every
         entry opened a search page."""
-        label = f"{site['name']}  —  {site['base_url']}"
+        label = f"{site['name']}  â€”  {site['base_url']}"
         state = "checking" if site["id"] in self._probing_sites else site.get("resolves")
         note = _RESOLVES_LABELS.get(state)
-        return f"{label}   ·   {note}" if note else label
+        return f"{label}   Â·   {note}" if note else label
 
     def _probe_site_async(self, which: str, site_id: str):
         """Check what a site resolves to, in the background - it makes
@@ -892,7 +844,7 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     def _refresh_video_sites(self):
         self.video_sites_list.clear()
-        item = QListWidgetItem("Stremio  —  built-in, always available")
+        item = QListWidgetItem("Stremio  â€”  built-in, always available")
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         self.video_sites_list.addItem(item)
         for site in anime_sites.list_sites():
@@ -1011,9 +963,6 @@ class SettingsDialog(QDialog):
     def _disconnect_stremio(self):
         app_settings.clear_stremio_auth()
         self._refresh_stremio_account()
-
-    def _save_anilist_username(self):
-        app_settings.set_anilist_username(self.anilist_username_edit.text().strip())
 
     def _save_manga_music_url(self):
         app_settings.set_manga_music_url(self.manga_music_edit.text().strip())

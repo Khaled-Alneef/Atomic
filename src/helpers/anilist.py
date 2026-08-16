@@ -1,22 +1,22 @@
 """Minimal client for the public AniList GraphQL API (https://anilist.co) -
-a title search, a public list-progress lookup, the airing schedule for
-the next episode, and a title's Crunchyroll page, no login/API key
-needed.
+the airing schedule for the next episode, and a title's page on a
+streaming service AniList records a link for. No login or API key.
 
-Unlike Crunchyroll (whose equivalent data lives behind an OAuth-gated,
-Cloudflare-bot-protected API this app won't try to bypass - see the
-Crunchyroll paragraph in anime_sites.py's module docstring), AniList's
-is fully open for public profiles: a username is enough to read
-someone's list, no password or token flow. Since a lot of people track
-their watching on AniList regardless of which app they actually watch
-in, this gives real progress for Crunchyroll-provider Anime entries
-too, not just Stremio's - and `fetch_crunchyroll_urls` is what lets
-those entries resolve to a real Crunchyroll page at all, since
-Crunchyroll itself cannot be asked.
+**Not watch progress.** AniList used to answer that too, and it was
+removed: it only ever knew what some other tracker had written to it, so
+a card could state an episode its owner had never reached, confidently
+and with nothing to say where the number came from. Progress now comes
+from the user's Stremio account or from nowhere - see
+tracker._fetch_real_progress. Don't reintroduce a second source here
+without a way to tell which one is right.
 
-Every lookup fails soft (returns None) so a flaky connection, a private
-list, or no title match never crashes the tracker UI - it just means no
-progress shows up.
+`fetch_external_urls` is what lets a Crunchyroll or Netflix entry
+resolve to a real title page at all, since neither service can be
+searched (see anime_sites.py's module docstring).
+
+Every lookup fails soft (returns None/[]), so a flaky connection or no
+title match never crashes the tracker UI - it just means no schedule or
+no link.
 """
 
 import json
@@ -68,63 +68,6 @@ query ($search: String) {
 }
 """
 
-_PROGRESS_QUERY = """
-query ($userName: String, $mediaId: Int) {
-  MediaList(userName: $userName, mediaId: $mediaId, type: ANIME) {
-    progress
-  }
-}
-"""
-
-# Every entry a franchise has, because AniList files each season as its
-# own work while Crunchyroll (and this app's cards) put them all under
-# one name. Searching "One-Punch Man" and reading the first hit gives
-# season 1 forever - which is exactly how a card sat at E12 while its
-# owner was part-way through season 2.
-#
-# startDate is what orders them: AniList has no "season number" field,
-# and release order is what "season 2" actually means.
-_SEASONS_QUERY = """
-query ($search: String) {
-  Page(perPage: 25) {
-    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
-      id
-      format
-      episodes
-      startDate { year month day }
-      title { romaji english native }
-      synonyms
-    }
-  }
-}
-"""
-
-# One request for the user's progress on every season found, rather than
-# one per season - a franchise with four entries would otherwise be four
-# round trips on a lookup that already runs per tracked entry.
-_SEASON_PROGRESS_QUERY = """
-query ($userName: String, $ids: [Int]) {
-  Page(perPage: 50) {
-    mediaList(userName: $userName, mediaId_in: $ids, type: ANIME) {
-      mediaId
-      progress
-      status
-    }
-  }
-}
-"""
-
-# Only formats that are *seasons*. A franchise's OVAs, specials and
-# films would otherwise take slots in the ordering and shift every real
-# season's number - "S03E02" for something that is actually season 2.
-_SEASON_FORMATS = ("TV", "TV_SHORT", "ONA")
-
-# Paged for the same reason _AIRING_QUERY is: the single-Media search
-# picks one entry, and for a franchise it is routinely the wrong one.
-# Searching "Frieren: Beyond Journey's End" ranks the spin-off "Sousou no
-# Frieren: ●● no Mahou" above the series itself, and only the series
-# carries a Crunchyroll link - so the whole page has to be scored, not
-# just its first row.
 _EXTERNAL_LINKS_QUERY = """
 query ($search: String) {
   Page(perPage: 10) {
@@ -177,174 +120,6 @@ def _post(query: str, variables: dict, timeout: int):
         if exc.code in _RATE_LIMIT_CODES:
             raise RateLimited(f"AniList answered {exc.code}") from exc
         raise
-
-
-def _main_names(media: dict) -> list:
-    """The entry's own titles - deliberately *not* its synonyms.
-
-    Synonyms are where a spin-off picks up the parent's name: AniList
-    lists the 1-episode short "Go! Saitama" with a One-Punch Man synonym,
-    and counting it as a season pushed the real season 3 to number 4
-    (measured against the live API). An actual sequel carries the
-    franchise name in its own title."""
-    titles = media.get("title") or {}
-    return [titles.get("romaji"), titles.get("english"), titles.get("native")]
-
-
-def _same_franchise(title: str, media: dict) -> bool:
-    """Whether this AniList entry is a season of `title`.
-
-    Containment rather than similarity, because a sequel is named after
-    its predecessor plus a suffix ("One Punch Man" -> "One Punch Man 2nd
-    Season") - which scores far below the similarity threshold while
-    being unmistakably the same show."""
-    wanted = title_match.normalize(title)
-    if not wanted:
-        return False
-    for name in _main_names(media):
-        if not name:
-            continue
-        candidate = title_match.normalize(name)
-        if not candidate:
-            continue
-        if wanted in candidate or candidate in wanted:
-            return True
-        if title_match.similarity(title, name) >= _MATCH_THRESHOLD:
-            return True
-    return False
-
-
-# "2nd Season", "Season 3", "3rd Season", "Part 2" is deliberately absent
-# - a cour split ("Season 3 Part 2") is still season 3, and matching
-# "Part" would turn it into its own season.
-_SEASON_NUMBER_RE = re.compile(
-    r'\b(?:season\s*(\d{1,2})|(\d{1,2})\s*(?:st|nd|rd|th)\s*season)\b',
-    re.IGNORECASE)
-
-
-def _stated_season(media: dict):
-    """The season number written in the entry's own title, or None.
-
-    Preferred over release order because release order counts things
-    that are not seasons and splits things that are: AniList files
-    "One Punch Man Season 3 Part 2" as its own work, and it is still
-    season 3."""
-    for name in _main_names(media):
-        found = _SEASON_NUMBER_RE.search(name or "")
-        if found:
-            return int(found.group(1) or found.group(2))
-    return None
-
-
-def _release_key(media: dict):
-    start = media.get("startDate") or {}
-    # id last, so entries with no date at all still order stably rather
-    # than swapping places between lookups.
-    return (start.get("year") or 9999, start.get("month") or 99,
-            start.get("day") or 99, media.get("id") or 0)
-
-
-def fetch_season_progress(title: str, username: str, timeout: int = 6):
-    """How far through a franchise `username` actually is, as (season,
-    episode), or None.
-
-    AniList keeps each season as a separate work and counts episodes
-    from 1 within it; Crunchyroll and this app's cards use one title
-    with a season number. Asking AniList for "One-Punch Man" therefore
-    answers about season 1 forever, which is the whole reason this
-    exists: a card stuck at E12 while its owner was on season 2.
-
-    So: find the franchise's seasons, order them by release date, ask
-    for progress on all of them in one request, and report the furthest
-    one actually started. Season 1 finished plus season 2 at episode 5
-    is "S02E05" - the answer a person would give."""
-    title = (title or "").strip()
-    username = (username or "").strip()
-    if not title or not username:
-        return None
-
-    body = _post(_SEASONS_QUERY, {"search": title}, timeout)
-    media = ((body.get("data") or {}).get("Page") or {}).get("media") or []
-    seasons = [m for m in media
-               if m.get("format") in _SEASON_FORMATS and _same_franchise(title, m)]
-    if not seasons:
-        return None
-    seasons.sort(key=_release_key)
-
-    ids = [m["id"] for m in seasons if m.get("id")]
-    listed = _post(_SEASON_PROGRESS_QUERY, {"userName": username, "ids": ids}, timeout)
-    rows = ((listed.get("data") or {}).get("Page") or {}).get("mediaList") or []
-    progress_by_id = {row.get("mediaId"): (row.get("progress") or 0)
-                      for row in rows if row.get("mediaId")}
-
-    # Numbers written in the titles win over release order wherever they
-    # exist - see _stated_season. Release order is the fallback for
-    # franchises that name their sequels rather than numbering them.
-    stated = {id(entry): _stated_season(entry) for entry in seasons}
-    numbered = any(value for value in stated.values())
-
-    # The furthest season actually started, not the newest one on the
-    # list: adding season 3 to your list without watching it must not
-    # move progress forwards, and rewatching season 1 must not move it
-    # back.
-    furthest = None
-    for index, entry in enumerate(seasons, start=1):
-        progress = progress_by_id.get(entry.get("id")) or 0
-        if progress <= 0:
-            continue
-        # An entry with no number among numbered siblings is the first
-        # season - that is exactly how AniList names them ("One-Punch
-        # Man", then "One-Punch Man Season 2").
-        season = (stated[id(entry)] or 1) if numbered else index
-        if furthest is None or season >= furthest[0]:
-            furthest = (season, progress)
-    if furthest is None:
-        return None
-    # One season and nothing else means there is no season number to
-    # claim - keep the flat "E12" shape the rest of the app already
-    # stores for those.
-    season, episode = furthest
-    return (season if len(seasons) > 1 else 0), episode
-
-
-def fetch_watch_progress(title: str, username: str, timeout: int = 6):
-    """Your real AniList progress for the anime matching `title`, from
-    `username`'s list - AniList's profile privacy has to allow public
-    list viewing for this to work; there's no login here, just their
-    username. Returns (season, episode), or None if there's no title
-    match, the list/entry is private, or the lookup fails.
-
-    Tries the season-aware path first (see fetch_season_progress) and
-    only falls back to the single-entry lookup when that finds nothing,
-    so a franchise answers about the season you are on rather than
-    about its first one."""
-    title = (title or "").strip()
-    username = (username or "").strip()
-    if not title or not username:
-        return None
-    try:
-        seasonal = fetch_season_progress(title, username, timeout)
-        if seasonal:
-            return seasonal
-        search_body = _post(_SEARCH_QUERY, {"search": title}, timeout)
-        media_id = ((search_body.get("data") or {}).get("Media") or {}).get("id")
-        if not media_id:
-            return None
-        body = _post(_PROGRESS_QUERY, {"userName": username, "mediaId": media_id}, timeout)
-        entry = (body.get("data") or {}).get("MediaList")
-        progress = entry.get("progress") if entry else None
-        if progress is None:
-            return None
-        return 0, int(progress)
-    except RateLimited:
-        # The one lookup here that does not fail soft. This is the answer
-        # the user reads as "the app is broken", so the caller has to be
-        # able to say which of the two happened; the schedule lookups
-        # below stay soft, because a missing countdown on a card has
-        # nowhere to say it and no one waiting on it.
-        raise
-    except Exception:
-        return None
 
 
 def _candidate_names(media: dict):

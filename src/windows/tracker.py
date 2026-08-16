@@ -1,4 +1,4 @@
-"""Anime & Manga & Series tracker: three pages sharing this list-widget
+﻿"""Anime & Manga & Series tracker: three pages sharing this list-widget
 implementation. Anime/Manga share one data file split by the entry's
 `type` field (so you can reclassify one into the other); Series has its
 own file since it's a different domain entirely.
@@ -46,12 +46,18 @@ _SEARCHING_HINT = "(clear the search to drag cards into a new order)"
 # as one group everywhere except the Type dropdown itself.
 MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
 
-# Status wording differs by content type: you "watch" Anime/Series but
-# "read" Manga/Manhwa/Manhua.
+# Types that are watched rather than read. Stremio, the Video Website
+# list and the progress sync all apply to exactly these - written once
+# here because the rule used to be spelled `== "Anime"` in a dozen
+# places, which is why Series could never open on a chosen site.
+VIDEO_TYPES = ("Anime", "Series", "Movie")
+
+# Status wording differs by content type: you "watch" Anime/Series/Movie
+# but "read" Manga/Manhwa/Manhua.
+_WATCHING_STATUSES = ["Watching", "Completed", "On Hold", "Dropped", "Plan to Watch"]
 _READING_STATUSES = ["Reading", "Completed", "On Hold", "Dropped", "Plan to Read"]
 STATUSES_BY_TYPE = {
-    "Anime": ["Watching", "Completed", "On Hold", "Dropped", "Plan to Watch"],
-    "Series": ["Watching", "Completed", "On Hold", "Dropped", "Plan to Watch"],
+    **{t: list(_WATCHING_STATUSES) for t in VIDEO_TYPES},
     **{t: _READING_STATUSES for t in MANGA_TYPES},
 }
 IN_PROGRESS_STATUSES = {"Watching", "Reading"}
@@ -66,9 +72,11 @@ _LEGACY_STATUS_MAP = {
 # What kind of search/launch each content type uses. Manga/Manhwa/Manhua
 # have no Stremio presence (it's not video), so they search the Settings-
 # configured reading sites instead and open a plain browser tab.
-SEARCH_PROVIDER_BY_TYPE = {"Anime": "stremio", "Series": "stremio",
+SEARCH_PROVIDER_BY_TYPE = {**{t: "stremio" for t in VIDEO_TYPES},
                             **{t: "manga_sites" for t in MANGA_TYPES}}
-STREMIO_CATALOG_BY_TYPE = {"Anime": "series", "Series": "series"}
+# Cinemeta keeps films in their own catalog, so a Movie searched against
+# the series catalog finds nothing at all.
+STREMIO_CATALOG_BY_TYPE = {"Anime": "series", "Series": "series", "Movie": "movie"}
 
 # Shown whenever a progress field gets auto-filled from "how far this
 # release currently goes" rather than "what you've actually watched/read"
@@ -197,6 +205,11 @@ def open_tracker_entry(parent, entry):
     link or plain URL as-is. Returns False if there's nothing to open."""
     if entry.get("type") in MANGA_TYPES:
         return _open_manga_entry(parent, entry)
+    # Series and Movie take the same route as Anime now that they can
+    # carry a Video Website of their own - an entry pinned to Netflix
+    # has to open there, not on whatever url a Stremio match left behind.
+    if entry.get("type") in VIDEO_TYPES and entry.get("site_id"):
+        return _open_anime_entry(parent, entry)
     if entry.get("type") == "Anime":
         return _open_anime_entry(parent, entry)
 
@@ -366,40 +379,16 @@ class _ProgressSyncSignals(QObject):
 # hover: a progress number the user disagrees with is unarguable until
 # it says who said it.
 SOURCE_STREMIO = "Stremio"
-SOURCE_ANILIST = "AniList"
 SOURCE_MANUAL = "you"
 
+# The one thing that can stop a sync and that the user can fix - no
+# Stremio account connected. Everything else is a genuine no-match.
+REASON_NO_STREMIO_ACCOUNT = "no_stremio_account"
 
-# Why a sync found nothing, when that is known. Several causes look
-# identical on screen - no progress - and the user reads all of them as
-# "the app is broken", which is exactly what happened: an empty AniList
-# username silently meant nothing could ever sync, and nothing said so.
-#
-# AniList refused the connection rather than answering. Nothing about
-# this title is known either way, so it must not be reported as "not on
-# your list".
-REASON_ANILIST_RATE_LIMITED = "anilist_rate_limited"
-
-# The one setting Anime progress depends on is blank. The most useful
-# thing the app can say, because it is the one the user can act on.
-REASON_NO_ANILIST_USERNAME = "no_anilist_username"
-
-# The entry sits on a service whose watch history cannot be read by
-# anything, ever, without the user's own login - carried as
-# "site_unreadable:netflix" so the message can name it.
-REASON_SITE_UNREADABLE = "site_unreadable"
-
-# Kept in one place so the wording is the same in the dialog, the
-# tooltip and the page notice.
+# Services whose watch history no app can read. Kept only to explain why
+# an entry on one of them never fills itself in; nothing tries to sync
+# them any more.
 _UNREADABLE_NAMES = {"netflix": "Netflix", "crunchyroll": "Crunchyroll"}
-
-
-def _reason_provider(reason: str):
-    """The service named in a REASON_SITE_UNREADABLE reason, if present."""
-    for part in (reason or "").split(","):
-        if part.startswith(REASON_SITE_UNREADABLE + ":"):
-            return part.split(":", 1)[1]
-    return None
 
 
 class _CoverSignals(QObject):
@@ -427,7 +416,7 @@ class TrackerPage(GlassPage):
     TITLE = "Anime"
     TYPE_OPTIONS = ["Anime", "Manga"]
     PROGRESS_COLUMNS = ["Last Season", "Last Episode"]
-    # Manga has no Stremio/AniList presence to sync progress against.
+    # Manga has no Stremio presence to sync progress against.
     SUPPORTS_PROGRESS_SYNC = True
     # Which release-schedule source the hover tooltip's "next episode/
     # chapter" lines come from for this page - see helpers/release_schedule.
@@ -486,9 +475,9 @@ class TrackerPage(GlassPage):
         header = QHBoxLayout()
         header.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
         header.addStretch()
-        refresh_btn = QPushButton("⟳", objectName="AccentIcon")
+        refresh_btn = QPushButton("âŸ³", objectName="AccentIcon")
         refresh_btn.setFixedSize(40, 40)
-        refresh_btn.setToolTip("Refresh progress from Stremio/AniList and re-check release schedules"
+        refresh_btn.setToolTip("Refresh progress from Stremio and re-check release schedules"
                                if self.SUPPORTS_PROGRESS_SYNC else "Re-check release schedules")
         refresh_btn.clicked.connect(self._refresh_everything)
         header.addWidget(refresh_btn)
@@ -526,8 +515,8 @@ class TrackerPage(GlassPage):
 
         # Why progress isn't syncing, said once for the whole page rather
         # than on every card. The user spent a long time believing the app
-        # was broken when the real answers were "no AniList username is
-        # set" and "Netflix/Crunchyroll publish no watch history at all" -
+        # was broken when the real answers were "no account is connected"
+        # and "Netflix/Crunchyroll publish no watch history at all" -
         # neither of which is deducible from a card that simply shows
         # nothing. Filled in by _update_sync_notice, hidden when there is
         # nothing to say.
@@ -732,7 +721,7 @@ class TrackerPage(GlassPage):
         for entry in targets:
             lookup_pool.submit(
                 self._fetch_real_progress, entry["id"], _entry_imdb_id(entry),
-                entry["title"], entry.get("type") == "Anime", True)
+                entry["title"], True)
 
     # ------------------------------------------------------------------
     def _search_query(self) -> str:
@@ -826,30 +815,25 @@ class TrackerPage(GlassPage):
     def _update_sync_notice(self):
         """The standing reasons this page can't sync progress, if any.
 
-        Recomputed on every redraw rather than cached: the AniList
-        username can be filled in from Settings while the page is open,
-        and a site can be changed on any entry."""
+        Recomputed on every redraw rather than cached: the Stremio
+        account can be connected from Settings while the page is open."""
         if not self.SUPPORTS_PROGRESS_SYNC:
             return
         entries = [e for e in self.entries if e["type"] in self.ENTRY_TYPES]
         lines = []
-        if any(e["type"] == "Anime" for e in entries) and not app_settings.get_anilist_username():
-            lines.append("No AniList username is set, so Anime progress has "
-                         "nothing to sync from - add it in Settings.")
+        _, auth_key = app_settings.get_stremio_auth()
+        if entries and not auth_key:
+            lines.append("No Stremio account is connected, so nothing can sync "
+                         "on its own - connect one in Settings.")
         providers = anime_sites.streaming_provider_map()
         used = sorted({providers[e["site_id"]] for e in entries
                        if e.get("site_id") in providers})
-        if "crunchyroll" in used:
-            lines.append("Crunchyroll can't be read directly - Settings > "
-                         "Crunchyroll Progress has the 6 steps to keep AniList "
-                         "updated for you instead.")
-            used = [p for p in used if p != "crunchyroll"]
         if used:
             names = " and ".join(_UNREADABLE_NAMES.get(p, p.title()) for p in used)
-            lines.append(f"{names} doesn't publish watch history to anyone who "
-                         f"isn't signed in, so progress for entries there is set "
-                         f"by hand.")
-        self.sync_notice.setText("  •  ".join(lines))
+            lines.append(f"{names} publishes nothing about what you've watched, "
+                         f"so entries opened there only sync what Stremio itself "
+                         f"knows about them.")
+        self.sync_notice.setText("  â€¢  ".join(lines))
         self.sync_notice.setVisible(bool(lines))
 
     def _refresh_grid(self, *_args):
@@ -920,17 +904,14 @@ class TrackerPage(GlassPage):
                 f"color: {theme.ACCENT}; font-weight: 700; font-size: 9pt; background: transparent;")
             card_layout.addWidget(progress_label)
 
+        # Reading only. Anime/Series/Movie progress comes from Stremio,
+        # which is authoritative and updates itself - a +1 there competed
+        # with the sync rather than helping it, and a hand-set number
+        # would be overwritten by the next refresh anyway. Chapters have
+        # no such source, so they keep theirs.
         if entry["type"] in MANGA_TYPES:
             card_layout.addLayout(self._bump_controls(
                 entry, "Last Watched Chapter", self._bump_watched_chapter))
-        else:
-            # Same control Manga has always had, for episodes. Without it
-            # the only way to move progress by one was the whole Edit
-            # dialog - and on these two types that dialog is also where
-            # the search/cover/link machinery lives, so it is a heavy way
-            # to say "watched one more".
-            card_layout.addLayout(self._bump_controls(
-                entry, "Episode", self._bump_episode))
 
         card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
@@ -951,32 +932,6 @@ class TrackerPage(GlassPage):
                 controls.addStretch()
             controls.addWidget(button)
         return controls
-
-    def _bump_episode(self, entry, delta):
-        """Move episode progress by one from the card.
-
-        Never rolls a season over: nothing here knows how many episodes a
-        season has (latest_available is the newest episode *out*, not a
-        season length), so guessing would silently put progress in the
-        wrong season. The season only changes in Edit, where it is typed.
-
-        Marks the progress verified, exactly as editing the spinner by
-        hand does (EntryForm._on_progress_hand_edited) - pressing +1 is
-        the same assertion that this is really your progress, and without
-        it the card would keep showing nothing after being clicked."""
-        text = (entry.get("progress") or "").strip()
-        season, episode = parse_episode_progress(text)
-        if text and not season and not episode:
-            return  # freeform note from an old entry - don't overwrite it
-        episode = max(0, episode + delta)
-        entry["progress"] = format_episode_progress(season, episode)
-        entry["progress_verified"] = True
-        # Yours now, whatever a sync said before - and the next sync from
-        # a source that disagrees will say so by name.
-        entry["progress_source"] = SOURCE_MANUAL
-        entry["updated_at"] = storage.now_iso()
-        self._save_entries()
-        self._refresh_grid()
 
     def _bump_watched_chapter(self, entry, delta):
         current = entry.get("last_watched_chapter") or 0.0
@@ -1016,58 +971,21 @@ class TrackerPage(GlassPage):
     def _not_found_message(self, reason: str) -> str:
         """What to say when a sync found no progress.
 
-        Four different situations used to share one message that began
-        "No real progress found for this title" - including the two the
-        user cannot possibly deduce: a service that publishes no watch
-        history at all, and an AniList username that was never filled in.
-        Reading "not found" in those cases is what made the app look
-        broken rather than unconfigured."""
-        codes = set((reason or "").split(","))
-        if REASON_ANILIST_RATE_LIMITED in codes:
-            # Its own message, not a line added to the others: nothing
-            # was learned about this title at all, so anything else said
-            # here would be a guess.
-            return ("AniList is refusing requests from this connection right "
-                    "now (it answers 403 once it decides a connection has "
-                    "asked too often, and that can last an hour or more). "
-                    "This says nothing about whether the title is on your "
-                    "list - try again later.")
-
-        parts = []
-        provider = _reason_provider(reason)
-        if provider:
-            name = _UNREADABLE_NAMES.get(provider, provider.title())
-            parts.append(
-                f"{name} publishes nothing about what you've watched, so this "
-                f"entry can't fill itself in on its own. The fix that lasts is "
-                f"letting your browser keep AniList updated as you watch - "
-                f"Settings > Crunchyroll Progress has the 6 steps. Or set it "
-                f"by hand with the +1 button on the card.")
-        if provider:
-            # Said in both cases above. It is the half the user cannot
-            # deduce - the old behaviour silently showed Stremio's number
-            # here, which is a different viewing and was simply wrong.
-            name = _UNREADABLE_NAMES.get(provider, provider.title())
-            parts.append(
-                f"Your Stremio progress is deliberately not used for this "
-                f"entry - you watch it on {name}, so Stremio's number would be "
-                f"a different viewing, and showing it here stated the wrong "
-                f"episode as fact.")
-        if REASON_NO_ANILIST_USERNAME in codes:
-            parts.append(
-                "No AniList username is set. Anime progress syncs from your "
-                "Stremio account or your public AniList list, and with that "
-                "field blank in Settings there is nothing to read - which is "
-                "why nothing has been syncing.")
-        if not parts:
-            parts.append(
-                "No real progress found for this title. Either it's not in "
-                "your Stremio library (or, for Anime, your AniList list), or "
-                "Stremio has no specific episode recorded for it - that only "
-                "happens once you've actually pressed play on one through "
-                "Stremio itself, not just added it to your library. You can "
-                "still set your progress by hand in Edit.")
-        return "\n\n".join(parts)
+        The one cause the user can act on is a Stremio account that was
+        never connected - saying "not found" for that made the app look
+        broken rather than unconfigured, which cost its owner a long
+        time before anyone worked it out."""
+        if REASON_NO_STREMIO_ACCOUNT in set((reason or "").split(",")):
+            return ("No Stremio account is connected, so there is nothing to "
+                    "read your progress from. Connect one in Settings > "
+                    "Stremio Account - it's the only service that publishes "
+                    "what you've actually watched.")
+        return ("No real progress found for this title. Either it isn't in "
+                "your Stremio library, or Stremio has no specific episode "
+                "recorded for it - that only happens once you've actually "
+                "pressed play on one through Stremio itself, not just added "
+                "it to your library. You can still set your progress by hand "
+                "in Edit.")
 
     def _entry_provider(self, entry):
         """The unreadable-service name for this entry, or None. Read here
@@ -1076,9 +994,9 @@ class TrackerPage(GlassPage):
         return anime_sites.streaming_provider(entry.get("site_id"))
 
     def _sync_progress(self, entry):
-        """Re-fetch this one entry's *real* progress (your connected
-        Stremio account, or - for Anime - your AniList username) and
-        overwrite the stored value with it. Unlike the initial add-time
+        """Re-fetch this one entry's *real* progress from your connected
+        Stremio account and overwrite the stored value with it. Unlike
+        the initial add-time
         guess, this can be re-run any time, so a saved entry never has to
         stay stuck on a fallback estimate."""
         imdb_id = _entry_imdb_id(entry)
@@ -1089,8 +1007,7 @@ class TrackerPage(GlassPage):
         # queue behind a page-load backfill of every other entry.
         threading.Thread(
             target=self._fetch_real_progress,
-            args=(entry["id"], imdb_id, entry["title"], entry.get("type") == "Anime", False,
-                  self._entry_provider(entry)),
+            args=(entry["id"], imdb_id, entry["title"], False),
             daemon=True).start()
 
     def _sync_all_progress(self):
@@ -1111,59 +1028,30 @@ class TrackerPage(GlassPage):
         for entry in targets:
             lookup_pool.submit(
                 self._fetch_real_progress, entry["id"], _entry_imdb_id(entry),
-                entry["title"], entry.get("type") == "Anime", True)
+                entry["title"], True)
 
-    def _fetch_real_progress(self, entry_id, imdb_id, title, is_anime, silent,
-                             provider=None):
-        """`provider` is the entry's streaming service when it is one that
-        can't be read (see anime_sites.streaming_provider) - worked out on
-        the UI thread by the caller, since it reads the saved sites."""
+    def _fetch_real_progress(self, entry_id, imdb_id, title, silent):
+        """Your real progress for one entry, from your Stremio account.
+
+        Stremio is the only source, deliberately. Everything else that
+        could answer this was tried and removed: Crunchyroll publishes
+        nothing without a login it grants no one, and the list services
+        only ever knew whatever some other tracker had written to them -
+        which is how a card confidently showed an episode its owner had
+        never reached. One source that is right beats three that
+        disagree."""
         result = None
         source = ""
         reasons = []
         _, auth_key = app_settings.get_stremio_auth()
-        anilist_username = app_settings.get_anilist_username() if is_anime else ""
-
-        # Which source is asked depends on where the entry is actually
-        # watched, and that is not a preference - it was a wrong number
-        # on the card.
-        #
-        # Stremio used to be asked first for everything, and whatever it
-        # answered won. For an entry pinned to Crunchyroll that is a
-        # different viewing entirely: One-Punch Man read S01E07 from
-        # Stremio while Crunchyroll's own history said E2, and the card
-        # stated the wrong one as fact with nothing to say where it came
-        # from. So an entry the user watches on Crunchyroll or Netflix
-        # does not take Stremio's number at all - their own AniList list
-        # is the only source that can speak for it.
-        watches_elsewhere = provider in _UNREADABLE_NAMES
-
-        # Crunchyroll itself, first, when the entry lives there and an
-        # account is connected. It is the only source that knows what was
-        # actually watched on Crunchyroll - AniList only ever knows what
-        # some other tracker wrote to it, which is why an entry watched
-        # to episode 2 could sit there reading episode 7.
-        if not watches_elsewhere and auth_key:
+        if auth_key:
             try:
                 result = stremio.fetch_watch_progress(imdb_id, auth_key)
                 source = SOURCE_STREMIO if result else ""
             except Exception:
                 result = None
-        if not result and anilist_username:
-            try:
-                result = anilist.fetch_watch_progress(title, anilist_username)
-                source = SOURCE_ANILIST if result else ""
-            except anilist.RateLimited:
-                # Deliberately not folded into the except below: the
-                # whole point is that this is not a no-match.
-                result = None
-                reasons.append(REASON_ANILIST_RATE_LIMITED)
-            except Exception:
-                result = None
-        if not result and is_anime and not anilist_username:
-            reasons.append(REASON_NO_ANILIST_USERNAME)
-        if not result and provider in _UNREADABLE_NAMES:
-            reasons.append(f"{REASON_SITE_UNREADABLE}:{provider}")
+        else:
+            reasons.append(REASON_NO_STREMIO_ACCOUNT)
         try:
             total = stremio.fetch_latest_episode(imdb_id, "series")
         except Exception:
@@ -1368,9 +1256,9 @@ class MangaPage(TrackerPage):
 
 class SeriesPage(TrackerPage):
     DATA_FILE = "series.json"
-    ENTRY_TYPES = ("Series",)
-    TITLE = "Series"
-    TYPE_OPTIONS = ["Series"]
+    ENTRY_TYPES = ("Series", "Movie")
+    TITLE = "Movies & Series"
+    TYPE_OPTIONS = ["Series", "Movie"]
     MEDIUM = release_schedule.MEDIUM_SERIES
 
 
@@ -1410,7 +1298,7 @@ class EntryForm(QDialog):
         self._video_wait_used = False  # ...and Save only ever waits the once
         self._latest_available = entry.get("latest_available", "") if entry else ""
         # Whether the season/episode spinners hold *confirmed* progress
-        # (fetched from a connected Stremio/AniList account, or typed in
+        # (fetched from a connected Stremio account, or typed in
         # by hand) rather than just the unconfirmed "latest episode out"
         # guess - only verified progress shows on the card. Manual edits
         # to the spinners flip this true (see the valueChanged connect
@@ -1513,7 +1401,7 @@ class EntryForm(QDialog):
 
         # Unlike Last Chapter above (auto-filled from the reading site's
         # latest release), this is never auto-filled - only you know what
-        # you've actually read, same as Anime/Series' real Stremio/AniList
+        # you've actually read, same as Anime/Series' real Stremio
         # progress. Shown on the card and adjustable there via +/-.
         watched_col = QVBoxLayout()
         watched_col.setSpacing(2)
@@ -1537,7 +1425,7 @@ class EntryForm(QDialog):
         season_col.addWidget(QLabel("Last Season"))
         self.season_spin = QSpinBox()
         self.season_spin.setRange(0, 99)
-        self.season_spin.setSpecialValueText("—")
+        self.season_spin.setSpecialValueText("â€”")
         self.season_spin.setValue(season0)
         season_col.addWidget(self.season_spin)
         episode_layout.addLayout(season_col)
@@ -1623,7 +1511,7 @@ class EntryForm(QDialog):
         other's (e.g. "Loading cover..." stomping the "not your progress"
         hint, or vice versa)."""
         self._status_parts[key] = text
-        self.status_label.setText(" · ".join(p for p in self._status_parts.values() if p))
+        self.status_label.setText(" Â· ".join(p for p in self._status_parts.values() if p))
 
     def _provider(self):
         return SEARCH_PROVIDER_BY_TYPE.get(self.type_box.currentText(), "manga_sites")
@@ -1635,7 +1523,7 @@ class EntryForm(QDialog):
         else:
             self.title_label.setText("Title (type to search your reading websites)")
         self.site_label.setText(
-            "Video Website (opens directly on double-click)" if self.type_box.currentText() == "Anime"
+            "Video Website (opens directly on double-click)" if self.type_box.currentText() in VIDEO_TYPES
             else "Reading Website (opens directly on double-click)")
 
     def _status_options(self):
@@ -1663,7 +1551,7 @@ class EntryForm(QDialog):
 
     def _update_url_and_site_visibility(self):
         current_type = self.type_box.currentText()
-        has_site = current_type in MANGA_TYPES or current_type == "Anime"
+        has_site = current_type in MANGA_TYPES or current_type in VIDEO_TYPES
         self.url_row.setVisible(not has_site)
         self.site_row.setVisible(has_site)
 
@@ -1679,11 +1567,11 @@ class EntryForm(QDialog):
     def _populate_site_options(self, current_site_id=None):
         self.site_box.blockSignals(True)
         self.site_box.clear()
-        if self.type_box.currentText() == "Anime":
+        if self.type_box.currentText() in VIDEO_TYPES:
             self.site_box.addItem("Stremio", None)
             sites = anime_sites.list_sites()
         else:
-            self.site_box.addItem("— None —", None)
+            self.site_box.addItem("â€” None â€”", None)
             sites = manga_sites.list_sites()
         for site in sites:
             self.site_box.addItem(site["name"], site["id"])
@@ -1716,7 +1604,7 @@ class EntryForm(QDialog):
         # through to a search-results page. Also re-blanks a page url
         # resolved for a title that's since been edited away.
         site_id = self.site_box.currentData()
-        if self.type_box.currentText() == "Anime" and site_id is not None:
+        if self.type_box.currentText() in VIDEO_TYPES and site_id is not None:
             self._start_video_site_resolution(site_id, text)
 
     def _search_worker(self, provider, text, seq):
@@ -1756,7 +1644,7 @@ class EntryForm(QDialog):
         if seq != self._search_seq:
             return
 
-        if provider == "stremio" and self.type_box.currentText() == "Anime":
+        if provider == "stremio" and self.type_box.currentText() in VIDEO_TYPES:
             results = self._expand_for_video_sites(results)
 
         source_name = "Stremio" if provider == "stremio" else "your manga websites"
@@ -1830,7 +1718,7 @@ class EntryForm(QDialog):
             # the dropdown below to match, so the two always agree instead
             # of the dropdown silently staying on whatever it last was.
             video_site_id = result.get("_video_site_id")
-            if self.type_box.currentText() == "Anime" and "_video_site_id" in result:
+            if self.type_box.currentText() in VIDEO_TYPES and "_video_site_id" in result:
                 # Signals blocked because _on_site_changed would re-run
                 # the resolution below off whatever is currently typed;
                 # the explicit call does it with the suggestion's own
@@ -1848,7 +1736,7 @@ class EntryForm(QDialog):
             # resolved in the background - explicitly cleared first so
             # the field is empty (and the entry falls back to the site's
             # search page) if the resolution finds nothing.
-            uses_site = self.type_box.currentText() == "Anime" and video_site_id is not None
+            uses_site = self.type_box.currentText() in VIDEO_TYPES and video_site_id is not None
             if uses_site:
                 self.url_edit.setText("")
                 self._start_video_site_resolution(video_site_id, result["title"])
@@ -1861,8 +1749,8 @@ class EntryForm(QDialog):
             # Season/Last Episode fields with the latest aired episode
             # (how far the release currently goes), *not* your own watch
             # progress - that's a separate concept, only ever set via
-            # Sync Progress (a connected Stremio account, or for Anime
-            # your AniList username) after the entry's saved, same as
+            # Sync Progress (a connected Stremio account) after the
+            # entry's saved, same as
             # Manga's "Last Chapter" (site's latest) never doubles as
             # "Last Watched Chapter" (your own progress) either. Tracked
             # via its own identity (not url_edit's text) since site-
@@ -1931,7 +1819,7 @@ class EntryForm(QDialog):
     # every configured site on every keystroke.
 
     def _on_site_changed(self, _index):
-        if self.type_box.currentText() != "Anime":
+        if self.type_box.currentText() not in VIDEO_TYPES:
             return
         site_id = self.site_box.currentData()
         title = self.title_combo.currentText().strip()
@@ -2076,7 +1964,7 @@ class EntryForm(QDialog):
         # the suggestion and saving inside the lookup's own duration. So
         # hold the save until the lookup reports - it always does, hit or
         # miss - and let _on_video_url_resolved re-enter here.
-        if (self.type_box.currentText() == "Anime" and not self.url_edit.text().strip()
+        if (self.type_box.currentText() in VIDEO_TYPES and not self.url_edit.text().strip()
                 and self._video_lookup_in_flight() and not self._video_wait_used):
             self._video_wait_used = True
             self._save_waiting_on_video = True
@@ -2089,8 +1977,8 @@ class EntryForm(QDialog):
             self.entry = {"id": str(uuid.uuid4())}
         current_type = self.type_box.currentText()
         is_manga = current_type in MANGA_TYPES
-        is_anime = current_type == "Anime"
-        has_site = is_manga or is_anime
+        is_video = current_type in VIDEO_TYPES
+        has_site = is_manga or is_video
         site_id = self.site_box.currentData() if has_site else None
         saved_url = self.url_edit.text().strip()
         # An Anime entry set to a configured Video Website (not the
@@ -2101,7 +1989,7 @@ class EntryForm(QDialog):
         # An http(s) url here is the opposite case: it's the page
         # anime_sites resolved *on that site*, and it's exactly what
         # should open, instead of the site's search results.
-        if is_anime and site_id is not None and saved_url.startswith("stremio://"):
+        if is_video and site_id is not None and saved_url.startswith("stremio://"):
             saved_url = ""
         self.entry.update(
             title=title,
@@ -2115,7 +2003,7 @@ class EntryForm(QDialog):
             cover_url=self.selected_cover_url,
             cover_path=self.selected_cover_path,
             site_id=site_id,
-            imdb_id=self.selected_imdb_id if (is_anime or current_type == "Series") else None,
+            imdb_id=self.selected_imdb_id if is_video else None,
         )
         self.on_save(self.entry, self.is_new)
         self.accept()

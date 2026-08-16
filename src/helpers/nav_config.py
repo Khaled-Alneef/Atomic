@@ -15,7 +15,10 @@ HOME_ITEM = ("Home", "home")
 NAV_ITEMS = [
     ("Anime", "anime"),
     ("Reading", "manga"),
-    ("Series", "series"),
+    # Page key stays "series" - it is what saved nav orders, hidden-section
+    # lists and series.json already refer to. Only the label changed when
+    # films joined it.
+    ("Movies & Series", "series"),
     ("Games", "games"),
     ("Apps", "apps"),
     ("Websites", "websites"),

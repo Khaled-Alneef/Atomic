@@ -92,7 +92,7 @@ PAGES = {
 ADD_ITEMS = [
     ("Anime Entry", "anime", lambda page: page._open_form()),
     ("Reading Entry", "manga", lambda page: page._open_form()),
-    ("Series Entry", "series", lambda page: page._open_form()),
+    ("Movie or Series Entry", "series", lambda page: page._open_form()),
     ("Game", "games", lambda page: page._add_game()),
     ("App", "apps", lambda page: page._open_add_form()),
     ("Website", "websites", lambda page: page._open_add_form()),

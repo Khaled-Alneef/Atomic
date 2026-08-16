@@ -1,5 +1,5 @@
-"""Small persisted app-wide settings (connected Stremio account, AniList
-username, sidebar nav order, manga sites/music)."""
+"""Small persisted app-wide settings (connected Stremio account, sidebar
+nav order, manga sites/music)."""
 
 from . import storage
 
@@ -149,16 +149,6 @@ def set_stremio_auth(email: str, auth_key: str):
 
 def clear_stremio_auth():
     set_stremio_auth("", "")
-
-
-def get_anilist_username() -> str:
-    return _load().get("anilist_username", "")
-
-
-def set_anilist_username(username: str):
-    data = _load()
-    data["anilist_username"] = (username or "").strip()
-    storage.save(SETTINGS_FILE, data)
 
 
 def get_launcher_dirs() -> dict:

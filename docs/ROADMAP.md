@@ -28,7 +28,8 @@ defects, usability gaps, the Amazon Prime coverage note):
 | 16 | Investigate code signing to stop the antivirus false positive | release-engineer | shape unknown - investigate first | done - **decision needed from the user** |
 | 17 | Investigate Kitsu as a second source for watch progress | integrations-engineer | shape unknown - investigate first | todo |
 | 18 | Read Crunchyroll progress from Crunchyroll, and stop Stremio answering for entries watched elsewhere | integrations-engineer | spans modules | done - direct reading later **removed**, see #19 |
-| 19 | Route Crunchyroll through MAL-Sync → AniList, and read AniList per season | integrations-engineer | spans modules | done |
+| 19 | Route Crunchyroll through MAL-Sync → AniList, and read AniList per season | integrations-engineer | spans modules | **superseded by #20** |
+| 20 | One progress source (Stremio), Movies alongside Series, Netflix as a default site | ui-engineer | spans modules | done |
 
 Items 1-8 landed together as the correctness pass. Each block below
 records what was actually built and what it measured - which in several
@@ -926,6 +927,55 @@ live query confirming the four real One-Punch Man entries in order.
 
 **Known limit**: a franchise that numbers nothing in its titles falls
 back to release order, which is only as good as AniList's dates.
+
+### 20. One progress source, Movies alongside Series, Netflix by default
+
+**What** - Five changes the owner asked for after living with the
+alternatives: Netflix as a default video website, films tracked next to
+series, progress from Stremio only, no Crunchyroll progress settings,
+and no +/- on watched types.
+**Why now** - Items #7 through #19 chased watch progress across four
+services. Each one worked in isolation and none was reliable: an
+authenticated Crunchyroll client (impossible - no client credential), a
+pasted token (dies in an hour), AniList by username (only knows what
+another tracker wrote), MAL-Sync feeding AniList (needs the episode
+finished, and a manual match per new show). Stremio was correct the
+whole time. **This item is the decision to stop.**
+**Owner** - ui-engineer
+**Where** - `windows/tracker.py` (VIDEO_TYPES, SeriesPage),
+`helpers/anilist.py`, `helpers/settings_dialog.py`,
+`helpers/app_settings.py`, `helpers/anime_sites.py`,
+`helpers/nav_config.py`.
+**Done when** - a film can be tracked, Netflix is offered without adding
+it by hand, and nothing but Stremio ever writes a progress number.
+**What happens when the service says no** - no Stremio account means the
+page says so plainly and nothing syncs. There is no fallback by design.
+
+**Landed.** 26/26 verified.
+
+*One source.* `_fetch_real_progress` asks Stremio and stops.
+`anilist.py` lost every progress function and kept schedules and link
+resolution; the AniList username setting and all Crunchyroll progress
+settings are gone, as is `crunchyroll.py`.
+
+*Movies & Series.* `Movie` is a tracked type with watching statuses,
+searched against **Cinemeta's movie catalog** rather than the series one
+- a film searched against `series` finds nothing at all, verified live
+("Spirited Away" returns 3 movie results, "The Boys" 8 series results).
+The page key stays `series` so saved nav order and `series.json` are
+untouched; only the label changed.
+
+*Netflix by default*, alongside Crunchyroll, and both resolve to real
+title pages via Wikidata/AniList rather than a search.
+
+*Video sites for all watched types.* The rule was spelled `== "Anime"`
+in twelve places, which is why a Series could never be pinned to a site;
+it is now `VIDEO_TYPES` in one place.
+
+*No +/- on Anime, Series or Movie.* Stremio is authoritative and
+overwrites a hand-set number on the next refresh, so the button competed
+with the sync rather than helping. Reading keeps its +/-, having no such
+source.
 
 ---
 
