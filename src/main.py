@@ -20,8 +20,8 @@ import sys
 import threading
 from pathlib import Path
 
-from helpers import (app_settings, images, logs, native_cursor, startup,
-                     storage, theme, updater, whats_new)
+from helpers import (app_settings, global_search, images, logs, native_cursor,
+                     startup, storage, theme, updater, whats_new)
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -54,7 +54,7 @@ from PyQt6.QtWidgets import (
 )
 from helpers.settings_dialog import SettingsDialog
 from helpers.widgets import (release_stale_hover_cursors, show_toast,
-                             use_hover_cursor)
+                             take_live_undo, use_hover_cursor)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -928,11 +928,65 @@ class MainWindow(QMainWindow):
         if event.key() == Qt.Key.Key_F11:
             self.toggle_fullscreen()
             return
-        # Escape only means "leave full screen" while in it - otherwise it
-        # is left alone, so it keeps closing dialogs and menus as usual.
-        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
-            self.exit_fullscreen()
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_F:
+                # The page's own search box, not the global panel - F is
+                # "find in this list" everywhere else too.
+                box = getattr(self._current_page, "search_box", None)
+                if box is not None:
+                    box.setFocus()
+                    box.selectAll()
+                return
+            if event.key() == Qt.Key.Key_Z:
+                # Undo means the offer that is on screen right now, not a
+                # history of its own - see widgets.take_live_undo.
+                toast = take_live_undo()
+                if toast is not None:
+                    toast.trigger_undo()
+                else:
+                    show_toast(self, "Nothing To Undo")
+                return
+            if event.key() == Qt.Key.Key_N:
+                # The same menu the + button opens, at the same place -
+                # setMenu means Qt positions it, so this is one call and
+                # no geometry maths (see _show_add_menu's comment).
+                self.add_btn.showMenu()
+                return
+            if event.key() == Qt.Key.Key_Comma:
+                self._open_settings()
+                return
+            if Qt.Key.Key_1 <= event.key() <= Qt.Key.Key_9:
+                # Sidebar order, not a fixed map: the sidebar is
+                # drag-to-reorder and hideable, so Ctrl+3 has to mean the
+                # third row the user can actually see. Home is row 1.
+                pages = ["home", *(page for _label, page in visible_nav_items())]
+                index = event.key() - Qt.Key.Key_1
+                if index < len(pages):
+                    self.navigate_to(pages[index])
+                return
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_K):
+            # Ctrl+K rather than Ctrl+F: F belongs to the page's own
+            # search box (see item #17), and K is what every app with a
+            # "search everything" panel binds it to.
+            self.open_global_search()
             return
+        if event.key() == Qt.Key.Key_Escape:
+            # A search box being narrowed to nothing is the thing most
+            # worth escaping from, so it wins over leaving full screen -
+            # and only when there is actually something in it, so Escape
+            # keeps its usual meaning the rest of the time.
+            box = getattr(self._current_page, "search_box", None)
+            if box is not None and box.text():
+                box.clear()
+                self._current_page.setFocus()
+                return
+            # Otherwise Escape only means "leave full screen" while in
+            # it; left alone otherwise, so it keeps closing dialogs and
+            # menus as usual.
+            if self.isFullScreen():
+                self.exit_fullscreen()
+                return
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -951,6 +1005,29 @@ class MainWindow(QMainWindow):
         self._history.append(page_name)
         self._history_index += 1
         self._show_page(page_name, direction=self._direction_between(current, page_name), animate=animate)
+
+    def open_global_search(self):
+        """Ctrl+K. One search across every page - see
+        helpers/global_search.py, including why the panel sits where it
+        does."""
+        panel = global_search.GlobalSearch(self)
+        panel.show()
+        panel.field.setFocus()
+
+    def reveal_entry(self, page_name, title):
+        """Go to the page an entry lives on and narrow it to that entry.
+
+        Not a second way to *open* things: every page already knows how
+        to open its own entries, and a global list that launched them
+        itself would be six open behaviours reimplemented in one place.
+        This puts the card on screen and leaves the opening to the page,
+        which is also what makes it correct for a page that has no search
+        box - navigation still happens, the narrowing just doesn't."""
+        self.navigate_to(page_name)
+        page = self._current_page
+        box = getattr(page, "search_box", None)
+        if box is not None:
+            box.setText(title)
 
     def go_back(self):
         if self._history_index > 0:

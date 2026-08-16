@@ -539,6 +539,12 @@ class UndoToast(Toast):
         use_hover_cursor(self)
 
     def mousePressEvent(self, event):
+        self.trigger_undo()
+
+    def trigger_undo(self):
+        """Take the offer. Called by a click on the box and by Ctrl+Z,
+        which reaches this same offer rather than keeping an undo history
+        of its own."""
         if self._spent:
             return
         # Marked spent before the callback runs, not after: restoring
@@ -558,6 +564,24 @@ class UndoToast(Toast):
         self.set_text(message or "Restored", 2600)
 
 
+# The undo offer currently on screen, if any. Ctrl+Z has to reach the
+# same offer the toast shows rather than keeping an undo history of its
+# own: the offer already knows what was removed, already knows how to put
+# it back, and already expires. A second record would be a second answer
+# to "what does undo do right now".
+_live_undo_toast = None
+
+
+def take_live_undo():
+    """The undo offer on screen, once. None when there is nothing to
+    undo - an expired, spent or withdrawn offer never comes back."""
+    global _live_undo_toast
+    toast, _live_undo_toast = _live_undo_toast, None
+    if toast is None or not toast.isVisible() or toast._spent:
+        return None
+    return toast
+
+
 def show_undo_toast(page, text, on_undo, duration_ms=UNDO_TOAST_MS):
     """Offer back the removal `page` just made. `on_undo` does the
     restoring and returns the message to replace the offer with.
@@ -568,8 +592,10 @@ def show_undo_toast(page, text, on_undo, duration_ms=UNDO_TOAST_MS):
     entry back to disk behind a page that had already loaded the list
     without it - correct on disk, wrong on screen, with nothing to
     prompt a redraw."""
+    global _live_undo_toast
     toast = UndoToast(page, text, on_undo, duration_ms)
     page.destroyed.connect(toast.close)
+    _live_undo_toast = toast
     return toast
 
 

@@ -70,14 +70,14 @@ clever one, and leave a working path working.
 | 14 | Remember window size and position across launches | ui-engineer | contained | **landed 1.4.9** |
 | 15 | Give Settings some structure before it grows further | ui-engineer | shape unknown - investigate first | todo |
 | 16 | Flag an App/Website entry whose target has disappeared | ui-engineer | contained | **landed 1.4.9** |
-| 17 | Keyboard shortcut to jump to a page's search box | ui-engineer | contained | todo |
+| 17 | Keyboard shortcut to jump to a page's search box | ui-engineer | contained | **landed 1.4.13** |
 | 18 | Bring Apps to parity with Games' "Import from Launchers" | ui-engineer | spans modules | **landed 1.4.12** |
 | 19 | Check every configured site at once, not one at a time | ui-engineer | contained | **landed 1.4.10** |
 | 20 | Back up all tracked data from Settings | ui-engineer | contained | **landed 1.4.10** |
 | 21 | Restore tracked data from a backup archive | ui-engineer | spans modules | **landed 1.4.10** |
 | 22 | Multi-select bulk status change on tracker cards | ui-engineer | shape unknown - investigate first | todo |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
-| 24 | One search across every page, not just the tracker family | ui-engineer | shape unknown - investigate first | todo |
+| 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
 
 Ordered correctness-first, worst blast-radius first: a confidently
@@ -1011,6 +1011,50 @@ breaks a currently-working, if unstructured, dialog is worse than
 leaving it alone. Don't let "it's long" alone justify a rewrite without
 sizing the actual cost/benefit.
 
+**Landed** - investigated, and the answer is **no restructuring**; only
+the category name changed ("Anime & Series" -> "Watching").
+
+The premise had expired. This item was written against 1,024 lines of
+one long scrolling form; the file now opens on a 210px category sidebar
+driving a `QStackedWidget` of five pages (General / Watching / Reading /
+Games / Data), each in its own scroll area. The structure this item asked
+for is already there.
+
+Measured in a real window (920x640 default, dpr 1.25), content height
+against viewport per category:
+
+| Category | Default 920x640 | Minimum 760x560 | 1280x900 |
+|---|---|---|---|
+| General | 43px over (1.28 screens) | 123px | fits |
+| Watching | 129px over (1.41) | 209px | fits |
+| Reading | 60px over (1.20) | 159px | fits |
+| Games | fits | 48px | fits |
+| Data | 48px over (1.29) | 147px | fits |
+
+The deepest page is 129px past the fold at the default size - **2.1
+wheel notches** (`singleStep` 20px, three steps per notch), and 0.7-1.0
+notches for the rest. Nothing scrolls at all above roughly 900px of
+window height. Tabs, sub-navigation or collapsible sections all cost a
+click to reach content that is currently one flick away, on a dialog
+whose every control is working; that trade is not worth making.
+
+The "four more sections are coming" argument is also spent: items #10,
+#19, #20 and #21 have all landed *into these numbers* (the three-state
+Stremio line, Check All, Backup and Restore), and the worst page still
+sits at 1.41 screens. Reopen this only if a page passes roughly two
+screens at the default size - that is the number to measure against, not
+the line count.
+
+**Owner's addition, done** - the category is now **Watching**, covering
+anime, films and series alike. The literal "Anime, Movies & Series" was
+measured against the sidebar and does not fit: it needs 192px of the
+list's 182px and elides to "Anime, Movies & Seri..." ("Anime, Films &
+Series" clears it by 3px, which is no margin at all on another font or
+scale factor). "Watching" needs 104px, cannot read as excluding films,
+and pairs with "Reading" directly below it. `nav_config` was not touched
+- the main sidebar's own "Movies & Series" page name is unchanged, and
+the stack is indexed by position, not by label.
+
 ### 16. Flag an App/Website entry whose target has disappeared
 
 **What** - An Apps entry launches a local `.exe`/`.lnk` path; nothing
@@ -1125,6 +1169,21 @@ discoverable from within the app, not only from this file.
 #23 actually has a record), and nothing here may shadow a shortcut Qt
 already binds inside a text field - verify by typing in the Add/Edit
 dialogs with every new binding live.
+**Landed** (1.4.13) - Ctrl+K search everything, Ctrl+F this page's
+search box, Ctrl+N add, Ctrl+Z undo, Ctrl+1-9 jump to a sidebar page,
+Ctrl+, settings, Esc clear a search. Ctrl+Z reaches the undo offer that
+is *on screen* rather than keeping a history of its own: the offer
+already knows what was removed, how to put it back, and when it expires,
+and a second record would be a second answer to "what does undo do right
+now". With no offer live it says "Nothing To Undo" rather than appearing
+to work. Ctrl+1-9 reads the sidebar's current order, since that order is
+draggable and sections can be hidden - Ctrl+3 has to mean the third row
+actually on screen. Escape clears a page search before it leaves full
+screen, but only when there is something in the box, so it keeps its
+usual meaning otherwise. Discoverability: the map is listed in the
+Ctrl+K panel while the field is empty, which is the one place opened by
+a shortcut in the first place. Driven as real key presses on a real
+window.
 
 ### 18. Bring Apps to parity with Games' "Import from Launchers"
 
@@ -1369,6 +1428,20 @@ sits above them, not instead of them.
 **Risk** - don't build this before #11/#12 land; it would either
 duplicate their filtering logic or leave two inconsistent search
 implementations side by side.
+**Landed** (1.4.13) - `helpers/global_search.py`, on Ctrl+K. The
+placement is argued from the apps the owner asked to compare against -
+VS Code's Quick Open, Spotlight, Raycast, Slack, Notion all put it in
+the same place, and it is not the middle of the screen: a fixed-width
+panel centred horizontally with its top around a fifth of the window
+height, results growing downwards. 620px (Quick Open ~600, Raycast
+~750), capped at 90% of a small window, top at 18%, eight results max so
+the panel can never outgrow its window. Measured: centred to within a
+pixel, top at 18%, and it grew from 59px to 210px as results arrived.
+Choosing a result navigates to that entry's page and puts the title in
+that page's search box - deliberately *not* a second way to open an
+entry, since every page already knows how to open its own and a global
+list that launched things itself would reimplement six open behaviours.
+Positioned from `window.geometry()`, never `mapToGlobal`.
 
 ---
 
