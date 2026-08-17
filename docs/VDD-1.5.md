@@ -27,8 +27,8 @@ Unchanged from VDD-1.2 §2.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,760,400 bytes. SHA-256 `b752bd9ff565145e51f5d0da3b7f4b4f4b2c2ebe785ba10821fe6a566212d515` |
-| `src/` | Full Python source, 15,185 lines across 37 modules (12,036 across 36 at 1.4) |
+| `Atomic.exe` | The application. 47,763,671 bytes. SHA-256 `440aacd2199e53ccfd0591c3b8d8d01930ce960f67d6159995849ca4189d93c5` |
+| `src/` | Full Python source, 15,230 lines across 37 modules (12,036 across 36 at 1.4) |
 | `src/filter_icon.png` | The tracker filter button's icon, bundled into the executable |
 | `packaging/` | `build.py`, `Atomic.spec` and `check_release_notes.py`, which produce and gate the executable |
 | `docs/VDD-1.5.md` | This document |
@@ -38,6 +38,12 @@ Build environment unchanged from VDD-1.1 §3.
 Twenty-two development builds (1.4.1–1.4.22) stand between 1.4 and this
 release. Line counts are measured per file and summed, the same method
 as the 1.4 column above.
+
+1.5 was re-cut once after first being tagged, before anyone had it, to
+take the framed keys under Settings → Keybinds (§5). The size and hash
+above are the re-cut binary's; the first ones described a build that is
+no longer what `v1.5` points at. As with 1.4's re-cut, `main` carries
+one commit per release rather than a correction on top of one.
 
 ---
 
@@ -104,6 +110,14 @@ before it leaves full screen, but only when the box has something in it.
 The list lives in Settings under Keybinds — in the search panel it was a
 wall of grey text shown to someone who had just proved they knew the
 shortcut.
+
+Each key there is drawn as a cap of its own rather than as one string
+with a plus in it: surface fill, border, and a 2px darker bottom edge,
+which is the whole illusion — a flat rectangle reads as a badge, an edge
+under it reads as a key with a side. The combination is split on `+`
+rather than parsed, since none of the keys is itself a plus; `Ctrl+,`
+survives that and `Ctrl+1-9` keeps its range on one cap, which is what
+it is — one key, any of nine.
 
 ### Selecting several entries, and deleting them
 
@@ -369,6 +383,11 @@ In addition to VDD-1.0 §11 through VDD-1.4 §11:
 - **The red Uninstall row was measured as a pixel**, not as the value
   that had been set — the first check passed against a row that drew
   `#9d9db1`.
+- **The keybind column was remeasured once the keys were framed**: the
+  longest row wants 111px against the 92 the column held when they were
+  one plain label, and a fixed width narrower than its content clips
+  rather than wraps. Measured across all eight rows in a real window,
+  and the page screenshotted from one.
 - **The search field's centring was measured** at 1100, 1400, 1920 and
   2400px window widths, centred to within 2px, after a fixed 520px field
   had overflowed a 1400px window and been clipped.
