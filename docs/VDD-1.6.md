@@ -27,15 +27,18 @@ Unchanged from VDD-1.2 §2.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,764,441 bytes. SHA-256 `2ba42c0fdfb401dd106afba09e70e04b2e6641c025bace8a8d7d77fadf3994be` |
-| `src/` | Full Python source, 15,237 lines across 37 modules (15,230 at 1.5) |
+| `Atomic.exe` | The application. 47,762,647 bytes. SHA-256 `c7e97193048ac1401db8ef11b1c5397185f92806d0e5923341030c1aaf4ae9ae` |
+| `src/` | Full Python source, 15,247 lines across 37 modules (15,230 at 1.5) |
 | `packaging/` | `build.py`, `Atomic.spec` and `check_release_notes.py` |
 | `docs/VDD-1.6.md` | This document |
 
 Build environment unchanged from VDD-1.1 §3.
 
-No development builds stand between 1.5 and this release: 1.6 is one
-change taken straight off `development`, released the same day as 1.5.
+No development builds stand between 1.5 and this release: 1.6 is two
+changes taken straight off `development`, released the same day as 1.5.
+It was re-cut once after first being tagged, before anyone had it, to
+take the Escape and keybind-wording work in §5; the size and hash above
+are the re-cut binary's.
 
 ---
 
@@ -43,9 +46,11 @@ change taken straight off `development`, released the same day as 1.5.
 
 | Module changed | Lines | What changed |
 |---|---|---|
+| `windows/home.py` | 886 | Escape leaves the global search field, focus included |
 | `helpers/theme.py` | 761 | The Anime and Movies & Series nav glyphs swapped |
-| `helpers/whats_new.py` | 312 | 1.6's note |
+| `helpers/whats_new.py` | 314 | 1.6's notes |
 | `helpers/updater.py` | 272 | `APP_VERSION` |
+| `helpers/global_search.py` | 248 | The shortcut list's wording and capitals |
 
 Nothing else in `src/` differs from 1.5.
 
@@ -68,6 +73,27 @@ The glyphs swap; the page keys do not. `"anime"` and `"series"` stay as
 they are, because saved nav orders, hidden-section lists and
 `series.json` all refer to them — the same reason the key stayed
 `"series"` when the label became "Movies & Series" in 1.4.
+
+### Escape leaves a search box, rather than only emptying it
+
+Escape in Home's global search field cleared the text, closed the
+results and left the caret blinking in a box the user had just said they
+were done with. Measured before it was changed: focus stayed on the
+`QLineEdit`, while the same key on a tracker page already dropped focus
+onto the page. The two paths were written apart, and only one of them
+finished the job; Home now ends the same way — clear, close, drop focus.
+
+The keybind list says so: the Esc row reads **Exit search** rather than
+"clear a search", which is what the key now does.
+
+### The keybind descriptions start with capitals
+
+Every row under Settings → Keybinds now reads "Search everything",
+"Undo the last action", "Exit search". They were the only
+lowercase-first user-facing strings in the app: a scan over every string
+literal in `src/` turned up three placeholders
+(`https://example.com/`, `e.g. G:\{label}`) and mid-sentence fragments,
+none of which should change — so nothing else did.
 
 Everything else in this release is 1.5. See VDD-1.5 §5.
 
@@ -130,6 +156,11 @@ In addition to VDD-1.0 §11 through VDD-1.5 §11:
 - **The keys each glyph drives were confirmed** rather than assumed:
   `main.py` reads `theme.NAV_ICONS` by page key, and `nav_config` maps
   `"anime"` → Anime and `"series"` → Movies & Series.
+- **The Escape behaviour was measured on both paths, before and after**,
+  in a real window with real key events: before, Home's field kept focus
+  after Escape while a tracker page's did not; after, both end on the
+  page. Focus is what was asserted, not the field being empty — the text
+  was already being cleared, which is why the defect survived.
 - **The bundle gate passed**: every file `Atomic.spec` promises in
   `datas` present in the archive and byte-identical to the one on disk.
 - **`check_release_notes.py` passed** for 1.6, with one note written.
