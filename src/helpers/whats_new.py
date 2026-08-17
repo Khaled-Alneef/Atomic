@@ -26,6 +26,26 @@ from . import theme, updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.8": [
+        "Games imported from a launcher now start through that launcher. "
+        "Steam sees you playing, Overwatch no longer asks you to sign in "
+        "from inside the game, and VALORANT starts at all.",
+        "Home has a clock, top right, on the greeting's line.",
+        "Home keeps up while you are looking at it: a game you just "
+        "played moves to the front of its row, an app you just opened "
+        "moves to the top of its list, and dragging the sidebar into a "
+        "new order rearranges Home's sections to match.",
+        "Games, Apps and Websites fit 13 cards to a row, and 14 while "
+        "the sidebar is folded - re-flowing the moment you fold it.",
+        "The sideways rows on Anime, Reading and Movies & Series have an "
+        "arrow at each end, with the cards fading out beneath them.",
+        "Checking a website in Settings searches it for titles you "
+        "actually track, instead of one fixed title it may not carry - "
+        "which is why sites that open pages perfectly well were being "
+        "reported as search-only. Check All now fills in every row.",
+        "Two things saving at the same moment can no longer lose one "
+        "another's changes.",
+    ],
     "1.7": [
         "The Title field in Add and Edit simply says \"type to search\" - "
         "it no longer names Stremio or your reading websites.",
