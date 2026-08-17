@@ -57,10 +57,14 @@ CATEGORIES = ["General", "Preferences", "Watching", "Reading", "Games",
 # scroll below the buttons that wipe a single category.
 DANGER_CATEGORY = "Uninstall"
 
-# Width of the key-combination column under Keybinds, wide enough for the
-# longest of them ("Ctrl+1-9") with room to spare, so every description
-# starts at the same x rather than stepping with the combination's length.
-KEYBIND_COLUMN_WIDTH = 92
+# Width of the key-combination column under Keybinds, so every
+# description starts at the same x rather than stepping with the
+# combination's length. Measured, not guessed: with each key in its own
+# frame the longest ("Ctrl+1-9") wants 111px against the 92 this was
+# when the keys were one plain string, and a fixed width narrower than
+# its content clips rather than wraps. 124 leaves margin for a wider
+# font or scale factor.
+KEYBIND_COLUMN_WIDTH = 124
 
 # Slack added to the measured height of the category rows: the selected
 # row's QSS border draws at the very edge of its box, and without a few
@@ -265,6 +269,29 @@ def _stremio_sign_in_rejected() -> bool:
         return False
     tracker = sys.modules.get("windows.tracker")
     return bool(tracker is not None and getattr(tracker, "_auth_warning_shown", False))
+
+
+def _key_caps(keys: str) -> QWidget:
+    """"Ctrl+K" as two framed keys with a plus between them.
+
+    Split on "+" rather than parsed: every combination in SHORTCUTS is
+    plus-separated and no key in it is itself a plus, so a parser would
+    be code with nothing to decide. "Ctrl+," survives it - the comma is
+    the second half - and "Ctrl+1-9" keeps its range on one cap, which
+    is what it is: one key, any of nine.
+    """
+    holder = QWidget()
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(4)
+    for index, key in enumerate(keys.split("+")):
+        if index:
+            row.addWidget(QLabel("+", objectName="KeyPlus"))
+        row.addWidget(QLabel(key, objectName="KeyCap"))
+    # Left-aligned in a fixed-width column: without this the caps spread
+    # across the whole column and stop lining up with the row above.
+    row.addStretch()
+    return holder
 
 
 def _verdict_legend(kind: str) -> QLabel:
@@ -530,12 +557,13 @@ class SettingsDialog(QDialog):
         form.addWidget(keys_hint)
         for keys, what in global_search.SHORTCUTS:
             row = QHBoxLayout()
-            combo = QLabel(keys)
+            row.setSpacing(8)
             # Fixed width so the descriptions line up in a column
             # instead of stepping in and out with the length of each
             # combination.
-            combo.setFixedWidth(KEYBIND_COLUMN_WIDTH)
-            row.addWidget(combo)
+            caps = _key_caps(keys)
+            caps.setFixedWidth(KEYBIND_COLUMN_WIDTH)
+            row.addWidget(caps)
             row.addWidget(QLabel(what, objectName="Muted"), stretch=1)
             form.addLayout(row)
 

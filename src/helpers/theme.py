@@ -334,6 +334,23 @@ QLabel#Muted {{
     color: {TEXT_MUTED};
     background: transparent;
 }}
+/* One frame per key, so "Ctrl+K" reads as two keys and not as a string
+   with a plus in it. The darker bottom border is the whole illusion -
+   a flat rectangle reads as a badge, an edge under it reads as a cap
+   with a side. */
+QLabel#KeyCap {{
+    color: {TEXT};
+    background: {SURFACE_HOVER};
+    border: 1px solid {BORDER};
+    border-bottom: 2px solid {BG};
+    border-radius: {RADIUS_SM}px;
+    padding: 2px 8px;
+    font-weight: 600;
+}}
+QLabel#KeyPlus {{
+    color: {TEXT_DIM};
+    background: transparent;
+}}
 
 /* ---- Cards ------------------------------------------------------------ */
 QFrame#Card {{
