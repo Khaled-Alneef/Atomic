@@ -4,10 +4,29 @@ import json
 import os
 import shutil
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import logs
+
+# Held across every write, and across the read-modify-write of the
+# helpers below. Background threads save here constantly - four
+# lookup_pool workers each updating one tracked entry, two site probes
+# each recording a verdict - and two of them writing at once broke in two
+# separate ways:
+#
+#   * save() writes one fixed "<name>.tmp" and renames it into place, so
+#     with two writers the second one's os.replace found its temp file
+#     already renamed away by the first and raised. Measured: Check All
+#     on the video sites list saved Netflix's verdict and lost
+#     Crunchyroll's to exactly this, leaving that row permanently blank.
+#   * Even without the raise, both threads had already read the same list
+#     and each merged its own field into its own copy - so whichever
+#     saved last silently dropped the other's change.
+#
+# Reentrant: update_entry holds it while calling load() and save().
+_write_lock = threading.RLock()
 
 
 def _default_data_dir() -> Path:
@@ -100,18 +119,19 @@ def save(filename: str, data):
     .bak covers the accident without ever standing in the way."""
     path = DATA_DIR / filename
     temp_path = path.with_name(path.name + ".tmp")
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    if path.exists():
-        try:
-            shutil.copy2(path, path.with_name(path.name + ".bak"))
-        except OSError:
-            # Not fatal: losing the safety copy is worse than not having
-            # it, but refusing the save the user asked for is worse still.
-            logs.exception(f"Could not back up {filename} before saving")
-    os.replace(temp_path, path)
+    with _write_lock:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".bak"))
+            except OSError:
+                # Not fatal: losing the safety copy is worse than not having
+                # it, but refusing the save the user asked for is worse still.
+                logs.exception(f"Could not back up {filename} before saving")
+        os.replace(temp_path, path)
 
 
 def update_entry(filename: str, entry_id, fields: dict, id_key: str = "id") -> bool:
@@ -127,14 +147,20 @@ def update_entry(filename: str, entry_id, fields: dict, id_key: str = "id") -> b
     games, could vanish on the next unrelated edit. Touching only the
     one entry that actually changed can't do that.
 
-    Returns False if no entry with that id is in the file (any more)."""
-    entries = load(filename, [])
-    for item in entries:
-        if item.get(id_key) == entry_id:
-            item.update(fields)
-            save(filename, entries)
-            return True
-    return False
+    Returns False if no entry with that id is in the file (any more).
+
+    Locked around the whole read-modify-write, not just the save: two
+    threads updating two different entries of the same file would
+    otherwise each write back a list read before the other's change (see
+    _write_lock)."""
+    with _write_lock:
+        entries = load(filename, [])
+        for item in entries:
+            if item.get(id_key) == entry_id:
+                item.update(fields)
+                save(filename, entries)
+                return True
+        return False
 
 
 def _index_of(items, entry_id, id_key):
@@ -194,12 +220,14 @@ def move_entry(filename: str, moved_id, target_id, id_key: str = "id") -> bool:
     """move_in_list against the saved file, re-read first - same reason
     update_entry re-reads (see above): the page asking for this holds a
     copy of the list from when it was built, and writing that copy back
-    would undo anything saved since."""
-    items = load(filename, [])
-    if not move_in_list(items, moved_id, target_id, id_key):
-        return False
-    save(filename, items)
-    return True
+    would undo anything saved since. Locked for the same reason
+    update_entry is."""
+    with _write_lock:
+        items = load(filename, [])
+        if not move_in_list(items, moved_id, target_id, id_key):
+            return False
+        save(filename, items)
+        return True
 
 
 def apply_custom_order(filename: str, ordered_ids, id_key: str = "id") -> None:
@@ -209,6 +237,7 @@ def apply_custom_order(filename: str, ordered_ids, id_key: str = "id") -> None:
     card: the stored order has to become the order already on screen
     before the drop moves anything within it, or the page would jump to
     some older arrangement the moment it redraws."""
-    items = load(filename, [])
-    order_by_ids(items, ordered_ids, id_key)
-    save(filename, items)
+    with _write_lock:
+        items = load(filename, [])
+        order_by_ids(items, ordered_ids, id_key)
+        save(filename, items)

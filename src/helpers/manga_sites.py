@@ -361,9 +361,14 @@ def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list
     return []
 
 
-# What a site is probed with. A title essentially every catalogue
-# carries, so "no results" means the engine didn't match the site's
-# shape rather than that the site simply doesn't have this one.
+# What a site is probed with when the caller offers nothing better. The
+# assumption behind it - that every catalogue carries this one, so "no
+# results" means the engine didn't match the site's shape - is wrong for
+# the sites actually configured here: three of the four are Arabic
+# scanlation sites that file series under Arabic titles, and every one of
+# them was reported "directed to search page" while opening title pages
+# perfectly well. So the caller passes the user's *own* tracked titles
+# and this is only the fallback for an empty library (see probe_site).
 PROBE_TITLE = "One Piece"
 
 RESOLVES_ENGINE = "engine"
@@ -372,20 +377,38 @@ RESOLVES_UNREACHABLE = "unreachable"
 RESOLVES_UNKNOWN = "unknown"
 
 
-def probe_site(site: dict, timeout: int = 6) -> str:
+def probe_site(site: dict, timeout: int = 6, titles=None) -> str:
     """Whether this site will resolve to per-title pages, or only ever
     fall back to a search link.
 
     Asked once when a site is added, because until now the only way to
     find out was to add it, use it, and notice which kind of link it
     produced - days later, on an entry that quietly points at a search
-    page."""
+    page.
+
+    `titles` is what to look for, in order, and the site passes on the
+    first one it resolves. Pass the user's own tracked titles: asking a
+    site for a title it simply does not carry proves nothing about
+    whether it *can* resolve one (see PROBE_TITLE)."""
     base_url = site.get("base_url")
     if not base_url:
         return RESOLVES_UNREACHABLE
-    deadline = net.deadline_in(timeout * 3)
-    if search_site(site, PROBE_TITLE, timeout, deadline=deadline):
-        return RESOLVES_ENGINE
+    titles = [t for t in (titles or ()) if (t or "").strip()] or [PROBE_TITLE]
+    # The budget grows with the number of titles, but by less than the
+    # full per-title amount: only a site that answers for none of them
+    # runs all the way through, and one that hangs is cut off by the
+    # deadline whichever title it was asked for.
+    deadline = net.deadline_in(timeout * (2 + len(titles)))
+    for title in titles:
+        # One step is held back for the reachability check at the end -
+        # `deadline - timeout` is that same deadline brought forward by
+        # one. Spending the last of the budget on another search is how a
+        # slow site produced "Check failed" (measured: 29s, no verdict)
+        # when the honest answer was that it is up and resolved nothing.
+        if net.step_timeout(deadline - timeout, timeout) is None:
+            break
+        if search_site(site, title, timeout, deadline=deadline):
+            return RESOLVES_ENGINE
     step = net.step_timeout(deadline, timeout)
     if step is None:
         return RESOLVES_UNKNOWN

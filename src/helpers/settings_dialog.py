@@ -241,6 +241,12 @@ _VERDICT_LEGEND = (
 # every open and the lifetime wanted is the process, not the dialog.
 _CHECKED_THIS_RUN = set()
 
+# How many of the user's own titles one Check asks a site for. Three:
+# enough that a site missing one particular series still gets a fair
+# hearing, few enough that a site answering nothing is still bounded
+# (see probe_site's deadline).
+_PROBE_TITLE_LIMIT = 3
+
 # Set once the user signs in again from this dialog, to stop the marker
 # below - which is sticky for the life of the process - from calling a
 # brand new session rejected. Module level for the same reason as the set
@@ -918,7 +924,7 @@ class SettingsDialog(QDialog):
     def _import_launcher_worker(self, key, path):
         label, subpath = next(((l, s) for k, l, s in launchers.LAUNCHERS if k == key), (None, None))
         try:
-            found = [{**g, "launcher": key} for g in launchers.scan_launcher(path, subpath, label)]
+            found = [{**g, "launcher": key} for g in launchers.scan_launcher(path, subpath, label, key)]
             added = launchers.import_scanned_games(found)
         except Exception:
             added = 0
@@ -1219,19 +1225,59 @@ class SettingsDialog(QDialog):
             self._refresh_sites()
         else:
             self._refresh_video_sites()
-        # The shared pool rather than a thread of its own: Check All fires
-        # one of these per configured site, and a bare thread each is the
-        # shape that once put 651 simultaneous connections on this user's
-        # network (.claude/rules/integrations.md). The pool caps it at 4
-        # and the rest queue.
-        lookup_pool.submit(self._probe_site_worker, which, site_id, dict(site))
+        # Pooled, not a thread of its own: Check All fires one of these
+        # per configured site, and a bare thread each is the shape that
+        # once put 651 simultaneous connections on this user's network
+        # (.claude/rules/integrations.md).
+        #
+        # submit_watched, not submit: the shared queue is drained by
+        # three tracker pages' worth of page-load backfill, and a Check
+        # pressed after visiting one of them sat behind all of it.
+        # Crunchyroll made that plain - its verdict is decided from a
+        # table with no request at all, and the row still never filled
+        # in, because the job had not started yet.
+        lookup_pool.submit_watched(self._probe_site_worker, which, site_id, dict(site),
+                                   self._probe_titles(which, site_id))
 
-    def _probe_site_worker(self, which, site_id, site):
+    def _probe_titles(self, which: str, site_id: str) -> list:
+        """Titles to check a site with: ones the user actually tracks,
+        preferring any already pointed at this very site, since those are
+        certain to exist there.
+
+        A single fixed title was the whole bug behind "directed to search
+        page" on sites that resolve fine - three of the four reading
+        sites here are Arabic scanlation sites that do not carry "One
+        Piece" under that name, so the probe found nothing and blamed the
+        site. Read off disk rather than from a page: Settings opens over
+        whichever page is showing, and none of them may be a tracker one.
+
+        Reading entries are "everything in tracker.json that isn't
+        Anime" - that file holds Anime and the reading types, and
+        films/series live in series.json - which avoids restating the
+        list of reading types (it belongs to windows.tracker, and helpers
+        must not import from windows)."""
+        tracked = storage.load("tracker.json", [])
+        if which == "reading":
+            entries = [e for e in tracked if e.get("type") != "Anime"]
+        else:
+            entries = [e for e in tracked if e.get("type") == "Anime"]
+            entries += storage.load("series.json", [])
+        entries.sort(key=lambda e: e.get("site_id") != site_id)
+        titles = []
+        for entry in entries:
+            title = (entry.get("title") or "").strip()
+            if title and title not in titles:
+                titles.append(title)
+            if len(titles) >= _PROBE_TITLE_LIMIT:
+                break
+        return titles
+
+    def _probe_site_worker(self, which, site_id, site, titles=None):
         # Must never raise - a dead thread would leave the row stuck on
         # "checking..." forever.
         module = manga_sites if which == "reading" else anime_sites
         try:
-            verdict = module.probe_site(site)
+            verdict = module.probe_site(site, titles=titles)
         except Exception:
             verdict = module.RESOLVES_UNKNOWN
         try:
@@ -1242,7 +1288,13 @@ class SettingsDialog(QDialog):
             # which is exactly what is being kept off the screen. set.add
             # off the UI thread is fine (atomic); the redraw itself still
             # goes through the signal below.
-            pass
+            #
+            # Logged rather than passed over in silence: swallowing it is
+            # why Check All looked like it simply skipped Crunchyroll for
+            # so long - two probes finishing at once collided in
+            # storage.save (fixed there), and the row's blankness was the
+            # only symptom anywhere.
+            logs.exception(f"Could not record the check result for {site.get('name')}")
         else:
             _CHECKED_THIS_RUN.add(site_id)
         self._site_probe_signals.done.emit(which, site_id)

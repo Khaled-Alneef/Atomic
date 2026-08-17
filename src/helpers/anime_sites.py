@@ -998,9 +998,11 @@ def resolve_page_url(site: dict, title: str, timeout: int = 6):
     return None
 
 
-# What a site is probed with. A title essentially every catalogue
-# carries, so "no results" means the engine didn't match the site's
-# shape rather than that the site simply doesn't have this one.
+# What a site is probed with when the caller offers nothing better. It
+# is only a fallback: a site that doesn't carry this one title returns
+# nothing and looks incapable of resolving anything, which is how the
+# reading sites here were all reported "directed to search page". The
+# caller passes the user's own tracked titles instead (see probe_site).
 PROBE_TITLE = "One Piece"
 
 RESOLVES_STREAMING = "streaming"
@@ -1011,9 +1013,13 @@ RESOLVES_UNREACHABLE = "unreachable"
 RESOLVES_UNKNOWN = "unknown"
 
 
-def probe_site(site: dict, timeout: int = 6) -> str:
+def probe_site(site: dict, timeout: int = 6, titles=None) -> str:
     """Whether this site will resolve to per-title pages, or only ever
     fall back to a search link.
+
+    `titles` is what to look for, in order; the site passes on the first
+    one it resolves. Pass the user's own tracked titles - asking for one
+    the site doesn't carry proves nothing about what it can resolve.
 
     Asked once when a site is added. Until now the only way to find out
     was to add it, use it, and eventually notice which kind of link the
@@ -1030,13 +1036,22 @@ def probe_site(site: dict, timeout: int = 6) -> str:
         # Never searched at all: these resolve from Wikidata/AniList, so
         # they always produce a real title page when the title is known.
         return RESOLVES_STREAMING
-    deadline = net.deadline_in(timeout * 3)
-    if search_site(site, PROBE_TITLE, timeout, deadline=deadline):
-        return RESOLVES_ENGINE
-    step = net.step_timeout(deadline, timeout)
-    if step is not None:
+    titles = [t for t in (titles or ()) if (t or "").strip()] or [PROBE_TITLE]
+    # See manga_sites.probe_site for why the budget grows this way.
+    deadline = net.deadline_in(timeout * (2 + len(titles)))
+    for title in titles:
+        # See manga_sites.probe_site: one step held back so the
+        # reachability check below always gets to run.
+        if net.step_timeout(deadline - timeout, timeout) is None:
+            break
+        if search_site(site, title, timeout, deadline=deadline):
+            return RESOLVES_ENGINE
+    for title in titles:
+        step = net.step_timeout(deadline - timeout, timeout)
+        if step is None:
+            break
         try:
-            if _search_generic_html(base_url, PROBE_TITLE, step):
+            if _search_generic_html(base_url, title, step):
                 return RESOLVES_GENERIC
         except Exception:
             pass

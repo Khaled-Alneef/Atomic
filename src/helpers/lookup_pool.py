@@ -37,21 +37,42 @@ _workers = []
 _workers_lock = threading.Lock()
 
 
+# The second queue, for work somebody is sitting in front of waiting on -
+# Settings' per-site Check. Separate from the queue above rather than
+# tuned differently: that one is drained by three pages' worth of
+# page-load backfill, so a Check pressed after visiting a tracker page
+# queued behind every one of those lookups. Measured: Crunchyroll's
+# verdict needs no network at all (it is decided from a table) and the
+# row still sat blank, because the job had not started. Two workers - a
+# Check All overlaps a little without turning into a burst.
+WATCHED_WORKERS = 2
+
+_watched_queue = queue.Queue()
+_watched_workers = []
+
+
 def submit(fn, *args, **kwargs):
     """Queue one lookup. Runs on one of at most MAX_WORKERS threads."""
-    _ensure_workers()
+    _ensure_workers(_workers, _queue, MAX_WORKERS, "lookup")
     _queue.put((fn, args, kwargs))
 
 
-def _ensure_workers():
+def submit_watched(fn, *args, **kwargs):
+    """Queue one job the user is watching for an answer to, on its own
+    workers - never behind the backfill draining the shared queue."""
+    _ensure_workers(_watched_workers, _watched_queue, WATCHED_WORKERS, "lookup-watched")
+    _watched_queue.put((fn, args, kwargs))
+
+
+def _ensure_workers(workers, work_queue, count, name):
     with _workers_lock:
-        if _workers:
+        if workers:
             return
-        for i in range(MAX_WORKERS):
-            worker = threading.Thread(target=_run_forever, name=f"lookup-{i}",
-                                      daemon=True)
+        for i in range(count):
+            worker = threading.Thread(target=_run_forever, args=(work_queue,),
+                                      name=f"{name}-{i}", daemon=True)
             worker.start()
-            _workers.append(worker)
+            workers.append(worker)
 
 
 _latest_jobs = {}
@@ -100,16 +121,16 @@ def _run_latest_forever():
             pass
 
 
-def _run_forever():
+def _run_forever(work_queue):
     # Must never raise: an uncaught exception would kill this worker for
     # good, and unlike a one-shot thread it takes every lookup still
     # queued behind it with it - the page's refresh counters would then
     # wait forever for results that can never arrive.
     while True:
-        fn, args, kwargs = _queue.get()
+        fn, args, kwargs = work_queue.get()
         try:
             fn(*args, **kwargs)
         except Exception:
             pass
         finally:
-            _queue.task_done()
+            work_queue.task_done()
