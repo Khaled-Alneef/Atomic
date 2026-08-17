@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 from helpers import app_settings, child_process, images, launchers, storage, theme
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
-    finish_toast, scroll_area, show_toast, show_undo_toast,
+    finish_toast, scroll_area, search_field, show_toast, show_undo_toast,
 )
 from windows.link_grid import (
     CARD_MARGINS, CARD_WIDTH, GRID_COLS, THUMB_SIZE, CardTextLabel,
@@ -95,10 +95,7 @@ class GamesPage(GridSelection, GlassPage):
         # No drag hint here any more: it named a right-click Move Up/Down
         # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search games...")
-        self.search_box.setClearButtonEnabled(True)
-        self.search_box.setFixedWidth(220)
+        self.search_box = search_field("Search games...", width=220)
         # Debounced rather than filtering on every keystroke: each redraw
         # rebuilds every card from scratch (pages hold no state - see
         # .claude/rules/ui.md), so typing six characters would otherwise

@@ -80,6 +80,9 @@ clever one, and leave a working path working.
 | 41 | Take the Start-menu import back off Apps | ui-engineer | contained | **landed 1.4.17** - owner-raised |
 | 42 | Delete several entries at once, on every page | ui-engineer | spans modules | **landed 1.4.17** - owner-raised |
 | 43 | Ctrl+Y to redo an undone removal | ui-engineer | contained | **landed 1.4.17** - owner-raised |
+| 44 | A search bar across the top of the window, and a magnifier in every search field | ui-engineer | contained | **landed 1.4.18** - owner-raised |
+| 45 | Stop telling people to double-click | ui-engineer | contained | **landed 1.4.18** - owner-raised |
+| 46 | Select All becomes a tick, and Clear goes | ui-engineer | contained | **landed 1.4.18** - owner-raised |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
@@ -823,6 +826,52 @@ on the redo: the batch was confirmed when it was deleted, and Ctrl+Y is
 an explicit request to put that back. Round-tripped delete -> Ctrl+Z ->
 Ctrl+Y -> Ctrl+Z against the file on disk on tracker (single and batch),
 Games and Apps, plus real key presses.
+
+### 44. A search bar across the top of the window, and a magnifier in every search field
+
+**What** - Owner-raised: a wide search field centred at the top of the
+main window, and the glass icon at the left of every search box in the
+app.
+**Owner** - ui-engineer
+**Landed** (1.4.18) - 520px, centred against the *content* area rather
+than the window: the sidebar is 220px and folds to 68px, so centring on
+the window would leave the field visibly off-centre above the page it
+sits over, and would shift every time the sidebar folded. Measured at
+913px against a content centre of 914. Typing hands over to the Ctrl+K
+panel rather than filtering in place - the results span six pages, which
+is a panel's job, and two places drawing them would be two behaviours to
+keep in step; the bar empties as it hands over so the two fields can
+never disagree about which one is the search. The panel now hangs 7px
+under the bar instead of at a fixed fraction of the window. The
+magnifier is drawn rather than bundled (`widgets.magnifier_icon`) -
+a 14px glass is a circle and a stroke, and a PNG would be one more asset
+to keep in step with the palette - and every field goes through one
+`search_field` helper, so there is one place it can be drawn wrong.
+
+### 45. Stop telling people to double-click
+
+**What** - Owner-raised: nothing opens on a double-click any more, so
+no text should say it does. Removed rather than replaced with "single
+click" - a click is what a card is for, and saying so is noise.
+**Owner** - ui-engineer
+**Landed** (1.4.18) - Settings' Video Websites hint, the Add/Edit form's
+three link labels, and two module docstrings that described the gesture.
+`itemDoubleClicked` on Settings' two site lists is untouched: that is a
+real Qt signal opening an editor, not a claim to the user.
+
+### 46. Select All becomes a tick, and Clear goes
+
+**What** - Owner-raised, in two steps: first fold Clear into a Select
+All that flips to Unselect All, then - on seeing it - make it a checkbox
+instead and drop the flipping label.
+**Owner** - ui-engineer
+**Landed** (1.4.18) - a `QCheckBox` reading "Select All" on every page
+that has selection. Ticked, everything visible is picked; unticked, the
+selection empties; and unpicking one card unticks it on its own, which
+is the thing a button could never show. Its state is set with signals
+blocked when it is only catching up with the selection, or it would
+re-apply what it is reporting. "Everything" still means what is on
+screen, so under a search it picks the handful in front of you.
 
 ### 29. Let the "what's new" dialog scroll
 

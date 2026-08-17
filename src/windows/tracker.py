@@ -7,7 +7,7 @@ Typing a title searches a matching source in the background - Stremio's
 Cinemeta catalog for Anime/Series, every reading site configured in
 Settings for Manga - and picking a suggestion auto-fills the title/cover
 and a direct link (a stremio:// deep link for Anime/Series, or the
-matched manga's page on whichever site it came from) so double-click
+matched manga's page on whichever site it came from) so opening it
 jumps straight there. You can also just type your own title if it's not
 listed there.
 """
@@ -35,7 +35,7 @@ from helpers import (
 )
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
-    scroll_area, show_toast, show_undo_toast,
+    scroll_area, search_field, show_toast, show_undo_toast,
 )
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
@@ -626,10 +626,7 @@ class TrackerPage(GlassPage):
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
         top_row.addStretch()
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search titles...")
-        self.search_box.setClearButtonEnabled(True)
-        self.search_box.setFixedWidth(220)
+        self.search_box = search_field("Search titles...", width=220)
         # Restored before textChanged is wired up, not after: setText
         # fires it, which would start the debounce timer for a redraw the
         # _refresh_grid at the end of __init__ is about to do anyway.
@@ -1092,12 +1089,12 @@ class TrackerPage(GlassPage):
         self.selection_label = QLabel("", objectName="Muted")
         row.addWidget(self.selection_label)
         row.addStretch()
-        self.select_all_btn = QPushButton("Select All")
-        self.select_all_btn.clicked.connect(self._select_all_visible)
-        row.addWidget(self.select_all_btn)
-        self.clear_selection_btn = QPushButton("Clear")
-        self.clear_selection_btn.clicked.connect(self._clear_selection)
-        row.addWidget(self.clear_selection_btn)
+        # A checkbox rather than a button: "select everything" is a
+        # state, not an action, and a tick can show that everything is
+        # already picked where a button can only ever say it.
+        self.select_all_check = QCheckBox("Select All")
+        self.select_all_check.toggled.connect(self._on_select_all_toggled)
+        row.addWidget(self.select_all_check)
         self.bulk_status_btn = QPushButton("Set Status", objectName="Accent")
         # setMenu rather than exec'ing at a computed point: Qt places it
         # against the button itself, so there is no mapToGlobal to get
@@ -1136,7 +1133,13 @@ class TrackerPage(GlassPage):
                       else "Click cards to pick them")
         self.bulk_status_btn.setEnabled(count > 0)
         self.bulk_delete_btn.setEnabled(count > 0)
-        self.clear_selection_btn.setEnabled(count > 0)
+        # Blocked, because this is the tick catching up with the
+        # selection - not the user asking for one. Unblocked it would
+        # re-enter _on_select_all_toggled and re-apply what it is only
+        # reporting.
+        self.select_all_check.blockSignals(True)
+        self.select_all_check.setChecked(self._everything_visible_selected())
+        self.select_all_check.blockSignals(False)
 
     def _toggle_select_mode(self):
         self._set_select_mode(not self._select_mode)
@@ -1166,6 +1169,20 @@ class TrackerPage(GlassPage):
         if drawn:
             self._paint_selection(*drawn, entry_id in self._selected_ids)
         self._update_selection_bar()
+
+    def _everything_visible_selected(self) -> bool:
+        """Whether every entry currently on screen is already picked -
+        what turns Select All into Unselect All. Measured against the
+        visible entries, so under a search or a filter "everything" means
+        what is in front of the user, exactly as the selection does."""
+        visible = {entry.get("id") for entry in self._visible_entries()}
+        return bool(visible) and visible <= self._selected_ids
+
+    def _on_select_all_toggled(self, checked):
+        if checked:
+            self._select_all_visible()
+        else:
+            self._clear_selection()
 
     def _select_all_visible(self):
         # _selection_cards is exactly the cards currently drawn, which is
@@ -2393,13 +2410,13 @@ class EntryForm(QDialog):
     def _update_labels(self):
         if self._provider() == "stremio":
             self.title_label.setText("Title (type to search Stremio)")
-            self.url_label.setText("Stremio link (opens Stremio on double-click)")
+            self.url_label.setText("Stremio link (opens Stremio)")
         else:
             self.title_label.setText("Title (type to search your reading websites)")
         is_video = self.type_box.currentText() in VIDEO_TYPES
         self.site_label.setText(
-            "Video Website (opens directly on double-click)" if is_video
-            else "Reading Website (opens directly on double-click)")
+            "Video Website (opens directly)" if is_video
+            else "Reading Website (opens directly)")
         # The Stremio line's visibility is not set here any more. It used
         # to be, on `is_video` alone, and this runs *after*
         # _update_progress_visibility in __init__ - so it re-showed the

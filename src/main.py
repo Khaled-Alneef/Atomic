@@ -53,8 +53,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import (release_stale_hover_cursors, show_toast,
-                             take_live_redo, take_live_undo, use_hover_cursor)
+from helpers.widgets import (release_stale_hover_cursors, search_field,
+                             show_toast, take_live_redo, take_live_undo,
+                             use_hover_cursor)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -138,6 +139,11 @@ GEOMETRY_SAVE_DELAY_MS = 400
 # scale factors, and it only ever applies to a window being rescued from
 # off-screen coordinates.
 TITLE_BAR_ALLOWANCE = 48
+
+# The window-wide search field's width. Wider than a page's own 220px
+# box because it searches everything rather than one list, and capped so
+# it stays a field rather than becoming a banner across a 2048px display.
+GLOBAL_SEARCH_BAR_WIDTH = 520
 
 SIDEBAR_WIDTH = 220
 # Wide enough for the nav bullets and the +/gear buttons once the text
@@ -262,8 +268,21 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(self._build_sidebar())
 
+        # The content side: a search bar across the top, the pages below
+        # it. The bar sits here rather than on each page because what it
+        # searches is not one page - it is everything (see
+        # helpers/global_search.py), and a control that means the same
+        # thing everywhere belongs to the window, not to whichever page
+        # happens to be showing.
+        content = QWidget(objectName="Bare")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self._build_search_bar())
+
         self.container = QWidget()
-        root_layout.addWidget(self.container, stretch=1)
+        content_layout.addWidget(self.container, stretch=1)
+        root_layout.addWidget(content, stretch=1)
 
         self._history = ["home"]
         self._history_index = 0
@@ -1015,13 +1034,51 @@ class MainWindow(QMainWindow):
         self._history_index += 1
         self._show_page(page_name, direction=self._direction_between(current, page_name), animate=animate)
 
-    def open_global_search(self):
+    def _build_search_bar(self):
+        """The wide search field across the top of the content area.
+
+        Centred and wide because it searches the whole app rather than
+        the page under it - the same reasoning that puts a browser's
+        address bar across the window instead of in a corner. It is
+        centred against the *content* area, not the window: the sidebar
+        is 220px and folds to 68px, and centring on the window would
+        leave the field visibly off-centre above the page it sits over,
+        and would move every time the sidebar folded.
+
+        Typing hands over to the Ctrl+K panel rather than filtering in
+        place: the results are a list of things on six different pages,
+        which is a panel's job, and having two places that draw those
+        results would be two behaviours to keep in step."""
+        bar = QWidget(objectName="Bare")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(18, 14, 18, 4)
+        layout.addStretch()
+        self.search_bar = search_field("Search everything...",
+                                       width=GLOBAL_SEARCH_BAR_WIDTH)
+        self.search_bar.textEdited.connect(self._search_bar_typed)
+        layout.addWidget(self.search_bar)
+        layout.addStretch()
+        return bar
+
+    def _search_bar_typed(self, text):
+        """The first keystroke opens the panel, carrying what was typed.
+
+        The bar is emptied as it hands over, so the two fields can never
+        both hold a query and disagree about which one is the search."""
+        if not text.strip():
+            return
+        self.search_bar.clear()
+        self.open_global_search(initial=text)
+
+    def open_global_search(self, initial=""):
         """Ctrl+K. One search across every page - see
         helpers/global_search.py, including why the panel sits where it
         does."""
-        panel = global_search.GlobalSearch(self)
+        panel = global_search.GlobalSearch(self, anchor=self.search_bar)
         panel.show()
         panel.field.setFocus()
+        if initial:
+            panel.field.setText(initial)
 
     def reveal_entry(self, page_name, title):
         """Go to the page an entry lives on and narrow it to that entry.

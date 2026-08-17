@@ -28,7 +28,7 @@ things itself would be a second implementation of six different open
 behaviours.
 """
 
-from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtCore import QEvent, QPoint, Qt
 from PyQt6.QtWidgets import (
     QDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout,
 )
@@ -101,9 +101,14 @@ class GlobalSearch(QDialog):
     """The panel itself. Built fresh each time it is opened, so it never
     holds a stale copy of any page's data."""
 
-    def __init__(self, window):
+    def __init__(self, window, anchor=None):
         super().__init__(window)
         self._window = window
+        # The widget to hang under, if there is one. With the search bar
+        # across the top of the window, dropping the panel at a fixed
+        # fraction of the window height would leave a gap between the
+        # field being typed into and the results for it.
+        self._anchor = anchor
         self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
@@ -146,9 +151,7 @@ class GlobalSearch(QDialog):
         width = min(PANEL_WIDTH, int(frame.width() * 0.9))
         self.setFixedWidth(width)
         self.adjustSize()
-        x = frame.x() + (frame.width() - width) // 2
-        y = frame.y() + int(frame.height() * PANEL_TOP_FRACTION)
-        self.move(x, y)
+        self.move(self._panel_position(width))
 
     def _refresh(self, _text=None):
         query = self.field.text()
@@ -174,8 +177,22 @@ class GlobalSearch(QDialog):
         self._place_vertically()
 
     def _place_vertically(self):
+        self.move(self._panel_position(self.width()))
+
+    def _panel_position(self, width):
+        """Under the search bar when there is one, otherwise a fifth of
+        the way down the window.
+
+        Both are worked out from `geometry()`, which is already global -
+        never `mapToGlobal`, which returns coordinates divided by the
+        other screen's scale factor on a mixed-DPI pair."""
         frame = self._window.geometry()
-        self.move(self.x(), frame.y() + int(frame.height() * PANEL_TOP_FRACTION))
+        if self._anchor is not None and self._anchor.isVisible():
+            top_left = self._anchor.mapTo(self._window, QPoint(0, 0))
+            return QPoint(frame.x() + top_left.x() + (self._anchor.width() - width) // 2,
+                          frame.y() + top_left.y() + self._anchor.height() + 6)
+        return QPoint(frame.x() + (frame.width() - width) // 2,
+                      frame.y() + int(frame.height() * PANEL_TOP_FRACTION))
 
     def eventFilter(self, obj, event):
         # Down/Up from the field move through the results without the

@@ -593,7 +593,7 @@ class SettingsDialog(QDialog):
 
         form.addWidget(QLabel("Video Websites", objectName="SectionTitle"))
         video_sites_hint = QLabel(
-            "Where entries open on double-click, chosen per entry in Add/Edit.",
+            "Where entries open, chosen per entry in Add/Edit.",
             objectName="Muted",
         )
         video_sites_hint.setWordWrap(True)

@@ -3,12 +3,13 @@
 import weakref
 
 from PyQt6.QtCore import (QEvent, QMimeData, QObject, QPoint, QPointF, QRect,
-                          Qt, QTimer)
+                          QRectF, Qt, QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QColor, QDrag, QPainter, QRadialGradient
+from PyQt6.QtGui import (QColor, QDrag, QIcon, QPainter, QPen, QPixmap,
+                         QRadialGradient)
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QScrollArea, QToolTip, QWidget,
+    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QScrollArea, QToolTip, QWidget,
 )
 
 from . import logs, theme
@@ -725,12 +726,12 @@ class GridSelection:
         self.selection_label = QLabel("", objectName="Muted")
         row.addWidget(self.selection_label)
         row.addStretch()
-        self.select_all_btn = QPushButton("Select All")
-        self.select_all_btn.clicked.connect(self._select_all_visible)
-        row.addWidget(self.select_all_btn)
-        self.clear_selection_btn = QPushButton("Clear")
-        self.clear_selection_btn.clicked.connect(self._clear_selection)
-        row.addWidget(self.clear_selection_btn)
+        # A checkbox rather than a button: "select everything" is a
+        # state, not an action, and a tick can show that everything is
+        # already picked where a button can only ever say it.
+        self.select_all_check = QCheckBox("Select All")
+        self.select_all_check.toggled.connect(self._on_select_all_toggled)
+        row.addWidget(self.select_all_check)
         self.bulk_delete_btn = QPushButton("Delete", objectName="Danger")
         self.bulk_delete_btn.clicked.connect(self._delete_selected)
         row.addWidget(self.bulk_delete_btn)
@@ -754,7 +755,13 @@ class GridSelection:
         label.setText(f"{self._selection_count(count)} selected" if count
                       else "Click cards to pick them")
         self.bulk_delete_btn.setEnabled(count > 0)
-        self.clear_selection_btn.setEnabled(count > 0)
+        # Blocked, because this is the tick catching up with the
+        # selection - not the user asking for one. Unblocked it would
+        # re-enter _on_select_all_toggled and re-apply what it is only
+        # reporting.
+        self.select_all_check.blockSignals(True)
+        self.select_all_check.setChecked(self._everything_visible_selected())
+        self.select_all_check.blockSignals(False)
 
     def _toggle_select_mode(self):
         self._set_select_mode(not self._select_mode)
@@ -780,6 +787,21 @@ class GridSelection:
         if drawn:
             self._paint_selection(*drawn, entry_id in self._selected_ids)
         self._update_selection_bar()
+
+    def _everything_visible_selected(self) -> bool:
+        """Whether the selection already holds every card on screen -
+        which is what turns Select All into Unselect All. Read off the
+        cards actually drawn, so under a search "everything" means the
+        handful in front of the user, the same rule the selection itself
+        follows."""
+        visible = {entry_id for entry_id in self._selection_cards if entry_id}
+        return bool(visible) and visible <= self._selected_ids
+
+    def _on_select_all_toggled(self, checked):
+        if checked:
+            self._select_all_visible()
+        else:
+            self._clear_selection()
 
     def _select_all_visible(self):
         # _selection_cards is exactly the cards currently drawn, which is
@@ -941,6 +963,52 @@ class GridSelection:
 
         self._mutate(apply_change)
         return f"Restored {self._selection_count(len(removed))}"
+
+
+SEARCH_ICON_SIZE = 14
+
+
+def magnifier_icon(color: str = None, size: int = SEARCH_ICON_SIZE, dpr: float = 1.0) -> QIcon:
+    """The search glass, drawn rather than bundled.
+
+    A 14px glyph is a circle and a stroke; shipping a PNG for it would
+    mean an asset to keep in step with the palette, and tinted_asset
+    already exists because a fixed-colour PNG sat wrong next to text
+    drawn from theme. Painted at the display's ratio and tagged with it,
+    like every other pixmap here, or it is soft on a scaled display."""
+    pixmap = QPixmap(int(size * dpr), int(size * dpr))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color or theme.TEXT_MUTED))
+    pen.setWidthF(1.4)
+    painter.setPen(pen)
+    # A lens in the top-left five-eighths, and a handle running from its
+    # lower-right corner to the bottom-right of the box - the proportions
+    # every toolbar magnifier uses.
+    lens = size * 0.58
+    painter.drawEllipse(QRectF(1.0, 1.0, lens, lens))
+    painter.drawLine(QPointF(lens * 0.92, lens * 0.92), QPointF(size - 1.5, size - 1.5))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def search_field(placeholder: str, width: int = None) -> QLineEdit:
+    """A search box with the glass on its left, which is what every
+    search field in this app is.
+
+    One helper rather than four copies: the icon is drawn (see above), so
+    a copy per page would mean four chances to draw it at a different
+    size or colour."""
+    field = QLineEdit()
+    field.setPlaceholderText(placeholder)
+    field.setClearButtonEnabled(True)
+    dpr = field.devicePixelRatioF() or 1.0
+    field.addAction(magnifier_icon(dpr=dpr), QLineEdit.ActionPosition.LeadingPosition)
+    if width:
+        field.setFixedWidth(width)
+    return field
 
 
 def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
