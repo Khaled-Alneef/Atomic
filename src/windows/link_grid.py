@@ -4,22 +4,26 @@ entry can launch up to 3 targets together at once - URLs for Websites,
 executables/shortcuts for Apps (each page is single-purpose via its own
 TARGET_KIND, not a per-target Website/App choice)."""
 
+import copy
 import subprocess
 import threading
+import time
 import uuid
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, Qt
+from PyQt6.QtCore import QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from helpers import child_process, images, storage, theme
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, defer_grid_rebuild, scroll_area,
+    Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
+    scroll_area, search_field, show_toast, show_undo_toast,
 )
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
@@ -30,27 +34,163 @@ CARD_WIDTH = 120
 THUMB_SIZE = (44, 44)
 GRID_COLS = 13
 
+# Shared by Apps, Websites and Games so the three grids stay identical
+# and CARD_TEXT_WIDTH below can't drift out of step with the margins it
+# is derived from.
+CARD_MARGINS = (8, 10, 8, 10)
+# The width a card's text actually gets on screen: the fixed card width
+# less the card layout's own left/right margins. The QSS border is not
+# subtracted - measured, a 120px card lays its contents out across 104px.
+CARD_TEXT_WIDTH = CARD_WIDTH - CARD_MARGINS[0] - CARD_MARGINS[2]
+
 # Same shape as Games' SORT_OPTIONS ("Last Played" here is "Last Used" -
 # whenever an entry's targets were last opened, see _open_entry).
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Used"]
 
 
+class CardTextLabel(QLabel):
+    """A word-wrapped line of text on a card, sized honestly for the
+    width it will actually be given.
+
+    A plain wrapped QLabel is not, and that clipped the second line of
+    every long card name on Apps, Websites and Games. Two Qt behaviours
+    combine to do it:
+
+    * `QLabel.sizeHint()` for a wrapped label is a heuristic - it picks a
+      wrap width it thinks looks balanced rather than the one it will be
+      laid out at, and reports the height *that* width needs. Measured on
+      "A Really Long Missing Application Name": a sizeHint wide enough
+      for two lines, in a card that only ever offers 104px, where the
+      same text needs three.
+    * A QBoxLayout with an alignment set (these cards centre their
+      contents) lays itself out inside `alignmentRect`, which clamps the
+      layout's *width* to what the card has - but keeps the height the
+      too-wide sizeHint asked for. So the label is narrowed without ever
+      being asked how tall it now needs to be.
+
+    Fixing the width and answering sizeHint from `heightForWidth` at that
+    same width removes both halves: the layout cannot narrow it further,
+    and the height it reports is the height the text really occupies.
+    Deliberately lazy rather than measured in `__init__` - the fonts here
+    come from QSS (#CardTitle's weight, the badge's 8pt), which is not
+    applied to a widget until it is polished, some time after it is
+    built."""
+
+    def __init__(self, text, width=CARD_TEXT_WIDTH, parent=None):
+        super().__init__(text, parent)
+        self._text_width = width
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.setFixedWidth(width)
+
+    def sizeHint(self):
+        return QSize(self._text_width, self.heightForWidth(self._text_width))
+
+    def minimumSizeHint(self):
+        # Same answer as sizeHint: QLabel's own minimumSizeHint for
+        # wrapped text is another heuristic, and a minimum shorter than
+        # the real height is all a grid row needs to squeeze the last
+        # line back off the card.
+        return self.sizeHint()
+
+
 def open_link_entry(parent, entry, label="Links"):
     """Launch every target (site/app) attached to a Websites/Apps entry.
-    Shared by LinkGridPage and the Home dashboard's preview lists."""
+    Shared by LinkGridPage and the Home dashboard's preview lists.
+
+    A target whose program is no longer on disk is skipped rather than
+    attempted: `cwd=` below raises `OSError` before the launch is even
+    tried, and that used to reach the user as a modal dialog quoting the
+    raw OS message - on a card that had just told them, in the app's own
+    words, that the program is missing. The check here is
+    `missing_app_targets`, the same call the card badge and Home's row
+    read, so the click and the badge cannot disagree.
+
+    `label` is the calling page's title. It named the dialog that is now
+    a toast, and toasts carry no title; the parameter stays so the two
+    call sites (this page's and Home's) don't have to change together.
+    """
+    missing = set(missing_app_targets(entry))
+    launched = 0
+    failures = []
     for t in entry.get("targets", []):
-        if not t.get("target"):
+        target = t.get("target")
+        if not target or target in missing:
             continue
         if t["type"] == "app":
             try:
-                subprocess.Popen([t["target"]], shell=True,
-                                  cwd=str(Path(t["target"]).parent),
+                subprocess.Popen([target], shell=True,
+                                  cwd=str(Path(target).parent),
                                   env=child_process.clean_env(),
                                   creationflags=child_process.flags())
             except OSError as exc:
-                QMessageBox.critical(parent, label, f"Couldn't launch '{t['target']}':\n{exc}")
+                failures.append(exc)
+                continue
         else:
-            webbrowser.open(t["target"])
+            webbrowser.open(target)
+        launched += 1
+
+    if not missing and not failures:
+        return
+    # One message for the whole entry, never one per target: toasts all
+    # stack in the same corner, so three broken targets would put three
+    # boxes on top of each other.
+    total = len([t for t in entry.get("targets", []) if t.get("target")])
+    if failures:
+        # On disk and still refusing to start - a corrupt shortcut, a
+        # permissions problem. Nothing the app can do about it, so it is
+        # a message rather than a dialog to click away (rules/ui.md).
+        reason = getattr(failures[0], "strerror", None) or "It Wouldn't Start"
+        text = f"Couldn't Open '{entry['name']}' - {reason}"
+    elif launched:
+        # Same words as the card's badge, which is what the user just
+        # read: an entry that opens three programs and lost one still
+        # did something, and saying "can't open" would be wrong.
+        text = f"Opened '{entry['name']}' - {len(missing)} of {total} Not Found"
+    else:
+        text = f"Can't Open '{entry['name']}' - Not Found on This PC"
+    show_toast(parent, text, 5000)
+
+
+# A stat on a local disk is microseconds, but a path on a disconnected
+# network share or an unplugged drive can block for seconds - and this
+# grid is rebuilt from scratch on every visit, every sort change and
+# every debounced search keystroke, so one uninstalled app on a dead
+# drive would otherwise be paid for again on each redraw. Answers are
+# reused for a few seconds: long enough that typing a query costs one
+# check per path instead of one per rebuild, short enough that
+# installing or removing a program while Atomic is open shows up on the
+# next visit rather than needing a restart.
+_EXISTS_TTL = 5.0
+_exists_cache = {}
+
+
+def _target_exists(path: str) -> bool:
+    now = time.monotonic()
+    cached = _exists_cache.get(path)
+    if cached is not None and now - cached[0] < _EXISTS_TTL:
+        return cached[1]
+    # Path.exists() answers False rather than raising for a path Windows
+    # can't even parse (illegal characters, a drive letter that isn't
+    # mounted), which is the answer wanted here anyway.
+    exists = Path(path).exists()
+    _exists_cache[path] = (now, exists)
+    return exists
+
+
+def missing_app_targets(entry) -> list:
+    """The entry's app targets whose path no longer exists - an
+    uninstalled or moved program.
+
+    App targets only. A "site" target is a URL, and asking the same
+    question of one means a network probe with all of probe_site's
+    deadline discipline; that is deliberately out of scope (roadmap
+    #16), which is also why this needs no per-page special-casing -
+    Websites entries carry no "app" target, so they simply never
+    match."""
+    return [t["target"] for t in entry.get("targets", [])
+            if t.get("type") == "app" and t.get("target")
+            and not _target_exists(t["target"])]
 
 
 def _migrate_entry(entry):
@@ -58,23 +198,44 @@ def _migrate_entry(entry):
     entry; fold that into the new `targets` list so existing data keeps
     working. Also backfills added_at/last_used (added once sorting/Move
     Up-Down was added, matching Games) for entries saved before either
-    existed."""
+    existed.
+
+    Returns True when it actually changed the entry, so the caller can
+    tell a real migration (which has to be written) from the ordinary
+    case of already-current data (which must not be)."""
+    changed = False
     if "targets" not in entry:
         entry["targets"] = [{"type": entry.pop("type", "site"), "target": entry.pop("target", "")}]
+        changed = True
     if not entry.get("id"):
         # Entries saved before ids existed have none, and everything that
         # touches one entry rather than the whole list works by id -
         # update_entry, and now drag-to-reorder, which would otherwise
         # match every id-less card against every other one.
         entry["id"] = str(uuid.uuid4())
+        changed = True
     if "added_at" not in entry:
         entry["added_at"] = storage.now_iso()
+        changed = True
     if "last_used" not in entry:
         entry["last_used"] = None
-    return entry
+        changed = True
+    return changed
 
 
-class LinkGridPage(GlassPage):
+def _migrate_entries(entries):
+    """(migrated list, did anything change). Applied to whatever was just
+    read off disk - including inside _mutate, because a list re-read there
+    can be older than the one this page was built from (Settings > Clear
+    Data writes these files too), and an un-migrated entry has no id for
+    update_entry or drag-reorder to work by."""
+    changed = False
+    for entry in entries:
+        changed |= _migrate_entry(entry)
+    return list(entries), changed
+
+
+class LinkGridPage(GridSelection, GlassPage):
     """Base for a customizable icon+name grid of sites/apps. Subclasses
     just set DATA_FILE/TITLE/DEFAULT_ENTRIES/TARGET_KIND.
 
@@ -89,16 +250,30 @@ class LinkGridPage(GlassPage):
     TITLE = "Links"
     DEFAULT_ENTRIES = []
     TARGET_KIND = "site"
+    # What the selection bar and its messages call these - see
+    # widgets.GridSelection, shared with the Games page. "entries" rather
+    # than the page's own title, because one of these grids holds apps
+    # and the other sites and the bar is the same bar.
+    SELECTION_NOUN = ("entry", "entries")
 
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
+        self._init_selection()
 
         entries = storage.load(self.DATA_FILE, None)
-        if entries is None:
+        fresh = entries is None
+        if fresh:
             entries = self.DEFAULT_ENTRIES
-        self.entries = [_migrate_entry(e) for e in entries]
-        storage.save(self.DATA_FILE, self.entries)
+        self.entries, migrated = _migrate_entries(entries)
+        # Only written when the migration actually changed something, or
+        # there was no file yet. This used to write the whole list back on
+        # every single visit to the page - a whole-list save off a
+        # just-loaded snapshot is harmless in itself, but it meant the one
+        # save shape this file is being fixed for ran every time the user
+        # clicked Apps or Websites in the sidebar.
+        if fresh or migrated:
+            storage.save(self.DATA_FILE, self.entries)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -134,7 +309,23 @@ class LinkGridPage(GlassPage):
         # No drag hint here any more: it named a right-click Move Up/Down
         # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
+        self.search_box = search_field(f"Search {self.TITLE.lower()}...", width=220)
+        # Debounced rather than filtering on every keystroke: each redraw
+        # rebuilds every card from scratch (pages hold no state - see
+        # .claude/rules/ui.md), so typing six characters would otherwise
+        # rebuild the whole grid six times. Same 150ms as the tracker
+        # pages, which this is the extension of.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._refresh_grid)
+        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
+        top_row.addWidget(self.search_box)
+        top_row.addWidget(self._build_select_button(
+            f"Pick several {self.TITLE.lower()} and delete them at once"))
         panel_layout.addLayout(top_row)
+
+        panel_layout.addWidget(self._build_selection_bar())
 
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
@@ -184,6 +375,28 @@ class LinkGridPage(GlassPage):
             return sorted(self.entries, key=lambda e: e.get("last_used") or "", reverse=True)
         return self.entries
 
+    def _search_query(self) -> str:
+        # getattr because _refresh_grid can run before the box exists on a
+        # page still being built.
+        box = getattr(self, "search_box", None)
+        return box.text().strip().lower() if box else ""
+
+    def _visible_entries(self):
+        """What the grid draws: the sorted list narrowed by the search box.
+
+        Deliberately not folded into _sorted_entries - that one is what
+        _begin_custom_order writes out as the custom order, and it has to
+        stay the whole list even if a query were somehow active."""
+        query = self._search_query()
+        entries = self._sorted_entries()
+        if not query:
+            return entries
+        # Plain case-insensitive substring, not a fuzzy match: same
+        # reasoning as the tracker pages - the user is looking for a name
+        # they know is there, and near-misses quietly included make a
+        # short query look like it failed to filter at all.
+        return [e for e in entries if query in (e.get("name") or "").lower()]
+
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -196,42 +409,93 @@ class LinkGridPage(GlassPage):
                 # added right after it.
                 widget.hide()
                 widget.deleteLater()
+        self._clear_selection_cards()
 
-        if not self.entries:
-            empty = QLabel(f"No {self.TITLE.lower()} yet - click '+' to create one.",
-                            objectName="Muted")
-            self.grid_layout.addWidget(empty, 0, 0)
+        # Dragging is off while a search is narrowing the grid: a drop
+        # writes the order that is on screen (see _begin_custom_order),
+        # and that isn't the whole order while cards are hidden.
+        narrowed = bool(self._search_query())
+
+        entries = self._visible_entries()
+        # Before the early return below as well as the draw: a search
+        # that matches nothing must still drop the selection it hid.
+        self._prune_selection({e.get("id") for e in entries})
+        if not entries:
+            message = (f"Nothing here matches '{self.search_box.text().strip()}'."
+                       if narrowed
+                       else f"No {self.TITLE.lower()} yet - click '+' to create one.")
+            self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
-        for index, entry in enumerate(self._sorted_entries()):
-            card = self._build_card(entry)
+        for index, entry in enumerate(entries):
+            # Dragging is off while selecting as well as while the grid is
+            # narrowed: both a drag and a pick want the same left press.
+            card = self._build_card(entry, draggable=not narrowed and not self._select_mode)
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
-    def _build_card(self, entry):
+    def _build_card(self, entry, draggable=True):
         card = Card(hoverable=True, matte=True)
         card.setFixedWidth(CARD_WIDTH)
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.setContentsMargins(8, 10, 8, 10)
+        layout.setContentsMargins(*CARD_MARGINS)
+
+        missing = missing_app_targets(entry)
 
         icon = QLabel()
         icon.setFixedSize(*THUMB_SIZE)
         icon.setPixmap(images.thumbnail_or_avatar(entry.get("image"), entry["name"], THUMB_SIZE))
+        if missing:
+            # Dimmed rather than swapped for a warning glyph: the icon is
+            # how a card is picked out of a grid at a glance, and losing
+            # it would make the row harder to read, not clearer. The
+            # badge below is what actually states the verdict.
+            faded = QGraphicsOpacityEffect(icon)
+            faded.setOpacity(0.3)
+            icon.setGraphicsEffect(faded)
         layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        name = QLabel(entry["name"], objectName="CardTitle")
-        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        name.setWordWrap(True)
+        name = CardTextLabel(entry["name"])
+        name.setObjectName("CardTitle")
         layout.addWidget(name)
 
-        card.clicked.connect(lambda en=entry: self._open_entry(en))
+        if missing:
+            total = len([t for t in entry.get("targets", []) if t.get("target")])
+            # "Not found" only when nothing on this card can launch; an
+            # entry that opens three programs and lost one still works,
+            # and saying otherwise would be wrong rather than cautious.
+            text = ("Not found" if len(missing) >= total
+                    else f"{len(missing)} of {total} not found")
+            badge = CardTextLabel(text)
+            badge.setStyleSheet(
+                f"color: {theme.DANGER}; font-weight: 700; font-size: 8pt; background: transparent;")
+            layout.addWidget(badge)
+            # The card itself carries the paths - the badge has room for
+            # a verdict, not for a path, and "which one?" is the next
+            # question on an entry that launches more than one.
+            card.setToolTip("No longer on disk:\n" + "\n".join(missing))
+
+        if self._select_mode:
+            # After the layout's own widgets, so the mark stacks above
+            # them rather than under the icon.
+            self._attach_selection_badge(card, entry.get("id"))
+            card.clicked.connect(lambda en_id=entry.get("id"): self._toggle_selected(en_id))
+        else:
+            card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
-        self._drag_reorder.attach(card, entry.get("id"))
+        if draggable:
+            self._drag_reorder.attach(card, entry.get("id"))
         return card
 
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_edit_form(entry))
+        # The second way into selection mode, from the card the user is
+        # already pointing at - the toolbar button alone means noticing a
+        # word at the far end of the row before knowing to look for it.
+        # Same entry point the tracker pages carry.
+        if not self._select_mode:
+            menu.addAction("Select", lambda: self._set_select_mode(True, entry.get("id")))
         # No Move Up/Move Down: these cards reorder by dragging, same as
         # every other page, and the menu items only appeared under one sort
         # mode - a second, worse way to do the same thing.
@@ -239,18 +503,71 @@ class LinkGridPage(GlassPage):
         menu.exec(event.globalPosition().toPoint())
 
     # ------------------------------------------------------------------
+    def _mutate(self, apply_change):
+        """Apply a change to the saved list and redraw - GamesPage._mutate,
+        same reasoning and same shape.
+
+        Re-reads the file and works on that rather than saving this page's
+        own `self.entries`: Home holds its own copy of apps.json and
+        websites.json, and Settings > Clear Data can empty either one
+        while this page sits open behind the dialog (main.py's
+        refresh_current_page names that exact race). Writing back the
+        snapshot this page was built from would roll all of that back -
+        which is how reordering one game once erased a whole batch of
+        freshly imported ones."""
+        self.entries, _ = _migrate_entries(storage.load(self.DATA_FILE, []))
+        apply_change(self.entries)
+        storage.save(self.DATA_FILE, self.entries)
+        self._refresh_grid()
+
+    @staticmethod
+    def _index_of(entries, entry):
+        return next((i for i, e in enumerate(entries) if e.get("id") == entry.get("id")), None)
+
     def _open_entry(self, entry):
         open_link_entry(self, entry, self.TITLE)
         entry["last_used"] = storage.now_iso()
-        storage.save(self.DATA_FILE, self.entries)
+        # One field on one entry, so no whole-list write and no redraw of
+        # cards the user is still looking at.
+        storage.update_entry(self.DATA_FILE, entry.get("id"), {"last_used": entry["last_used"]})
         if self.sort_box.currentText() == "Last Used":
             self._refresh_grid()
 
     def _remove_entry(self, entry):
-        if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") == QMessageBox.StandardButton.Yes:
-            self.entries.remove(entry)
-            storage.save(self.DATA_FILE, self.entries)
-            self._refresh_grid()
+        if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") != QMessageBox.StandardButton.Yes:
+            return
+
+        # The whole record, copied before it is dropped: the cards holding
+        # this dict are about to be torn down and _mutate re-reads the
+        # file into fresh dicts, so nothing else keeps it alive. Deep,
+        # because `targets` is a list of dicts and undo has to put back
+        # the entry that was removed, not a shell of it.
+        removed = copy.deepcopy(entry)
+        removed_at = []
+
+        def apply_change(entries):
+            idx = self._index_of(entries, entry)
+            if idx is not None:
+                entries.pop(idx)
+                # Where it sat in the saved list, so undo restores its
+                # place under Custom Order and not just its existence.
+                removed_at.append(idx)
+
+        self._mutate(apply_change)
+        show_undo_toast(self, f"Removed '{removed['name']}' - Click to Undo",
+                        lambda: self._restore_entry(removed, removed_at),
+                        on_redo=lambda: self._delete_ids([removed.get("id")]))
+
+    def _restore_entry(self, entry, removed_at):
+        def apply_change(entries):
+            # Clamped rather than trusted: the file is re-read here, and
+            # another page (or Settings > Clear Data) can have shortened
+            # the list since the removal.
+            index = removed_at[0] if removed_at else len(entries)
+            entries.insert(min(index, len(entries)), entry)
+
+        self._mutate(apply_change)
+        return f"Restored '{entry['name']}'"
 
     def _open_add_form(self):
         EntryForm(self, None, on_save=self._on_form_save)
@@ -262,8 +579,15 @@ class LinkGridPage(GlassPage):
         if is_new:
             entry["added_at"] = storage.now_iso()
             entry["last_used"] = None
-            self.entries.append(entry)
-        storage.save(self.DATA_FILE, self.entries)
+            self._mutate(lambda entries: entries.append(entry))
+            return
+        # An edit touches only this entry's own fields; update_entry
+        # merges them into the file as it stands now. The form has
+        # already applied them to the dict the cards hold, so the page
+        # only needs the redraw.
+        storage.update_entry(self.DATA_FILE, entry.get("id"), {
+            "name": entry["name"], "targets": entry["targets"], "image": entry.get("image"),
+        })
         self._refresh_grid()
 
 

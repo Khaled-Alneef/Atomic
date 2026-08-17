@@ -71,7 +71,9 @@ actually invoked.
 work from: it names the owner, the files, and the "done when" for each
 item, so picking up a task doesn't start with rediscovering it. Whoever
 lands an item marks it done in the same commit - a plan nobody updates
-stops being one. **The Architect is dispatched only when the user asks
+stops being one. It lives on `development` only and is deleted from
+every release snapshot - a shipped tree describes what the app *is*,
+not what is queued for it. **The Architect is dispatched only when the user asks
 for planning**; otherwise the roadmap is read, not rewritten, and a
 diagnosed bug goes straight to its owner rather than through a plan.
 

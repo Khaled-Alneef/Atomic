@@ -6,12 +6,13 @@ dragging a card onto the slot you want it in (which switches the sort to
 Custom Order as the drag begins).
 """
 
+import copy
 import subprocess
 import threading
 import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, Qt
+from PyQt6.QtCore import QObject, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -20,10 +21,12 @@ from PyQt6.QtWidgets import (
 
 from helpers import app_settings, child_process, images, launchers, storage, theme
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
-    scroll_area, show_toast,
+    Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
+    finish_toast, scroll_area, search_field, show_toast, show_undo_toast,
 )
-from windows.link_grid import CARD_WIDTH, GRID_COLS, THUMB_SIZE
+from windows.link_grid import (
+    CARD_MARGINS, CARD_WIDTH, GRID_COLS, THUMB_SIZE, CardTextLabel,
+)
 
 DATA_FILE = "games.json"
 CARD_ICON_SIZE = THUMB_SIZE  # match the Apps/Websites card image size
@@ -40,13 +43,18 @@ class _ScanSignals(QObject):
     done = Signal(list)  # [{"name", "path", "launcher"}, ...] found by the background scan
 
 
-class GamesPage(GlassPage):
+class GamesPage(GridSelection, GlassPage):
+    # What the selection bar and its messages call these - see
+    # widgets.GridSelection, which Apps/Websites share.
+    SELECTION_NOUN = ("game", "games")
+
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
 
         self.games = storage.load(DATA_FILE, [])
         self._migrate_and_backfill()
+        self._init_selection()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -87,7 +95,23 @@ class GamesPage(GlassPage):
         # No drag hint here any more: it named a right-click Move Up/Down
         # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
+        self.search_box = search_field("Search games...", width=220)
+        # Debounced rather than filtering on every keystroke: each redraw
+        # rebuilds every card from scratch (pages hold no state - see
+        # .claude/rules/ui.md), so typing six characters would otherwise
+        # rebuild the whole grid six times. Same 150ms as the tracker
+        # pages, which this is the extension of.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._refresh_grid)
+        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
+        top_row.addWidget(self.search_box)
+        top_row.addWidget(self._build_select_button(
+            "Pick several games and delete them at once"))
         layout.addLayout(top_row)
+
+        layout.addWidget(self._build_selection_bar())
 
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
@@ -174,6 +198,28 @@ class GamesPage(GlassPage):
             return sorted(self.games, key=lambda g: g.get("last_played") or "", reverse=True)
         return self.games
 
+    def _search_query(self) -> str:
+        # getattr because _refresh_grid can run before the box exists on a
+        # page still being built.
+        box = getattr(self, "search_box", None)
+        return box.text().strip().lower() if box else ""
+
+    def _visible_games(self):
+        """What the grid draws: the sorted list narrowed by the search box.
+
+        Deliberately not folded into _sorted_games - that one is what
+        _begin_custom_order writes out as the custom order, and it has to
+        stay the whole list even if a query were somehow active."""
+        query = self._search_query()
+        games = self._sorted_games()
+        if not query:
+            return games
+        # Plain case-insensitive substring, not a fuzzy match: same
+        # reasoning as the tracker pages - the user is looking for a name
+        # they know is there, and near-misses quietly included make a
+        # short query look like it failed to filter at all.
+        return [g for g in games if query in (g.get("name") or "").lower()]
+
     # ------------------------------------------------------------------
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
@@ -181,44 +227,70 @@ class GamesPage(GlassPage):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+        self._clear_selection_cards()
 
-        games = self._sorted_games()
+        # Dragging is off while a search is narrowing the grid: a drop
+        # writes the order that is on screen (see _begin_custom_order),
+        # and that isn't the whole order while cards are hidden.
+        narrowed = bool(self._search_query())
+
+        games = self._visible_games()
+        # Before the early return below as well as the draw: a search
+        # that matches nothing must still drop the selection it hid.
+        self._prune_selection({g.get("id") for g in games})
         if not games:
-            empty = QLabel("No games yet - click '+' to add one.", objectName="Muted")
-            self.grid_layout.addWidget(empty, 0, 0)
+            message = (f"Nothing here matches '{self.search_box.text().strip()}'."
+                       if narrowed else "No games yet - click '+' to add one.")
+            self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
         for index, game in enumerate(games):
-            card = self._build_card(game)
+            # Dragging is off while selecting as well as while the grid is
+            # narrowed: both a drag and a pick want the same left press.
+            card = self._build_card(game, draggable=not narrowed and not self._select_mode)
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
-    def _build_card(self, game):
+    def _build_card(self, game, draggable=True):
         card = Card(hoverable=True, matte=True)
         card.setFixedWidth(CARD_WIDTH)
         card.setToolTip(game["name"])
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.setContentsMargins(8, 10, 8, 10)
+        layout.setContentsMargins(*CARD_MARGINS)
 
         icon = QLabel()
         icon.setFixedSize(*CARD_ICON_SIZE)
         icon.setPixmap(images.thumbnail_or_avatar(game.get("icon"), game["name"], CARD_ICON_SIZE))
         layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        name = QLabel(game["name"], objectName="CardTitle")
-        name.setWordWrap(True)
-        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # Same clipped-second-line defect as Apps/Websites - this grid is
+        # built from the same constants, so it had it identically.
+        name = CardTextLabel(game["name"])
+        name.setObjectName("CardTitle")
         layout.addWidget(name)
 
-        card.clicked.connect(lambda g=game: self._launch(g))
+        if self._select_mode:
+            # After the layout's own widgets, so the mark stacks above
+            # them rather than under the icon.
+            self._attach_selection_badge(card, game.get("id"))
+            card.clicked.connect(lambda g_id=game.get("id"): self._toggle_selected(g_id))
+        else:
+            card.clicked.connect(lambda g=game: self._launch(g))
         card.rightClicked.connect(lambda event, g=game: self._show_context_menu(event, g))
-        self._drag_reorder.attach(card, game.get("id"))
+        if draggable:
+            self._drag_reorder.attach(card, game.get("id"))
         return card
 
     def _show_context_menu(self, event, game):
         menu = QMenu(self)
         menu.addAction("Launch", lambda: self._launch(game))
         menu.addAction("Edit", lambda: self._edit(game))
+        # The second way into selection mode, from the card the user is
+        # already pointing at - the toolbar button alone means noticing a
+        # word at the far end of the row before knowing to look for it.
+        # Same entry point the tracker pages carry.
+        if not self._select_mode:
+            menu.addAction("Select", lambda: self._set_select_mode(True, game.get("id")))
         # No Move Up/Move Down: dragging a card reorders it on every page,
         # and these only appeared under one sort mode anyway.
         menu.addAction("Delete", lambda: self._remove(game))
@@ -295,12 +367,35 @@ class GamesPage(GlassPage):
         if QMessageBox.question(self, "Remove Game", f"Remove '{game['name']}' from the list?") != QMessageBox.StandardButton.Yes:
             return
 
+        # Copied whole before the removal - _mutate re-reads the file into
+        # fresh dicts and the card holding this one is torn down, so this
+        # is the only surviving copy of the record undo has to restore
+        # (icon path and added_at included, not just the name and path).
+        removed = copy.deepcopy(game)
+        removed_at = []
+
         def apply_change(games):
             idx = self._index_of(games, game)
             if idx is not None:
                 games.pop(idx)
+                # Its place in the saved list, so undo under Custom Order
+                # puts it back where it was rather than at the end.
+                removed_at.append(idx)
 
         self._mutate(apply_change)
+        show_undo_toast(self, f"Removed '{removed['name']}' - Click to Undo",
+                        lambda: self._restore(removed, removed_at),
+                        on_redo=lambda: self._delete_ids([removed.get("id")]))
+
+    def _restore(self, game, removed_at):
+        def apply_change(games):
+            # Clamped: the file is re-read here, and Settings' launcher
+            # import (or Clear Data) can have changed its length since.
+            index = removed_at[0] if removed_at else len(games)
+            games.insert(min(index, len(games)), game)
+
+        self._mutate(apply_change)
+        return f"Restored '{game['name']}'"
 
 
 class EditGameForm(QDialog):

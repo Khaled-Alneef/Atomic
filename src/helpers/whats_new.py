@@ -21,11 +21,61 @@ from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from . import theme, updater
+from . import theme, updater, widgets
 
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.5": [
+        "One search across everything you track. Ctrl+K, or the box "
+        "beside the greeting on Home - picking a result opens it, the "
+        "same way its own card would.",
+        "Settings is now eight categories instead of one long form, with "
+        "Uninstall on a page of its own rather than a scroll below the "
+        "buttons that clear a single page.",
+        "Every page can select several entries at once - set a status or "
+        "delete them in one go, with one confirmation and one undo for "
+        "the whole batch.",
+        "Ctrl+Z undoes the last thing you did and Ctrl+Y puts it back. "
+        "The full list of shortcuts is in Settings, under Keybinds.",
+        "Your data can be copied to a file before something goes wrong, "
+        "and put back from it afterwards.",
+        "An update you have not taken yet is offered again at each "
+        "launch, instead of being mentioned once and then only as a dot "
+        "on the Settings button.",
+        "Dragging a card onto another to reorder it works again on the "
+        "Anime, Reading and Movies & Series pages.",
+        "Each status section scrolls sideways in a row of its own, so a "
+        "long section no longer pushes everything else down the page.",
+        "Atomic says when Stremio has stopped accepting the saved "
+        "sign-in, reopens where you left it, and no longer clips long "
+        "card names or closes itself on an empty tracker page.",
+    ],
+    "1.4": [
+        "Films are tracked alongside your shows - the page is now "
+        "Movies & Series, and searching in Add or Edit finds films too.",
+        "Netflix is now offered on installs that already had video "
+        "websites saved, and any watched type can be pinned to it - not "
+        "just anime.",
+        "Watch progress now comes from Stremio and nothing else. The "
+        "Crunchyroll and AniList progress settings are gone: each was "
+        "silently wrong often enough to be worse than no number at all.",
+        "A filter button beside each tracker's search box narrows the "
+        "grid by status, and by type where there is a choice of them.",
+        "Hovering a card now says Last Released, and the boxes you type "
+        "in say Last Watched - the two used to share one label.",
+        "A tick in Add and Edit chooses whether an entry shows a "
+        "last-watched number, which brings back the + and - buttons on "
+        "the entries you keep by hand.",
+        "Opening a page refreshes it. The refresh button and its long "
+        "\"Updating...\" toast are gone; results land on the cards as "
+        "they arrive.",
+        "Move Up and Move Down are gone from every page - drag a card "
+        "onto the slot you want instead.",
+        "A sequel no longer opens its predecessor's page, and the "
+        "garbled characters on the Last Season box, the website dropdown "
+        "and the Settings site list are gone.",
+    ],
     "1.3": [
         "Netflix titles now open on the show's own page instead of "
         "Netflix's search results.",
@@ -82,14 +132,17 @@ class UpdateSummaryDialog(QDialog):
     of the relaunch (see the house rule in .claude/rules/ui.md - dialogs
     are for what the user must not miss)."""
 
+    WIDTH = 440
+    MARGIN_H = 22
+
     def __init__(self, parent, current: str, sections: list):
         super().__init__(parent)
         self.setWindowTitle("Atomic Updated")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(self.WIDTH)
         theme.apply_dark_titlebar(self)
 
         body = QVBoxLayout(self)
-        body.setContentsMargins(22, 18, 22, 16)
+        body.setContentsMargins(self.MARGIN_H, 18, self.MARGIN_H, 16)
         body.setSpacing(8)
 
         body.addWidget(QLabel(f"Atomic is now version {current}", objectName="SectionTitle"))
@@ -98,16 +151,31 @@ class UpdateSummaryDialog(QDialog):
         body.addWidget(intro)
         body.addSpacing(6)
 
+        # The notes scroll; the heading and the button never do. Without
+        # this the dialog is as tall as its notes make it - 1.4's nine
+        # measured 720px, and an update crossing 1.2-1.4 measured 1243px,
+        # already past the 1104px this desktop can show, with the button
+        # off the bottom edge and no way to reach it.
+        notes = QWidget()
+        notes_body = QVBoxLayout(notes)
+        notes_body.setContentsMargins(0, 0, 0, 0)
+        notes_body.setSpacing(8)
         for index, (version, lines) in enumerate(sections):
             # Only worth labelling which version a line came from when
             # the update crossed more than one - otherwise the heading
             # just repeats the title above.
             if len(sections) > 1:
                 if index:
-                    body.addSpacing(6)
-                body.addWidget(QLabel(f"Version {version}", objectName="SectionTitle"))
+                    notes_body.addSpacing(6)
+                notes_body.addWidget(QLabel(f"Version {version}", objectName="SectionTitle"))
             for line in lines:
-                body.addWidget(self._bullet(line))
+                notes_body.addWidget(self._bullet(line))
+        # Keeps the notes packed at the top when the area is taller than
+        # they are; QLabel grows to fill spare height otherwise.
+        notes_body.addStretch()
+
+        area = widgets.scroll_area(notes)
+        body.addWidget(area, 1)
 
         body.addSpacing(14)
         button_row = QHBoxLayout()
@@ -117,6 +185,53 @@ class UpdateSummaryDialog(QDialog):
         done.clicked.connect(self.accept)
         button_row.addWidget(done)
         body.addLayout(button_row)
+
+        self._size_to_notes(area, notes)
+
+    def _size_to_notes(self, area, notes):
+        """Give the scroll area exactly the height its notes need, capped
+        at what the screen can actually show.
+
+        The height has to be set rather than left to Qt: QScrollArea's
+        own sizeHint is *bounded* at 24 line-heights regardless of its
+        contents, so a dialog laid out normally would open around 400px
+        and scroll even when nothing overflows - and the requirement is
+        that today's nine notes still show whole.
+
+        Measured with heightForWidth at the width the text will really
+        wrap to, because a word-wrapped QLabel's sizeHint is a guess at a
+        line length, not the height it takes here."""
+        # Polish first: the section headings get their larger font from
+        # the stylesheet, and measuring before that applies reports the
+        # default font's line heights - which came out 326px short on a
+        # three-version dialog in one run and right in another.
+        notes.ensurePolished()
+        inner = self.WIDTH - 2 * self.MARGIN_H
+        natural = (notes.heightForWidth(inner) if notes.hasHeightForWidth()
+                   else notes.sizeHint().height())
+
+        # What the heading, spacings, margins and button take - measured
+        # by collapsing the area rather than adding up constants that
+        # would drift the moment the layout changes.
+        area.setMaximumHeight(0)
+        self.layout().activate()
+        chrome = self.sizeHint().height()
+
+        # Leave room for the title bar and a margin of desktop, so the
+        # dialog lands inside the work area rather than exactly filling
+        # it. availableGeometry already excludes the taskbar, and
+        # screen() is the parent window's monitor - not the primary one,
+        # which on two displays is often not the one Atomic is on.
+        budget = self.screen().availableGeometry().height() - 96
+        fit = max(120, min(natural, budget - chrome))
+
+        # Min and max together: the max is what caps the dialog (a
+        # layout's maximum constrains its window), the min is what stops
+        # QScrollArea's bounded sizeHint shrinking it back.
+        area.setMinimumHeight(fit)
+        area.setMaximumHeight(fit)
+        self.layout().activate()
+        self.resize(self.sizeHint())
 
     @staticmethod
     def _bullet(text: str) -> QWidget:

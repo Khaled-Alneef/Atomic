@@ -5,6 +5,12 @@ from . import storage
 
 SETTINGS_FILE = "settings.json"
 
+# Smallest saved window geometry still worth restoring anyone into. The
+# sidebar alone is 220px wide, so anything under this is a corrupted or
+# hand-edited value, not a size someone chose - see get_window_geometry.
+MIN_WINDOW_WIDTH = 480
+MIN_WINDOW_HEIGHT = 360
+
 
 def _load():
     return storage.load(SETTINGS_FILE, {})
@@ -120,6 +126,64 @@ def has_run_before() -> bool:
     first launch writes the file only once something is saved."""
     return bool({k: v for k, v in _load().items()
                  if k not in ("updated_from", "last_seen_version")})
+
+
+def get_notified_update_version() -> str:
+    """The version the startup update check has already announced, or ""
+    if it never has.
+
+    Stored so the toast is shown once *per version*, not once per launch:
+    someone who isn't ready to update shouldn't be told again every time
+    they open the app. The sidebar's dot stays regardless - it is a
+    marker, not an interruption."""
+    return _load().get("notified_update_version") or ""
+
+
+def set_notified_update_version(version: str):
+    data = _load()
+    data["notified_update_version"] = version or ""
+    storage.save(SETTINGS_FILE, data)
+
+
+def get_window_geometry() -> dict:
+    """Size, position and maximized state the main window was last left
+    at, as {"x", "y", "width", "height", "maximized"} - or {} if this
+    profile has never saved one, which is what a first-ever launch sees
+    and what makes it fall back to the built-in 1280x840/maximized.
+
+    Plain numbers rather than Qt's own saveGeometry() blob: the blob is
+    opaque in settings.json and carries its own screen assumptions, while
+    these can be clamped by hand to the monitors that exist *now* (see
+    main._fit_to_available_screen) - a geometry saved on a monitor that
+    has since been unplugged must not reopen the window out of reach.
+
+    Anything malformed, or too small to be a usable window, reads as "no
+    saved geometry" rather than being restored: opening a 40px stub with
+    no way to know why is worse than losing the position once."""
+    saved = _load().get("window_geometry")
+    if not isinstance(saved, dict):
+        return {}
+    try:
+        geometry = {key: int(saved[key])
+                    for key in ("x", "y", "width", "height")}
+    except (KeyError, TypeError, ValueError):
+        return {}
+    if (geometry["width"] < MIN_WINDOW_WIDTH
+            or geometry["height"] < MIN_WINDOW_HEIGHT):
+        return {}
+    geometry["maximized"] = bool(saved.get("maximized", False))
+    return geometry
+
+
+def set_window_geometry(x: int, y: int, width: int, height: int,
+                        maximized: bool):
+    data = _load()
+    data["window_geometry"] = {
+        "x": int(x), "y": int(y),
+        "width": int(width), "height": int(height),
+        "maximized": bool(maximized),
+    }
+    storage.save(SETTINGS_FILE, data)
 
 
 def get_manga_music_url() -> str:

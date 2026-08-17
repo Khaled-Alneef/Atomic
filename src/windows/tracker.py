@@ -1,4 +1,4 @@
-﻿"""Anime & Manga & Series tracker: three pages sharing this list-widget
+"""Anime & Manga & Series tracker: three pages sharing this list-widget
 implementation. Anime/Manga share one data file split by the entry's
 `type` field (so you can reclassify one into the other); Series has its
 own file since it's a different domain entirely.
@@ -7,11 +7,12 @@ Typing a title searches a matching source in the background - Stremio's
 Cinemeta catalog for Anime/Series, every reading site configured in
 Settings for Manga - and picking a suggestion auto-fills the title/cover
 and a direct link (a stremio:// deep link for Anime/Series, or the
-matched manga's page on whichever site it came from) so double-click
+matched manga's page on whichever site it came from) so opening it
 jumps straight there. You can also just type your own title if it's not
 listed there.
 """
 
+import copy
 import re
 import threading
 import time
@@ -23,8 +24,9 @@ from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
-    QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
 from helpers import (
@@ -33,7 +35,7 @@ from helpers import (
 )
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
-    scroll_area, show_toast,
+    scroll_area, search_field, show_toast, show_undo_toast,
 )
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
@@ -55,6 +57,11 @@ MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
 # here because the rule used to be spelled `== "Anime"` in a dozen
 # places, which is why Series could never open on a chosen site.
 VIDEO_TYPES = ("Anime", "Series", "Movie")
+
+# How a type reads as a section heading, where a page draws one row per
+# type. Only where the plural isn't the word itself ("Series" already is
+# one, and heading a row "Seriess" is how that goes wrong).
+SECTION_TYPE_PLURAL = {"Movie": "Movies"}
 
 # Status wording differs by content type: you "watch" Anime/Series/Movie
 # but "read" Manga/Manhwa/Manhua.
@@ -130,7 +137,6 @@ FILTER_ICON = "filter_icon.png"
 FILTER_ICON_HEIGHT = 18
 
 POSTER_SIZE = (160, 216)
-GRID_COLS = 9
 PREVIEW_SIZE = (90, 120)
 SEARCH_DEBOUNCE_MS = 450
 
@@ -426,9 +432,25 @@ class _ProgressSyncSignals(QObject):
 SOURCE_STREMIO = "Stremio"
 SOURCE_MANUAL = "you"
 
-# The one thing that can stop a sync and that the user can fix - no
-# Stremio account connected. Everything else is a genuine no-match.
+# The two things that can stop a sync and that the user can fix - no
+# Stremio account connected, or one whose saved session Stremio no longer
+# accepts. Everything else is a genuine no-match.
 REASON_NO_STREMIO_ACCOUNT = "no_stremio_account"
+# A connected account that has stopped answering (stremio.AuthFailed).
+# Separate from the one above because the fix is different - reconnect,
+# not connect - and separate from a no-match because Stremio is the only
+# progress source there is: when the key dies, *nothing* syncs, and the
+# whole point of this code is that the app says that out loud rather than
+# reporting "not in your library" about every entry forever.
+REASON_STREMIO_AUTH_FAILED = "stremio_auth_failed"
+
+# Said once per app run, not once per page arrival. The arrival sync is
+# deliberately silent (see TrackerPage._auto_refresh), so this is the only
+# way the silent path can speak at all - but a dead key stays dead, and
+# walking between Anime and Series would otherwise repeat the same warning
+# every few seconds.
+_auth_warning_shown = False
+_STREMIO_AUTH_TOAST = "Stremio Sign-In Needs Refreshing - Reconnect In Settings"
 
 # Services whose watch history no app can read. Kept only to explain why
 # an entry on one of them never fills itself in; nothing tries to sync
@@ -466,6 +488,18 @@ class _StayOpenMenu(QMenu):
         super().mouseReleaseEvent(event)
 
 
+# Each page's search text and filter ticks, keyed by page class name,
+# for as long as the process lives. Pages rebuild from scratch on every
+# visit (.claude/rules/ui.md), so without this a search typed on Anime
+# was gone the moment you looked at Home and came back.
+#
+# Deliberately in memory and never written to storage: a filter narrowing
+# the grid on a fresh launch, with nothing on screen saying why entries
+# are missing, is worse than today's reset. Quitting clears it, which is
+# the visible escape hatch.
+_SESSION_VIEW_STATE = {}
+
+
 class TrackerPage(GlassPage):
     """Base for the Anime/Manga/Series pages. Subclasses set
     DATA_FILE/ENTRY_TYPES/TITLE/TYPE_OPTIONS/PROGRESS_COLUMNS.
@@ -479,6 +513,11 @@ class TrackerPage(GlassPage):
     TITLE = "Anime"
     TYPE_OPTIONS = ["Anime", "Manga"]
     PROGRESS_COLUMNS = ["Last Released Season", "Last Released Episode"]
+    # Whether a status section is drawn as one row per entry type. Only
+    # the films-and-shows page wants it: Anime/Reading hold one kind of
+    # thing each, and splitting Manga from Manhwa would be three rows of
+    # the same shape saying nothing.
+    SPLIT_SECTIONS_BY_TYPE = False
     # Manga has no Stremio presence to sync progress against.
     SUPPORTS_PROGRESS_SYNC = True
     # Which release-schedule source the hover tooltip's "next episode/
@@ -512,6 +551,11 @@ class TrackerPage(GlassPage):
         self._refresh_pending = 0
         self._refresh_changed = False
         self._refresh_before = {}
+        # Set by any result in the current batch that came back
+        # REASON_STREMIO_AUTH_FAILED, read once when the batch finishes.
+        # A batch is one verdict, and one dead key fails all of it, so the
+        # message is said once rather than per entry.
+        self._stremio_auth_broken = False
 
         self._cover_signals = _CoverSignals()
         self._cover_signals.ready.connect(self._on_sharper_cover_ready)
@@ -526,15 +570,31 @@ class TrackerPage(GlassPage):
         # an entry of someone else's type that disk doesn't have.
         self._ids_at_load = {e.get("id") for e in self.entries if e.get("id")}
 
-        # Filter selections last only as long as the page does. Pages
-        # rebuild from scratch on every visit (.claude/rules/ui.md), and a
-        # filter still narrowing the grid from a previous visit would read
-        # as entries having gone missing. Empty means "everything".
-        self._status_filter = set()
-        self._type_filter = set()
+        # Filter selections last as long as the app run, not as long as
+        # the page: restored here from _SESSION_VIEW_STATE and written
+        # back on every change, so navigating away and returning shows
+        # what was left on screen. Copied out of the store rather than
+        # aliased, so a half-applied filter can't leak between page
+        # instances. Empty means "everything".
+        remembered = _SESSION_VIEW_STATE.get(self._view_state_key(), {})
+        self._status_filter = set(remembered.get("status", ()))
+        self._type_filter = set(remembered.get("type", ()))
         # (action, kind, value) for every item in the filter menu, so the
         # ticks can be re-read off the sets while the menu is still open.
         self._filter_actions = []
+
+        # Multi-select state - see the block above _build_selection_bar
+        # for the shape and the two rules it rests on. Ids rather than
+        # entries: a page rebuilds every card from scratch on every
+        # redraw, so anything holding widgets or dicts across one is
+        # holding what has just been deleted.
+        self._select_mode = False
+        self._selected_ids = set()
+        # entry id -> (card, badge) for the cards currently drawn, so a
+        # click can repaint one mark instead of rebuilding the grid.
+        # Rebuilt by _refresh_grid, which is also what makes it safe:
+        # nothing in here outlives the redraw that filled it.
+        self._selection_cards = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -566,10 +626,11 @@ class TrackerPage(GlassPage):
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
         top_row.addStretch()
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Search titles...")
-        self.search_box.setClearButtonEnabled(True)
-        self.search_box.setFixedWidth(220)
+        self.search_box = search_field("Search titles...", width=220)
+        # Restored before textChanged is wired up, not after: setText
+        # fires it, which would start the debounce timer for a redraw the
+        # _refresh_grid at the end of __init__ is about to do anyway.
+        self.search_box.setText(remembered.get("search", ""))
         # Debounced rather than filtering on every keystroke: each redraw
         # rebuilds every card from scratch (pages hold no state - see
         # .claude/rules/ui.md), so typing six characters would otherwise
@@ -578,7 +639,7 @@ class TrackerPage(GlassPage):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
         self._search_timer.timeout.connect(self._refresh_grid)
-        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
+        self.search_box.textChanged.connect(self._on_search_text_changed)
         top_row.addWidget(self.search_box)
         # Symbol only, no label - it sits beside a search box that already
         # says what this row is for. The menu is attached with setMenu
@@ -609,12 +670,30 @@ class TrackerPage(GlassPage):
         self._filter_menu.aboutToShow.connect(self._build_filter_menu)
         self.filter_btn.setMenu(self._filter_menu)
         top_row.addWidget(self.filter_btn)
+        # Selection mode's switch. Its label is the state - "Select" when
+        # off, "Done" when on - rather than a checkable button: theme.py
+        # gives a plain QPushButton no :checked rule, so a ticked one
+        # would look identical to an unticked one, and a mode nobody can
+        # see they are in is the whole failure this is written around.
+        self.select_btn = QPushButton("Select")
+        self.select_btn.setFixedHeight(40)
+        self.select_btn.setToolTip("Pick several entries and change or delete them at once")
+        self.select_btn.clicked.connect(self._toggle_select_mode)
+        top_row.addWidget(self.select_btn)
         layout.addLayout(top_row)
 
+        layout.addWidget(self._build_selection_bar())
+
         self.grid_body = QWidget()
-        self.grid_layout = QGridLayout(self.grid_body)
-        self.grid_layout.setSpacing(14)
-        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # One row per section, each scrolling sideways on its own, rather
+        # than one grid wrapping at a fixed column count. That grid cut
+        # its 9th card
+        # of a row off the right edge with no way to reach it: the page's
+        # scroll area has its horizontal bar switched off, so anything
+        # past the viewport simply wasn't there.
+        self.grid_layout = QVBoxLayout(self.grid_body)
+        self.grid_layout.setSpacing(18)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(scroll_area(self.grid_body), stretch=1)
 
         self._drag_reorder = CardDragReorder(
@@ -719,6 +798,13 @@ class TrackerPage(GlassPage):
             return
         toast, self._refresh_toast = self._refresh_toast, None
         self._refresh_before = {}
+        if self._stremio_auth_broken:
+            # Outranks both ordinary verdicts: with the session rejected,
+            # no progress was read at all, so "There is No New Update" is
+            # true and useless - it is the sentence that hid this bug.
+            self._stremio_auth_broken = False
+            self._warn_stremio_auth_once(toast)
+            return
         finish_toast(toast, self, "Updated Successfully" if self._refresh_changed
                      else "There is No New Update")
 
@@ -842,6 +928,31 @@ class TrackerPage(GlassPage):
                 entry["title"], True)
 
     # ------------------------------------------------------------------
+    @classmethod
+    def _view_state_key(cls) -> str:
+        """Which slot of _SESSION_VIEW_STATE this page owns.
+
+        The class name, not TITLE: AnimePage inherits TITLE from the base
+        class, so two pages could end up sharing one slot if the titles
+        were ever made to collide."""
+        return cls.__name__
+
+    def _remember_view_state(self):
+        """Write the current search text and ticks to the session store.
+
+        Called on every change rather than on teardown - a page is
+        replaced, not closed, and there is no hook that reliably runs
+        before it goes."""
+        _SESSION_VIEW_STATE[self._view_state_key()] = {
+            "search": self.search_box.text(),
+            "status": set(self._status_filter),
+            "type": set(self._type_filter),
+        }
+
+    def _on_search_text_changed(self, _text):
+        self._remember_view_state()
+        self._search_timer.start()
+
     def _search_query(self) -> str:
         # getattr because _refresh_grid can run before the box exists on
         # a page still being built.
@@ -871,7 +982,7 @@ class TrackerPage(GlassPage):
                     lambda checked, n=name: self._toggle_filter(self._type_filter, n, checked))
                 self._filter_actions.append((action, "type", name))
         menu.addSeparator()
-        for status in STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], _WATCHING_STATUSES):
+        for status in self._page_statuses():
             action = menu.addAction(status)
             action.setCheckable(True)
             action.triggered.connect(
@@ -898,6 +1009,7 @@ class TrackerPage(GlassPage):
         else:
             selected.discard(value)
         self._sync_filter_menu_checks()
+        self._remember_view_state()
         self._refresh_grid()
 
     def _clear_filters(self, *_args):
@@ -906,8 +1018,364 @@ class TrackerPage(GlassPage):
         self._status_filter.clear()
         self._type_filter.clear()
         self._sync_filter_menu_checks()
+        self._remember_view_state()
         self._refresh_grid()
 
+    def _page_statuses(self):
+        """The statuses this page's entries can hold.
+
+        One list per page, not per entry: a page's types are either all
+        watched or all read (VIDEO_TYPES vs MANGA_TYPES), so Series and
+        Movie share a list and Manga/Manhwa/Manhua share the other. The
+        filter menu has always assumed this; the bulk status menu below
+        relies on the same thing, which is what lets a mixed Series/Movie
+        selection be given one status."""
+        return STATUSES_BY_TYPE.get(self.ENTRY_TYPES[0], _WATCHING_STATUSES)
+
+    # ------------------------------------------------------------------
+    # Multi-select: a mode, not a modifier.
+    #
+    # A left click on a card opens the entry - it is the page's primary
+    # gesture - so selection cannot share it. Ctrl+click was the obvious
+    # alternative and was rejected twice over: nothing on screen would
+    # ever say the page could do this, and `Card.clicked` carries no
+    # modifiers, so it would have meant reworking the click path every
+    # page in the app uses. A mode announces itself (the button reads
+    # "Done", a bar appears, every card carries a mark) and confines the
+    # change in what a click means to while it is switched on.
+    #
+    # Two rules decide how it coexists with what is already here:
+    #
+    # * **Only what is on screen can be selected.** The selection is
+    #   pruned to the visible entries on every redraw (_refresh_grid), so
+    #   a search, a filter or a status change can never leave an entry
+    #   selected that the user cannot see, and "Select All" means the
+    #   ones in front of them. A narrowed grid is *safe* here in a way it
+    #   is not for dragging: a drop rewrites the whole saved order from a
+    #   partial view (see _grid_is_narrowed), while a bulk status change
+    #   writes only the entries actually picked, one
+    #   storage.update_entry each. Filter to Plan to Watch, Select All,
+    #   set Dropped is the point of this feature rather than a hazard -
+    #   and it is what makes Delete safe on a narrowed grid too, since a
+    #   batch delete removes only the entries actually picked.
+    # * **Dragging is off while selecting.** Both want the same press,
+    #   and drag-reorder is already off whenever the grid is narrowed -
+    #   this is the same switch with one more reason in it.
+    #
+    # Changing a status moves those entries to another section, or out of
+    # the view entirely under a status filter. So the selection is
+    # cleared once the change lands and the mode stays on: keeping cards
+    # selected across a move would mean a selection scattered over
+    # sections the user never picked from, and dropping out of the mode
+    # would fight the common case of doing a second batch. The toast is
+    # what says how many moved, which matters exactly when they left the
+    # view and there is nothing on screen to show for it.
+    #
+    # The mode is deliberately not remembered across a page visit the way
+    # search and filter are (_SESSION_VIEW_STATE): arriving on a page
+    # where clicking a card silently fails to open it would read as the
+    # app being broken.
+    def _build_selection_bar(self):
+        """The row that appears under the toolbar while selecting.
+
+        Built once and hidden, not built on entering the mode: it sits in
+        the page's layout above the grid, and adding it later would push
+        every section down by its height at the moment the mode is
+        switched on."""
+        bar = QWidget(objectName="Bare")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        self.selection_label = QLabel("", objectName="Muted")
+        row.addWidget(self.selection_label)
+        row.addStretch()
+        # A checkbox rather than a button: "select everything" is a
+        # state, not an action, and a tick can show that everything is
+        # already picked where a button can only ever say it.
+        self.select_all_check = QCheckBox("Select All")
+        self.select_all_check.toggled.connect(self._on_select_all_toggled)
+        row.addWidget(self.select_all_check)
+        self.bulk_status_btn = QPushButton("Set Status", objectName="Accent")
+        # setMenu rather than exec'ing at a computed point: Qt places it
+        # against the button itself, so there is no mapToGlobal to get
+        # wrong across two monitors at different scale factors (see
+        # .claude/rules/ui.md), the same reasoning as the filter button.
+        self._bulk_status_menu = QMenu(self)
+        for status in self._page_statuses():
+            self._bulk_status_menu.addAction(
+                status, lambda checked=False, s=status: self._apply_bulk_status(s))
+        self.bulk_status_btn.setMenu(self._bulk_status_menu)
+        row.addWidget(self.bulk_status_btn)
+        # Last in the row and the only "Danger" thing on the page, so the
+        # button that destroys data is not the one nearest the pointer
+        # after picking a card, and doesn't read as another neutral
+        # toolbar action beside Select All and Clear.
+        self.bulk_delete_btn = QPushButton("Delete", objectName="Danger")
+        self.bulk_delete_btn.clicked.connect(self._delete_selected)
+        row.addWidget(self.bulk_delete_btn)
+        bar.setVisible(False)
+        self.selection_bar = bar
+        return bar
+
+    @staticmethod
+    def _entry_count(count) -> str:
+        return f"{count} entry" if count == 1 else f"{count} entries"
+
+    def _update_selection_bar(self):
+        # getattr because _refresh_grid can run before the bar exists on
+        # a page still being built, the same reason _search_query guards
+        # its own box.
+        label = getattr(self, "selection_label", None)
+        if label is None:
+            return
+        count = len(self._selected_ids)
+        label.setText(f"{self._entry_count(count)} selected" if count
+                      else "Click cards to pick them")
+        self.bulk_status_btn.setEnabled(count > 0)
+        self.bulk_delete_btn.setEnabled(count > 0)
+        # Blocked, because this is the tick catching up with the
+        # selection - not the user asking for one. Unblocked it would
+        # re-enter _on_select_all_toggled and re-apply what it is only
+        # reporting.
+        self.select_all_check.blockSignals(True)
+        self.select_all_check.setChecked(self._everything_visible_selected())
+        self.select_all_check.blockSignals(False)
+
+    def _toggle_select_mode(self):
+        self._set_select_mode(not self._select_mode)
+
+    def _set_select_mode(self, on, first_id=None):
+        self._select_mode = on
+        self._selected_ids = {first_id} if on and first_id else set()
+        self.select_btn.setText("Done" if on else "Select")
+        self.selection_bar.setVisible(on)
+        # A full rebuild, unlike picking a card below: every card has to
+        # gain or lose its mark, and what its click does changes with it.
+        self._refresh_grid()
+
+    def _toggle_selected(self, entry_id):
+        """Pick or unpick one card, repainting that card alone.
+
+        Not _refresh_grid: each section is its own sideways-scrolling
+        strip (see _build_section_strip), and rebuilding the grid puts
+        every one of them back to scroll position 0 - so picking the
+        twelfth card in a row would scroll the row away from under the
+        pointer before the next click."""
+        if entry_id in self._selected_ids:
+            self._selected_ids.discard(entry_id)
+        else:
+            self._selected_ids.add(entry_id)
+        drawn = self._selection_cards.get(entry_id)
+        if drawn:
+            self._paint_selection(*drawn, entry_id in self._selected_ids)
+        self._update_selection_bar()
+
+    def _everything_visible_selected(self) -> bool:
+        """Whether every entry currently on screen is already picked -
+        what turns Select All into Unselect All. Measured against the
+        visible entries, so under a search or a filter "everything" means
+        what is in front of the user, exactly as the selection does."""
+        visible = {entry.get("id") for entry in self._visible_entries()}
+        return bool(visible) and visible <= self._selected_ids
+
+    def _on_select_all_toggled(self, checked):
+        if checked:
+            self._select_all_visible()
+        else:
+            self._clear_selection()
+
+    def _select_all_visible(self):
+        # _selection_cards is exactly the cards currently drawn, which is
+        # the whole point: under a search or a filter this picks what is
+        # on screen and nothing else.
+        self._selected_ids = {entry_id for entry_id in self._selection_cards if entry_id}
+        self._repaint_all_selection()
+
+    def _clear_selection(self):
+        self._selected_ids.clear()
+        self._repaint_all_selection()
+
+    def _repaint_all_selection(self):
+        for entry_id, (card, badge) in self._selection_cards.items():
+            self._paint_selection(card, badge, entry_id in self._selected_ids)
+        self._update_selection_bar()
+
+    def _paint_selection(self, card, badge, selected):
+        """Mark or unmark one card.
+
+        The badge over the poster's corner is the mark that decides it;
+        the accent border is only there so a picked tile reads as picked
+        from across the page. Measured, and the reason round that way: an
+        accent border is exactly what theme.py's #Card:hover rule already
+        draws, so the card under the pointer looks bordered whether or
+        not it is picked - the badge is what tells them apart. No glyph
+        in it, because the filter button's "▽" rendered as a sliver of a
+        missing-glyph box (see the comment on filter_btn) and a filled
+        accent disc needs no font at all.
+
+        Border stays 1px in both states: QSS border width comes out of
+        the widget's content rect, so a thicker one would shift every
+        label inside the card by a pixel the moment it was picked."""
+        badge.setStyleSheet(
+            f"background: {theme.ACCENT if selected else theme.BG}; "
+            f"border: 2px solid {theme.TEXT if selected else theme.TEXT_MUTED}; "
+            f"border-radius: 11px;")
+        # Scoped to QFrame#Card so it cannot reach the labels inside the
+        # card, and naming only `border` so the app stylesheet's gradient
+        # fill still paints - a widget stylesheet is merged with the
+        # application one property by property, not instead of it.
+        card.setStyleSheet(f"QFrame#Card {{ border: 1px solid {theme.ACCENT}; }}"
+                           if selected else "")
+
+    def _apply_bulk_status(self, status):
+        """Give every picked entry the same status.
+
+        One storage.update_entry per entry, never a whole-list write:
+        Anime and Reading are both backed by tracker.json and each page
+        holds its own copy loaded when it was built, so writing the list
+        back would restore the other page's entries as they were then
+        (.claude/rules/ui.md, and see _save_entries for the defect that
+        rule came from)."""
+        if not self._selected_ids:
+            return
+        self._apply_status_to_ids(set(self._selected_ids), status)
+
+    def _apply_status_to_ids(self, ids, status):
+        """The body of a bulk status change, against an explicit set of
+        ids rather than the current selection - so Ctrl+Y can re-apply
+        the batch it just undid, by which point nothing is selected."""
+        stamp = storage.now_iso()
+        previous = []   # (id, status, updated_at) as they were, for undo
+        for entry in self.entries:
+            entry_id = entry.get("id")
+            if entry_id not in ids or entry.get("status") == status:
+                continue
+            before = (entry_id, entry.get("status"), entry.get("updated_at"))
+            # Disk first, memory second. A False here means the entry is
+            # no longer in the file - another page deleted it while this
+            # one was open - and changing this page's copy anyway would
+            # show a status that nothing on disk agrees with.
+            if not storage.update_entry(self.DATA_FILE, entry_id,
+                                        {"status": status, "updated_at": stamp}):
+                continue
+            entry["status"] = status
+            entry["updated_at"] = stamp
+            previous.append(before)
+        self._selected_ids.clear()
+        self._refresh_grid()
+        if not previous:
+            show_toast(self, f"Already {status}")
+            return
+        show_undo_toast(
+            self, f"Moved {self._entry_count(len(previous))} to {status} - Click to Undo",
+            lambda: self._undo_bulk_status(previous),
+            on_redo=lambda ids={before[0] for before in previous}:
+                self._apply_status_to_ids(ids, status))
+
+    def _undo_bulk_status(self, previous):
+        by_id = {e.get("id"): e for e in self.entries}
+        restored = 0
+        for entry_id, status, updated_at in previous:
+            fields = {"status": status}
+            # Only when there was one: an entry saved before updated_at
+            # existed has no such field, and writing None back would put
+            # one there that the app never wrote.
+            if updated_at is not None:
+                fields["updated_at"] = updated_at
+            if not storage.update_entry(self.DATA_FILE, entry_id, fields):
+                continue
+            entry = by_id.get(entry_id)
+            if entry is not None:
+                entry.update(fields)
+            restored += 1
+        self._refresh_grid()
+        return f"Restored {self._entry_count(restored)}"
+
+    def _delete_selected(self):
+        """Delete every picked entry, asked about once.
+
+        One question for the whole batch rather than one per entry: the
+        point of picking eight cards is not to answer eight dialogs, and
+        the count in the question is what the user checks the selection
+        against. The undo offer is what lets it be a single question -
+        the whole batch comes back from it, every field intact.
+
+        Through _save_entries, not storage.update_entry: update_entry
+        merges fields into an entry and has no way to remove one, and
+        _save_entries is already this page's re-read-then-apply path. It
+        reloads the file and lets this page speak only for its own entry
+        types, so the other page's entries (Anime and Reading share
+        tracker.json) are carried over as they are on disk rather than as
+        this page last saw them - the same call the single-entry delete
+        makes, for the same reason."""
+        if not self._selected_ids:
+            return
+        # Indices recorded against this page's list before anything is
+        # removed: undo puts each record back at the index it came from,
+        # and an index read after the first removal would name the wrong
+        # slot. The record is the whole entry, deep-copied - an entry
+        # carries far more than the card shows (cover, link, the cached
+        # schedule and its checked-at stamp, the resolved MangaDex/site
+        # ids) and undo has to give all of it back, not re-add a title.
+        removed = [(index, copy.deepcopy(entry))
+                   for index, entry in enumerate(self.entries)
+                   if entry.get("id") in self._selected_ids]
+        if not removed:
+            return
+        if QMessageBox.question(
+                self, "Delete Entries",
+                f"Delete {self._entry_count(len(removed))}?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        gone = {entry.get("id") for _index, entry in removed}
+        # In place, not a rebind: the schedule and cover lookups already
+        # in flight hold this list, not the attribute.
+        self.entries[:] = [e for e in self.entries if e.get("id") not in gone]
+        # Selection cleared, mode left on - same as a bulk status change:
+        # the common case after one batch is a second one.
+        self._selected_ids.clear()
+        self._save_entries()
+        self._refresh_grid()
+        show_undo_toast(
+            self, f"Deleted {self._entry_count(len(removed))} - Click to Undo",
+            lambda: self._restore_entries(removed),
+            on_redo=lambda ids=[e.get("id") for _i, e in removed]: self._delete_ids(ids))
+
+    def _delete_ids(self, ids):
+        """Delete by id with nothing asked - what Ctrl+Y re-applies. The
+        batch was already confirmed once; redo is an explicit request to
+        put it back as it was. It raises a fresh undo offer, so Ctrl+Z
+        still works after a redo."""
+        wanted = set(ids)
+        removed = [(index, entry) for index, entry in enumerate(self.entries)
+                   if entry.get("id") in wanted]
+        if not removed:
+            return
+        gone = {entry.get("id") for _index, entry in removed}
+        self.entries[:] = [e for e in self.entries if e.get("id") not in gone]
+        self._save_entries()
+        self._refresh_grid()
+        show_undo_toast(
+            self, f"Deleted {self._entry_count(len(removed))} - Click to Undo",
+            lambda: self._restore_entries(removed),
+            on_redo=lambda: self._delete_ids(ids))
+
+    def _restore_entries(self, removed):
+        """Put a deleted batch back, each record at the index it held."""
+        # Ascending, so each insert lands before the ones still to come
+        # and the list ends up in the order it was - and clamped, because
+        # another page can have shortened it since (_save_entries lets a
+        # delete made elsewhere stand).
+        for index, entry in sorted(removed, key=lambda pair: pair[0]):
+            self.entries.insert(min(index, len(self.entries)), entry)
+        # _save_entries re-reads the file and lets this page's own copy
+        # win for its own entry types, so putting the records back into
+        # self.entries is what writes them back.
+        self._save_entries()
+        self._refresh_grid()
+        return f"Restored {self._entry_count(len(removed))}"
+
+    # ------------------------------------------------------------------
     def _grid_is_narrowed(self) -> bool:
         """Whether the grid is showing less than the whole page.
 
@@ -1004,8 +1472,23 @@ class TrackerPage(GlassPage):
         for entry in self._visible_entries():
             grouped.setdefault(entry.get("status") or known_statuses[0], []).append(entry)
         extra_statuses = [s for s in grouped if s not in known_statuses]
-        return [(status, grouped[status])
-                for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
+        sections = [(status, grouped[status])
+                    for status in [*known_statuses, *extra_statuses] if grouped.get(status)]
+        if not self.SPLIT_SECTIONS_BY_TYPE:
+            return sections
+        # Films and shows share every status but nothing else - one is a
+        # single sitting, the other is a season and an episode number -
+        # so "Watching" holding both put two unlike things on one row.
+        split = []
+        for status, group in sections:
+            by_type = {entry_type: [] for entry_type in self.ENTRY_TYPES}
+            for entry in group:
+                by_type.setdefault(entry.get("type") or self.ENTRY_TYPES[0], []).append(entry)
+            for entry_type, entries in by_type.items():
+                if entries:
+                    split.append((f"{status} · {SECTION_TYPE_PLURAL.get(entry_type, entry_type)}",
+                                  entries))
+        return split
 
     def _refresh_grid(self, *_args):
         while self.grid_layout.count():
@@ -1013,6 +1496,11 @@ class TrackerPage(GlassPage):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+        # Emptied here, before the cards it names are deleted: every
+        # entry in it points at a widget this loop has just taken out of
+        # the layout, and repainting one of those afterwards is a call
+        # into a C++ object that is on its way out.
+        self._selection_cards = {}
 
         self._card_providers = anime_sites.streaming_provider_map()
 
@@ -1023,6 +1511,15 @@ class TrackerPage(GlassPage):
         narrowed = self._grid_is_narrowed()
 
         sections = self._sections()
+        # The selection can only ever hold what is on screen. A search, a
+        # filter, a re-sort or a status change that moved an entry out of
+        # the view all arrive here, and each drops whatever it hid - so
+        # "3 entries selected" always names three cards the user can see
+        # and check before pressing Set Status.
+        visible_ids = {entry.get("id") for _status, group in sections for entry in group}
+        self._selected_ids &= visible_ids
+        self._update_selection_bar()
+
         if not sections:
             if self._search_query():
                 message = f"Nothing here matches '{self.search_box.text().strip()}'."
@@ -1030,18 +1527,61 @@ class TrackerPage(GlassPage):
                 message = "Nothing matches the filter - clear it from the filter button."
             else:
                 message = f"No {self.TITLE.lower()} yet - click '+' to create one."
-            self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
+            # No row/column arguments: this layout became a QVBoxLayout
+            # when sections turned into sideways-scrolling rows, and the
+            # grid form left here raised TypeError on the one path that
+            # still used it - an empty page, or a search matching
+            # nothing. Raised inside a slot, which takes the process down
+            # rather than showing an error.
+            self.grid_layout.addWidget(QLabel(message, objectName="Muted"))
+            self.grid_layout.addStretch()
             return
 
-        row = 0
         for status, group in sections:
-            header = QLabel(f"{status} ({len(group)})", objectName="SectionTitle")
-            self.grid_layout.addWidget(header, row, 0, 1, GRID_COLS)
-            row += 1
-            for index, entry in enumerate(group):
-                card = self._build_card(entry)
-                self.grid_layout.addWidget(card, row + index // GRID_COLS, index % GRID_COLS)
-            row += (len(group) + GRID_COLS - 1) // GRID_COLS
+            self.grid_layout.addWidget(
+                QLabel(f"{status} ({len(group)})", objectName="SectionTitle"))
+            self.grid_layout.addWidget(self._build_section_strip(group))
+        # Somewhere for the leftover height to go. The page's scroll area
+        # resizes this widget to the viewport, and with nothing elastic in
+        # the layout that spare height is handed to whatever can take it -
+        # measured: one section on a full-height page stretched its own
+        # header from 23px to 272px, leaving the row stranded mid-page.
+        # Two sections hid it, because there was no spare height left.
+        self.grid_layout.addStretch()
+
+    def _build_section_strip(self, group):
+        """One section's cards on a single line that scrolls sideways.
+
+        Its own scroll area per section, not one for the page: sections
+        are different lengths, and a shared sideways scroll would drag a
+        short section off screen to reach the end of a long one.
+
+        Vertical wheel is left alone (the bar is off, so Qt hands the
+        event up to the page, which is what should scroll); Shift+wheel
+        and the bar itself move the row."""
+        strip = QWidget(objectName="Bare")
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
+        strip_layout.setSpacing(14)
+        for entry in group:
+            strip_layout.addWidget(self._build_card(entry))
+        strip_layout.addStretch()
+
+        area = QScrollArea(objectName="Bare")
+        area.setWidget(strip)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.viewport().setAutoFillBackground(False)
+        strip.setAutoFillBackground(False)
+        # Height is the cards' own, plus room for the bar when it appears.
+        # Without a fixed height the area claims the whole page and one
+        # section fills the window.
+        strip.adjustSize()
+        area.setFixedHeight(strip.sizeHint().height()
+                            + area.horizontalScrollBar().sizeHint().height())
+        return area
 
     def _build_card(self, entry):
         card = Card(hoverable=True)
@@ -1056,6 +1596,21 @@ class TrackerPage(GlassPage):
         cover.setFixedSize(*POSTER_SIZE)
         cover.setPixmap(images.thumbnail_or_avatar(entry.get("cover_path"), entry["title"], POSTER_SIZE))
         card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        if self._select_mode:
+            # A child of the cover at a fixed corner offset, not a row in
+            # the card's layout: a layout row would make every card taller
+            # the moment the mode came on, so entering selection would
+            # reflow the whole page under the pointer.
+            badge = QLabel(cover)
+            badge.setFixedSize(22, 22)
+            badge.move(8, 8)
+            # The card is what handles the click; a badge that took the
+            # press would leave a 22px hole in the middle of its own
+            # target.
+            badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            self._selection_cards[entry.get("id")] = (card, badge)
+            self._paint_selection(card, badge, entry.get("id") in self._selected_ids)
 
         title = QLabel(entry["title"], objectName="CardTitle")
         title.setWordWrap(True)
@@ -1089,9 +1644,15 @@ class TrackerPage(GlassPage):
                 card_layout.addLayout(self._bump_controls(
                     entry, "Last Watched Episode", self._bump_watched_episode))
 
-        card.clicked.connect(lambda en=entry: self._open_entry(en))
+        if self._select_mode:
+            card.clicked.connect(lambda en_id=entry.get("id"): self._toggle_selected(en_id))
+        else:
+            card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
-        if not self._grid_is_narrowed():
+        # Dragging is off while selecting as well as while the grid is
+        # narrowed: both a drag and a pick want the same left press, and
+        # attaching the drag also moves `clicked` from press to release.
+        if not self._grid_is_narrowed() and not self._select_mode:
             self._drag_reorder.attach(card, entry.get("id"))
         return card
 
@@ -1157,6 +1718,11 @@ class TrackerPage(GlassPage):
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_form(edit=True, entry=entry))
+        # The second way into selection mode, from the card the user is
+        # already pointing at - the toolbar button alone means noticing a
+        # word at the far end of the row before knowing to look for it.
+        if not self._select_mode:
+            menu.addAction("Select", lambda: self._set_select_mode(True, entry.get("id")))
         if entry.get("type") in ("Anime", "Series") and _entry_imdb_id(entry):
             menu.addAction("Sync Progress", lambda: self._sync_progress(entry))
         # No Move Up/Move Down: every page reorders by dragging a card,
@@ -1168,11 +1734,20 @@ class TrackerPage(GlassPage):
     def _not_found_message(self, reason: str) -> str:
         """What to say when a sync found no progress.
 
-        The one cause the user can act on is a Stremio account that was
+        The causes the user can act on are a Stremio account that was
         never connected - saying "not found" for that made the app look
         broken rather than unconfigured, which cost its owner a long
-        time before anyone worked it out."""
-        if REASON_NO_STREMIO_ACCOUNT in set((reason or "").split(",")):
+        time before anyone worked it out - and one that was connected and
+        has since been rejected, which reads identically on screen and is
+        worse, because it starts working and then stops."""
+        codes = set((reason or "").split(","))
+        if REASON_STREMIO_AUTH_FAILED in codes:
+            return ("Stremio rejected the saved sign-in, so it can't be asked "
+                    "what you've watched - this is not about this title. It "
+                    "happens after a password change or a \"log out "
+                    "everywhere\". Reconnect the account in Settings > "
+                    "Stremio Account and sync again.")
+        if REASON_NO_STREMIO_ACCOUNT in codes:
             return ("No Stremio account is connected, so there is nothing to "
                     "read your progress from. Connect one in Settings > "
                     "Stremio Account - it's the only service that publishes "
@@ -1250,6 +1825,14 @@ class TrackerPage(GlassPage):
             try:
                 result = stremio.fetch_watch_progress(imdb_id, auth_key)
                 source = SOURCE_STREMIO if result else ""
+            except stremio.AuthFailed:
+                # The saved key is dead, not the title missing. This used
+                # to land in the bare except below and read as "not in
+                # your library" - for every entry, indefinitely, because
+                # Stremio is the only source and nothing retries a wrong
+                # answer that never looked wrong.
+                reasons.append(REASON_STREMIO_AUTH_FAILED)
+                result = None
             except Exception:
                 result = None
         else:
@@ -1284,6 +1867,9 @@ class TrackerPage(GlassPage):
             if silent and (entry.get("progress"), entry.get("latest_available")) != before:
                 self._sync_changed = True
 
+        if silent and REASON_STREMIO_AUTH_FAILED in set((reason or "").split(",")):
+            self._stremio_auth_broken = True
+
         if not silent:
             if not found:
                 QMessageBox.information(self, "Sync Progress",
@@ -1304,7 +1890,31 @@ class TrackerPage(GlassPage):
             self._refresh_grid()
             changed, self._sync_changed = self._sync_changed, False
             run, self._sync_batch_run = self._sync_batch_run, 0
+            # A refresh has a toast of its own to say this through, and
+            # two toasts share one corner - so only the arrival sync,
+            # which has none, raises its own here.
+            if self._stremio_auth_broken and self._refresh_toast is None:
+                self._stremio_auth_broken = False
+                self._warn_stremio_auth_once()
             self._refresh_step_done(run, changed)
+
+    def _warn_stremio_auth_once(self, toast=None):
+        """Say that the saved Stremio session has stopped being accepted.
+
+        Given a live "Updating..." toast, it finishes into that one - the
+        refresh was asked for, so it answers every time and must not leave
+        the sticky toast up. On the silent arrival path there is nothing
+        to finish, so a fresh toast is raised, once per app run (see
+        _auth_warning_shown)."""
+        global _auth_warning_shown
+        if toast is not None:
+            _auth_warning_shown = True
+            finish_toast(toast, self, _STREMIO_AUTH_TOAST, 6000)
+            return
+        if _auth_warning_shown:
+            return
+        _auth_warning_shown = True
+        show_toast(self, _STREMIO_AUTH_TOAST, 6000)
 
     def _save_entries(self):
         """Write this page's entries back without discarding another
@@ -1395,10 +2005,35 @@ class TrackerPage(GlassPage):
         defer_grid_rebuild(self._refresh_grid)
 
     def _delete_entry(self, entry):
-        if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") == QMessageBox.StandardButton.Yes:
-            self.entries.remove(entry)
-            self._save_entries()
-            self._refresh_grid()
+        if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") != QMessageBox.StandardButton.Yes:
+            return
+        # By id, not list.remove(): two entries compare equal to Python
+        # the moment their fields match, and the index is wanted anyway so
+        # undo can put this one back where it was rather than at the end.
+        index = next((i for i, e in enumerate(self.entries)
+                      if e.get("id") == entry.get("id")), None)
+        if index is None:
+            return
+        # The whole record, copied before it goes: an entry carries far
+        # more than the form shows - cover, link, the cached schedule and
+        # its checked-at stamp, the resolved MangaDex/site ids - and undo
+        # has to give all of it back, not just re-add a title.
+        removed = copy.deepcopy(self.entries.pop(index))
+        self._save_entries()
+        self._refresh_grid()
+        show_undo_toast(self, f"Deleted '{removed['title']}' - Click to Undo",
+                        lambda: self._restore_entry(removed, index),
+                        on_redo=lambda: self._delete_ids([removed.get("id")]))
+
+    def _restore_entry(self, entry, index):
+        # _save_entries re-reads the file and lets this page's own copy
+        # win for its own entry types, so putting the record back into
+        # self.entries is what writes it back - and it lands in the list
+        # where it was, which is the order the grid draws.
+        self.entries.insert(min(index, len(self.entries)), entry)
+        self._save_entries()
+        self._refresh_grid()
+        return f"Restored '{entry['title']}'"
 
     # ------------------------------------------------------------------
     def _open_form(self, edit=False, entry=None):
@@ -1451,6 +2086,7 @@ class MangaPage(TrackerPage):
 class SeriesPage(TrackerPage):
     DATA_FILE = "series.json"
     ENTRY_TYPES = ("Series", "Movie")
+    SPLIT_SECTIONS_BY_TYPE = True
     TITLE = "Movies & Series"
     TYPE_OPTIONS = ["Series", "Movie"]
     MEDIUM = release_schedule.MEDIUM_SERIES
@@ -1604,6 +2240,17 @@ class EntryForm(QDialog):
         # on - see shows_last_watched.
         self.show_watched_check.setChecked(shows_last_watched(entry) if entry else False)
         self.show_watched_check.toggled.connect(self._update_progress_visibility)
+        # Ticking it on starts the numbers at zero. The spinners below are
+        # seeded from the entry's stored progress, which for an entry that
+        # was *not* already showing a last-watched number is the released
+        # figure the app filled in on its own - so ticking the box used to
+        # reveal "S2 E12" as if it were how far you had watched, and
+        # saving straight after would have written that down as yours.
+        # Zeroed only while the seeded numbers are still that borrowed
+        # kind: once they have been shown or typed, they are answers and
+        # this leaves them alone.
+        self._watched_seeded_from_release = not (shows_last_watched(entry) if entry else False)
+        self.show_watched_check.toggled.connect(self._zero_unowned_watched_values)
         form.addWidget(self.show_watched_check)
 
         self.chapter_row = QWidget()
@@ -1763,13 +2410,13 @@ class EntryForm(QDialog):
     def _update_labels(self):
         if self._provider() == "stremio":
             self.title_label.setText("Title (type to search Stremio)")
-            self.url_label.setText("Stremio link (opens Stremio on double-click)")
+            self.url_label.setText("Stremio link (opens Stremio)")
         else:
             self.title_label.setText("Title (type to search your reading websites)")
         is_video = self.type_box.currentText() in VIDEO_TYPES
         self.site_label.setText(
-            "Video Website (opens directly on double-click)" if is_video
-            else "Reading Website (opens directly on double-click)")
+            "Video Website (opens directly)" if is_video
+            else "Reading Website (opens directly)")
         # The Stremio line's visibility is not set here any more. It used
         # to be, on `is_video` alone, and this runs *after*
         # _update_progress_visibility in __init__ - so it re-showed the
@@ -1881,8 +2528,16 @@ class EntryForm(QDialog):
         # a background thread (.claude/rules/integrations.md).
         catalogs = self._search_catalogs()
         self._searched_several_types = len(catalogs) > 1
-        threading.Thread(target=self._search_worker,
-                         args=(provider, text, seq, catalogs), daemon=True).start()
+        # Not a bare thread, for the same reason the Video Website lookup
+        # below isn't one: this fires per debounce pause, so typing faster
+        # than a search answers used to run several concurrently with
+        # nothing capping them - and a dual-catalog video search
+        # (_search_catalogs) is two Cinemeta requests each, not one.
+        # submit_latest drops a superseded search before it ever runs; the
+        # seq check in _apply_search_results stays as the second line of
+        # defence for the one that was already running.
+        lookup_pool.submit_latest("entry-search", self._search_worker,
+                                  provider, text, seq, catalogs)
         # The Video Website is searched on its own, off what's typed,
         # rather than only when a Cinemeta suggestion is picked: the site
         # knows its own catalogue, and a title Cinemeta spells
@@ -1912,15 +2567,23 @@ class EntryForm(QDialog):
         return [(t, STREMIO_CATALOG_BY_TYPE.get(t, "series")) for t in types]
 
     def _search_worker(self, provider, text, seq, catalogs=()):
-        if provider == "stremio":
+        # Must never raise. On a bare thread a failure only lost this one
+        # search; on the shared submit_latest worker it would also be the
+        # last thing this dialog said, leaving "Searching..." on screen
+        # forever. Emit an empty result instead - the status line then
+        # reads "No matches", which is both true and dismissable.
+        try:
+            if provider == "stremio":
+                results = []
+                for entry_type, catalog in catalogs:
+                    # Each result remembers which catalog answered, because
+                    # that is what the entry's Type has to become.
+                    results.extend({**r, "_entry_type": entry_type}
+                                   for r in stremio.search(text, catalog))
+            else:
+                results = manga_sites.search_all(text)
+        except Exception:
             results = []
-            for entry_type, catalog in catalogs:
-                # Each result remembers which catalog answered, because
-                # that is what the entry's Type has to become.
-                results.extend({**r, "_entry_type": entry_type}
-                               for r in stremio.search(text, catalog))
-        else:
-            results = manga_sites.search_all(text)
         self._signals.results.emit(provider, results, seq)
 
     def _video_site_options(self):
@@ -1982,7 +2645,11 @@ class EntryForm(QDialog):
         # it out ("No matches from Stremio", "...from your manga
         # websites") only invited the question of why that one was asked.
         if labels:
-            self.search_status_label.setText(f"{len(labels)} match(es) - pick one below")
+            # "1 Match found" / "4 Matches found". The dropdown opens on
+            # its own right below, so the old "- pick one below" was
+            # telling the user what they were already looking at.
+            noun = "Match" if len(labels) == 1 else "Matches"
+            self.search_status_label.setText(f"{len(labels)} {noun} found")
             self.title_combo.showPopup()
         else:
             self.search_status_label.setText("No matches - you can still save this title as-is")
@@ -2024,6 +2691,17 @@ class EntryForm(QDialog):
         self.selected_cover_path = None
 
         if result.get("_provider") == "manga_sites":
+            # A different page than the number on screen came from means
+            # that number belongs to a different manga. Measured: typing
+            # "Kingdom (WAN)" auto-applies plain "Kingdom" the moment the
+            # first word is a full match, whose page lookup then wrote 798
+            # into the field; the real pick (884) arrived after and was
+            # refused by the "don't overwrite what's already there" rule
+            # below, so the entry read 798 for a manga on chapter 884.
+            # Cleared here so the lookup for the page actually picked has
+            # somewhere to land.
+            if result["url"] != self.url_edit.text():
+                self.chapter_spin.setValue(0)
             self.url_edit.setText(result["url"])
             idx = self.site_box.findData(result["site_id"])
             if idx >= 0:
@@ -2190,10 +2868,11 @@ class EntryForm(QDialog):
         # can't tell one pending lookup from another.
         identity = f"{site_id}\n{title}"
         self._pending_video_identity = identity
-        # Doesn't name the site: which one is being asked is already in the
-        # dropdown right there, and naming it made the line different for
-        # every site while saying the same thing.
-        self._set_status_part("site", "Searching...")
+        # Nothing on screen while it runs. The line used to say
+        # "Searching...", which added a second thing moving under a field
+        # the user isn't waiting on - the page url fills itself in, and
+        # only its *failure* is worth a word (see _on_video_url_resolved).
+        self._set_status_part("site", "")
         # Not a bare thread: this fires per debounced keystroke, so
         # typing a title used to start one unbounded resolution after
         # another, each opening its own connections while its result was
@@ -2257,6 +2936,20 @@ class EntryForm(QDialog):
             # never count as verified.
             self._progress_verified = False
             self._autofilled_progress = True
+
+    def _zero_unowned_watched_values(self, checked):
+        """First tick of Show Last Watched clears the borrowed numbers.
+
+        Blocked signals: these spinners report a hand edit by their
+        valueChanged, and zeroing them is not the user saying they have
+        watched nothing - it is the form admitting it does not know."""
+        if not checked or not self._watched_seeded_from_release:
+            return
+        self._watched_seeded_from_release = False
+        for spin in (self.season_spin, self.episode_spin, self.watched_chapter_spin):
+            spin.blockSignals(True)
+            spin.setValue(0)
+            spin.blockSignals(False)
 
     def _on_progress_hand_edited(self, _value):
         self._progress_verified = True

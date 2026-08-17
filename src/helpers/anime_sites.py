@@ -4,7 +4,7 @@ Same deal as manga_sites.py, and for the same reason: a site is just a
 name + base URL, and `search_site` tries a handful of known search-
 endpoint shapes against it, so adding a site in Settings needs no
 hand-typed URL template. What this buys is the point of the module -
-double-clicking a tracked Anime entry lands on *that title's own page*
+opening a tracked Anime entry lands on *that title's own page*
 on the site, never on a search-results listing.
 
 The shapes here were found by fetching the real sites and reading what

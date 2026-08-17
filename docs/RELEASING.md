@@ -94,7 +94,10 @@ actually contains, and added there — it is not inherited from
 git checkout main
 git read-tree -u --reset development    # main's tree becomes development's
 python packaging/build.py               # build the release exe from that source
+python packaging/check_release_notes.py # fail if version has no "what's new" notes
 git add -f Atomic.exe                   # -f: gitignored, and tracked only here
+git rm --cached docs/ROADMAP.md         # development-only; never ships
+rm -f docs/ROADMAP.md
 git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"
 git push origin main && git push origin v1.1
@@ -107,6 +110,25 @@ Check the release commit actually contains the executable before pushing
 — `git ls-tree main -- Atomic.exe` — because a release without one leaves
 `contents/Atomic.exe?ref=v1.1` returning nothing and every update
 attempt failing.
+
+Then check it is the *right* executable. 1.4 first shipped a binary
+built before the last two commits: it was missing `src/filter_icon.png`
+altogether. This is now caught automatically: `packaging/build.py`
+verifies the produced exe contains every file listed in `Atomic.spec`'s
+`datas` and fails loudly if not. It also warns if PyInstaller's work
+directory is older than the source tree (a sign of cache no-op). A
+"succeeded" build log proves nothing — PyInstaller caches, and a no-op
+rebuild silently re-copies the previous binary, but the build script
+catches this.
+
+**A release cannot be tagged without its notes.**
+`packaging/check_release_notes.py` refuses when `src/helpers/whats_new.py`
+has no `NOTES` entry for the version about to ship. 1.4 went out without
+one, so everyone updating into it opened an empty dialog — and
+`set_last_seen_version` recorded the version as seen regardless, so there
+was no second chance to show them. It reads the version itself: two-part
+`APP_VERSION` is the release being made, three-part is a development
+build heading for the next one.
 
 ### Marker tags
 

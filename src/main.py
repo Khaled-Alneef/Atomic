@@ -17,25 +17,30 @@ the slide direction immediately too - nothing to keep in sync by hand.
 """
 
 import sys
+import threading
 from pathlib import Path
 
-from helpers import (app_settings, images, logs, native_cursor, startup,
-                     storage, theme, whats_new)
+from helpers import (app_settings, global_search, images, logs, native_cursor,
+                     startup, storage, theme, updater, whats_new)
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
+    QObject,
     QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
+    QRect,
     QSize,
     Qt,
     QTimer,
+    pyqtSignal as Signal,
 )
 from PyQt6.QtGui import QCursor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QMessageBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -49,7 +54,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import release_stale_hover_cursors, use_hover_cursor
+from helpers.widgets import (release_stale_hover_cursors, show_toast,
+                             take_live_redo, take_live_undo, use_hover_cursor)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -101,11 +107,51 @@ ADD_ITEMS = [
 ANIM_DURATION_MS = 220
 LOGO_HEIGHT = 120
 
+# How long after the window is up the startup update check waits before
+# asking GitHub. Launch is already the busiest moment this app has - the
+# image prewarm is decoding covers and whichever page is showing may be
+# firing its own backfill through lookup_pool - and nobody is waiting on
+# this answer, so it goes last rather than competing for the connection.
+UPDATE_CHECK_DELAY_MS = 4000
+
+# The accent dot drawn over the Settings button while an update is
+# waiting, and how far in from the button's top-right corner it sits.
+# 5, not 7: the collapsed rail is only 36px of button, and at 7 the dot
+# landed on the gear glyph's top-right edge rather than beside it
+# (measured off a grab of the folded sidebar).
+UPDATE_DOT_SIZE = 8
+UPDATE_DOT_MARGIN = 5
+
+# How long the window has to sit still before its size/position is
+# written out. A resize or a drag emits a continuous stream of events -
+# saving on each one would rewrite settings.json dozens of times per
+# gesture - and nothing reads the value again until the next launch, so
+# there is no reason to be prompt. closeEvent flushes whatever is still
+# pending, so a window closed mid-gesture loses nothing.
+GEOMETRY_SAVE_DELAY_MS = 400
+
+# Room kept above a restored window's client area when clamping it onto
+# a screen. geometry() is the client rectangle, so the title bar lives
+# *above* its top edge: clamping straight to available.y() would push
+# that bar off the screen and leave nothing to drag the window by, which
+# is the exact failure the clamp exists to prevent. Measured 31px on
+# this Windows 11 machine at 100% scale; 48 leaves headroom for larger
+# scale factors, and it only ever applies to a window being rescued from
+# off-screen coordinates.
+TITLE_BAR_ALLOWANCE = 48
+
 SIDEBAR_WIDTH = 220
 # Wide enough for the nav bullets and the +/gear buttons once the text
 # labels are dropped (see _set_sidebar_collapsed).
 SIDEBAR_COLLAPSED_WIDTH = 68
 SIDEBAR_ANIM_MS = 180
+
+
+class _UpdateCheckSignals(QObject):
+    # The startup check runs off the UI thread; this carries its answer
+    # back onto it. Nothing but the update dict (or None) crosses - a
+    # failed check has nothing to say (see _update_check_worker).
+    found = Signal(object)
 
 
 class NavListWidget(QListWidget):
@@ -146,10 +192,57 @@ class NavListWidget(QListWidget):
         pass
 
 
+def _fit_to_available_screen(rect):
+    """`rect` moved, and shrunk if it has to be, until it sits wholly
+    inside the usable area of a screen that exists right now.
+
+    A geometry saved on a monitor that has since been unplugged is what
+    this is for: the coordinates still describe a perfectly valid
+    rectangle, just one nobody can see or reach, and restoring it as-is
+    opens Atomic somewhere off the desktop with no title bar to drag it
+    back by. The screen chosen is whichever one the saved rectangle
+    overlaps most, so a window that merely straddled a monitor edge stays
+    where the user put it; with no overlap anywhere - the unplugged
+    monitor - the primary screen takes it.
+
+    availableGeometry(), not geometry(): the taskbar's strip is not
+    somewhere a window should be restored underneath.
+    """
+    best = None
+    best_area = 0
+    for screen in QApplication.screens():
+        overlap = screen.availableGeometry().intersected(rect)
+        area = overlap.width() * overlap.height()
+        if area > best_area:
+            best, best_area = screen, area
+    if best is None:
+        best = QApplication.primaryScreen()
+    if best is None:
+        # No screens at all is not a real desktop state, but reporting a
+        # rectangle is still better than raising during startup.
+        return QRect(rect)
+    available = best.availableGeometry()
+    width = min(rect.width(), available.width())
+    height = min(rect.height(), available.height() - TITLE_BAR_ALLOWANCE)
+    x = min(max(rect.x(), available.x()), available.right() - width + 1)
+    y = min(max(rect.y(), available.y() + TITLE_BAR_ALLOWANCE),
+            available.bottom() - height + 1)
+    return QRect(x, y, width, height)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Atomic")
+        # Before the first resize()/setGeometry() below, because both
+        # deliver events that move/resizeEvent answer by starting this
+        # timer - built any later and startup raises AttributeError.
+        self._geometry_save_timer = QTimer(self)
+        self._geometry_save_timer.setSingleShot(True)
+        self._geometry_save_timer.timeout.connect(self._save_window_geometry)
+        # The size a profile with nothing saved opens at - see
+        # _restore_window_geometry, which overrides it for every launch
+        # after the first.
         self.resize(1280, 840)
         # The window explicitly owns the plain arrow, rather than leaving
         # it as "no cursor set". Without an explicit cursor anywhere in
@@ -183,6 +276,12 @@ class MainWindow(QMainWindow):
         self._cursor_watchdog.timeout.connect(self._cursor_watchdog_tick)
         self._cursor_watchdog.start(CURSOR_WATCHDOG_MS)
 
+        self._update_signals = _UpdateCheckSignals()
+        self._update_signals.found.connect(self._on_update_found)
+
+        self._restore_rect = None
+        self._open_maximized = self._restore_window_geometry()
+
         self._show_page("home", animate=False)
 
         # Application-wide, so it sees the container's own resize events
@@ -196,6 +295,9 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(SIDEBAR_WIDTH)
         self.sidebar = sidebar
         self._sidebar_collapsed = False
+        # Set before anything styles the Settings button, which reads it
+        # for its tooltip. Filled in by the startup update check.
+        self._pending_update_version = ""
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 20, 16, 16)
         layout.setSpacing(4)
@@ -299,7 +401,15 @@ class MainWindow(QMainWindow):
         self.add_btn.setFixedHeight(34)
         self.add_btn.setToolTip("Add")
         use_hover_cursor(self.add_btn)
-        self.add_btn.clicked.connect(lambda: self._show_add_menu(self.add_btn))
+        # setMenu, not clicked -> menu.exec(...): Qt then places the popup
+        # itself, on the screen the button is actually on. Positioning it
+        # by hand means mapToGlobal, which returns coordinates divided by
+        # the *other* screen's scale factor on a mixed-DPI pair - the same
+        # trap that once put toasts 200px off (.claude/rules/ui.md). The
+        # tracker's filter button is built this way for the same reason.
+        self._add_menu = QMenu(self)
+        self._add_menu.aboutToShow.connect(self._build_add_menu)
+        self.add_btn.setMenu(self._add_menu)
         layout.addWidget(self.add_btn)
 
         self.settings_btn = QPushButton(objectName="NavButton")
@@ -311,7 +421,32 @@ class MainWindow(QMainWindow):
         self._style_settings_btn()
         layout.addWidget(self.settings_btn)
 
+        # The "an update is waiting" marker: a plain accent dot in the
+        # button's corner, hidden until the startup check finds one. A
+        # child widget rather than a character appended to the button's
+        # text, because that text is drawn in the Segoe icon font at both
+        # sidebar widths and a dot glyph there is one more codepoint that
+        # can come out as a missing-glyph box on a machine without it.
+        # Transparent to the mouse so the button underneath keeps its own
+        # hover highlight and hand cursor (.claude/rules/ui.md - never
+        # leave a cursor set on something that isn't handling the click).
+        self._update_dot = QLabel(self.settings_btn)
+        self._update_dot.setFixedSize(UPDATE_DOT_SIZE, UPDATE_DOT_SIZE)
+        self._update_dot.setStyleSheet(
+            f"background: {theme.ACCENT}; border-radius: {UPDATE_DOT_SIZE // 2}px;")
+        self._update_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._update_dot.hide()
+
         return sidebar
+
+    def _position_update_dot(self):
+        """Top-right corner of the Settings button. Re-run on every resize
+        of that button (see eventFilter) rather than placed once: folding
+        the sidebar animates its width from 220 to 68, and a dot placed at
+        the old width would sit outside the collapsed rail."""
+        button = self.settings_btn
+        self._update_dot.move(
+            button.width() - UPDATE_DOT_SIZE - UPDATE_DOT_MARGIN, UPDATE_DOT_MARGIN)
 
     # ------------------------------------------------------------------
     def _style_nav_item(self, item, name, page_name):
@@ -347,7 +482,15 @@ class MainWindow(QMainWindow):
         self.settings_btn.setText(
             theme.SETTINGS_ICON if collapsed else f"  {theme.SETTINGS_ICON}   Settings")
         self.settings_btn.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
-        self.settings_btn.setToolTip("Settings" if collapsed else "")
+        # A waiting update outranks the usual tooltip at either width -
+        # the dot says something is there, this says what. Expanded, the
+        # button already reads "Settings", so there is otherwise nothing
+        # to add and the tooltip stays empty.
+        if self._pending_update_version:
+            self.settings_btn.setToolTip(
+                f"Atomic {self._pending_update_version} is available")
+        else:
+            self.settings_btn.setToolTip("Settings" if collapsed else "")
         # Drives the [collapsed="true"] QSS rule; Qt only re-evaluates
         # property-based selectors after an explicit unpolish/polish.
         self.settings_btn.setProperty("collapsed", collapsed)
@@ -415,14 +558,16 @@ class MainWindow(QMainWindow):
         ]
         app_settings.set_nav_order(order)
 
-    def _show_add_menu(self, anchor_btn):
+    def _build_add_menu(self):
+        """Rebuilt every time it opens, not once at startup: hiding a
+        section in Settings has to drop it from here without a restart,
+        the way it already does from the sidebar."""
+        self._add_menu.clear()
         hidden = set(app_settings.get_hidden_sections())
-        menu = QMenu(self)
         for label, page_name, action in ADD_ITEMS:
             if page_name in hidden:
                 continue
-            menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
-        menu.exec(anchor_btn.mapToGlobal(anchor_btn.rect().bottomLeft()))
+            self._add_menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
 
     def _add_via(self, page_name, action):
         self.navigate_to(page_name, animate=False)
@@ -430,6 +575,86 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self):
         SettingsDialog(self)
+
+    # ---- Startup update check -----------------------------------------
+    def schedule_update_check(self):
+        """Ask GitHub once per launch whether a newer release exists.
+
+        Until now check_for_update() was reachable only from Settings'
+        button, so anyone who never opened Settings never learned a new
+        version had shipped (roadmap #13). This changes nothing about
+        *how* the check is made - same function, same API contract - only
+        that something asks it without being told to.
+
+        Not while running from source: there is no executable to replace
+        (updater.is_frozen), so the offer would lead to Settings saying
+        exactly that - which is also why packaging/test_update.py has to
+        pretend the app is frozen to see any of this at all. Called after the window is showing, and after the
+        what's-new dialog has been dismissed - that one is modal, and a
+        timer started before it would fire into its nested event loop and
+        drop a toast on top of the dialog."""
+        if not updater.is_frozen():
+            return
+        QTimer.singleShot(UPDATE_CHECK_DELAY_MS, self._start_update_check)
+
+    def _start_update_check(self):
+        threading.Thread(target=self._update_check_worker, daemon=True).start()
+
+    def _update_check_worker(self):
+        """Off the UI thread, and silent on failure. The user did not ask
+        for this check, so no network, a rate-limited GitHub or a
+        malformed answer must produce nothing visible at all - the
+        Settings button still reports properly when it *is* asked. Broad
+        except on purpose: an uncaught exception in a worker dies silently
+        and would leave the signal unemitted."""
+        try:
+            found = updater.check_for_update()
+        except Exception:
+            found = None
+        self._update_signals.found.emit(found)
+
+    def _on_update_found(self, found):
+        if not found:
+            return
+        version = found.get("version") or ""
+        self._pending_update_version = version
+        self._update_dot.show()
+        self._position_update_dot()
+        self._style_settings_btn()
+        # First time this version is seen: a toast, which is enough to
+        # say it exists. Every launch after that, while it is still
+        # waiting: an alert, because the owner asked to be *reminded*
+        # rather than told once - a reminder nobody sees twice is not
+        # one. The dot carries it in between either way.
+        first_time = app_settings.get_notified_update_version() != version
+        app_settings.set_notified_update_version(version)
+        if first_time:
+            show_toast(self, f"Atomic {version} Is Available - Install It in Settings", 6000)
+            return
+        self._remind_about_update(version)
+
+    def _remind_about_update(self, version):
+        """The reminder, once per launch while an update is waiting.
+
+        A dialog and not a toast, unlike the first notice: this one asks
+        something (take it now, or not yet), and `.claude/rules/ui.md`
+        draws that line - dialogs are for what the user must decide or
+        must not miss. Answering "Later" leaves the dot and asks again
+        next launch; there is no "stop asking", because the way to stop
+        it is to install the update, which is one click away in the same
+        dialog."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Update Available")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"Atomic {version} is available.")
+        box.setInformativeText("You are running "
+                               f"{updater.APP_VERSION}. Updating keeps your entries.")
+        install = box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        theme.apply_dark_titlebar(box)
+        box.exec()
+        if box.clickedButton() is install:
+            self._open_settings()
 
     def refresh_current_page(self):
         """Re-create whichever page is currently showing, fresh from
@@ -453,6 +678,8 @@ class MainWindow(QMainWindow):
         # looking like a second sidebar had appeared out of nowhere.
         if obj is self.container and event.type() == QEvent.Type.Resize:
             self._fit_current_page()
+        if obj is self.settings_btn and event.type() == QEvent.Type.Resize:
+            self._position_update_dot()
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.BackButton:
                 self.go_back()
@@ -546,6 +773,138 @@ class MainWindow(QMainWindow):
         if state == Qt.ApplicationState.ApplicationActive:
             self._drain_override_cursor()
 
+    # ------------------------------------------------------------------
+    def _restore_window_geometry(self):
+        """Put the window back at the size and position it was last left
+        at, and answer whether it should open maximized.
+
+        True when nothing has been saved: opening maximized is what every
+        launch did before this existed, so a first-ever run is unchanged
+        (1280x840 restored size, shown maximized).
+
+        The saved rectangle is never trusted as-is - see
+        _fit_to_available_screen for why the monitor it was saved on may
+        not be there any more."""
+        saved = app_settings.get_window_geometry()
+        if not saved:
+            self._restore_rect = None
+            return True
+        self._restore_rect = _fit_to_available_screen(
+            QRect(saved["x"], saved["y"], saved["width"], saved["height"]))
+        # Applied here so the window is never painted at a default
+        # position first; show_remembered applies it a second time, which
+        # is the pass that actually lands exactly - see there.
+        self.setGeometry(self._restore_rect)
+        return saved["maximized"]
+
+    def _save_window_geometry(self):
+        """Write the restored size/position plus whether the window is
+        maximized, for the next launch to reopen with.
+
+        Only a window that is genuinely normal reports a rectangle worth
+        storing. While maximized, the restored rectangle is Windows'
+        own bookkeeping rather than anything that was asked for, and on
+        a fractional-scale display it reads back a few pixels off what
+        was restored into it - re-saving it each launch is how a
+        deliberate 900x700 walked down to 895x682 in three launches
+        (measured). So a maximized window updates the flag and keeps the
+        size it was last given by hand.
+
+        Nothing at all is written while minimized or full screen:
+        neither is a size anyone chose, and what is already stored is. A
+        minimized window reports an off-screen position on Windows, and
+        full screen is an F11 mode rather than a shape to reopen at."""
+        if self.isMinimized() or self.isFullScreen():
+            return
+        if self.isMaximized():
+            saved = app_settings.get_window_geometry()
+            if saved:
+                kept = self._restored_rect_for_current_screen(
+                    QRect(saved["x"], saved["y"],
+                          saved["width"], saved["height"]))
+                if saved["maximized"] and kept == QRect(
+                        saved["x"], saved["y"], saved["width"], saved["height"]):
+                    return  # nothing has changed - don't rewrite the file
+                app_settings.set_window_geometry(kept.x(), kept.y(),
+                                                 kept.width(), kept.height(),
+                                                 True)
+                return
+            # Nothing stored yet - a first-ever launch, which opens
+            # maximized. Its restored rectangle is the 1280x840 fallback
+            # and is worth keeping, so un-maximizing later has somewhere
+            # sensible to go.
+            rect = self.normalGeometry()
+        else:
+            # geometry(), the rectangle setGeometry takes back unchanged
+            # (measured: stable across four apply-and-read cycles on both
+            # monitors). normalGeometry matches it exactly here anyway.
+            rect = self.geometry()
+        # Invalid until the window has been laid out once; a save fired
+        # in that window would store an empty box that
+        # get_window_geometry then has to throw away.
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        app_settings.set_window_geometry(rect.x(), rect.y(),
+                                         rect.width(), rect.height(),
+                                         self.isMaximized())
+
+    def _restored_rect_for_current_screen(self, rect):
+        """`rect` centred on the screen this window is actually on, if it
+        describes somewhere else entirely.
+
+        A maximized window has no position of its own worth storing, so
+        the stored restored rectangle is also what decides which monitor
+        the next launch maximizes onto (showMaximized fills the screen
+        the window is already on). Left alone, maximizing on the second
+        monitor and relaunching reopened on the first."""
+        screen = self.screen()
+        if screen is None:
+            return rect
+        available = screen.availableGeometry()
+        if available.intersects(rect):
+            return rect
+        moved = QRect(rect)
+        moved.moveCenter(available.center())
+        return _fit_to_available_screen(moved)
+
+    def show_remembered(self):
+        """Open the window the way it was last left - maximized, or at
+        the restored size and position saved from the last session.
+
+        The geometry is applied a second time here, after show(), on
+        purpose. A rectangle set on a window with no native frame yet
+        comes back changed: measured on this two-monitor setup (125%
+        primary, 100% secondary), asking for 300,200 900x700 before
+        show() put 301,206 898x694 on screen - and since what is on
+        screen is what gets saved, every launch nudged the window 6px
+        further down and 6px smaller, reaching 895x682 by the third.
+        The same call once the window exists is exact and stays exact
+        when repeated.
+
+        Plain showMaximized() rather than theme.without_window_animation:
+        that guard is for a *visible* window changing state, where
+        Windows zooms the maximize out from the restored size and briefly
+        paints it. Nothing is on screen yet to zoom from - the same
+        reasoning start_fullscreen records."""
+        if self._open_maximized:
+            self.showMaximized()
+            return
+        self.show()
+        if self._restore_rect is not None:
+            self.setGeometry(self._restore_rect)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
+
+    def closeEvent(self, event):
+        # Flush rather than wait: the debounce is still pending after a
+        # window that was dragged or resized and then closed straight
+        # away, and there is no later chance to write it.
+        self._geometry_save_timer.stop()
+        self._save_window_geometry()
+        super().closeEvent(event)
+
     def start_fullscreen(self):
         """Open straight into full screen, for a sign-in launch with
         Settings > Startup > "Fullscreen mode when launch on startup" on.
@@ -596,11 +955,74 @@ class MainWindow(QMainWindow):
         if event.key() == Qt.Key.Key_F11:
             self.toggle_fullscreen()
             return
-        # Escape only means "leave full screen" while in it - otherwise it
-        # is left alone, so it keeps closing dialogs and menus as usual.
-        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
-            self.exit_fullscreen()
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_F:
+                # The page's own search box, not the global panel - F is
+                # "find in this list" everywhere else too.
+                box = getattr(self._current_page, "search_box", None)
+                if box is not None:
+                    box.setFocus()
+                    box.selectAll()
+                return
+            if event.key() == Qt.Key.Key_Y:
+                # Redo: do again whatever Ctrl+Z just undid. Only ever
+                # what was last undone - see widgets.take_live_redo.
+                redo = take_live_redo()
+                if redo is not None:
+                    redo()
+                else:
+                    show_toast(self, "Nothing To Redo")
+                return
+            if event.key() == Qt.Key.Key_Z:
+                # Undo means the offer that is on screen right now, not a
+                # history of its own - see widgets.take_live_undo.
+                toast = take_live_undo()
+                if toast is not None:
+                    toast.trigger_undo()
+                else:
+                    show_toast(self, "Nothing To Undo")
+                return
+            if event.key() == Qt.Key.Key_N:
+                # The same menu the + button opens, at the same place -
+                # setMenu means Qt positions it, so this is one call and
+                # no geometry maths (see _show_add_menu's comment).
+                self.add_btn.showMenu()
+                return
+            if event.key() == Qt.Key.Key_Comma:
+                self._open_settings()
+                return
+            if Qt.Key.Key_1 <= event.key() <= Qt.Key.Key_9:
+                # Sidebar order, not a fixed map: the sidebar is
+                # drag-to-reorder and hideable, so Ctrl+3 has to mean the
+                # third row the user can actually see. Home is row 1.
+                pages = ["home", *(page for _label, page in visible_nav_items())]
+                index = event.key() - Qt.Key.Key_1
+                if index < len(pages):
+                    self.navigate_to(pages[index])
+                return
+        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_K):
+            # Ctrl+K rather than Ctrl+F: F belongs to the page's own
+            # search box (see item #17), and K is what every app with a
+            # "search everything" panel binds it to.
+            self.open_global_search()
             return
+        if event.key() == Qt.Key.Key_Escape:
+            # A search box being narrowed to nothing is the thing most
+            # worth escaping from, so it wins over leaving full screen -
+            # and only when there is actually something in it, so Escape
+            # keeps its usual meaning the rest of the time.
+            box = getattr(self._current_page, "search_box", None)
+            if box is not None and box.text():
+                box.clear()
+                self._current_page.setFocus()
+                return
+            # Otherwise Escape only means "leave full screen" while in
+            # it; left alone otherwise, so it keeps closing dialogs and
+            # menus as usual.
+            if self.isFullScreen():
+                self.exit_fullscreen()
+                return
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -619,6 +1041,23 @@ class MainWindow(QMainWindow):
         self._history.append(page_name)
         self._history_index += 1
         self._show_page(page_name, direction=self._direction_between(current, page_name), animate=animate)
+
+    def open_global_search(self, initial=""):
+        """Ctrl+K, from any page: go to Home and put the cursor in its
+        search field.
+
+        Home rather than a panel over whatever page is showing, because
+        Home is where the field lives now - one search box, in one place,
+        reached from everywhere."""
+        self.navigate_to("home")
+        page = self._current_page
+        field = getattr(page, "search_bar", None)
+        if field is None:
+            return
+        field.setFocus()
+        if initial:
+            field.setText(initial)
+            page._search_bar_typed(initial)
 
     def go_back(self):
         if self._history_index > 0:
@@ -700,6 +1139,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_current_page()
+        self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
 
 
 def _prewarm_image_specs():
@@ -751,7 +1191,7 @@ def main():
     if startup.launched_on_startup() and app_settings.get_fullscreen_on_startup():
         window.start_fullscreen()
     else:
-        window.showMaximized()
+        window.show_remembered()
     # Not just shown but actually brought forward. Launched normally this
     # is what already happens; launched by the updater's relaunch it is
     # not, and the window would otherwise sit behind everything blinking
@@ -766,6 +1206,10 @@ def main():
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())
+    # Last, and on its own delay: the one thing here nobody is waiting
+    # for. After whats_new deliberately - that dialog is modal, so a
+    # timer armed before it would tick inside its nested event loop.
+    window.schedule_update_check()
     sys.exit(app.exec())
 
 

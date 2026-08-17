@@ -31,9 +31,21 @@ Set `APP_VERSION` to the two-part number and rebuild **first** (see the
 holds, executable included, so a stale dev-numbered exe would ship as
 the release.
 
+The exe is gitignored on `development`, so `read-tree` carries no
+executable and the checkout deletes any untracked one sitting in the
+tree - build the release exe *on `main`*, from the source the release
+actually contains (`docs/RELEASING.md` is the long form).
+`docs/ROADMAP.md` is development-only and never ships: drop it from
+every snapshot.
+
 ```
+rm -f Atomic.exe                        # untracked here; checkout refuses otherwise
 git checkout main
 git read-tree -u --reset development    # main's tree becomes development's
+python packaging/build.py               # build the release exe from that source
+python packaging/check_release_notes.py # fail if this version has no notes
+git add -f Atomic.exe                   # gitignored, so -f is required
+git rm --cached docs/ROADMAP.md && rm -f docs/ROADMAP.md
 git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"
 git push origin main && git push origin v1.1
@@ -42,6 +54,23 @@ git checkout development
 
 `main` and `development` share no ancestry (`main` was restarted at 1.0
 as a single squashed commit) - never merge, always snapshot.
+
+**Prove the exe belongs to the tree you are tagging, and notes are written, before pushing.**
+1.4 shipped an executable built before the last two commits - it was
+missing `src/filter_icon.png` entirely. This is now caught automatically:
+`packaging/build.py` verifies the produced exe contains every file
+listed in `Atomic.spec`'s `datas` and fails loudly if the build is stale
+or incomplete. A "succeeded" build log proves nothing — PyInstaller
+caches aggressively — but the build script now enforces verification.
+
+`packaging/check_release_notes.py` is the other gate: no `NOTES` entry
+for the version about to ship, no tag. 1.4 shipped without one and
+recorded itself as seen anyway, so its notes could never be shown to
+anyone who had already updated. It works out the version itself -
+two-part `APP_VERSION` means that release is the one being made,
+three-part means a development build heading for the next one, and
+reading the two-part case as "the one after" would demand notes for 1.6
+while shipping 1.5.
 
 ## The VDD
 

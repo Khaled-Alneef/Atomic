@@ -11,7 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, QRect, QTimer, Qt, pyqtSignal,
+    QEasingCurve, QEvent, QParallelAnimationGroup, QPropertyAnimation, QRect,
+    QTimer, Qt, pyqtSignal,
 )
 from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import (
@@ -19,11 +20,13 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import child_process, images, launchers, nav_config, storage, theme
+from helpers import (child_process, global_search, images, launchers,
+                     nav_config, storage, theme)
 from helpers.widgets import (
     Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
+    search_field,
 )
-from windows.link_grid import open_link_entry
+from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
     IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress,
     open_tracker_entry, shows_last_watched,
@@ -46,6 +49,14 @@ TRACKER_PREVIEW_LIMIT = 6
 SERIES_PREVIEW_LIMIT = 6
 GAMES_PREVIEW_LIMIT = 6
 QUICK_LIST_LIMIT = 5
+
+# The search field's width here. Wider than a page's own 220px filter box
+# because it searches everything rather than one list, and capped so it
+# stays a field rather than a banner across a 2048px display.
+SEARCH_BAR_WIDTH = 520
+# What it may shrink to before the page would rather clip it - narrow
+# enough that a 1000px window still shows a usable field.
+SEARCH_BAR_MIN_WIDTH = 240
 
 HERO_CONTENT_WIDTH = 620
 HERO_SLIDE_LIMIT = 4
@@ -213,12 +224,51 @@ class HomePage(GlassPage):
         # actually need scrolling (see scroll_area's always_show_vbar).
         panel_layout.addWidget(scroll_area(body, always_show_vbar=True))
 
+        # Greeting on the left, the app-wide search on the same line.
+        # Only this page carries the field: it searches everything, and
+        # Home is the page that is already about everything. Ctrl+K
+        # reaches the same panel from anywhere else.
+        header_row = QHBoxLayout()
         header = QVBoxLayout()
         header.setSpacing(2)
         self.greeting_label = QLabel(f"{_greeting()} \U0001F44B", objectName="PanelTitle")
         header.addWidget(self.greeting_label)
         header.addWidget(QLabel("Here's what's going on", objectName="PanelSubtitle"))
-        body_layout.addLayout(header)
+        greeting_box = QWidget(objectName="Bare")
+        greeting_box.setLayout(header)
+        header_row.addWidget(greeting_box)
+
+        header_row.addStretch()
+        # A range, not a fixed width. Fixed at 520 the row's minimum came
+        # to 1733px - the greeting, the field and the greeting-width
+        # spacer that balances it - so on a 1400px window the row
+        # overflowed the viewport and the field was clipped off the right
+        # edge rather than sitting centred.
+        self.search_bar = search_field("Search everything...")
+        self.search_bar.setMinimumWidth(SEARCH_BAR_MIN_WIDTH)
+        self.search_bar.setMaximumWidth(SEARCH_BAR_WIDTH)
+        self.search_bar.textEdited.connect(self._search_bar_typed)
+        self.search_bar.installEventFilter(self)
+        # The results list under the field, built on the first keystroke
+        # and closed with the query.
+        self._search_results = None
+        # Top-aligned, which puts it on the greeting's own line: the
+        # block under it is two lines (greeting plus subtitle), so
+        # centring the field against the block dropped it into the gap
+        # between them - measured 11px below the greeting's centre, and
+        # visibly so. The field and the greeting line are within a pixel
+        # of the same height, so aligning their tops aligns their middles.
+        header_row.addWidget(self.search_bar, stretch=3, alignment=Qt.AlignmentFlag.AlignTop)
+        header_row.addStretch()
+        # Balances the greeting's width on the right, so the field lands
+        # centred in the page rather than centred in what is left over
+        # beside the greeting. Taken from the greeting's own hint at
+        # build time; the stretches either side do the rest.
+        spacer = QWidget(objectName="Bare")
+        spacer.setMaximumWidth(greeting_box.sizeHint().width())
+        spacer.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        header_row.addWidget(spacer, stretch=1)
+        body_layout.addLayout(header_row)
 
         self._greeting_timer = QTimer(self)
         self._greeting_timer.timeout.connect(self._refresh_greeting)
@@ -276,6 +326,47 @@ class HomePage(GlassPage):
             body_layout.addWidget(widget)
 
         body_layout.addStretch()
+
+    def _search_bar_typed(self, text):
+        """Results appear under the field as it is typed into.
+
+        The panel is a list, not a second search box: it opens beneath
+        this field, follows it, and closes when there is nothing to
+        show."""
+        if not text.strip():
+            self._close_search_results()
+            return
+        if self._search_results is None:
+            self._search_results = global_search.GlobalSearch(
+                self.window(), anchor=self.search_bar)
+            self._search_results.show()
+        self._search_results.set_query(text)
+
+    def _close_search_results(self):
+        if self._search_results is not None:
+            self._search_results.close()
+            self._search_results = None
+
+    def eventFilter(self, obj, event):
+        """Up/Down/Enter/Escape in the field drive the list under it -
+        the field keeps the focus throughout, which is why the panel is
+        shown without activating."""
+        if obj is self.search_bar and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if self._search_results is not None:
+                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    self._search_results.move_selection(1 if key == Qt.Key.Key_Down else -1)
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._search_results.open_current()
+                    self.search_bar.clear()
+                    self._close_search_results()
+                    return True
+            if key == Qt.Key.Key_Escape:
+                self.search_bar.clear()
+                self._close_search_results()
+                return True
+        return super().eventFilter(obj, event)
 
     def _refresh_greeting(self):
         self.greeting_label.setText(f"{_greeting()} \U0001F44B")
@@ -758,6 +849,19 @@ class HomePage(GlassPage):
             row_layout.addWidget(icon)
             row_layout.addWidget(QLabel(entry["name"]))
             row_layout.addStretch()
+
+            # An app whose program has been uninstalled or moved reads as
+            # broken on the Apps page and read as fine here, on the page
+            # it is most likely to be clicked from. A row is a fraction
+            # of a card's height, so it gets the short form of the same
+            # answer: the word, in the same colour, with the paths in the
+            # tooltip.
+            missing = missing_app_targets(entry)
+            if missing:
+                flag = QLabel("Not found")
+                flag.setStyleSheet(f"color: {theme.DANGER}; background: transparent;")
+                row_layout.addWidget(flag)
+                row.setToolTip("Not found:\n" + "\n".join(missing))
 
             row.clicked.connect(lambda en=entry, df=data_file, es=entries: self._open_quick_link(en, title, df, es))
             layout.addWidget(row)
