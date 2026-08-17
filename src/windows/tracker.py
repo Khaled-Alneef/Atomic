@@ -34,8 +34,8 @@ from helpers import (
     release_schedule, storage, stremio, theme,
 )
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
-    scroll_area, search_field, show_toast, show_undo_toast,
+    Card, CardDragReorder, GlassPage, SideScroller, defer_grid_rebuild,
+    finish_toast, scroll_area, search_field, show_toast, show_undo_toast,
 )
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
@@ -1557,8 +1557,9 @@ class TrackerPage(GlassPage):
         short section off screen to reach the end of a long one.
 
         Vertical wheel is left alone (the bar is off, so Qt hands the
-        event up to the page, which is what should scroll); Shift+wheel
-        and the bar itself move the row."""
+        event up to the page, which is what should scroll); Shift+wheel,
+        the bar itself, and the arrows SideScroller lays over each end
+        move the row."""
         strip = QWidget(objectName="Bare")
         strip_layout = QHBoxLayout(strip)
         strip_layout.setContentsMargins(0, 0, 0, 0)
@@ -1581,7 +1582,9 @@ class TrackerPage(GlassPage):
         strip.adjustSize()
         area.setFixedHeight(strip.sizeHint().height()
                             + area.horizontalScrollBar().sizeHint().height())
-        return area
+        # Wrapped, not replaced: the arrows and their fades are drawn over
+        # this same area, which keeps scrolling exactly as it did.
+        return SideScroller(area)
 
     def _build_card(self, entry):
         card = Card(hoverable=True)

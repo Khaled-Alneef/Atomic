@@ -316,6 +316,16 @@ QLabel#PanelTitle {{
     font-weight: 700;
     background: transparent;
 }}
+/* Home's clock, at the far end of the greeting's line. Larger than the
+   greeting's own 19pt rather than equal to it: set at the same size the
+   clock reads as the smaller of the two, because the greeting is a wide
+   phrase with an emoji beside it and the clock is five narrow glyphs. */
+QLabel#HomeClock {{
+    color: {TEXT};
+    font-size: 22pt;
+    font-weight: 700;
+    background: transparent;
+}}
 QLabel#HeroTitle {{
     color: {TEXT};
     font-size: 16pt;
@@ -504,6 +514,24 @@ QPushButton#Icon:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; border: 1p
    down-arrow drawn into it, beside the icon it already has. Nothing here
    wants two glyphs, so it is removed rather than styled. */
 QPushButton::menu-indicator {{ image: none; width: 0px; height: 0px; }}
+
+/* The round arrows over a sideways-scrolling row (widgets.SideScroller).
+   Circular via a radius of half the fixed 30px size, and deliberately
+   the card colour rather than the accent: it sits on top of the row's
+   own cards, and an accent disc there reads as one of them being
+   selected. 15pt for the chevron, which is a small glyph at label
+   size. */
+QPushButton#ScrollArrow {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 15px;
+    padding: 0px 0px 3px 0px;
+    font-size: 15pt;
+    font-weight: 700;
+}}
+QPushButton#ScrollArrow:hover {{ background: {SURFACE_HOVER}; border: 1px solid {ACCENT}; }}
+QPushButton#ScrollArrow:pressed {{ background: {SURFACE_ACTIVE}; }}
 
 QPushButton#Flat {{
     background: transparent;
