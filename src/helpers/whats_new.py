@@ -26,6 +26,31 @@ from . import theme, updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.5": [
+        "One search across everything you track. Ctrl+K, or the box "
+        "beside the greeting on Home - picking a result opens it, the "
+        "same way its own card would.",
+        "Settings is now eight categories instead of one long form, with "
+        "Uninstall on a page of its own rather than a scroll below the "
+        "buttons that clear a single page.",
+        "Every page can select several entries at once - set a status or "
+        "delete them in one go, with one confirmation and one undo for "
+        "the whole batch.",
+        "Ctrl+Z undoes the last thing you did and Ctrl+Y puts it back. "
+        "The full list of shortcuts is in Settings, under Keybinds.",
+        "Your data can be copied to a file before something goes wrong, "
+        "and put back from it afterwards.",
+        "An update you have not taken yet is offered again at each "
+        "launch, instead of being mentioned once and then only as a dot "
+        "on the Settings button.",
+        "Dragging a card onto another to reorder it works again on the "
+        "Anime, Reading and Movies & Series pages.",
+        "Each status section scrolls sideways in a row of its own, so a "
+        "long section no longer pushes everything else down the page.",
+        "Atomic says when Stremio has stopped accepting the saved "
+        "sign-in, reopens where you left it, and no longer clips long "
+        "card names or closes itself on an empty tracker page.",
+    ],
     "1.4": [
         "Films are tracked alongside your shows - the page is now "
         "Movies & Series, and searching in Add or Edit finds films too.",
