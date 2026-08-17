@@ -274,11 +274,21 @@ In addition to VDD-1.0 §11 through VDD-1.7 §11:
   temp files. Before it, Check All on the video list recorded Netflix's
   verdict and lost Crunchyroll's, leaving that row permanently blank.
 
+- **The tag and its executable were confirmed on `origin`**:
+  `refs/tags/v1.8` is present remotely and the blob at
+  `v1.8:Atomic.exe` is 47,783,790 bytes — the same object built and
+  hashed here.
+- **The updater resolved this release from the live repository.** Run
+  with `APP_VERSION` lowered to 1.7, `check_for_update()` returned
+  `v1.8` with the raw URL and a size of 47,783,790 bytes; run as 1.8 it
+  returned `None`, meaning already current. The first attempt, made
+  seconds after the push, returned `None` as 1.7 — GitHub's tags
+  endpoint had not yet listed the new tag. Worth knowing before
+  concluding an update is broken.
+
 Not verified: the release executable has not been exercised by its owner
 against real data before publication, and no Defender scan was
-performed. The updater's own `check_for_update()` against the live
-repository is recorded in §11 of this document only if it ran — see the
-note below.
+performed.
 
 ---
 
