@@ -26,6 +26,10 @@ from . import theme, updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.7": [
+        "The Title field in Add and Edit simply says \"type to search\" - "
+        "it no longer names Stremio or your reading websites.",
+    ],
     "1.6": [
         "The Anime and Movies & Series icons have swapped places in the "
         "sidebar - Anime is the monitor now, Movies & Series the camera.",

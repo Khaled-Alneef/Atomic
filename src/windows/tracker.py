@@ -2409,10 +2409,10 @@ class EntryForm(QDialog):
 
     def _update_labels(self):
         if self._provider() == "stremio":
-            self.title_label.setText("Title (type to search Stremio)")
+            self.title_label.setText("Title (type to search)")
             self.url_label.setText("Stremio link (opens Stremio)")
         else:
-            self.title_label.setText("Title (type to search your reading websites)")
+            self.title_label.setText("Title (type to search)")
         is_video = self.type_box.currentText() in VIDEO_TYPES
         self.site_label.setText(
             "Video Website (opens directly)" if is_video
