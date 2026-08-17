@@ -125,12 +125,20 @@ In addition to VDD-1.0 §11 through VDD-1.6 §11:
   `datas` present in the archive and byte-identical to the one on disk,
   174 entries.
 - **`check_release_notes.py` passed** for 1.7, with one note written.
-- The updater was confirmed to resolve `v1.7` against the live
-  repository with `APP_VERSION` temporarily lowered.
+- **The tag and its executable were confirmed on `origin`**:
+  `refs/tags/v1.7` is present remotely, and the blob at
+  `v1.7:Atomic.exe` is 47,764,478 bytes — the same object that was
+  built and hashed here.
 
-Not verified: the release executable has not been exercised by its owner
-against real data before publication, and no Defender scan was
-performed.
+Not verified: **the updater's own `check_for_update()` could not be run
+against the live repository.** `api.github.com` answered HTTP 504 on
+every attempt from this machine, sandboxed and not, while `git push`
+over HTTPS to the same host succeeded — an outage or a filtered API
+host, not something about this release. The contract it exercises is
+unchanged from 1.6, and the tag and executable were verified directly
+through git instead. The release executable has also not been exercised
+by its owner against real data before publication, and no Defender scan
+was performed.
 
 ---
 
