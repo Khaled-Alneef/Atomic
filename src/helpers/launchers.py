@@ -21,40 +21,7 @@ from pathlib import Path
 from . import icon_extract, images, storage
 
 GAMES_FILE = "games.json"
-APPS_FILE = "apps.json"
 ICON_EXTRACT_SIZE = 96
-
-# Where Windows keeps the shortcuts the Start menu is built from - one
-# list for everyone on the machine, one for this user. This is the Apps
-# equivalent of a launcher's library folder: not a manifest of installed
-# programs (there isn't one worth trusting), but the list a person
-# already thinks of as "my programs", maintained by the installers
-# themselves.
-START_MENU_DIRS = (
-    Path(os.environ.get("ProgramData", r"C:\ProgramData"))
-    / "Microsoft" / "Windows" / "Start Menu" / "Programs",
-    Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
-)
-
-# Shortcuts that are not a program you launch. Measured against a real
-# Start menu: without these, an import offers to add "Uninstall X",
-# "X on the Web" and a pile of release notes alongside the actual app.
-_APP_EXCLUDE_PATTERNS = (
-    "uninstall", "unins", "readme", "read me", "release notes", "help",
-    "documentation", "manual", "on the web", "website", "web site",
-    "support", "license", "licence", "eula", "repair", "modify",
-    "troubleshoot", "command prompt", "powershell", "registry editor",
-)
-
-# Folders of Windows' own tools. They are shortcuts to real programs, so
-# nothing above excludes them, but nobody adds "ODBC Data Sources" to a
-# dashboard of the apps they use.
-_APP_EXCLUDE_FOLDERS = {
-    "administrative tools", "windows administrative tools", "windows tools",
-    "accessories", "windows accessories", "system tools", "windows system",
-    "startup", "maintenance", "accessibility", "windows powershell",
-    "windows kits", "microsoft visual studio", "sysinternals",
-}
 
 # (settings key, display label, subpath from the configured root down to
 # where each game's own folder lives - None means directly under root).
@@ -263,84 +230,6 @@ def import_scanned_games(found):
         games.extend(new_games)
         storage.save(GAMES_FILE, games)
     return len(new_games)
-
-
-def scan_start_menu():
-    """Every program shortcut in the Start menu, as
-    [{"name", "path"}, ...] sorted by name.
-
-    Shortcuts rather than a walk of Program Files: an installer writes
-    exactly one shortcut for the thing it wants launched, already named
-    the way its author meant it, and pointing at the right executable
-    with the right arguments. Walking install folders means _pick_game_exe
-    all over again, guessing which of eleven .exe files is the program.
-
-    Deliberately not deduplicated by *target*: two shortcuts to the same
-    executable with different arguments are two different things (a
-    profile, a mode), and the name is what a person recognises anyway."""
-    found = {}
-    for directory in START_MENU_DIRS:
-        if not directory or not directory.exists():
-            continue
-        for link in sorted(directory.rglob("*.lnk")):
-            name = link.stem
-            folders = {part.lower() for part in link.relative_to(directory).parts[:-1]}
-            # The folder names below also turn up as shortcuts in their
-            # own right, one level up ("Administrative Tools.lnk" opens
-            # the folder), so the same list is checked against the name.
-            if folders & _APP_EXCLUDE_FOLDERS or name.lower() in _APP_EXCLUDE_FOLDERS:
-                continue
-            if any(pattern in name.lower() for pattern in _APP_EXCLUDE_PATTERNS):
-                continue
-            # Machine-wide wins over per-user when both exist, which is
-            # the order START_MENU_DIRS is written in - so this keeps the
-            # first one seen rather than the last.
-            found.setdefault(_normalize(name), {"name": name, "path": str(link)})
-    return sorted(found.values(), key=lambda app: app["name"].lower())
-
-
-def import_scanned_apps(found):
-    """Add newly-found shortcuts to the Apps page, skipping any whose
-    target is already there. Same shape and reasoning as
-    import_scanned_games above, against apps.json's own entry format
-    (windows.link_grid) - an app is a name plus a list of targets, not a
-    single path.
-
-    Returns how many were actually added."""
-    apps = storage.load(APPS_FILE, [])
-    existing = set()
-    for app in apps:
-        for target in app.get("targets") or []:
-            if target.get("target"):
-                existing.add(os.path.normcase(os.path.normpath(target["target"])))
-    added_at = storage.now_iso()
-    new_apps = []
-    for app in found:
-        normalized = os.path.normcase(os.path.normpath(app["path"]))
-        if normalized in existing:
-            continue
-        existing.add(normalized)
-        new_apps.append({
-            "id": str(uuid.uuid4()),
-            "name": app["name"],
-            "targets": [{"type": "app", "target": app["path"]}],
-            "image": extract_and_cache_icon(app["path"]),
-            "added_at": added_at,
-            "last_used": None,
-        })
-    if new_apps:
-        apps.extend(new_apps)
-        storage.save(APPS_FILE, apps)
-    return len(new_apps)
-
-
-def import_app_result_message(added: int) -> str:
-    """Same wording rules as import_result_message, for apps."""
-    if not added:
-        return "No New Apps Found"
-    if added == 1:
-        return "1 App Was Successfully Added"
-    return f"{added} Apps Were Successfully Added"
 
 
 def import_result_message(added: int) -> str:

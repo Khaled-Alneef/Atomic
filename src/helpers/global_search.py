@@ -44,6 +44,7 @@ SHORTCUTS = (
     ("Ctrl+F", "search this page"),
     ("Ctrl+N", "add something"),
     ("Ctrl+Z", "undo the last removal"),
+    ("Ctrl+Y", "redo it"),
     ("Ctrl+1-9", "jump to a sidebar page"),
     ("Ctrl+,", "settings"),
     ("Esc", "clear a search"),

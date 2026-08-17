@@ -54,7 +54,7 @@ from PyQt6.QtWidgets import (
 )
 from helpers.settings_dialog import SettingsDialog
 from helpers.widgets import (release_stale_hover_cursors, show_toast,
-                             take_live_undo, use_hover_cursor)
+                             take_live_redo, take_live_undo, use_hover_cursor)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -936,6 +936,15 @@ class MainWindow(QMainWindow):
                 if box is not None:
                     box.setFocus()
                     box.selectAll()
+                return
+            if event.key() == Qt.Key.Key_Y:
+                # Redo: do again whatever Ctrl+Z just undid. Only ever
+                # what was last undone - see widgets.take_live_redo.
+                redo = take_live_redo()
+                if redo is not None:
+                    redo()
+                else:
+                    show_toast(self, "Nothing To Redo")
                 return
             if event.key() == Qt.Key.Key_Z:
                 # Undo means the offer that is on screen right now, not a

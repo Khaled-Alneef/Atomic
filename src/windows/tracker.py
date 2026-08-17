@@ -680,7 +680,7 @@ class TrackerPage(GlassPage):
         # see they are in is the whole failure this is written around.
         self.select_btn = QPushButton("Select")
         self.select_btn.setFixedHeight(40)
-        self.select_btn.setToolTip("Pick several entries and change their status at once")
+        self.select_btn.setToolTip("Pick several entries and change or delete them at once")
         self.select_btn.clicked.connect(self._toggle_select_mode)
         top_row.addWidget(self.select_btn)
         layout.addLayout(top_row)
@@ -1058,7 +1058,9 @@ class TrackerPage(GlassPage):
     #   partial view (see _grid_is_narrowed), while a bulk status change
     #   writes only the entries actually picked, one
     #   storage.update_entry each. Filter to Plan to Watch, Select All,
-    #   set Dropped is the point of this feature rather than a hazard.
+    #   set Dropped is the point of this feature rather than a hazard -
+    #   and it is what makes Delete safe on a narrowed grid too, since a
+    #   batch delete removes only the entries actually picked.
     # * **Dragging is off while selecting.** Both want the same press,
     #   and drag-reorder is already off whenever the grid is narrowed -
     #   this is the same switch with one more reason in it.
@@ -1107,6 +1109,13 @@ class TrackerPage(GlassPage):
                 status, lambda checked=False, s=status: self._apply_bulk_status(s))
         self.bulk_status_btn.setMenu(self._bulk_status_menu)
         row.addWidget(self.bulk_status_btn)
+        # Last in the row and the only "Danger" thing on the page, so the
+        # button that destroys data is not the one nearest the pointer
+        # after picking a card, and doesn't read as another neutral
+        # toolbar action beside Select All and Clear.
+        self.bulk_delete_btn = QPushButton("Delete", objectName="Danger")
+        self.bulk_delete_btn.clicked.connect(self._delete_selected)
+        row.addWidget(self.bulk_delete_btn)
         bar.setVisible(False)
         self.selection_bar = bar
         return bar
@@ -1126,6 +1135,7 @@ class TrackerPage(GlassPage):
         label.setText(f"{self._entry_count(count)} selected" if count
                       else "Click cards to pick them")
         self.bulk_status_btn.setEnabled(count > 0)
+        self.bulk_delete_btn.setEnabled(count > 0)
         self.clear_selection_btn.setEnabled(count > 0)
 
     def _toggle_select_mode(self):
@@ -1211,11 +1221,17 @@ class TrackerPage(GlassPage):
         rule came from)."""
         if not self._selected_ids:
             return
+        self._apply_status_to_ids(set(self._selected_ids), status)
+
+    def _apply_status_to_ids(self, ids, status):
+        """The body of a bulk status change, against an explicit set of
+        ids rather than the current selection - so Ctrl+Y can re-apply
+        the batch it just undid, by which point nothing is selected."""
         stamp = storage.now_iso()
         previous = []   # (id, status, updated_at) as they were, for undo
         for entry in self.entries:
             entry_id = entry.get("id")
-            if entry_id not in self._selected_ids or entry.get("status") == status:
+            if entry_id not in ids or entry.get("status") == status:
                 continue
             before = (entry_id, entry.get("status"), entry.get("updated_at"))
             # Disk first, memory second. A False here means the entry is
@@ -1235,7 +1251,9 @@ class TrackerPage(GlassPage):
             return
         show_undo_toast(
             self, f"Moved {self._entry_count(len(previous))} to {status} - Click to Undo",
-            lambda: self._undo_bulk_status(previous))
+            lambda: self._undo_bulk_status(previous),
+            on_redo=lambda ids={before[0] for before in previous}:
+                self._apply_status_to_ids(ids, status))
 
     def _undo_bulk_status(self, previous):
         by_id = {e.get("id"): e for e in self.entries}
@@ -1255,6 +1273,90 @@ class TrackerPage(GlassPage):
             restored += 1
         self._refresh_grid()
         return f"Restored {self._entry_count(restored)}"
+
+    def _delete_selected(self):
+        """Delete every picked entry, asked about once.
+
+        One question for the whole batch rather than one per entry: the
+        point of picking eight cards is not to answer eight dialogs, and
+        the count in the question is what the user checks the selection
+        against. The undo offer is what lets it be a single question -
+        the whole batch comes back from it, every field intact.
+
+        Through _save_entries, not storage.update_entry: update_entry
+        merges fields into an entry and has no way to remove one, and
+        _save_entries is already this page's re-read-then-apply path. It
+        reloads the file and lets this page speak only for its own entry
+        types, so the other page's entries (Anime and Reading share
+        tracker.json) are carried over as they are on disk rather than as
+        this page last saw them - the same call the single-entry delete
+        makes, for the same reason."""
+        if not self._selected_ids:
+            return
+        # Indices recorded against this page's list before anything is
+        # removed: undo puts each record back at the index it came from,
+        # and an index read after the first removal would name the wrong
+        # slot. The record is the whole entry, deep-copied - an entry
+        # carries far more than the card shows (cover, link, the cached
+        # schedule and its checked-at stamp, the resolved MangaDex/site
+        # ids) and undo has to give all of it back, not re-add a title.
+        removed = [(index, copy.deepcopy(entry))
+                   for index, entry in enumerate(self.entries)
+                   if entry.get("id") in self._selected_ids]
+        if not removed:
+            return
+        if QMessageBox.question(
+                self, "Delete Entries",
+                f"Delete {self._entry_count(len(removed))}?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        gone = {entry.get("id") for _index, entry in removed}
+        # In place, not a rebind: the schedule and cover lookups already
+        # in flight hold this list, not the attribute.
+        self.entries[:] = [e for e in self.entries if e.get("id") not in gone]
+        # Selection cleared, mode left on - same as a bulk status change:
+        # the common case after one batch is a second one.
+        self._selected_ids.clear()
+        self._save_entries()
+        self._refresh_grid()
+        show_undo_toast(
+            self, f"Deleted {self._entry_count(len(removed))} - Click to Undo",
+            lambda: self._restore_entries(removed),
+            on_redo=lambda ids=[e.get("id") for _i, e in removed]: self._delete_ids(ids))
+
+    def _delete_ids(self, ids):
+        """Delete by id with nothing asked - what Ctrl+Y re-applies. The
+        batch was already confirmed once; redo is an explicit request to
+        put it back as it was. It raises a fresh undo offer, so Ctrl+Z
+        still works after a redo."""
+        wanted = set(ids)
+        removed = [(index, entry) for index, entry in enumerate(self.entries)
+                   if entry.get("id") in wanted]
+        if not removed:
+            return
+        gone = {entry.get("id") for _index, entry in removed}
+        self.entries[:] = [e for e in self.entries if e.get("id") not in gone]
+        self._save_entries()
+        self._refresh_grid()
+        show_undo_toast(
+            self, f"Deleted {self._entry_count(len(removed))} - Click to Undo",
+            lambda: self._restore_entries(removed),
+            on_redo=lambda: self._delete_ids(ids))
+
+    def _restore_entries(self, removed):
+        """Put a deleted batch back, each record at the index it held."""
+        # Ascending, so each insert lands before the ones still to come
+        # and the list ends up in the order it was - and clamped, because
+        # another page can have shortened it since (_save_entries lets a
+        # delete made elsewhere stand).
+        for index, entry in sorted(removed, key=lambda pair: pair[0]):
+            self.entries.insert(min(index, len(self.entries)), entry)
+        # _save_entries re-reads the file and lets this page's own copy
+        # win for its own entry types, so putting the records back into
+        # self.entries is what writes them back.
+        self._save_entries()
+        self._refresh_grid()
+        return f"Restored {self._entry_count(len(removed))}"
 
     # ------------------------------------------------------------------
     def _grid_is_narrowed(self) -> bool:
@@ -1903,7 +2005,8 @@ class TrackerPage(GlassPage):
         self._save_entries()
         self._refresh_grid()
         show_undo_toast(self, f"Deleted '{removed['title']}' - Click to Undo",
-                        lambda: self._restore_entry(removed, index))
+                        lambda: self._restore_entry(removed, index),
+                        on_redo=lambda: self._delete_ids([removed.get("id")]))
 
     def _restore_entry(self, entry, index):
         # _save_entries re-reads the file and lets this page's own copy

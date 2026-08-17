@@ -7,7 +7,8 @@ from PyQt6.QtCore import (QEvent, QMimeData, QObject, QPoint, QPointF, QRect,
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QDrag, QPainter, QRadialGradient
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFrame, QLabel, QScrollArea, QToolTip, QWidget,
+    QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QPushButton, QScrollArea, QToolTip, QWidget,
 )
 
 from . import logs, theme
@@ -554,9 +555,11 @@ class UndoToast(Toast):
     and a 40px target in the corner of the screen is worse to hit than
     the box that is already there and already says what it does."""
 
-    def __init__(self, anchor, text, on_undo, duration_ms=UNDO_TOAST_MS):
+    def __init__(self, anchor, text, on_undo, duration_ms=UNDO_TOAST_MS,
+                 on_redo=None):
         super().__init__(anchor, text, duration_ms, clickable=True)
         self._on_undo = on_undo
+        self._on_redo = on_redo
         self._spent = False
         use_hover_cursor(self)
 
@@ -583,6 +586,11 @@ class UndoToast(Toast):
             # the app vanishing while the user watches.
             logs.exception("undo failed")
             message = "Couldn't Undo That"
+            self.set_text(message, 2600)
+            return
+        # Only a successful undo leaves something to redo.
+        global _live_redo
+        _live_redo = self._on_redo
         self.set_text(message or "Restored", 2600)
 
 
@@ -592,6 +600,22 @@ class UndoToast(Toast):
 # it back, and already expires. A second record would be a second answer
 # to "what does undo do right now".
 _live_undo_toast = None
+
+
+_live_redo = None
+
+
+def take_live_redo():
+    """What Ctrl+Y should re-apply, once, or None.
+
+    Set only by an undo that actually ran, and cleared by taking it or by
+    the next removal - so redo always means "put back the thing Ctrl+Z
+    just took away", never something from three pages ago. A page that
+    has been rebuilt since is not a problem the way it is for undo: redo
+    re-runs the page's own action, which reads the file itself."""
+    global _live_redo
+    redo, _live_redo = _live_redo, None
+    return redo
 
 
 def take_live_undo():
@@ -604,7 +628,7 @@ def take_live_undo():
     return toast
 
 
-def show_undo_toast(page, text, on_undo, duration_ms=UNDO_TOAST_MS):
+def show_undo_toast(page, text, on_undo, duration_ms=UNDO_TOAST_MS, on_redo=None):
     """Offer back the removal `page` just made. `on_undo` does the
     restoring and returns the message to replace the offer with.
 
@@ -614,11 +638,309 @@ def show_undo_toast(page, text, on_undo, duration_ms=UNDO_TOAST_MS):
     entry back to disk behind a page that had already loaded the list
     without it - correct on disk, wrong on screen, with nothing to
     prompt a redraw."""
-    global _live_undo_toast
-    toast = UndoToast(page, text, on_undo, duration_ms)
+    global _live_undo_toast, _live_redo
+    toast = UndoToast(page, text, on_undo, duration_ms, on_redo)
     page.destroyed.connect(toast.close)
     _live_undo_toast = toast
+    # A new removal supersedes whatever redo was pending: redo means the
+    # last thing undone, and that is no longer it.
+    _live_redo = None
     return toast
+
+
+class GridSelection:
+    """Multi-select and batch delete for a flat grid of Cards - Games,
+    Apps and Websites.
+
+    A mixin rather than a copy per page: Games and the two link grids
+    draw the same card in the same grid, and the one thing this has to
+    get right (what is selectable, and what a delete writes) is exactly
+    what would drift if it were written twice. It is deliberately *not*
+    shared with the tracker pages, which carry their own version -
+    theirs adds Set Status, and its cards are posters in per-status
+    sideways-scrolling strips rather than one flat grid.
+
+    The shape follows the tracker's, including the two rules that decide
+    how selection coexists with what is already on these pages:
+
+    * **Only what is on screen can be selected.** _prune_selection is
+      called from every redraw, so a search or a re-sort can never leave
+      an entry selected that the user cannot see, and "Select All" means
+      the cards in front of them.
+    * **Dragging is off while selecting.** Both want the same left
+      press, and dragging is already off whenever a search narrows the
+      grid - this is the same switch with one more reason in it.
+
+    A mode rather than Ctrl+click: `Card.clicked` carries no modifiers,
+    and nothing on screen would ever say the page could do this. The
+    mode announces itself - the button reads "Done", a bar appears,
+    every card carries a mark.
+
+    The page supplies `_refresh_grid()` and `_mutate(apply_change)` (the
+    re-read-then-apply save path); this supplies everything else.
+    """
+
+    # (singular, plural) for the counts this puts in front of the user.
+    SELECTION_NOUN = ("entry", "entries")
+
+    def _init_selection(self):
+        """Call before the page's first _refresh_grid.
+
+        Ids rather than entries or cards: a page rebuilds every card from
+        scratch on every redraw (.claude/rules/ui.md), so anything holding
+        widgets or dicts across one is holding what has just been torn
+        down."""
+        self._select_mode = False
+        self._selected_ids = set()
+        # entry id -> (card, badge) for the cards currently drawn, so a
+        # click can repaint one mark instead of rebuilding the grid.
+        self._selection_cards = {}
+
+    # ---- the two controls the page puts in its own layout -------------
+    def _build_select_button(self, tooltip):
+        """The mode's switch, for the page's toolbar row.
+
+        Its label is the state - "Select" when off, "Done" when on -
+        rather than a checkable button: theme.py gives a plain
+        QPushButton no :checked rule, so a ticked one would look
+        identical to an unticked one, and a mode nobody can see they are
+        in is the whole failure this is written around."""
+        self.select_btn = QPushButton("Select")
+        self.select_btn.setFixedHeight(40)
+        self.select_btn.setToolTip(tooltip)
+        self.select_btn.clicked.connect(self._toggle_select_mode)
+        return self.select_btn
+
+    def _build_selection_bar(self):
+        """The row that appears under the toolbar while selecting.
+
+        Built once and hidden, not built on entering the mode: it sits in
+        the page's layout above the grid, and adding it later would push
+        every card down by its height at the moment the mode is switched
+        on."""
+        bar = QWidget(objectName="Bare")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        self.selection_label = QLabel("", objectName="Muted")
+        row.addWidget(self.selection_label)
+        row.addStretch()
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.clicked.connect(self._select_all_visible)
+        row.addWidget(self.select_all_btn)
+        self.clear_selection_btn = QPushButton("Clear")
+        self.clear_selection_btn.clicked.connect(self._clear_selection)
+        row.addWidget(self.clear_selection_btn)
+        self.bulk_delete_btn = QPushButton("Delete", objectName="Danger")
+        self.bulk_delete_btn.clicked.connect(self._delete_selected)
+        row.addWidget(self.bulk_delete_btn)
+        bar.setVisible(False)
+        self.selection_bar = bar
+        return bar
+
+    # ---- state --------------------------------------------------------
+    def _selection_count(self, count) -> str:
+        singular, plural = self.SELECTION_NOUN
+        return f"{count} {singular if count == 1 else plural}"
+
+    def _update_selection_bar(self):
+        # getattr because _refresh_grid can run before the bar exists on
+        # a page still being built, the same reason the pages' own
+        # _search_query guards their search box.
+        label = getattr(self, "selection_label", None)
+        if label is None:
+            return
+        count = len(self._selected_ids)
+        label.setText(f"{self._selection_count(count)} selected" if count
+                      else "Click cards to pick them")
+        self.bulk_delete_btn.setEnabled(count > 0)
+        self.clear_selection_btn.setEnabled(count > 0)
+
+    def _toggle_select_mode(self):
+        self._set_select_mode(not self._select_mode)
+
+    def _set_select_mode(self, on, first_id=None):
+        self._select_mode = on
+        self._selected_ids = {first_id} if on and first_id else set()
+        self.select_btn.setText("Done" if on else "Select")
+        self.selection_bar.setVisible(on)
+        # A full rebuild, unlike picking a card below: every card has to
+        # gain or lose its mark, and what its click does changes with it.
+        self._refresh_grid()
+
+    def _toggle_selected(self, entry_id):
+        """Pick or unpick one card, repainting that card alone - not
+        _refresh_grid, which would rebuild the whole grid and put the
+        page's scroll position back to the top under the pointer."""
+        if entry_id in self._selected_ids:
+            self._selected_ids.discard(entry_id)
+        else:
+            self._selected_ids.add(entry_id)
+        drawn = self._selection_cards.get(entry_id)
+        if drawn:
+            self._paint_selection(*drawn, entry_id in self._selected_ids)
+        self._update_selection_bar()
+
+    def _select_all_visible(self):
+        # _selection_cards is exactly the cards currently drawn, which is
+        # the point: under a search this picks what is on screen and
+        # nothing else.
+        self._selected_ids = {entry_id for entry_id in self._selection_cards if entry_id}
+        self._repaint_all_selection()
+
+    def _clear_selection(self):
+        self._selected_ids.clear()
+        self._repaint_all_selection()
+
+    def _repaint_all_selection(self):
+        for entry_id, (card, badge) in self._selection_cards.items():
+            self._paint_selection(card, badge, entry_id in self._selected_ids)
+        self._update_selection_bar()
+
+    # ---- redraw hooks -------------------------------------------------
+    def _clear_selection_cards(self):
+        """Called from _refresh_grid once the old cards are out of the
+        layout: every entry in here points at a widget that has just been
+        taken out and deleteLater'd, and repainting one afterwards is a
+        call into a C++ object on its way out."""
+        self._selection_cards = {}
+
+    def _prune_selection(self, visible_ids):
+        """Keep only what the redraw about to happen will actually draw,
+        so "3 entries selected" always names three cards the user can see
+        and check before pressing Delete."""
+        self._selected_ids &= set(visible_ids)
+        self._update_selection_bar()
+
+    def _attach_selection_badge(self, card, entry_id):
+        """The mark on one card, and its registration for repainting.
+
+        A child of the card at a fixed corner offset, not a row in its
+        layout: a layout row would make every card taller the moment the
+        mode came on, so entering selection would reflow the whole grid
+        under the pointer. It sits in the card's own 8px margin rather
+        than over the icon, which on these cards is 44px and would be
+        half-covered by a mark big enough to see."""
+        badge = QLabel(card)
+        badge.setFixedSize(16, 16)
+        badge.move(6, 6)
+        # The card is what handles the click; a badge that took the press
+        # would leave a hole in the middle of its own target.
+        badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._selection_cards[entry_id] = (card, badge)
+        self._paint_selection(card, badge, entry_id in self._selected_ids)
+        return badge
+
+    def _paint_selection(self, card, badge, selected):
+        """Mark or unmark one card.
+
+        The badge is the mark that decides it; the accent border is only
+        there so a picked card reads as picked from across the page. That
+        way round because an accent border is exactly what theme.py's
+        #Card:hover rule already draws, so the card under the pointer
+        looks bordered whether or not it is picked - the badge is what
+        tells them apart. No glyph in it: a filled accent disc needs no
+        font, and this app has already had a missing-glyph box render as a
+        sliver on a button.
+
+        Border stays 1px in both states - QSS border width comes out of
+        the widget's content rect, so a thicker one would shift the icon
+        and label inside the card the moment it was picked."""
+        badge.setStyleSheet(
+            f"background: {theme.ACCENT if selected else theme.BG}; "
+            f"border: 2px solid {theme.TEXT if selected else theme.TEXT_MUTED}; "
+            f"border-radius: 8px;")
+        # Scoped to QFrame#Card so it cannot reach the labels inside the
+        # card, and naming only `border` so the app stylesheet's fill
+        # still paints - a widget stylesheet is merged with the
+        # application one property by property, not instead of it.
+        card.setStyleSheet(f"QFrame#Card {{ border: 1px solid {theme.ACCENT}; }}"
+                           if selected else "")
+
+    # ---- the batch ----------------------------------------------------
+    def _delete_selected(self):
+        """Delete every picked entry, asked about once.
+
+        One question for the batch, not one per entry: the point of
+        picking eight cards is not to answer eight dialogs, and the count
+        in the question is what the user checks the selection against.
+        The undo offer is what lets it be a single question - the whole
+        batch comes back from it, every record intact.
+
+        Through the page's _mutate, never a whole-list save of what this
+        page holds: Home keeps its own copy of these same files and
+        Settings can write them while the page sits open behind a dialog,
+        so the list is re-read, the removals applied to *that*, and the
+        result saved (see GamesPage._mutate for the defect this comes
+        from)."""
+        ids = set(self._selected_ids)
+        if not ids:
+            return
+        if QMessageBox.question(
+                self, f"Delete {self.SELECTION_NOUN[1].capitalize()}",
+                f"Delete {self._selection_count(len(ids))}?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        removed = []   # (index, record) as they were on disk, for undo
+
+        def apply_change(entries):
+            # Descending, so each pop leaves the indices still to come
+            # exactly where they were. The records come out of the list
+            # _mutate has just re-read off disk - which is both the
+            # freshest copy of each entry and, once it is popped, the
+            # only surviving one, so there is nothing to deep-copy from.
+            for index in sorted((i for i, e in enumerate(entries)
+                                 if e.get("id") in ids), reverse=True):
+                removed.append((index, entries.pop(index)))
+
+        self._selected_ids.clear()
+        # Stays in selection mode, with nothing picked: the common case
+        # after one batch is a second one, and dropping out of the mode
+        # would fight it.
+        self._mutate(apply_change)
+        if not removed:
+            return
+        ids_removed = [record.get("id") for _index, record in removed]
+        show_undo_toast(
+            self, f"Deleted {self._selection_count(len(removed))} - Click to Undo",
+            lambda: self._restore_selected(removed),
+            on_redo=lambda: self._delete_ids(ids_removed))
+
+    def _delete_ids(self, ids):
+        """Delete by id with nothing asked - what Ctrl+Y re-applies.
+
+        No confirmation: the batch was confirmed when it was deleted, and
+        redo is an explicit ask to put that back the way it was. The undo
+        offer it raises is a fresh one, so Ctrl+Z still works afterwards."""
+        wanted = set(ids)
+        removed = []
+
+        def apply_change(entries):
+            for index in sorted((i for i, e in enumerate(entries)
+                                 if e.get("id") in wanted), reverse=True):
+                removed.append((index, entries.pop(index)))
+
+        self._mutate(apply_change)
+        if not removed:
+            return
+        show_undo_toast(
+            self, f"Deleted {self._selection_count(len(removed))} - Click to Undo",
+            lambda: self._restore_selected(removed),
+            on_redo=lambda: self._delete_ids(ids))
+
+    def _restore_selected(self, removed):
+        """Put a deleted batch back, each record at the index it held."""
+        def apply_change(entries):
+            # Ascending, the mirror of the descending pop above: each
+            # insert lands before the ones still to come, so the list ends
+            # up as it was rather than reversed. Clamped because _mutate
+            # re-reads the file and another page (or Settings > Clear
+            # Data) can have shortened it since.
+            for index, entry in sorted(removed, key=lambda pair: pair[0]):
+                entries.insert(min(index, len(entries)), entry)
+
+        self._mutate(apply_change)
+        return f"Restored {self._selection_count(len(removed))}"
 
 
 def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:

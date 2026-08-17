@@ -21,8 +21,8 @@ from PyQt6.QtWidgets import (
 
 from helpers import app_settings, child_process, images, launchers, storage, theme
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, defer_grid_rebuild, finish_toast,
-    scroll_area, show_toast, show_undo_toast,
+    Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
+    finish_toast, scroll_area, show_toast, show_undo_toast,
 )
 from windows.link_grid import (
     CARD_MARGINS, CARD_WIDTH, GRID_COLS, THUMB_SIZE, CardTextLabel,
@@ -43,13 +43,18 @@ class _ScanSignals(QObject):
     done = Signal(list)  # [{"name", "path", "launcher"}, ...] found by the background scan
 
 
-class GamesPage(GlassPage):
+class GamesPage(GridSelection, GlassPage):
+    # What the selection bar and its messages call these - see
+    # widgets.GridSelection, which Apps/Websites share.
+    SELECTION_NOUN = ("game", "games")
+
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
 
         self.games = storage.load(DATA_FILE, [])
         self._migrate_and_backfill()
+        self._init_selection()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -105,7 +110,11 @@ class GamesPage(GlassPage):
         self._search_timer.timeout.connect(self._refresh_grid)
         self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
         top_row.addWidget(self.search_box)
+        top_row.addWidget(self._build_select_button(
+            "Pick several games and delete them at once"))
         layout.addLayout(top_row)
+
+        layout.addWidget(self._build_selection_bar())
 
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
@@ -221,6 +230,7 @@ class GamesPage(GlassPage):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+        self._clear_selection_cards()
 
         # Dragging is off while a search is narrowing the grid: a drop
         # writes the order that is on screen (see _begin_custom_order),
@@ -228,6 +238,9 @@ class GamesPage(GlassPage):
         narrowed = bool(self._search_query())
 
         games = self._visible_games()
+        # Before the early return below as well as the draw: a search
+        # that matches nothing must still drop the selection it hid.
+        self._prune_selection({g.get("id") for g in games})
         if not games:
             message = (f"Nothing here matches '{self.search_box.text().strip()}'."
                        if narrowed else "No games yet - click '+' to add one.")
@@ -235,7 +248,9 @@ class GamesPage(GlassPage):
             return
 
         for index, game in enumerate(games):
-            card = self._build_card(game, draggable=not narrowed)
+            # Dragging is off while selecting as well as while the grid is
+            # narrowed: both a drag and a pick want the same left press.
+            card = self._build_card(game, draggable=not narrowed and not self._select_mode)
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
     def _build_card(self, game, draggable=True):
@@ -257,7 +272,13 @@ class GamesPage(GlassPage):
         name.setObjectName("CardTitle")
         layout.addWidget(name)
 
-        card.clicked.connect(lambda g=game: self._launch(g))
+        if self._select_mode:
+            # After the layout's own widgets, so the mark stacks above
+            # them rather than under the icon.
+            self._attach_selection_badge(card, game.get("id"))
+            card.clicked.connect(lambda g_id=game.get("id"): self._toggle_selected(g_id))
+        else:
+            card.clicked.connect(lambda g=game: self._launch(g))
         card.rightClicked.connect(lambda event, g=game: self._show_context_menu(event, g))
         if draggable:
             self._drag_reorder.attach(card, game.get("id"))
@@ -267,6 +288,12 @@ class GamesPage(GlassPage):
         menu = QMenu(self)
         menu.addAction("Launch", lambda: self._launch(game))
         menu.addAction("Edit", lambda: self._edit(game))
+        # The second way into selection mode, from the card the user is
+        # already pointing at - the toolbar button alone means noticing a
+        # word at the far end of the row before knowing to look for it.
+        # Same entry point the tracker pages carry.
+        if not self._select_mode:
+            menu.addAction("Select", lambda: self._set_select_mode(True, game.get("id")))
         # No Move Up/Move Down: dragging a card reorders it on every page,
         # and these only appeared under one sort mode anyway.
         menu.addAction("Delete", lambda: self._remove(game))
@@ -360,7 +387,8 @@ class GamesPage(GlassPage):
 
         self._mutate(apply_change)
         show_undo_toast(self, f"Removed '{removed['name']}' - Click to Undo",
-                        lambda: self._restore(removed, removed_at))
+                        lambda: self._restore(removed, removed_at),
+                        on_redo=lambda: self._delete_ids([removed.get("id")]))
 
     def _restore(self, game, removed_at):
         def apply_change(games):

@@ -77,6 +77,9 @@ clever one, and leave a working path working.
 | 21 | Restore tracked data from a backup archive | ui-engineer | spans modules | **landed 1.4.10** |
 | 22 | Multi-select bulk status change on tracker cards | ui-engineer | spans modules | **landed 1.4.15** |
 | 40 | Drag-to-reorder stopped working on tracker pages | ui-engineer | contained | **landed 1.4.15** - regression from #36 |
+| 41 | Take the Start-menu import back off Apps | ui-engineer | contained | **landed 1.4.17** - owner-raised |
+| 42 | Delete several entries at once, on every page | ui-engineer | spans modules | **landed 1.4.17** - owner-raised |
+| 43 | Ctrl+Y to redo an undone removal | ui-engineer | contained | **landed 1.4.17** - owner-raised |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
@@ -768,6 +771,58 @@ exercised the one branch the conversion had missed.
 **Risk** - none in the fix. The lesson is the harness: a layout
 conversion has to be checked against the states that draw *nothing*, not
 only the ones that draw the thing being changed.
+
+### 41. Take the Start-menu import back off Apps
+
+**What** - Owner-raised, the day after #18 landed: remove it. The button,
+the `_discovery_actions` hook it hung on, and `scan_start_menu` /
+`import_scanned_apps` / `import_app_result_message` in `launchers.py`
+are all gone - a hook with no implementers is a hook nobody can see the
+point of, and a scanner nothing calls is the same dead weight
+`diagnose_anilist.py` was (#8).
+**Owner** - ui-engineer
+**Landed** (1.4.17) - Games' own launcher import is untouched; it reads
+a library folder the user configures, which is a different thing from
+guessing at a Start menu. Should this ever be wanted again, what was
+measured is worth keeping: 141 shortcuts on the owner's machine, 70 left
+after filtering, and the filtering is the part that would need
+rethinking - 70 entries is still more than a dashboard of favourites
+wants.
+
+### 42. Delete several entries at once, on every page
+
+**What** - Owner-raised. #22 gave the tracker a Select mode that could
+only change status; the same mode now deletes, and Games, Apps and
+Websites - which had no selection at all - have it too.
+**Owner** - ui-engineer
+**Landed** (1.4.17) - a `GridSelection` mixin in `widgets.py` for the
+flat grids, and a Delete action in the tracker's existing bar. One
+confirmation for the whole batch, never one per entry, and one undo
+offer for the whole batch. #22's two coexistence rules carry over
+unchanged: the selection is pruned to what is visible on every redraw,
+and dragging is off while selecting. Deletes go through the page's
+existing reload-then-apply path, so a batch delete cannot roll back an
+entry another page wrote in the meantime - verified, on all three
+families, including a game appended to games.json mid-session and a
+Manga entry written to tracker.json after the page was built. Undo puts
+every record back at the index it held, checked byte-for-byte against
+the pre-delete file.
+
+### 43. Ctrl+Y to redo an undone removal
+
+**What** - Owner-raised, the other half of Ctrl+Z.
+**Owner** - ui-engineer
+**Landed** (1.4.17) - every undo offer now carries a redo alongside it,
+and `widgets.take_live_redo` hands it out once. Redo means **the last
+thing undone** and nothing else: it is set only by an undo that actually
+ran, cleared by being taken, and cleared again by the next removal - so
+it can never re-apply something from three pages ago. A redo raises a
+fresh undo offer, so Ctrl+Z still works after Ctrl+Y, and with nothing
+to redo the app says so rather than appearing to work. No confirmation
+on the redo: the batch was confirmed when it was deleted, and Ctrl+Y is
+an explicit request to put that back. Round-tripped delete -> Ctrl+Z ->
+Ctrl+Y -> Ctrl+Z against the file on disk on tracker (single and batch),
+Games and Apps, plus real key presses.
 
 ### 29. Let the "what's new" dialog scroll
 

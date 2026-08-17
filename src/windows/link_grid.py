@@ -22,8 +22,8 @@ from PyQt6.QtWidgets import (
 
 from helpers import child_process, images, storage, theme
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, defer_grid_rebuild, scroll_area,
-    show_toast, show_undo_toast,
+    Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
+    scroll_area, show_toast, show_undo_toast,
 )
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
@@ -235,7 +235,7 @@ def _migrate_entries(entries):
     return list(entries), changed
 
 
-class LinkGridPage(GlassPage):
+class LinkGridPage(GridSelection, GlassPage):
     """Base for a customizable icon+name grid of sites/apps. Subclasses
     just set DATA_FILE/TITLE/DEFAULT_ENTRIES/TARGET_KIND.
 
@@ -250,10 +250,16 @@ class LinkGridPage(GlassPage):
     TITLE = "Links"
     DEFAULT_ENTRIES = []
     TARGET_KIND = "site"
+    # What the selection bar and its messages call these - see
+    # widgets.GridSelection, shared with the Games page. "entries" rather
+    # than the page's own title, because one of these grids holds apps
+    # and the other sites and the bar is the same bar.
+    SELECTION_NOUN = ("entry", "entries")
 
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
+        self._init_selection()
 
         entries = storage.load(self.DATA_FILE, None)
         fresh = entries is None
@@ -287,15 +293,6 @@ class LinkGridPage(GlassPage):
         title_box.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
         header.addLayout(title_box)
         header.addStretch()
-        # Pages that can discover their own entries put the button here,
-        # left of Add - Games has had one since it could read a
-        # launcher's library, and Apps can read the Start menu. Empty by
-        # default: Websites has nothing to scan.
-        for label, tooltip, handler in self._discovery_actions():
-            discover_btn = QPushButton(label)
-            discover_btn.setToolTip(tooltip)
-            discover_btn.clicked.connect(handler)
-            header.addWidget(discover_btn, alignment=Qt.AlignmentFlag.AlignTop)
         add_btn = QPushButton("+", objectName="AccentIcon")
         add_btn.setFixedSize(40, 40)
         add_btn.setToolTip("Add")
@@ -327,7 +324,11 @@ class LinkGridPage(GlassPage):
         self._search_timer.timeout.connect(self._refresh_grid)
         self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
         top_row.addWidget(self.search_box)
+        top_row.addWidget(self._build_select_button(
+            f"Pick several {self.TITLE.lower()} and delete them at once"))
         panel_layout.addLayout(top_row)
+
+        panel_layout.addWidget(self._build_selection_bar())
 
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
@@ -411,6 +412,7 @@ class LinkGridPage(GlassPage):
                 # added right after it.
                 widget.hide()
                 widget.deleteLater()
+        self._clear_selection_cards()
 
         # Dragging is off while a search is narrowing the grid: a drop
         # writes the order that is on screen (see _begin_custom_order),
@@ -418,6 +420,9 @@ class LinkGridPage(GlassPage):
         narrowed = bool(self._search_query())
 
         entries = self._visible_entries()
+        # Before the early return below as well as the draw: a search
+        # that matches nothing must still drop the selection it hid.
+        self._prune_selection({e.get("id") for e in entries})
         if not entries:
             message = (f"Nothing here matches '{self.search_box.text().strip()}'."
                        if narrowed
@@ -426,7 +431,9 @@ class LinkGridPage(GlassPage):
             return
 
         for index, entry in enumerate(entries):
-            card = self._build_card(entry, draggable=not narrowed)
+            # Dragging is off while selecting as well as while the grid is
+            # narrowed: both a drag and a pick want the same left press.
+            card = self._build_card(entry, draggable=not narrowed and not self._select_mode)
             self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
 
     def _build_card(self, entry, draggable=True):
@@ -471,7 +478,13 @@ class LinkGridPage(GlassPage):
             # question on an entry that launches more than one.
             card.setToolTip("No longer on disk:\n" + "\n".join(missing))
 
-        card.clicked.connect(lambda en=entry: self._open_entry(en))
+        if self._select_mode:
+            # After the layout's own widgets, so the mark stacks above
+            # them rather than under the icon.
+            self._attach_selection_badge(card, entry.get("id"))
+            card.clicked.connect(lambda en_id=entry.get("id"): self._toggle_selected(en_id))
+        else:
+            card.clicked.connect(lambda en=entry: self._open_entry(en))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
         if draggable:
             self._drag_reorder.attach(card, entry.get("id"))
@@ -480,6 +493,12 @@ class LinkGridPage(GlassPage):
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
         menu.addAction("Edit", lambda: self._open_edit_form(entry))
+        # The second way into selection mode, from the card the user is
+        # already pointing at - the toolbar button alone means noticing a
+        # word at the far end of the row before knowing to look for it.
+        # Same entry point the tracker pages carry.
+        if not self._select_mode:
+            menu.addAction("Select", lambda: self._set_select_mode(True, entry.get("id")))
         # No Move Up/Move Down: these cards reorder by dragging, same as
         # every other page, and the menu items only appeared under one sort
         # mode - a second, worse way to do the same thing.
@@ -539,7 +558,8 @@ class LinkGridPage(GlassPage):
 
         self._mutate(apply_change)
         show_undo_toast(self, f"Removed '{removed['name']}' - Click to Undo",
-                        lambda: self._restore_entry(removed, removed_at))
+                        lambda: self._restore_entry(removed, removed_at),
+                        on_redo=lambda: self._delete_ids([removed.get("id")]))
 
     def _restore_entry(self, entry, removed_at):
         def apply_change(entries):
@@ -551,12 +571,6 @@ class LinkGridPage(GlassPage):
 
         self._mutate(apply_change)
         return f"Restored '{entry['name']}'"
-
-    def _discovery_actions(self):
-        """(button label, tooltip, handler) for anything this page can
-        find on its own. None by default - a subclass with a source of
-        entries overrides it (see windows.apps)."""
-        return []
 
     def _open_add_form(self):
         EntryForm(self, None, on_save=self._on_form_save)
