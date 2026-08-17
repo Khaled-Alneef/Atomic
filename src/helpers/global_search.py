@@ -229,18 +229,16 @@ def _open_game(parent, game):
     """A game has no shared open helper - GamesPage._launch is a method
     on the page, and the page may not be built. This is its body without
     the redraw, which is the part that needs a page."""
-    from helpers import child_process
     from pathlib import Path
-    import subprocess
+
+    from helpers import game_launch
 
     path = game.get("path")
     if not path or not Path(path).exists():
         show_toast(parent, f"Can't Open '{game.get('name')}' - Not Found on This PC", 5000)
         return
     try:
-        subprocess.Popen([path], shell=True, cwd=str(Path(path).parent),
-                         env=child_process.clean_env(),
-                         creationflags=child_process.flags())
+        game_launch.run(game)
     except OSError as exc:
         show_toast(parent, f"Couldn't Open '{game.get('name')}' - "
                            f"{getattr(exc, 'strerror', None) or 'It Wouldn\'t Start'}", 5000)

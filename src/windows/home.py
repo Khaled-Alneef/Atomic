@@ -6,9 +6,7 @@ files the other pages read/write (tracker.json's/series.json's
 "recents" state to maintain.
 """
 
-import subprocess
 from datetime import datetime
-from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve, QEvent, QParallelAnimationGroup, QPropertyAnimation, QRect,
@@ -20,11 +18,11 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import (child_process, global_search, images, launchers,
+from helpers import (game_launch, global_search, images, launchers,
                      nav_config, storage, theme)
 from helpers.widgets import (
-    Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
-    search_field,
+    Card, GlassPage, defer_grid_rebuild, hold_hover_cursor,
+    release_hover_cursor, scroll_area, search_field,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
@@ -44,6 +42,11 @@ POSTER_SIZE = (78, 104)
 HERO_COVER_SIZE = (156, 208)
 ICON_SIZE = (40, 40)
 ROW_ICON_SIZE = (28, 28)
+
+# How long after a game is launched the Games row re-sorts it to the
+# front. Not immediate: the card would slide out from under the pointer
+# that just clicked it, which reads as a misclick.
+GAMES_RESORT_DELAY_MS = 2500
 
 TRACKER_PREVIEW_LIMIT = 6
 SERIES_PREVIEW_LIMIT = 6
@@ -167,6 +170,17 @@ def _greeting():
     return "Good Evening"
 
 
+def _clock_text() -> str:
+    """The time as "9:24 AM" - 12-hour, no leading zero on the hour,
+    uppercase meridiem.
+
+    Assembled rather than strftime'd: the hour without a leading zero is
+    "%-I" on Linux and "%#I" on Windows, so either spelling makes this
+    platform-specific for the sake of one digit."""
+    now = datetime.now()
+    return f"{now.hour % 12 or 12}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}"
+
+
 class HomePage(GlassPage):
     def __init__(self, app):
         super().__init__(parent=None)
@@ -178,6 +192,7 @@ class HomePage(GlassPage):
         # cached file has gone missing, rather than silently showing a
         # letter avatar here until the Games page is next opened.
         self.games = launchers.backfill_missing_icons(storage.load(GAMES_FILE, []))
+        self.games = launchers.backfill_launch_commands(self.games)
         self.websites = storage.load(WEBSITES_FILE, [])
         self.apps = storage.load(APPS_FILE, [])
 
@@ -263,16 +278,42 @@ class HomePage(GlassPage):
         # Balances the greeting's width on the right, so the field lands
         # centred in the page rather than centred in what is left over
         # beside the greeting. Taken from the greeting's own hint at
-        # build time; the stretches either side do the rest.
-        spacer = QWidget(objectName="Bare")
-        spacer.setMaximumWidth(greeting_box.sizeHint().width())
-        spacer.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
-        header_row.addWidget(spacer, stretch=1)
+        # build time; the stretches either side do the rest. It carries
+        # the clock now - the balance was already the right shape and
+        # width for it, and a second widget beside it would have thrown
+        # the centring out by its own width.
+        clock_box = QWidget(objectName="Bare")
+        clock_box.setMaximumWidth(greeting_box.sizeHint().width())
+        clock_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        clock_layout = QVBoxLayout(clock_box)
+        # Default margins, deliberately not zeroed: the greeting sits in
+        # a layout with the same defaults, and its 9px top margin is
+        # exactly how far down the row its first line starts. Measured -
+        # zeroing these put the clock 9px above the greeting's line.
+        # Its own style rather than the greeting's #PanelTitle: same
+        # weight and colour, a few points larger - see theme.py.
+        self.clock_label = QLabel(_clock_text(), objectName="HomeClock")
+        self.clock_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        clock_layout.addWidget(self.clock_label)
+        # AlignTop, like the search field: the block on the left is two
+        # lines, so centring against it would drop the clock into the gap
+        # between the greeting and its subtitle.
+        header_row.addWidget(clock_box, stretch=1, alignment=Qt.AlignmentFlag.AlignTop)
         body_layout.addLayout(header_row)
 
         self._greeting_timer = QTimer(self)
         self._greeting_timer.timeout.connect(self._refresh_greeting)
         self._greeting_timer.start(GREETING_REFRESH_MS)
+
+        # The clock re-arms itself to the next minute boundary instead of
+        # riding the greeting's fixed 60s interval: a timer started
+        # mid-minute would show each new minute up to 59s late, which is
+        # visible against any other clock on the screen.
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setSingleShot(True)
+        self._clock_timer.timeout.connect(self._tick_clock)
+        self._arm_clock()
 
         body_layout.addWidget(self._build_hero())
 
@@ -302,11 +343,20 @@ class HomePage(GlassPage):
             sections.append((pos, self._build_section(
                 "Movies & Series", self._build_poster_grid(series_recent))))
 
+        # Kept so the row can be redrawn in place the moment a game is
+        # launched from it (see _refresh_games_row) - the order here is
+        # "most recently played first", and it used to be worked out only
+        # when the page was built.
+        self._games_section = None
+        self._games_grid = None
+        self._quick_lists = {}
+
         recent_games = [] if "games" in hidden else self._recent_games()
         if recent_games:
             pos = nav_config.nav_position("games")
-            sections.append((pos, self._build_section(
-                "Games", self._build_games_grid(recent_games))))
+            self._games_grid = self._build_games_grid(recent_games)
+            self._games_section = self._build_section("Games", self._games_grid)
+            sections.append((pos, self._games_section))
 
         show_apps = bool(self.apps) and "apps" not in hidden
         show_websites = bool(self.websites) and "websites" not in hidden
@@ -378,6 +428,19 @@ class HomePage(GlassPage):
 
     def _refresh_greeting(self):
         self.greeting_label.setText(f"{_greeting()} \U0001F44B")
+
+    def _tick_clock(self):
+        self.clock_label.setText(_clock_text())
+        self._arm_clock()
+
+    def _arm_clock(self):
+        """Fire again just after the next minute turns over. The 50ms is
+        so the timer lands on the far side of the boundary rather than a
+        hair before it, which would re-arm for another whole minute
+        showing the minute that has just ended."""
+        now = datetime.now()
+        self._clock_timer.start(
+            (60 - now.second) * 1000 - now.microsecond // 1000 + 50)
 
     # ------------------------------------------------------------------
     def _all_trackable_entries(self):
@@ -823,13 +886,22 @@ class HomePage(GlassPage):
 
     def _launch_game(self, game):
         try:
-            subprocess.Popen([game["path"]], shell=True, cwd=str(Path(game["path"]).parent),
-                             env=child_process.clean_env(),
-                             creationflags=child_process.flags())
+            game_launch.run(game)
         except OSError as exc:
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
             return
         game["last_played"] = storage.now_iso()
+        # Back to the front of the row, but not under the pointer that
+        # just clicked it: the row re-sorts a beat later, by which time
+        # the game is coming up and the cursor has left the card.
+        # A timer parented to the page rather than QTimer.singleShot: a
+        # Home navigated away from before it fires takes the timer down
+        # with it, where a bare singleShot would fire into a page Qt has
+        # already deleted.
+        resort = QTimer(self)
+        resort.setSingleShot(True)
+        resort.timeout.connect(self._refresh_games_row)
+        resort.start(GAMES_RESORT_DELAY_MS)
         # Only this game's own field, not a wholesale save of the copy
         # Home loaded when it was built - that snapshot goes stale the
         # moment the Games page (or a Settings import) touches the list,
@@ -837,6 +909,43 @@ class HomePage(GlassPage):
         storage.update_entry(GAMES_FILE, game.get("id"), {"last_played": game["last_played"]})
 
     # ------------------------------------------------------------------
+    def _swap_in(self, old, new):
+        """Put `new` where `old` sits, in whatever layout is holding it.
+
+        Home is built once in __init__, so anything that changes what a
+        row should show (playing a game, opening an app) either redraws
+        that row in place or waits until the page is next opened. This is
+        the in-place half - one row rebuilt, rather than the whole page
+        torn down and the scroll position with it."""
+        parent = old.parentWidget()
+        layout = parent.layout() if parent is not None else None
+        if layout is None:
+            return old
+        layout.replaceWidget(old, new)
+        # hide() as well as deleteLater(): the delete is deferred to the
+        # event loop, and until then the old widget goes on painting over
+        # the new one (same trap as the grid pages' _refresh_grid).
+        old.hide()
+        old.deleteLater()
+        return new
+
+    def _refresh_games_row(self):
+        if self._games_grid is None:
+            return
+        self._games_grid = self._swap_in(
+            self._games_grid, self._build_games_grid(self._recent_games()))
+
+    def _refresh_quick_list(self, data_file):
+        """Redraw one Quick Apps/Websites list after something in it was
+        opened, so it re-sorts to most-recently-used straight away."""
+        found = self._quick_lists.get(data_file)
+        if found is None:
+            return
+        frame, title, entries = found
+        # _build_quick_list re-registers the new frame under this same
+        # key, so the next refresh finds the widget that is on screen.
+        self._swap_in(frame, self._build_quick_list(title, entries, data_file))
+
     def _build_quick_list(self, title, entries, data_file):
         frame = QWidget(objectName="SectionBox")
         layout = QVBoxLayout(frame)
@@ -874,6 +983,7 @@ class HomePage(GlassPage):
             row.clicked.connect(lambda en=entry, df=data_file, es=entries: self._open_quick_link(en, title, df, es))
             layout.addWidget(row)
 
+        self._quick_lists[data_file] = (frame, title, entries)
         return frame
 
     def _open_quick_link(self, entry, title, data_file, entries):
@@ -884,3 +994,7 @@ class HomePage(GlassPage):
         # would undo anything they'd changed since Home was built (same
         # reason games.json edits go through update_entry).
         storage.update_entry(data_file, entry.get("id"), {"last_used": entry["last_used"]})
+        # Same live re-sort the Games row gets, and deferred for the same
+        # reason - the row that was clicked is one of the widgets this
+        # rebuild replaces.
+        defer_grid_rebuild(lambda: self._refresh_quick_list(data_file))

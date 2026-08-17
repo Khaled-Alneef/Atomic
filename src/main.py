@@ -517,6 +517,15 @@ class MainWindow(QMainWindow):
                 self._style_nav_item(item, name, page_name)
         self.nav_list.updateGeometry()
 
+        # The card grids fit one more card per row against the folded
+        # rail (link_grid.grid_columns), so whatever is showing re-flows
+        # now rather than looking wrong until the next time it is opened.
+        # Before the animation, not after it: the column count is decided
+        # by the fold, not by the width it is currently passing through.
+        relayout = getattr(self._current_page, "relayout_for_sidebar", None)
+        if callable(relayout):
+            relayout()
+
         target = SIDEBAR_COLLAPSED_WIDTH if collapsed else SIDEBAR_WIDTH
         # setFixedWidth pins min and max together, so the animation drives
         # maximumWidth and drags minimumWidth along with it - animating
@@ -557,6 +566,14 @@ class MainWindow(QMainWindow):
             for i in range(self.nav_list.count())
         ]
         app_settings.set_nav_order(order)
+        # Home lays its preview sections out in this same order, so a
+        # drop while Home is showing has to redraw it - otherwise the
+        # sidebar and the page under it disagree until the user navigates
+        # away and back. Deferred by a tick: this runs from inside the
+        # drop, and the page being rebuilt owns widgets the drag is still
+        # unwinding through.
+        if self._history[self._history_index] == "home":
+            QTimer.singleShot(0, self.refresh_current_page)
 
     def _build_add_menu(self):
         """Rebuilt every time it opens, not once at startup: hiding a

@@ -30,6 +30,7 @@ does for the same reason.
 Both are inert when running from source or off Windows.
 """
 
+import contextlib
 import os
 import subprocess
 
@@ -54,6 +55,19 @@ def clean_env() -> dict:
     for name in _BOOTLOADER_VARS:
         environment.pop(name, None)
     return environment
+
+
+@contextlib.contextmanager
+def clean_environ():
+    """The same strip as clean_env, applied to this process for the
+    length of the block. For starting something through ShellExecute
+    (os.startfile), which takes no env= and hands the child whatever this
+    process is holding - a launcher URI has no other way to be opened."""
+    saved = {name: os.environ.pop(name) for name in _BOOTLOADER_VARS if name in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 def flags(detached: bool = False) -> int:
