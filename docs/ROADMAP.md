@@ -86,6 +86,7 @@ clever one, and leave a working path working.
 | 47 | The search bar belongs on Home, and the keybinds in Settings | ui-engineer | contained | **landed 1.4.19** - owner-raised |
 | 48 | Eight Settings categories, with Preferences and Uninstall of their own | ui-engineer | contained | **landed 1.4.20** - owner-raised |
 | 49 | One search field, and picking a result opens it | ui-engineer | contained | **landed 1.4.20** - owner-raised |
+| 50 | Remind about a waiting update at start-up, not just once | ui-engineer | contained | **landed 1.4.21** - owner-raised |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
@@ -950,6 +951,29 @@ entry opened from search behaves exactly as it does from its card,
 missing-target toast included. Measured: Ctrl+K from Games lands on Home
 with the field focused, the panel sits 1px off its computed spot under
 the field, and picking a website opened its URL.
+
+### 50. Remind about a waiting update at start-up, not just once
+
+**What** - Owner-raised after testing #13: the first notice was
+once-per-version by design, to avoid nagging, but an update that is
+never taken then never comes up again except as a dot.
+**Owner** - ui-engineer
+**Landed** (1.4.21) - told once, reminded after. The first launch that
+sees a version still gets the toast; every launch after that, while the
+same update is still waiting, gets an "Update Available" dialog with
+**Open Settings** and **Later**. A dialog and not a toast this time
+because this one asks something, which is the line `ui.md` draws. There
+is no "stop asking" - the way to stop it is one click away in the same
+dialog.
+
+**The test that found the gap was also wrong** (`packaging/test_update.py`).
+`schedule_update_check` returns early when the app is not frozen -
+running from source there is no executable to replace - so a test run
+from source could never show the toast, the dot or the reminder, which
+is the whole start-up half of the feature. It now stubs
+`updater.is_frozen`; `download_update` still refuses in every mode, so
+the binary still cannot be replaced by a test of the thing that replaces
+binaries.
 
 ### 29. Let the "what's new" dialog scroll
 

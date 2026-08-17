@@ -40,6 +40,7 @@ from PyQt6.QtGui import QCursor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QMessageBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -587,7 +588,8 @@ class MainWindow(QMainWindow):
 
         Not while running from source: there is no executable to replace
         (updater.is_frozen), so the offer would lead to Settings saying
-        exactly that. Called after the window is showing, and after the
+        exactly that - which is also why packaging/test_update.py has to
+        pretend the app is frozen to see any of this at all. Called after the window is showing, and after the
         what's-new dialog has been dismissed - that one is modal, and a
         timer started before it would fire into its nested event loop and
         drop a toast on top of the dialog."""
@@ -619,15 +621,40 @@ class MainWindow(QMainWindow):
         self._update_dot.show()
         self._position_update_dot()
         self._style_settings_btn()
-        # The toast is the once-per-*version* half, not once-per-launch:
-        # the dot is what persists, and repeating "there's an update" at
-        # every launch until it is taken is the naggy failure this item
-        # was explicitly told to avoid. A toast rather than a dialog -
-        # nothing here has to be decided (.claude/rules/ui.md).
-        if app_settings.get_notified_update_version() == version:
-            return
+        # First time this version is seen: a toast, which is enough to
+        # say it exists. Every launch after that, while it is still
+        # waiting: an alert, because the owner asked to be *reminded*
+        # rather than told once - a reminder nobody sees twice is not
+        # one. The dot carries it in between either way.
+        first_time = app_settings.get_notified_update_version() != version
         app_settings.set_notified_update_version(version)
-        show_toast(self, f"Atomic {version} Is Available - Install It in Settings", 6000)
+        if first_time:
+            show_toast(self, f"Atomic {version} Is Available - Install It in Settings", 6000)
+            return
+        self._remind_about_update(version)
+
+    def _remind_about_update(self, version):
+        """The reminder, once per launch while an update is waiting.
+
+        A dialog and not a toast, unlike the first notice: this one asks
+        something (take it now, or not yet), and `.claude/rules/ui.md`
+        draws that line - dialogs are for what the user must decide or
+        must not miss. Answering "Later" leaves the dot and asks again
+        next launch; there is no "stop asking", because the way to stop
+        it is to install the update, which is one click away in the same
+        dialog."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Update Available")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"Atomic {version} is available.")
+        box.setInformativeText("You are running "
+                               f"{updater.APP_VERSION}. Updating keeps your entries.")
+        install = box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        theme.apply_dark_titlebar(box)
+        box.exec()
+        if box.clickedButton() is install:
+            self._open_settings()
 
     def refresh_current_page(self):
         """Re-create whichever page is currently showing, fresh from

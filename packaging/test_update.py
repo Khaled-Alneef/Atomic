@@ -69,6 +69,14 @@ def main(argv):
     temp = temp_copy_of_real_data()
     from helpers import updater
 
+    # The startup check gives up immediately when the app is not frozen -
+    # from source there is no executable to replace - so without this the
+    # toast, the dot and the reminder can never appear and the whole
+    # start-up half of the feature goes untested. Only the *check* is
+    # fooled; download_update below still refuses, so nothing can be
+    # written over.
+    updater.is_frozen = lambda: True
+
     if mode == "available":
         updater.check_for_update = lambda timeout=10: dict(FAKE_UPDATE)
         print("pretending Atomic 9.9 is available")
@@ -101,8 +109,8 @@ def main(argv):
         print("  - an accent dot on the Settings button, bottom left")
         print("  - Settings > General > Version: offers 9.9, and Install")
         print("    reports the test refused the download")
-        print("  - close and run this again: the dot returns, the toast")
-        print("    does not - it is once per version, not per launch")
+        print("  - close and run this again: the toast is replaced by an")
+        print("    Update Available alert - told once, reminded after")
     elif mode == "current":
         print("  - no toast and no dot")
         print("  - Settings > General > Version: 'There is No New Update'")
