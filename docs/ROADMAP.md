@@ -83,6 +83,7 @@ clever one, and leave a working path working.
 | 44 | A search bar across the top of the window, and a magnifier in every search field | ui-engineer | contained | **landed 1.4.18** - owner-raised |
 | 45 | Stop telling people to double-click | ui-engineer | contained | **landed 1.4.18** - owner-raised |
 | 46 | Select All becomes a tick, and Clear goes | ui-engineer | contained | **landed 1.4.18** - owner-raised |
+| 47 | The search bar belongs on Home, and the keybinds in Settings | ui-engineer | contained | **landed 1.4.19** - owner-raised |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
@@ -872,6 +873,43 @@ is the thing a button could never show. Its state is set with signals
 blocked when it is only catching up with the selection, or it would
 re-apply what it is reporting. "Everything" still means what is on
 screen, so under a search it picks the handful in front of you.
+
+### 47. The search bar belongs on Home, and the keybinds in Settings
+
+**What** - Owner-raised, on seeing #44: the field should be on the main
+page only, Ctrl+K should still reach the panel from anywhere, it should
+sit on the greeting's line, the black strip behind it should go, the
+magnifier was blurry and scratched, and the shortcut list should move
+out of the panel into Settings under **Keybinds**.
+**Owner** - ui-engineer
+**Landed** (1.4.19), each with what it turned out to be:
+- **The black strip** was the bar sitting on the raw window background
+  while the page below painted the glass gradient. The wrapper is a
+  `GlassPage` now, so there is one surface and no seam - and moving the
+  field onto Home settles it anyway.
+- **On Home, on the greeting's line.** Top-aligned, not centred against
+  the greeting *block*: the block is two lines and the field is one, so
+  centring dropped it into the gap between them - measured 11px below
+  the greeting's own centre. Aligning tops puts their middles within a
+  pixel.
+- **Centred, and it now fits.** The first version fixed the field at
+  520px, which with the greeting and its balancing spacer gave the row a
+  1733px minimum - so on a 1400px window it overflowed and the field was
+  clipped off the right edge, which is exactly what it looked like. The
+  field is a 240-520px range and the spacer may shrink; measured centred
+  to 2px at 1100, 1400, 1920 and 2400.
+- **Ctrl+K still works everywhere.** The panel anchors under Home's
+  field when Home is showing and falls back to the window-centred
+  placement anywhere else - the shortcut belongs to the app, the field
+  to one page.
+- **The glass** was built at the widget's own device ratio, which is 1.0
+  until the widget has been shown, so the display upscaled a 14px pixmap
+  - that is the blur. It is drawn at the *screen's* ratio now, at 16px,
+  on half-pixel centres with a round cap, which is what the scratchy
+  edge was.
+- **Keybinds** moved to Settings > General. In the panel the list was a
+  wall of grey text shown to someone who had just proved they knew the
+  shortcut; Settings imports the same tuple rather than repeating it.
 
 ### 29. Let the "what's new" dialog scroll
 

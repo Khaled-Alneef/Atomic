@@ -35,10 +35,12 @@ from PyQt6.QtWidgets import (
 
 from . import storage, theme
 
-# The keyboard map, shown here because this panel is the one place every
-# user opens with a shortcut - a list of shortcuts nobody can find is not
-# a feature. Kept to the ones worth memorising; Alt+Left/Right and F11
-# predate this and are where a browser puts them anyway.
+# The app's keyboard map. Listed in Settings under Keybinds - it lived in
+# this panel first, which put a wall of grey text under the field every
+# time the panel opened, in front of someone who had just proved they
+# knew the shortcut. Kept here because this is where the keys are
+# defined-adjacent, and Settings imports it rather than repeating it.
+# Alt+Left/Right and F11 predate this and sit where a browser puts them.
 SHORTCUTS = (
     ("Ctrl+K", "search everything"),
     ("Ctrl+F", "search this page"),
@@ -130,12 +132,6 @@ class GlobalSearch(QDialog):
         self.empty.setWordWrap(True)
         layout.addWidget(self.empty)
 
-        self.hints = QLabel(
-            "   ".join(f"<b>{keys}</b> {what}" for keys, what in SHORTCUTS),
-            objectName="Muted")
-        self.hints.setWordWrap(True)
-        layout.addWidget(self.hints)
-
         self.setStyleSheet(
             f"QDialog {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};"
             f" border-radius: 10px; }}")
@@ -166,9 +162,6 @@ class GlobalSearch(QDialog):
         # The list is hidden rather than left empty, so the panel is a
         # single field until there is something to show under it.
         self.results.setVisible(bool(rows))
-        # The shortcut list is what an empty panel says instead of
-        # nothing - the moment anything is typed it gets out of the way.
-        self.hints.setVisible(not query.strip())
         self.empty.setVisible(bool(query.strip()) and not rows)
         self.empty.setText(f"Nothing matches '{query.strip()}'." if not rows else "")
         self.results.setFixedHeight(

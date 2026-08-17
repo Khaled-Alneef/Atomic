@@ -965,31 +965,44 @@ class GridSelection:
         return f"Restored {self._selection_count(len(removed))}"
 
 
-SEARCH_ICON_SIZE = 14
+SEARCH_ICON_SIZE = 16
 
 
-def magnifier_icon(color: str = None, size: int = SEARCH_ICON_SIZE, dpr: float = 1.0) -> QIcon:
+def magnifier_icon(color: str = None, size: int = SEARCH_ICON_SIZE) -> QIcon:
     """The search glass, drawn rather than bundled.
 
-    A 14px glyph is a circle and a stroke; shipping a PNG for it would
-    mean an asset to keep in step with the palette, and tinted_asset
-    already exists because a fixed-colour PNG sat wrong next to text
-    drawn from theme. Painted at the display's ratio and tagged with it,
-    like every other pixmap here, or it is soft on a scaled display."""
+    A 14px glyph is a circle and a stroke; shipping a PNG for it would be
+    one more asset to keep in step with the palette, and tinted_asset
+    exists precisely because a fixed-colour PNG sat wrong beside text
+    drawn from theme.
+
+    Two things it has to get right, both of which it got wrong first:
+    the ratio comes from the *screen*, since a widget's own
+    devicePixelRatioF is 1.0 until it has been shown and an icon built
+    then is upscaled by the display and looks soft; and the strokes are
+    laid on half-pixel centres with a round cap, or a 1.4px line drawn on
+    the pixel grid renders as a broken, scratchy edge."""
+    screen = QApplication.primaryScreen()
+    dpr = screen.devicePixelRatio() if screen is not None else 1.0
     pixmap = QPixmap(int(size * dpr), int(size * dpr))
     pixmap.setDevicePixelRatio(dpr)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     pen = QPen(QColor(color or theme.TEXT_MUTED))
-    pen.setWidthF(1.4)
+    pen.setWidthF(1.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     painter.setPen(pen)
-    # A lens in the top-left five-eighths, and a handle running from its
-    # lower-right corner to the bottom-right of the box - the proportions
-    # every toolbar magnifier uses.
-    lens = size * 0.58
-    painter.drawEllipse(QRectF(1.0, 1.0, lens, lens))
-    painter.drawLine(QPointF(lens * 0.92, lens * 0.92), QPointF(size - 1.5, size - 1.5))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    # Lens in the top-left, handle from its lower-right diagonal out to
+    # the corner. Inset by the pen's half-width so neither stroke is
+    # clipped by the edge of the pixmap.
+    inset = 1.25
+    lens = size * 0.55
+    painter.drawEllipse(QRectF(inset, inset, lens, lens))
+    from math import sqrt
+    edge = inset + lens * (0.5 + 0.5 / sqrt(2))
+    painter.drawLine(QPointF(edge, edge), QPointF(size - inset, size - inset))
     painter.end()
     return QIcon(pixmap)
 
@@ -1004,8 +1017,7 @@ def search_field(placeholder: str, width: int = None) -> QLineEdit:
     field = QLineEdit()
     field.setPlaceholderText(placeholder)
     field.setClearButtonEnabled(True)
-    dpr = field.devicePixelRatioF() or 1.0
-    field.addAction(magnifier_icon(dpr=dpr), QLineEdit.ActionPosition.LeadingPosition)
+    field.addAction(magnifier_icon(), QLineEdit.ActionPosition.LeadingPosition)
     if width:
         field.setFixedWidth(width)
     return field

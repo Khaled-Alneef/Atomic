@@ -33,8 +33,9 @@ from PyQt6.QtWidgets import (
 )
 
 from . import (
-    anime_sites, app_settings, launchers, logs, lookup_pool, manga_sites,
-    nav_config, startup, storage, stremio, theme, uninstall, updater,
+    anime_sites, app_settings, global_search, launchers, logs, lookup_pool,
+    manga_sites, nav_config, startup, storage, stremio, theme, uninstall,
+    updater,
 )
 from .widgets import finish_toast, scroll_area, show_toast
 
@@ -48,6 +49,11 @@ from .widgets import finish_toast, scroll_area, show_toast
 # excluding films, and pairs with "Reading" one row below - the two things
 # the tracker does.
 CATEGORIES = ["General", "Watching", "Reading", "Games", "Data"]
+
+# Width of the key-combination column under Keybinds, wide enough for the
+# longest of them ("Ctrl+1-9") with room to spare, so every description
+# starts at the same x rather than stepping with the combination's length.
+KEYBIND_COLUMN_WIDTH = 92
 
 # (display name, data file, predicate). A predicate of None means "clear
 # the whole file" (Series/Games/Apps/Websites each hold only their own
@@ -447,6 +453,23 @@ class SettingsDialog(QDialog):
         )
         home_hint.setWordWrap(True)
         form.addWidget(home_hint)
+
+        form.addSpacing(24)
+        form.addWidget(QLabel("Keybinds", objectName="SectionTitle"))
+        keys_hint = QLabel("What the keyboard does. These are fixed.",
+                           objectName="Muted")
+        keys_hint.setWordWrap(True)
+        form.addWidget(keys_hint)
+        for keys, what in global_search.SHORTCUTS:
+            row = QHBoxLayout()
+            combo = QLabel(keys)
+            # Fixed width so the descriptions line up in a column
+            # instead of stepping in and out with the length of each
+            # combination.
+            combo.setFixedWidth(KEYBIND_COLUMN_WIDTH)
+            row.addWidget(combo)
+            row.addWidget(QLabel(what, objectName="Muted"), stretch=1)
+            form.addLayout(row)
 
         form.addStretch()
         return page

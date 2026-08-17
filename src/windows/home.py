@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 from helpers import child_process, images, launchers, nav_config, storage, theme
 from helpers.widgets import (
     Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
+    search_field,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
@@ -46,6 +47,14 @@ TRACKER_PREVIEW_LIMIT = 6
 SERIES_PREVIEW_LIMIT = 6
 GAMES_PREVIEW_LIMIT = 6
 QUICK_LIST_LIMIT = 5
+
+# The search field's width here. Wider than a page's own 220px filter box
+# because it searches everything rather than one list, and capped so it
+# stays a field rather than a banner across a 2048px display.
+SEARCH_BAR_WIDTH = 520
+# What it may shrink to before the page would rather clip it - narrow
+# enough that a 1000px window still shows a usable field.
+SEARCH_BAR_MIN_WIDTH = 240
 
 HERO_CONTENT_WIDTH = 620
 HERO_SLIDE_LIMIT = 4
@@ -213,12 +222,47 @@ class HomePage(GlassPage):
         # actually need scrolling (see scroll_area's always_show_vbar).
         panel_layout.addWidget(scroll_area(body, always_show_vbar=True))
 
+        # Greeting on the left, the app-wide search on the same line.
+        # Only this page carries the field: it searches everything, and
+        # Home is the page that is already about everything. Ctrl+K
+        # reaches the same panel from anywhere else.
+        header_row = QHBoxLayout()
         header = QVBoxLayout()
         header.setSpacing(2)
         self.greeting_label = QLabel(f"{_greeting()} \U0001F44B", objectName="PanelTitle")
         header.addWidget(self.greeting_label)
         header.addWidget(QLabel("Here's what's going on", objectName="PanelSubtitle"))
-        body_layout.addLayout(header)
+        greeting_box = QWidget(objectName="Bare")
+        greeting_box.setLayout(header)
+        header_row.addWidget(greeting_box)
+
+        header_row.addStretch()
+        # A range, not a fixed width. Fixed at 520 the row's minimum came
+        # to 1733px - the greeting, the field and the greeting-width
+        # spacer that balances it - so on a 1400px window the row
+        # overflowed the viewport and the field was clipped off the right
+        # edge rather than sitting centred.
+        self.search_bar = search_field("Search everything...")
+        self.search_bar.setMinimumWidth(SEARCH_BAR_MIN_WIDTH)
+        self.search_bar.setMaximumWidth(SEARCH_BAR_WIDTH)
+        self.search_bar.textEdited.connect(self._search_bar_typed)
+        # Top-aligned, which puts it on the greeting's own line: the
+        # block under it is two lines (greeting plus subtitle), so
+        # centring the field against the block dropped it into the gap
+        # between them - measured 11px below the greeting's centre, and
+        # visibly so. The field and the greeting line are within a pixel
+        # of the same height, so aligning their tops aligns their middles.
+        header_row.addWidget(self.search_bar, stretch=3, alignment=Qt.AlignmentFlag.AlignTop)
+        header_row.addStretch()
+        # Balances the greeting's width on the right, so the field lands
+        # centred in the page rather than centred in what is left over
+        # beside the greeting. Taken from the greeting's own hint at
+        # build time; the stretches either side do the rest.
+        spacer = QWidget(objectName="Bare")
+        spacer.setMaximumWidth(greeting_box.sizeHint().width())
+        spacer.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        header_row.addWidget(spacer, stretch=1)
+        body_layout.addLayout(header_row)
 
         self._greeting_timer = QTimer(self)
         self._greeting_timer.timeout.connect(self._refresh_greeting)
@@ -276,6 +320,15 @@ class HomePage(GlassPage):
             body_layout.addWidget(widget)
 
         body_layout.addStretch()
+
+    def _search_bar_typed(self, text):
+        """The first keystroke hands over to the Ctrl+K panel, carrying
+        what was typed. The field empties as it does, so the two can
+        never both hold a query and disagree about which is the search."""
+        if not text.strip() or self.app is None:
+            return
+        self.search_bar.clear()
+        self.app.open_global_search(initial=text)
 
     def _refresh_greeting(self):
         self.greeting_label.setText(f"{_greeting()} \U0001F44B")
