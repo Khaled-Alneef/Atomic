@@ -42,14 +42,14 @@ from .widgets import show_toast
 # defined-adjacent, and Settings imports it rather than repeating it.
 # Alt+Left/Right and F11 predate this and sit where a browser puts them.
 SHORTCUTS = (
-    ("Ctrl+K", "search everything"),
-    ("Ctrl+F", "search this page"),
-    ("Ctrl+N", "add something"),
-    ("Ctrl+Z", "undo the last action"),
-    ("Ctrl+Y", "redo the last action"),
-    ("Ctrl+1-9", "jump to a sidebar page"),
-    ("Ctrl+,", "settings"),
-    ("Esc", "clear a search"),
+    ("Ctrl+K", "Search everything"),
+    ("Ctrl+F", "Search this page"),
+    ("Ctrl+N", "Add something"),
+    ("Ctrl+Z", "Undo the last action"),
+    ("Ctrl+Y", "Redo the last action"),
+    ("Ctrl+1-9", "Jump to a sidebar page"),
+    ("Ctrl+,", "Settings"),
+    ("Esc", "Exit search"),
 )
 
 PANEL_WIDTH = 620
