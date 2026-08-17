@@ -27,8 +27,8 @@ Unchanged from VDD-1.2 §2.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,762,647 bytes. SHA-256 `c7e97193048ac1401db8ef11b1c5397185f92806d0e5923341030c1aaf4ae9ae` |
-| `src/` | Full Python source, 15,247 lines across 37 modules (15,230 at 1.5) |
+| `Atomic.exe` | The application. 47,764,713 bytes. SHA-256 `5ed579a7377ef91c039b6aec4fa7cc13331c05f6db9ffcdf47da673f3a397313` |
+| `src/` | Full Python source, 15,253 lines across 37 modules (15,230 at 1.5) |
 | `packaging/` | `build.py`, `Atomic.spec` and `check_release_notes.py` |
 | `docs/VDD-1.6.md` | This document |
 
@@ -36,9 +36,10 @@ Build environment unchanged from VDD-1.1 §3.
 
 No development builds stand between 1.5 and this release: 1.6 is two
 changes taken straight off `development`, released the same day as 1.5.
-It was re-cut once after first being tagged, before anyone had it, to
-take the Escape and keybind-wording work in §5; the size and hash above
-are the re-cut binary's.
+It was re-cut twice after first being tagged, before anyone had it:
+once for the Escape and keybind-wording work in §5, and once for the
+empty-box half of the Escape fix that the first of those missed. The
+size and hash above are the last binary's.
 
 ---
 
@@ -46,6 +47,7 @@ are the re-cut binary's.
 
 | Module changed | Lines | What changed |
 |---|---|---|
+| `src/main.py` | 1,223 | Escape leaves a page's search box, empty or not |
 | `windows/home.py` | 886 | Escape leaves the global search field, focus included |
 | `helpers/theme.py` | 761 | The Anime and Movies & Series nav glyphs swapped |
 | `helpers/whats_new.py` | 314 | 1.6's notes |
@@ -85,6 +87,15 @@ finished the job; Home now ends the same way — clear, close, drop focus.
 
 The keybind list says so: the Esc row reads **Exit search** rather than
 "clear a search", which is what the key now does.
+
+A page's own search box needed the same fix a second time, and this is
+the more interesting half. The window's handler tested `box.text()`, so
+an empty box matched nothing and Escape fell through to the full-screen
+branch with the caret still in it — the case you land in after clearing
+by hand. It tests *focused or holding text* now. The text half stays on
+purpose: a query still narrowing the grid is worth escaping from after
+the focus has moved onto a card, so keying on focus alone would have
+traded one gap for another.
 
 ### The keybind descriptions start with capitals
 
@@ -156,11 +167,16 @@ In addition to VDD-1.0 §11 through VDD-1.5 §11:
 - **The keys each glyph drives were confirmed** rather than assumed:
   `main.py` reads `theme.NAV_ICONS` by page key, and `nav_config` maps
   `"anime"` → Anime and `"series"` → Movies & Series.
-- **The Escape behaviour was measured on both paths, before and after**,
-  in a real window with real key events: before, Home's field kept focus
-  after Escape while a tracker page's did not; after, both end on the
-  page. Focus is what was asserted, not the field being empty — the text
-  was already being cleared, which is why the defect survived.
+- **The Escape behaviour was measured over six cases** — a tracker page,
+  the Games page and Home's global bar, each empty and with text — in a
+  real window with real key events, asserting on *focus* rather than on
+  the field being empty, since the text was already being cleared and
+  that is precisely why the defect survived being "fixed" once.
+- **The Escape fix was run with a control**: with it removed, the harness
+  reproduces exactly the two reported failures (a tracker page and Games
+  with an empty box) while Home passes both, which is why the defect
+  looked intermittent from the outside. A check that cannot fail proves
+  nothing, and this one was made to fail first.
 - **The bundle gate passed**: every file `Atomic.spec` promises in
   `datas` present in the archive and byte-identical to the one on disk.
 - **`check_release_notes.py` passed** for 1.6, with one note written.
