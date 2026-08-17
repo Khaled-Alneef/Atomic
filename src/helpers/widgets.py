@@ -2,11 +2,12 @@
 
 import weakref
 
-from PyQt6.QtCore import (QEvent, QMimeData, QObject, QPoint, QPointF, QRect,
-                          QRectF, Qt, QTimer)
+from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
+                          QPointF, QPropertyAnimation, QRect, QRectF, Qt,
+                          QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QColor, QDrag, QIcon, QPainter, QPen, QPixmap,
-                         QRadialGradient)
+from PyQt6.QtGui import (QColor, QDrag, QIcon, QLinearGradient, QPainter, QPen,
+                         QPixmap, QRadialGradient)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QToolTip, QWidget,
@@ -1043,3 +1044,145 @@ def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
         area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     area.setWidget(body)
     return area
+
+
+# The round arrow buttons over a sideways-scrolling row, and the soft
+# edge they sit on. The fade is wider than the button so the cards
+# dissolve into the panel rather than sliding under a hard-edged disc.
+SIDE_ARROW_SIZE = 30
+SIDE_ARROW_INSET = 4
+SIDE_FADE_WIDTH = 64
+# One click moves most of a screenful, not a fixed number of cards: the
+# rows this wraps hold different card widths, and "nearly a viewport"
+# is the movement these arrows read as everywhere else.
+SIDE_SCROLL_STEP = 0.85
+SIDE_SCROLL_ANIM_MS = 240
+
+
+class _EdgeFade(QWidget):
+    """The soft edge under a scroll arrow: the panel colour at the outer
+    edge, fading to nothing a little way in, so a card being scrolled
+    past thins out instead of being cut in half by the button on top of
+    it.
+
+    Painted rather than a QSS gradient because it has to be transparent
+    at one end - a stylesheet background is composited as one opaque
+    rectangle, which would just paint a bar over the row. Mouse-
+    transparent, so the card underneath is still clickable right up to
+    the button itself."""
+
+    def __init__(self, parent, at_left: bool):
+        super().__init__(parent)
+        self._at_left = at_left
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        solid = QColor(theme.BG_ALT)
+        clear = QColor(theme.BG_ALT)
+        clear.setAlpha(0)
+        gradient = QLinearGradient(0, 0, self.width(), 0)
+        gradient.setColorAt(0.0, solid if self._at_left else clear)
+        gradient.setColorAt(1.0, clear if self._at_left else solid)
+        painter.fillRect(self.rect(), gradient)
+
+
+class SideScroller(QWidget):
+    """A horizontally scrolling row with an arrow button at each end.
+
+    The row keeps everything it already had - its scrollbar, Shift+wheel,
+    dragging a card out of it; the arrows are for reaching the rest of a
+    long row with the mouse alone, which previously meant aiming at a
+    2px scrollbar.
+
+    An arrow is shown only while there is something that way to reach, so
+    a row that fits entirely on screen carries no chrome at all. The area
+    is positioned by hand rather than laid out: the arrows and their
+    fades sit *over* it, and a layout would push them into a column
+    beside it."""
+
+    def __init__(self, area: QScrollArea, parent=None):
+        super().__init__(parent)
+        self._area = area
+        area.setParent(self)
+        self._bar = area.horizontalScrollBar()
+
+        # Animated rather than a jump: at this distance an instant
+        # scroll gives no sense of which way the row moved.
+        self._anim = QPropertyAnimation(self._bar, b"value", self)
+        self._anim.setDuration(SIDE_SCROLL_ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._fades = {}
+        self._buttons = {}
+        for at_left, glyph, tip in ((True, "‹", "Scroll left"),
+                                    (False, "›", "Scroll right")):
+            self._fades[at_left] = _EdgeFade(self, at_left)
+            button = QPushButton(glyph, self, objectName="ScrollArrow")
+            button.setFixedSize(SIDE_ARROW_SIZE, SIDE_ARROW_SIZE)
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.clicked.connect(lambda _checked=False, left=at_left: self._scroll(left))
+            use_hover_cursor(button)
+            self._buttons[at_left] = button
+
+        # Both signals: the value moves when the user scrolls, and the
+        # range only becomes non-zero once the row has been laid out -
+        # at construction there is nothing to scroll yet and both arrows
+        # would be hidden forever.
+        self._bar.valueChanged.connect(self._sync_arrows)
+        self._bar.rangeChanged.connect(lambda *_: self._sync_arrows())
+        # maximumHeight, not height(): the caller pins the area's height
+        # before wrapping it, and the widget has not been laid out yet,
+        # so height() is still the default 480.
+        self.setFixedHeight(area.maximumHeight())
+        self._sync_arrows()
+
+    def _row_height(self):
+        """The card area's height - the scrollbar's strip along the
+        bottom is not somewhere an arrow should be centred against, or
+        somewhere the fade should be painting over.
+
+        The bar's sizeHint, not whether it is currently visible: the
+        caller reserves that height whether the bar is up or not, and
+        visibility only flips *after* the range change that brings us
+        here - measured, reading it live left the fade 11px too tall and
+        tinting the ends of the bar it was supposed to sit above."""
+        return self.height() - self._bar.sizeHint().height()
+
+    def resizeEvent(self, event):
+        self._layout_children()
+        super().resizeEvent(event)
+
+    def _layout_children(self):
+        self._area.setGeometry(self.rect())
+        row_height = self._row_height()
+        for at_left in (True, False):
+            fade = self._fades[at_left]
+            button = self._buttons[at_left]
+            fade.setGeometry(0 if at_left else self.width() - SIDE_FADE_WIDTH, 0,
+                             SIDE_FADE_WIDTH, row_height)
+            button.move(SIDE_ARROW_INSET if at_left
+                        else self.width() - SIDE_ARROW_SIZE - SIDE_ARROW_INSET,
+                        (row_height - SIDE_ARROW_SIZE) // 2)
+            fade.raise_()
+            button.raise_()
+
+    def _sync_arrows(self, *_args):
+        bar = self._bar
+        for at_left, visible in ((True, bar.value() > bar.minimum()),
+                                 (False, bar.value() < bar.maximum())):
+            self._fades[at_left].setVisible(visible)
+            self._buttons[at_left].setVisible(visible)
+
+    def _scroll(self, at_left: bool):
+        bar = self._bar
+        step = max(1, int(self._area.viewport().width() * SIDE_SCROLL_STEP))
+        target = bar.value() + (-step if at_left else step)
+        target = max(bar.minimum(), min(bar.maximum(), target))
+        # Stopped first: clicking twice quickly should continue from
+        # where the row is heading, not restart from where it was.
+        self._anim.stop()
+        self._anim.setStartValue(bar.value())
+        self._anim.setEndValue(target)
+        self._anim.start()

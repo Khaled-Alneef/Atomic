@@ -32,7 +32,13 @@ MAX_TARGETS = 3
 
 CARD_WIDTH = 120
 THUMB_SIZE = (44, 44)
-GRID_COLS = 13
+# Cards per row, which depends on how much of the window the sidebar is
+# taking - the folded 68px rail gives back room for one more card. Both
+# are the owner's chosen widths (see grid_columns); the grid does not
+# measure the available space, so a window narrower than the row needs
+# will overflow rather than wrap.
+GRID_COLS = 14
+GRID_COLS_SIDEBAR_OPEN = 13
 
 # Shared by Apps, Websites and Games so the three grids stay identical
 # and CARD_TEXT_WIDTH below can't drift out of step with the margins it
@@ -46,6 +52,19 @@ CARD_TEXT_WIDTH = CARD_WIDTH - CARD_MARGINS[0] - CARD_MARGINS[2]
 # Same shape as Games' SORT_OPTIONS ("Last Played" here is "Last Used" -
 # whenever an entry's targets were last opened, see _open_entry).
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Used"]
+
+
+def grid_columns(page) -> int:
+    """How many cards this page's grid fits on one row right now.
+
+    Read off the window every time rather than stored on the page: the
+    sidebar can fold while the page is showing, and the answer has to
+    change with it (main._toggle_sidebar re-flows the grid). Via
+    `page.app`, not `page.window()` - pages are built with no parent and
+    only get one when they are shown, so during __init__ window() is the
+    page itself and a folded sidebar would go unnoticed."""
+    window = getattr(page, "app", None)
+    return GRID_COLS if getattr(window, "_sidebar_collapsed", False) else GRID_COLS_SIDEBAR_OPEN
 
 
 class CardTextLabel(QLabel):
@@ -427,11 +446,19 @@ class LinkGridPage(GridSelection, GlassPage):
             self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
+        columns = grid_columns(self)
         for index, entry in enumerate(entries):
             # Dragging is off while selecting as well as while the grid is
             # narrowed: both a drag and a pick want the same left press.
             card = self._build_card(entry, draggable=not narrowed and not self._select_mode)
-            self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
+            self.grid_layout.addWidget(card, index // columns, index % columns)
+
+    def relayout_for_sidebar(self):
+        """Re-flow the grid because the sidebar folded or unfolded, which
+        changes how many cards fit on a row. Called by main, on whatever
+        page is showing - so the row width follows the fold instead of
+        waiting for the next visit to this page."""
+        self._refresh_grid()
 
     def _build_card(self, entry, draggable=True):
         card = Card(hoverable=True, matte=True)

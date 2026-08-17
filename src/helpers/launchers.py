@@ -18,7 +18,7 @@ import os
 import uuid
 from pathlib import Path
 
-from . import icon_extract, images, storage
+from . import game_launch, icon_extract, images, storage
 
 GAMES_FILE = "games.json"
 ICON_EXTRACT_SIZE = 96
@@ -121,25 +121,32 @@ def _pick_game_exe(game_dir: Path):
     return max(candidates, key=lambda p: p.stat().st_size if p.exists() else 0)
 
 
-def scan_launcher(root_dir: str, common_subpath: str = None, launcher_label: str = None):
+def scan_launcher(root_dir: str, common_subpath: str = None, launcher_label: str = None,
+                  launcher_key: str = None):
     """Every game found under one launcher's install directory, as
-    {"name": folder name, "path": guessed .exe}. Skips folders no
-    plausible .exe could be found in, and the launcher's own internal
-    folders (see _is_launcher_internal_folder) - `launcher_label` is
-    needed for the latter check and is optional only for convenience
+    {"name": folder name, "path": guessed .exe, "launch": how to start
+    it through its launcher (see helpers/game_launch) or None}. Skips
+    folders no plausible .exe could be found in, and the launcher's own
+    internal folders (see _is_launcher_internal_folder) - `launcher_label`
+    is needed for the latter check and is optional only for convenience
     (callers with just a raw directory and no known launcher identity
-    still get the fixed-name checks, just not the label-based ones)."""
+    still get the fixed-name checks, just not the label-based ones).
+    `launcher_key` is what resolves the launch command; without it the
+    games still import and still start by path."""
     root = Path(root_dir)
     games_root = (root / common_subpath) if common_subpath else root
     if not games_root.is_dir():
         return []
+    # Built once for the whole directory, not per game - see index_for.
+    index = game_launch.index_for(launcher_key, root_dir) if launcher_key else None
     results = []
     for entry in sorted(games_root.iterdir()):
         if not entry.is_dir() or _is_launcher_internal_folder(entry.name, launcher_label):
             continue
         exe = _pick_game_exe(entry)
         if exe:
-            results.append({"name": entry.name, "path": str(exe)})
+            command = game_launch.command_for(launcher_key, index, entry) if launcher_key else None
+            results.append({"name": entry.name, "path": str(exe), "launch": command})
     return results
 
 
@@ -153,7 +160,7 @@ def scan_all(launcher_dirs: dict):
         if not root_dir:
             continue
         label, subpath = by_key.get(key, (None, None))
-        for game in scan_launcher(root_dir, subpath, label):
+        for game in scan_launcher(root_dir, subpath, label, key):
             results.append({**game, "launcher": key})
     return results
 
@@ -206,6 +213,56 @@ def backfill_missing_icons(games=None):
     return games
 
 
+def backfill_launch_commands(games=None):
+    """Give games imported before launch commands existed (and any whose
+    launcher has since been configured, or reinstalled somewhere else)
+    the command that starts them through their launcher. Returns the
+    up-to-date list.
+
+    Matching is by path: a saved game whose .exe lives under a configured
+    launcher root belongs to that launcher, and its own folder is the
+    first one below that root. Nothing is re-scanned - this reads the
+    same manifests a scan would, for the entries that lack an answer.
+
+    Called from the Games page and Home for the same reason
+    backfill_missing_icons is: the alternative is telling the user to
+    re-import a library they already have."""
+    from . import app_settings  # helpers-level cycle: app_settings imports storage, not this
+
+    games = storage.load(GAMES_FILE, []) if games is None else games
+    pending = [g for g in games if not g.get("launch") and g.get("path")]
+    if not pending:
+        return games
+    dirs = app_settings.get_launcher_dirs()
+    indexes = {}
+    for key, label, subpath in LAUNCHERS:
+        root_dir = dirs.get(key)
+        if not root_dir:
+            continue
+        games_root = Path(root_dir) / subpath if subpath else Path(root_dir)
+        prefix = os.path.normcase(os.path.normpath(str(games_root))) + os.sep
+        for game in pending:
+            if game.get("launch"):
+                continue
+            path = os.path.normpath(game["path"])
+            if not os.path.normcase(path).startswith(prefix):
+                continue
+            # The game's own folder, not the .exe's - a game exe often
+            # sits several levels down (Binaries/Win64, _retail_). Taken
+            # off the un-normcased path: the folder name is matched
+            # against a manifest's, and normcase would lowercase it.
+            game_dir = games_root / Path(os.path.relpath(path, games_root)).parts[0]
+            if key not in indexes:
+                indexes[key] = game_launch.index_for(key, root_dir)
+            command = game_launch.command_for(key, indexes[key], game_dir)
+            if command:
+                game["launch"] = command
+                game["launcher"] = key
+                storage.update_entry(GAMES_FILE, game.get("id"),
+                                     {"launch": command, "launcher": key})
+    return games
+
+
 def import_scanned_games(found):
     """Add newly-discovered games (from scan_launcher/scan_all) straight
     into the saved games list, skipping any whose path is already there.
@@ -225,6 +282,10 @@ def import_scanned_games(found):
         new_games.append({
             "id": str(uuid.uuid4()), "name": game["name"], "path": game["path"],
             "icon": extract_and_cache_icon(game["path"]), "added_at": added_at, "last_played": None,
+            # Which launcher owns it, and how to start it through that
+            # launcher - a Steam game run straight off its .exe never
+            # registers as running, and a Blizzard one asks to sign in.
+            "launcher": game.get("launcher"), "launch": game.get("launch"),
         })
     if new_games:
         games.extend(new_games)

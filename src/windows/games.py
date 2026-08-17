@@ -7,7 +7,6 @@ Custom Order as the drag begins).
 """
 
 import copy
-import subprocess
 import threading
 import uuid
 from pathlib import Path
@@ -19,13 +18,13 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import app_settings, child_process, images, launchers, storage, theme
+from helpers import app_settings, game_launch, images, launchers, storage, theme
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
     finish_toast, scroll_area, search_field, show_toast, show_undo_toast,
 )
 from windows.link_grid import (
-    CARD_MARGINS, CARD_WIDTH, GRID_COLS, THUMB_SIZE, CardTextLabel,
+    CARD_MARGINS, CARD_WIDTH, THUMB_SIZE, CardTextLabel, grid_columns,
 )
 
 DATA_FILE = "games.json"
@@ -167,6 +166,10 @@ class GamesPage(GridSelection, GlassPage):
         if changed:
             storage.save(DATA_FILE, self.games)
         self.games = launchers.backfill_missing_icons(self.games)
+        # Games imported before launch commands existed still hold only a
+        # path; this gives them their launcher's own way in without the
+        # user re-importing a library they already have.
+        self.games = launchers.backfill_launch_commands(self.games)
 
     def _mutate(self, apply_change):
         """Apply a change to the saved games list and redraw.
@@ -244,11 +247,16 @@ class GamesPage(GridSelection, GlassPage):
             self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
+        columns = grid_columns(self)
         for index, game in enumerate(games):
             # Dragging is off while selecting as well as while the grid is
             # narrowed: both a drag and a pick want the same left press.
             card = self._build_card(game, draggable=not narrowed and not self._select_mode)
-            self.grid_layout.addWidget(card, index // GRID_COLS, index % GRID_COLS)
+            self.grid_layout.addWidget(card, index // columns, index % columns)
+
+    def relayout_for_sidebar(self):
+        """See LinkGridPage.relayout_for_sidebar - same grid, same reason."""
+        self._refresh_grid()
 
     def _build_card(self, game, draggable=True):
         card = Card(hoverable=True, matte=True)
@@ -342,9 +350,7 @@ class GamesPage(GridSelection, GlassPage):
 
     def _launch(self, game):
         try:
-            subprocess.Popen([game["path"]], shell=True, cwd=str(Path(game["path"]).parent),
-                             env=child_process.clean_env(),
-                             creationflags=child_process.flags())
+            game_launch.run(game)
         except OSError as exc:
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
             return
@@ -359,6 +365,7 @@ class GamesPage(GridSelection, GlassPage):
     def _on_edit_save(self, game):
         storage.update_entry(DATA_FILE, game.get("id"), {
             "name": game["name"], "path": game["path"], "icon": game.get("icon"),
+            "launch": game.get("launch"), "launcher": game.get("launcher"),
         })
         self._refresh_grid()
 
@@ -486,6 +493,12 @@ class EditGameForm(QDialog):
         if not name or not path:
             QMessageBox.warning(self, "Games", "Name and path can't be empty.")
             return
+        if Path(path) != Path(self.game.get("path") or ""):
+            # Pointing the entry somewhere else has to drop the command
+            # resolved for where it used to be, or Save would look like
+            # it worked while every launch still started the old game.
+            self.game["launch"] = None
+            self.game["launcher"] = None
         self.game.update(name=name, path=path, icon=self.icon_path)
         self.on_save()
         self.accept()
