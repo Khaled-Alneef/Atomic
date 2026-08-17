@@ -1008,13 +1008,19 @@ class MainWindow(QMainWindow):
             self.open_global_search()
             return
         if event.key() == Qt.Key.Key_Escape:
-            # A search box being narrowed to nothing is the thing most
-            # worth escaping from, so it wins over leaving full screen -
-            # and only when there is actually something in it, so Escape
-            # keeps its usual meaning the rest of the time.
+            # A search box is the thing most worth escaping from, so it
+            # wins over leaving full screen. Focused *or* holding text,
+            # not text alone: keyed on text, an empty box swallowed
+            # nothing and Escape left the caret sitting in it - reported,
+            # and the half of this the first fix missed. The text half
+            # stays because a query still narrowing the grid is worth
+            # escaping from after the focus has moved to a card. A box
+            # that is neither is not what Escape is about, so it keeps
+            # its usual meaning the rest of the time.
             box = getattr(self._current_page, "search_box", None)
-            if box is not None and box.text():
+            if box is not None and (box.hasFocus() or box.text()):
                 box.clear()
+                box.clearFocus()
                 self._current_page.setFocus()
                 return
             # Otherwise Escape only means "leave full screen" while in
