@@ -28,6 +28,7 @@ behaviour per kind of thing and this is not a second one.
 """
 
 from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QDialog, QLabel, QListWidget, QListWidgetItem, QVBoxLayout,
 )
@@ -114,6 +115,17 @@ class GlobalSearch(QDialog):
     keyboard, which would take focus off the very field being typed into.
     """
 
+    # Emitted whenever this panel closes, including the close it does to
+    # itself when a result is clicked. Whoever opened it keeps a
+    # reference, and this deletes itself on close - so without this the
+    # page is left pointing at a deleted object. Shipped bug: opening a
+    # result *by clicking it* left Home holding the dead panel, and every
+    # later keystroke in the search field raised on it, so no suggestions
+    # appeared again until the page happened to be rebuilt. Pressing
+    # Enter never showed it, because that path closes the panel from the
+    # page's own side.
+    closed = Signal()
+
     def __init__(self, window, anchor=None):
         super().__init__(window)
         self._window = window
@@ -198,6 +210,10 @@ class GlobalSearch(QDialog):
                           frame.y() + top_left.y() + self._anchor.height() + 6)
         return QPoint(frame.x() + (frame.width() - width) // 2,
                       frame.y() + int(frame.height() * PANEL_TOP_FRACTION))
+
+    def closeEvent(self, event):
+        self.closed.emit()
+        super().closeEvent(event)
 
     def _open(self, item):
         page_name, entry = item.data(Qt.ItemDataRole.UserRole)
