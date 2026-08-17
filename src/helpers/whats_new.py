@@ -26,6 +26,12 @@ from . import theme, updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.6": [
+        "The Anime and Movies & Series icons have swapped places in the "
+        "sidebar - Anime is the monitor now, Movies & Series the camera.",
+        "Escape leaves a search box instead of only emptying it, so the "
+        "cursor is no longer left blinking in a box you are done with.",
+    ],
     "1.5": [
         "One search across everything you track. Ctrl+K, or the box "
         "beside the greeting on Home - picking a result opens it, the "

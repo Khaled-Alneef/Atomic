@@ -349,8 +349,9 @@ class HomePage(GlassPage):
 
     def eventFilter(self, obj, event):
         """Up/Down/Enter/Escape in the field drive the list under it -
-        the field keeps the focus throughout, which is why the panel is
-        shown without activating."""
+        the field keeps the focus while the list is being driven, which
+        is why the panel is shown without activating. Escape is the one
+        that ends it, focus included."""
         if obj is self.search_bar and event.type() == QEvent.Type.KeyPress:
             key = event.key()
             if self._search_results is not None:
@@ -363,8 +364,15 @@ class HomePage(GlassPage):
                     self._close_search_results()
                     return True
             if key == Qt.Key.Key_Escape:
+                # Escape leaves the field, it doesn't just empty it -
+                # measured, clearing alone left the caret blinking in a
+                # box the user had just said they were done with, while
+                # the same key on a tracker page dropped focus onto the
+                # page. Same ending on both now.
                 self.search_bar.clear()
                 self._close_search_results()
+                self.search_bar.clearFocus()
+                self.setFocus()
                 return True
         return super().eventFilter(obj, event)
 

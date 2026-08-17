@@ -107,11 +107,14 @@ FONT_FAMILY_ICON_FALLBACKS = (FONT_FAMILY_ICONS, "Segoe MDL2 Assets", FONT_FAMIL
 # showing one of these glyphs has to be handed the family here too, or
 # it renders the codepoint as a missing-glyph box.
 FONT_STACK_ICONS = ", ".join(f'"{name}"' for name in FONT_FAMILY_ICON_FALLBACKS)
+# Anime carries the monitor and Movies & Series the camera, not the
+# other way round: swapped at the owner's request after seeing the
+# folded strip, where the two sat three rows apart and read backwards.
 NAV_ICONS = {
     "home": "",      # Home
-    "anime": "",     # Video
+    "anime": "",     # TVMonitor
     "manga": "",     # ReadingMode
-    "series": "",    # TVMonitor
+    "series": "",    # Video
     "games": "",     # Game (controller)
     "apps": "",      # AllApps
     "websites": "",  # Globe
