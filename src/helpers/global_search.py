@@ -20,20 +20,20 @@ coordinates divided by the *other* screen's scale factor on a mixed-DPI
 pair, which is how this app's toasts once landed 200px off
 (.claude/rules/ui.md).
 
-Choosing a result navigates to that entry's own page and puts the title
-in that page's search box, so the card is on screen with nothing else
-around it. Deliberately not a second way to open an entry: every page
-already knows how to open its own, and a global list that launched
-things itself would be a second implementation of six different open
-behaviours.
+Choosing a result opens it - the anime in Stremio, the game, the app,
+the site - rather than walking to its page and leaving it to be clicked
+again. Nothing here knows *how* to open anything: it hands the entry to
+the same function the entry's own page uses, so there is one open
+behaviour per kind of thing and this is not a second one.
 """
 
-from PyQt6.QtCore import QEvent, QPoint, Qt
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtWidgets import (
-    QDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout,
+    QDialog, QLabel, QListWidget, QListWidgetItem, QVBoxLayout,
 )
 
 from . import storage, theme
+from .widgets import show_toast
 
 # The app's keyboard map. Listed in Settings under Keybinds - it lived in
 # this panel first, which put a wall of grey text under the field every
@@ -75,7 +75,9 @@ _PAGE_LABELS = {
 
 def collect(query: str):
     """Everything whose name contains `query`, as
-    [(title, page name, page label), ...].
+    [(title, page name, page label, entry), ...] - the entry included
+    because choosing a result opens it, and opening needs the record
+    rather than its name.
 
     Read fresh on every search rather than cached: this opens over
     whichever page is showing, and that page may have just added,
@@ -92,7 +94,8 @@ def collect(query: str):
             entry_page = page
             if entry_page is None:
                 entry_page = "manga" if entry.get("type") in _MANGA_TYPES else "anime"
-            results.append((title, entry_page, _PAGE_LABELS.get(entry_page, entry_page)))
+            results.append((title, entry_page,
+                            _PAGE_LABELS.get(entry_page, entry_page), entry))
     # Titles that *start* with what was typed first - typing "one" should
     # reach One Piece before The World After The End.
     results.sort(key=lambda row: (not row[0].lower().startswith(query), row[0].lower()))
@@ -100,28 +103,33 @@ def collect(query: str):
 
 
 class GlobalSearch(QDialog):
-    """The panel itself. Built fresh each time it is opened, so it never
-    holds a stale copy of any page's data."""
+    """The results, under whichever field is driving them.
+
+    No field of its own any more. There was one, and with the search box
+    on Home it meant two fields on screen a few pixels apart, one of them
+    holding what had been typed into the other. What is typed lives in
+    the page's field; this shows what it found.
+
+    Frameless and non-modal rather than a Popup: a Popup grabs the
+    keyboard, which would take focus off the very field being typed into.
+    """
 
     def __init__(self, window, anchor=None):
         super().__init__(window)
         self._window = window
-        # The widget to hang under, if there is one. With the search bar
-        # across the top of the window, dropping the panel at a fixed
-        # fraction of the window height would leave a gap between the
-        # field being typed into and the results for it.
+        # The field driving this, if there is one - the panel hangs
+        # beneath it. Without one it falls back to the window's own
+        # geometry (see _panel_position).
         self._anchor = anchor
-        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        # Shown without taking focus, so the field being typed into keeps
+        # it and every keystroke still arrives there.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
-
-        self.field = QLineEdit()
-        self.field.setPlaceholderText("Search everything...")
-        self.field.textChanged.connect(self._refresh)
-        layout.addWidget(self.field)
 
         self.results = QListWidget()
         self.results.itemActivated.connect(self._open)
@@ -135,50 +143,54 @@ class GlobalSearch(QDialog):
         self.setStyleSheet(
             f"QDialog {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};"
             f" border-radius: 10px; }}")
-        self.field.installEventFilter(self)
-        self._refresh("")
-        self._place()
+        self._rows = []
 
-    def _place(self):
-        """Sized and positioned against the window's own geometry, which
-        is already in global coordinates - see the module docstring for
-        why not mapToGlobal, and where the numbers come from."""
+    def set_query(self, query: str):
+        """Show what `query` finds. Returns whether anything was found -
+        the caller decides whether an empty panel is worth showing."""
+        self.results.clear()
+        self._rows = collect(query)
+        for title, page, label, entry in self._rows:
+            item = QListWidgetItem(f"{title}    ·    {label}")
+            item.setData(Qt.ItemDataRole.UserRole, (page, entry))
+            self.results.addItem(item)
+        if self._rows:
+            self.results.setCurrentRow(0)
+        self.results.setVisible(bool(self._rows))
+        self.empty.setVisible(not self._rows)
+        self.empty.setText("" if self._rows else f"Nothing matches '{query.strip()}'.")
+        self.results.setFixedHeight(
+            max(1, len(self._rows)) * (self.results.sizeHintForRow(0) if self._rows else 1) + 8)
+        self.adjustSize()
+        self.place()
+        return bool(self._rows)
+
+    def move_selection(self, delta):
+        if not self._rows:
+            return
+        row = self.results.currentRow() + delta
+        self.results.setCurrentRow(max(0, min(row, self.results.count() - 1)))
+
+    def open_current(self):
+        item = self.results.currentItem()
+        if item is not None:
+            self._open(item)
+
+    def place(self):
         frame = self._window.geometry()
         width = min(PANEL_WIDTH, int(frame.width() * 0.9))
+        if self._anchor is not None:
+            width = max(width, self._anchor.width())
         self.setFixedWidth(width)
-        self.adjustSize()
         self.move(self._panel_position(width))
 
-    def _refresh(self, _text=None):
-        query = self.field.text()
-        self.results.clear()
-        rows = collect(query)
-        for title, page, label in rows:
-            item = QListWidgetItem(f"{title}    ·    {label}")
-            item.setData(Qt.ItemDataRole.UserRole, (page, title))
-            self.results.addItem(item)
-        if rows:
-            self.results.setCurrentRow(0)
-        # The list is hidden rather than left empty, so the panel is a
-        # single field until there is something to show under it.
-        self.results.setVisible(bool(rows))
-        self.empty.setVisible(bool(query.strip()) and not rows)
-        self.empty.setText(f"Nothing matches '{query.strip()}'." if not rows else "")
-        self.results.setFixedHeight(
-            max(1, len(rows)) * (self.results.sizeHintForRow(0) if rows else 1) + 8)
-        self.adjustSize()
-        self._place_vertically()
-
-    def _place_vertically(self):
-        self.move(self._panel_position(self.width()))
-
     def _panel_position(self, width):
-        """Under the search bar when there is one, otherwise a fifth of
-        the way down the window.
+        """Under the field driving it, or a fifth of the way down the
+        window when nothing is.
 
-        Both are worked out from `geometry()`, which is already global -
-        never `mapToGlobal`, which returns coordinates divided by the
-        other screen's scale factor on a mixed-DPI pair."""
+        Both from `geometry()`, which is already global - never
+        `mapToGlobal`, which returns coordinates divided by the other
+        screen's scale factor on a mixed-DPI pair."""
         frame = self._window.geometry()
         if self._anchor is not None and self._anchor.isVisible():
             top_left = self._anchor.mapTo(self._window, QPoint(0, 0))
@@ -187,23 +199,50 @@ class GlobalSearch(QDialog):
         return QPoint(frame.x() + (frame.width() - width) // 2,
                       frame.y() + int(frame.height() * PANEL_TOP_FRACTION))
 
-    def eventFilter(self, obj, event):
-        # Down/Up from the field move through the results without the
-        # focus leaving what is being typed - the behaviour every app
-        # this borrows from has.
-        if obj is self.field and event.type() == QEvent.Type.KeyPress:
-            if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up) and self.results.isVisible():
-                row = self.results.currentRow() + (1 if event.key() == Qt.Key.Key_Down else -1)
-                self.results.setCurrentRow(max(0, min(row, self.results.count() - 1)))
-                return True
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                item = self.results.currentItem()
-                if item is not None:
-                    self._open(item)
-                return True
-        return super().eventFilter(obj, event)
-
     def _open(self, item):
-        page_name, title = item.data(Qt.ItemDataRole.UserRole)
+        page_name, entry = item.data(Qt.ItemDataRole.UserRole)
         self.close()
-        self._window.reveal_entry(page_name, title)
+        open_entry(self._window, page_name, entry)
+
+
+def open_entry(parent, page_name, entry):
+    """Open one search result.
+
+    Imported here rather than at module scope: helpers must not depend on
+    windows (the same reason settings_dialog reaches for a page module
+    through sys.modules), and these three functions are the ones the
+    pages themselves use - so an entry opened from here behaves exactly
+    as it does from its own card, including the toasts it raises when a
+    target is missing."""
+    from windows.link_grid import open_link_entry
+    from windows.tracker import open_tracker_entry
+
+    if page_name in ("anime", "manga", "series"):
+        open_tracker_entry(parent, entry)
+    elif page_name == "games":
+        _open_game(parent, entry)
+    else:
+        open_link_entry(parent, entry)
+
+
+def _open_game(parent, game):
+    """A game has no shared open helper - GamesPage._launch is a method
+    on the page, and the page may not be built. This is its body without
+    the redraw, which is the part that needs a page."""
+    from helpers import child_process
+    from pathlib import Path
+    import subprocess
+
+    path = game.get("path")
+    if not path or not Path(path).exists():
+        show_toast(parent, f"Can't Open '{game.get('name')}' - Not Found on This PC", 5000)
+        return
+    try:
+        subprocess.Popen([path], shell=True, cwd=str(Path(path).parent),
+                         env=child_process.clean_env(),
+                         creationflags=child_process.flags())
+    except OSError as exc:
+        show_toast(parent, f"Couldn't Open '{game.get('name')}' - "
+                           f"{getattr(exc, 'strerror', None) or 'It Wouldn\'t Start'}", 5000)
+        return
+    storage.update_entry("games.json", game.get("id"), {"last_played": storage.now_iso()})

@@ -1016,33 +1016,21 @@ class MainWindow(QMainWindow):
         self._show_page(page_name, direction=self._direction_between(current, page_name), animate=animate)
 
     def open_global_search(self, initial=""):
-        """Ctrl+K. One search across every page - see
-        helpers/global_search.py, including why the panel sits where it
-        does."""
-        # Anchored under Home's own field when Home is what is showing,
-        # centred on the window from anywhere else - the shortcut works
-        # on every page, the field only exists on one.
-        panel = global_search.GlobalSearch(
-            self, anchor=getattr(self._current_page, "search_bar", None))
-        panel.show()
-        panel.field.setFocus()
-        if initial:
-            panel.field.setText(initial)
+        """Ctrl+K, from any page: go to Home and put the cursor in its
+        search field.
 
-    def reveal_entry(self, page_name, title):
-        """Go to the page an entry lives on and narrow it to that entry.
-
-        Not a second way to *open* things: every page already knows how
-        to open its own entries, and a global list that launched them
-        itself would be six open behaviours reimplemented in one place.
-        This puts the card on screen and leaves the opening to the page,
-        which is also what makes it correct for a page that has no search
-        box - navigation still happens, the narrowing just doesn't."""
-        self.navigate_to(page_name)
+        Home rather than a panel over whatever page is showing, because
+        Home is where the field lives now - one search box, in one place,
+        reached from everywhere."""
+        self.navigate_to("home")
         page = self._current_page
-        box = getattr(page, "search_box", None)
-        if box is not None:
-            box.setText(title)
+        field = getattr(page, "search_bar", None)
+        if field is None:
+            return
+        field.setFocus()
+        if initial:
+            field.setText(initial)
+            page._search_bar_typed(initial)
 
     def go_back(self):
         if self._history_index > 0:

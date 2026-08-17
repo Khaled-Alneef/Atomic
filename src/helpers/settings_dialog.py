@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
@@ -48,7 +49,14 @@ from .widgets import finish_toast, scroll_area, show_toast
 # different font or scale factor). "Watching" needs 104px, cannot read as
 # excluding films, and pairs with "Reading" one row below - the two things
 # the tracker does.
-CATEGORIES = ["General", "Watching", "Reading", "Games", "Data"]
+CATEGORIES = ["General", "Preferences", "Watching", "Reading", "Games",
+              "Data", "Keybinds", "Uninstall"]
+
+# Uninstall is a category rather than a section at the bottom of Data,
+# and it is the one row drawn in the danger colour: it deletes every
+# saved file and removes the app, and it should not sit one careless
+# scroll below the buttons that wipe a single category.
+DANGER_CATEGORY = "Uninstall"
 
 # Width of the key-combination column under Keybinds, wide enough for the
 # longest of them ("Ctrl+1-9") with room to spare, so every description
@@ -320,11 +328,16 @@ class SettingsDialog(QDialog):
         self._update_signals.downloaded.connect(self._on_update_downloaded)
 
         self.stack = QStackedWidget()
+        # Same order as CATEGORIES - the stack is indexed by the
+        # sidebar's row, so the two lists are one list in two places.
         self.stack.addWidget(scroll_area(self._build_general_page()))
+        self.stack.addWidget(scroll_area(self._build_preferences_page()))
         self.stack.addWidget(scroll_area(self._build_anime_page()))
         self.stack.addWidget(scroll_area(self._build_reading_page()))
         self.stack.addWidget(scroll_area(self._build_games_page()))
         self.stack.addWidget(scroll_area(self._build_data_page()))
+        self.stack.addWidget(scroll_area(self._build_keybinds_page()))
+        self.stack.addWidget(scroll_area(self._build_uninstall_page()))
         content_col.addWidget(self.stack, stretch=1)
         self.category_list.setCurrentRow(0)
 
@@ -360,7 +373,13 @@ class SettingsDialog(QDialog):
         self.category_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.category_list.setSpacing(2)
         for name in CATEGORIES:
-            self.category_list.addItem(QListWidgetItem(f"  {name}"))
+            item = QListWidgetItem(f"  {name}")
+            if name == DANGER_CATEGORY:
+                # Coloured on the item, not through QSS: the nav list's
+                # stylesheet colours every row alike, and one row needing
+                # its own colour is what a foreground role is for.
+                item.setForeground(QColor(theme.DANGER))
+            self.category_list.addItem(item)
         self.category_list.currentRowChanged.connect(self._on_category_changed)
         layout.addWidget(self.category_list)
         layout.addStretch()
@@ -419,7 +438,18 @@ class SettingsDialog(QDialog):
         form.addWidget(fullscreen_hint)
         self._sync_fullscreen_startup_check()
 
-        form.addSpacing(24)
+        form.addStretch()
+        return page
+
+    def _build_preferences_page(self):
+        """How the app is laid out for this person - which sections exist
+        and whether Home mirrors that. Split out of General, which had
+        become "everything that is not a website list"."""
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
         form.addWidget(QLabel("Sections", objectName="SectionTitle"))
         sections_hint = QLabel(
             "Which sections show in the sidebar. Hidden ones keep their entries.",
@@ -454,7 +484,17 @@ class SettingsDialog(QDialog):
         home_hint.setWordWrap(True)
         form.addWidget(home_hint)
 
-        form.addSpacing(24)
+        form.addStretch()
+        return page
+
+    def _build_keybinds_page(self):
+        """The keyboard map. Read-only - these are fixed, and saying so
+        is cheaper than a rebinding UI nobody asked for."""
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
         form.addWidget(QLabel("Keybinds", objectName="SectionTitle"))
         keys_hint = QLabel("What the keyboard does. These are fixed.",
                            objectName="Muted")
@@ -909,19 +949,6 @@ class SettingsDialog(QDialog):
         clear_btn.clicked.connect(self._clear_checked_categories)
         form.addWidget(clear_btn)
 
-        form.addSpacing(28)
-        form.addWidget(QLabel("Uninstall", objectName="SectionTitle"))
-        uninstall_hint = QLabel(
-            "Deletes every entry, site list and setting, then removes the "
-            "app. This cannot be undone.",
-            objectName="Muted",
-        )
-        uninstall_hint.setWordWrap(True)
-        form.addWidget(uninstall_hint)
-        uninstall_btn = QPushButton("Uninstall", objectName="Danger")
-        uninstall_btn.clicked.connect(self._uninstall)
-        form.addWidget(uninstall_btn)
-
         form.addStretch()
         return page
 
@@ -1017,6 +1044,31 @@ class SettingsDialog(QDialog):
         # writes a pre-restore value straight back over what was restored.
         # The dialog is rebuilt from saved state on every open anyway.
         self.accept()
+
+    def _build_uninstall_page(self):
+        """On its own, at the bottom, in red. It was a section under Clear
+        Data - one scroll below the buttons that wipe a single category,
+        which is too close for the one control that removes everything
+        including the app."""
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        form.addWidget(QLabel("Uninstall", objectName="SectionTitle"))
+        uninstall_hint = QLabel(
+            "Deletes every entry, site list and setting, then removes the "
+            "app. This cannot be undone.",
+            objectName="Muted",
+        )
+        uninstall_hint.setWordWrap(True)
+        form.addWidget(uninstall_hint)
+        uninstall_btn = QPushButton("Uninstall", objectName="Danger")
+        uninstall_btn.clicked.connect(self._uninstall)
+        form.addWidget(uninstall_btn)
+
+        form.addStretch()
+        return page
 
     def _toggle_all_clear_checks(self, checked):
         for cb in self.clear_checks:

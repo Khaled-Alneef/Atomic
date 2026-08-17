@@ -11,7 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, QRect, QTimer, Qt, pyqtSignal,
+    QEasingCurve, QEvent, QParallelAnimationGroup, QPropertyAnimation, QRect,
+    QTimer, Qt, pyqtSignal,
 )
 from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import (
@@ -19,7 +20,8 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import child_process, images, launchers, nav_config, storage, theme
+from helpers import (child_process, global_search, images, launchers,
+                     nav_config, storage, theme)
 from helpers.widgets import (
     Card, GlassPage, hold_hover_cursor, release_hover_cursor, scroll_area,
     search_field,
@@ -246,6 +248,10 @@ class HomePage(GlassPage):
         self.search_bar.setMinimumWidth(SEARCH_BAR_MIN_WIDTH)
         self.search_bar.setMaximumWidth(SEARCH_BAR_WIDTH)
         self.search_bar.textEdited.connect(self._search_bar_typed)
+        self.search_bar.installEventFilter(self)
+        # The results list under the field, built on the first keystroke
+        # and closed with the query.
+        self._search_results = None
         # Top-aligned, which puts it on the greeting's own line: the
         # block under it is two lines (greeting plus subtitle), so
         # centring the field against the block dropped it into the gap
@@ -322,13 +328,45 @@ class HomePage(GlassPage):
         body_layout.addStretch()
 
     def _search_bar_typed(self, text):
-        """The first keystroke hands over to the Ctrl+K panel, carrying
-        what was typed. The field empties as it does, so the two can
-        never both hold a query and disagree about which is the search."""
-        if not text.strip() or self.app is None:
+        """Results appear under the field as it is typed into.
+
+        The panel is a list, not a second search box: it opens beneath
+        this field, follows it, and closes when there is nothing to
+        show."""
+        if not text.strip():
+            self._close_search_results()
             return
-        self.search_bar.clear()
-        self.app.open_global_search(initial=text)
+        if self._search_results is None:
+            self._search_results = global_search.GlobalSearch(
+                self.window(), anchor=self.search_bar)
+            self._search_results.show()
+        self._search_results.set_query(text)
+
+    def _close_search_results(self):
+        if self._search_results is not None:
+            self._search_results.close()
+            self._search_results = None
+
+    def eventFilter(self, obj, event):
+        """Up/Down/Enter/Escape in the field drive the list under it -
+        the field keeps the focus throughout, which is why the panel is
+        shown without activating."""
+        if obj is self.search_bar and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if self._search_results is not None:
+                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    self._search_results.move_selection(1 if key == Qt.Key.Key_Down else -1)
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._search_results.open_current()
+                    self.search_bar.clear()
+                    self._close_search_results()
+                    return True
+            if key == Qt.Key.Key_Escape:
+                self.search_bar.clear()
+                self._close_search_results()
+                return True
+        return super().eventFilter(obj, event)
 
     def _refresh_greeting(self):
         self.greeting_label.setText(f"{_greeting()} \U0001F44B")

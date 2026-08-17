@@ -84,6 +84,8 @@ clever one, and leave a working path working.
 | 45 | Stop telling people to double-click | ui-engineer | contained | **landed 1.4.18** - owner-raised |
 | 46 | Select All becomes a tick, and Clear goes | ui-engineer | contained | **landed 1.4.18** - owner-raised |
 | 47 | The search bar belongs on Home, and the keybinds in Settings | ui-engineer | contained | **landed 1.4.19** - owner-raised |
+| 48 | Eight Settings categories, with Preferences and Uninstall of their own | ui-engineer | contained | **landed 1.4.20** - owner-raised |
+| 49 | One search field, and picking a result opens it | ui-engineer | contained | **landed 1.4.20** - owner-raised |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
@@ -910,6 +912,44 @@ out of the panel into Settings under **Keybinds**.
 - **Keybinds** moved to Settings > General. In the panel the list was a
   wall of grey text shown to someone who had just proved they knew the
   shortcut; Settings imports the same tuple rather than repeating it.
+
+### 48. Eight Settings categories, with Preferences and Uninstall of their own
+
+**What** - Owner-raised: General, Preferences, Watching, Reading, Games,
+Data, Keybinds, Uninstall - with the sidebar-section toggles moved into
+Preferences, the keybind list into Keybinds, and Uninstall out of the
+Data page into a category of its own, drawn in red.
+**Owner** - ui-engineer
+**Landed** (1.4.20) - the sidebar list and the stack are indexed by the
+same row, so the two orders are one order in two places. Uninstall is
+coloured on the item rather than through QSS, since the nav rule colours
+every row alike and one row wanting its own colour is what a foreground
+role is for. It is a category rather than a section because it used to
+sit one careless scroll below the buttons that clear a single content
+type, which is too close for the control that deletes everything and the
+app with it. Verified: eight rows, eight stack pages, each page's first
+heading where it should be, and the Uninstall row measured at
+`theme.DANGER`.
+
+### 49. One search field, and picking a result opens it
+
+**What** - Owner-raised, superseding half of #44/#47: the search panel
+had a field of its own, so with the bar on Home there were two fields a
+few pixels apart, one holding what had been typed into the other. And
+picking a result should open the thing, not walk to its page.
+**Owner** - ui-engineer
+**Landed** (1.4.20) - the panel is a results list now, driven by Home's
+field; Up/Down/Enter/Escape in that field work it, and it is shown
+`WA_ShowWithoutActivating` as a Tool window rather than a Popup, because
+a Popup grabs the keyboard and would take focus off the field being
+typed into. Ctrl+K from any page navigates to Home and puts the cursor
+in the field - one search box, in one place, reached from everywhere.
+Choosing a result calls the same function the entry's own page uses
+(`open_tracker_entry`, `open_link_entry`, or the game launcher), so an
+entry opened from search behaves exactly as it does from its card,
+missing-target toast included. Measured: Ctrl+K from Games lands on Home
+with the field focused, the panel sits 1px off its computed spot under
+the field, and picking a website opened its URL.
 
 ### 29. Let the "what's new" dialog scroll
 
