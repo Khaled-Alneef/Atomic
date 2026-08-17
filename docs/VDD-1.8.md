@@ -27,16 +27,25 @@ Unchanged from VDD-1.2 §2.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,783,790 bytes. SHA-256 `1b04f705c04dbdecaebf78a154f11ab5234707b33bce3843e2dc6f2a7f4c176c` |
-| `src/` | Full Python source, 16,096 lines across 38 modules (15,257 across 37 at 1.7) |
+| `Atomic.exe` | The application. 47,784,456 bytes. SHA-256 `47193995acb2397b8071873cbf03ca7d6dde4ce26eff7bb435926ee0ae82ff41` |
+| `src/` | Full Python source, 16,122 lines across 38 modules (15,257 across 37 at 1.7) |
 | `packaging/` | `build.py`, `Atomic.spec` and `check_release_notes.py` |
 | `docs/VDD-1.8.md` | This document |
 
 Build environment unchanged from VDD-1.1 §3.
 
-Four commits stand between 1.7 and this release, taken from
+Five commits stand between 1.7 and this release, taken from
 `development` as a single snapshot. No development builds sit in
-between, and this release was cut once.
+between.
+
+**This release was cut twice.** The first cut was tagged and pushed, and
+a defect in the Home search panel (§5) was found against it before
+anyone had downloaded it; `v1.8` was moved to the second cut with the
+owner's agreement rather than the fix going out as 1.8.1. The first
+cut's executable — 47,783,790 bytes, SHA-256 `1b04f705…` — is superseded
+and is not the release. The version number did not move, so an install
+carrying the first cut reports 1.8 and will not be offered this one;
+none exist.
 
 ---
 
@@ -45,15 +54,16 @@ between, and this release was cut once.
 | Module changed | Lines | What changed |
 |---|---|---|
 | `helpers/game_launch.py` | 261 | **New.** How to start a game through its own launcher |
+| `helpers/global_search.py` | 262 | The panel announces its own closing |
 | `helpers/settings_dialog.py` | 1,582 | Probe titles from the user's library; probes on their own workers |
 | `helpers/widgets.py` | 1,188 | `SideScroller` and its edge fade |
 | `helpers/anime_sites.py` | 1,086 | `probe_site` takes several titles |
-| `windows/home.py` | 1,000 | The clock; the in-place row/list refreshes |
+| `windows/home.py` | 1,008 | The clock; the in-place row/list refreshes; drops the panel on its `closed` |
 | `windows/link_grid.py` | 809 | `grid_columns`, `relayout_for_sidebar` |
 | `helpers/theme.py` | 789 | `#ScrollArrow`, `#HomeClock` |
 | `windows/games.py` | 504 | Launch via `game_launch`; column count; Edit clears a stale command |
 | `helpers/manga_sites.py` | 456 | `probe_site` takes several titles |
-| `helpers/whats_new.py` | 338 | 1.8's seven notes |
+| `helpers/whats_new.py` | 340 | 1.8's eight notes |
 | `helpers/launchers.py` | 305 | Launch commands resolved at scan time, and backfilled |
 | `helpers/updater.py` | 272 | `APP_VERSION` |
 | `helpers/global_search.py` | 246 | Opens a game through `game_launch` |
@@ -130,6 +140,18 @@ appears only while there is something that way to reach.
 
 See §6.
 
+### Searching again after clicking a result
+
+The suggestions panel deletes itself when it closes, and it closes
+itself when a result is clicked — leaving the Home page holding a
+deleted object. Every keystroke after that raised inside the search
+field's own slot, including the keystroke that would have cleared the
+stale reference, so no suggestions appeared again until the page was
+rebuilt by navigating away and back. That delay is what it looked like
+from the outside: the search "taking a while", when nothing was working
+on it at all. Pressing Enter never showed the fault, because that path
+closes the panel from the page's side.
+
 Everything else in this release is 1.7. See VDD-1.7 §5.
 
 ---
@@ -169,6 +191,13 @@ is drained by three tracker pages' page-load backfill, so a Check
 pressed after visiting one waited behind all of it. Crunchyroll made
 that visible: its verdict is decided from a table with no request at
 all, and the row still never filled in.
+
+**Why the search panel announces its own closing rather than the page
+watching for it.** The page cannot ask a deleted object whether it is
+deleted, and the panel is the only party that knows every way it can
+close — the click that opens a result closes it from the inside. A
+signal from `closeEvent` covers all of them, including the page's own
+`close()`, so there is one rule instead of one per path.
 
 **Why the write lock is in `storage` and not in the dialog.** `save()`
 writes one fixed `<name>.tmp` and renames it into place, so two threads
@@ -274,17 +303,23 @@ In addition to VDD-1.0 §11 through VDD-1.7 §11:
   temp files. Before it, Check All on the video list recorded Netflix's
   verdict and lost Crunchyroll's, leaving that row permanently blank.
 
-- **The tag and its executable were confirmed on `origin`**:
-  `refs/tags/v1.8` is present remotely and the blob at
-  `v1.8:Atomic.exe` is 47,783,790 bytes — the same object built and
-  hashed here.
+- **The search panel measured by driving the real field**, not the
+  function under it. Before the fix, typing after a result was clicked
+  raised `RuntimeError: wrapped C/C++ object of type GlobalSearch has
+  been deleted`. After it: click a result, type again, and the panel is
+  rebuilt in 0.013s with its rows, the page's reference cleared, nothing
+  raised — checked for the click path, the Enter path, and Ctrl+K opened
+  from another page.
+- **The tag and its executable were confirmed on `origin`** for the
+  second cut: `refs/tags/v1.8` present remotely, the blob at
+  `v1.8:Atomic.exe` matching the object built and hashed here.
 - **The updater resolved this release from the live repository.** Run
   with `APP_VERSION` lowered to 1.7, `check_for_update()` returned
-  `v1.8` with the raw URL and a size of 47,783,790 bytes; run as 1.8 it
-  returned `None`, meaning already current. The first attempt, made
-  seconds after the push, returned `None` as 1.7 — GitHub's tags
-  endpoint had not yet listed the new tag. Worth knowing before
-  concluding an update is broken.
+  `v1.8` with its raw URL and size; run as 1.8 it returned `None`,
+  meaning already current. Checked against the first cut and again after
+  the re-cut. The very first attempt, seconds after the initial push,
+  returned `None` as 1.7 — GitHub's tags endpoint had not yet listed the
+  new tag. Worth knowing before concluding an update is broken.
 
 Not verified: the release executable has not been exercised by its owner
 against real data before publication, and no Defender scan was

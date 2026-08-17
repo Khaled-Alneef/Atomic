@@ -45,6 +45,8 @@ NOTES = {
         "reported as search-only. Check All now fills in every row.",
         "Two things saving at the same moment can no longer lose one "
         "another's changes.",
+        "Searching again straight after clicking a result works. It used "
+        "to show nothing until you left the Home page and came back.",
     ],
     "1.7": [
         "The Title field in Add and Edit simply says \"type to search\" - "

@@ -389,8 +389,16 @@ class HomePage(GlassPage):
         if self._search_results is None:
             self._search_results = global_search.GlobalSearch(
                 self.window(), anchor=self.search_bar)
+            # The panel can close without this page asking it to - it
+            # closes itself when a result is clicked - and it deletes
+            # itself when it does. Dropping the reference then is what
+            # keeps the next keystroke from talking to a deleted panel.
+            self._search_results.closed.connect(self._forget_search_results)
             self._search_results.show()
         self._search_results.set_query(text)
+
+    def _forget_search_results(self):
+        self._search_results = None
 
     def _close_search_results(self):
         if self._search_results is not None:
