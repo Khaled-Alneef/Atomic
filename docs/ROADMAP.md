@@ -87,6 +87,7 @@ clever one, and leave a working path working.
 | 48 | Eight Settings categories, with Preferences and Uninstall of their own | ui-engineer | contained | **landed 1.4.20** - owner-raised |
 | 49 | One search field, and picking a result opens it | ui-engineer | contained | **landed 1.4.20** - owner-raised |
 | 50 | Remind about a waiting update at start-up, not just once | ui-engineer | contained | **landed 1.4.21** - owner-raised |
+| 51 | Three Settings categories were unreachable, and the red one was never red | ui-engineer | contained | **landed 1.4.22** - regression from #48 |
 | 23 | Undo the last removal, via a toast | ui-engineer | spans modules | **landed 1.4.12** |
 | 24 | One search across every page, not just the tracker family | ui-engineer | contained | **landed 1.4.13** |
 | 26 | Audit what PyInstaller actually bundles into `Atomic.exe` | release-engineer | investigated | **closed 1.4.9 - nothing to adopt** |
@@ -974,6 +975,33 @@ is the whole start-up half of the feature. It now stubs
 `updater.is_frozen`; `download_update` still refuses in every mode, so
 the binary still cannot be replaced by a test of the thing that replaces
 binaries.
+
+### 51. Three Settings categories were unreachable, and the red one was never red
+
+**What** - Reported as "why did you remove Data and Uninstall", which is
+what it looked like. They were there; you could not reach them. Two
+separate mistakes in #48, both mine:
+- **The category list is 302px tall and eight rows need 453.** Its
+  scrollbars are switched off, so Data, Keybinds and Uninstall were not
+  merely out of view, they were unreachable. `QListWidget`'s own
+  sizeHint is bounded whatever it holds - it asked for 192px - and at
+  five categories that happened to fit. This is the same shape as the
+  tracker's ninth card: a container asked to hold more than it did when
+  it was written, with no scrollbar to admit it.
+- **The red row was never red.** `item.setForeground(theme.DANGER)` is
+  the obvious way and does nothing here: the nav list's QSS sets a
+  colour on `::item`, and a stylesheet colour beats the model's
+  ForegroundRole. The first check read the value that had been *set*
+  rather than the pixel painted, which is why it passed - measured
+  properly, the row drew at #9d9db1.
+**Owner** - ui-engineer
+**Landed** (1.4.22) - the list is sized from its own rows (there is
+nothing to scroll: the sidebar had the room, it just was not being given
+to the list), and the danger row is painted by a transparent-background
+label sitting on it, which is the one thing a stylesheet colour does not
+override. Measured: 454px for eight rows with none clipped at either
+dialog size, every row reaching its page, and the Uninstall glyphs
+drawing at #eb513c against General's #f1f1f7.
 
 ### 29. Let the "what's new" dialog scroll
 

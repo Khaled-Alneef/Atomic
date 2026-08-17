@@ -25,7 +25,6 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt
-from PyQt6.QtGui import QColor
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
@@ -62,6 +61,12 @@ DANGER_CATEGORY = "Uninstall"
 # longest of them ("Ctrl+1-9") with room to spare, so every description
 # starts at the same x rather than stepping with the combination's length.
 KEYBIND_COLUMN_WIDTH = 92
+
+# Slack added to the measured height of the category rows: the selected
+# row's QSS border draws at the very edge of its box, and without a few
+# pixels spare the list clips its own bottom border off - the same margin
+# main.NavListWidget keeps, for the same reason.
+CATEGORY_LIST_PADDING = 12
 
 # (display name, data file, predicate). A predicate of None means "clear
 # the whole file" (Series/Games/Apps/Websites each hold only their own
@@ -374,13 +379,36 @@ class SettingsDialog(QDialog):
         self.category_list.setSpacing(2)
         for name in CATEGORIES:
             item = QListWidgetItem(f"  {name}")
-            if name == DANGER_CATEGORY:
-                # Coloured on the item, not through QSS: the nav list's
-                # stylesheet colours every row alike, and one row needing
-                # its own colour is what a foreground role is for.
-                item.setForeground(QColor(theme.DANGER))
             self.category_list.addItem(item)
+            if name == DANGER_CATEGORY:
+                # Painted by a label sitting on the row, not by the item's
+                # own foreground brush. The brush was the obvious way and
+                # it does nothing here: the nav list's QSS sets a colour
+                # on ::item, and a stylesheet colour beats the model's
+                # ForegroundRole - measured, the row still drew at
+                # #9d9db1 with theme.DANGER set on it. A child widget's
+                # own stylesheet is the one thing that wins, and a
+                # transparent background leaves the row's hover and
+                # selection painting untouched underneath.
+                label = QLabel(item.text())
+                label.setStyleSheet(
+                    f"color: {theme.DANGER}; background: transparent;")
+                item.setSizeHint(self.category_list.item(0).sizeHint())
+                item.setText("")
+                self.category_list.setItemWidget(item, label)
         self.category_list.currentRowChanged.connect(self._on_category_changed)
+        # Tall enough for every row, measured rather than left to Qt.
+        # QListWidget's own sizeHint is bounded however many items it
+        # holds - it asked for 192px while eight rows needed 453 - and
+        # this list has its scrollbars switched off, so the rows past the
+        # end were not merely out of view but unreachable. There is
+        # nothing to scroll: the sidebar has the room, it just was not
+        # being given to the list.
+        rows = self.category_list.count()
+        row_height = self.category_list.sizeHintForRow(0) if rows else 0
+        spacing = self.category_list.spacing()
+        self.category_list.setFixedHeight(
+            rows * row_height + spacing * (rows + 1) + CATEGORY_LIST_PADDING)
         layout.addWidget(self.category_list)
         layout.addStretch()
 
