@@ -63,6 +63,26 @@ listed in `Atomic.spec`'s `datas` and fails loudly if the build is stale
 or incomplete. A "succeeded" build log proves nothing — PyInstaller
 caches aggressively — but the build script now enforces verification.
 
+**Scan the release exe with Defender before tagging it.** 1.10's first
+cut was flagged `Trojan:Win32/Wacatac.B!ml` and deleted as the owner
+downloaded it, while 1.9 was clean - and there is no source fix, because
+the verdict is a cloud ML guess on the binary's shape. PyInstaller does
+not build byte-identical output twice, so *rebuilding the same tree*
+produces a different file, and the next one is often clean. Build, scan,
+repeat until clean, and tag that binary:
+
+```
+& "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File <exe> -DisableRemediation
+```
+
+Exit 0 is clean, 2 is flagged; `-DisableRemediation` reports without
+quarantining. **Check `Get-Service WinDefend` is Running first** - a
+stopped service fails the scan with `0x800106ba`, which looks like
+"nothing found" to anyone reading only for a threat name. Re-run a
+verdict once to confirm: it is stable per file, and only varies between
+builds. This is a lottery ticket, not a fix - roadmap #8 (code signing)
+is still the durable answer.
+
 `packaging/check_release_notes.py` is the other gate: no `NOTES` entry
 for the version about to ship, no tag. 1.4 shipped without one and
 recorded itself as seen anyway, so its notes could never be shown to
