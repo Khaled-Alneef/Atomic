@@ -2494,12 +2494,32 @@ class EntryForm(QDialog):
         title = self.title_combo.currentText() or "?"
         self.preview_label.setPixmap(images.thumbnail_or_avatar(self.selected_cover_path, title, PREVIEW_SIZE))
 
+    def _video_sites_for(self, entry_type, keep_site_id=None):
+        """The configured Video Websites worth offering for `entry_type`.
+
+        Crunchyroll's catalogue is anime only, so it has no page for a
+        Series or a Movie and offering it there is a promise the app
+        can't keep - typing "Interstellar" on the Series page suggested
+        "Interstellar (Crunchyroll)". anime_sites decides which sites
+        those are (anime_only_site_ids); a site the user added is untyped
+        and stays offered for everything.
+
+        `keep_site_id` is never dropped: an entry already saved on such a
+        site keeps showing it when reopened, rather than the dropdown
+        silently reassigning it to Stremio behind the user's back."""
+        sites = anime_sites.list_sites()
+        if entry_type == "Anime":
+            return sites
+        anime_only = anime_sites.anime_only_site_ids()
+        return [s for s in sites
+                if s["id"] not in anime_only or s["id"] == keep_site_id]
+
     def _populate_site_options(self, current_site_id=None):
         self.site_box.blockSignals(True)
         self.site_box.clear()
         if self.type_box.currentText() in VIDEO_TYPES:
             self.site_box.addItem("Stremio", None)
-            sites = anime_sites.list_sites()
+            sites = self._video_sites_for(self.type_box.currentText(), current_site_id)
         else:
             self.site_box.addItem("— None —", None)
             sites = manga_sites.list_sites()
@@ -2589,20 +2609,33 @@ class EntryForm(QDialog):
             results = []
         self._signals.results.emit(provider, results, seq)
 
-    def _video_site_options(self):
+    def _video_site_options(self, entry_type=None):
         """(site_id, site_name) pairs matching the Video Website dropdown -
         the built-in Stremio option (None) first, then every configured
-        anime site, same order as _populate_site_options."""
-        return [(None, "Stremio")] + [(s["id"], s["name"]) for s in anime_sites.list_sites()]
+        anime site that carries `entry_type`, same order and same
+        filtering as _populate_site_options."""
+        sites = self._video_sites_for(entry_type or self.type_box.currentText(),
+                                      self.site_box.currentData())
+        return [(None, "Stremio")] + [(s["id"], s["name"]) for s in sites]
 
     def _expand_for_video_sites(self, results):
         """One Stremio match can open on any configured Video Website -
         fan each raw result out into one suggestion per site (mirroring
         manga's one-result-per-site search), tagged with which site it
-        represents so picking it can set the dropdown below to match."""
+        represents so picking it can set the dropdown below to match.
+
+        Per result rather than per dialog, because a Series-page search
+        asks both catalogs (_search_catalogs) and each hit carries the
+        type its catalog answered for - so a film's row is fanned out
+        over the sites that carry films, not over whatever the Type
+        dropdown happens to say."""
         expanded = []
+        options_by_type = {}  # one sites-file read per type, not per result
         for r in results:
-            for site_id, site_name in self._video_site_options():
+            entry_type = r.get("_entry_type") or self.type_box.currentText()
+            if entry_type not in options_by_type:
+                options_by_type[entry_type] = self._video_site_options(entry_type)
+            for site_id, site_name in options_by_type[entry_type]:
                 expanded.append({**r, "_video_site_id": site_id, "_video_site_name": site_name})
         return expanded
 

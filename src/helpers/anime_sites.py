@@ -765,6 +765,36 @@ def streaming_provider(site_id: str):
     return row[1] if row else None
 
 
+# Services whose catalogue is anime and nothing else. Crunchyroll
+# carries anime and anime films only, so offering it for a Series or a
+# Movie promises a page that cannot exist: searching "Interstellar" on
+# the Series page listed "Interstellar (Crunchyroll)" as a suggestion,
+# and picking it burned a resolution to end up on Crunchyroll's search
+# results for a film it has never carried. Netflix is deliberately not
+# here - it carries films and series as well as anime, which is why it
+# was added alongside Crunchyroll in the first place.
+#
+# Only the known services can be classified at all; a site the user
+# added is untyped and stays offered everywhere, which is the honest
+# default - this app has no way to know what someone else's site holds.
+_ANIME_ONLY_HOSTS = ("crunchyroll.com",)
+
+
+def _is_anime_only(base_url: str) -> bool:
+    host = _host_key(urllib.parse.urlsplit(base_url or "").netloc)
+    return any(host == suffix or host.endswith("." + suffix)
+               for suffix in _ANIME_ONLY_HOSTS)
+
+
+def anime_only_site_ids() -> set:
+    """Ids of saved sites that carry anime only, so a page offering
+    Series or Movie can leave them out of the Video Website choices.
+
+    One read of the sites file for the whole dropdown, same reason as
+    streaming_provider_map below."""
+    return {s["id"] for s in _load() if s.get("id") and _is_anime_only(_to_base_url(s))}
+
+
 def streaming_provider_map() -> dict:
     """{site_id: provider} for every saved site that is one. One read of
     the sites file rather than one per entry - a tracker page asks this

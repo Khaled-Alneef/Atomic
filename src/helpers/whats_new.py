@@ -26,6 +26,12 @@ from . import theme, updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.9": [
+        "Crunchyroll is no longer offered for films and series. It "
+        "carries anime only, so searching Movies & Series for something "
+        "like Interstellar used to suggest a Crunchyroll page that could "
+        "never exist.",
+    ],
     "1.8": [
         "Games imported from a launcher now start through that launcher. "
         "Steam sees you playing, Overwatch no longer asks you to sign in "
