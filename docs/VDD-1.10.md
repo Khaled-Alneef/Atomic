@@ -27,7 +27,7 @@ Unchanged from VDD-1.2 §2.
 
 | Item | Description |
 |---|---|
-| `Atomic.exe` | The application. 47,785,893 bytes. SHA-256 `9aab64e28a5d2dbdfd1f771cc50192b509c219c797276c2059b7bec1115c1ac4` |
+| `Atomic.exe` | The application. 47,785,342 bytes. SHA-256 `7c21d1988c6195cc81f7a6bdc224caed83c7145c62d87baed50b7dc06268fb2a` |
 | `src/` | Full Python source, 16,208 lines across 38 modules (16,191 across 38 at 1.9) |
 | `packaging/` | `build.py`, `Atomic.spec` and `check_release_notes.py` |
 | `docs/VDD-1.10.md` | This document |
@@ -37,6 +37,16 @@ Build environment unchanged from VDD-1.1 §3, with one change to
 
 One commit stands between 1.9 and this release, taken from `development`
 as a single snapshot. No development builds sit in between.
+
+**This release was cut twice, and the source is identical in both.** The
+first cut - 47,785,893 bytes, SHA-256 `9aab64e2...` - was flagged
+`Trojan:Win32/Wacatac.B!ml` by Microsoft Defender and deleted on
+download, while 1.9 was not. `v1.10` was moved to a second cut with the
+owner's agreement; the first cut is superseded and is not the release.
+The version number did not move, so an install carrying the first cut
+reports 1.10 and will not be offered this one - and since Defender
+deleted it, none are running. §11 records what the two builds measured;
+§6 records why rebuilding is the remedy at all.
 
 **On the version number.** 1.10 follows 1.9, and is not 1.1 written
 differently. `updater.parse_version` reads the digits into a tuple, so
@@ -96,6 +106,22 @@ deleted. Copying that into the quick-list path would have copied the
 comment with it, and a second constant to keep in step. The constant
 lost its `GAMES_` prefix for the same reason: it is no longer about
 games.
+
+**Why rebuilding the same source fixes a Defender verdict.** It should
+not be able to, and that is the finding. `Trojan:Win32/Wacatac.B!ml` is
+a cloud machine-learning verdict on the binary's shape, not a signature
+match on anything in it, and PyInstaller does not build byte-identical
+output twice - archive ordering and embedded timestamps differ per run.
+So two builds of one source tree are two different files to the
+classifier, and measured here, one was flagged and the next was clean.
+
+That makes rebuild-and-rescan the only remedy available without a
+certificate, and it is a lottery ticket rather than a fix: the next
+release can be flagged again for no reason attributable to its code.
+Roadmap #8 is unchanged - the durable answer is code signing. What did
+change is that a release is now scanned before it is tagged (§11)
+instead of after it has reached the owner, which is how the first cut
+got out.
 
 **Why `numpy` is excluded from the build.** Nothing in this app imports
 numpy, but Pillow's PyInstaller hook collects it whenever it is
@@ -192,6 +218,23 @@ In addition to VDD-1.0 §11 through VDD-1.9 §11:
 - **The version numbering checked before tagging**:
   `parse_version("v1.10")` is `(1, 10)` and compares above
   `parse_version("1.9")`; `RELEASE_TAG_RE` matches `v1.10`.
+- **Both cuts scanned with Microsoft Defender before tagging the second**
+  (`MpCmdRun -Scan -ScanType 3 -File ... -DisableRemediation`, engine
+  1.1.26070.7, signatures 1.457.225.0). The first cut returned
+  `Trojan:Win32/Wacatac.B!ml`, the shipped cut returned no threats, and
+  1.9 - which the owner reported as unaffected - returned no threats.
+  Every verdict re-run twice and identical both times, so the classifier
+  is stable per file even though it disagrees between builds of one
+  source tree. The service had to be confirmed running first: a stopped
+  `WinDefend` fails these scans with `0x800106ba`, which reads as
+  success to anything only checking that no threat was named.
+- **Defender's own detection history read back** rather than relying on
+  the report: `Get-MpThreatDetection` recorded the first cut at 20:30 and
+  20:33 on the day of release, against tag times of 17:31 for 1.9 and
+  20:25 for 1.10. The same ThreatID had also hit an Atomic download five
+  times three days earlier, on 1.7 - so the flag is not new to this
+  version, and the owner's report that 1.9 was clean is nonetheless
+  exactly right.
 - **The tag and its executable were confirmed on `origin`**:
   `refs/tags/v1.10` present remotely, the blob at `v1.10:Atomic.exe`
   matching the object built and hashed here.
@@ -199,7 +242,9 @@ In addition to VDD-1.0 §11 through VDD-1.9 §11:
   with `APP_VERSION` lowered to 1.9, `check_for_update()` returned
   `v1.10`; run as 1.10 it returned `None`, meaning already current.
 
-Not verified: no Defender scan was performed on this build.
+Not verified: no antivirus other than Microsoft Defender was consulted,
+and the executable has not been exercised by its owner against real data
+since the re-cut.
 
 ---
 
