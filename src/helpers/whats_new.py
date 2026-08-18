@@ -26,6 +26,12 @@ from . import theme, updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "1.10": [
+        "An app or website you just opened moves to the top of its Home "
+        "list 2.5 seconds later, instead of the instant you click it - "
+        "the row no longer rearranges itself under your pointer. The "
+        "Games row already behaved this way.",
+    ],
     "1.9": [
         "Crunchyroll is no longer offered for films and series. It "
         "carries anime only, so searching Movies & Series for something "

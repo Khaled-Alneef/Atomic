@@ -81,7 +81,15 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # numpy is never imported by this app. Pillow's hook collects it
+    # whenever it is installed, and PyInstaller's dependency analysis then
+    # imports the collected packages in an isolated subprocess to resolve
+    # their binary deps - where numpy 2.5.2 on this Python segfaults the
+    # child (`import numpy.random` dies with no traceback, reproducibly),
+    # taking the whole build down with it. Excluding it changes nothing in
+    # the bundle: the released 1.9 exe carries zero numpy entries, because
+    # the analysis discarded it as unused anyway.
+    excludes=['numpy'],
     noarchive=False,
     optimize=0,
 )
