@@ -21,8 +21,8 @@ from PyQt6.QtWidgets import (
 from helpers import (game_launch, global_search, images, launchers,
                      nav_config, storage, theme)
 from helpers.widgets import (
-    Card, GlassPage, defer_grid_rebuild, hold_hover_cursor,
-    release_hover_cursor, scroll_area, search_field,
+    Card, GlassPage, hold_hover_cursor, release_hover_cursor,
+    scroll_area, search_field,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
@@ -43,10 +43,13 @@ HERO_COVER_SIZE = (156, 208)
 ICON_SIZE = (40, 40)
 ROW_ICON_SIZE = (28, 28)
 
-# How long after a game is launched the Games row re-sorts it to the
-# front. Not immediate: the card would slide out from under the pointer
-# that just clicked it, which reads as a misclick.
-GAMES_RESORT_DELAY_MS = 2500
+# How long after something is opened from Home its section re-sorts it
+# to the front. Not immediate: the card would slide out from under the
+# pointer that just clicked it, which reads as a misclick. Games had this
+# from the start; Quick Apps and Quick Websites re-sorted on the next
+# tick of the event loop instead, so the row under the cursor rearranged
+# itself while the click was still being let go of.
+RESORT_DELAY_MS = 2500
 
 TRACKER_PREVIEW_LIMIT = 6
 SERIES_PREVIEW_LIMIT = 6
@@ -899,22 +902,27 @@ class HomePage(GlassPage):
             QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
             return
         game["last_played"] = storage.now_iso()
-        # Back to the front of the row, but not under the pointer that
-        # just clicked it: the row re-sorts a beat later, by which time
-        # the game is coming up and the cursor has left the card.
-        # A timer parented to the page rather than QTimer.singleShot: a
-        # Home navigated away from before it fires takes the timer down
-        # with it, where a bare singleShot would fire into a page Qt has
-        # already deleted.
-        resort = QTimer(self)
-        resort.setSingleShot(True)
-        resort.timeout.connect(self._refresh_games_row)
-        resort.start(GAMES_RESORT_DELAY_MS)
+        self._resort_after_delay(self._refresh_games_row)
         # Only this game's own field, not a wholesale save of the copy
         # Home loaded when it was built - that snapshot goes stale the
         # moment the Games page (or a Settings import) touches the list,
         # and writing it back would undo their changes.
         storage.update_entry(GAMES_FILE, game.get("id"), {"last_played": game["last_played"]})
+
+    def _resort_after_delay(self, refresh):
+        """Run `refresh` once, RESORT_DELAY_MS after whatever was just
+        opened - back to the front of its section, but not under the
+        pointer that clicked it: by then the app or game is coming up and
+        the cursor has left the card.
+
+        A timer parented to the page rather than QTimer.singleShot: a
+        Home navigated away from before it fires takes the timer down
+        with it, where a bare singleShot would fire into a page Qt has
+        already deleted."""
+        resort = QTimer(self)
+        resort.setSingleShot(True)
+        resort.timeout.connect(refresh)
+        resort.start(RESORT_DELAY_MS)
 
     # ------------------------------------------------------------------
     def _swap_in(self, old, new):
@@ -945,7 +953,8 @@ class HomePage(GlassPage):
 
     def _refresh_quick_list(self, data_file):
         """Redraw one Quick Apps/Websites list after something in it was
-        opened, so it re-sorts to most-recently-used straight away."""
+        opened, so it re-sorts to most-recently-used - on the same delay
+        the Games row uses (see _resort_after_delay)."""
         found = self._quick_lists.get(data_file)
         if found is None:
             return
@@ -1002,7 +1011,9 @@ class HomePage(GlassPage):
         # would undo anything they'd changed since Home was built (same
         # reason games.json edits go through update_entry).
         storage.update_entry(data_file, entry.get("id"), {"last_used": entry["last_used"]})
-        # Same live re-sort the Games row gets, and deferred for the same
-        # reason - the row that was clicked is one of the widgets this
-        # rebuild replaces.
-        defer_grid_rebuild(lambda: self._refresh_quick_list(data_file))
+        # Same delayed live re-sort the Games row gets. The delay also
+        # covers what defer_grid_rebuild's zero-delay timer was here for
+        # - the row that was clicked is one of the widgets this rebuild
+        # replaces, so it cannot be deleted from inside its own click
+        # handler.
+        self._resort_after_delay(lambda: self._refresh_quick_list(data_file))
