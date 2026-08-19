@@ -25,7 +25,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
     QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
     QWidget,
 )
 
@@ -278,7 +278,41 @@ def _progress_data_file(entry) -> str:
             else AnimePage.DATA_FILE)
 
 
+def correct_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
+    """Set progress to an exact number, including a lower one.
+
+    The deliberate escape hatch from record_progress's forward-only
+    rule. That rule is right for automatic writes - re-opening chapter 3
+    of something you are 300 into must not erase 300 - but with the
+    manual +/- controls gone it left no way at all to undo a wrong
+    number, and wrong numbers do happen: an episode matched to the wrong
+    season, a chapter list that renumbered, a Stremio sync that ran
+    ahead. A number nobody can fix is worse than one that can move both
+    ways when a person asks it to.
+
+    Separate function rather than a flag on record_progress, so nothing
+    automatic can reach it by accident - every caller of this one is a
+    person typing a number."""
+    return _write_progress(entry, season=season, episode=episode,
+                           chapter=chapter, forward_only=False)
+
+
 def record_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
+    """Record what was just opened - the automatic path, forward only.
+
+    The player calls it with `season`/`episode` for what it played, the
+    reader with `chapter` for what it opened. Returns True when the
+    stored number actually moved.
+
+    Forward-only is the whole point: opening chapter 3 of something you
+    are 300 chapters into must leave 300 alone. To set a number
+    deliberately, including downwards, use correct_progress."""
+    return _write_progress(entry, season=season, episode=episode,
+                           chapter=chapter, forward_only=True)
+
+
+def _write_progress(entry, *, season=None, episode=None, chapter=None,
+                    forward_only: bool = True) -> bool:
     """Record what was just opened onto `entry` - the single place
     progress is written now that nothing sets it by hand.
 
@@ -320,7 +354,7 @@ def record_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
         # and the release schedule all read. `progress` is not touched:
         # for reading that holds the *site's* latest release, which is a
         # different number entirely.
-        if number <= (entry.get("last_watched_chapter") or 0.0):
+        if forward_only and number <= (entry.get("last_watched_chapter") or 0.0):
             return False
         fields = {"last_watched_chapter": number}
     else:
@@ -328,7 +362,9 @@ def record_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
             season_n, episode_n = int(season or 0), int(episode)
         except (TypeError, ValueError):
             return False
-        if not episode_n or not progress_moves_forward(entry, season_n, episode_n):
+        if not episode_n:
+            return False
+        if forward_only and not progress_moves_forward(entry, season_n, episode_n):
             return False
         if not season_n:
             # Keep the season the entry is already on rather than writing
@@ -2378,6 +2414,39 @@ class EntryForm(QDialog):
         self.show_watched_check.toggled.connect(self._update_progress_visibility)
         form.addWidget(self.show_watched_check)
 
+        # Correcting a wrong number by hand. Progress is otherwise
+        # written only by opening something, and only ever forwards, so
+        # without this a number that went wrong - an episode matched to
+        # the wrong season, a chapter list that renumbered - could never
+        # be put right. Deliberately not a +/- stepper: this is not for
+        # counting through episodes, it is for fixing one mistake, which
+        # is why it is a typed value on an existing entry only.
+        self.correct_row = QWidget()
+        correct_layout = QHBoxLayout(self.correct_row)
+        correct_layout.setContentsMargins(0, 0, 0, 0)
+        correct_layout.setSpacing(8)
+        correct_col = QVBoxLayout()
+        correct_col.setSpacing(2)
+        correct_col.addWidget(QLabel("Correct Last Watched/Read"))
+        self.correct_spin = QDoubleSpinBox()
+        self.correct_spin.setRange(0, 99999)
+        self.correct_spin.setDecimals(1)
+        self.correct_season_spin = QSpinBox()
+        self.correct_season_spin.setRange(0, 99)
+        self.correct_season_spin.setPrefix("S")
+        inner = QHBoxLayout()
+        inner.setSpacing(6)
+        inner.addWidget(self.correct_season_spin)
+        inner.addWidget(self.correct_spin)
+        correct_col.addLayout(inner)
+        correct_layout.addLayout(correct_col)
+        correct_layout.addStretch(1)
+        form.addWidget(self.correct_row)
+        # Only ever on an entry that already exists - there is nothing to
+        # correct about one being created.
+        self.correct_row.setVisible(not self.is_new)
+        self._seed_correction()
+
         self.chapter_row = QWidget()
         chapter_layout = QHBoxLayout(self.chapter_row)
         chapter_layout.setContentsMargins(0, 0, 0, 0)
@@ -2936,6 +3005,42 @@ class EntryForm(QDialog):
             return format_chapter_progress(value)
         return self._original_progress
 
+    def _seed_correction(self):
+        """Pre-fill the correction with what is stored now, so leaving it
+        alone changes nothing."""
+        entry = self.entry or {}
+        is_manga = (self.type_combo.currentText() if hasattr(self, "type_combo")
+                    else entry.get("type")) in MANGA_TYPES
+        self.correct_season_spin.setVisible(not is_manga)
+        if is_manga:
+            self.correct_spin.setDecimals(1)
+            self.correct_spin.setValue(float(entry.get("last_watched_chapter") or 0.0))
+        else:
+            season, episode = parse_episode_progress(entry.get("progress"))
+            self.correct_spin.setDecimals(0)
+            self.correct_spin.setValue(float(episode or 0))
+            self.correct_season_spin.setValue(int(season or 0))
+
+    def _apply_correction(self):
+        """Write a hand-typed number, in either direction.
+
+        Only when it actually differs from what is stored - otherwise
+        opening Edit and pressing Save would rewrite progress on every
+        entry, which is how an "untouched" field quietly becomes a
+        writer."""
+        entry = self.entry or {}
+        if self.is_new or not entry.get("id"):
+            return
+        if entry.get("type") in MANGA_TYPES:
+            wanted = round(float(self.correct_spin.value()), 1)
+            if wanted and wanted != float(entry.get("last_watched_chapter") or 0.0):
+                correct_progress(entry, chapter=wanted)
+            return
+        episode = int(self.correct_spin.value())
+        season = int(self.correct_season_spin.value())
+        if episode and (season, episode) != parse_episode_progress(entry.get("progress")):
+            correct_progress(entry, season=season, episode=episode)
+
     def _save(self):
         title = self.title_combo.currentText().strip()
         if not title:
@@ -3001,5 +3106,8 @@ class EntryForm(QDialog):
             site_id=site_id,
             imdb_id=self.selected_imdb_id if is_video else None,
         )
+        # After the entry itself is written, so the correction is applied
+        # to the saved record rather than being overwritten by it.
+        self._apply_correction()
         self.on_save(self.entry, self.is_new)
         self.accept()

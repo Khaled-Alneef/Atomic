@@ -1660,9 +1660,17 @@ class PlayerPage(GlassPage):
                 panel.add_group(f"{group.upper()}  ·  {source.upper()}")
                 for item in entries:
                     label = item.get("release") or item.get("name") or "Subtitle"
-                    meta = " · ".join(str(p) for p in
-                                      (item.get("format"), item.get("lang")) if p)
-                    panel.add_row(label, meta,
+                    parts = [str(p) for p in
+                             (item.get("format"), item.get("lang")) if p]
+                    # Say so when a line was produced by machine
+                    # translation rather than written by a person. It is
+                    # often serviceable and sometimes nonsense, and
+                    # which one you picked should not be a guess -
+                    # especially for anime, where these are frequently
+                    # the only Arabic on offer.
+                    if item.get("translated"):
+                        parts.insert(0, "auto-translated")
+                    panel.add_row(label, " · ".join(parts),
                                   lambda checked=False, r=item: self._pick_subtitle(r),
                                   selected=label == self._subtitle_label)
         panel.finish()
