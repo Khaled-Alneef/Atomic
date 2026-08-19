@@ -60,6 +60,7 @@ from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
 from windows.apps import AppsPage
+from windows.downloads_page import DownloadsPage
 from windows.games import GamesPage
 from windows.home import HomePage
 from windows.tracker import AnimePage, MangaPage, SeriesPage
@@ -92,6 +93,7 @@ PAGES = {
     "games": GamesPage,
     "apps": AppsPage,
     "websites": WebsitesPage,
+    "downloads": DownloadsPage,
 }
 
 # label, page to jump to, action to run on that page once it's showing
@@ -397,6 +399,20 @@ class MainWindow(QMainWindow):
         # down clear of the nav list.
         layout.addStretch()
 
+        # Downloads sits with Settings rather than in the nav list above:
+        # it is a utility view over a queue, not one of the user's
+        # sections, and the nav list is their own drag-to-reorder order -
+        # a row appearing in the middle of it would be one they never put
+        # there. A NavButton for the same reason Settings is one: it is
+        # already proven to render at both sidebar widths.
+        self.downloads_btn = QPushButton(objectName="NavButton")
+        self.downloads_btn.setFixedHeight(34)
+        self.downloads_btn.setCheckable(True)
+        use_hover_cursor(self.downloads_btn)
+        self.downloads_btn.clicked.connect(lambda: self.navigate_to("downloads"))
+        self._style_downloads_btn()
+        layout.addWidget(self.downloads_btn)
+
         self.add_btn = QPushButton("+", objectName="AddButton")
         self.add_btn.setFixedHeight(34)
         self.add_btn.setToolTip("Add")
@@ -471,6 +487,25 @@ class MainWindow(QMainWindow):
         self.home_list.setFixedHeight(
             self.home_list.sizeHintForRow(0) + self.home_list.spacing() * 2)
 
+    def _style_downloads_btn(self):
+        """Same two-width treatment as the Settings button below it: glyph
+        and label when the sidebar is open, glyph alone in the rail with
+        the label moved to a tooltip.
+
+        The glyph lives here rather than in theme.NAV_ICONS because this
+        entry is not one of the reorderable nav sections that table feeds
+        - written as an escape, not the character itself, since a private
+        -use codepoint does not survive a tool re-encoding this file
+        (CLAUDE.md records that happening twice)."""
+        collapsed = self._sidebar_collapsed
+        glyph = ""   # Download, Segoe Fluent Icons
+        self.downloads_btn.setText(glyph if collapsed else f"  {glyph}   Downloads")
+        self.downloads_btn.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
+        self.downloads_btn.setToolTip("Downloads" if collapsed else "")
+        self.downloads_btn.setProperty("collapsed", collapsed)
+        self.downloads_btn.style().unpolish(self.downloads_btn)
+        self.downloads_btn.style().polish(self.downloads_btn)
+
     def _style_settings_btn(self):
         collapsed = self._sidebar_collapsed
         # Same glyph either way. Expanded used to show the ⚙ emoji, which
@@ -504,6 +539,7 @@ class MainWindow(QMainWindow):
         self.fold_btn.setText("»" if collapsed else "«")
         self.fold_btn.setToolTip("Expand sidebar" if collapsed else "Collapse sidebar")
         self.logo_label.setVisible(not collapsed)
+        self._style_downloads_btn()
         self._style_settings_btn()
 
         # Restyled in place rather than rebuilt, so the user's drag order
@@ -1097,6 +1133,7 @@ class MainWindow(QMainWindow):
             self._show_page(target, direction=self._direction_between(current, target))
 
     def _sync_nav_highlight(self, page_name):
+        self.downloads_btn.setChecked(page_name == "downloads")
         if page_name == "home":
             self.home_list.setCurrentRow(0)
         else:

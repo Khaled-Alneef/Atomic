@@ -60,11 +60,12 @@ from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
+    QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from helpers import images, logs, lookup_pool, net, storage, theme
+from helpers import (downloads, images, logs, lookup_pool, net, storage,
+                     theme)
 from helpers.widgets import (Card, GlassPage, finish_toast, show_toast,
                              use_hover_cursor)
 from windows.tracker import format_chapter_progress
@@ -172,6 +173,7 @@ ICON_EXIT_FULLSCREEN = "\ue73f"       # BackToWindow
 ICON_LEAVE = "\uf3b1"                 # SignOut - a door with a way out of it
 ICON_BROWSER = "\ue774"               # Globe
 ICON_CHEVRON_DOWN = "\ue70d"          # ChevronDown - "this opens"
+ICON_DOWNLOAD = "\ue896"              # Download
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Atomic/1.0"
 
@@ -1015,6 +1017,9 @@ class ReaderPage(GlassPage):
         self._pending_resume = None
         self._refresh_toast = None
         self._bottom_widgets = None     # see resizeEvent's guard
+        # Filled in the first time the download dialog opens, from the
+        # folder last used anywhere in the app.
+        self._download_folder = None
 
         self._signals = _ChapterSignals()
         self._signals.listed.connect(self._on_chapters_listed)
@@ -1153,6 +1158,11 @@ class ReaderPage(GlassPage):
         row.addWidget(self._zoom_out_btn)
         row.addWidget(self._zoom_label)
         row.addWidget(self._zoom_in_btn)
+
+        self._download_btn = self._glyph_button(
+            ICON_DOWNLOAD, "Save chapters as .cbz files")
+        self._download_btn.clicked.connect(self._open_download_dialog)
+        row.addWidget(self._download_btn)
 
         self._refresh_btn = self._glyph_button(
             ICON_REFRESH, "Re-fetch this chapter from the site (R)")
@@ -1670,6 +1680,166 @@ class ReaderPage(GlassPage):
             show_toast(self, "This Entry Has No Page to Open")
             return
         webbrowser.open(url)
+
+    # ---- downloading ---------------------------------------------------
+    def _download_candidates(self):
+        """The chapters a range may be taken from: everything in one
+        language, newest first.
+
+        One language, not the whole list, and this is not tidiness. The
+        list arrives grouped - Arabic first, then whatever other
+        languages the source has - so an index span across the join holds
+        the same chapter twice. Both copies save as
+        `<title> - <number>.cbz` (helpers.downloads._run_chapter), so the
+        second silently overwrites the first and a "42 chapters" download
+        leaves 30 files. The language of the chapter being read decides
+        it; on the chapter list, the first chapter's does."""
+        if not self.chapters:
+            return []
+        anchor = (self.chapter_index
+                  if 0 <= self.chapter_index < len(self.chapters) else 0)
+        wanted = str(self.chapters[anchor].get("lang") or "").lower()
+        return [index for index, chapter in enumerate(self.chapters)
+                if str(chapter.get("lang") or "").lower() == wanted]
+
+    def _open_download_dialog(self):
+        """This chapter, or a range of them, saved as .cbz.
+
+        A dialog rather than the player's overlay panel: this page is an
+        ordinary widget in the main window, and every other "fill this in
+        and confirm" in the app (adding a game, editing an entry) is a
+        QDialog. The reader's own bars are hover-revealed and float over
+        the artwork, which is the wrong place to put a form."""
+        if not self.chapters:
+            show_toast(self, "No Chapters to Download")
+            return
+        from windows import downloads_page
+        if self._download_folder is None:
+            self._download_folder = downloads_page.saved_folder()
+
+        candidates = self._download_candidates()
+        reading = self.chapter_index if self.chapter_index in candidates else -1
+        current = candidates.index(reading) if reading >= 0 else 0
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Download Chapters")
+        dialog.setMinimumWidth(560)
+        theme.apply_dark_titlebar(dialog)
+        column = QVBoxLayout(dialog)
+        column.setContentsMargins(20, 18, 20, 18)
+        column.setSpacing(12)
+
+        scope = QComboBox()
+        scope.addItems(["This Chapter", "A Range of Chapters"])
+        use_hover_cursor(scope)
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Download:"))
+        scope_row.addWidget(scope, stretch=1)
+        column.addLayout(scope_row)
+
+        labels = [chapter_title(self.chapters[index]) for index in candidates]
+        first_box, last_box = QComboBox(), QComboBox()
+        for box in (first_box, last_box):
+            box.addItems(labels)
+            box.setCurrentIndex(current)
+            use_hover_cursor(box)
+            # A QComboBox popup paints its items with the view's own
+            # font, not the QSS ::item family (.claude/rules/ui.md), and
+            # chapter names are long enough to need the width.
+            box.view().setMinimumWidth(460)
+            box.view().setFont(box.font())
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("From:"))
+        range_row.addWidget(first_box, stretch=1)
+        range_row.addWidget(QLabel("To:"))
+        range_row.addWidget(last_box, stretch=1)
+        column.addLayout(range_row)
+
+        count_label = QLabel("", objectName="Muted")
+        count_label.setWordWrap(True)
+        column.addWidget(count_label)
+
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Saving to:", objectName="Muted"))
+        folder_label = QLabel(self._download_folder)
+        folder_label.setToolTip(self._download_folder)
+        folder_row.addWidget(folder_label, stretch=1)
+        change_btn = QPushButton("Change...")
+        use_hover_cursor(change_btn)
+        folder_row.addWidget(change_btn)
+        column.addLayout(folder_row)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        use_hover_cursor(cancel_btn)
+        cancel_btn.clicked.connect(dialog.reject)
+        buttons.addWidget(cancel_btn)
+        start_btn = QPushButton("Download", objectName="Accent")
+        use_hover_cursor(start_btn)
+        buttons.addWidget(start_btn)
+        column.addLayout(buttons)
+
+        def picked_indexes():
+            if scope.currentIndex() == 0:
+                return [candidates[first_box.currentIndex()]]
+            low = min(first_box.currentIndex(), last_box.currentIndex())
+            high = max(first_box.currentIndex(), last_box.currentIndex())
+            # Reversed: the list runs newest first, and a range should
+            # arrive on disk oldest first so the queue reads in order.
+            return list(reversed(candidates[low:high + 1]))
+
+        def sync(*_args):
+            ranged = scope.currentIndex() == 1
+            last_box.setEnabled(ranged)
+            count = len(picked_indexes())
+            count_label.setText(
+                f"{count} chapter{'s' if count != 1 else ''} will be saved as "
+                f".cbz file{'s' if count != 1 else ''}.")
+            start_btn.setText("Download" if count == 1 else f"Download {count}")
+
+        scope.currentIndexChanged.connect(sync)
+        first_box.currentIndexChanged.connect(sync)
+        last_box.currentIndexChanged.connect(sync)
+
+        def change_folder():
+            picked = downloads_page.choose_folder(dialog, self._download_folder)
+            if not picked:
+                return
+            self._download_folder = picked
+            folder_label.setText(picked)
+            folder_label.setToolTip(picked)
+
+        change_btn.clicked.connect(change_folder)
+        start_btn.clicked.connect(
+            lambda: self._start_chapter_download(dialog, picked_indexes()))
+        sync()
+        dialog.exec()
+
+    def _start_chapter_download(self, dialog, indexes):
+        chapters = [self.chapters[index] for index in indexes
+                    if 0 <= index < len(self.chapters)]
+        if not chapters:
+            show_toast(self, "Nothing to Download")
+            return
+        # Asked once, with the count, and only for a range: this list can
+        # run to several hundred chapters, and queueing all of One Piece
+        # must not be a single click on the wrong row.
+        if len(chapters) > 1 and QMessageBox.question(
+                dialog, "Download Chapters",
+                f"Queue {len(chapters)} chapters for download?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            downloads.queue_chapters(self.entry, chapters,
+                                     folder=self._download_folder)
+        except Exception:
+            logs.exception("Could not queue a chapter download")
+            show_toast(self, "Could Not Queue Those Chapters")
+            return
+        dialog.accept()
+        show_toast(self, "Queued for Download" if len(chapters) == 1
+                   else f"Queued {len(chapters)} Chapters")
 
     # There is no "back to the chapter list" any more, and no button for
     # it: the jump list pinned to the bottom centre does that job from

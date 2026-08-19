@@ -387,6 +387,67 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
     return info_hash
 
 
+def download_whole(info_hash: str, *, all_files: bool = False) -> bool:
+    """Switch a torrent from streaming to fetching the whole thing.
+
+    Streaming deliberately fetches a narrow band around the read
+    position and leaves the rest of the file at priority 1, which is
+    right for watching and wrong for keeping: the file on disk is full
+    of holes. This raises the chosen file - or every video file in the
+    torrent, for a season pack - to full priority so it completes.
+
+    Still sequential-ish in effect, because the streaming priorities
+    that were already set stay ahead of it; a download started while
+    something is playing does not steal the pieces playback needs next.
+    """
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return False
+    try:
+        info = torrent.info
+        count = info.files().num_files()
+        if all_files:
+            priorities = [
+                7 if str(info.files().file_path(i)).lower().endswith(_VIDEO_SUFFIXES)
+                else 1
+                for i in range(count)]
+        else:
+            priorities = [0] * count
+            priorities[torrent.file_index] = 7
+        torrent.handle.prioritize_files(priorities)
+        # Undo the streaming piece priorities, which cap most of the file
+        # at 1 and would otherwise hold the download at a crawl.
+        torrent.handle.prioritize_pieces([7] * info.num_pieces())
+        return True
+    except Exception:
+        return False
+
+
+def file_progress(info_hash: str) -> dict:
+    """How far along a download is: bytes, fraction, rate, and where the
+    finished file will be."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None or torrent.file_index is None:
+        return {}
+    try:
+        status = torrent.handle.status()
+        wanted = torrent.file_size()
+        done = 0
+        try:
+            done = torrent.handle.file_progress()[torrent.file_index]
+        except Exception:
+            done = int(status.progress * wanted)
+        return {"done": int(done), "total": int(wanted),
+                "fraction": (done / wanted) if wanted else 0.0,
+                "rate": int(status.download_rate),
+                "peers": int(status.num_peers),
+                "path": torrent.file_path(),
+                "name": os.path.basename(torrent.file_path()),
+                "finished": wanted > 0 and done >= wanted}
+    except Exception:
+        return {}
+
+
 def peers(info_hash: str) -> int:
     torrent = _torrents.get(info_hash)
     if torrent is None:

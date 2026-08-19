@@ -58,11 +58,12 @@ from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QCursor, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSlider,
-    QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSizePolicy,
+    QSlider, QVBoxLayout, QWidget,
 )
 
-from helpers import logs, net, storage, theme, video_backend
+from helpers import (app_settings, downloads, logs, net, storage, theme,
+                     video_backend)
 from helpers.widgets import (Card, GlassPage, scroll_area, show_toast,
                              use_hover_cursor)
 
@@ -184,6 +185,8 @@ ICON_BACK = ""
 # diff - which is how a wrong glyph gets reviewed as correct. E700 is
 # GlobalNavButton, the same "list" affordance the app's own sidebar has.
 ICON_EPISODES = ""
+# Download, added with the same reasoning as the escape above.
+ICON_DOWNLOAD = ""
 
 # The arrows on a stepper row. U+2039/U+203A, deliberately not the
 # Fluent chevrons: these rows are drawn in the text font, and a Fluent
@@ -700,6 +703,17 @@ class PlayerPage(GlassPage):
         self._speed = 1.0
         self._marked_watched = False
         self._panel = None
+        # What the download panel is currently set to. Held on the page,
+        # not in the panel: the panel is rebuilt from scratch on every
+        # pick (the same pattern the subtitle panel uses), so anything
+        # kept in it would be thrown away by the first choice made.
+        # `None` quality means "best available", which is also what an
+        # empty stream list has to fall back to.
+        self._dl_scope = "episode"
+        self._dl_quality = None
+        self._dl_quality_set = False
+        self._dl_subtitle = None
+        self._dl_folder = None
         self._temp_dir = None
         self._pending_resume = None
         self._episode_bar = None
@@ -890,6 +904,13 @@ class PlayerPage(GlassPage):
         self.quality_btn.clicked.connect(self._open_streams_panel)
         self.quality_btn.hide()          # shown only when there is a choice
         row.addWidget(self.quality_btn)
+
+        # Always shown, unlike the quality button: keeping a copy does not
+        # depend on there being a choice of source to make, and the
+        # queue re-finds its own streams anyway (helpers.downloads).
+        self.download_btn = _icon_button(ICON_DOWNLOAD, "Download")
+        self.download_btn.clicked.connect(self._open_download_panel)
+        row.addWidget(self.download_btn)
 
         self.fullscreen_btn = _icon_button(ICON_FULLSCREEN, "Full screen (F)")
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
@@ -1839,6 +1860,188 @@ class PlayerPage(GlassPage):
                           selected=index == self._stream_index)
         panel.finish()
         self._show_panel(panel)
+
+    # ---- downloading -------------------------------------------------
+    def _download_folder(self):
+        """Where this player's downloads go - the last folder used
+        anywhere in the app until the user changes it here."""
+        if self._dl_folder is None:
+            from windows import downloads_page
+            self._dl_folder = downloads_page.saved_folder()
+        return self._dl_folder
+
+    def _dl_available_qualities(self):
+        if streams_module is None:
+            return []
+        return streams_module.qualities(self._streams)
+
+    def _dl_default_quality(self):
+        """The preferred resolution when the swarm actually has it.
+
+        Falling back to "best available" rather than to the preference
+        itself: a preference for 1080p on a release that only exists in
+        720p would otherwise queue a job whose quality filter matches
+        nothing, and the honest offer is the resolutions that are there.
+        Computed once per player, so a pick made here is not silently
+        reset when the stream list is refreshed mid-panel."""
+        if self._dl_quality_set:
+            return self._dl_quality
+        self._dl_quality_set = True
+        preferred = app_settings.get_preferred_resolution()
+        available = self._dl_available_qualities()
+        self._dl_quality = preferred if preferred in available else None
+        return self._dl_quality
+
+    def _open_download_panel(self):
+        """Scope, resolution and subtitle in one panel, then Download.
+
+        An OverlayPanel rather than a QDialog, like every other choice in
+        the player: these controls are native child windows over the
+        video (see the module docstring), and a modal dialog in the
+        middle of a film is a heavier interruption than the panel the
+        same buttons beside it already open."""
+        panel = self._new_panel("Download", "download")
+        self._dl_default_quality()
+
+        if self.episode:
+            count = self._episode_count()
+            panel.add_group("WHAT TO SAVE")
+            panel.add_row(
+                "This episode",
+                f"Season {int(self.season or 1)}, episode {int(self.episode)}",
+                lambda: self._dl_set("scope", "episode"),
+                selected=self._dl_scope == "episode")
+            panel.add_row(
+                "The whole season",
+                f"Season {int(self.season or 1)} - "
+                f"{count} episode{'s' if count != 1 else ''}",
+                lambda: self._dl_set("scope", "season"),
+                selected=self._dl_scope == "season")
+        else:
+            self._dl_scope = "episode"
+
+        panel.add_group("RESOLUTION")
+        available = self._dl_available_qualities()
+        panel.add_row("Best available",
+                      "Whatever the fastest source is offering",
+                      lambda: self._dl_set("quality", None),
+                      selected=self._dl_quality is None)
+        for quality in available:
+            label = "4K (2160p)" if quality == "2160p" else quality
+            matches = (streams_module.matching_quality(self._streams, quality)
+                       if streams_module else [])
+            panel.add_row(
+                label,
+                f"{len(matches)} source{'s' if len(matches) != 1 else ''}",
+                lambda checked=False, q=quality: self._dl_set("quality", q),
+                selected=self._dl_quality == quality)
+        if not available:
+            panel.add_message("Sources are still being looked up - "
+                              "best available is what will be saved.")
+
+        panel.add_group("SUBTITLE TO SAVE ALONGSIDE")
+        panel.add_row("None", "Video only",
+                      lambda: self._dl_set("subtitle", None),
+                      selected=self._dl_subtitle is None)
+        arabic = [s for s in self._subtitles
+                  if str(s.get("lang", "")).lower().startswith("ar")]
+        for item in arabic:
+            label = item.get("release") or item.get("name") or "Subtitle"
+            parts = [str(p) for p in (item.get("source"), item.get("format")) if p]
+            if item.get("translated"):
+                parts.insert(0, "auto-translated")
+            panel.add_row(label, " · ".join(parts),
+                          lambda checked=False, r=item: self._dl_set("subtitle", r),
+                          # By value, not identity: a fresh subtitle
+                          # search replaces the whole list, and an
+                          # identity check would silently unpick the row
+                          # the user had already chosen.
+                          selected=self._dl_subtitle == item)
+        if not arabic:
+            panel.add_message("No Arabic subtitles have been found for this "
+                              "yet - open the Subtitles panel to search.")
+        panel.finish()
+
+        folder_btn = _text_button(os.path.basename(self._download_folder())
+                                  or self._download_folder(),
+                                  f"Saving to {self._download_folder()}")
+        folder_btn.clicked.connect(self._dl_pick_folder)
+        panel.footer_layout.addWidget(self._dl_footer_row("Folder", folder_btn))
+
+        start = _text_button("Download", "Add this to the download queue")
+        start.setStyleSheet(
+            start.styleSheet()
+            + f"QPushButton {{ background: {theme.ACCENT}; color: white;"
+              f" border: 1px solid {theme.ACCENT}; font-weight: 700; }}"
+              f"QPushButton:hover {{ background: {theme.ACCENT_HOVER}; }}")
+        start.clicked.connect(self._dl_start)
+        panel.footer_layout.addWidget(start)
+        self._show_panel(panel)
+
+    @staticmethod
+    def _dl_footer_row(name, button):
+        row = QWidget()
+        row.setStyleSheet("background: transparent; border: none;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        title = QLabel(name)
+        title.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 11pt;"
+            f" background: transparent; border: none;")
+        layout.addWidget(title)
+        layout.addStretch(1)
+        # Elided by fixing the width rather than the text: the button
+        # carries the full path in its tooltip, and a folder name is what
+        # is worth reading at a glance.
+        button.setFixedWidth(170)
+        layout.addWidget(button)
+        return row
+
+    def _dl_set(self, field, value):
+        setattr(self, f"_dl_{field}", value)
+        if field == "quality":
+            self._dl_quality_set = True
+        self._open_download_panel()      # rebuild in place, with the new pick
+
+    def _dl_pick_folder(self):
+        from windows import downloads_page
+        picked = downloads_page.choose_folder(self, self._download_folder())
+        if not picked:
+            return
+        self._dl_folder = picked
+        self._open_download_panel()
+
+    def _dl_start(self):
+        folder = self._download_folder()
+        try:
+            if self._dl_scope == "season" and self.episode:
+                numbers = list(range(1, self._episode_count() + 1))
+                if QMessageBox.question(
+                        self, "Download Season",
+                        f"Queue all {len(numbers)} episodes of season "
+                        f"{int(self.season or 1)} for download?"
+                ) != QMessageBox.StandardButton.Yes:
+                    return
+                downloads.queue_season(
+                    self.entry, season=self.season, episodes=numbers,
+                    quality=self._dl_quality, subtitle=self._dl_subtitle,
+                    folder=folder)
+                message = f"Queued {len(numbers)} Episodes"
+            else:
+                downloads.queue_episode(
+                    self.entry, season=self.season, episode=self.episode,
+                    quality=self._dl_quality, subtitle=self._dl_subtitle,
+                    folder=folder)
+                message = "Queued for Download"
+        except Exception:
+            # Queueing writes a file and starts a thread; neither is
+            # allowed to take the player down mid-playback.
+            logs.exception("Could not queue a download")
+            show_toast(self._toast_anchor(), "Could Not Queue That Download")
+            return
+        self._close_panel()
+        show_toast(self._toast_anchor(), message)
 
     def _switch_stream(self, index):
         """Swap source without losing the seat - a stalling source is
