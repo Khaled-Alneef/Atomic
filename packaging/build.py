@@ -33,6 +33,52 @@ DIST_DIR = PACKAGING_DIR / "dist"
 WORK_DIR = PACKAGING_DIR / "build"
 
 
+# The interpreter the exe must be built with. Not a preference: the
+# built-in torrent engine is libtorrent, which publishes wheels for
+# CPython 3.9-3.13 only. This machine's default python is 3.15, a beta
+# with no wheels for it at all, so a build run there produces an exe
+# whose player cannot stream anything on its own.
+BUILD_PYTHON_TAG = "3.13"
+ENGINE_MODULES = ("libtorrent",)
+
+
+def _reexec_on_build_python():
+    """Re-run this script under the interpreter that has the engine.
+
+    Done here rather than by telling the user to type a different
+    command: `python packaging/build.py` is what the docs and habit say,
+    and a build that silently omits the torrent engine is exactly the
+    class of "succeeded but wrong" this file already exists to catch."""
+    missing = [m for m in ENGINE_MODULES if not _importable(m)]
+    if not missing:
+        return
+    if os.environ.get("ATOMIC_BUILD_REEXEC"):
+        raise SystemExit(
+            f"{', '.join(missing)} is missing from {sys.executable}.\n"
+            f"Install it there, or install Python {BUILD_PYTHON_TAG} and "
+            f"run: py -{BUILD_PYTHON_TAG} -m pip install libtorrent")
+    launcher = shutil.which("py")
+    if not launcher:
+        raise SystemExit(
+            f"{', '.join(missing)} is missing and the `py` launcher was not "
+            f"found to switch to Python {BUILD_PYTHON_TAG}.")
+    print(f"{', '.join(missing)} missing here - rebuilding under "
+          f"Python {BUILD_PYTHON_TAG}...")
+    environment = dict(os.environ, ATOMIC_BUILD_REEXEC="1")
+    result = subprocess.run([launcher, f"-{BUILD_PYTHON_TAG}",
+                             str(Path(__file__).resolve()), *sys.argv[1:]],
+                            env=environment)
+    raise SystemExit(result.returncode)
+
+
+def _importable(name: str) -> bool:
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _ensure_pyinstaller():
     try:
         import PyInstaller  # noqa: F401
@@ -171,6 +217,9 @@ def _verify_not_cached():
 
 
 def main():
+    # Before anything else: a build without the torrent engine is not a
+    # build worth doing.
+    _reexec_on_build_python()
     if not ICON_FILE.exists():
         sys.exit(f"Missing {ICON_FILE.name} in {SRC_DIR} - put the icon there before building.")
     if not SPEC_FILE.exists():

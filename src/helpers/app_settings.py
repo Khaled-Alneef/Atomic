@@ -186,6 +186,27 @@ def set_window_geometry(x: int, y: int, width: int, height: int,
     storage.save(SETTINGS_FILE, data)
 
 
+# What the player starts with when it has a choice. 1080p rather than
+# the highest available, on measured grounds: a 2160p release is picked
+# from a smaller swarm and moves far larger pieces, and the one measured
+# here (313 seeders) served no bytes at all inside 60s while 1080p
+# started instantly. "Best" is the wrong default when it means waiting.
+RESOLUTION_CHOICES = ("2160p", "1080p", "720p", "480p", "best")
+DEFAULT_RESOLUTION = "1080p"
+
+
+def get_preferred_resolution() -> str:
+    value = str(_load().get("preferred_resolution") or DEFAULT_RESOLUTION).lower()
+    return value if value in RESOLUTION_CHOICES else DEFAULT_RESOLUTION
+
+
+def set_preferred_resolution(value: str):
+    data = _load()
+    value = str(value or "").lower()
+    data["preferred_resolution"] = value if value in RESOLUTION_CHOICES else DEFAULT_RESOLUTION
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 

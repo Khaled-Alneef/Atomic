@@ -4,11 +4,12 @@ own sidebar) on the left, the selected category's controls on the right.
 General: Windows-startup toggle (plus whether that sign-in launch opens
 full screen), and which sections show up in the main
 sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
-without losing their saved data). Watching: the list of Video
-Websites anime, film and series entries can be set to open on (Stremio is
-always available as a built-in option; Crunchyroll and any others are
-addable/editable, the same way Reading sites work) and the connected
-Stremio account used to pull in real watch progress. Reading: the list of manga/manhwa/manhua reading sites the
+without losing their saved data). Watching: the resolution the in-app
+player starts on, and the connected Stremio
+account, which fills in what was watched outside Atomic (anime, films
+and series play inside the app now, so there is no per-entry "where does
+this open" list here any more - see _build_anime_page).
+Reading: the list of manga/manhwa/manhua reading sites the
 Reading page can search and open to, plus an optional music/ambience URL.
 Games: each game launcher's install directory, so the Games page can
 bulk-import every game it finds there (see helpers.launchers) instead of
@@ -27,9 +28,9 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import (
@@ -40,8 +41,8 @@ from . import (
 from .widgets import finish_toast, scroll_area, show_toast
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
-# and the Video Websites and Stremio account on this page serve all three
-# media. The literal "Anime, Movies & Series" was measured against this
+# and the Stremio account on this page serves all three media. The
+# literal "Anime, Movies & Series" was measured against this
 # sidebar and does not fit - it needs 192px of the list's 182px and elides
 # to "Anime, Movies & Seri..." (Segoe UI 10.5 at 125% scaling; "Anime,
 # Films & Series" clears it by 3px, which is no margin at all on a
@@ -71,6 +72,19 @@ KEYBIND_COLUMN_WIDTH = 124
 # pixels spare the list clips its own bottom border off - the same margin
 # main.NavListWidget keeps, for the same reason.
 CATEGORY_LIST_PADDING = 12
+
+# How each stored resolution reads in the Watching page's dropdown. Same
+# order as app_settings.RESOLUTION_CHOICES, which is the order the player
+# ranks in - highest first, "best" last because it is not a resolution
+# but an instruction. "2160p" is spelled out as 4K as well: the sources
+# are labelled 2160p and the person choosing thinks in 4K.
+RESOLUTION_LABELS = {
+    "2160p": "4K (2160p)",
+    "1080p": "1080p (recommended)",
+    "720p": "720p",
+    "480p": "480p",
+    "best": "Best available",
+}
 
 # (display name, data file, predicate). A predicate of None means "clear
 # the whole file" (Series/Games/Apps/Websites each hold only their own
@@ -391,7 +405,6 @@ class SettingsDialog(QDialog):
         body.addWidget(content_wrap, stretch=1)
 
         self._refresh_stremio_account()
-        self._refresh_video_sites()
         self._refresh_sites()
 
         self.exec()
@@ -716,49 +729,46 @@ class SettingsDialog(QDialog):
         form.setContentsMargins(4, 4, 12, 4)
         form.setSpacing(6)
 
-        form.addWidget(QLabel("Video Websites", objectName="SectionTitle"))
-        video_sites_hint = QLabel(
-            "Where entries open, chosen per entry in Add/Edit.",
+        # No Video Websites list here any more - no Stremio/Netflix/
+        # Crunchyroll to choose between, and nothing to add to the choice.
+        # Video plays inside Atomic now, so where an entry "opens" stopped
+        # being a setting. The saved sites file and every entry's site_id
+        # are untouched: anime_sites.streaming_provider still reads them
+        # to tell the player that a Netflix or Crunchyroll entry is DRM
+        # and cannot be played. This is a removal from the interface, not
+        # from the data.
+
+        form.addWidget(QLabel("Playback", objectName="SectionTitle"))
+        resolution_row = QHBoxLayout()
+        resolution_row.addWidget(QLabel("Default resolution"))
+        self.resolution_combo = QComboBox()
+        for value in app_settings.RESOLUTION_CHOICES:
+            self.resolution_combo.addItem(RESOLUTION_LABELS.get(value, value), value)
+        current = app_settings.get_preferred_resolution()
+        index = self.resolution_combo.findData(current)
+        if index >= 0:
+            self.resolution_combo.setCurrentIndex(index)
+        # currentIndexChanged, not activated: the two behave the same for
+        # a click, and this one also fires for a keyboard change, which
+        # `activated` misses.
+        self.resolution_combo.currentIndexChanged.connect(self._save_resolution)
+        resolution_row.addWidget(self.resolution_combo)
+        resolution_row.addStretch()
+        form.addLayout(resolution_row)
+
+        resolution_hint = QLabel(
+            "Which quality the player starts on when a title offers several. "
+            "It falls back to the nearest available one.",
             objectName="Muted",
         )
-        video_sites_hint.setWordWrap(True)
-        video_sites_hint.setToolTip(
-            "Stremio is always available and opens the title directly. Crunchyroll "
-            "and Netflix open the title's own page too, found through public "
-            "databases. Anything else you add depends on its own search - Check "
-            "says which. Suggestions, covers and watch progress come from Stremio "
-            "either way, whichever site an entry opens on.")
-        form.addWidget(video_sites_hint)
-
-        self.video_sites_list = QListWidget()
-        self.video_sites_list.setMinimumHeight(120)
-        self.video_sites_list.itemDoubleClicked.connect(self._edit_video_site)
-        form.addWidget(self.video_sites_list)
-
-        video_sites_btn_row = QHBoxLayout()
-        add_video_site_btn = QPushButton("Add...")
-        add_video_site_btn.clicked.connect(self._add_video_site)
-        video_sites_btn_row.addWidget(add_video_site_btn)
-        edit_video_site_btn = QPushButton("Edit...")
-        edit_video_site_btn.clicked.connect(self._edit_video_site)
-        video_sites_btn_row.addWidget(edit_video_site_btn)
-        check_video_site_btn = QPushButton("Check")
-        check_video_site_btn.setToolTip(
-            "Searches this site for a title it should have, then says which "
-            "of the verdicts below you would get by opening an entry here.")
-        check_video_site_btn.clicked.connect(self._check_video_site)
-        video_sites_btn_row.addWidget(check_video_site_btn)
-        check_all_video_btn = QPushButton("Check All")
-        check_all_video_btn.setToolTip("Check every site in this list. Verdicts clear "
-                                       "when Atomic restarts, so this is how to fill "
-                                       "them back in.")
-        check_all_video_btn.clicked.connect(lambda: self._check_all_sites("video"))
-        video_sites_btn_row.addWidget(check_all_video_btn)
-        remove_video_site_btn = QPushButton("Remove", objectName="Danger")
-        remove_video_site_btn.clicked.connect(self._remove_video_site)
-        video_sites_btn_row.addWidget(remove_video_site_btn)
-        form.addLayout(video_sites_btn_row)
-        form.addWidget(_verdict_legend("anime/movies/series"))
+        resolution_hint.setWordWrap(True)
+        # The detail that does not fit two lines - and the reason the
+        # default is not "best".
+        resolution_hint.setToolTip(
+            "4K is picked from a much smaller swarm and moves far larger "
+            "pieces: one measured here advertised 313 seeders and served "
+            "nothing at all inside a minute, while 1080p started instantly.")
+        form.addWidget(resolution_hint)
 
         form.addSpacing(24)
         form.addWidget(QLabel("Stremio Account", objectName="SectionTitle"))
@@ -789,15 +799,21 @@ class SettingsDialog(QDialog):
         form.addLayout(stremio_account_btn_row)
 
         stremio_account_hint = QLabel(
-            "Fills in how far you have watched. Your password is never stored.",
+            "Fills in what you watched elsewhere. Your password is never stored.",
             objectName="Muted",
         )
         stremio_account_hint.setWordWrap(True)
         form.addWidget(stremio_account_hint)
 
         form.addSpacing(24)
+        # Reworded rather than dropped. It used to read "Only Stremio can
+        # report watch progress", which stopped being true the moment
+        # Atomic played video itself - and left the account looking
+        # mandatory when it is now only for what was watched elsewhere.
         progress_note = QLabel(
-            "Only Stremio can report watch progress - nobody else publishes it.",
+            "Playing an episode here records it on the entry by itself. "
+            "Progress only ever moves forward - rewatching an old episode "
+            "leaves the number where it is.",
             objectName="Muted",
         )
         progress_note.setWordWrap(True)
@@ -1221,10 +1237,10 @@ class SettingsDialog(QDialog):
         if not site:
             return
         self._probing_sites.add(site_id)
+        # Reading is the only list on screen now (the Video Websites one
+        # is gone), so it is the only one with a row to repaint.
         if which == "reading":
             self._refresh_sites()
-        else:
-            self._refresh_video_sites()
         # Pooled, not a thread of its own: Check All fires one of these
         # per configured site, and a bare thread each is the shape that
         # once put 651 simultaneous connections on this user's network
@@ -1303,8 +1319,6 @@ class SettingsDialog(QDialog):
         self._probing_sites.discard(site_id)
         if which == "reading":
             self._refresh_sites()
-        else:
-            self._refresh_video_sites()
 
     def _refresh_sites(self):
         self.sites_list.clear()
@@ -1367,58 +1381,11 @@ class SettingsDialog(QDialog):
             manga_sites.remove_site(site_id)
             self._refresh_sites()
 
-    # ------------------------------------------------------------------
-    def _refresh_video_sites(self):
-        self.video_sites_list.clear()
-        item = QListWidgetItem("Stremio  —  built-in, always available")
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        self.video_sites_list.addItem(item)
-        for site in anime_sites.list_sites():
-            item = QListWidgetItem(self._site_label(site))
-            item.setData(Qt.ItemDataRole.UserRole, site["id"])
-            self.video_sites_list.addItem(item)
-
-    def _selected_video_site_id(self):
-        items = self.video_sites_list.selectedItems()
-        return items[0].data(Qt.ItemDataRole.UserRole) if items else None
-
-    def _add_video_site(self):
-        # Same plain base URL as a Reading Website now - the per-site
-        # search pattern is worked out in anime_sites, not typed here.
-        dialog = SiteForm(self, "Video Website")
-        if dialog.result_data:
-            site = anime_sites.add_site(*dialog.result_data)
-            self._refresh_video_sites()
-            self._probe_site_async("video", site["id"])
-
-    def _edit_video_site(self):
-        site_id = self._selected_video_site_id()
-        if not site_id:
-            QMessageBox.information(self, "Video Websites", "Select a website first.")
-            return
-        dialog = SiteForm(self, "Video Website", anime_sites.get_site(site_id))
-        if dialog.result_data:
-            anime_sites.update_site(site_id, *dialog.result_data)
-            self._refresh_video_sites()
-            # Re-checked, not kept: the URL may be the thing that changed.
-            self._probe_site_async("video", site_id)
-
-    def _check_video_site(self):
-        site_id = self._selected_video_site_id()
-        if not site_id:
-            QMessageBox.information(self, "Video Websites", "Select a website first.")
-            return
-        self._probe_site_async("video", site_id)
-
-    def _remove_video_site(self):
-        site_id = self._selected_video_site_id()
-        if not site_id:
-            QMessageBox.information(self, "Video Websites", "Select a website first.")
-            return
-        site = anime_sites.get_site(site_id)
-        if QMessageBox.question(self, "Remove Website", f"Remove '{site['name']}'?") == QMessageBox.StandardButton.Yes:
-            anime_sites.remove_site(site_id)
-            self._refresh_video_sites()
+    # The Add/Edit/Check/Remove set for Video Websites lived here. It went
+    # with the list itself: there is nothing to add a video site *to* any
+    # more. anime_sites keeps its saved sites and its whole API - entries
+    # still carry site_id, and streaming_provider is what tells the player
+    # a Netflix or Crunchyroll entry is DRM - it simply has no editor.
 
     def _toggle_startup(self, checked):
         try:
@@ -1525,6 +1492,11 @@ class SettingsDialog(QDialog):
         _STREMIO_SIGNED_IN_HERE = True
         self.stremio_email_edit.clear()
         self._refresh_stremio_account()
+
+    def _save_resolution(self, index):
+        value = self.resolution_combo.itemData(index)
+        if value:
+            app_settings.set_preferred_resolution(value)
 
     def _save_manga_music_url(self):
         app_settings.set_manga_music_url(self.manga_music_edit.text().strip())

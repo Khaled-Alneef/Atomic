@@ -11,6 +11,14 @@ ICON_FILE = os.path.join(SRC_DIR, "app_icon.ico")
 LOGO_FILE = os.path.join(SRC_DIR, "atomic_icon.png")
 FILTER_ICON_FILE = os.path.join(SRC_DIR, "filter_icon.png")
 BUILD_DIR = os.path.join(SPECPATH, "build")
+# The video player's decode engine. Not in the repository (see
+# fetch_libmpv.py for why); the build stops here rather than producing an
+# exe whose player silently cannot open anything.
+LIBMPV_FILE = os.path.join(SPECPATH, "..", "vendor", "libmpv-2.dll")
+if not os.path.isfile(LIBMPV_FILE):
+    raise SystemExit(
+        "vendor/libmpv-2.dll is missing - the video player cannot decode "
+        "without it.\nRun: python packaging/fetch_libmpv.py")
 
 
 def _app_version():
@@ -76,8 +84,22 @@ a = Analysis(
     # and so does filter_icon.png (the tracker's filter button) - read at
     # runtime from the bundle root, so a build without it here shows a
     # button with no icon at all.
-    datas=[(ICON_FILE, '.'), (LOGO_FILE, '.'), (FILTER_ICON_FILE, '.')],
-    hiddenimports=[],
+    datas=[(ICON_FILE, '.'), (LOGO_FILE, '.'), (FILTER_ICON_FILE, '.'),
+           # libmpv goes in as data, not as a `binaries` entry: it lands
+           # at the bundle root either way, and PyInstaller does not need
+           # to walk its dependency tree - it has none outside the
+           # system, and analysing a 120MB DLL costs build time for an
+           # answer that is always empty. helpers/video_backend.py looks
+           # for it in sys._MEIPASS, which is exactly here.
+           (LIBMPV_FILE, '.')],
+    # python-mpv is loaded by helpers/video_backend.py only after the DLL
+    # directory is registered, so the import is inside a function and
+    # PyInstaller's static analysis never sees it. libtorrent is imported
+    # inside a try/except in helpers/torrent_engine.py for the same
+    # reason - the analysis skips guarded imports, and without it named
+    # here the exe ships with no torrent engine and every torrent falls
+    # back to needing Stremio installed.
+    hiddenimports=['mpv', 'libtorrent'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -106,7 +128,12 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    # libmpv is left uncompressed on purpose. UPX has to unpack a DLL in
+    # memory before it can be loaded, and on a 120MB library that is both
+    # the slowest thing in startup and the one PyInstaller/UPX pairing
+    # with a history of producing a binary that loads everywhere except
+    # the machine you need it on. The exe is larger; it works.
+    upx_exclude=['libmpv-2.dll'],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,

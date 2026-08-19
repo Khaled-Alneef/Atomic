@@ -15,6 +15,13 @@ dist/
 # `git add -f`, since this rule would otherwise skip it.
 /Atomic.exe
 
+# The video player's decode engine (libmpv-2.dll, ~120MB unpacked).
+# Same argument as Atomic.exe above: it is a rebuildable artifact, not
+# source, and committing it would put 120MB into every clone forever.
+# Fetch it with `python packaging/fetch_libmpv.py`; the build refuses to
+# run without it rather than shipping a player that cannot decode.
+/vendor/
+
 # User data: personal tracker lists, settings (incl. Stremio auth key/
 # email once connected), cached cover images, site config - none of this
 # belongs in source control, and dev data is auto-recreated on first run.
