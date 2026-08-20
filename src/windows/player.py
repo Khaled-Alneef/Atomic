@@ -58,8 +58,9 @@ import uuid
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt,
                           QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QColor, QCursor, QFontMetrics, QLinearGradient,
-                         QPainter, QPen, QPixmap, QPolygonF, QRegion)
+from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
+                         QLinearGradient, QPainter, QPen, QPixmap,
+                         QPolygonF, QRegion)
 from PyQt6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
@@ -67,9 +68,8 @@ from PyQt6.QtWidgets import (
 
 from helpers import (app_settings, artwork, downloads, logs, net, storage,
                      theme, video_backend)
-from helpers.widgets import (Card, GlassPage, LogoProgress,
-                             MirroredGlyphButton, scroll_area, show_toast,
-                             use_hover_cursor)
+from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
+                             scroll_area, show_toast, use_hover_cursor)
 
 # Soft imports. These two modules are written alongside this page and a
 # tree without them must still import `windows.player` - main.py imports
@@ -209,7 +209,10 @@ BAR_ALPHA = 180
 # The bottom controls sit under an even fainter veil - a soft darkening
 # behind the seek strip and buttons rather than a bar (the owner's
 # reference picture). The top bar has no veil at all; it is colour-keyed
-# (see KEY_COLOR).
+# (see KEY_COLOR). A dithered gradient scrim (TopScrim) was tried behind
+# it and removed the same day at the owner's ask ("remove the shades") -
+# the bar is bare text over the video, kept fringe-free by rendering
+# that text without antialiasing (see _build_top_bar).
 CONTROLS_VEIL_ALPHA = 130
 
 _GWL_EXSTYLE = -20
@@ -250,12 +253,12 @@ ICON_MUTED = "\ue74f"
 ICON_FULLSCREEN = "\ue740"
 ICON_EXIT_FULLSCREEN = "\ue73f"
 ICON_SUBTITLES = "\ued1e"
-# Leaving the player, at the far left of the top bar. F3B1 is SignOut -
-# a door with a way out of it - and it is the same glyph reader.py's
-# leave button carries, which is the whole point: both pages' top bars
-# now open with the identical control. It was E700 (the sidebar's
-# hamburger), which read as "menu" rather than "out".
-ICON_EXIT = "\uf3b1"
+# Leaving the player, at the far left of the top bar. E892 is Previous
+# - the same left arrow the transport's previous-episode button carries
+# - replacing the SignOut door at the owner's ask, and it is the same
+# glyph reader.py's leave button carries, which is the whole point:
+# both pages' top bars open with the identical control.
+ICON_EXIT = "\ue892"
 # The episode-list opener, immediately right of the door. E8FD is
 # BulletedList, the same glyph the reader's chapter-list button carries.
 ICON_EPISODE_LIST = "\ue8fd"
@@ -503,6 +506,27 @@ def _set_window_colorkey(widget) -> bool:
     except Exception:
         logs.exception("Could not colour-key the player bar")
         return False
+
+
+def _hard_edge_font(point_size, bold=False) -> QFont:
+    """A font that rasterises with no antialiasing, for text drawn on a
+    colour-keyed window.
+
+    This is the fix for the black outline the owner photographed twice:
+    antialiased glyph edges blend toward the window's KEY_COLOR, those
+    blended pixels are no longer the exact key, so DWM keeps them - and
+    a near-black halo rides every letter over a bright frame. With
+    antialiasing off, every pixel is either the key (removed) or the
+    text's own white (kept); there is nothing in between to leave
+    behind. A scrim behind the bar was tried first and rejected ("remove
+    the shades"), so hard edges are what remains - and at the bar's
+    sizes Segoe UI holds up without smoothing."""
+    font = QFont()
+    font.setPointSizeF(point_size)
+    if bold:
+        font.setWeight(QFont.Weight.Bold)
+    font.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+    return font
 
 
 def _icon_button(glyph, tooltip, size=44, font_pt=16):
@@ -1046,10 +1070,15 @@ class OverlayPanel(QFrame):
         self.body_layout.addWidget(label)
         return label
 
-    def add_stepper(self, name, value_text, on_left, on_right):
+    def add_stepper(self, name, value_text, on_left, on_right, step_text=""):
         """A stepper as the owner sketched it: the name small above, then
-        a full-width row of round − button, the value centred between
-        them, round + button.
+        a full-width row of − button, the value centred between them,
+        + button.
+
+        `step_text` puts the amount on the buttons themselves ("-0.1" /
+        "+0.1"), the owner's ask - a bare +/- said which way but not by
+        how much, and the delay button in particular moves in tenths
+        where the font one moves in fours.
 
         Two lines rather than the old single row with the name on the
         left: at the panel's width that layout crowded the value column
@@ -1074,7 +1103,9 @@ class OverlayPanel(QFrame):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        minus = self._stepper_button(GLYPH_MINUS, f"Less {name.lower()}")
+        minus = self._stepper_button(
+            f"{GLYPH_MINUS}{step_text}" if step_text else GLYPH_MINUS,
+            f"Less {name.lower()}", wide=bool(step_text))
         minus.clicked.connect(on_left)
         row.addWidget(minus)
 
@@ -1087,7 +1118,9 @@ class OverlayPanel(QFrame):
         # row's ends and never move as the number changes width.
         row.addWidget(value, stretch=1)
 
-        plus = self._stepper_button(GLYPH_PLUS, f"More {name.lower()}")
+        plus = self._stepper_button(
+            f"{GLYPH_PLUS}{step_text}" if step_text else GLYPH_PLUS,
+            f"More {name.lower()}", wide=bool(step_text))
         plus.clicked.connect(on_right)
         row.addWidget(plus)
         column.addLayout(row)
@@ -1096,18 +1129,21 @@ class OverlayPanel(QFrame):
         return value.setText
 
     @staticmethod
-    def _stepper_button(glyph, tooltip):
-        """A round, clearly-tappable +/- button for a stepper row -
-        circular because that is the owner's sketch, and because a disc
-        reads as "tap me" where a square reads as a key."""
+    def _stepper_button(glyph, tooltip, wide=False):
+        """A round, clearly-tappable stepper button - circular because
+        that is the owner's sketch, and because a disc reads as "tap me"
+        where a square reads as a key. `wide` is the pill variant for a
+        button carrying the step amount ("-0.1"), which cannot fit a
+        36px disc; the smaller font is for the same reason."""
         button = QPushButton(glyph)
         button.setToolTip(tooltip)
-        button.setFixedSize(36, 36)
+        button.setFixedSize(64 if wide else 36, 36)
         button.setStyleSheet(
             # padding:0 - see PlayPauseButton; the app-wide 8px 16px padding
             # would otherwise clip a glyph on a button this small.
             f"QPushButton {{ background: {theme.SURFACE_HOVER}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER}; padding: 0px; font-size: 15pt;"
+            f" border: 1px solid {theme.BORDER}; padding: 0px;"
+            f" font-size: {'11pt' if wide else '15pt'};"
             f" font-weight: 700; border-radius: 18px; }}"
             f"QPushButton:hover {{ background: {theme.ACCENT_SOFT};"
             f" border: 1px solid {theme.ACCENT}; }}"
@@ -1194,6 +1230,10 @@ class PlayerPage(GlassPage):
         self._dl_folder = None
         self._temp_dir = None
         self._pending_resume = None
+        # Whether the wordless loading state is up (backdrop + pulsing
+        # logo, no status box) - _status_visible alone can no longer
+        # answer "is the loading screen showing" (see _show_loading).
+        self._loading_visible = False
         self._episode_bar = None
         self._episode_rows = {}
         # Which season the episode panel is showing. Starts on the one
@@ -1346,11 +1386,13 @@ class PlayerPage(GlassPage):
     def _build_top_bar(self):
         self.top_bar = QWidget(self)
         _make_native(self.top_bar)
-        # No slab at all (the owner's ask): the background is painted in
-        # KEY_COLOR and colour-keyed away by DWM (_set_window_colorkey),
-        # so only the buttons and text float over the video. The window
-        # itself still has to exist and be native - that is what puts
-        # anything over mpv's surface in the first place.
+        # No slab and no shade at all (the owner's ask, twice over - a
+        # dithered gradient scrim was tried and taken out the same day):
+        # the background is painted in KEY_COLOR and colour-keyed away by
+        # DWM (_set_window_colorkey), so only the buttons and text float
+        # over the video. The window itself still has to exist and be
+        # native - that is what puts anything over mpv's surface in the
+        # first place.
         self.top_bar.setStyleSheet(f"background: {KEY_COLOR};")
         layout = QHBoxLayout(self.top_bar)
         # 4px above and below, not 6, and 38px buttons rather than the
@@ -1360,17 +1402,18 @@ class PlayerPage(GlassPage):
         layout.setSpacing(10)
 
         # The left edge, and it is deliberately identical to the reader's:
-        # the door out, then the list of what else there is to open. Both
+        # the way out, then the list of what else there is to open. Both
         # pages are a full-window take-over reached from a card, so the
         # first two controls answering "how do I get out" and "what else
         # is in this title" in the same place, in the same order, with the
         # same two glyphs is the whole of them reading as one design.
-        # Mirrored so the door leads *left* - the direction out - and
-        # painted rather than set as text, which is also what ends the
-        # clipped, "scratched" rendering for good (see
-        # widgets.MirroredGlyphButton; the reader's door is the same).
-        exit_btn = MirroredGlyphButton(ICON_EXIT, "Leave the player (Esc)",
-                                       size=(38, 38), font_pt=14)
+        # A large left arrow now, not the SignOut door (the owner's ask -
+        # the same arrow the prev/next episode controls carry), painted
+        # rather than set as text, which is what ends the clipped,
+        # "scratched" rendering for good (see widgets.GlyphButton; the
+        # reader's arrow is the same).
+        exit_btn = GlyphButton(ICON_EXIT, "Leave the player (Esc)",
+                               size=(38, 38), font_pt=18)
         exit_btn.clicked.connect(self.close_player)
         layout.addWidget(exit_btn)
         self.exit_btn = exit_btn
@@ -1382,9 +1425,16 @@ class PlayerPage(GlassPage):
         layout.addWidget(self.episodes_btn)
 
         self.title_label = QLabel("")
+        # Pure white (the owner's ask), not the palette's blue-tinted
+        # TEXT - see theme.TEXT_OVER_MEDIA. The size rides in both
+        # places on purpose: QSS font properties win the resolve, so the
+        # stylesheet carries size/weight, while NoAntialias - which QSS
+        # cannot express and therefore cannot overwrite - rides on the
+        # widget font (see _hard_edge_font).
+        self.title_label.setFont(_hard_edge_font(13.5, bold=True))
         self.title_label.setStyleSheet(
-            f"color: {theme.TEXT}; font-size: 13.5pt; font-weight: 700;"
-            f" background: transparent;")
+            f"color: {theme.TEXT_OVER_MEDIA}; font-size: 13.5pt;"
+            f" font-weight: 700; background: transparent;")
         layout.addWidget(self.title_label)
         self._refresh_title_label()
 
@@ -1403,8 +1453,14 @@ class PlayerPage(GlassPage):
         layout.addWidget(self.audio_pill)
 
         self.source_label = QLabel("")
+        # White like the title (the owner's ask - TEXT_MUTED is a dark
+        # blue-grey that disappeared into bright frames); smaller size
+        # keeps it reading as secondary. Hard-edged for the same reason
+        # as the title, size in QSS for the same reason as the title.
+        self.source_label.setFont(_hard_edge_font(10.5))
         self.source_label.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-size: 10.5pt; background: transparent;")
+            f"color: {theme.TEXT_OVER_MEDIA}; font-size: 10.5pt;"
+            f" background: transparent;")
         layout.addWidget(self.source_label)
         layout.addStretch(1)
 
@@ -2221,12 +2277,13 @@ class PlayerPage(GlassPage):
         if run != self._run or self._closing:
             return
         kind, _, path = str(payload).partition(":")
+        loading = self._status_visible() or self._loading_visible
         if kind == "backdrop":
-            if self.backdrop.set_backdrop(path) and self._status_visible():
+            if self.backdrop.set_backdrop(path) and loading:
                 self._show_backdrop()
             return
         if self.logo.set_logo(path):
-            if self._status_visible():
+            if loading:
                 self._show_backdrop()
             self._update_startup_status()
 
@@ -2272,7 +2329,7 @@ class PlayerPage(GlassPage):
         elif streams_module is None:
             self._show_status("No stream sources are available in this build.")
         else:
-            self._show_status("Looking for a source...")
+            self._show_loading("Looking for a source...")
             self._spawn(self._find_streams_worker, self._run)
         self._search_subtitles()
 
@@ -2473,7 +2530,7 @@ class PlayerPage(GlassPage):
         # stream - off the UI thread, because it can also have to start
         # the server.
         if not stream.get("url") and stream.get("info_hash") and streams_module:
-            self._show_status("Connecting to the source...")
+            self._show_loading("Connecting to the source...")
             self._spawn(self._prepare_stream_worker, index, resume_at, self._run)
             return
 
@@ -2569,7 +2626,7 @@ class PlayerPage(GlassPage):
                 continue
             if self._streams[index].get("kind") == "drm":
                 continue
-            self._show_status("That source had no peers. Trying the next one...")
+            self._show_loading("That source had no peers. Trying the next one...")
             self._play_stream(index)
             return True
         return False
@@ -2591,11 +2648,14 @@ class PlayerPage(GlassPage):
         # completely empty logo reads as nothing happening.
         if self.logo.has_logo():
             self.logo.set_fraction(max(percent / 100.0, 0.04))
+        # No words with the logo up - the pulse and the fill are the
+        # whole message now (the owner's ask). The text survives only as
+        # _show_loading's fallback for a title with no logo art.
         if percent > 0:
-            self._show_status(f"Buffering... {percent}%")
+            self._show_loading(f"Buffering... {percent}%")
         else:
-            self._show_status("Finding peers for this source...\n"
-                              "The first few seconds take longest.")
+            self._show_loading("Finding peers for this source...\n"
+                               "The first few seconds take longest.")
 
     def _load_into_mpv(self, stream, resume_at=None):
         self._awaiting_first_frame = True
@@ -2911,6 +2971,12 @@ class PlayerPage(GlassPage):
         elif name == "track-list":
             self._tracks = list(value or [])
             self._update_audio_pill()
+            # An open tracks panel follows mpv's own answer: the pick
+            # already moved the highlight optimistically (_pick_track),
+            # and this is the confirmation - or the correction, when mpv
+            # refused the track - arriving a beat later.
+            if self._panel is not None and getattr(self._panel, "kind", "") == "tracks":
+                self._open_tracks_panel()
         elif name == "paused-for-cache":
             # Only ever a note, never an error: a stalled buffer usually
             # recovers, and a dialog for it would fire constantly on a
@@ -3035,11 +3101,13 @@ class PlayerPage(GlassPage):
         set_delay = panel.add_stepper(
             "Delay", self._delay_text(),
             lambda: self._nudge_delay(-SUB_DELAY_STEP),
-            lambda: self._nudge_delay(SUB_DELAY_STEP))
+            lambda: self._nudge_delay(SUB_DELAY_STEP),
+            step_text=f"{SUB_DELAY_STEP:g}")
         set_size = panel.add_stepper(
             "Font size", str(self._sub_size),
             lambda: self._nudge_size(-SUB_SIZE_STEP),
-            lambda: self._nudge_size(SUB_SIZE_STEP))
+            lambda: self._nudge_size(SUB_SIZE_STEP),
+            step_text=str(SUB_SIZE_STEP))
         # Held on the panel, not captured in the nudge calls: the panel is
         # rebuilt whenever a subtitle is picked, and a setter belonging to
         # a deleted QLabel would take the process with it.
@@ -3136,6 +3204,21 @@ class PlayerPage(GlassPage):
                 self.handle["sub-visibility"] = True
         except Exception:
             logs.exception("Track change failed")
+        # The local list's `selected` flags are updated here, before the
+        # rebuild, rather than waiting for mpv: the property write above
+        # is asynchronous, and the track-list observation confirming it
+        # arrives a beat later - so the rebuilt panel used to highlight
+        # the *old* row until the panel was closed and reopened (the
+        # owner's report). mpv's own answer still lands in _on_property,
+        # which refreshes the panel again if it disagrees.
+        kind = "audio" if prop == "aid" else "sub"
+        picked = None if track is None else track.get("id")
+        for entry in self._tracks:
+            if entry.get("type") == kind:
+                entry["selected"] = (picked is not None
+                                     and entry.get("id") == picked)
+        if kind == "audio":
+            self._update_audio_pill()
         self._open_tracks_panel()
 
     def _open_settings_panel(self):
@@ -3499,6 +3582,24 @@ class PlayerPage(GlassPage):
         # screen (see the status stylesheet).
         _set_window_colorkey(self.status)
 
+    def _show_loading(self, text=""):
+        """The loading state, wordless (the owner's ask): the title's
+        backdrop with its logo pulsing and filling over the middle, and
+        no message box at all. _show_status is now only for dead ends -
+        things that stopped and need saying - never for progress.
+
+        The one exception is a title with no logo (TMDB has none, or no
+        key is set): there the words were the only thing on screen
+        saying "working, not hung", so `text` is shown for exactly that
+        case and dropped the moment a logo exists."""
+        self._loading_visible = True
+        if self.logo.has_logo() or not text:
+            self.status.hide()
+            self._layout_overlays()
+            self._show_backdrop()
+        else:
+            self._show_status(text)
+
     def _show_backdrop(self):
         """Put the loading frame up behind whatever the status box says.
 
@@ -3527,6 +3628,7 @@ class PlayerPage(GlassPage):
                 overlay.raise_()
 
     def _hide_status(self):
+        self._loading_visible = False
         self.status.hide()
         # The loading frame goes with it: it covers the whole window, so
         # leaving it up would hide the first frame it was waiting for.
@@ -3807,7 +3909,10 @@ class PlayerPage(GlassPage):
         self.backdrop.setGeometry(rect)
         width = min(680, max(320, rect.width() - 120))
         height = self.status.sizeHint().height() + 12
-        logo_width = max(260, min(int(rect.width() * 0.46), 620))
+        # Much smaller than the old 46%-of-window treatment (the owner's
+        # ask): a quarter of the width, capped at 300 - a loading mark
+        # that pulses in the middle, not a poster.
+        logo_width = max(160, min(int(rect.width() * 0.24), 300))
         logo_height = int(logo_width * 0.34)
         logo_y = int((rect.height() - logo_height) / 2)
         self.logo.setGeometry(int((rect.width() - logo_width) / 2), logo_y,

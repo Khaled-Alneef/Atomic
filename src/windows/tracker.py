@@ -146,7 +146,12 @@ FILTER_ICON_HEIGHT = 18
 
 POSTER_SIZE = (160, 216)
 PREVIEW_SIZE = (90, 120)
-SEARCH_DEBOUNCE_MS = 450
+# 450 originally; halved at the owner's ask ("the suggestion search is
+# too slow") - the debounce was a flat 450ms added on top of the network
+# round trip before a search even started. 250 still coalesces normal
+# typing (inter-key gaps are ~100-200ms) without holding a finished
+# title hostage for half a second.
+SEARCH_DEBOUNCE_MS = 250
 
 # How long Save will hold for the Video Website page-url lookup still in
 # flight behind it. The lookup itself always reports back, success or
@@ -821,15 +826,21 @@ class _ContinueButton(QPushButton):
         self.setToolTip(tooltip)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         radius = CONTINUE_BUTTON_SIZE // 2
+        # A hollow ring, not a filled disc (the owner's ask): accent
+        # border, empty middle, so the artwork stays visible through the
+        # control until it is actually aimed at - then it fills, which
+        # is the hover answering "this is the thing you press".
         # padding: 0px explicitly. The app-wide QPushButton rule sets
         # 8px 16px, which on a small fixed square eats the whole content
         # box - player.py and reader.py both carry the same note, from
         # the same measured clipping.
         self.setStyleSheet(
-            f"QPushButton {{ background: {theme.accent_gradient(0, 0, 0, 1)};"
-            f" border: none; padding: 0px; border-radius: {radius}px; }}"
+            f"QPushButton {{ background: transparent;"
+            f" border: 2px solid {theme.ACCENT}; padding: 0px;"
+            f" border-radius: {radius}px; }}"
             f"QPushButton:hover {{"
-            f" background: {theme.accent_gradient(0, 0, 0, 1, hover=True)}; }}"
+            f" background: {theme.accent_gradient(0, 0, 0, 1, hover=True)};"
+            f" border: 2px solid {theme.ACCENT_HOVER}; }}"
             f"QPushButton:pressed {{ background: {theme.ACCENT_ACTIVE}; }}")
         use_hover_cursor(self)
 
@@ -838,9 +849,11 @@ class _ContinueButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        # ON_ACCENT, never white: white on this cyan computes to 1.8:1
-        # (see the palette note at the top of theme.py).
-        painter.setBrush(QColor(theme.ON_ACCENT))
+        # The triangle follows the fill: accent while the ring is empty,
+        # ON_ACCENT once the hover fills it - never white, which on this
+        # cyan computes to 1.8:1 (see the palette note in theme.py).
+        painter.setBrush(QColor(theme.ON_ACCENT if self.underMouse()
+                                else theme.ACCENT))
         side = self.width()
         height = side * 0.36
         width = height * 0.86
@@ -2141,15 +2154,24 @@ class TrackerPage(GlassPage):
 
         pixmap = images.thumbnail_or_avatar(entry.get("cover_path"),
                                             entry["title"], POSTER_SIZE)
-        # No frosted cover and no round continue button on the tracker
-        # pages any more, at the owner's ask: a card here is one target -
-        # it opens the episode/chapter list (the details page), whose own
-        # big Continue button is where resuming lives. Home's sliding
-        # cards keep the cover control; ContinueCover stays exported for
-        # them, untouched.
-        cover = QLabel()
-        cover.setFixedSize(*POSTER_SIZE)
-        cover.setPixmap(pixmap)
+        # The round continue button is back on the tracker cards, and on
+        # every medium now (the owner's ask, reversing the earlier
+        # removal): hovering a card offers the hollow ring in the middle
+        # of its cover, which resumes exactly where that entry stopped -
+        # the reader's saved page, or the player's saved position. The
+        # card's body stays one target, the episode/chapter list (the
+        # details page). Selection mode keeps the plain cover: its click
+        # is a pick, and a resume control inside a pick target is a trap.
+        continuable = (not self._select_mode
+                       and entry.get("type") in MANGA_TYPES + VIDEO_TYPES)
+        if continuable:
+            cover = ContinueCover(
+                pixmap, POSTER_SIZE,
+                lambda en=entry: self._open_entry(en, resume=True))
+        else:
+            cover = QLabel()
+            cover.setFixedSize(*POSTER_SIZE)
+            cover.setPixmap(pixmap)
         card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         if self._select_mode:
@@ -2207,6 +2229,11 @@ class TrackerPage(GlassPage):
         # attaching the drag also moves `clicked` from press to release.
         if not self._grid_is_narrowed() and not self._select_mode:
             self._drag_reorder.attach(card, entry.get("id"))
+        if continuable:
+            # After every child exists - the relay watches each of them,
+            # since each takes the hover off the card as the pointer
+            # crosses onto it (see attach_continue_cover).
+            attach_continue_cover(card, cover)
         return card
 
     def _progress_display(self, entry):
@@ -3046,12 +3073,26 @@ class EntryForm(QDialog):
         # reads "No matches", which is both true and dismissable.
         try:
             if provider == "stremio":
+                # Both catalogs at once, not one after the other: a
+                # dual-type search (Series + Movie) was two sequential
+                # Cinemeta round trips, and the second doubled how long
+                # "Searching..." sat there. Each result remembers which
+                # catalog answered, because that is what the entry's
+                # Type has to become.
+                import concurrent.futures
                 results = []
-                for entry_type, catalog in catalogs:
-                    # Each result remembers which catalog answered, because
-                    # that is what the entry's Type has to become.
-                    results.extend({**r, "_entry_type": entry_type}
-                                   for r in stremio.search(text, catalog))
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=max(1, len(catalogs))) as pool:
+                    futures = [
+                        (entry_type, pool.submit(stremio.search, text, catalog))
+                        for entry_type, catalog in catalogs]
+                    for entry_type, future in futures:
+                        try:
+                            found = future.result()
+                        except Exception:
+                            found = []
+                        results.extend({**r, "_entry_type": entry_type}
+                                       for r in found)
             else:
                 results = manga_sites.search_all(text)
         except Exception:

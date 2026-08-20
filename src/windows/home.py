@@ -15,19 +15,20 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from helpers import (game_launch, global_search, images, launchers,
                      nav_config, storage, theme)
 from helpers.widgets import (
-    Card, GlassPage, hold_hover_cursor, release_hover_cursor,
+    Card, GlassPage, SideScroller, hold_hover_cursor, release_hover_cursor,
     scroll_area, search_field,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
-    IN_PROGRESS_STATUSES, MANGA_TYPES, ContinueCover, attach_continue_cover,
-    format_chapter_progress, open_tracker_entry, shows_last_watched,
+    IN_PROGRESS_STATUSES, MANGA_TYPES, POSTER_SIZE, VIDEO_TYPES,
+    ContinueCover, attach_continue_cover, format_chapter_progress,
+    open_tracker_entry, shows_last_watched,
 )
 
 GREETING_REFRESH_MS = 60_000
@@ -38,7 +39,10 @@ GAMES_FILE = "games.json"
 WEBSITES_FILE = "websites.json"
 APPS_FILE = "apps.json"
 
-POSTER_SIZE = (78, 104)
+# No local POSTER_SIZE any more: Home's rows show the same-size cards
+# the Anime/Reading/Series pages do (the owner's ask), so the size is
+# imported from windows.tracker with the rest of its pieces - one number
+# in one place, and main.py's prewarm follows it automatically.
 HERO_COVER_SIZE = (156, 208)
 ICON_SIZE = (40, 40)
 ROW_ICON_SIZE = (28, 28)
@@ -51,8 +55,7 @@ ROW_ICON_SIZE = (28, 28)
 # itself while the click was still being let go of.
 RESORT_DELAY_MS = 2500
 
-TRACKER_PREVIEW_LIMIT = 6
-SERIES_PREVIEW_LIMIT = 6
+# No preview limits for the tracker rows any more - see _recent_entries.
 GAMES_PREVIEW_LIMIT = 6
 QUICK_LIST_LIMIT = 5
 
@@ -465,8 +468,12 @@ class HomePage(GlassPage):
         return sorted(entries, key=lambda e: e.get("updated_at") or "", reverse=True)
 
     def _recent_entries(self, entries):
-        entries = sorted(entries, key=lambda e: e.get("updated_at") or "", reverse=True)
-        return entries[:TRACKER_PREVIEW_LIMIT]
+        """Every entry, most recently touched first - no preview cap any
+        more (the owner's ask: an added entry must always appear here).
+        The row scrolls sideways instead of truncating, the same answer
+        the tracker pages give a long section."""
+        return sorted(entries, key=lambda e: e.get("updated_at") or "",
+                      reverse=True)
 
     def _recent_games(self):
         played = [g for g in self.games if g.get("last_played")]
@@ -829,14 +836,19 @@ class HomePage(GlassPage):
         # No #SectionBox frame here (unlike the Apps/Websites lists
         # below) - a wall of poster art doesn't need a background box
         # to read as a group the way rows of icon+text do.
+        #
+        # One sideways-scrolling strip, not a fixed grid: the rows carry
+        # *every* entry now (see _recent_entries), so a full row scrolls
+        # behind SideScroller's ‹ › arrows exactly like a tracker page's
+        # section strips (tracker._build_section_strip is the model).
         box = QWidget(objectName="Bare")
         outer = QVBoxLayout(box)
         outer.setContentsMargins(16, 16, 16, 16)
 
-        grid = QGridLayout()
+        strip = QWidget(objectName="Bare")
+        grid = QHBoxLayout(strip)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(10)
-        grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        outer.addLayout(grid)
 
         for index, entry in enumerate(entries):
             # One shared #SectionBox frame for the whole grid (below)
@@ -850,12 +862,12 @@ class HomePage(GlassPage):
 
             pixmap = images.thumbnail_or_avatar(entry.get("cover_path"),
                                                 entry["title"], POSTER_SIZE)
-            # Reading posters carry the same two targets they carry on the
-            # Reading page: the round button on the blurred cover resumes,
-            # the rest of the card opens the chapter list. Anime and
-            # series keep the single target they have always had - there
-            # is no chapter list behind them to browse.
-            continuable = entry["type"] in MANGA_TYPES
+            # Every tracker medium carries the same two targets here now
+            # (the owner's ask - anime/series/movies used to be a single
+            # target): the round ring on the hovered cover resumes where
+            # that entry stopped, the rest of the card opens the episode/
+            # chapter list (the details page).
+            continuable = entry["type"] in MANGA_TYPES + VIDEO_TYPES
             if continuable:
                 cover = ContinueCover(
                     pixmap, POSTER_SIZE,
@@ -884,7 +896,25 @@ class HomePage(GlassPage):
                 # them, since each takes the hover off the card as the
                 # pointer crosses onto it.
                 attach_continue_cover(card, cover)
-            grid.addWidget(card, 0, index)
+            grid.addWidget(card)
+        grid.addStretch()
+
+        # Same recipe as tracker._build_section_strip: the strip in its
+        # own horizontal scroll area, fixed to the cards' height (without
+        # that it claims the whole page), vertical wheel left for the
+        # page, and SideScroller's arrows laid over the two ends.
+        area = QScrollArea(objectName="Bare")
+        area.setWidget(strip)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.viewport().setAutoFillBackground(False)
+        strip.setAutoFillBackground(False)
+        strip.adjustSize()
+        area.setFixedHeight(strip.sizeHint().height()
+                            + area.horizontalScrollBar().sizeHint().height())
+        outer.addWidget(SideScroller(area))
         return box
 
     def _build_games_grid(self, games):

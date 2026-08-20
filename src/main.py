@@ -431,17 +431,21 @@ class MainWindow(QMainWindow):
         self.downloads_btn.setCheckable(True)
         use_hover_cursor(self.downloads_btn)
         self.downloads_btn.clicked.connect(lambda: self.navigate_to("downloads"))
-        # A notification dot in the button's top-right corner while
-        # anything is downloading (the owner's ask) - readable at a
-        # glance where the count in the label is not, and the only
-        # signal the folded rail has room for. A child at a fixed
-        # offset, not a layout row, so nothing in the column moves when
-        # it appears. Mouse-transparent: it sits on its own button.
+        # A notification badge in the button's top-right corner while
+        # anything is downloading (the owner's ask) - it carries the
+        # *count* now, not just a dot, so how many are running is
+        # readable without opening the page, at either sidebar width. A
+        # child at a fixed offset, not a layout row, so nothing in the
+        # column moves when it appears. Mouse-transparent: it sits on
+        # its own button. Sized per count in refresh_download_indicator
+        # (two digits need a wider pill than one).
         self.downloads_dot = QLabel(self.downloads_btn)
-        self.downloads_dot.setFixedSize(9, 9)
+        self.downloads_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.downloads_dot.setFixedSize(16, 16)
         self.downloads_dot.setStyleSheet(
             f"background: {theme.ACCENT}; border: 1px solid {theme.BG};"
-            f" border-radius: 4px;")
+            f" border-radius: 8px; color: {theme.ON_ACCENT};"
+            f" font-size: 8pt; font-weight: 700;")
         self.downloads_dot.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.downloads_dot.hide()
@@ -617,13 +621,17 @@ class MainWindow(QMainWindow):
             self.downloads_dot.hide()
             count, tooltip = 0, ""
         else:
-            # The dot rides the button's own top-right corner; placed
+            count = int(active.get("count") or 0)
+            # The badge rides the button's own top-right corner; placed
             # here because the button's width depends on the sidebar
             # state and this is the one place that runs on every change.
-            self.downloads_dot.move(self.downloads_btn.width() - 13, 3)
+            # Width follows the digits - "12" in a 16px disc clips.
+            self.downloads_dot.setText(str(count) if count else "")
+            width = 16 if count < 10 else 22
+            self.downloads_dot.setFixedSize(width, 16)
+            self.downloads_dot.move(self.downloads_btn.width() - width - 2, 0)
             self.downloads_dot.show()
             self.downloads_dot.raise_()
-            count = int(active.get("count") or 0)
             try:
                 fraction = float(active.get("progress") or 0.0)
             except (TypeError, ValueError):

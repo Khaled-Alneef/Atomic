@@ -5,10 +5,10 @@ General: Windows-startup toggle (plus whether that sign-in launch opens
 full screen), and which sections show up in the main
 sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
 without losing their saved data). Watching: the resolution the in-app
-player starts on, and the connected Stremio
-account, which fills in what was watched outside Atomic (anime, films
-and series play inside the app now, so there is no per-entry "where does
-this open" list here any more - see _build_anime_page).
+player starts on (anime, films and series play inside the app now, so
+there is no per-entry "where does this open" list here any more, and the
+Stremio account sign-in is gone at the owner's ask - see
+_build_anime_page).
 Reading: the list of manga/manhwa/manhua reading sites the
 Reading page can search and open to, plus an optional music/ambience URL.
 Games: each game launcher's install directory, so the Games page can
@@ -19,7 +19,6 @@ or uninstall the app entirely (every saved file plus the app itself).
 """
 
 import json
-import sys
 import threading
 import zipfile
 from datetime import datetime
@@ -35,13 +34,13 @@ from PyQt6.QtWidgets import (
 
 from . import (
     anime_sites, app_settings, global_search, launchers, logs, lookup_pool,
-    manga_sites, nav_config, startup, storage, stremio, theme, uninstall,
+    manga_sites, nav_config, startup, storage, theme, uninstall,
     updater,
 )
 from .widgets import finish_toast, scroll_area, show_toast
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
-# and the Stremio account on this page serves all three media. The
+# and the page's settings serve all three media. The
 # literal "Anime, Movies & Series" was measured against this
 # sidebar and does not fit - it needs 192px of the list's 182px and elides
 # to "Anime, Movies & Seri..." (Segoe UI 10.5 at 125% scaling; "Anime,
@@ -208,10 +207,6 @@ def _read_backup(path: Path) -> dict:
             "only partly downloaded. Nothing was changed.")
 
 
-class _StremioLoginSignals(QObject):
-    done = Signal(str, str, str)  # email, auth key, error message (one is always "")
-
-
 class _SiteProbeSignals(QObject):
     done = Signal(str, str)  # which list ("reading"/"video"), site name
 
@@ -268,34 +263,11 @@ _CHECKED_THIS_RUN = set()
 # (see probe_site's deadline).
 _PROBE_TITLE_LIMIT = 3
 
-# Set once the user signs in again from this dialog, to stop the marker
-# below - which is sticky for the life of the process - from calling a
-# brand new session rejected. Module level for the same reason as the set
-# above: the dialog is rebuilt on every open, the fact is not.
-_STREMIO_SIGNED_IN_HERE = False
-
-
-def _stremio_sign_in_rejected() -> bool:
-    """Whether the tracker's last progress sync was turned away by
-    Stremio, meaning the saved session is dead and nothing is syncing.
-
-    Read, never measured: asking Stremio whether the key still works
-    would put a network request behind merely opening this dialog. The
-    tracker has already asked, on every page arrival, and records the
-    answer - windows.tracker._auth_warning_shown goes True the first time
-    a bulk sync comes back REASON_STREMIO_AUTH_FAILED (see
-    TrackerPage._warn_stremio_auth_once). That marker is once-per-run by
-    design and never resets, so this reads exactly as often as the
-    tracker's own toast says it: a dead key stays dead until reconnected.
-
-    sys.modules rather than an import, on purpose - helpers must not
-    depend on windows (see CLEAR_CATEGORIES above for the same call), and
-    a run in which no tracker page was ever built then reads as "nothing
-    known" rather than dragging the whole page module in to find out."""
-    if _STREMIO_SIGNED_IN_HERE:
-        return False
-    tracker = sys.modules.get("windows.tracker")
-    return bool(tracker is not None and getattr(tracker, "_auth_warning_shown", False))
+# The Stremio account sign-in that used to live on the Watching page is
+# gone entirely, at the owner's ask. A session saved before the removal
+# keeps working - app_settings still holds and serves the auth key and
+# the tracker still syncs with it - there is simply no UI here to add or
+# replace one any more.
 
 
 def _key_caps(keys: str) -> QWidget:
@@ -363,9 +335,6 @@ class SettingsDialog(QDialog):
         content_col.setSpacing(14)
         content_col.addWidget(QLabel("Settings", objectName="PanelTitle"))
 
-        self._login_signals = _StremioLoginSignals()
-        self._login_signals.done.connect(self._on_stremio_login_done)
-
         self._site_probe_signals = _SiteProbeSignals()
         self._site_probe_signals.done.connect(self._on_site_probed)
         # Sites currently being checked, so the list can say so instead of
@@ -412,7 +381,6 @@ class SettingsDialog(QDialog):
         content_wrap.setLayout(content_col)
         body.addWidget(content_wrap, stretch=1)
 
-        self._refresh_stremio_account()
         self._refresh_sites()
 
         self.exec()
@@ -779,45 +747,11 @@ class SettingsDialog(QDialog):
         form.addWidget(resolution_hint)
 
         form.addSpacing(24)
-        form.addWidget(QLabel("Stremio Account", objectName="SectionTitle"))
-
-        self.stremio_account_status = QLabel("", objectName="Muted")
-        # Wraps because the rejected-session wording is longer than one
-        # line at this width; kept to two rendered lines like every other
-        # hint on this page (measured at the dialog's 920px, 688px pane).
-        self.stremio_account_status.setWordWrap(True)
-        form.addWidget(self.stremio_account_status)
-
-        self.stremio_email_edit = QLineEdit()
-        self.stremio_email_edit.setPlaceholderText("Email")
-        form.addWidget(self.stremio_email_edit)
-
-        self.stremio_password_edit = QLineEdit()
-        self.stremio_password_edit.setPlaceholderText("Password")
-        self.stremio_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addWidget(self.stremio_password_edit)
-
-        stremio_account_btn_row = QHBoxLayout()
-        self.stremio_connect_btn = QPushButton("Sign In")
-        self.stremio_connect_btn.clicked.connect(self._connect_stremio)
-        stremio_account_btn_row.addWidget(self.stremio_connect_btn)
-        self.stremio_disconnect_btn = QPushButton("Disconnect", objectName="Danger")
-        self.stremio_disconnect_btn.clicked.connect(self._disconnect_stremio)
-        stremio_account_btn_row.addWidget(self.stremio_disconnect_btn)
-        form.addLayout(stremio_account_btn_row)
-
-        stremio_account_hint = QLabel(
-            "Fills in what you watched elsewhere. Your password is never stored.",
-            objectName="Muted",
-        )
-        stremio_account_hint.setWordWrap(True)
-        form.addWidget(stremio_account_hint)
-
-        form.addSpacing(24)
-        # Reworded rather than dropped. It used to read "Only Stremio can
-        # report watch progress", which stopped being true the moment
-        # Atomic played video itself - and left the account looking
-        # mandatory when it is now only for what was watched elsewhere.
+        # The Stremio Account sign-in that lived here (email/password,
+        # Sign In/Disconnect) is removed entirely at the owner's ask -
+        # see the module-level note near _PROBE_TITLE_LIMIT. The progress
+        # note below survives it: it describes the in-app player, which
+        # is the only thing recording progress now.
         progress_note = QLabel(
             "Playing an episode here records it on the entry by itself. "
             "Progress only ever moves forward - rewatching an old episode "
@@ -1528,83 +1462,6 @@ class SettingsDialog(QDialog):
 
     def _toggle_fullscreen_on_startup(self, checked):
         app_settings.set_fullscreen_on_startup(checked)
-
-    def _refresh_stremio_account(self):
-        """Three states, not two. "Connected as X" used to be shown for
-        the whole life of a saved key, including after Stremio had begun
-        refusing it - the account page said connected while every sync
-        silently returned nothing, which is the one place the user would
-        come to fix it. The third state is read off the tracker's last
-        attempt (see _stremio_sign_in_rejected), never re-measured."""
-        email, auth_key = app_settings.get_stremio_auth()
-        connected = bool(auth_key)
-        rejected = connected and _stremio_sign_in_rejected()
-        if not connected:
-            self.stremio_account_status.setText("Not connected")
-        elif rejected:
-            self.stremio_account_status.setText(
-                f"Connected as {email} — but Stremio is refusing this sign-in, "
-                "so no watch progress is syncing. Sign in again below.")
-        else:
-            self.stremio_account_status.setText(f"Connected as {email}")
-        # Muted grey is right for a status nobody needs to act on and
-        # wrong for this one; the colour comes from theme so it follows
-        # the palette rather than pinning a literal here.
-        self.stremio_account_status.setStyleSheet(
-            f"color: {theme.WARNING}; background: transparent;" if rejected else "")
-        # The sign-in fields come back for a rejected session: telling
-        # someone to sign in again while hiding the form behind Disconnect
-        # is the same defect one step further on. Disconnect stays too -
-        # there is still a stored key, and clearing it is a valid answer.
-        self.stremio_email_edit.setVisible(not connected or rejected)
-        self.stremio_password_edit.setVisible(not connected or rejected)
-        self.stremio_connect_btn.setVisible(not connected or rejected)
-        self.stremio_disconnect_btn.setVisible(connected)
-        if rejected and not self.stremio_email_edit.text():
-            self.stremio_email_edit.setText(email)
-
-    def _connect_stremio(self):
-        email = self.stremio_email_edit.text().strip()
-        password = self.stremio_password_edit.text()
-        if not email or not password:
-            QMessageBox.warning(self, "Stremio Account", "Email and password are required.")
-            return
-        self.stremio_connect_btn.setEnabled(False)
-        self.stremio_account_status.setText("Signing in...")
-        threading.Thread(target=self._stremio_login_worker, args=(email, password), daemon=True).start()
-
-    def _stremio_login_worker(self, email, password):
-        try:
-            auth_key = stremio.login(email, password)
-            self._login_signals.done.emit(email, auth_key, "")
-        except Exception as exc:
-            self._login_signals.done.emit("", "", str(exc))
-
-    def _on_stremio_login_done(self, email, auth_key, error):
-        self.stremio_connect_btn.setEnabled(True)
-        self.stremio_password_edit.clear()
-        if error:
-            self.stremio_account_status.setText("Not connected")
-            QMessageBox.critical(self, "Stremio Account", f"Couldn't sign in:\n{error}")
-            return
-        global _STREMIO_SIGNED_IN_HERE
-        app_settings.set_stremio_auth(email, auth_key)
-        # Stremio just issued this key, so whatever the tracker's earlier
-        # attempt found is about a key that no longer exists. Without
-        # this, the marker's once-per-run stickiness would leave a fresh
-        # sign-in reading as rejected until the app restarted.
-        _STREMIO_SIGNED_IN_HERE = True
-        self.stremio_email_edit.clear()
-        self._refresh_stremio_account()
-
-    def _disconnect_stremio(self):
-        global _STREMIO_SIGNED_IN_HERE
-        app_settings.clear_stremio_auth()
-        # Nothing stored, nothing rejected - and the next sign-in from
-        # here would otherwise inherit the old verdict.
-        _STREMIO_SIGNED_IN_HERE = True
-        self.stremio_email_edit.clear()
-        self._refresh_stremio_account()
 
     def _save_resolution(self, index):
         value = self.resolution_combo.itemData(index)

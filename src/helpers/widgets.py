@@ -1,10 +1,11 @@
 """Small reusable widgets shared across windows."""
 
+import math
 import weakref
 
 from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
                           QPointF, QPropertyAnimation, QRect, QRectF, Qt,
-                          QTimer)
+                          QTimer, QVariantAnimation)
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QColor, QDrag, QIcon, QLinearGradient, QPainter, QPen,
                          QPixmap, QRadialGradient)
@@ -40,11 +41,47 @@ class LogoProgress(QWidget):
     # frame, and the full-colour fill arriving still reads as progress.
     GHOST_OPACITY = 0.42
 
+    # One breath of the pulse, and how far it dips. The whole logo
+    # breathes between full strength and PULSE_FLOOR while it is on
+    # screen - the movement is what says "loading" now that the loading
+    # screen carries no text (the owner's ask). Driven by a linear 0-1
+    # loop mapped through a cosine in paintEvent, so the loop's wrap
+    # from 1 back to 0 lands on the same opacity it left and the breath
+    # never visibly snaps.
+    PULSE_MS = 1600
+    PULSE_FLOOR = 0.55
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixmap = None
         self._fraction = 0.0
+        self._pulse = 0.0
+        self._pulse_anim = QVariantAnimation(self)
+        self._pulse_anim.setStartValue(0.0)
+        self._pulse_anim.setEndValue(1.0)
+        self._pulse_anim.setDuration(self.PULSE_MS)
+        self._pulse_anim.setLoopCount(-1)
+        self._pulse_anim.valueChanged.connect(self._on_pulse)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def _on_pulse(self, value):
+        self._pulse = float(value)
+        self.update()
+
+    def _pulse_opacity(self) -> float:
+        wave = 0.5 - 0.5 * math.cos(2 * math.pi * self._pulse)
+        return self.PULSE_FLOOR + (1.0 - self.PULSE_FLOOR) * (1.0 - wave)
+
+    # Started and stopped by visibility rather than by the caller: the
+    # player shows/hides this with its backdrop, and an animation left
+    # running behind a hidden widget is a 60Hz repaint of nothing.
+    def showEvent(self, event):
+        self._pulse_anim.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._pulse_anim.stop()
+        super().hideEvent(event)
 
     def set_logo(self, path: str) -> bool:
         pixmap = QPixmap(path) if path else QPixmap()
@@ -92,12 +129,13 @@ class LogoProgress(QWidget):
             Qt.TransformationMode.SmoothTransformation)
         scaled.setDevicePixelRatio(ratio)
 
-        painter.setOpacity(self.GHOST_OPACITY)
+        pulse = self._pulse_opacity()
+        painter.setOpacity(self.GHOST_OPACITY * pulse)
         painter.drawPixmap(target, scaled)
 
         filled = int(target.width() * self._fraction)
         if filled > 0:
-            painter.setOpacity(1.0)
+            painter.setOpacity(pulse)
             # Clip in *widget* coordinates to the filled portion, then
             # draw the same pixmap again - so the two halves line up
             # exactly and the seam is a straight edge through the art
@@ -1088,16 +1126,17 @@ class GridSelection:
         return f"Restored {self._selection_count(len(removed))}"
 
 
-class MirroredGlyphButton(QPushButton):
-    """A glyph button whose icon is painted flipped left-to-right.
+class GlyphButton(QPushButton):
+    """A glyph button whose icon is painted rather than set as text.
 
-    Built for the two exit doors (player and reader top bars). Segoe
-    Fluent's SignOut glyph walks out to the *right*, and the owner asked
-    for the door to open to the left - the direction "back" actually is
-    in this app. There is no leftward variant in the font, so the glyph
-    is painted through a mirrored transform instead of set as text.
+    Built for the two exit controls (player and reader top bars). They
+    carried Segoe Fluent's SignOut door, painted through a mirrored
+    transform so it led left; the owner replaced the door with the same
+    left arrow the episode list's prev/next carry, which already points
+    the right way - so the mirroring is gone and only the painting
+    remains.
 
-    Painting it ourselves also ends the "scratched" look for good: a
+    Painting it ourselves is what ends the "scratched" look for good: a
     text glyph on a QSS-styled button is clipped by whatever padding the
     app-wide rule leaves (player._icon_button records the measurement),
     where a painted one is centred on the button's own rect with no
@@ -1125,11 +1164,6 @@ class MirroredGlyphButton(QPushButton):
         font = theme.icon_font(self._font_pt)
         painter.setFont(font)
         painter.setPen(QColor(theme.TEXT if self.isEnabled() else theme.TEXT_DIM))
-        # Mirror around the button's vertical centre line: translate to
-        # the right edge, flip x. Text drawn under this transform comes
-        # out left-handed, which is the whole point.
-        painter.translate(self.width(), 0)
-        painter.scale(-1.0, 1.0)
         painter.drawText(QRect(0, 0, self.width(), self.height()),
                          Qt.AlignmentFlag.AlignCenter, self._glyph)
         painter.end()
@@ -1193,6 +1227,94 @@ def search_field(placeholder: str, width: int = None) -> QLineEdit:
     return field
 
 
+class _SmoothWheel(QObject):
+    """Animated wheel scrolling for one QScrollArea.
+
+    A wheel notch used to land as an instant jump, which is most of why
+    the pages read as stiff (the owner's word): everything else in the
+    app eases, and the single most-repeated interaction snapped. This
+    glides the same distance over a short curve instead.
+
+    Retargeting, not restarting: a second notch mid-glide moves the
+    destination and the animation re-aims from wherever the view
+    currently is, so spinning the wheel feels like momentum rather than
+    a queue of little animations.
+
+    Deliberately narrow about what it takes over:
+      * trackpad pixel-delta scrolling is already 1:1 with the finger
+        and is left alone;
+      * Ctrl/Shift chords belong to zoom and horizontal scrolling;
+      * a notch past the end of the range is *not* consumed, so Qt still
+        propagates it to whatever scrolls behind this area.
+    The reader's strip keeps its own physics (windows.reader.WHEEL_STEP_PX
+    and a hand-tuned feel) - it does not go through scroll_area()."""
+
+    DURATION_MS = 160
+    # Distance per notch. Qt's own default is wheelScrollLines (3) x
+    # singleStep (20) = 60px; kept as the floor so nothing scrolls
+    # *slower* than it used to, but a taller viewport earns a longer
+    # stride - a tenth of a screen per notch was unusably slow on the
+    # tracker grids.
+    NOTCH_FLOOR_PX = 60
+
+    def __init__(self, area: QScrollArea):
+        super().__init__(area)
+        self._area = area
+        self._target = None
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(self.DURATION_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._apply)
+        self._anim.finished.connect(self._settled)
+        # Grabbing the scrollbar mid-glide must win instantly - an
+        # animation still writing values under a held slider fights the
+        # hand holding it.
+        area.verticalScrollBar().sliderPressed.connect(self._cancel)
+        area.viewport().installEventFilter(self)
+        area.verticalScrollBar().installEventFilter(self)
+
+    def _apply(self, value):
+        self._area.verticalScrollBar().setValue(int(value))
+
+    def _settled(self):
+        self._target = None
+
+    def _cancel(self):
+        self._anim.stop()
+        self._target = None
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.Wheel:
+            return False
+        if not event.pixelDelta().isNull():
+            return False
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.ShiftModifier):
+            return False
+        steps = event.angleDelta().y() / 120.0
+        if not steps:
+            return False
+        bar = self._area.verticalScrollBar()
+        if bar.maximum() <= bar.minimum():
+            return False
+        notch = max(self.NOTCH_FLOOR_PX,
+                    int(self._area.viewport().height() * 0.22))
+        current = self._target if self._target is not None else bar.value()
+        target = max(bar.minimum(), min(bar.maximum(),
+                                        int(current - steps * notch)))
+        if target == bar.value() and self._target is None:
+            # Already hard against this end - hand the notch back to Qt
+            # so a parent scroller (if any) can take it.
+            return False
+        self._target = target
+        self._anim.stop()
+        self._anim.setStartValue(float(bar.value()))
+        self._anim.setEndValue(float(target))
+        self._anim.start()
+        event.accept()
+        return True
+
+
 def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
     """Wrap `body` in a frameless, resizable, mouse-wheel-scrollable area.
 
@@ -1212,6 +1334,8 @@ def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
     if always_show_vbar:
         area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     area.setWidget(body)
+    # Parented to the area, so it lives and dies with it.
+    _SmoothWheel(area)
     return area
 
 

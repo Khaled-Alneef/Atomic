@@ -70,7 +70,7 @@ from PyQt6.QtWidgets import (
 
 from helpers import (downloads, images, logs, lookup_pool, net, storage,
                      theme)
-from helpers.widgets import (Card, GlassPage, MirroredGlyphButton,
+from helpers.widgets import (Card, GlassPage, GlyphButton,
                              finish_toast, show_toast, use_hover_cursor)
 from windows.tracker import correct_progress, format_chapter_progress
 
@@ -127,12 +127,14 @@ ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 # manhua are cut as narrow phone strips and arrived slightly too small.
 # The numbers are the owner's own, measured against what he was setting
 # by hand every chapter: manga 75% of the old baseline, the two vertical
-# strips 115%.
+# strips 115% - then raised again to 145% *of that* (1.15 x 1.45 =
+# 1.67), the owner's ask, since 115% still opened smaller than the size
+# every strip chapter was being zoomed to by hand.
 #
 # This is the baseline, not the zoom: the +/- controls and the label
 # still read 100% here, so "100%" means "the size this medium opens at"
 # rather than a number that has to be re-learned per series.
-MEDIUM_BASE_SCALE = {"manga": 0.75, "manhwa": 1.15, "manhua": 1.15}
+MEDIUM_BASE_SCALE = {"manga": 0.75, "manhwa": 1.67, "manhua": 1.67}
 DEFAULT_BASE_SCALE = 1.0
 
 # How far outside the viewport the strip keeps pixels. This margin is
@@ -183,11 +185,12 @@ BOTTOM_GAP = 16
 # chapter 30,000px tall is 500 notches from top to bottom. 300 was the
 # first try and the owner still called it slow on a long webtoon; 640
 # overshot a panel; 460 was called still slightly too fast; 380 was the
-# next step down and the owner asked for slower again, so 320 - about a
-# third of a ~900px viewport, ~98 notches on the 31,365px Kingdom
-# chapter measured here. Raised from Qt's 60 in the first place so a
-# long webtoon does not need five hundred.
-WHEEL_STEP_PX = 320
+# next step down and the owner asked for slower again, so 320; and the
+# owner asked for slower once more, so 260 - a bit over a quarter of a
+# ~900px viewport, ~121 notches on the 31,365px Kingdom chapter
+# measured earlier. Raised from Qt's 60 in the first place so a long
+# webtoon does not need five hundred.
+WHEEL_STEP_PX = 260
 
 # The gap drawn between pages, per medium. Zero for the vertical strips
 # - a webtoon's panels are cut mid-image and any spacing draws a seam
@@ -212,7 +215,9 @@ ARROW_SCROLL_PX = 200
 ICON_REFRESH = "\ue72c"               # Refresh
 ICON_FULLSCREEN = "\ue740"            # FullScreen
 ICON_EXIT_FULLSCREEN = "\ue73f"       # BackToWindow
-ICON_LEAVE = "\uf3b1"                 # SignOut - a door with a way out of it
+ICON_LEAVE = "\ue892"                 # Previous - the same left arrow the
+                                      # player's prev/next carry (the door
+                                      # it replaced led the same way)
 ICON_CHAPTER_LIST = "\ue8fd"          # List - the same glyph the player's
                                       # episode list uses, so "the list of
                                       # things to open" is one icon in both
@@ -1300,11 +1305,28 @@ class _StripView(QScrollArea):
         self._store.set_keep(keep)
 
     def _show(self, slot, pixmap, ratio):
-        slot.natural = pixmap.size()
+        # A landscape page is a double-page spread (manga pages are cut
+        # portrait; only a spread comes out wider than tall), and at the
+        # chapter's zoom it lands about twice the viewport wide - the
+        # owner was zooming out for page 3 of every such chapter and
+        # back in for page 4. Fitted to the window's width instead,
+        # display-only: the cache keeps the decode untouched, so nothing
+        # is re-fetched when the window or the zoom changes, and
+        # _typical_width is not fed a spread's width (it sizes the
+        # placeholders for the ordinary pages).
+        shown = QPixmap(pixmap)
+        is_spread = pixmap.width() > pixmap.height()
+        if is_spread:
+            fit = self.viewport().width() * ratio
+            if 0 < fit < shown.width():
+                shown = shown.scaledToWidth(
+                    int(fit), Qt.TransformationMode.SmoothTransformation)
+        slot.natural = shown.size()
         slot.setText("")
-        slot.setPixmap(_tagged(QPixmap(pixmap), ratio))
+        slot.setPixmap(_tagged(shown, ratio))
         slot.loaded = True
-        self._typical_width = max(1, round(pixmap.width() / ratio))
+        if not is_spread:
+            self._typical_width = max(1, round(pixmap.width() / ratio))
         self._resize_slot(slot)
 
     def _on_page_ready(self, index):
@@ -1519,15 +1541,15 @@ class ReaderPage(GlassPage):
         row.setContentsMargins(12, 6, 12, 6)
         row.setSpacing(8)
 
-        # Far left: the door out, then which chapter this is. The player's
-        # top bar opens the same way (door, then the episode list), so
-        # leaving is in the same corner whichever one you are in.
-        # Painted mirrored (see widgets.MirroredGlyphButton): the Fluent
-        # SignOut glyph walks out to the right, and the owner asked for
-        # the door to lead left - and for the clipping that read as a
-        # scratched icon to be gone, which painting it ourselves settles.
-        self._leave_btn = MirroredGlyphButton(
-            ICON_LEAVE, "Leave the reader (Esc)", size=(34, 30), font_pt=12)
+        # Far left: the way out, then which chapter this is. The player's
+        # top bar opens the same way (arrow, then the episode list), so
+        # leaving is in the same corner whichever one you are in. A large
+        # left arrow now, not the SignOut door (the owner's ask - the
+        # same glyph the player's prev/next carry), painted rather than
+        # set as text so the clipping that read as a scratched icon
+        # stays gone (see widgets.GlyphButton).
+        self._leave_btn = GlyphButton(
+            ICON_LEAVE, "Leave the reader (Esc)", size=(34, 30), font_pt=15)
         self._leave_btn.clicked.connect(self.leave)
         row.addWidget(self._leave_btn)
 

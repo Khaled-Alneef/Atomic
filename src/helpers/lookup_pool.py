@@ -75,9 +75,9 @@ def _ensure_workers(workers, work_queue, count, name):
             workers.append(worker)
 
 
-_latest_jobs = {}
-_latest_ready = threading.Condition()
-_latest_worker = None
+_latest_jobs = {}       # key -> pending (fn, args, kwargs), newest wins
+_latest_lock = threading.Lock()
+_latest_workers = {}    # key -> its worker thread and wake-up condition
 
 
 def submit_latest(key: str, fn, *args, **kwargs):
@@ -93,27 +93,37 @@ def submit_latest(key: str, fn, *args, **kwargs):
 
     Deliberately *not* the shared queue above: this is a lookup the user
     is watching a status line for, and behind a page-load backfill of
-    every tracked entry it would wait minutes. One dedicated worker
-    instead - which caps this path at a single connection, tighter than
-    the shared pool - and superseded jobs are dropped before they ever
-    run rather than raced."""
-    global _latest_worker
-    with _latest_ready:
+    every tracked entry it would wait minutes.
+
+    One worker *per key*, not one worker total. The single shared worker
+    was measured as the "suggestions are slow" complaint: the entry
+    form's title search ("entry-search") queued behind an in-flight
+    Video Website resolution ("video-site"), so a suggestion the network
+    answered in a second sat unstarted for the other job's full 6-10s
+    timeout. Each key keeps the properties that matter - its own jobs
+    run one at a time and a superseded one is dropped before it starts -
+    while different keys stop waiting on each other. The key set is a
+    handful of fixed strings, so this stays a handful of threads."""
+    with _latest_lock:
         _latest_jobs[key] = (fn, args, kwargs)
-        if _latest_worker is None:
-            _latest_worker = threading.Thread(target=_run_latest_forever,
-                                              name="lookup-latest", daemon=True)
-            _latest_worker.start()
-        _latest_ready.notify()
+        entry = _latest_workers.get(key)
+        if entry is None:
+            ready = threading.Condition(_latest_lock)
+            worker = threading.Thread(target=_run_latest_forever,
+                                      args=(key, ready),
+                                      name=f"lookup-latest-{key}", daemon=True)
+            _latest_workers[key] = (worker, ready)
+            worker.start()
+        else:
+            entry[1].notify()
 
 
-def _run_latest_forever():
+def _run_latest_forever(key, ready):
     # Must never raise, for the same reason _run_forever must not.
     while True:
-        with _latest_ready:
-            while not _latest_jobs:
-                _latest_ready.wait()
-            key = next(iter(_latest_jobs))
+        with _latest_lock:
+            while key not in _latest_jobs:
+                ready.wait()
             fn, args, kwargs = _latest_jobs.pop(key)
         try:
             fn(*args, **kwargs)

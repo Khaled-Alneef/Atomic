@@ -52,6 +52,11 @@ BORDER = "#2b3b5e"
 TEXT = "#eaf1ff"
 TEXT_MUTED = "#8ca0c4"
 TEXT_DIM = "#5a6d8f"
+# Pure white, for text sitting directly over video/artwork (the player's
+# top bar) where the palette's blue-tinted TEXT reads as dingy against a
+# bright frame. Not for text on the app's own surfaces - TEXT is
+# calibrated against those.
+TEXT_OVER_MEDIA = "#ffffff"
 
 ACCENT = "#25d3e8"        # primary action - bright cyan
 ACCENT_HOVER = "#54e2f2"

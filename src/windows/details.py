@@ -735,7 +735,8 @@ class DetailsPage(GlassPage):
         if shown == 0 and self._chapters:
             self._panel_note.setText("Nothing matches that search.")
 
-    def _row_card(self, title, date_text, badge, on_click, on_menu=None):
+    def _row_card(self, title, date_text, badge, on_click, on_menu=None,
+                  play_glyph=True):
         from windows.reader import _ElidedLabel
         card = Card(matte=True, hoverable=on_click is not None)
         card.setFixedHeight(ROW_HEIGHT)
@@ -743,11 +744,15 @@ class DetailsPage(GlassPage):
         row.setContentsMargins(14, 10, 14, 10)
         row.setSpacing(10)
 
-        glyph = QLabel(ICON_PLAY_GLYPH)
-        glyph.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-family: {theme.FONT_STACK_ICONS};"
-            f" font-size: 13pt; background: transparent; border: none;")
-        row.addWidget(glyph)
+        # play_glyph=False is the source picker's back row: it navigates
+        # rather than plays, and a play triangle on "Back to episodes"
+        # read as a resume control (the owner's screenshot).
+        if play_glyph:
+            glyph = QLabel(ICON_PLAY_GLYPH)
+            glyph.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; font-family: {theme.FONT_STACK_ICONS};"
+                f" font-size: 13pt; background: transparent; border: none;")
+            row.addWidget(glyph)
 
         column = QVBoxLayout()
         column.setSpacing(2)
@@ -820,7 +825,8 @@ class DetailsPage(GlassPage):
         name = (f"S{int(season or 1):02d}E{int(episode):02d}"
                 if episode else "this film")
         self._rows.insertWidget(0, self._row_card(
-            "‹  Back to episodes", "", None, self._close_source_picker))
+            "‹  Back to episodes", "", None, self._close_source_picker,
+            play_glyph=False))
         shown = 1
 
         streams_found = pick.get("streams")
