@@ -8,3 +8,6 @@ class AppsPage(LinkGridPage):
     TITLE = "Apps"
     DEFAULT_ENTRIES = []
     TARGET_KIND = "app"
+    # Poster-size tiles with store artwork (the owner's ask) - see
+    # LinkGridPage.POSTER_CARDS and helpers/app_art.
+    POSTER_CARDS = True

@@ -28,6 +28,20 @@ def set_nav_order(order: list):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_section_order() -> list:
+    """Saved order of the tracker pages' sub-sections (the section
+    sidebar's drag-to-reorder list), or [] before the user has dragged
+    one. Keys are tracker.TABS keys; every tracker page shares the one
+    order, since they share the sections themselves."""
+    return _load().get("section_order", [])
+
+
+def set_section_order(order: list):
+    data = _load()
+    data["section_order"] = list(order)
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_hidden_sections() -> list:
     """Page-names the user has hidden (see Settings > General), or [] if
     nothing's hidden. Hidden sections keep their saved data - this only
@@ -219,6 +233,20 @@ def set_preferred_resolution(value: str):
     data = _load()
     value = str(value or "").lower()
     data["preferred_resolution"] = value if value in RESOLUTION_CHOICES else DEFAULT_RESOLUTION
+    storage.save(SETTINGS_FILE, data)
+
+
+def get_auto_pick_source() -> bool:
+    """Whether pressing an episode starts playing right away instead of
+    opening the source list first (the owner's ask - the picking step
+    was the slow part of starting anything). Defaults on; the player's
+    own source and resolution controls remain either way."""
+    return bool(_load().get("auto_pick_source", True))
+
+
+def set_auto_pick_source(enabled: bool):
+    data = _load()
+    data["auto_pick_source"] = bool(enabled)
     storage.save(SETTINGS_FILE, data)
 
 

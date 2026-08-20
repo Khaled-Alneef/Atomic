@@ -390,6 +390,18 @@ class SetupWizard(QDialog):
         resolution_hint.setWordWrap(True)
         form.addWidget(resolution_hint)
 
+        form.addSpacing(10)
+        self.auto_pick_check = QCheckBox("Auto choose source to play")
+        self.auto_pick_check.setChecked(app_settings.get_auto_pick_source())
+        self.auto_pick_check.toggled.connect(app_settings.set_auto_pick_source)
+        form.addWidget(self.auto_pick_check)
+        auto_pick_hint = QLabel(
+            "Pressing an episode starts the best source right away, "
+            "instead of listing every source to pick from first.",
+            objectName="Muted")
+        auto_pick_hint.setWordWrap(True)
+        form.addWidget(auto_pick_hint)
+
         downloads_module = _downloads_page()
         self._downloads_module = downloads_module
         if downloads_module is not None:

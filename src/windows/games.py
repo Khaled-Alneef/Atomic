@@ -18,18 +18,24 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QMenu, QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import app_settings, game_launch, images, launchers, storage, theme
+from helpers import (app_settings, game_art, game_launch, images, launchers,
+                     lookup_pool, storage, theme)
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, GridSelection, confirm,
     defer_grid_rebuild, finish_toast, frameless_dialog, inform, scroll_area,
     search_field, show_toast, show_undo_toast,
 )
 from windows.link_grid import (
-    CARD_MARGINS, CARD_WIDTH, THUMB_SIZE, CardTextLabel, grid_columns,
+    CARD_MARGINS, POSTER_ART_SIZE, POSTER_CARD_WIDTH, CardTextLabel,
+    poster_grid_columns,
 )
 
 DATA_FILE = "games.json"
-CARD_ICON_SIZE = THUMB_SIZE  # match the Apps/Websites card image size
+# Poster tiles now, the Movies & Series card's own size (the owner's
+# ask) - the art comes from Steam's store (helpers/game_art), and a
+# game with none keeps the letter avatar: ImageOps.fit would stretch a
+# 32px shell icon across a 160x216 tile as mush.
+CARD_COVER_SIZE = POSTER_ART_SIZE
 FILE_FILTER = "Games (*.exe *.lnk *.url);;All files (*.*)"
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Played"]
@@ -41,6 +47,12 @@ _extract_and_cache_icon = launchers.extract_and_cache_icon
 
 class _ScanSignals(QObject):
     done = Signal(list)  # [{"name", "path", "launcher"}, ...] found by the background scan
+
+
+class _CoverSignals(QObject):
+    # game id -> local Steam cover path, back from the lookup pool so
+    # the storage write and the repaint stay on the UI thread.
+    ready = Signal(str, str)
 
 
 class GamesPage(GridSelection, GlassPage):
@@ -122,7 +134,56 @@ class GamesPage(GridSelection, GlassPage):
         self._drag_reorder = CardDragReorder(
             self.grid_body, self._begin_custom_order, self._drop_reorder)
 
+        # game id -> the drawn card's cover label, so an arriving Steam
+        # cover swaps one pixmap instead of rebuilding the grid under
+        # the pointer. Nothing in it outlives the redraw that filled it.
+        self._cover_labels = {}
+        self._cover_signals = _CoverSignals()
+        self._cover_signals.ready.connect(self._on_cover_ready)
+
         self._refresh_grid()
+        self._backfill_covers()
+
+    # ------------------------------------------------------------------
+    def _backfill_covers(self):
+        """Fetch a Steam poster for every game that has none - the
+        poster tiles need portrait art no .exe icon can supply, and
+        helpers/game_art is the measured, matched source for it. One
+        lookup per game on the shared bounded pool; game_art caches both
+        hits and authoritative misses on disk, so later loads cost a
+        stat, not a request."""
+        for game in self.games:
+            cover = game.get("cover")
+            if cover and Path(cover).exists():
+                continue
+            lookup_pool.submit(self._cover_worker, game.get("id"),
+                               game.get("name") or "", game.get("path"))
+
+    def _cover_worker(self, game_id, name, install_path):
+        # Never raises - an exception here kills the pool worker thread.
+        try:
+            path = game_art.fetch_cover(name, install_path=install_path)
+        except Exception:
+            path = None
+        if path and game_id:
+            self._cover_signals.ready.emit(game_id, str(path))
+
+    def _on_cover_ready(self, game_id, path):
+        game = next((g for g in self.games if g.get("id") == game_id), None)
+        if game is None:
+            return
+        game["cover"] = path
+        # One field on one entry - Home and Settings hold their own
+        # copies of this file (see _mutate for the defect a whole-list
+        # write caused).
+        storage.update_entry(DATA_FILE, game_id, {"cover": path})
+        drawn = self._cover_labels.get(game_id)
+        if drawn is not None:
+            try:
+                drawn.setPixmap(images.thumbnail_or_avatar(
+                    path, game.get("name") or "", CARD_COVER_SIZE))
+            except RuntimeError:
+                pass    # the grid rebuilt; the new card already asked
 
     # ------------------------------------------------------------------
     def _begin_custom_order(self):
@@ -232,6 +293,9 @@ class GamesPage(GridSelection, GlassPage):
             if widget:
                 widget.deleteLater()
         self._clear_selection_cards()
+        # Emptied with the cards it names, same reason as the selection
+        # map above.
+        self._cover_labels = {}
 
         # Dragging is off while a search is narrowing the grid: a drop
         # writes the order that is on screen (see _begin_custom_order),
@@ -248,7 +312,7 @@ class GamesPage(GridSelection, GlassPage):
             self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
-        columns = grid_columns(self)
+        columns = poster_grid_columns(self)
         for index, game in enumerate(games):
             # Dragging is off while selecting as well as while the grid is
             # narrowed: both a drag and a pick want the same left press.
@@ -264,21 +328,26 @@ class GamesPage(GridSelection, GlassPage):
         # (theme.py) - icon and name floating on the ground, box only on
         # hover - the same Harbor language the poster grids and Home use.
         card = Card(hoverable=True)
-        card.setFixedWidth(CARD_WIDTH)
+        card.setFixedWidth(POSTER_CARD_WIDTH)
         card.setToolTip(game["name"])
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.setContentsMargins(*CARD_MARGINS)
 
-        icon = QLabel()
-        icon.setFixedSize(*CARD_ICON_SIZE)
-        icon.setPixmap(images.thumbnail_or_avatar(game.get("icon"), game["name"], CARD_ICON_SIZE))
-        layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # The Steam poster when one has been resolved, the letter avatar
+        # until (or unless) one is - not the extracted icon, which at
+        # poster size renders as a 32px shell icon stretched to mush.
+        cover = QLabel()
+        cover.setFixedSize(*CARD_COVER_SIZE)
+        cover.setPixmap(images.thumbnail_or_avatar(
+            game.get("cover"), game["name"], CARD_COVER_SIZE))
+        layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._cover_labels[game.get("id")] = cover
 
-        # Same clipped-second-line defect as Apps/Websites - this grid is
-        # built from the same constants, so it had it identically.
-        name = CardTextLabel(game["name"])
+        name = CardTextLabel(game["name"], width=POSTER_CARD_WIDTH
+                             - CARD_MARGINS[0] - CARD_MARGINS[2])
         name.setObjectName("CardTitle")
+        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(name)
 
         if self._select_mode:

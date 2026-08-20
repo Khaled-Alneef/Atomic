@@ -511,13 +511,15 @@ def _default_pick_key(stream, preferred):
     something other than the chosen resolution is not a preference, it
     is a suggestion.
 
-    **Within the preferred resolution, the smallest real file leads** -
-    the owner's ask: a 450MB 1080p episode starts and seeks faster than
-    a 1.4GB one and looks the same on this display. "Real" means past
-    _MIN_REAL_SIZE; a release whose title states no size (or a sample-
-    sized one) sorts after the sized ones rather than gaming the rule.
-    A zero-seeder release sorts behind everything with a pulse first,
-    whatever its size - small and dead is still dead.
+    **Within the preferred resolution, the most seeders lead** - the
+    owner's ask ("the one that has more seeds, not the size"), replacing
+    the smallest-real-file rule that briefly lived here: a big swarm is
+    what actually starts fast and downloads fast, and the small file it
+    replaced as the tiebreak still wins between equals. Raw seeder
+    counts, not capped at _SEEDER_CEILING - an ordering has to be able
+    to tell 250 from 2000 even though both are "plenty". A release whose
+    title states no usable size keeps sorting after the sized ones when
+    seeders tie, rather than gaming the tiebreak.
 
     **Everywhere else, resolution then seeders** - the old rule, kept:
     sorting on resolution alone once picked a 2160p release with 21
@@ -531,13 +533,13 @@ def _default_pick_key(stream, preferred):
     quality = (stream.get("quality") or "").lower()
     if quality == "4k":
         quality = "2160p"
-    seeders = min(int(stream.get("seeders") or 0), _SEEDER_CEILING)
+    raw_seeders = int(stream.get("seeders") or 0)
+    seeders = min(raw_seeders, _SEEDER_CEILING)
     if preferred != "best" and quality == preferred:
         size = int(stream.get("size_bytes") or 0)
         size_key = size if size >= _MIN_REAL_SIZE else float("inf")
-        return (drm, resolvable, 0, 1 if seeders == 0 else 0,
-                size_key, -seeders)
-    return (drm, resolvable, 1, 0, -_quality_rank(quality), -seeders)
+        return (drm, resolvable, 0, -raw_seeders, size_key)
+    return (drm, resolvable, 1, -_quality_rank(quality), -seeders)
 
 
 def _stremio_id(entry, season=None, episode=None) -> str:

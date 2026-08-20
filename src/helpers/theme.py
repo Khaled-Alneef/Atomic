@@ -158,12 +158,11 @@ FONT_FAMILY_ICON_FALLBACKS = (FONT_FAMILY_ICONS, "Segoe MDL2 Assets", FONT_FAMIL
 # showing one of these glyphs has to be handed the family here too, or
 # it renders the codepoint as a missing-glyph box.
 FONT_STACK_ICONS = ", ".join(f'"{name}"' for name in FONT_FAMILY_ICON_FALLBACKS)
-# Anime carries the monitor and Movies & Series the camera, not the
-# other way round: swapped at the owner's request after seeing the
-# folded strip, where the two sat three rows apart and read backwards.
+# Anime merged into Movies & Series (the owner's ask - one watch page
+# under the camera glyph), so the monitor glyph the separate Anime entry
+# carried left with it.
 NAV_ICONS = {
     "home": "",      # Home
-    "anime": "",     # TVMonitor
     "manga": "",     # ReadingMode
     "series": "",    # Video
     "games": "",     # Game (controller)
@@ -175,6 +174,15 @@ SETTINGS_ICON = ""   # Setting (gear)
 RADIUS_SM = 8
 RADIUS = 12
 RADIUS_LG = 18
+
+
+def rgba(color: str, alpha: int) -> str:
+    """A palette hex token as a QSS rgba() carrying `alpha`, so a
+    translucent fill still has the palette as its single source - a
+    hand-typed rgba would be a literal colour with extra steps."""
+    value = color.lstrip("#")
+    red, green, blue = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({red}, {green}, {blue}, {alpha})"
 
 # Also referenced outside the stylesheet (see windows.home) to compensate
 # fixed-width centered content for the vertical scrollbar's width - it
@@ -318,15 +326,21 @@ QWidget#Sidebar {{
     border-top-right-radius: {RADIUS_LG}px;
     border-bottom-right-radius: {RADIUS_LG}px;
 }}
-/* The collapse/expand chevron pinned at the sidebar's top edge. */
+/* The collapse/expand chevron pinned at the sidebar's top edge. The
+   icon stack is here because the glyph is a Fluent chevron
+   (main.FOLD_*), and a QSS-styled button resolves its font from the
+   rule, not from setFont - without the family the codepoint renders as
+   a box. 14pt because the owner asked for the single chevron drawn
+   large; the button stays 28px, which a 14pt Fluent glyph still fits. */
 QPushButton#FoldButton {{
     background: transparent;
     color: {TEXT_MUTED};
     border: none;
     border-radius: {RADIUS_SM}px;
     padding: 2px;
-    font-size: 13pt;
-    font-weight: 700;
+    font-family: {FONT_STACK_ICONS};
+    font-size: 14pt;
+    font-weight: 400;
 }}
 QPushButton#FoldButton:hover {{
     background: {SURFACE};
@@ -542,13 +556,6 @@ QFrame#HomeItem {{
 QFrame#HomeItem:hover {{
     background: {ACCENT_SOFT};
     border: 1px solid {ACCENT};
-}}
-/* Home hero carousel peeks (_HeroCardLabel) - pixmap-filled, so a
-   background highlight would be painted over invisibly; a border
-   isn't, since QLabel is a QFrame under the hood. */
-QLabel#HeroCardLabel:hover {{
-    border: 2px solid {ACCENT};
-    border-radius: {RADIUS}px;
 }}
 QLabel#CardTitle {{
     color: {TEXT};
@@ -792,13 +799,20 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none
 QScrollBar:horizontal {{
     background: transparent;
     height: 11px;
+    margin: 0px 2px 0px 2px;
 }}
 QScrollBar::handle:horizontal {{
     background: {SURFACE_HOVER};
     min-width: 28px;
     border-radius: 5px;
 }}
+QScrollBar::handle:horizontal:hover {{ background: {ACCENT}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+/* Without this Qt paints the groove either side of the handle with the
+   native style's checkerboard dither, which on this near-black theme
+   reads as a strip of white dots (the owner's screenshot). The vertical
+   rules above always had it; the horizontal pair was simply missed. */
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: none; }}
 
 /* ---- Menus --------------------------------------------------------------- */
 QMenu {{

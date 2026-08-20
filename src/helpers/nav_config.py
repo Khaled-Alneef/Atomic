@@ -13,12 +13,17 @@ HOME_ITEM = ("Home", "home")
 # Default order; the sidebar's drag-to-reorder list overrides this once
 # the user has customized it (see app_settings.get/set_nav_order).
 NAV_ITEMS = [
-    ("Anime", "anime"),
-    ("Reading", "manga"),
+    # "Read" and "Watch" (the owner's ask), not "Reading" and "Movies &
+    # Series" - the verbs; Home's rows keep the longer "Reading"/
+    # "Watching" headings, also the owner's ask.
+    ("Read", "manga"),
     # Page key stays "series" - it is what saved nav orders, hidden-section
-    # lists and series.json already refer to. Only the label changed when
-    # films joined it.
-    ("Movies & Series", "series"),
+    # lists and series.json already refer to. Anime merged into this page
+    # (the owner's ask - one watch page under the camera glyph), so there
+    # is no "anime" nav entry any more; a saved order or hidden-sections
+    # list still naming it is simply filtered out by the by_page lookups
+    # below rather than migrated.
+    ("Watch", "series"),
     ("Games", "games"),
     ("Apps", "apps"),
     ("Websites", "websites"),

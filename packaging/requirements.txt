@@ -1,5 +1,11 @@
 PyQt6>=6.11
 Pillow>=10.0
+# The video player: python-mpv drives vendor/libmpv-2.dll (fetched by
+# fetch_libmpv.py); libtorrent is its torrent engine, and publishes
+# wheels for CPython 3.9-3.13 only - which is why build.py insists on
+# running under `py -3.13`.
+python-mpv>=1.0
+libtorrent>=2.0
 
 # Only needed to rebuild the standalone EXE - run `python build.py` from
 # this folder (it wraps `pyinstaller Atomic.spec`, which bundles

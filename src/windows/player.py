@@ -207,30 +207,33 @@ DEFAULT_SEASON_EPISODES = 12
 # one uniform alpha to the whole window, text included, so the scrim, not
 # the alpha, is what has to carry the contrast.
 BAR_ALPHA = 180
-# The bottom controls sit under an even fainter veil - a soft darkening
-# behind the seek strip and buttons rather than a bar (the owner's
-# reference picture). The top bar has no veil at all; it is colour-keyed
-# (see KEY_COLOR). A dithered gradient scrim (TopScrim) was tried behind
-# it and removed the same day at the owner's ask ("remove the shades") -
-# the bar is bare text over the video, kept fringe-free by rendering
-# that text without antialiasing (see _build_top_bar).
+# The two full-width bars sit under this fainter veil - a soft
+# darkening behind the buttons rather than a slab (the owner's
+# reference picture). The top bar wore no veil at all for a while (its
+# background was colour-keyed to nothing); that ended when the key
+# failed on the owner's display and rendered as black boxes around the
+# title and buttons - see _build_top_bar.
 CONTROLS_VEIL_ALPHA = 130
 
 _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
 _LWA_ALPHA = 0x00000002
-_LWA_COLORKEY = 0x00000001
 _VK_LBUTTON = 0x01
 
-# The colour-key the frameless overlays paint their background in: every
-# pixel of exactly this colour is removed from the window by DWM, so
-# only the buttons and text remain over the video (the owner's ask - no
-# bar slab at all). Near-black on purpose: antialiased text edges blend
-# toward the key colour, and a dark fringe is invisible where a magenta
-# one would not be. Must not collide with any colour actually drawn -
-# theme's nearest is BG #0e0c09.
-KEY_COLOR = "#020202"
-_KEY_COLORREF = 0x020202        # COLORREF is 0x00BBGGRR - grey, so equal
+# How long an episode *switch* may wait before the loading frame is
+# shown at all - see _show_loading_soon. Under this, a season pack
+# that is already downloading hands over the next episode's first
+# frame with nothing flashing in between.
+LOADING_FLASH_GUARD_MS = 350
+
+# How long after a panel opens, closes or rebuilds the click-to-pause
+# poll ignores clicks - see _click_toggle. The poll samples the mouse
+# up to 40ms late, and a panel that changed shape under a click (the
+# resolution drill-down replacing a tall list with a short one) made
+# the *same press* that chose a row read as a click on the video
+# behind where the row used to be, which dismissed the drill-down the
+# press had just opened (the owner's "clicking 4K closes the window").
+PANEL_CLICK_GUARD_S = 0.45
 
 # Segoe Fluent Icons codepoints, same family the sidebar uses (see
 # theme.FONT_STACK_ICONS) - monochrome, so they take the button's colour
@@ -254,12 +257,14 @@ ICON_MUTED = "\ue74f"
 ICON_FULLSCREEN = "\ue740"
 ICON_EXIT_FULLSCREEN = "\ue73f"
 ICON_SUBTITLES = "\ued1e"
-# Leaving the player, at the far left of the top bar. E892 is Previous
-# - the same left arrow the transport's previous-episode button carries
-# - replacing the SignOut door at the owner's ask, and it is the same
-# glyph reader.py's leave button carries, which is the whole point:
-# both pages' top bars open with the identical control.
-ICON_EXIT = "\ue892"
+# Leaving the player, at the far left of the top bar. E72B is Back -
+# the plain left arrow, the same glyph the details page's back button
+# carries (the owner's ask: a normal back arrow, not E892's
+# previous-track arrow, which repeated the transport's previous-episode
+# glyph two rows apart and read as the same control twice).
+# reader.py's leave button carries the identical glyph, so every
+# overlay opens with the same way out.
+ICON_EXIT = "\ue72b"
 # The episode-list opener, immediately right of the door. E8FD is
 # BulletedList, the same glyph the reader's chapter-list button carries.
 ICON_EPISODE_LIST = "\ue8fd"
@@ -482,51 +487,24 @@ def _set_window_alpha(widget, alpha) -> bool:
         return False
 
 
-def _set_window_colorkey(widget) -> bool:
-    """Make every KEY_COLOR pixel of this native child window fully
-    transparent, leaving everything else opaque.
-
-    The other half of the layered-window story _set_window_alpha tells:
-    LWA_ALPHA blends the *whole* window - text included - where
-    LWA_COLORKEY removes exactly the background and leaves the glyphs
-    crisp. This is what "just the buttons over the video, no bar" is
-    made of; a Qt-side transparent background cannot do it, because an
-    unpainted native child composites as black, not as absence."""
-    if os.name != "nt":
-        return False
-    try:
-        hwnd = int(widget.winId())
-        if not hwnd:
-            return False
-        user32 = ctypes.windll.user32
-        style = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
-        if not style & _WS_EX_LAYERED:
-            user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, style | _WS_EX_LAYERED)
-        return bool(user32.SetLayeredWindowAttributes(
-            hwnd, _KEY_COLORREF, 0, _LWA_COLORKEY))
-    except Exception:
-        logs.exception("Could not colour-key the player bar")
-        return False
-
-
 def _hard_edge_font(point_size, bold=False) -> QFont:
-    """A font that rasterises with no antialiasing, for text drawn on a
-    colour-keyed window.
+    """The top bar's label font. Plain antialiased text now: the
+    NoAntialias strategy this carried existed only for the colour-keyed
+    era (blended glyph edges stopped matching the key and rode every
+    letter as a dark halo), and with the bars alpha-veiled instead
+    there is nothing for smoothing to break. The name and the split -
+    size in QSS, rendering traits here - stay, because the QSS font
+    rules still win the resolve and the eliding metrics still have to
+    match what is painted.
 
-    This is the fix for the black outline the owner photographed twice:
-    antialiased glyph edges blend toward the window's KEY_COLOR, those
-    blended pixels are no longer the exact key, so DWM keeps them - and
-    a near-black halo rides every letter over a bright frame. With
-    antialiasing off, every pixel is either the key (removed) or the
-    text's own white (kept); there is nothing in between to leave
-    behind. A scrim behind the bar was tried first and rejected ("remove
-    the shades"), so hard edges are what remains - and at the bar's
-    sizes Segoe UI holds up without smoothing."""
+    (Historical note, kept because it was photographed twice: with a
+    key, antialiased edges blended toward the key colour, stopped
+    matching it exactly, and DWM kept them - a near-black halo on every
+    letter over a bright frame.)"""
     font = QFont()
     font.setPointSizeF(point_size)
     if bold:
         font.setWeight(QFont.Weight.Bold)
-    font.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
     return font
 
 
@@ -1306,19 +1284,31 @@ class PlayerPage(GlassPage):
         _make_native(self.status)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setWordWrap(True)
-        # No box any more (the owner's ask - the rounded "Connecting to
-        # the source..." slab is gone): the background is colour-keyed
-        # away, so only the words float under the logo. The backdrop's
-        # scrim is what keeps them readable; without a backdrop they sit
-        # on the flat page, which is darker still.
+        # The same near-black veil the control bar sits under, blended
+        # by DWM alpha in _show_status. This was colour-keyed to bare
+        # words for a while, and the key is what the owner's screenshot
+        # caught failing: on his display the keyed background rendered
+        # as a solid black box around the text instead of vanishing
+        # (LWA_COLORKEY is unreliable under HDR/some scaling paths,
+        # and its failure mode is exactly a black slab). Uniform alpha
+        # has no such mode - it can only ever be a soft veil.
         self.status.setStyleSheet(
-            f"background: {KEY_COLOR}; color: {theme.TEXT};"
-            f" padding: 4px; font-size: 13.5pt; font-weight: 600;")
+            f"background: {theme.BG}; color: {theme.TEXT};"
+            f" padding: 10px 16px; font-size: 13.5pt; font-weight: 600;")
         self.status.hide()
 
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
         self._idle_timer.timeout.connect(self._hide_controls)
+        # The loading frame's grace timer - see _show_loading_soon.
+        self._pending_loading_text = ""
+        self._loading_delay = QTimer(self)
+        self._loading_delay.setSingleShot(True)
+        self._loading_delay.setInterval(LOADING_FLASH_GUARD_MS)
+        self._loading_delay.timeout.connect(self._pending_loading_show)
+        # When a panel last opened, closed or rebuilt - what the click
+        # poll holds off for (see _click_toggle / PANEL_CLICK_GUARD_S).
+        self._panel_guard = 0.0
         self._pointer_timer = QTimer(self)
         self._pointer_timer.timeout.connect(self._poll_pointer)
         self._last_pointer = QCursor.pos()
@@ -1390,14 +1380,16 @@ class PlayerPage(GlassPage):
     def _build_top_bar(self):
         self.top_bar = QWidget(self)
         _make_native(self.top_bar)
-        # No slab and no shade at all (the owner's ask, twice over - a
-        # dithered gradient scrim was tried and taken out the same day):
-        # the background is painted in KEY_COLOR and colour-keyed away by
-        # DWM (_set_window_colorkey), so only the buttons and text float
-        # over the video. The window itself still has to exist and be
-        # native - that is what puts anything over mpv's surface in the
-        # first place.
-        self.top_bar.setStyleSheet(f"background: {KEY_COLOR};")
+        # The same faint near-black veil the control bar wears, blended
+        # by DWM alpha (_wake_controls). The colour-keyed bare-text
+        # treatment that briefly lived here is gone at the owner's ask
+        # ("remove the text and the buttons borders - in black now"):
+        # his screenshot shows the key *failing* - the keyed background
+        # rendering as solid black boxes around the title and buttons.
+        # LWA_COLORKEY is unreliable under HDR and some scaling paths,
+        # and that is precisely its failure mode; uniform alpha cannot
+        # fail that way, so the veil is what stays.
+        self.top_bar.setStyleSheet(f"background: {theme.BG};")
         layout = QHBoxLayout(self.top_bar)
         # 4px above and below, not 6, and 38px buttons rather than the
         # 44px default: the bar is TOPBAR_HEIGHT tall and its tallest
@@ -2324,6 +2316,11 @@ class PlayerPage(GlassPage):
         self._prefetched = False
         self._duration = 0.0
         self._position = 0.0
+        # Owed a fresh first frame from here on - set at the switch, not
+        # only when mpv loads, so the delayed loading frame can ask "has
+        # it arrived yet" across the whole lookup as well (see
+        # _show_loading_soon).
+        self._awaiting_first_frame = True
         self.seek_bar.set_duration(0)
         self.seek_bar.set_position(0)
         self.seek_bar.set_buffered(0)
@@ -2337,7 +2334,7 @@ class PlayerPage(GlassPage):
         elif streams_module is None:
             self._show_status("No stream sources are available in this build.")
         else:
-            self._show_loading("Looking for a source...")
+            self._show_loading_soon("Looking for a source...")
             self._spawn(self._find_streams_worker, self._run)
         self._search_subtitles()
 
@@ -2538,7 +2535,7 @@ class PlayerPage(GlassPage):
         # stream - off the UI thread, because it can also have to start
         # the server.
         if not stream.get("url") and stream.get("info_hash") and streams_module:
-            self._show_loading("Connecting to the source...")
+            self._show_loading_soon("Connecting to the source...")
             self._spawn(self._prepare_stream_worker, index, resume_at, self._run)
             return
 
@@ -3053,6 +3050,11 @@ class PlayerPage(GlassPage):
 
     # ---- panels ------------------------------------------------------
     def _close_panel(self):
+        # Stamped on every close as well as every show: the click that
+        # picked a row can close (or rebuild) the panel mid-press, and
+        # the poll's late sample must not read that press as a click on
+        # whatever the panel uncovered - see PANEL_CLICK_GUARD_S.
+        self._panel_guard = time.monotonic()
         if self._panel is not None:
             self._panel.deleteLater()
             self._panel = None
@@ -3557,6 +3559,7 @@ class PlayerPage(GlassPage):
         self._play_stream(index, resume_at=self._position)
 
     def _show_panel(self, panel):
+        self._panel_guard = time.monotonic()
         # Geometry first - see _show_status.
         self._layout_overlays()
         panel.show()
@@ -3577,6 +3580,10 @@ class PlayerPage(GlassPage):
         "window flashing open and closed" - it is not a window of its
         own, and every overlay here now gets its geometry before it is
         allowed on screen."""
+        # A message on screen outranks a loading frame still waiting on
+        # its delay - firing after this would paint the frame over the
+        # words (see _show_loading_soon).
+        self._loading_delay.stop()
         self.status.setText(text)
         # _layout_overlays sizes the box whether or not it is showing -
         # it used to skip a hidden one, which is exactly the case that
@@ -3585,9 +3592,37 @@ class PlayerPage(GlassPage):
         self._show_backdrop()
         self.status.show()
         self.status.raise_()
-        # Colour-keyed, not alpha-blended: only the words exist on
-        # screen (see the status stylesheet).
-        _set_window_colorkey(self.status)
+        # The bars' own veil - see the status stylesheet for why this
+        # stopped being colour-keyed.
+        _set_window_alpha(self.status, BAR_ALPHA)
+        _round_overlay(self.status)
+
+    def _show_loading_soon(self, text=""):
+        """The loading frame, only once the wait proves real.
+
+        Switching to another episode while the season's source is
+        already active gets a first frame in well under the guard, and
+        the full-window loading frame blinking up for those few frames
+        is the "opens a small window and closes it fast" the owner
+        reported from the episode list. So a switch arms a short timer
+        instead of showing anything, and _pending_loading_show puts the
+        frame up only if the new episode's first frame still has not
+        arrived - a fast switch shows nothing at all, and a slow one
+        loses 350ms of spinner nobody needed. The first episode of a
+        page skips the delay: nothing is on screen yet, and a blank
+        page saying nothing reads as hung."""
+        if self._run <= 1:
+            self._show_loading(text)
+            return
+        self._pending_loading_text = text
+        self._loading_delay.start()
+
+    def _pending_loading_show(self):
+        if self._closing or not self._awaiting_first_frame:
+            return
+        if self._status_visible():
+            return    # a real message (an error) outranks the frame
+        self._show_loading(self._pending_loading_text)
 
     def _show_loading(self, text=""):
         """The loading state, wordless (the owner's ask): the title's
@@ -3599,6 +3634,15 @@ class PlayerPage(GlassPage):
         key is set): there the words were the only thing on screen
         saying "working, not hung", so `text` is shown for exactly that
         case and dropped the moment a logo exists."""
+        # While a switch's grace timer runs, every caller lands here
+        # eventually - _update_startup_status included, which mpv's
+        # buffering callbacks fire straight away on a load. Deferring
+        # them all in this one place is what keeps a fast episode
+        # switch from flashing the frame through a side door; the timer
+        # slot shows whatever text arrived last.
+        if self._loading_delay.isActive():
+            self._pending_loading_text = text
+            return
         self._loading_visible = True
         if self.logo.has_logo() or not text:
             self.status.hide()
@@ -3635,6 +3679,7 @@ class PlayerPage(GlassPage):
                 overlay.raise_()
 
     def _hide_status(self):
+        self._loading_delay.stop()
         self._loading_visible = False
         self.status.hide()
         # The loading frame goes with it: it covers the whole window, so
@@ -3668,12 +3713,11 @@ class PlayerPage(GlassPage):
         # Reapplied on every wake, not once at build time: Qt destroys and
         # recreates a native child window on a reparent or a screen
         # change, and the recreated one has none of the extended style,
-        # so the bar silently goes back to opaque.
-        # Controls: a low uniform alpha over a near-black fill - the
-        # faint veil. Top bar: colour-keyed instead, so nothing but its
-        # buttons and text exists on screen at all.
+        # so the bar silently goes back to opaque. Both bars wear the
+        # same low-alpha near-black veil now (see _build_top_bar for why
+        # the top bar's colour-keying is gone).
         _set_window_alpha(self.controls, CONTROLS_VEIL_ALPHA)
-        _set_window_colorkey(self.top_bar)
+        _set_window_alpha(self.top_bar, CONTROLS_VEIL_ALPHA)
         # Deliberate, and reversed on every path that hides them again:
         # this is not the sticky-hand-cursor trap in .claude/rules/ui.md,
         # which is about a widget keeping a cursor it no longer earns.
@@ -3865,6 +3909,15 @@ class PlayerPage(GlassPage):
         this only ever fires for a click on the picture itself."""
         if not self._over_video(position):
             return
+        # A press within the guard of a panel opening, closing or
+        # rebuilding is that interaction's own press, whatever the
+        # geometry says now: the resolution drill-down replaces a tall
+        # panel with a short one under the pointer mid-click, so the
+        # release lands "over the video" where the row just was and
+        # dismissed the very view the click had opened (the reported
+        # "clicking 4K closes the window").
+        if time.monotonic() - self._panel_guard < PANEL_CLICK_GUARD_S:
+            return
         if self._panel is not None:
             self._close_panel()
             self._wake_controls()
@@ -3928,6 +3981,9 @@ class PlayerPage(GlassPage):
                     else int((rect.height() - height) / 2))
         self.status.setGeometry(int((rect.width() - width) / 2), status_y,
                                 width, height)
+        # Re-cut after every size change, or the veil keeps the corners
+        # it was rounded with at the old geometry.
+        _round_overlay(self.status)
         button = getattr(self, "_drm_button", None)
         if button is not None:
             size = button.sizeHint()
@@ -4006,6 +4062,7 @@ class PlayerPage(GlassPage):
         self._pointer_timer.stop()
         self._mouse_timer.stop()
         self._save_timer.stop()
+        self._loading_delay.stop()
         self._close_panel()
         # Cursor first: the surface is about to go away, and a widget
         # that dies holding the blank cursor leaves Windows painting it

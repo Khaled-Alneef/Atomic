@@ -64,7 +64,7 @@ from windows.apps import AppsPage
 from windows.downloads_page import DownloadsPage
 from windows.games import GamesPage
 from windows.home import HomePage
-from windows.tracker import AnimePage, MangaPage, SeriesPage
+from windows.tracker import MangaPage, SeriesPage
 from windows.websites import WebsitesPage
 
 APP_DIR = Path(__file__).resolve().parent
@@ -80,15 +80,21 @@ CURSOR_WATCHDOG_MS = 120
 # changed there can't quietly leave the prewarm decoding the wrong one.
 tracker_poster_size = tracker_module.POSTER_SIZE
 home_poster_size = home_page_module.POSTER_SIZE
-home_hero_cover_size = home_page_module.HERO_COVER_SIZE
 home_icon_size = home_page_module.ICON_SIZE
 home_row_icon_size = home_page_module.ROW_ICON_SIZE
-games_icon_size = link_grid_module.THUMB_SIZE
 link_thumb_size = link_grid_module.THUMB_SIZE
+# The poster grids' art sizes: Steam covers at the tracker's poster
+# size, app-store icons square at the poster card's width.
+game_cover_size = tracker_module.POSTER_SIZE
+app_art_size = (link_grid_module.POSTER_ART_SIZE[0],
+                link_grid_module.POSTER_ART_SIZE[0])
 
 PAGES = {
     "home": HomePage,
-    "anime": AnimePage,
+    # No "anime" page: it merged into "series" (one watch page under the
+    # camera glyph, the owner's ask). Anything still asking for it by
+    # name - an old saved nav order, a stale history entry - resolves
+    # through _page_name below rather than KeyErroring mid-navigation.
     "manga": MangaPage,
     "series": SeriesPage,
     "games": GamesPage,
@@ -97,11 +103,18 @@ PAGES = {
     "downloads": DownloadsPage,
 }
 
+
+def _page_name(name: str) -> str:
+    """A page key that exists today. "anime" merged into "series"; saved
+    nav orders, session histories and shortcuts may still say it."""
+    return "series" if name == "anime" else name
+
+
 # label, page to jump to, action to run on that page once it's showing
 ADD_ITEMS = [
-    ("Anime Entry", "anime", lambda page: page._open_form()),
+    ("Anime Entry", "series", lambda page: page._open_form(default_type="Anime")),
     ("Reading Entry", "manga", lambda page: page._open_form()),
-    ("Movie or Series Entry", "series", lambda page: page._open_form()),
+    ("Movie or Series Entry", "series", lambda page: page._open_form(default_type="Series")),
     ("Game", "games", lambda page: page._add_game()),
     ("App", "apps", lambda page: page._open_add_form()),
     ("Website", "websites", lambda page: page._open_add_form()),
@@ -177,6 +190,14 @@ SECTION_ICONS = {
     "discover": "\uE721",  # Search
     "schedule": "\uE787",  # Calendar
 }
+
+# The fold toggle's two faces - single Fluent chevrons, drawn large
+# (the owner's ask: "keep it like this shape '\u203A' but large", replacing
+# the small double guillemets). Escapes, not the characters, for the
+# same re-encoding reason as SECTION_ICONS; the #FoldButton QSS rule
+# carries the icon font stack and the size so they resolve.
+FOLD_CLOSE_ICON = "\uE76B"      # ChevronLeft - points at the folding edge
+FOLD_OPEN_ICON = "\uE76C"       # ChevronRight - points back out
 
 
 class _UpdateCheckSignals(QObject):
@@ -345,7 +366,32 @@ class MainWindow(QMainWindow):
         self._swap_group = None
         self._build_sidebar(holder)
         self._build_section_sidebar(holder)
+        self._sync_fold_buttons()
         return holder
+
+    def _build_fold_button(self):
+        """One fold toggle - the main bar and the section bar each carry
+        their own copy (the section bar had none at all, so folding from
+        a tracker page meant going Back first - the owner's ask), and
+        _sync_fold_buttons keeps the pair reading the same state."""
+        button = QPushButton(objectName="FoldButton")
+        button.setFixedSize(28, 28)
+        use_hover_cursor(button)
+        button.clicked.connect(self._toggle_sidebar)
+        return button
+
+    def _sync_fold_buttons(self):
+        """Both bars' fold arrows follow the one collapsed state - a
+        single Fluent arrow pointing the way the press will move the
+        edge, not the guillemet chevrons (the owner's ask)."""
+        collapsed = self._sidebar_collapsed
+        glyph = FOLD_OPEN_ICON if collapsed else FOLD_CLOSE_ICON
+        tip = "Expand sidebar" if collapsed else "Collapse sidebar"
+        for button in (getattr(self, "fold_btn", None),
+                       getattr(self, "section_fold_btn", None)):
+            if button is not None:
+                button.setText(glyph)
+                button.setToolTip(tip)
 
     def _build_sidebar(self, parent):
         # Parented at construction rather than reparented after: a
@@ -366,12 +412,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(4)
 
         # Collapse/expand toggle, pinned top-right of the sidebar so it
-        # stays put (and stays reachable) at either width.
-        self.fold_btn = QPushButton("«", objectName="FoldButton")
-        self.fold_btn.setFixedSize(28, 28)
-        self.fold_btn.setToolTip("Collapse sidebar")
-        use_hover_cursor(self.fold_btn)
-        self.fold_btn.clicked.connect(self._toggle_sidebar)
+        # stays put (and stays reachable) at either width. Its glyph and
+        # tooltip come from _sync_fold_buttons, shared with the section
+        # bar's twin.
+        self.fold_btn = self._build_fold_button()
         fold_row = QHBoxLayout()
         fold_row.setContentsMargins(0, 0, 0, 0)
         fold_row.addStretch()
@@ -573,12 +617,14 @@ class MainWindow(QMainWindow):
     # ---- The contextual section sidebar ------------------------------
     def _build_section_sidebar(self, parent):
         """The bar that takes the main sidebar's place over a sectioned
-        page: Back on top, a separator, then one checkable NavButton per
-        entry of the page's SECTIONS. Built once, hidden; the section
-        buttons themselves are (re)built per page by
-        _sync_section_buttons, since SECTIONS is read generically off
-        whatever page is showing rather than assumed to be the
-        tracker's three."""
+        page: the fold toggle and Back on top, a separator, then the
+        page's SECTIONS as a nav list. A NavListWidget, deliberately the
+        very widget the main sidebar's content is (the owner's ask -
+        "make the sidebars content draggable"): same rows, same 13pt nav
+        face, same drag-to-reorder, with the picked order persisted
+        through app_settings.get/set_section_order. Built once, hidden;
+        the rows are (re)filled per page by _sync_section_list, since
+        SECTIONS is read generically off whatever page is showing."""
         bar = QWidget(objectName="Sidebar", parent=parent)
         self.section_sidebar = bar
         layout = QVBoxLayout(bar)
@@ -587,6 +633,16 @@ class MainWindow(QMainWindow):
         # changing contents, not two different panels.
         layout.setContentsMargins(16, 20, 16, 16)
         layout.setSpacing(4)
+
+        # The same fold control the main bar carries, in the same corner
+        # - this bar had none, so folding the rail from a tracker page
+        # meant pressing Back first (the owner's ask).
+        self.section_fold_btn = self._build_fold_button()
+        fold_row = QHBoxLayout()
+        fold_row.setContentsMargins(0, 0, 0, 0)
+        fold_row.addStretch()
+        fold_row.addWidget(self.section_fold_btn)
+        layout.addLayout(fold_row)
 
         self.section_back_btn = QPushButton(objectName="NavButton")
         self.section_back_btn.setFixedHeight(40)
@@ -602,83 +658,109 @@ class MainWindow(QMainWindow):
         layout.addWidget(separator)
         layout.addSpacing(6)
 
-        # The per-page section buttons land in here.
-        self._section_btn_layout = QVBoxLayout()
-        self._section_btn_layout.setContentsMargins(0, 0, 0, 0)
-        self._section_btn_layout.setSpacing(4)
-        layout.addLayout(self._section_btn_layout)
+        self.section_list = NavListWidget(objectName="NavList")
+        self.section_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.section_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.section_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.section_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.section_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.section_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.section_list.setSpacing(2)
+        self.section_list.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                        QSizePolicy.Policy.Fixed)
+        # The widget font as well as the QSS rule, or the 13pt nav face
+        # is silently ignored for list items - same trap as nav_list.
+        self.section_list.setFont(theme.nav_font())
+        self.section_list.itemClicked.connect(self._on_section_item_clicked)
+        self.section_list.model().rowsMoved.connect(self._on_sections_reordered)
+        layout.addWidget(self.section_list)
         layout.addStretch()
 
-        self._section_buttons = {}   # key -> (button, label)
-        self._section_keys = None    # what the buttons were last built for
+        self._section_labels = {}    # key -> label, for restyles on fold
+        self._section_keys = None    # what the list was last filled for
         self._style_section_bar()
         bar.hide()
 
     def _style_section_bar(self):
-        """Same two-width treatment as the Downloads/Settings buttons:
-        glyph and label when the sidebar is open, glyph alone in the
-        collapsed rail with the label moved to a tooltip. Called on
-        build, on rebuild of the section buttons, and from
-        _toggle_sidebar - not on every navigation, since unpolish/polish
-        makes a button flicker when repeated for no new information."""
+        """Restyle this bar for the current sidebar width: the Back
+        button gets the Downloads/Settings two-width treatment, and the
+        section rows restyle exactly as the main nav rows do. Called on
+        build, on refill, and from _toggle_sidebar - not on every
+        navigation, since unpolish/polish makes a button flicker when
+        repeated for no new information."""
         collapsed = self._sidebar_collapsed
 
-        def apply(button, glyph, label):
-            button.setText(glyph if collapsed else f"  {glyph}   {label}")
-            button.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
-            button.setToolTip(label if collapsed else "")
-            button.setProperty("collapsed", collapsed)
-            button.style().unpolish(button)
-            button.style().polish(button)
+        button = self.section_back_btn
+        button.setText(SECTION_BACK_ICON if collapsed
+                       else f"  {SECTION_BACK_ICON}   Back")
+        button.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
+        button.setToolTip("Back" if collapsed else "")
+        button.setProperty("collapsed", collapsed)
+        button.style().unpolish(button)
+        button.style().polish(button)
 
-        apply(self.section_back_btn, SECTION_BACK_ICON, "Back")
-        for key, (button, label) in self._section_buttons.items():
-            apply(button, SECTION_ICONS.get(key, theme.NAV_BULLET), label)
+        for row in range(self.section_list.count()):
+            item = self.section_list.item(row)
+            key = item.data(Qt.ItemDataRole.UserRole)
+            self._style_rail_item(item, self._section_labels.get(key, key),
+                                  SECTION_ICONS.get(key, theme.NAV_BULLET))
+        self.section_list.updateGeometry()
 
-    def _sync_section_buttons(self, page):
-        """Make the section buttons match `page`: rebuild them when its
-        SECTIONS differ from what is built (cheap - it never happens
-        between the three tracker pages, which share one tuple), and
-        re-derive the checks from the page's own current_section() every
-        time - each page remembers its own section in session state, so
-        crossing from Anime to Reading can change the check without any
-        button being clicked."""
+    def _sync_section_list(self, page):
+        """Make the section rows match `page`: refill when its SECTIONS
+        differ from what is built (cheap - it never happens between the
+        tracker pages, which share one tuple), ordered by the user's
+        saved drag order with the page's own order for anything new, and
+        re-highlight from the page's current_section() every time - each
+        page remembers its own section in session state, so crossing
+        between tracker pages can change the highlight without a click."""
         sections = tuple(getattr(page, "SECTIONS", ()) or ())
         keys = tuple(key for key, _label in sections)
         if keys != self._section_keys:
-            while self._section_btn_layout.count():
-                item = self._section_btn_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
-            self._section_buttons = {}
-            for key, label in sections:
-                button = QPushButton(objectName="NavButton")
-                button.setFixedHeight(40)
-                button.setCheckable(True)
-                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                use_hover_cursor(button)
-                button.clicked.connect(
-                    lambda _checked=False, k=key: self._on_section_clicked(k))
-                self._section_btn_layout.addWidget(button)
-                self._section_buttons[key] = (button, label)
+            by_key = dict(sections)
+            order = [k for k in app_settings.get_section_order() if k in by_key]
+            order += [k for k in keys if k not in order]
+            self.section_list.blockSignals(True)
+            self.section_list.clear()
+            for key in order:
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, key)
+                self.section_list.addItem(item)
+            self.section_list.blockSignals(False)
+            self._section_labels = by_key
             self._section_keys = keys
             self._style_section_bar()
         getter = getattr(page, "current_section", None)
         current = getter() if callable(getter) else None
-        for key, (button, _label) in self._section_buttons.items():
-            button.setChecked(key == current)
+        match = None
+        for row in range(self.section_list.count()):
+            item = self.section_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == current:
+                match = item
+                break
+        if match is not None:
+            self.section_list.setCurrentItem(match)
+        else:
+            self.section_list.clearSelection()
+
+    def _on_section_item_clicked(self, item):
+        self._on_section_clicked(item.data(Qt.ItemDataRole.UserRole))
+
+    def _on_sections_reordered(self, *_args):
+        order = [self.section_list.item(i).data(Qt.ItemDataRole.UserRole)
+                 for i in range(self.section_list.count())]
+        app_settings.set_section_order(order)
 
     def _on_section_clicked(self, key):
-        """Switch the showing page's section - never navigate. The checks
-        are re-read off the page afterwards rather than trusted to the
-        click, because the page may coerce an unknown key back to its
-        default."""
+        """Switch the showing page's section - never navigate. The
+        highlight is re-read off the page afterwards rather than trusted
+        to the click, because the page may coerce an unknown key back to
+        its default."""
         page = self._current_page
         setter = getattr(page, "set_active_section", None)
         if callable(setter):
             setter(key)
-        self._sync_section_buttons(page)
+        self._sync_section_list(page)
 
     def _section_back(self):
         """The Back button is history back - the same move as Alt+Left
@@ -715,7 +797,7 @@ class MainWindow(QMainWindow):
         does not move (measured: see the swap harness)."""
         sectioned = getattr(page, "SECTIONS", None) is not None
         if sectioned:
-            self._sync_section_buttons(page)
+            self._sync_section_list(page)
         if sectioned == self._section_bar_showing:
             return
         self._settle_swap()
@@ -778,15 +860,19 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _style_nav_item(self, item, name, page_name):
-        """Harbor's row language: the section's own Fluent glyph leads
-        the label when expanded (replacing the one-shape-for-every-row
-        ◈ bullet), and the collapsed rail shows the same glyph alone,
-        centred, with the label moved to a tooltip - one symbol per
-        section at both widths. The expanded font is a two-family chain
-        (theme.nav_row_font): the glyph resolves from the icon face and
-        the label falls through to the nav face, because an item
-        carries exactly one font."""
-        glyph = theme.NAV_ICONS.get(page_name, theme.NAV_BULLET)
+        self._style_rail_item(item, name,
+                              theme.NAV_ICONS.get(page_name, theme.NAV_BULLET))
+
+    def _style_rail_item(self, item, name, glyph):
+        """Harbor's row language, shared by the nav list and the section
+        list (they are the same widget on purpose): the row's Fluent
+        glyph leads the label when expanded (replacing the
+        one-shape-for-every-row ◈ bullet), and the collapsed rail shows
+        the same glyph alone, centred, with the label moved to a tooltip
+        - one symbol per row at both widths. The expanded font is a
+        two-family chain (theme.nav_row_font): the glyph resolves from
+        the icon face and the label falls through to the nav face,
+        because an item carries exactly one font."""
         if self._sidebar_collapsed:
             item.setText(glyph)
             item.setFont(theme.icon_font())
@@ -932,8 +1018,7 @@ class MainWindow(QMainWindow):
         self._sidebar_collapsed = not self._sidebar_collapsed
         collapsed = self._sidebar_collapsed
 
-        self.fold_btn.setText("»" if collapsed else "«")
-        self.fold_btn.setToolTip("Expand sidebar" if collapsed else "Collapse sidebar")
+        self._sync_fold_buttons()
         self.logo_label.setVisible(not collapsed)
         self._style_downloads_btn()
         self._style_settings_btn()
@@ -1497,6 +1582,7 @@ class MainWindow(QMainWindow):
         return "down" if nav_position(to_page) > nav_position(from_page) else "up"
 
     def navigate_to(self, page_name, animate=True):
+        page_name = _page_name(page_name)
         current = self._history[self._history_index]
         if current == page_name:
             return
@@ -1554,6 +1640,7 @@ class MainWindow(QMainWindow):
             self.nav_list.clearSelection()
 
     def _show_page(self, page_name, direction="down", animate=True):
+        page_name = _page_name(page_name)
         self._sync_nav_highlight(page_name)
 
         old_page = self._current_page
@@ -1613,6 +1700,30 @@ class MainWindow(QMainWindow):
         self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
 
 
+def _merge_anime_into_series():
+    """One-time data move behind the page merge: Anime rows lived in
+    tracker.json beside the reading types, and the merged Movies &
+    Series page reads series.json - so each page keeps exactly one file
+    (which everything from storage.update_entry to the progress writers
+    assumes). Runs before any page is built, is idempotent (once no
+    Anime remains in tracker.json it does nothing), and never duplicates
+    an id already present in series.json."""
+    tracker_entries = storage.load("tracker.json", [])
+    anime = [e for e in tracker_entries if e.get("type") == "Anime"]
+    if not anime:
+        return
+    series_entries = storage.load("series.json", [])
+    known = {e.get("id") for e in series_entries if e.get("id")}
+    series_entries.extend(e for e in anime
+                          if not e.get("id") or e.get("id") not in known)
+    # Series first, so a crash between the two writes duplicates rather
+    # than loses: the next launch re-runs this, sees the Anime rows
+    # still in tracker.json, and the id guard above skips them.
+    storage.save("series.json", series_entries)
+    storage.save("tracker.json",
+                 [e for e in tracker_entries if e.get("type") != "Anime"])
+
+
 def _prewarm_image_specs():
     """(path, size) pairs for every cover/icon a page might draw, at the
     sizes those pages actually ask for.
@@ -1630,16 +1741,24 @@ def _prewarm_image_specs():
             if path:
                 specs.append((path, tracker_poster_size))
                 specs.append((path, home_poster_size))
-                specs.append((path, home_hero_cover_size))
     for game in storage.load("games.json", []):
         if game.get("icon"):
-            specs.append((game["icon"], games_icon_size))
             specs.append((game["icon"], home_icon_size))
-    for data_file in ("apps.json", "websites.json"):
-        for entry in storage.load(data_file, []):
-            if entry.get("image"):
-                specs.append((entry["image"], link_thumb_size))
-                specs.append((entry["image"], home_row_icon_size))
+        if game.get("cover"):
+            specs.append((game["cover"], game_cover_size))
+    for entry in storage.load("apps.json", []):
+        # The Apps grid draws art (or the icon standing in for it)
+        # square at poster width; Home's quick list still draws the
+        # small icon.
+        art = entry.get("art") or entry.get("image")
+        if art:
+            specs.append((art, app_art_size))
+        if entry.get("image"):
+            specs.append((entry["image"], home_row_icon_size))
+    for entry in storage.load("websites.json", []):
+        if entry.get("image"):
+            specs.append((entry["image"], link_thumb_size))
+            specs.append((entry["image"], home_row_icon_size))
     return specs
 
 
@@ -1654,6 +1773,10 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     theme.apply_theme(app)
+
+    # Before the window exists: the pages it builds each load their own
+    # file, and the move has to be finished before either looks.
+    _merge_anime_into_series()
 
     window = MainWindow()
     # Full screen only for a launch Windows itself started at sign-in

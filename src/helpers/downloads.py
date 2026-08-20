@@ -397,6 +397,37 @@ def _run_queue():
                     detail="Nothing could be downloaded for this.")
 
 
+# (entry id or title, season) -> the info hash of the season pack a job
+# in that season last resolved. In-memory only: it points into the
+# torrent engine's own held torrents, which don't survive a restart
+# either, and file_index_for answers None for anything no longer held.
+_season_packs = {}
+
+
+def _prefetch_group_siblings(job, info_hash):
+    """Want the still-queued episodes of this job's season group that
+    live in the same pack, so they download alongside the current one
+    instead of each re-warming the swarm from zero when its turn comes.
+    Their own jobs still run - instantly finding their file complete (or
+    nearly) and tracking whatever remains."""
+    from . import torrent_engine
+    group = job.get("group")
+    if not group:
+        return
+    try:
+        with _lock:
+            siblings = [(j.get("season"), j.get("episode"))
+                        for j in _load()
+                        if j.get("group") == group and j.get("state") == QUEUED]
+        indexes = [torrent_engine.file_index_for(info_hash, s, e)
+                   for s, e in siblings]
+        indexes = [i for i in indexes if i is not None]
+        if indexes:
+            torrent_engine.raise_files(info_hash, indexes)
+    except Exception:
+        pass          # a failed prefetch costs nothing but the head start
+
+
 _DUB_RE = re.compile(r"dual[\s._-]?audio|multi[\s._-]?audio|\bdub(?:bed)?\b"
                      r"|english\s*audio|\beng\b.{0,12}\baudio\b", re.I)
 
@@ -424,22 +455,44 @@ def _run_video(job) -> str:
     season, episode = job.get("season"), job.get("episode")
     job_id = job["id"]
 
-    _update(job_id, detail="Looking for a source...")
-    found = streams.find_streams(entry, season=season, episode=episode,
-                                 deadline=net.deadline_in(40))
-    wanted = job.get("quality")
-    ordered = streams.matching_quality(found, wanted) if wanted else []
-    candidates = [s for s in (ordered or found) if s.get("info_hash")]
-    candidates = _order_by_audio(candidates, job.get("audio"))
-    if not candidates:
-        return ""
+    # A season queued as five jobs used to pay five full source lookups
+    # and five swarm warm-ups even when every episode lived in the one
+    # season pack the first job had already connected to. If the pack a
+    # sibling resolved is still held and *names* this episode, reuse it -
+    # the metadata, the peers and often the pieces are already here.
+    # file_index_for insists on a name match, so a single-episode torrent
+    # can never be mistaken for a pack (the copied-episode-1-five-times
+    # defect this whole path replaces).
+    pack_key = (entry.get("id") or entry.get("title"), season)
+    info_hash = _season_packs.get(pack_key)
+    if not (info_hash and torrent_engine.file_index_for(
+            info_hash, season, episode) is not None):
+        _update(job_id, detail="Looking for a source...")
+        found = streams.find_streams(entry, season=season, episode=episode,
+                                     deadline=net.deadline_in(40))
+        wanted = job.get("quality")
+        ordered = streams.matching_quality(found, wanted) if wanted else []
+        candidates = [s for s in (ordered or found) if s.get("info_hash")]
+        candidates = _order_by_audio(candidates, job.get("audio"))
+        if not candidates:
+            return ""
 
-    _update(job_id, detail="Connecting to peers...")
-    ready = streams.prepare_fastest(candidates, season=season, episode=episode)
-    if not ready or not ready.get("info_hash"):
-        return ""
-    info_hash = ready["info_hash"]
+        _update(job_id, detail="Connecting to peers...")
+        ready = streams.prepare_fastest(candidates, season=season,
+                                        episode=episode)
+        if not ready or not ready.get("info_hash"):
+            return ""
+        info_hash = ready["info_hash"]
+    else:
+        # add() re-picks the file for this episode on the held torrent;
+        # metadata is already there, so this returns immediately.
+        if not torrent_engine.add(info_hash, season=season, episode=episode):
+            _season_packs.pop(pack_key, None)
+            return _run_video(job)
+    if season and episode:
+        _season_packs[pack_key] = info_hash
     torrent_engine.download_whole(info_hash)
+    _prefetch_group_siblings(job, info_hash)
 
     folder = job.get("folder") or default_folder()
     os.makedirs(folder, exist_ok=True)
@@ -461,14 +514,23 @@ def _run_video(job) -> str:
     source = state.get("path")
     target = os.path.join(folder, safe_name(os.path.basename(source)))
     _update(job_id, detail="Saving...")
-    try:
-        # Copy rather than move: the engine may still be serving this
-        # file to a player, and pulling it out from under mpv mid-frame
-        # is a crash rather than a tidy-up.
-        import shutil
-        shutil.copy2(source, target)
-    except Exception:
-        target = source          # leave it where it is rather than lose it
+    # Copy rather than move: the engine may still be serving this file
+    # to a player, and pulling it out from under mpv mid-frame is a
+    # crash rather than a tidy-up. Retried once - the engine can still
+    # be flushing its last pieces - and a copy that still fails fails
+    # the *job*: the old fallback reported Done pointing into the
+    # engine's temp cache, which trim_cache later deletes, i.e. a
+    # download that quietly ceases to exist.
+    import shutil
+    for attempt in (1, 2):
+        try:
+            shutil.copy2(source, target)
+            break
+        except Exception:
+            if attempt == 2:
+                raise RuntimeError("The finished file could not be saved "
+                                   "into the download folder.")
+            time.sleep(2.0)
 
     chosen = job.get("subtitle")
     if chosen:

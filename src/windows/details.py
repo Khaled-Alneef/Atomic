@@ -29,6 +29,7 @@ same thing for video and the owner rightly called that broken.
 """
 
 import datetime
+import uuid
 
 from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
@@ -38,7 +39,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import artwork, images, logs, lookup_pool, net, theme
+from helpers import (app_settings, artwork, images, logs, lookup_pool, net,
+                     storage, theme)
 from helpers.widgets import (Card, GlassPage, confirm, frameless_dialog,
                              scroll_area, show_toast, use_hover_cursor)
 
@@ -87,6 +89,16 @@ class _Signals(QObject):
     art = Signal(int, str, str)         # run, "logo"/"backdrop", local path
     chapters = Signal(int, object)      # run, chapter list or None
     sources = Signal(int, object, object)  # run, stream list, (season, ep)
+    # A reading title's MangaDex genre tags - run, [names]. Video pages
+    # get genres free with the Cinemeta meta; this is the reading pair.
+    reading_genres = Signal(int, object)
+    # Resolving a Discover reading title on a picked site - run, the
+    # fields to store ({url, site_id}) or None, the site's name.
+    site_resolved = Signal(int, object, str)
+    # A just-saved entry's downloaded cover: entry id, data file, local
+    # path. Crossed back so the storage write happens on the UI thread
+    # with every other writer, not from the pool.
+    saved_cover = Signal(str, str, str)
 
 
 def _meta_worker(signals, run, imdb_id, content_type):
@@ -155,6 +167,46 @@ def _reading_art_worker(signals, run, entry):
         signals.art.emit(run, "backdrop", str(path))
 
 
+def _reading_genres_worker(signals, run, title):
+    """MangaDex's genre tags for this title, for the genre buttons.
+    Never raises - the pool's worker thread dies silently otherwise."""
+    try:
+        from helpers import discover
+        names = discover.reading_genres(title)
+    except Exception:
+        names = []
+    signals.reading_genres.emit(run, list(names or []))
+
+
+def _site_resolve_worker(signals, run, site, title):
+    """Find `title` on one picked reading site and hand back the fields
+    that bind the entry to it. Best title-matched result wins; a site
+    that answers nothing usable reports None so the page can say so and
+    re-offer the list. Never raises."""
+    fields, site_name = None, str(site.get("name") or "the site")
+    try:
+        from helpers import manga_sites, title_match
+        results = manga_sites.search_site(site, title,
+                                          deadline=net.deadline_in(12))
+        best, best_score = None, 0.0
+        for row in results or []:
+            score = title_match.similarity(title, row.get("title") or "")
+            if score > best_score:
+                best, best_score = row, score
+        # 0.5, not the schedule lookups' 0.85: the user picked this site
+        # by hand and is about to see the chapter list it produces, so a
+        # looser match is checkable in a way a silent background lookup
+        # never is - and these sites localize titles enough that 0.85
+        # would refuse real hits.
+        if best is not None and best_score >= 0.5 and best.get("url"):
+            fields = {"url": best["url"], "site_id": site.get("id")}
+            if best.get("cover_url"):
+                fields["cover_url"] = best["cover_url"]
+    except Exception:
+        fields = None
+    signals.site_resolved.emit(run, fields, site_name)
+
+
 def _chapters_worker(signals, run, entry):
     try:
         chapters = chapter_source.list_chapters(
@@ -197,6 +249,24 @@ def _chip(text, accent=False) -> QLabel:
     return label
 
 
+def _chip_button(text) -> QPushButton:
+    """A chip that can be pressed - the genre buttons (the owner's ask:
+    the genres open everything else filed under them). Deliberately the
+    _chip look at rest, so the facts row stays one design; hover borrows
+    the accent border every other clickable thing here answers with."""
+    button = QPushButton(text)
+    button.setStyleSheet(
+        f"QPushButton {{ color: {theme.TEXT}; background: {theme.SURFACE_HOVER};"
+        f" border: 1px solid {theme.BORDER};"
+        f" border-radius: {theme.RADIUS}px; padding: 5px 14px;"
+        f" font-weight: 600; font-size: 10.5pt; }}"
+        f"QPushButton:hover {{ border: 1px solid {theme.ACCENT};"
+        f" color: {theme.ACCENT}; }}")
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    use_hover_cursor(button)
+    return button
+
+
 def _badge(text, kind) -> QLabel:
     """WATCHED / READ in the accent, UPCOMING in the success green - the
     two states the owner's reference picture colours differently."""
@@ -235,12 +305,19 @@ class DetailsPage(GlassPage):
         # clicked, cleared by its back row or by picking a source.
         # {"season", "episode", "streams" (None while looking)}.
         self._source_pick = None
+        # A Discover reading title with no site yet: the list panel
+        # offers the configured reading sites first (the owner's ask),
+        # and this stays True until one is picked and answers.
+        self._site_choice_pending = False
 
         self._signals = _Signals()
         self._signals.meta.connect(self._on_meta)
         self._signals.art.connect(self._on_art)
         self._signals.chapters.connect(self._on_chapters)
         self._signals.sources.connect(self._on_sources)
+        self._signals.saved_cover.connect(self._on_saved_cover)
+        self._signals.reading_genres.connect(self._on_reading_genres)
+        self._signals.site_resolved.connect(self._on_site_resolved)
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -439,6 +516,17 @@ class DetailsPage(GlassPage):
                 f" background: transparent; border: none;")
             header.insertWidget(2, title, stretch=1)
 
+        # A Discover title arrives here unsaved - no id (see
+        # tracker._discover_entry) - and this list is where deciding to
+        # keep it happens, so Save lives at the top of it (the owner's
+        # ask). An entry opened from Saved never shows it.
+        self._save_btn = QPushButton("+  Save to My List", objectName="Accent")
+        self._save_btn.setFixedHeight(44)
+        use_hover_cursor(self._save_btn)
+        self._save_btn.clicked.connect(self._save_entry)
+        self._save_btn.setVisible(not self.entry.get("id"))
+        column.addWidget(self._save_btn)
+
         self._search = QLineEdit()
         self._search.setPlaceholderText(
             "search chapters" if self._is_reading else "search videos")
@@ -479,11 +567,19 @@ class DetailsPage(GlassPage):
             threading.Thread(target=_reading_art_worker,
                              args=(self._signals, self._run, dict(self.entry)),
                              daemon=True).start()
-            if chapter_source is not None:
+            lookup_pool.submit(_reading_genres_worker, self._signals,
+                               self._run, self.entry.get("title") or "")
+            if chapter_source is None:
+                self._panel_note.setText("No chapter source in this build.")
+            elif (not self.entry.get("url") and not self.entry.get("site_id")
+                    and self._reading_site_choices()):
+                # A Discover title has no site yet - offer the configured
+                # reading sites first (the owner's ask), and fetch the
+                # chapters from whichever one is picked.
+                self._fill_site_rows()
+            else:
                 lookup_pool.submit(_chapters_worker, self._signals, self._run,
                                    dict(self.entry))
-            else:
-                self._panel_note.setText("No chapter source in this build.")
         elif self.entry.get("imdb_id") and stremio is not None:
             kind = "movie" if self.entry.get("type") == "Movie" else "series"
             lookup_pool.submit(_meta_worker, self._signals, self._run,
@@ -563,7 +659,7 @@ class DetailsPage(GlassPage):
         genres = [g for g in (meta.get("genres") or []) if g][:5]
         if genres:
             self._genres_head.setVisible(True)
-            fill(self._genres_row, genres)
+            self._fill_genre_buttons(genres)
         cast = [c for c in (meta.get("cast") or []) if c][:4]
         if cast:
             self._cast_head.setVisible(True)
@@ -573,6 +669,43 @@ class DetailsPage(GlassPage):
             self._summary_head.setVisible(True)
             self._summary.setVisible(True)
             self._summary.setText(description)
+
+    # ---- genres as doors --------------------------------------------
+    def _fill_genre_buttons(self, genres):
+        """The genre chips, pressable: each one opens everything else
+        filed under that genre (the owner's ask). Replaces whatever the
+        row held - the reading lookup can land after a rebuild."""
+        while self._genres_row.count() > 1:
+            item = self._genres_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for genre in genres:
+            button = _chip_button(genre)
+            button.clicked.connect(
+                lambda _checked=False, g=genre: self._open_genre_browse(g))
+            self._genres_row.insertWidget(self._genres_row.count() - 1, button)
+
+    def _on_reading_genres(self, run, names):
+        if run != self._run or self._closed or not names:
+            return
+        self._genres_head.setVisible(True)
+        self._fill_genre_buttons([str(n) for n in names][:5])
+
+    def _open_genre_browse(self, genre):
+        dialog = _GenreBrowseDialog(self, genre, self._is_reading)
+        dialog.open_title = self._open_browsed_title
+        dialog.exec()
+
+    def _open_browsed_title(self, item, entry_type):
+        """A pick from the genre browse opens its own details page over
+        this one - the same transient-entry road a Discover card takes
+        (tracker._discover_entry states why it is id-less)."""
+        try:
+            from windows.tracker import discover_entry
+            open_details(self.window(), discover_entry(item, entry_type))
+        except Exception:
+            logs.exception("genre browse could not open the details page")
 
     # ---- the list panel -------------------------------------------------
     def _seasons(self) -> list:
@@ -657,10 +790,86 @@ class DetailsPage(GlassPage):
     def _fill_rows(self):
         if self._source_pick is not None:
             self._fill_source_rows()
+        elif self._site_choice_pending:
+            self._fill_site_rows()
         elif self._is_reading:
             self._fill_chapter_rows()
         else:
             self._fill_episode_rows()
+
+    # ---- picking a reading site (Discover titles) ---------------------
+    def _reading_site_choices(self) -> list:
+        try:
+            from helpers import manga_sites
+            return manga_sites.list_sites()
+        except Exception:
+            return []
+
+    def _fill_site_rows(self):
+        """The configured reading sites as the list panel's rows - what
+        a Discover manga shows before it has a site (the owner's ask).
+        MangaDex closes the list as the built-in fallback, so there is
+        always a road to a chapter list even with every site down."""
+        self._site_choice_pending = True
+        self._clear_rows()
+        shown = 0
+        for site in self._reading_site_choices():
+            self._rows.insertWidget(shown, self._row_card(
+                site.get("name") or "Site", site.get("base_url") or "",
+                None, lambda s=site: self._pick_reading_site(s),
+                play_glyph=False))
+            shown += 1
+        self._rows.insertWidget(shown, self._row_card(
+            "MangaDex", "The built-in chapter source", None,
+            self._pick_mangadex, play_glyph=False))
+        self._panel_note.setVisible(True)
+        self._panel_note.setText("Where should this be read from?")
+
+    def _pick_reading_site(self, site):
+        self._run += 1
+        self._clear_rows()
+        self._panel_note.setVisible(True)
+        self._panel_note.setText(
+            f"Searching {site.get('name') or 'the site'} for "
+            f"'{self.entry.get('title')}'...")
+        lookup_pool.submit(_site_resolve_worker, self._signals, self._run,
+                           dict(site), self.entry.get("title") or "")
+
+    def _pick_mangadex(self):
+        self._site_choice_pending = False
+        self._run += 1
+        self._panel_note.setVisible(True)
+        self._panel_note.setText("Loading...")
+        lookup_pool.submit(_chapters_worker, self._signals, self._run,
+                           dict(self.entry))
+
+    def _on_site_resolved(self, run, fields, site_name):
+        if run != self._run or self._closed:
+            return
+        if not fields:
+            # Back to the list, with the verdict written where the
+            # question was - a silent return would read as a dead click.
+            self._fill_site_rows()
+            self._panel_note.setText(
+                f"{site_name} has nothing under this title. "
+                "Pick another website.")
+            return
+        # Written in place on the shared dict: if the title is saved
+        # later (the Save button), the binding rides along; if it is
+        # already saved, record it now so the pick survives the page.
+        self.entry.update(fields)
+        if self.entry.get("id"):
+            try:
+                from windows.tracker import _progress_data_file
+                storage.update_entry(_progress_data_file(self.entry),
+                                     self.entry["id"], fields)
+            except Exception:
+                logs.exception("details page could not record the site")
+        self._site_choice_pending = False
+        self._panel_note.setText(f"Loading chapters from {site_name}...")
+        self._run += 1
+        lookup_pool.submit(_chapters_worker, self._signals, self._run,
+                           dict(self.entry))
 
     def _fill_episode_rows(self):
         self._clear_rows()
@@ -673,7 +882,7 @@ class DetailsPage(GlassPage):
         if not rows and self.entry.get("type") == "Movie":
             self._rows.insertWidget(0, self._row_card(
                 "Play Film", _pretty_date((self._meta or {}).get("released")),
-                None, lambda: self._open_source_picker(None, None)))
+                None, lambda: self._start_episode(None, None)))
             self._panel_note.setVisible(False)
             return
         shown = 0
@@ -694,12 +903,8 @@ class DetailsPage(GlassPage):
             self._rows.insertWidget(shown, self._row_card(
                 title, _pretty_date(video.get("firstAired") or video.get("released")),
                 badge,
-                # An episode chosen from this list goes through the
-                # source picker - the owner's ask: no assumed default
-                # here. Continue/Next in the player keep the automatic
-                # smallest-preferred pick.
                 (None if upcoming
-                 else lambda s=season, e=number: self._open_source_picker(s, e)),
+                 else lambda s=season, e=number: self._start_episode(s, e)),
                 on_menu=(None if upcoming
                          else lambda ev, s=season, e=number:
                          self._episode_menu(ev, s, e))))
@@ -787,6 +992,18 @@ class DetailsPage(GlassPage):
         return card
 
     # ---- the source picker ------------------------------------------------
+    def _start_episode(self, season, episode):
+        """What pressing an episode does. With "Auto choose source to
+        play" on (Settings > Playback, the default - the picking step
+        was the slow part of starting anything, the owner's ask), the
+        player opens straight away and races the best sources itself;
+        off restores the source picker. The player's own source and
+        resolution panels are the manual override either way."""
+        if app_settings.get_auto_pick_source():
+            self._play(season, episode)
+        else:
+            self._open_source_picker(season, episode)
+
     def _open_source_picker(self, season, episode):
         """Swap the list panel to this episode's sources, grouped by
         resolution - nothing plays until one is chosen."""
@@ -940,12 +1157,8 @@ class DetailsPage(GlassPage):
         if self._closed:
             return
         try:
-            from helpers import storage
-            from windows.tracker import AnimePage, SeriesPage
-            data_file = (SeriesPage.DATA_FILE
-                         if self.entry.get("type") in ("Series", "Movie")
-                         else AnimePage.DATA_FILE)
-            fresh = next((e for e in storage.load(data_file, [])
+            from windows.tracker import _progress_data_file
+            fresh = next((e for e in storage.load(_progress_data_file(self.entry), [])
                           if e.get("id") == self.entry.get("id")), None)
             if fresh:
                 self.entry.update(fresh)
@@ -988,12 +1201,19 @@ class DetailsPage(GlassPage):
         watched_season, watched_episode = self._progress()
         already = (watched_season, watched_episode) >= (season, episode)
         menu = QMenu(self)
+        # The explicit way into the source list while auto-pick is on -
+        # the left click plays right away then (see _start_episode).
+        pick_source = menu.addAction("Choose Source...")
+        menu.addSeparator()
         mark = menu.addAction("Mark as Unwatched" if already
                               else "Mark as Watched")
         menu.addSeparator()
         mark_all = menu.addAction("Mark All as Watched")
         clear_all = menu.addAction("Mark All as Unwatched")
         chosen = menu.exec(event.globalPosition().toPoint())
+        if chosen is pick_source:
+            self._open_source_picker(season, episode)
+            return
         if chosen is mark:
             if already:
                 if episode <= 1:
@@ -1342,6 +1562,65 @@ class DetailsPage(GlassPage):
         self._dialog_buttons(dialog, column, start)
         dialog.exec()
 
+    # ---- saving an unsaved (Discover-opened) title --------------------
+    def _save_entry(self):
+        """Write this title into its tracker file.
+
+        The id stamped here is what flips every "is it saved" check in
+        the app, this button's own visibility rule included; the page
+        that opened this one adopts the new row when the overlay closes
+        (tracker._on_inapp_closed reads the id off the shared entry
+        dict, which is why it is written in place rather than onto a
+        copy)."""
+        if self.entry.get("id"):
+            return
+        try:
+            from windows.tracker import _progress_data_file
+            data_file = _progress_data_file(self.entry)
+            stamp = storage.now_iso()
+            self.entry["id"] = str(uuid.uuid4())
+            self.entry.setdefault("status", "Reading" if self._is_reading
+                                  else "Watching")
+            self.entry["added_at"] = stamp
+            self.entry["updated_at"] = stamp
+            # A plain append of a fresh read: update_entry cannot create,
+            # and any tracker page open behind this overlay re-reads the
+            # file the moment the overlay closes.
+            entries = storage.load(data_file, [])
+            entries.append(dict(self.entry))
+            storage.save(data_file, entries)
+        except Exception:
+            logs.exception("details page could not save the entry")
+            show_toast(self, "Could Not Save That")
+            self.entry.pop("id", None)
+            return
+        self._save_btn.setText("Saved to My List")
+        self._save_btn.setEnabled(False)
+        show_toast(self, f"'{self.entry.get('title')}' Added to Saved")
+        if self.entry.get("cover_url"):
+            lookup_pool.submit(self._saved_cover_worker, self._signals,
+                               self.entry["id"], data_file,
+                               self.entry["cover_url"])
+
+    @staticmethod
+    def _saved_cover_worker(signals, entry_id, data_file, url):
+        """Download the poster the Discover row carried, off the UI
+        thread; the write happens back on it. Never raises."""
+        try:
+            path = images.download(url)
+        except Exception:
+            path = None
+        if path:
+            signals.saved_cover.emit(entry_id, data_file, str(path))
+
+    def _on_saved_cover(self, entry_id, data_file, path):
+        try:
+            storage.update_entry(data_file, entry_id, {"cover_path": path})
+        except Exception:
+            logs.exception("details page could not record the cover")
+        if self.entry.get("id") == entry_id:
+            self.entry["cover_path"] = path
+
     def _continue(self):
         """Resume where watching/reading stopped - the page's primary
         action, and with the cards' round button gone, the only one.
@@ -1421,6 +1700,188 @@ class DetailsPage(GlassPage):
         self.closed.emit()
         self.hide()
         self.deleteLater()
+
+
+class _GenreBrowseSignals(QObject):
+    rows = Signal(str, object)      # section label, catalog rows
+    poster = Signal(int, str)       # row key, local poster path
+    done = Signal()
+
+
+# One poster number for the browse rows - the Schedule rows' size, the
+# smallest cover the app draws anywhere.
+_BROWSE_COVER_SIZE = (46, 62)
+_BROWSE_LIMIT = 20
+
+
+class _GenreBrowseDialog(QDialog):
+    """Everything else filed under one genre - what pressing a genre
+    button opens (the owner's ask). Video genres come from Cinemeta's
+    own genre catalogs (series and movies, one section each); reading
+    genres from MangaDex's tag browse. Each row opens that title's
+    details page over the current one, the same transient-entry road a
+    Discover card takes."""
+
+    def __init__(self, parent, genre, is_reading):
+        super().__init__(parent)
+        self._genre = str(genre)
+        self._is_reading = bool(is_reading)
+        self._covers = {}         # row key -> (label, title), for posters
+        self._next_key = 0
+        self.open_title = None    # set by the caller
+
+        self.setModal(True)
+        self.resize(560, 680)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(22, 18, 22, 18)
+        column.setSpacing(10)
+
+        self._body_host = QWidget(objectName="Bare")
+        self._body_host.setStyleSheet("background: transparent; border: none;")
+        self._body = QVBoxLayout(self._body_host)
+        self._body.setContentsMargins(0, 0, 6, 0)
+        self._body.setSpacing(6)
+        self._body.addStretch(1)
+        area = scroll_area(self._body_host)
+        area.setStyleSheet("background: transparent; border: none;")
+        area.viewport().setStyleSheet("background: transparent;")
+        column.addWidget(area, stretch=1)
+
+        self._note = QLabel(f"Looking for {self._genre} titles...")
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
+        column.addWidget(self._note)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        use_hover_cursor(close_btn)
+        close_btn.clicked.connect(self.reject)
+        close_row.addWidget(close_btn)
+        column.addLayout(close_row)
+
+        frameless_dialog(self, title=self._genre)
+
+        self._signals = _GenreBrowseSignals()
+        self._signals.rows.connect(self._on_rows)
+        self._signals.poster.connect(self._on_poster)
+        self._signals.done.connect(self._on_done)
+        self._got_rows = False
+        import threading
+        threading.Thread(target=self._fetch_worker, daemon=True).start()
+
+    def _fetch_worker(self):
+        # Never raises; every section reports what it found, and `done`
+        # closes the looking-note whatever happened.
+        from helpers import discover
+        try:
+            if self._is_reading:
+                rows = discover.discover_reading_genre(self._genre,
+                                                       limit=_BROWSE_LIMIT)
+                self._signals.rows.emit("", list(rows or []))
+            else:
+                for kind, label in (("series", "Series"), ("movie", "Movies")):
+                    rows = discover.discover_video(kind, genre=self._genre,
+                                                   limit=_BROWSE_LIMIT)
+                    self._signals.rows.emit(label, list(rows or []))
+        except Exception:
+            logs.exception("genre browse lookup failed")
+        self._signals.done.emit()
+
+    def _on_rows(self, label, rows):
+        if not rows:
+            return
+        self._got_rows = True
+        insert_at = self._body.count() - 1
+        if label:
+            heading = QLabel(label.upper())
+            heading.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; font-size: 10pt; font-weight: 700;"
+                f" letter-spacing: 1px; background: transparent; border: none;"
+                f" padding: 6px 2px 0px 2px;")
+            self._body.insertWidget(insert_at, heading)
+            insert_at += 1
+        for item in rows:
+            self._body.insertWidget(insert_at, self._build_row(item))
+            insert_at += 1
+
+    def _build_row(self, item):
+        title = (item.get("title") or "").strip()
+        card = Card(matte=True, hoverable=True)
+        row = QHBoxLayout(card)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(12)
+
+        cover = QLabel()
+        cover.setFixedSize(*_BROWSE_COVER_SIZE)
+        cover.setPixmap(images.thumbnail_or_avatar(None, title,
+                                                   _BROWSE_COVER_SIZE))
+        row.addWidget(cover)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        head = QLabel(title)
+        head.setStyleSheet(f"color: {theme.TEXT}; font-weight: 600;"
+                           f" font-size: 12pt; background: transparent;"
+                           f" border: none;")
+        text.addWidget(head)
+        bits = [str(item.get("year") or "").strip(),
+                str(item.get("type") or "").strip()]
+        rating = str(item.get("imdbRating") or "").strip()
+        if rating:
+            bits.append(f"★ {rating}")
+        meta = QLabel("  ·  ".join(b for b in bits if b))
+        meta.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 10pt;"
+                           f" background: transparent; border: none;")
+        text.addWidget(meta)
+        row.addLayout(text, stretch=1)
+
+        poster_url = item.get("poster") or ""
+        if poster_url:
+            key = self._next_key
+            self._next_key += 1
+            self._covers[key] = (cover, title)
+            lookup_pool.submit(self._poster_worker, self._signals, key,
+                               poster_url)
+
+        card.clicked.connect(lambda it=dict(item): self._pick(it))
+        return card
+
+    @staticmethod
+    def _poster_worker(signals, key, url):
+        # Never raises - the pool's worker thread dies silently otherwise.
+        try:
+            path = images.download(url)
+        except Exception:
+            path = None
+        if path:
+            signals.poster.emit(key, str(path))
+
+    def _on_poster(self, key, path):
+        pair = self._covers.get(key)
+        if pair is None:
+            return
+        cover, title = pair
+        try:
+            cover.setPixmap(images.thumbnail_or_avatar(path, title,
+                                                       _BROWSE_COVER_SIZE))
+        except RuntimeError:
+            pass          # the dialog closed under the download
+
+    def _on_done(self):
+        if self._got_rows:
+            self._note.setVisible(False)
+        else:
+            self._note.setText(f"Nothing was found under {self._genre}. "
+                               "Check the connection and try again.")
+
+    def _pick(self, item):
+        callback = self.open_title
+        self.accept()
+        if callable(callback):
+            callback(item, item.get("type")
+                     or ("Manga" if self._is_reading else "Series"))
 
 
 def open_details(window, entry):

@@ -765,6 +765,21 @@ class SettingsDialog(QDialog):
             "nothing at all inside a minute, while 1080p started instantly.")
         form.addWidget(resolution_hint)
 
+        form.addSpacing(10)
+        self.auto_pick_check = QCheckBox("Auto choose source to play")
+        self.auto_pick_check.setChecked(app_settings.get_auto_pick_source())
+        self.auto_pick_check.toggled.connect(app_settings.set_auto_pick_source)
+        form.addWidget(self.auto_pick_check)
+        auto_pick_hint = QLabel(
+            "Pressing an episode starts the best source at your preferred "
+            "resolution right away. Turn off to pick from the source list "
+            "each time - the source and resolution can still be changed "
+            "inside the player either way.",
+            objectName="Muted",
+        )
+        auto_pick_hint.setWordWrap(True)
+        form.addWidget(auto_pick_hint)
+
         form.addSpacing(24)
         # The Stremio Account sign-in that lived here (email/password,
         # Sign In/Disconnect) is removed entirely at the owner's ask -

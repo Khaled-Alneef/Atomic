@@ -37,7 +37,7 @@ from helpers import (
     release_schedule, storage, stremio, theme,
 )
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, SideScroller, confirm,
+    Card, CardDragReorder, GlassPage, HeroBanner, SideScroller, confirm,
     defer_grid_rebuild, finish_toast, frameless_dialog, inform, scroll_area,
     search_field, show_toast, show_undo_toast, use_hover_cursor,
 )
@@ -162,15 +162,29 @@ SCHEDULE_COVER_SIZE = (46, 62)
 # The three sub-sections every tracker page carries. "saved" is the page
 # as it has always been - the sort row, the search, the sections grid,
 # select mode and drag-reorder all live there and nowhere else; the other
-# two are read-only views built on demand.
+# two are read-only views built on demand. Discover leads the tuple (the
+# owner's ask): this order is what the section sidebar lists, top to
+# bottom, until the user drags their own.
 TAB_SAVED = "saved"
 TAB_DISCOVER = "discover"
 TAB_SCHEDULE = "schedule"
-TABS = ((TAB_SAVED, "Saved"), (TAB_DISCOVER, "Discover"), (TAB_SCHEDULE, "Schedule"))
+TABS = ((TAB_DISCOVER, "Discover"), (TAB_SAVED, "Saved"), (TAB_SCHEDULE, "Schedule"))
 
 # How many titles one Discover row asks for. Bounded because every one of
 # them is a poster download queued onto the shared lookup pool.
 DISCOVER_LIMIT = 30
+
+# Discover rows already fetched this session, keyed (kind, query) ->
+# (monotonic stamp, rows). Pages rebuild from scratch on every visit
+# (.claude/rules/ui.md), so without this every walk to a tracker page
+# re-asked Cinemeta/MangaDex for the identical popular lists and the tab
+# sat on "Looking around..." for seconds each time - the single thing
+# the owner called out as slow. A quarter of an hour is well inside how
+# often these catalogs actually move; the worker refreshes an expired
+# key in place, so a stale answer is shown once and corrected, never
+# shown forever.
+_DISCOVER_CACHE = {}
+_DISCOVER_CACHE_TTL_S = 15 * 60
 # Typing here is debounced far longer than the entry form's title search
 # (SEARCH_DEBOUNCE_MS, 250): that one fills a dropdown the user is
 # staring at mid-word, this one rebuilds rows of poster cards and fires
@@ -313,10 +327,28 @@ def progress_moves_forward(entry, season, episode) -> bool:
 
 
 def _progress_data_file(entry) -> str:
-    """Which tracker file this entry lives in. Series and Movie have
-    their own; Anime and all three reading types share tracker.json."""
-    return (SeriesPage.DATA_FILE if entry.get("type") in ("Series", "Movie")
-            else AnimePage.DATA_FILE)
+    """Which tracker file this entry lives in. Everything watched -
+    Anime included, since it merged into the Movies & Series page - is
+    series.json; the reading types keep tracker.json (see main.py's
+    one-time _merge_anime_into_series for how existing Anime rows moved
+    over)."""
+    return (SeriesPage.DATA_FILE if entry.get("type") in VIDEO_TYPES
+            else MangaPage.DATA_FILE)
+
+
+def _entry_medium(entry) -> str:
+    """Which release-schedule source answers for this entry.
+
+    Per entry rather than per page now: the merged watch page holds
+    Anime (AniList's airing schedule) beside Series/Movie (TVmaze), so
+    one page-level MEDIUM would send every anime's lookup to the wrong
+    service."""
+    entry_type = (entry or {}).get("type")
+    if entry_type in MANGA_TYPES:
+        return release_schedule.MEDIUM_MANGA
+    if entry_type == "Anime":
+        return release_schedule.MEDIUM_ANIME
+    return release_schedule.MEDIUM_SERIES
 
 
 def correct_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
@@ -507,11 +539,15 @@ def _wire_overlay_refresh(page, parent, entry):
     hook = getattr(parent, "_on_inapp_closed", None)
     if page is None or not callable(hook):
         return
-    entry_id = (entry or {}).get("id")
 
     def notify():
         try:
-            hook(entry_id)
+            # The id is read when the overlay closes, not captured when
+            # it opened: a Discover title arrives here with no id at all
+            # and gains one if the details page's Save writes it, and a
+            # captured None would leave the page unable to pick the new
+            # entry up.
+            hook((entry or {}).get("id"))
         except RuntimeError:
             pass        # the page is gone; the next visit rebuilds anyway
     try:
@@ -617,7 +653,7 @@ def _resolve_then_open_anime(entry, site):
         if url:
             fields["url"] = url
         entry.update(fields)  # the in-memory copy this page is holding
-        storage.update_entry(AnimePage.DATA_FILE, entry.get("id"), fields)
+        storage.update_entry(_progress_data_file(entry), entry.get("id"), fields)
     except Exception:
         pass  # a page that opens beats a page that saved
     try:
@@ -782,8 +818,8 @@ def _clear_layout(layout):
 
 
 class _DiscoverSignals(QObject):
-    # Discover's two crossings back to the UI thread. Both carry the run
-    # number that asked for them, for the same reason the schedule
+    # Discover's crossings back to the UI thread. Each carries the run
+    # number that asked for it, for the same reason the schedule
     # lookups do: typing fires a new lookup per debounce pause, and a
     # slow row answering after the query moved on would otherwise fill
     # the rows under a different search.
@@ -794,6 +830,8 @@ class _DiscoverSignals(QObject):
     # poster: row kind, index within that row, the cached file path ("" =
     # nothing downloaded), run.
     poster = Signal(str, int, str, int)
+    # The hero banner's ground - a local backdrop path, run.
+    featured_backdrop = Signal(str, int)
 
 
 class _StayOpenMenu(QMenu):
@@ -1131,6 +1169,37 @@ def attach_continue_cover(card, cover):
     return relay
 
 
+# The Discover hero is widgets.HeroBanner - Harbor's backdrop-and-scrim
+# banner, shared with Home's continue hero so the two heads of the app
+# stay one design. It replaces the poster-beside-facts panel (the
+# owner's ask: "change the feature design ... to make it look like
+# Harbor").
+
+
+def discover_entry(item, entry_type):
+    """A catalog row (a Discover card, a genre-browse pick) as an entry
+    dict the details page (and a quick save) can hold. Deliberately
+    id-less: an id is what says "this is in Saved", and it is written
+    only when a save actually happens - the details page's Save button
+    keys its whole offer off that. Module-level because the details
+    page's genre browse builds these too."""
+    return {
+        "title": (item.get("title") or "").strip(),
+        "type": entry_type,
+        "status": STATUSES_BY_TYPE.get(entry_type, _WATCHING_STATUSES)[0],
+        "progress": "",
+        "progress_verified": False,
+        "latest_available": "",
+        "last_watched_chapter": None,
+        "show_last_watched": True,
+        "url": "",
+        "cover_url": item.get("poster") or None,
+        "cover_path": None,
+        "site_id": None,
+        "imdb_id": item.get("imdb_id") or None,
+    }
+
+
 class TrackerPage(GlassPage):
     """Base for the Anime/Manga/Series pages. Subclasses set
     DATA_FILE/ENTRY_TYPES/TITLE/TYPE_OPTIONS/PROGRESS_COLUMNS.
@@ -1151,9 +1220,8 @@ class TrackerPage(GlassPage):
     SPLIT_SECTIONS_BY_TYPE = False
     # Manga has no Stremio presence to sync progress against.
     SUPPORTS_PROGRESS_SYNC = True
-    # Which release-schedule source the hover tooltip's "next episode/
-    # chapter" lines come from for this page - see helpers/release_schedule.
-    MEDIUM = release_schedule.MEDIUM_ANIME
+    # No page-level MEDIUM: the schedule source is per entry now that
+    # Anime shares a page with Series/Movie - see _entry_medium.
     # The rows the Discover tab draws, as (kind, row label, entry type).
     # `kind` is what helpers/discover is asked for - the special
     # "reading" asks discover_reading, everything else discover_video -
@@ -1211,6 +1279,7 @@ class TrackerPage(GlassPage):
         self._discover_signals = _DiscoverSignals()
         self._discover_signals.results.connect(self._on_discover_results)
         self._discover_signals.poster.connect(self._on_discover_poster)
+        self._discover_signals.featured_backdrop.connect(self._on_featured_backdrop)
         # Which Discover lookup is the current one. Everything a lookup
         # produces - a row's results, each poster download - carries this
         # number and is dropped if it no longer matches, so a slow row
@@ -1232,6 +1301,16 @@ class TrackerPage(GlassPage):
         # sidebar main.py slides in over these pages drives this through
         # set_active_section, so nothing here paints tab state.
         self._active_tab = TAB_SAVED
+
+        # The Schedule rows' countdown labels, refreshed in place while
+        # that section is on screen - a countdown that only moved when
+        # the page was rebuilt sat wrong within a minute of being read.
+        # (label, when) pairs, reset by every _build_schedule.
+        self._schedule_countdowns = []
+        self._schedule_tick = QTimer(self)
+        self._schedule_tick.setInterval(30_000)
+        self._schedule_tick.timeout.connect(self._refresh_schedule_countdowns)
+        self._schedule_tick.start()
 
         self.entries = _migrate(storage.load(self.DATA_FILE, []), self.DATA_FILE)
         # What was on disk when this page loaded. _save_entries needs it
@@ -1276,7 +1355,12 @@ class TrackerPage(GlassPage):
         layout.setSpacing(14)
 
         header = QHBoxLayout()
-        header.addWidget(QLabel(self.TITLE, objectName="PanelTitle"))
+        # Named, not fire-and-forget: the heading reads as the *section*
+        # now ("Discover" / "Saved" / "Schedule", the owner's ask - the
+        # page's own name already sits highlighted in the sidebar), so
+        # _set_tab rewrites it on every section switch.
+        self.title_label = QLabel(self.TITLE, objectName="PanelTitle")
+        header.addWidget(self.title_label)
         header.addStretch()
         # No refresh button: opening the page is the refresh (see
         # _auto_refresh). A button that had to be pressed, and then sat
@@ -1544,7 +1628,7 @@ class TrackerPage(GlassPage):
         # background thread silently.
         try:
             found, manga_id = release_schedule.fetch(
-                self.MEDIUM, entry["title"], imdb_id=_entry_imdb_id(entry),
+                _entry_medium(entry), entry["title"], imdb_id=_entry_imdb_id(entry),
                 known_latest_chapter=_latest_known_chapter(entry),
                 manga_id=entry.get("mangadex_id"))
         except Exception:
@@ -1644,9 +1728,9 @@ class TrackerPage(GlassPage):
     def _view_state_key(cls) -> str:
         """Which slot of _SESSION_VIEW_STATE this page owns.
 
-        The class name, not TITLE: AnimePage inherits TITLE from the base
-        class, so two pages could end up sharing one slot if the titles
-        were ever made to collide."""
+        The class name, not TITLE: a subclass can inherit TITLE from the
+        base class, so two pages could end up sharing one slot if the
+        titles were ever made to collide."""
         return cls.__name__
 
     def _remember_view_state(self):
@@ -1693,6 +1777,7 @@ class TrackerPage(GlassPage):
         if key not in dict(TABS):
             key = TAB_SAVED
         self._active_tab = key
+        self.title_label.setText(dict(TABS)[key])
         self.saved_tab.setVisible(key == TAB_SAVED)
         self.discover_tab.setVisible(key == TAB_DISCOVER)
         self.schedule_tab.setVisible(key == TAB_SCHEDULE)
@@ -2190,7 +2275,7 @@ class TrackerPage(GlassPage):
         for label, value in zip(self.PROGRESS_COLUMNS, self._progress_columns(entry)):
             if value:
                 rows.append(f"{label}: {value}")
-        rows.extend(release_schedule.tooltip_lines(entry, self.MEDIUM))
+        rows.extend(release_schedule.tooltip_lines(entry, _entry_medium(entry)))
         # Who said so. A number the user disagrees with ("I'm on episode
         # 2, why does this say 7?") is unarguable while it is anonymous -
         # naming the source is what turns it into something checkable.
@@ -2483,6 +2568,14 @@ class TrackerPage(GlassPage):
                           if e.get("id") == entry_id), None)
             if entry is not None:
                 entry.update(fresh)
+            elif fresh.get("type") in self.ENTRY_TYPES:
+                # Saved from a details page opened off Discover - the
+                # entry was written straight to disk and this page has
+                # never held it. Adopting it here is what makes it appear
+                # in Saved (and earn its chip) without a page rebuild.
+                self.entries.append(fresh)
+                self._refresh_schedules()
+                self._sync_discover_saved()
         self._refresh_grid()
         # The overlay can have moved progress on, which moves a schedule
         # row's wording with it - rebuild only when that tab is the one
@@ -2902,6 +2995,9 @@ class TrackerPage(GlassPage):
         self._discover_query = query
         self._discover_cards = {}
         self._discover_holders = {}
+        self._featured_banner = None
+        self._featured_save_btn = None
+        self._featured_title = ""
         _clear_layout(self._discover_body_layout)
 
         if discover is None:
@@ -2940,8 +3036,15 @@ class TrackerPage(GlassPage):
             self._discover_holders[kind] = holder
             self._discover_body_layout.addWidget(section)
 
-        lookup_pool.submit_latest(self._discover_key(), self._discover_worker,
-                                  query, run)
+        # One job per row rather than one job walking every row in turn:
+        # the rows are independent requests to independent hosts, and
+        # serialized they cost their *sum* - measured ~1.3s each against
+        # Cinemeta, so the merged three-row page paid ~4s where the
+        # slowest single row is all it has to. submit_latest keyed per
+        # row keeps the newest-wins behaviour typing relies on.
+        for kind, _label, _entry_type in self.DISCOVER_ROWS:
+            lookup_pool.submit_latest(f"{self._discover_key()}-{kind}",
+                                      self._discover_row_worker, kind, query, run)
 
     def _discover_heading(self, label, labelled) -> str:
         if self._discover_query:
@@ -2952,24 +3055,39 @@ class TrackerPage(GlassPage):
         return (f"Matches for '{self._discover_query}'" if self._discover_query
                 else "What the catalog is watching")
 
-    def _discover_worker(self, query, run):
-        """Every row of this page, one job.
+    def _discover_row_worker(self, kind, query, run):
+        """One row's rows, cached for the session.
 
         Must never raise - an uncaught exception here kills the pool's
-        worker thread - and must report *every* row even when a source
+        worker thread - and must always report, even when a source
         answers nothing, or a row that never reports sits on "Looking
-        around..." for good."""
-        for kind, _label, _entry_type in self.DISCOVER_ROWS:
-            try:
-                if kind == "reading":
-                    found = discover.discover_reading(query=query, limit=DISCOVER_LIMIT)
-                else:
-                    found = discover.discover_video(kind, query=query,
-                                                    limit=DISCOVER_LIMIT)
-            except Exception:
-                found = None
-            rows = [item for item in (found or []) if isinstance(item, dict)]
-            self._discover_signals.results.emit(kind, rows, run)
+        around..." for good.
+
+        The cache is answered *and refilled* here on the worker, so a
+        fresh hit costs no request at all and an expired one is shown
+        immediately and then corrected - the tab is never blank while a
+        list that was on screen ten seconds ago is re-fetched."""
+        key = (kind, query)
+        stamp_and_rows = _DISCOVER_CACHE.get(key)
+        if stamp_and_rows is not None:
+            stamp, rows = stamp_and_rows
+            self._discover_signals.results.emit(kind, list(rows), run)
+            if time.monotonic() - stamp < _DISCOVER_CACHE_TTL_S:
+                return
+        try:
+            if kind == "reading":
+                found = discover.discover_reading(query=query, limit=DISCOVER_LIMIT)
+            else:
+                found = discover.discover_video(kind, query=query,
+                                                limit=DISCOVER_LIMIT)
+        except Exception:
+            found = None
+        rows = [item for item in (found or []) if isinstance(item, dict)]
+        if rows:
+            _DISCOVER_CACHE[key] = (time.monotonic(), list(rows))
+        if stamp_and_rows is not None and not rows:
+            return    # keep the stale-but-real list over an empty refresh
+        self._discover_signals.results.emit(kind, rows, run)
 
     def _on_discover_results(self, kind, results, run):
         if run != self._discover_run:
@@ -3082,7 +3200,7 @@ class TrackerPage(GlassPage):
         lookup_pool.submit(self._fetch_discover_poster, kind, index, url, run)
 
     def _fetch_discover_poster(self, kind, index, url, run):
-        # Must never raise - see _discover_worker.
+        # Must never raise - see _discover_row_worker.
         try:
             path = images.download(url)
         except Exception:
@@ -3150,117 +3268,205 @@ class TrackerPage(GlassPage):
             return
         layout = holder.layout()
         _clear_layout(layout)
-        layout.addWidget(QLabel("Top Result" if self._discover_query else "Featured",
-                                objectName="SectionTitle"))
-        layout.addWidget(self._build_featured_card(item, entry_type, run))
+        # No heading over it: the banner's own eyebrow chip says what it
+        # is, the Harbor way, and a SectionTitle above a hero read as a
+        # caption on a poster.
+        layout.addWidget(self._build_featured_banner(item, entry_type, run))
         holder.setVisible(True)
 
-    def _build_featured_card(self, item, entry_type, run):
-        """The top result at full size: poster on the left, the facts and
-        an Add button beside it.
-
-        Matte rather than the poster grid's glossy fill - that gradient
-        is tuned to a 216px-tall tile, and stretched across a wide short
-        panel its sheen band reads as an uneven wash (the same reason
-        Home's section frames are matte)."""
+    def _build_featured_banner(self, item, entry_type, run):
+        """The top result as Harbor's hero: the title's backdrop filling
+        a rounded banner, the facts over its scrim, then View (the
+        details page) and a watchlist button. Every colour is a token -
+        a borrowed layout must not arrive with a borrowed accent."""
         title_text = (item.get("title") or "").strip()
-        card = Card(hoverable=True, matte=True)
-        # One step up the surface family: this page's #Panel ground is
-        # already SURFACE, and with the matte border gone (the Harbor
-        # pass) a SURFACE slab vanished into it entirely - measured on
-        # the offscreen render. Border states still come from the app
-        # sheet, so hover keeps its accent ring.
-        card.setStyleSheet(
-            f"QFrame#Card {{ background: {theme.SURFACE_HOVER}; }}"
-            f"QFrame#Card:hover {{ background: {theme.SURFACE_ACTIVE}; }}")
-        row = QHBoxLayout(card)
-        row.setContentsMargins(14, 14, 14, 14)
-        row.setSpacing(18)
+        banner = HeroBanner()
+        column = QVBoxLayout(banner)
+        column.setContentsMargins(32, 22, 32, 26)
+        column.setSpacing(10)
 
-        cover = QLabel()
-        cover.setFixedSize(*POSTER_SIZE)
-        cover.setPixmap(images.thumbnail_or_avatar(None, title_text, POSTER_SIZE))
-        row.addWidget(cover, alignment=Qt.AlignmentFlag.AlignTop)
-        self._chip(cover, "FEATURED").move(8, 8)
-        record = {"cover": cover, "title": title_text, "size": POSTER_SIZE,
-                  "badge": None, "badge_at_foot": True}
-        if title_text.lower() in self._saved_titles():
-            self._place_saved_badge(record)
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(8)
+        eyebrow = QLabel("TOP RESULT" if self._discover_query else "FEATURED")
+        eyebrow.setStyleSheet(
+            f"color: {theme.ON_ACCENT}; background: {theme.ACCENT_GRADIENT};"
+            f" border-radius: {theme.RADIUS_SM}px; padding: 3px 10px;"
+            f" font-size: 8.5pt; font-weight: 700; letter-spacing: 1px;")
+        chip_row.addWidget(eyebrow)
+        chip_row.addStretch(1)
+        column.addLayout(chip_row)
+        column.addStretch(1)
 
-        column = QVBoxLayout()
-        column.setSpacing(8)
-        title = QLabel(title_text, objectName="HeroTitle")
+        title = QLabel(title_text)
         title.setWordWrap(True)
+        title.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 27pt; font-weight: 800;"
+            f" background: transparent;")
         column.addWidget(title)
 
         facts = QHBoxLayout()
-        facts.setSpacing(8)
-        year = str(item.get("year") or "").strip()
-        if year:
-            facts.addWidget(QLabel(year, objectName="CardMeta"))
+        facts.setSpacing(10)
+        meta_bits = [str(item.get("year") or "").strip(),
+                     str(item.get("type") or entry_type)]
+        meta = QLabel("   ·   ".join(bit for bit in meta_bits if bit))
+        meta.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 600;"
+            f" background: transparent;")
+        facts.addWidget(meta)
         rating = self._rating_text(item)
         if rating:
-            # Not _chip: this one sits on the panel, not on artwork, so
-            # it is a laid-out widget rather than a positioned child.
             chip = QLabel(rating)
             chip.setStyleSheet(
-                f"background: {theme.BG}; color: {theme.TEXT};"
+                f"background: {theme.rgba(theme.BG, 180)}; color: {theme.ACCENT};"
                 f" border: 1px solid {theme.BORDER};"
-                f" border-radius: {theme.RADIUS_SM}px; padding: 2px 8px;"
-                f" font-size: 9pt; font-weight: 700;")
+                f" border-radius: {theme.RADIUS_SM}px; padding: 2px 9px;"
+                f" font-size: 9.5pt; font-weight: 700;")
             facts.addWidget(chip)
-        facts.addStretch()
+        facts.addStretch(1)
         column.addLayout(facts)
-        # One line saying what this card *is*, rather than repeating the
-        # title's own facts. Without it the panel is a title, a year and
-        # a button against a poster's full height, and the empty middle
-        # read as something that had failed to load.
-        column.addWidget(QLabel(
-            f"Closest match for '{self._discover_query}'" if self._discover_query
-            else "Top of the catalog right now", objectName="Muted"))
 
         saved = title_text.lower() in self._saved_titles()
         buttons = QHBoxLayout()
-        buttons.setContentsMargins(0, 6, 0, 0)
-        add_btn = QPushButton("In Saved" if saved else "Add to Saved",
-                              objectName="Accent")
-        add_btn.clicked.connect(
-            lambda _checked=False, it=item, et=entry_type: self._on_discover_pick(it, et))
-        use_hover_cursor(add_btn)
-        buttons.addWidget(add_btn)
-        buttons.addStretch()
-        column.addLayout(buttons)
-        # The stretch goes last, so the block reads as one group at the
-        # top of the panel instead of a title and a button pinned to
-        # opposite ends of it with a hole between.
-        column.addStretch()
-        row.addLayout(column, stretch=1)
+        buttons.setSpacing(10)
+        buttons.setContentsMargins(0, 8, 0, 0)
+        view_btn = QPushButton("▶  View", objectName="Accent")
+        view_btn.setFixedHeight(44)
+        view_btn.clicked.connect(
+            lambda _checked=False, it=item, et=entry_type:
+            self._on_discover_pick(it, et))
+        use_hover_cursor(view_btn)
+        buttons.addWidget(view_btn)
+        # Harbor's "Add to Watchlist": an outlined pill on the artwork,
+        # translucent so the backdrop reads through it.
+        save_btn = QPushButton("In Saved" if saved else "+  Add to Saved")
+        save_btn.setFixedHeight(44)
+        save_btn.setEnabled(not saved)
+        save_btn.setStyleSheet(
+            f"QPushButton {{ background: {theme.rgba(theme.BG, 160)}; color: {theme.TEXT};"
+            f" border: 1px solid {theme.TEXT_MUTED}; border-radius: {theme.RADIUS}px;"
+            f" padding: 8px 18px; font-weight: 700; }}"
+            f"QPushButton:hover {{ border: 1px solid {theme.ACCENT};"
+            f" color: {theme.ACCENT}; }}"
+            f"QPushButton:disabled {{ color: {theme.TEXT_MUTED};"
+            f" border: 1px solid {theme.BORDER}; }}")
+        use_hover_cursor(save_btn)
 
-        card.clicked.connect(
+        def save_featured(_checked=False, it=item, et=entry_type, btn=save_btn):
+            if self._save_discover_item(it, et):
+                btn.setText("In Saved")
+                btn.setEnabled(False)
+
+        save_btn.clicked.connect(save_featured)
+        buttons.addWidget(save_btn)
+        buttons.addStretch(1)
+        column.addLayout(buttons)
+
+        banner.clicked.connect(
             lambda it=item, et=entry_type: self._on_discover_pick(it, et))
-        self._discover_cards[("featured", 0)] = record
-        self._request_poster("featured", 0, item, run)
-        return card
+        self._featured_banner = banner
+        self._featured_save_btn = save_btn
+        self._featured_title = title_text
+        # Its own thread, like the details page's art worker and for the
+        # same reason: the shared pool is busy with this very tab's rows
+        # and posters, and the hero's ground should not queue behind
+        # thirty thumbnails.
+        threading.Thread(target=self._featured_backdrop_worker,
+                         args=(dict(item), entry_type, run), daemon=True).start()
+        return banner
+
+    def _featured_backdrop_worker(self, item, entry_type, run):
+        """The hero's ground, off the UI thread: TMDB's backdrop by IMDb
+        id for the video kinds (artwork caches it on disk, so a revisit
+        costs a stat), AniList's banner for reading - the same two
+        sources the details page grounds itself with. Never raises."""
+        path = None
+        try:
+            if entry_type in MANGA_TYPES:
+                url = anilist.fetch_manga_artwork(item.get("title") or "")
+                found = images.download(url) if url else None
+                path = str(found) if found else None
+            elif item.get("imdb_id"):
+                from helpers import artwork
+                probe = {"imdb_id": item.get("imdb_id"),
+                         "title": item.get("title") or ""}
+                path = (artwork.backdrop_fast_path(probe)
+                        or artwork.backdrop_path(probe))
+        except Exception:
+            path = None
+        if path:
+            self._discover_signals.featured_backdrop.emit(str(path), run)
+
+    def _on_featured_backdrop(self, path, run):
+        if run != self._discover_run:
+            return
+        banner = getattr(self, "_featured_banner", None)
+        if banner is None:
+            return
+        try:
+            banner.set_backdrop(path)
+        except RuntimeError:
+            pass    # the tab rebuilt under the fetch
+
+    def _find_saved(self, title):
+        """This page's saved entry for `title`, or None. Title-matched,
+        the same rule _saved_titles states: the user is looking at the
+        title, whatever ids the catalogs disagree about."""
+        wanted = (title or "").strip().lower()
+        if not wanted:
+            return None
+        return next((e for e in self.entries
+                     if e.get("type") in self.ENTRY_TYPES
+                     and (e.get("title") or "").strip().lower() == wanted), None)
+
+    def _discover_entry(self, item, entry_type):
+        return discover_entry(item, entry_type)
 
     def _on_discover_pick(self, item, entry_type):
-        """Open the Add form on this title - or say it is already there.
-
-        Saved-ness is re-read here rather than trusted from the chip
-        drawn at build time: the entry may have been added since, from
-        this very tab."""
-        title_text = (item.get("title") or "").strip()
-        if title_text.lower() in self._saved_titles():
-            show_toast(self, "Already in Saved")
+        """A Discover card opens the title's details page - the episode
+        or chapter list - never the Add form (the owner's ask). A title
+        already in Saved opens its own entry, progress marks and all;
+        anything else goes over as a transient record whose Save button
+        on that page is what writes it into Saved."""
+        entry = (self._find_saved(item.get("title"))
+                 or self._discover_entry(item, entry_type))
+        window = _top_window(self)
+        if window is None:
             return
-        self._open_form(initial_title=title_text, default_type=entry_type)
+        try:
+            from windows import details
+            page = details.open_details(window, entry)
+        except Exception:
+            logs.exception("discover could not open the details page")
+            return
+        _wire_overlay_refresh(page, self, entry)
+
+    def _save_discover_item(self, item, entry_type) -> bool:
+        """Write one Discover result straight into Saved - the hero's
+        watchlist button. Through _on_form_save, so the id stamp, the
+        file write, the redraw, the schedule lookup and the Saved chips
+        all happen exactly as a form save makes them happen."""
+        title_text = (item.get("title") or "").strip()
+        if not title_text:
+            return False
+        if self._find_saved(title_text):
+            show_toast(self, "Already in Saved")
+            return True
+        entry = self._discover_entry(item, entry_type)
+        entry["id"] = str(uuid.uuid4())
+        self._on_form_save(entry, True)
+        if entry.get("cover_url"):
+            # The poster lands as the entry's cover through the same
+            # download-then-update path the sharper-cover backfill uses.
+            lookup_pool.submit(self._fetch_sharper_cover, entry["id"],
+                               entry["cover_url"])
+        show_toast(self, f"'{title_text}' Added to Saved")
+        return True
 
     def _sync_discover_saved(self):
         """Put a Saved chip on any Discover card whose title has since
         been added. Only ever adds one: a card cannot become unsaved
         while this tab is up (deleting happens on Saved, which rebuilds
         the whole page's grid anyway)."""
-        if not self._discover_cards:
-            return
         saved = self._saved_titles()
         for record in self._discover_cards.values():
             if record.get("badge") is not None:
@@ -3271,6 +3477,17 @@ class TrackerPage(GlassPage):
                 self._place_saved_badge(record)
             except RuntimeError:
                 pass    # the row went away under it
+        # The hero's watchlist button follows too - a title saved from
+        # its own row, or from the details page, must not leave the
+        # banner still offering to add it.
+        button = getattr(self, "_featured_save_btn", None)
+        if (button is not None
+                and getattr(self, "_featured_title", "").lower() in saved):
+            try:
+                button.setText("In Saved")
+                button.setEnabled(False)
+            except RuntimeError:
+                pass    # the tab rebuilt under it
 
     # ------------------------------------------------------------------
     # Schedule: what this page's own entries say is coming.
@@ -3320,8 +3537,25 @@ class TrackerPage(GlassPage):
             return "This Week"
         return "Later"
 
+    def _refresh_schedule_countdowns(self):
+        """Re-word every countdown on the Schedule section from the
+        clock, without rebuilding the rows (a rebuild would put the list
+        back to the top under the reader). Skipped while the section is
+        off screen - the labels are rebuilt on arrival anyway."""
+        if self._active_tab != TAB_SCHEDULE or not self._schedule_countdowns:
+            return
+        now = datetime.now(timezone.utc)
+        for label, when in self._schedule_countdowns:
+            try:
+                label.setText(release_schedule.format_countdown(when - now))
+            except RuntimeError:
+                # The section rebuilt under the timer; the fresh build
+                # refilled the list, and any stale pair dies with it.
+                pass
+
     def _build_schedule(self):
         _clear_layout(self._schedule_layout)
+        self._schedule_countdowns = []
         rows = self._schedule_rows()
         if not rows:
             self._schedule_layout.addWidget(QLabel(
@@ -3401,6 +3635,9 @@ class TrackerPage(GlassPage):
         countdown.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 700;"
                                 f" font-size: 9pt; background: transparent;")
         right.addWidget(countdown)
+        # Registered for the 30s tick, so the number keeps counting
+        # while the section sits on screen.
+        self._schedule_countdowns.append((countdown, when))
         if (entry.get("next_release") or {}).get("estimated"):
             # Said out loud, not implied: a manga date is extrapolated
             # from release history (see mangadex._predict), and a
@@ -3473,23 +3710,20 @@ class TrackerPage(GlassPage):
         self._sync_discover_saved()
 
 
-class AnimePage(TrackerPage):
-    DATA_FILE = "tracker.json"
-    ENTRY_TYPES = ("Anime",)
-    TITLE = "Anime"
-    TYPE_OPTIONS = ["Anime"]
-    MEDIUM = release_schedule.MEDIUM_ANIME
-    DISCOVER_ROWS = (("anime", "Anime", "Anime"),)
+# No AnimePage any more: Anime merged into the Movies & Series page (the
+# owner's ask - one watch page under the camera glyph). Its rows moved
+# from tracker.json into series.json once, at startup (main.py's
+# _merge_anime_into_series), so tracker.json is the reading file now.
 
 
 class MangaPage(TrackerPage):
     DATA_FILE = "tracker.json"
     ENTRY_TYPES = MANGA_TYPES
-    TITLE = "Reading"
+    # "Read" (the owner's ask) - the sidebar's verb, like "Watch".
+    TITLE = "Read"
     TYPE_OPTIONS = list(MANGA_TYPES)
     PROGRESS_COLUMNS = ["Last Released Chapter"]
     SUPPORTS_PROGRESS_SYNC = False
-    MEDIUM = release_schedule.MEDIUM_MANGA
     # "reading" is the one kind that goes to discover_reading rather than
     # discover_video; the entry type is Manga, which is the first of the
     # three reading flavours and the one the form opens on.
@@ -3498,15 +3732,21 @@ class MangaPage(TrackerPage):
 
 class SeriesPage(TrackerPage):
     DATA_FILE = "series.json"
-    ENTRY_TYPES = ("Series", "Movie")
+    # Anime leads: this owner's list is anime-heavy, so it fronts each
+    # status section and is what the Add form opens on.
+    ENTRY_TYPES = ("Anime", "Series", "Movie")
     SPLIT_SECTIONS_BY_TYPE = True
-    TITLE = "Movies & Series"
-    TYPE_OPTIONS = ["Series", "Movie"]
-    MEDIUM = release_schedule.MEDIUM_SERIES
-    # Two rows, because films and shows are two Cinemeta catalogs and
-    # picking from one has to open the form on that type - the same
-    # split _search_catalogs already makes in the Add form.
-    DISCOVER_ROWS = (("series", "Series", "Series"), ("movie", "Movies", "Movie"))
+    # "Watch" (the owner's ask) - the sidebar's verb; the heading itself
+    # is rewritten to the showing section's name by _set_tab anyway.
+    TITLE = "Watch"
+    TYPE_OPTIONS = ["Anime", "Series", "Movie"]
+    # One row per kind. Anime and Series are both Cinemeta's series
+    # catalog underneath (discover.py's genre chain does the splitting);
+    # picking from a row opens the form on that row's type - the same
+    # split _search_catalogs makes in the Add form.
+    DISCOVER_ROWS = (("anime", "Anime", "Anime"),
+                     ("series", "Series", "Series"),
+                     ("movie", "Movies", "Movie"))
 
 
 class _SearchSignals(QObject):
@@ -3926,7 +4166,22 @@ class EntryForm(QDialog):
         types = [t for t in self.type_options if t in VIDEO_TYPES]
         if current not in types:
             types = [current]
-        return [(t, STREMIO_CATALOG_BY_TYPE.get(t, "series")) for t in types]
+        # One request per *catalog*, not per type: Anime and Series are
+        # both Cinemeta's series catalog now that they share a form, and
+        # asking it twice would return every show twice under two
+        # labels. The current Type claims the shared catalog - a form on
+        # Anime tags series-catalog picks Anime, one on Series tags them
+        # Series - and search rows carry no genres to decide it better
+        # (measured in helpers/discover).
+        ordered = [current] + [t for t in types if t != current]
+        seen, catalogs = set(), []
+        for entry_type in ordered:
+            catalog = STREMIO_CATALOG_BY_TYPE.get(entry_type, "series")
+            if catalog in seen:
+                continue
+            seen.add(catalog)
+            catalogs.append((entry_type, catalog))
+        return catalogs
 
     def _search_worker(self, provider, text, seq, catalogs=()):
         # Must never raise. On a bare thread a failure only lost this one

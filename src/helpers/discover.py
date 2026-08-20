@@ -165,13 +165,17 @@ def _video_row(meta: dict, label: str):
     }
 
 
-def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None) -> list:
+def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
+                   genre: str = "") -> list:
     """Popular or searched titles for one of the video trackers.
 
     `kind` is "anime", "series" or "movie". An empty `query` returns the
-    popular catalog; a non-empty one searches. Rows are
-    {title, year, poster, imdb_id, type}. Always a list - [] on any
-    failure, an unknown kind, or nothing found.
+    popular catalog; a non-empty one searches; `genre` (with no query)
+    asks the genre's own catalog - the details pages' genre buttons.
+    Rows are {title, year, poster, imdb_id, type}. Always a list - [] on
+    any failure, an unknown kind, or nothing found; an unknown genre is
+    a fast empty answer, never an unfiltered list (measured, see
+    _video_catalog_urls).
 
     Anime search is a plain series search, deliberately: Cinemeta's
     search rows come back with `genres: null` (measured on every search
@@ -186,11 +190,15 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None) -
         deadline = net.deadline_in(VIDEO_BUDGET)
 
     query = (query or "").strip()
+    genre = (genre or "").strip()
     label = _KIND_LABELS[kind]
 
     if query:
         encoded = urllib.parse.quote(query)
         urls = [f"{CINEMETA_URL}/catalog/{content_type}/top/search={encoded}.json"]
+    elif genre:
+        urls = [f"{CINEMETA_URL}/catalog/{content_type}/top/"
+                f"genre={urllib.parse.quote(genre)}.json"]
     else:
         urls = _video_catalog_urls(kind, content_type)
 
@@ -310,4 +318,95 @@ def discover_reading(query: str = "", limit: int = 30, deadline=None) -> list:
         return []
 
     rows = [row for row in (_reading_row(m) for m in (body or {}).get("data") or []) if row]
+    return rows[:limit]
+
+
+# ------------------------------------------------------------------
+# reading genres - MangaDex tags, for the details pages' genre buttons
+
+# tag name (lowered) -> tag id, filled once per session from /manga/tag.
+# MangaDex filters browsing by tag *id* only; the names are what the
+# details page shows and the user clicks.
+_reading_tags = None
+
+
+def _reading_tag_ids():
+    global _reading_tags
+    if _reading_tags is not None:
+        return _reading_tags
+    try:
+        body = mangadex._get(f"{mangadex.BASE_URL}/manga/tag",
+                             READING_TIMEOUT)
+        tags = {}
+        for row in (body or {}).get("data") or []:
+            name = ((row.get("attributes") or {}).get("name") or {}).get("en")
+            if name and row.get("id"):
+                tags[str(name).strip().lower()] = str(row["id"])
+        # Only a real answer is remembered - a flaky minute must not
+        # blank every genre button for the rest of the session.
+        if tags:
+            _reading_tags = tags
+        return tags
+    except Exception:
+        return {}
+
+
+def reading_genres(title: str, limit: int = 6) -> list:
+    """The genre tags MangaDex files this title under, or []. What the
+    reading details page shows as its genre buttons - the video pages
+    get theirs free with Cinemeta's meta, and this is the reading
+    equivalent: one search, best follower-ordered match wins, tags of
+    the `genre` group only (the theme/format groups hold entries like
+    "Full Color" that are not genres)."""
+    title = (title or "").strip()
+    if not title:
+        return []
+    try:
+        from . import title_match
+        url = (f"{mangadex.BASE_URL}/manga?limit=5"
+               f"&order[followedCount]=desc"
+               f"&title={urllib.parse.quote(title)}")
+        body = mangadex._get(url, READING_TIMEOUT)
+        for manga in (body or {}).get("data") or []:
+            attributes = manga.get("attributes") or {}
+            if title_match.similarity(title, _reading_title(attributes)) < 0.85:
+                continue
+            names = []
+            for tag in attributes.get("tags") or []:
+                tag_attributes = tag.get("attributes") or {}
+                if tag_attributes.get("group") != "genre":
+                    continue
+                name = (tag_attributes.get("name") or {}).get("en")
+                if name:
+                    names.append(str(name).strip())
+            if names:
+                return names[:limit]
+        return []
+    except Exception:
+        return []
+
+
+def discover_reading_genre(genre: str, limit: int = 30, deadline=None) -> list:
+    """The most-followed manga filed under one genre tag - what a
+    reading genre button opens. Same row shape as discover_reading;
+    [] for an unknown tag or any failure."""
+    tag_id = _reading_tag_ids().get((genre or "").strip().lower())
+    if not tag_id or limit <= 0:
+        return []
+    if deadline is None:
+        deadline = net.deadline_in(READING_BUDGET)
+    step = net.step_timeout(deadline, READING_TIMEOUT)
+    if step is None:
+        return []
+    count = min(int(limit), _MANGADEX_MAX_LIMIT)
+    url = (f"{mangadex.BASE_URL}/manga?limit={count}&includes[]=cover_art"
+           f"&order[followedCount]=desc"
+           f"&includedTags[]={urllib.parse.quote(tag_id)}"
+           + _BROWSE_RATINGS)
+    try:
+        body = mangadex._get(url, step)
+    except Exception:
+        return []
+    rows = [row for row in (_reading_row(m)
+                            for m in (body or {}).get("data") or []) if row]
     return rows[:limit]

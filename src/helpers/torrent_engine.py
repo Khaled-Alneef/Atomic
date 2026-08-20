@@ -363,23 +363,40 @@ class _Torrent:
         return os.path.join(storage_path, self.info.files().file_path(self.file_index))
 
 
-def _pick_file(info, season=None, episode=None) -> int:
-    """Which file in the torrent to play - the episode if its name says
-    so, else the largest video."""
+def _video_files(info) -> list:
+    """(index, name, size) for every video file, or every file when the
+    torrent carries no recognised video at all."""
     files = info.files()
     candidates = []
     for index in range(files.num_files()):
         name = files.file_path(index)
         candidates.append((index, name, files.file_size(index)))
-    videos = [c for c in candidates
-              if c[1].lower().endswith(_VIDEO_SUFFIXES)] or candidates
-    if season and episode:
-        for index, name, _size in videos:
-            match = _EPISODE_RE.search(os.path.basename(name))
-            if (match and int(match.group(1)) == int(season)
-                    and int(match.group(2)) == int(episode)):
-                return index
-    return max(videos, key=lambda c: c[2])[0]
+    return [c for c in candidates
+            if c[1].lower().endswith(_VIDEO_SUFFIXES)] or candidates
+
+
+def _episode_file_index(info, season, episode):
+    """The file whose *name* states this episode, or None. Deliberately
+    no largest-file fallback here: callers asking "does this pack hold
+    episode N" must get an honest no, not the biggest file wearing N's
+    number (see file_index_for)."""
+    if not (season and episode):
+        return None
+    for index, name, _size in _video_files(info):
+        match = _EPISODE_RE.search(os.path.basename(name))
+        if (match and int(match.group(1)) == int(season)
+                and int(match.group(2)) == int(episode)):
+            return index
+    return None
+
+
+def _pick_file(info, season=None, episode=None) -> int:
+    """Which file in the torrent to play - the episode if its name says
+    so, else the largest video."""
+    matched = _episode_file_index(info, season, episode)
+    if matched is not None:
+        return matched
+    return max(_video_files(info), key=lambda c: c[2])[0]
 
 
 def add(info_hash: str, *, trackers=(), season=None, episode=None,
@@ -397,7 +414,27 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
 
     existing = _torrents.get(info_hash)
     if existing is not None:
+        # Re-pick the file for what is being asked for *now*. Returning
+        # the torrent untouched kept the previous request's file_index,
+        # and for a season pack that made every later episode serve the
+        # first one again: five queued Frieren episodes each found "their"
+        # file already complete, reported done instantly, and copied
+        # episode 1's file five times - the owner found one video where
+        # five were promised. Same staleness served the wrong episode to
+        # the player when switching within a held pack.
         existing.last_touched = time.time()
+        try:
+            wanted = (file_index if file_index is not None
+                      else _pick_file(existing.info, season, episode)
+                      if (season and episode) else existing.file_index)
+            if wanted is not None and wanted != existing.file_index:
+                existing.file_index = wanted
+                priorities = [0] * existing.info.files().num_files()
+                priorities[wanted] = 7
+                existing.handle.prioritize_files(priorities)
+                existing.focus(0, HEAD_BYTES)
+        except Exception:
+            pass
         return info_hash
 
     os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -464,19 +501,52 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
     return info_hash
 
 
+def _file_priorities(handle) -> list:
+    """The handle's file priorities, whichever name this binding gives
+    the getter."""
+    for name in ("get_file_priorities", "file_priorities"):
+        getter = getattr(handle, name, None)
+        if callable(getter):
+            return list(getter())
+    return []
+
+
+def _want_pieces(torrent, wanted_indexes):
+    """Set the piece priorities to fetch exactly these files in full: 7
+    across every wanted file's range, 0 everywhere else.
+
+    Piece priorities are the layer that actually gates the picker - file
+    priorities alone are a bulk way of writing them, and a later
+    prioritize_pieces overwrites what they said. The old download path
+    set *every* piece to 7 after zeroing the other files, which quietly
+    re-wanted them all: downloading one episode out of a 28-episode pack
+    fetched the entire pack, with the wanted file competing against 27
+    others for the same swarm."""
+    info = torrent.info
+    files = info.files()
+    length = info.piece_length()
+    priorities = [0] * info.num_pieces()
+    for index in wanted_indexes:
+        offset = files.file_offset(index)
+        size = files.file_size(index)
+        if size <= 0:
+            continue
+        for piece in range(int(offset // length),
+                           int((offset + size - 1) // length) + 1):
+            priorities[piece] = 7
+    torrent.handle.prioritize_pieces(priorities)
+
+
 def download_whole(info_hash: str, *, all_files: bool = False) -> bool:
-    """Switch a torrent from streaming to fetching the whole thing.
+    """Switch a torrent from streaming to fetching the chosen file whole.
 
     Streaming deliberately fetches a narrow band around the read
     position and leaves the rest of the file at priority 1, which is
     right for watching and wrong for keeping: the file on disk is full
     of holes. This raises the chosen file - or every video file in the
-    torrent, for a season pack - to full priority so it completes.
-
-    Still sequential-ish in effect, because the streaming priorities
-    that were already set stay ahead of it; a download started while
-    something is playing does not steal the pieces playback needs next.
-    """
+    torrent, with all_files - to full priority so it completes, and
+    wants nothing else (see _want_pieces for the bug the old
+    every-piece-at-7 version had)."""
     torrent = _torrents.get((info_hash or "").lower())
     if torrent is None:
         return False
@@ -484,17 +554,57 @@ def download_whole(info_hash: str, *, all_files: bool = False) -> bool:
         info = torrent.info
         count = info.files().num_files()
         if all_files:
-            priorities = [
-                7 if str(info.files().file_path(i)).lower().endswith(_VIDEO_SUFFIXES)
-                else 1
-                for i in range(count)]
+            wanted = [i for i in range(count)
+                      if str(info.files().file_path(i)).lower()
+                      .endswith(_VIDEO_SUFFIXES)]
         else:
-            priorities = [0] * count
-            priorities[torrent.file_index] = 7
+            wanted = [torrent.file_index]
+        priorities = [0] * count
+        for index in wanted:
+            priorities[index] = 7
         torrent.handle.prioritize_files(priorities)
-        # Undo the streaming piece priorities, which cap most of the file
-        # at 1 and would otherwise hold the download at a crawl.
-        torrent.handle.prioritize_pieces([7] * info.num_pieces())
+        _want_pieces(torrent, wanted)
+        return True
+    except Exception:
+        return False
+
+
+def file_index_for(info_hash: str, season, episode):
+    """The file in an already-held torrent whose name states this
+    episode, or None - None also when the torrent isn't held or has no
+    metadata. This is how the download queue asks "can the season pack I
+    already have serve the next episode" without paying another source
+    lookup; only a name match counts, because handing back the largest
+    file here would recreate the very copied-the-wrong-episode bug this
+    exists to avoid."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return None
+    try:
+        return _episode_file_index(torrent.info, season, episode)
+    except Exception:
+        return None
+
+
+def raise_files(info_hash: str, indexes) -> bool:
+    """Additionally want these files, keeping everything already wanted.
+    The download queue calls this once per season job with every sibling
+    episode's file, so the whole group rides one swarm together instead
+    of each job re-warming it from zero - the pieces the later jobs need
+    are arriving while the first one is still being tracked."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None or not indexes:
+        return False
+    try:
+        current = _file_priorities(torrent.handle)
+        if not current:
+            current = [0] * torrent.info.files().num_files()
+        for index in indexes:
+            if 0 <= int(index) < len(current):
+                current[int(index)] = max(current[int(index)], 7)
+        torrent.handle.prioritize_files(current)
+        _want_pieces(torrent,
+                     [i for i, p in enumerate(current) if p > 0])
         return True
     except Exception:
         return False

@@ -20,12 +20,16 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import child_process, images, storage, theme
+from helpers import app_art, child_process, images, lookup_pool, storage, theme
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, GridSelection, confirm,
     defer_grid_rebuild, frameless_dialog, inform, scroll_area, search_field,
     show_toast, show_undo_toast,
 )
+# One poster number for the whole app: the Games/Apps tiles are sized
+# off the tracker's own POSTER_SIZE (no cycle - tracker imports no
+# windows module at load time).
+from windows.tracker import POSTER_SIZE as POSTER_ART_SIZE
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 EXE_FILTER = "Executable / Shortcut (*.exe *.lnk);;All files (*.*)"
@@ -40,6 +44,22 @@ THUMB_SIZE = (44, 44)
 # will overflow rather than wrap.
 GRID_COLS = 14
 GRID_COLS_SIDEBAR_OPEN = 13
+
+# The poster-size tile the Games and Apps grids draw now - the same
+# card the Movies & Series page uses (the owner's ask: "make the games
+# and apps cards the same size as movies cards").
+POSTER_CARD_WIDTH = POSTER_ART_SIZE[0] + 20
+# Fewer per row than the 120px tiles above, for the same fixed-count
+# reasoning: each of these cards is half again as wide.
+POSTER_GRID_COLS = 9
+POSTER_GRID_COLS_SIDEBAR_OPEN = 8
+
+
+def poster_grid_columns(page) -> int:
+    """grid_columns' twin for the poster-size grids."""
+    window = getattr(page, "app", None)
+    return (POSTER_GRID_COLS if getattr(window, "_sidebar_collapsed", False)
+            else POSTER_GRID_COLS_SIDEBAR_OPEN)
 
 # Shared by Apps, Websites and Games so the three grids stay identical
 # and CARD_TEXT_WIDTH below can't drift out of step with the margins it
@@ -270,6 +290,11 @@ class LinkGridPage(GridSelection, GlassPage):
     TITLE = "Links"
     DEFAULT_ENTRIES = []
     TARGET_KIND = "site"
+    # Poster-size tiles with store-quality artwork (the Apps page, the
+    # owner's ask) instead of the 120px icon tiles. Websites keep the
+    # small tiles: favicons have no high-res source and a wall of
+    # poster-sized favicons is worse, not bigger.
+    POSTER_CARDS = False
     # What the selection bar and its messages call these - see
     # widgets.GridSelection, shared with the Games page. "entries" rather
     # than the page's own title, because one of these grids holds apps
@@ -356,7 +381,56 @@ class LinkGridPage(GridSelection, GlassPage):
         self._drag_reorder = CardDragReorder(
             self.grid_body, self._begin_custom_order, self._drop_reorder)
 
+        # entry id -> the drawn card's art label, so arriving artwork
+        # swaps one pixmap instead of rebuilding the grid. Nothing in
+        # it outlives the redraw that filled it.
+        self._art_labels = {}
+        self._art_signals = _ArtSignals()
+        self._art_signals.ready.connect(self._on_app_art)
+
         self._refresh_grid()
+        self._backfill_app_art()
+
+    # ------------------------------------------------------------------
+    def _backfill_app_art(self):
+        """Fetch high-res artwork for every poster-card entry that has
+        none (see helpers/app_art). One lookup per entry on the shared
+        bounded pool; app_art caches hits and authoritative misses on
+        disk, so later loads cost a stat, not a request."""
+        if not self.POSTER_CARDS:
+            return
+        for entry in self.entries:
+            art = entry.get("art")
+            if art and Path(art).exists():
+                continue
+            lookup_pool.submit(self._app_art_worker, entry.get("id"),
+                               entry.get("name") or "")
+
+    def _app_art_worker(self, entry_id, name):
+        # Never raises - an exception here kills the pool worker thread.
+        try:
+            path = app_art.fetch_art(name)
+        except Exception:
+            path = None
+        if path and entry_id:
+            self._art_signals.ready.emit(entry_id, str(path))
+
+    def _on_app_art(self, entry_id, path):
+        entry = next((e for e in self.entries if e.get("id") == entry_id), None)
+        if entry is None:
+            return
+        entry["art"] = path
+        # One field on one entry - Home holds its own copy of this file
+        # (see _mutate for the defect a whole-list write caused).
+        storage.update_entry(self.DATA_FILE, entry_id, {"art": path})
+        drawn = self._art_labels.get(entry_id)
+        if drawn is not None:
+            try:
+                drawn.setPixmap(images.thumbnail_or_avatar(
+                    path, entry.get("name") or "", (POSTER_ART_SIZE[0],
+                                                    POSTER_ART_SIZE[0])))
+            except RuntimeError:
+                pass    # the grid rebuilt; the new card already asked
 
     # ------------------------------------------------------------------
     def _begin_custom_order(self):
@@ -430,6 +504,9 @@ class LinkGridPage(GridSelection, GlassPage):
                 widget.hide()
                 widget.deleteLater()
         self._clear_selection_cards()
+        # Emptied with the cards it names, same reason as the selection
+        # map above.
+        self._art_labels = {}
 
         # Dragging is off while a search is narrowing the grid: a drop
         # writes the order that is on screen (see _begin_custom_order),
@@ -447,7 +524,8 @@ class LinkGridPage(GridSelection, GlassPage):
             self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
-        columns = grid_columns(self)
+        columns = (poster_grid_columns(self) if self.POSTER_CARDS
+                   else grid_columns(self))
         for index, entry in enumerate(entries):
             # Dragging is off while selecting as well as while the grid is
             # narrowed: both a drag and a pick want the same left press.
@@ -465,8 +543,9 @@ class LinkGridPage(GridSelection, GlassPage):
         # No matte any more: a plain #Card is the frameless tile now
         # (theme.py) - icon and name floating on the ground, box only on
         # hover - the same Harbor language the poster grids and Home use.
+        poster = self.POSTER_CARDS
         card = Card(hoverable=True)
-        card.setFixedWidth(CARD_WIDTH)
+        card.setFixedWidth(POSTER_CARD_WIDTH if poster else CARD_WIDTH)
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.setContentsMargins(*CARD_MARGINS)
@@ -474,8 +553,21 @@ class LinkGridPage(GridSelection, GlassPage):
         missing = missing_app_targets(entry)
 
         icon = QLabel()
-        icon.setFixedSize(*THUMB_SIZE)
-        icon.setPixmap(images.thumbnail_or_avatar(entry.get("image"), entry["name"], THUMB_SIZE))
+        if poster:
+            # Square, at the poster card's full width: store icons are
+            # square originals, and cropping one to the movie tile's
+            # portrait would cut the sides off every logo. Falls back to
+            # the extracted icon (soft at this size but recognisable),
+            # then the letter avatar.
+            art_size = (POSTER_ART_SIZE[0], POSTER_ART_SIZE[0])
+            icon.setFixedSize(*art_size)
+            icon.setPixmap(images.thumbnail_or_avatar(
+                entry.get("art") or entry.get("image"), entry["name"], art_size))
+            self._art_labels[entry.get("id")] = icon
+        else:
+            icon.setFixedSize(*THUMB_SIZE)
+            icon.setPixmap(images.thumbnail_or_avatar(
+                entry.get("image"), entry["name"], THUMB_SIZE))
         if missing:
             # Dimmed rather than swapped for a warning glyph: the icon is
             # how a card is picked out of a grid at a glance, and losing
@@ -486,7 +578,9 @@ class LinkGridPage(GridSelection, GlassPage):
             icon.setGraphicsEffect(faded)
         layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        name = CardTextLabel(entry["name"])
+        text_width = (POSTER_CARD_WIDTH - CARD_MARGINS[0] - CARD_MARGINS[2]
+                      if poster else CARD_TEXT_WIDTH)
+        name = CardTextLabel(entry["name"], width=text_width)
         name.setObjectName("CardTitle")
         layout.addWidget(name)
 
@@ -497,7 +591,7 @@ class LinkGridPage(GridSelection, GlassPage):
             # and saying otherwise would be wrong rather than cautious.
             text = ("Not found" if len(missing) >= total
                     else f"{len(missing)} of {total} not found")
-            badge = CardTextLabel(text)
+            badge = CardTextLabel(text, width=text_width)
             badge.setStyleSheet(
                 f"color: {theme.DANGER}; font-weight: 700; font-size: 8pt; background: transparent;")
             layout.addWidget(badge)
@@ -690,6 +784,12 @@ class TargetRow(QWidget):
 
 class _IconSignals(QObject):
     ready = Signal(str, str)  # target (identity check), local path ("" = failed)
+
+
+class _ArtSignals(QObject):
+    # entry id -> local high-res artwork path, back from the lookup pool
+    # so the storage write and the repaint stay on the UI thread.
+    ready = Signal(str, str)
 
 
 class EntryForm(QDialog):

@@ -57,19 +57,18 @@ PANEL_WIDTH = 620
 PANEL_TOP_FRACTION = 0.18
 MAX_RESULTS = 8
 
-# Which file holds what, and which page each entry belongs to. Anime and
-# Reading share tracker.json, so that one is split by the entry's own
-# type rather than by file - the same rule home.PAGE_FOR_TYPE uses.
-_MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
+# Which file holds what, and which page each entry belongs to. Since
+# the Anime merge (main._merge_anime_into_series), tracker.json is the
+# reading file and series.json holds everything watched.
 _SOURCES = (
-    ("tracker.json", None, "title"),
+    ("tracker.json", "manga", "title"),
     ("series.json", "series", "title"),
     ("games.json", "games", "name"),
     ("apps.json", "apps", "name"),
     ("websites.json", "websites", "name"),
 )
 _PAGE_LABELS = {
-    "anime": "Anime", "manga": "Reading", "series": "Movies & Series",
+    "manga": "Read", "series": "Watch",
     "games": "Games", "apps": "Apps", "websites": "Websites",
 }
 
@@ -92,11 +91,7 @@ def collect(query: str):
             title = entry.get(key) or ""
             if query not in title.lower():
                 continue
-            entry_page = page
-            if entry_page is None:
-                entry_page = "manga" if entry.get("type") in _MANGA_TYPES else "anime"
-            results.append((title, entry_page,
-                            _PAGE_LABELS.get(entry_page, entry_page), entry))
+            results.append((title, page, _PAGE_LABELS.get(page, page), entry))
     # Titles that *start* with what was typed first - typing "one" should
     # reach One Piece before The World After The End.
     results.sort(key=lambda row: (not row[0].lower().startswith(query), row[0].lower()))
@@ -239,7 +234,7 @@ def open_entry(parent, page_name, entry):
     from windows.link_grid import open_link_entry
     from windows.tracker import open_tracker_entry
 
-    if page_name in ("anime", "manga", "series"):
+    if page_name in ("manga", "series"):
         # The details page, not an immediate resume: someone searching a
         # title by name is looking it up, the same intent as clicking a
         # card's body - resuming playback is the cover button's job.

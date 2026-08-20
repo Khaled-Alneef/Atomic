@@ -1107,6 +1107,123 @@ class GridSelection:
         return f"Restored {self._selection_count(len(removed))}"
 
 
+# The hero banner, Harbor's shape: a title's backdrop filling a rounded
+# panel edge to edge under a scrim that rises from the left so text over
+# it always reads. Shared by Home's continue hero and the tracker's
+# Discover featured slot, so the two heads of the app are one design.
+HERO_BANNER_HEIGHT = 300
+# The scrim's stops, left to right, as (position, alpha) over theme.BG:
+# heaviest where the text sits, nearly clear at the artwork's edge.
+HERO_BANNER_SCRIM = ((0.0, 242), (0.45, 175), (0.72, 95), (1.0, 30))
+
+
+class HeroBanner(QFrame):
+    """The hero's canvas: paints the backdrop and its scrim, and the
+    caller lays labels and buttons out on top.
+
+    Clickable as a whole with the hover-cursor contract every clickable
+    thing here follows. The backdrop arrives late (a TMDB/AniList
+    lookup) and lands through set_backdrop, cross-fading over whatever
+    was there; until then the banner is a flat surface panel, which is
+    what it stays for a title with no landscape art anywhere."""
+
+    FADE_MS = 260
+
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(HERO_BANNER_HEIGHT)
+        self._backdrop = None
+        self._previous = None
+        self._path = None
+        # How much of the new backdrop is showing, 0-1 - the cross-fade
+        # a rotating hero needs so a slide change is a dissolve, not a
+        # blink. Scaled copies are cached per size, not per paint, the
+        # same stutter the details page's ground caches away.
+        self._mix = 1.0
+        self._fade = QVariantAnimation(self)
+        self._fade.setDuration(self.FADE_MS)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.valueChanged.connect(self._on_fade)
+        self._scaled = {}
+        use_hover_cursor(self)
+
+    def _on_fade(self, value):
+        self._mix = float(value)
+        self.update()
+
+    def set_backdrop(self, path, fade=True) -> bool:
+        """Show `path` as the ground. None clears back to the flat
+        panel. Returns whether there is now art on screen."""
+        path = str(path) if path else None
+        if path == getattr(self, "_path", None):
+            return self._backdrop is not None
+        pixmap = QPixmap(path) if path else QPixmap()
+        incoming = None if pixmap.isNull() else pixmap
+        self._path = path if incoming is not None else None
+        self._previous = self._backdrop if fade else None
+        self._backdrop = incoming
+        self._scaled = {}
+        if fade and (self._previous is not None or incoming is not None):
+            self._fade.stop()
+            self._fade.setStartValue(0.0)
+            self._fade.setEndValue(1.0)
+            self._fade.start()
+        else:
+            self._mix = 1.0
+            self.update()
+        return incoming is not None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def _scaled_for(self, key, pixmap, size):
+        # Keyed with the size it was cut for, because the expanding
+        # scale never *equals* the rect - one axis overshoots - so
+        # comparing the result's own size would rescale every paint.
+        cached = self._scaled.get(key)
+        if cached is None or cached[0] != size:
+            scaled = pixmap.scaled(
+                size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation)
+            cached = (size, scaled)
+            self._scaled[key] = cached
+        return cached[1]
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(rect), theme.RADIUS_LG, theme.RADIUS_LG)
+        painter.setClipPath(clip)
+        painter.fillRect(rect, QColor(theme.SURFACE_HOVER))
+
+        def draw(key, pixmap, opacity):
+            if pixmap is None or opacity <= 0.0:
+                return
+            scaled = self._scaled_for(key, pixmap, rect.size())
+            painter.setOpacity(opacity)
+            painter.drawPixmap(int((rect.width() - scaled.width()) / 2),
+                               int((rect.height() - scaled.height()) / 2),
+                               scaled)
+            painter.setOpacity(1.0)
+
+        draw("previous", self._previous, 1.0 - self._mix)
+        draw("current", self._backdrop, self._mix if self._previous is not None
+             else 1.0)
+        gradient = QLinearGradient(0.0, 0.0, float(rect.width()), 0.0)
+        ground = QColor(theme.BG)
+        for stop, alpha in HERO_BANNER_SCRIM:
+            ground.setAlpha(alpha)
+            gradient.setColorAt(stop, QColor(ground))
+        painter.fillRect(rect, gradient)
+        painter.end()
+
+
 class GlyphButton(QPushButton):
     """A glyph button whose icon is painted rather than set as text.
 
@@ -1406,11 +1523,61 @@ class SideScroller(QWidget):
         # would be hidden forever.
         self._bar.valueChanged.connect(self._sync_arrows)
         self._bar.rangeChanged.connect(lambda *_: self._sync_arrows())
+        # The plain wheel moves the row sideways while the pointer is on
+        # it (the owner's ask) - see eventFilter. Where the glide is
+        # heading, for retargeting; None when settled.
+        self._wheel_target = None
+        self._anim.finished.connect(self._wheel_settled)
+        area.viewport().installEventFilter(self)
         # maximumHeight, not height(): the caller pins the area's height
         # before wrapping it, and the widget has not been laid out yet,
         # so height() is still the default 480.
         self.setFixedHeight(area.maximumHeight())
         self._sync_arrows()
+
+    def _wheel_settled(self):
+        self._wheel_target = None
+
+    def eventFilter(self, obj, event):
+        """A plain vertical wheel notch over the row scrolls it sideways
+        (the owner's ask - the row is the thing under the pointer, and
+        aiming at its 11px scrollbar to move it was the alternative).
+
+        Retargeting, not restarting, same as widgets._SmoothWheel: a
+        second notch mid-glide moves the destination and the animation
+        re-aims from wherever the row currently is. A notch against a
+        hard end is left unconsumed so Qt hands it up to the page, which
+        is what should scroll then - without that, a row parked at its
+        start would swallow every upward notch and the page would refuse
+        to move while the pointer crossed it."""
+        if event.type() != QEvent.Type.Wheel or obj is not self._area.viewport():
+            return False
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.ShiftModifier):
+            return False    # zoom and Qt's own horizontal-wheel chord
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        steps = delta / 120.0
+        if not steps:
+            return False
+        bar = self._bar
+        if bar.maximum() <= bar.minimum():
+            return False    # the row fits - nothing to scroll
+        # A third of a viewport per notch: SIDE_SCROLL_STEP's near-screenful
+        # is right for a deliberate arrow press, and far too coarse for a
+        # wheel that delivers three notches in a flick.
+        notch = max(90, int(self._area.viewport().width() * 0.30))
+        current = self._wheel_target if self._wheel_target is not None else bar.value()
+        target = max(bar.minimum(), min(bar.maximum(),
+                                        int(current + (-steps) * notch)))
+        if target == bar.value() and self._wheel_target is None:
+            return False    # hard against this end - the page's notch
+        self._wheel_target = target
+        self._anim.stop()
+        self._anim.setStartValue(bar.value())
+        self._anim.setEndValue(target)
+        self._anim.start()
+        event.accept()
+        return True
 
     def content_widget(self):
         """The widget the wrapped area scrolls - what a walk over the
@@ -1461,7 +1628,11 @@ class SideScroller(QWidget):
         target = bar.value() + (-step if at_left else step)
         target = max(bar.minimum(), min(bar.maximum(), target))
         # Stopped first: clicking twice quickly should continue from
-        # where the row is heading, not restart from where it was.
+        # where the row is heading, not restart from where it was. The
+        # wheel's own target is dropped with it - stop() never emits
+        # finished, so without this a wheel glide cut off by an arrow
+        # press would leave a stale destination for the next notch.
+        self._wheel_target = None
         self._anim.stop()
         self._anim.setStartValue(bar.value())
         self._anim.setEndValue(target)

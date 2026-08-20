@@ -216,9 +216,11 @@ ARROW_SCROLL_PX = 200
 ICON_REFRESH = "\ue72c"               # Refresh
 ICON_FULLSCREEN = "\ue740"            # FullScreen
 ICON_EXIT_FULLSCREEN = "\ue73f"       # BackToWindow
-ICON_LEAVE = "\ue892"                 # Previous - the same left arrow the
-                                      # player's prev/next carry (the door
-                                      # it replaced led the same way)
+ICON_LEAVE = "\ue72b"                 # Back - the plain left arrow, the
+                                      # same glyph the player's exit and
+                                      # the details page's back carry (the
+                                      # owner's ask: a normal back arrow,
+                                      # not the previous-track shape)
 ICON_CHAPTER_LIST = "\ue8fd"          # List - the same glyph the player's
                                       # episode list uses, so "the list of
                                       # things to open" is one icon in both
