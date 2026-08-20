@@ -714,21 +714,82 @@ def _ask_addon(addon, kind, stream_id, deadline) -> list:
     return found
 
 
-def _run_all(jobs, deadline) -> list:
+# When a fan-out may stop waiting for the sources still out.
+#
+# **Measured, 21 August 2026, Frieren S01E05 cold, each source alone:**
+#
+#     Torrentio           68 rows   0.34s
+#     TorrentsDB          50 rows   0.37s
+#     indexers            12 rows   1.82s
+#     Torrentio Anime      0 rows  12.40s
+#
+# 118 releases are in hand after four tenths of a second, and the whole
+# call took 6.37s - all of it waiting on a source that answered with
+# nothing. So the rule is: once ENOUGH_RESULTS releases are in *and* the
+# floor has passed, stop waiting and rank what arrived.
+#
+# **Which sources are worth waiting for is not the same question as
+# which are fast.** A first attempt used a flat 2.5s floor before any
+# early return, and A/B'd against waiting for everything it was a wash
+# on the median - because the floor delayed the lookups where every
+# source was quick. What actually matters is that the title-keyed
+# indexers are the only source reaching fansub releases no id-based
+# addon carries (exactly what anime needs), so *they* are waited for
+# while a slow addon is not. Marked per job by find_streams; an
+# unmarked job is optional.
+ENOUGH_RESULTS = 8
+
+
+def _run_all(jobs, deadline, *, enough=ENOUGH_RESULTS) -> list:
     """Every job at once, results flattened, nothing raising out.
+
+    `jobs` are callables, optionally `(callable, essential)` pairs. Once
+    every *essential* job has reported and there are `enough` results in
+    hand, the optional stragglers are abandoned rather than waited for -
+    measured, that is a source answering nothing after twelve seconds
+    while 118 releases had been in hand since the fourth tenth of the
+    first. Pass `enough=None` to wait for everything.
 
     A plain ThreadPoolExecutor rather than lookup_pool: that pool is
     shared with the tracker's per-entry background lookups and is
     deliberately only four workers wide, so a page-load backfill would
     sit in front of the one lookup the user is actually watching. This
-    pool exists for the length of one lookup and then goes away."""
+    pool exists for the length of one lookup and then goes away.
+
+    Not used as a context manager on purpose: `with` shuts the pool down
+    waiting, which would block on the very stragglers this exists to
+    stop waiting for. They are left to finish into a result nobody
+    reads, bounded by their own per-request timeouts."""
     if not jobs:
         return []
+    pairs = [job if isinstance(job, tuple) else (job, False) for job in jobs]
     results = []
-    workers = min(LOOKUP_WORKERS, len(jobs))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for found in pool.map(lambda job: job(), jobs):
-            results.extend(found or [])
+    workers = min(LOOKUP_WORKERS, len(pairs))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {pool.submit(job): essential for job, essential in pairs}
+        waiting_for = sum(1 for essential in futures.values() if essential)
+        # `deadline` is a monotonic timestamp (net.deadline_in), so what
+        # is left is simply the difference - floored, because a deadline
+        # already past still has to let the completed jobs be collected.
+        remaining = None
+        if deadline is not None:
+            remaining = max(0.1, deadline - time.monotonic())
+        try:
+            for future in concurrent.futures.as_completed(futures,
+                                                          timeout=remaining):
+                if futures.get(future):
+                    waiting_for -= 1
+                try:
+                    results.extend(future.result() or [])
+                except Exception:
+                    continue        # one dead source is not a dead lookup
+                if enough and waiting_for <= 0 and len(results) >= enough:
+                    break
+        except concurrent.futures.TimeoutError:
+            pass                    # the deadline is the answer
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return results
 
 
@@ -842,14 +903,21 @@ def find_streams(entry, *, season=None, episode=None, deadline=None) -> list:
     # can be the only thing that answers for an entry Cinemeta never
     # matched. Only for something with an episode or a name to ask for.
     if indexers is not None and (entry or {}).get("title"):
-        jobs.append(lambda: indexers.search(entry, season=season,
-                                            episode=episode, deadline=deadline))
+        # Marked essential: this is the one source that answers by
+        # *title*, so it reaches fansub releases no id-keyed addon
+        # carries, and abandoning it to save a second would quietly cost
+        # anime its best releases (see _run_all).
+        jobs.append(((lambda: indexers.search(entry, season=season,
+                                              episode=episode,
+                                              deadline=deadline)), True))
 
     # A saved page URL is worth digging into as well - it is the only
     # route for the sites the user configured themselves.
     page_url = (entry or {}).get("url") or ""
     if page_url.startswith("http") and not drm:
-        jobs.append(lambda: resolve_page(page_url, deadline=deadline))
+        # Essential for the same reason as the indexers: the user's own
+        # configured site is a route nothing else in this list has.
+        jobs.append(((lambda: resolve_page(page_url, deadline=deadline)), True))
 
     results.extend(_run_all(jobs, deadline))
 

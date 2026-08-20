@@ -26,6 +26,7 @@ says which, rather than spinning. Nothing here raises.
 """
 
 import concurrent.futures
+import html
 import json
 import re
 import urllib.parse
@@ -151,7 +152,15 @@ def _chapters_from_html(body: str, series_url: str, entry_type=None) -> list:
     # Anchor plus its inner text, so a chapter can carry its own title.
     for match in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', body,
                              re.S | re.I):
-        href, label = match.group(1).strip(), _clean(match.group(2))
+        # **Unescaped before anything parses it.** An href written
+        # `/series/the-villainess&#x27;s-last-dance/chapter-19` carries a
+        # `#` inside that entity, and urlsplit reads everything after a
+        # `#` as the fragment - so the path came out as
+        # `/series/the-villainess&`, no chapter matched, and Azora's
+        # whole catalogue looked chapterless. Any slug holding an
+        # apostrophe or an ampersand failed the same way.
+        href = html.unescape(match.group(1).strip())
+        label = _clean(match.group(2))
         absolute = urllib.parse.urljoin(series_url, href)
         if not absolute.startswith("http"):
             continue
@@ -212,7 +221,9 @@ def _page_urls(body: str, series_url: str) -> list:
     base = series_url.split("?", 1)[0].rstrip("/")
     numbers = set()
     for href, number in _PAGE_LINK_RE.findall(body or ""):
-        absolute = urllib.parse.urljoin(series_url, href)
+        # Unescaped for the same reason the chapter links are - a `#`
+        # inside an entity turns the rest of the path into a fragment.
+        absolute = urllib.parse.urljoin(series_url, html.unescape(href))
         if absolute.split("?", 1)[0].rstrip("/") != base:
             continue
         try:
@@ -529,12 +540,64 @@ def list_chapters(entry, *, deadline=None, refresh=False) -> list:
         chapters = []
     if not chapters:
         try:
+            chapters = _other_site_chapters(entry, deadline)
+        except Exception:
+            chapters = []
+    if not chapters:
+        try:
             chapters = _mangadex_chapters(entry, deadline)
         except Exception:
             chapters = []
     if chapters and key:
         _store(key, chapters)
     return chapters
+
+
+def _other_site_chapters(entry, deadline) -> list:
+    """The same title on a *different* configured site.
+
+    The middle rung between "this title's own site" and MangaDex, and it
+    exists because a site can be perfectly good at listing series and
+    unable to serve one. Measured on Mangalek: its catalogue browses and
+    searches fine, while every series page and its chapter ajax answer
+    403 to any client that is not a browser (six header shapes tried,
+    including full Chrome + Referer + Sec-Fetch). Without this, a title
+    discovered there opens an empty chapter list; with it, the same
+    title is read off whichever configured site does answer.
+
+    Title-matched at 0.85 - the same bar the schedule lookups use -
+    because reading someone else's series is a worse failure here than
+    showing nothing."""
+    title = (entry or {}).get("title") or ""
+    if not title.strip():
+        return []
+    own_site = (entry or {}).get("site_id")
+    for site in manga_sites.list_sites():
+        if site.get("id") == own_site:
+            continue
+        if net.step_timeout(deadline, DEFAULT_TIMEOUT) is None:
+            break
+        try:
+            found = manga_sites.search_site(site, title, deadline=deadline)
+        except Exception:
+            continue
+        best, best_score = None, 0.0
+        for row in found or []:
+            score = title_match.similarity(title, row.get("title") or "")
+            if score > best_score:
+                best, best_score = row, score
+        if best is None or best_score < 0.85 or not best.get("url"):
+            continue
+        probe = dict(entry)
+        probe["url"] = best["url"]
+        probe["site_id"] = site.get("id")
+        try:
+            chapters = _site_chapters(probe, deadline)
+        except Exception:
+            chapters = []
+        if chapters:
+            return chapters
+    return []
 
 
 # Images that are furniture, not pages.

@@ -216,6 +216,36 @@ def _verify_not_cached():
                  "  python packaging/build.py\n")
 
 
+def _refresh_shell_icon(exe_path):
+    """Tell Explorer this file changed, so it re-reads the icon.
+
+    Windows caches an executable's icon per path, and a rebuild that
+    keeps the same path keeps the cached picture - which is why a
+    freshly gold icon can go on showing as the old one in folder view
+    (the owner reported exactly that, with an app_icon.ico measured at
+    21% gold and 0% blue). SHChangeNotify is the polite ask: it
+    invalidates this one item rather than deleting the whole icon
+    cache database and restarting the shell.
+
+    Best effort - a build that cannot reach the shell API still
+    produced a correct exe, so this never fails the build."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        SHCNE_UPDATEITEM = 0x00002000
+        SHCNE_ASSOCCHANGED = 0x08000000
+        SHCNF_PATHW = 0x0005
+        SHCNF_FLUSH = 0x1000
+        shell32 = ctypes.windll.shell32
+        shell32.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH,
+                               ctypes.c_wchar_p(str(exe_path)), None)
+        shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_FLUSH, None, None)
+        print("Asked Explorer to re-read the icon.")
+    except Exception as error:            # pragma: no cover - shell only
+        print(f"(Could not refresh the shell icon cache: {error})")
+
+
 def main():
     # Before anything else: a build without the torrent engine is not a
     # build worth doing.
@@ -252,6 +282,7 @@ def main():
 
     final_exe = PROJECT_ROOT / "Atomic.exe"
     shutil.copy2(built_exe, final_exe)
+    _refresh_shell_icon(final_exe)
     print(f"\nDone: {final_exe}")
 
 

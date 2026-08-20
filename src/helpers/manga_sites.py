@@ -24,11 +24,26 @@ from . import net, storage
 
 SITES_FILE = "manga_sites.json"
 
+# Measured live 21 August 2026, browse / search / chapters each:
+#   3asq        30 rows  /  works  /  works (madara ajax)
+#   TeamX       30 rows  /  works  /  works
+#   Lava Scans  30 rows  /  works  /  works
+#   SWAT        30 rows  /  works  /  works (v2 REST api)
+#   Mangalek    30 rows  /  works  /  **403** - see below
+#   Azora       30 rows  /  no     /  works (19 chapters, 0.6s)
+#
+# Mangalek is kept despite the 403 because browsing and searching it
+# both work, and a title found there is read off whichever other site
+# does answer (chapter_source._other_site_chapters). Its series pages
+# and its chapter ajax refuse every non-browser client - six header
+# shapes were tried, up to a full Chrome set with Referer and Sec-Fetch.
 DEFAULT_SITES = [
     {"name": "3asq", "base_url": "https://3asq.online/"},
     {"name": "TeamX", "base_url": "https://www.olympustaff.com/"},
     {"name": "Lava Scans", "base_url": "https://lavascans.com/"},
     {"name": "SWAT", "base_url": "https://meshmanga.com/"},
+    {"name": "Mangalek", "base_url": "https://mangalik.net/"},
+    {"name": "Azora", "base_url": "https://azorafly.com/"},
 ]
 
 
@@ -37,6 +52,46 @@ def _normalize(base_url: str) -> str:
     if base_url and not base_url.endswith("/"):
         base_url += "/"
     return base_url
+
+
+# Defaults added after the first release that shipped this file. Adding
+# a name here adds that site to installs that already have a
+# manga_sites.json - once, recorded in ADDED_FILE, so a site the user
+# then deletes stays deleted rather than coming back every launch.
+LATER_DEFAULTS = ("Mangalek", "Azora")
+ADDED_FILE = "manga_sites_added.json"
+
+
+def _add_later_defaults(sites) -> list:
+    """Put newly-shipped default sites into an existing install.
+
+    Keyed on the base URL rather than the name: the user may well have
+    renamed one, and adding a second copy of a site they already have is
+    worse than not adding it at all."""
+    try:
+        already = set(storage.load(ADDED_FILE, []) or [])
+    except Exception:
+        already = set()
+    have = {_normalize(s.get("base_url")) for s in sites}
+    added = False
+    for default in DEFAULT_SITES:
+        if default["name"] not in LATER_DEFAULTS:
+            continue
+        if default["name"] in already:
+            continue
+        already.add(default["name"])
+        added = True
+        if _normalize(default["base_url"]) in have:
+            continue
+        sites.append({"id": str(uuid.uuid4()), "name": default["name"],
+                      "base_url": default["base_url"]})
+    if added:
+        try:
+            storage.save(SITES_FILE, sites)
+            storage.save(ADDED_FILE, sorted(already))
+        except Exception:
+            pass
+    return sites
 
 
 def _load():
@@ -48,7 +103,12 @@ def _load():
         sites = [{"id": str(uuid.uuid4()), "name": s["name"], "base_url": s["base_url"]}
                   for s in DEFAULT_SITES]
         storage.save(SITES_FILE, sites)
-    return sites
+        try:
+            storage.save(ADDED_FILE, sorted(LATER_DEFAULTS))
+        except Exception:
+            pass
+        return sites
+    return _add_later_defaults(sites)
 
 
 def list_sites() -> list:
@@ -587,6 +647,21 @@ def _browse_html(base_url: str, path: str, limit: int, timeout: int) -> list:
         if image and not record["cover_url"]:
             record["cover_url"] = _strip_wp_size_suffix(
                 urllib.parse.urljoin(base_url, html.unescape(image.group(1))))
+
+    # **A text used by many cards is a label, not a title.** Azora's
+    # cards lead with the series *type* ("مانهوا"), so the anchor text -
+    # otherwise the most trustworthy candidate - named every one of its
+    # thirty rows the same thing. Counting is the general form of that
+    # check: no listing page carries the same series three times, so a
+    # repeated string is a category, a badge or a status, and the slug
+    # is what to fall back to.
+    counts = {}
+    for record in found.values():
+        if record["title"]:
+            counts[record["title"]] = counts.get(record["title"], 0) + 1
+    for url, record in found.items():
+        if counts.get(record["title"], 0) >= 3:
+            record["title"] = _title_from_slug(url) or record["title"]
 
     rows = [found[url] for url in order if found[url]["title"]]
     # Cards with artwork fill the row first, the rest behind them and

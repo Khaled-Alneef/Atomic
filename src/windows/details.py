@@ -31,7 +31,7 @@ same thing for video and the owner rightly called that broken.
 import datetime
 import uuid
 
-from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPixmap
 from PyQt6.QtWidgets import (
@@ -276,8 +276,10 @@ def _chip_button(text) -> QPushButton:
 
 
 def _badge(text, kind) -> QLabel:
-    """WATCHED / READ in the accent, UPCOMING in the success green - the
-    two states the owner's reference picture colours differently."""
+    """DONE in the accent, UPCOMING in the success green - the two
+    states the owner's reference picture colours differently. One word
+    for finished across both media (the owner's ask), where this used to
+    say WATCHED on episodes and READ on chapters."""
     colours = {"watched": (theme.ON_ACCENT, theme.ACCENT_GRADIENT, theme.ACCENT),
                "upcoming": ("#0d1206", theme.SUCCESS, theme.SUCCESS)}
     fg, bg, border = colours[kind]
@@ -1004,8 +1006,11 @@ class DetailsPage(GlassPage):
                       or (season == watched_season
                           and number <= watched_episode)))
                 or history.episode_key(season, number) in self._history_marks)
+            # "DONE" for both media (the owner's ask) - one word for
+            # "you have finished this", rather than WATCHED here and
+            # READ on the chapter rows.
             badge = ("upcoming", "UPCOMING") if upcoming else (
-                ("watched", "WATCHED") if watched else None)
+                ("watched", "DONE") if watched else None)
             self._rows.insertWidget(shown, self._row_card(
                 title, _pretty_date(video.get("firstAired") or video.get("released")),
                 badge,
@@ -1042,7 +1047,7 @@ class DetailsPage(GlassPage):
                 or history.chapter_key(number) in self._history_marks)
             self._rows.insertWidget(shown, self._row_card(
                 title, chapter_published(chapter),
-                ("watched", "READ") if read else None,
+                ("watched", "DONE") if read else None,
                 lambda n=number: self._read(n),
                 on_menu=lambda ev, n=number: self._chapter_menu(ev, n)))
             shown += 1
@@ -1822,14 +1827,31 @@ class DetailsPage(GlassPage):
         # full-resolution originals now (artwork.BACKDROP_SIZE), and
         # smooth-scaling several megapixels on every repaint would make
         # hovering the list stutter.
-        if self._backdrop_scaled is None or self._backdrop_size != rect.size():
+        #
+        # Cut at devicePixelRatio and tagged with it, or the ground is
+        # rendered at logical size and stretched by Qt on any non-100%
+        # display - which is what made the chapter list's background
+        # look soft (the owner's report; the same trap HeroBanner had,
+        # and .claude/rules/ui.md states it plainly). The ratio is part
+        # of the cache key, so dragging the window to a differently
+        # scaled monitor re-cuts rather than reusing the other one's.
+        ratio = self.devicePixelRatioF() or 1.0
+        if (self._backdrop_scaled is None
+                or self._backdrop_size != (rect.size(), ratio)):
+            target = QSize(max(1, int(rect.width() * ratio)),
+                           max(1, int(rect.height() * ratio)))
             self._backdrop_scaled = self._backdrop.scaled(
-                rect.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation)
-            self._backdrop_size = rect.size()
+            self._backdrop_scaled.setDevicePixelRatio(ratio)
+            self._backdrop_size = (rect.size(), ratio)
         scaled = self._backdrop_scaled
-        painter.drawPixmap(int((rect.width() - scaled.width()) / 2),
-                           int((rect.height() - scaled.height()) / 2), scaled)
+        # Centred on the pixmap's *logical* size - width()/height() are
+        # device pixels once it carries a ratio.
+        width = scaled.width() / ratio
+        height = scaled.height() / ratio
+        painter.drawPixmap(int((rect.width() - width) / 2),
+                           int((rect.height() - height) / 2), scaled)
         gradient = QLinearGradient(0.0, 0.0, 0.0, float(rect.height()))
         for stop, red, green, blue, alpha in SCRIM:
             gradient.setColorAt(stop, QColor(red, green, blue, alpha))

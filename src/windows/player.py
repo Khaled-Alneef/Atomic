@@ -171,6 +171,21 @@ SUB_POS_ABOVE_CONTROLS = 87
 STREAM_BUDGET_S = 24
 SUBTITLE_BUDGET_S = 24
 
+# How a subtitle is named in the list: "<Language> <n> <Provider>" -
+# "Arabic 1 OpenSubtitles", "Arabic 2 SubDL", "English 1 SubtitleCat"
+# (the owner's ask). The release name it used to show was the raw file
+# stem - group tags, resolution and hash - which said nothing about what
+# picking it would give you, and two entries from one provider were
+# routinely indistinguishable. The count restarts per language *and*
+# provider, so the numbering answers "the second Arabic one from SubDL".
+SUBTITLE_LANGUAGE_NAMES = {
+    "ar": "Arabic", "ara": "Arabic", "en": "English", "eng": "English",
+    "fr": "French", "es": "Spanish", "de": "German", "ja": "Japanese",
+    "jp": "Japanese", "ko": "Korean", "zh": "Chinese", "tr": "Turkish",
+    "ru": "Russian", "pt": "Portuguese", "it": "Italian", "nl": "Dutch",
+    "id": "Indonesian", "hi": "Hindi", "fa": "Persian", "he": "Hebrew",
+}
+
 # The controls hold two rows now - the seek strip with its end times on
 # top, the buttons under it (the owner's reference layout) - so the
 # height is both rows plus margins: 22 + 48 + 8 + 10 + 8 spacing = 96.
@@ -438,6 +453,29 @@ def _mark_watched(entry, season, episode):
     except ImportError:                                 # pragma: no cover
         return False
     return tracker.record_progress(entry, season=season, episode=episode)
+
+
+def _name_subtitles(found) -> list:
+    """Stamp every result with its display name - see
+    SUBTITLE_LANGUAGE_NAMES.
+
+    Done once, here, rather than in the panel: the same string names the
+    row, marks which row is selected, and labels the track after it
+    loads, and deriving it three times is three chances to disagree.
+    Sorted stably by (language, provider) first so the numbering reads
+    in the order the rows are drawn."""
+    rows = [dict(item) for item in found if isinstance(item, dict)]
+    counts = {}
+    for item in rows:
+        code = str(item.get("lang") or "").strip().lower()
+        language = SUBTITLE_LANGUAGE_NAMES.get(
+            code, SUBTITLE_LANGUAGE_NAMES.get(code[:2], code.upper() or "Unknown"))
+        provider = str(item.get("source") or "Unknown").strip()
+        key = (language, provider)
+        counts[key] = counts.get(key, 0) + 1
+        item["language_name"] = language
+        item["display_name"] = f"{language} {counts[key]} {provider}"
+    return rows
 
 
 def _make_native(widget):
@@ -2371,11 +2409,20 @@ class PlayerPage(GlassPage):
             kind = "series" if self.episode else "movie"
         except Exception:
             imdb_id, kind = self.entry.get("imdb_id"), "movie"
+        def partial(found):
+            # Each source's answers as they land, so the panel fills in
+            # under a second instead of after four (see subtitles.search
+            # for the measurement). Every batch is the full ranked list
+            # so far, so the panel just redraws.
+            if not self._closing and run == self._run:
+                self._work.subs_ready.emit(list(found or []), run)
+
         try:
             found = subtitles_module.search(
                 self.entry.get("title") or "", year=self.entry.get("year"),
                 season=self.season, episode=self.episode, imdb_id=imdb_id,
-                kind=kind, deadline=net.deadline_in(SUBTITLE_BUDGET_S))
+                kind=kind, deadline=net.deadline_in(SUBTITLE_BUDGET_S),
+                on_partial=partial)
             self._work.subs_ready.emit(list(found or []), run)
         except Exception:
             logs.exception("Subtitle search failed")
@@ -2402,7 +2449,10 @@ class PlayerPage(GlassPage):
                 self._work.failed.emit("That Subtitle Could Not Be Downloaded", run)
                 return
             fmt = result.get("format") or "srt"
-            label = result.get("release") or result.get("name") or "Subtitle"
+            # The same name the row carried (see _name_subtitles), so
+            # the loaded track and the list agree on what was picked.
+            label = (result.get("display_name") or result.get("release")
+                     or "Subtitle")
             lang = str(result.get("lang") or "").lower()
             if (not lang.startswith("ar") and ai_translate is not None
                     and ai_translate.available()):
@@ -2458,7 +2508,7 @@ class PlayerPage(GlassPage):
     def _on_subtitles(self, found, run):
         if self._closing or run != self._run:
             return
-        self._subtitles = list(found or [])
+        self._subtitles = _name_subtitles(found or [])
         self._set_subtitle_count(len([s for s in self._subtitles
                                       if str(s.get("lang", "")).lower().startswith("ar")]))
         if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
@@ -3097,9 +3147,13 @@ class PlayerPage(GlassPage):
             for source, entries in by_source.items():
                 panel.add_group(f"{group.upper()}  ·  {source.upper()}")
                 for item in entries:
-                    label = item.get("release") or item.get("name") or "Subtitle"
+                    # "Arabic 2 SubDL" (see _name_subtitles), with the
+                    # release name moved down to the detail line - it is
+                    # still worth seeing, it just is not a name.
+                    label = (item.get("display_name")
+                             or item.get("release") or "Subtitle")
                     parts = [str(p) for p in
-                             (item.get("format"), item.get("lang")) if p]
+                             (item.get("format"), item.get("release")) if p]
                     # Say so when a line was produced by machine
                     # translation rather than written by a person. It is
                     # often serviceable and sometimes nonsense, and

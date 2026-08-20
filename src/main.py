@@ -366,10 +366,122 @@ class MainWindow(QMainWindow):
         # derived from these.
         self._section_bar_showing = False
         self._swap_group = None
+        # Every Downloads/Settings pair on screen - one per sidebar (see
+        # _build_utility_footer). The style and indicator refreshes walk
+        # this rather than naming widgets, so a bar gaining or losing a
+        # footer changes nothing else.
+        self._utility_bars = []
         self._build_sidebar(holder)
         self._build_section_sidebar(holder)
         self._sync_fold_buttons()
         return holder
+
+    def _build_utility_footer(self, layout, *, primary):
+        """Downloads and Settings at the foot of a sidebar.
+
+        **Both bars carry a pair** (the owner's ask): the contextual
+        section bar replaces the main one over a tracker page, and
+        having neither control there meant pressing Back before either
+        could be reached. Twin widgets rather than one pair reparented
+        between the bars - a widget moved between layouts on every page
+        swap is a flicker and a lifetime problem, where two are just two.
+
+        Every pair is registered in `_utility_bars`, and the style and
+        indicator refreshes walk that list, so nothing has to know how
+        many bars exist. `primary` names the main bar's copies as the
+        attributes the rest of the window already talks to.
+
+        Downloads sits with Settings rather than in the nav list above:
+        it is a utility view over a queue, not one of the user's
+        sections, and the nav list is their own drag-to-reorder order -
+        a row appearing in the middle of it would be one they never put
+        there. A NavButton for the same reason Settings is one: it is
+        already proven to render at both sidebar widths."""
+        downloads = QPushButton(objectName="NavButton")
+        # 40, matching Settings below and the section bar's rows: the
+        # nav rows above grew to Harbor's more generous height, and a
+        # 34px row under a column of 44px ones read as a different
+        # control rather than the same list continuing.
+        downloads.setFixedHeight(40)
+        downloads.setCheckable(True)
+        use_hover_cursor(downloads)
+        downloads.clicked.connect(lambda: self.navigate_to("downloads"))
+
+        # A notification badge in the button's top-right corner while
+        # anything is downloading (the owner's ask) - it carries the
+        # *count*, not just a dot, so how many are running is readable
+        # without opening the page, at either sidebar width. A child at
+        # a fixed offset, not a layout row, so nothing in the column
+        # moves when it appears. Mouse-transparent: it sits on its own
+        # button. Sized per count in refresh_download_indicator (two
+        # digits need a wider pill than one).
+        dot = QLabel(downloads)
+        dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dot.setFixedSize(16, 16)
+        dot.setStyleSheet(
+            f"background: {theme.ACCENT}; border: 1px solid {theme.BG};"
+            f" border-radius: 8px; color: {theme.ON_ACCENT};"
+            f" font-size: 8pt; font-weight: 700;")
+        dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        dot.hide()
+        layout.addWidget(downloads)
+
+        # Progress where it can be seen without opening the page. A slim
+        # accent strip directly under the Downloads button, plus the
+        # count in that button's own label; what is downloading is in
+        # the tooltip, since there is no room for a title at 220px and
+        # none at all in the folded rail.
+        #
+        # Hidden rather than zeroed when nothing is running: a bar
+        # sitting at 0% reads as a download that is stuck, and an idle
+        # sidebar should look exactly as it did before this existed.
+        bar = QProgressBar()
+        bar.setRange(0, 1000)
+        bar.setTextVisible(False)
+        bar.setFixedHeight(DOWNLOAD_BAR_HEIGHT)
+        bar.setStyleSheet(
+            f"QProgressBar {{ background: {theme.SURFACE_HOVER};"
+            f" border: none; border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}"
+            f"QProgressBar::chunk {{ background: {theme.ACCENT_GRADIENT};"
+            f" border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}")
+        bar.hide()
+        layout.addWidget(bar)
+
+        settings = QPushButton(objectName="NavButton")
+        settings.setFixedHeight(40)
+        use_hover_cursor(settings)
+        settings.clicked.connect(self._open_settings)
+        layout.addWidget(settings)
+
+        # The "an update is waiting" marker: a plain accent dot in the
+        # button's corner, hidden until the startup check finds one. A
+        # child widget rather than a character appended to the button's
+        # text, because that text is drawn in the Segoe icon font at both
+        # sidebar widths and a dot glyph there is one more codepoint that
+        # can come out as a missing-glyph box on a machine without it.
+        # Transparent to the mouse so the button underneath keeps its own
+        # hover highlight and hand cursor (.claude/rules/ui.md - never
+        # leave a cursor set on something that isn't handling the click).
+        update_dot = QLabel(settings)
+        update_dot.setFixedSize(UPDATE_DOT_SIZE, UPDATE_DOT_SIZE)
+        update_dot.setStyleSheet(
+            f"background: {theme.ACCENT}; border-radius: {UPDATE_DOT_SIZE // 2}px;")
+        update_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        update_dot.hide()
+        settings.installEventFilter(self)
+
+        pair = {"downloads": downloads, "dot": dot, "bar": bar,
+                "settings": settings, "update_dot": update_dot}
+        self._utility_bars.append(pair)
+        if primary:
+            self.downloads_btn = downloads
+            self.downloads_dot = dot
+            self.downloads_bar = bar
+            self.settings_btn = settings
+            self._update_dot = update_dot
+        self._style_downloads_btn()
+        self._style_settings_btn()
+        return pair
 
     def _build_fold_button(self):
         """One fold toggle - the main bar and the section bar each carry
@@ -506,110 +618,18 @@ class MainWindow(QMainWindow):
         # down clear of the nav list.
         layout.addStretch()
 
-        # Downloads sits with Settings rather than in the nav list above:
-        # it is a utility view over a queue, not one of the user's
-        # sections, and the nav list is their own drag-to-reorder order -
-        # a row appearing in the middle of it would be one they never put
-        # there. A NavButton for the same reason Settings is one: it is
-        # already proven to render at both sidebar widths.
-        self.downloads_btn = QPushButton(objectName="NavButton")
-        # 40, with Add/Settings below and the section bar's rows: the
-        # nav rows above grew to Harbor's more generous height, and a
-        # 34px row under a column of 44px ones read as a different
-        # control rather than the same list continuing.
-        self.downloads_btn.setFixedHeight(40)
-        self.downloads_btn.setCheckable(True)
-        use_hover_cursor(self.downloads_btn)
-        self.downloads_btn.clicked.connect(lambda: self.navigate_to("downloads"))
-        # A notification badge in the button's top-right corner while
-        # anything is downloading (the owner's ask) - it carries the
-        # *count* now, not just a dot, so how many are running is
-        # readable without opening the page, at either sidebar width. A
-        # child at a fixed offset, not a layout row, so nothing in the
-        # column moves when it appears. Mouse-transparent: it sits on
-        # its own button. Sized per count in refresh_download_indicator
-        # (two digits need a wider pill than one).
-        self.downloads_dot = QLabel(self.downloads_btn)
-        self.downloads_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.downloads_dot.setFixedSize(16, 16)
-        self.downloads_dot.setStyleSheet(
-            f"background: {theme.ACCENT}; border: 1px solid {theme.BG};"
-            f" border-radius: 8px; color: {theme.ON_ACCENT};"
-            f" font-size: 8pt; font-weight: 700;")
-        self.downloads_dot.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.downloads_dot.hide()
-        self._style_downloads_btn()
-        layout.addWidget(self.downloads_btn)
+        # No Add button here any more (the owner's ask). The menu itself
+        # survives - Ctrl+N still opens it (see the shortcut, which calls
+        # _open_add_menu) and each page carries its own Add - so the
+        # sidebar's foot is Downloads and Settings alone.
+        self._add_menu = QMenu(self)
+        self._add_menu.aboutToShow.connect(self._build_add_menu)
 
-        # Progress where it can be seen without opening the page - the
-        # thing actually asked for. A slim accent strip directly under
-        # the Downloads button, plus the count in that button's own
-        # label; the season and episode being downloaded are in the
-        # tooltip, since there is no room for a title at 220px and none
-        # at all in the folded rail.
-        #
-        # Hidden rather than zeroed when nothing is running: a bar
-        # sitting at 0% reads as a download that is stuck, and an idle
-        # sidebar should look exactly as it did before this existed. It
-        # is the only thing in the column below the stretch that changes
-        # height, so showing it lifts the Downloads button by its own
-        # 4px + the layout's 4px spacing and leaves Add/Settings put.
-        self.downloads_bar = QProgressBar()
-        self.downloads_bar.setRange(0, 1000)
-        self.downloads_bar.setTextVisible(False)
-        self.downloads_bar.setFixedHeight(DOWNLOAD_BAR_HEIGHT)
-        self.downloads_bar.setStyleSheet(
-            f"QProgressBar {{ background: {theme.SURFACE_HOVER};"
-            f" border: none; border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}"
-            f"QProgressBar::chunk {{ background: {theme.ACCENT_GRADIENT};"
-            f" border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}")
-        self.downloads_bar.hide()
-        layout.addWidget(self.downloads_bar)
+        self._build_utility_footer(layout, primary=True)
 
         self._downloads_timer = QTimer(self)
         self._downloads_timer.timeout.connect(self.refresh_download_indicator)
         self._downloads_timer.start(DOWNLOAD_IDLE_POLL_MS)
-
-        self.add_btn = QPushButton("+", objectName="AddButton")
-        self.add_btn.setFixedHeight(40)
-        self.add_btn.setToolTip("Add")
-        use_hover_cursor(self.add_btn)
-        # setMenu, not clicked -> menu.exec(...): Qt then places the popup
-        # itself, on the screen the button is actually on. Positioning it
-        # by hand means mapToGlobal, which returns coordinates divided by
-        # the *other* screen's scale factor on a mixed-DPI pair - the same
-        # trap that once put toasts 200px off (.claude/rules/ui.md). The
-        # tracker's filter button is built this way for the same reason.
-        self._add_menu = QMenu(self)
-        self._add_menu.aboutToShow.connect(self._build_add_menu)
-        self.add_btn.setMenu(self._add_menu)
-        layout.addWidget(self.add_btn)
-
-        self.settings_btn = QPushButton(objectName="NavButton")
-        # Matches the Add button above it, and gives the collapsed gear
-        # glyph room to render without being clipped.
-        self.settings_btn.setFixedHeight(40)
-        use_hover_cursor(self.settings_btn)
-        self.settings_btn.clicked.connect(self._open_settings)
-        self._style_settings_btn()
-        layout.addWidget(self.settings_btn)
-
-        # The "an update is waiting" marker: a plain accent dot in the
-        # button's corner, hidden until the startup check finds one. A
-        # child widget rather than a character appended to the button's
-        # text, because that text is drawn in the Segoe icon font at both
-        # sidebar widths and a dot glyph there is one more codepoint that
-        # can come out as a missing-glyph box on a machine without it.
-        # Transparent to the mouse so the button underneath keeps its own
-        # hover highlight and hand cursor (.claude/rules/ui.md - never
-        # leave a cursor set on something that isn't handling the click).
-        self._update_dot = QLabel(self.settings_btn)
-        self._update_dot.setFixedSize(UPDATE_DOT_SIZE, UPDATE_DOT_SIZE)
-        self._update_dot.setStyleSheet(
-            f"background: {theme.ACCENT}; border-radius: {UPDATE_DOT_SIZE // 2}px;")
-        self._update_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._update_dot.hide()
 
         # A download left running from the last session (or queued by a
         # player window opened before this one) should be visible on the
@@ -677,6 +697,11 @@ class MainWindow(QMainWindow):
         self.section_list.model().rowsMoved.connect(self._on_sections_reordered)
         layout.addWidget(self.section_list)
         layout.addStretch()
+
+        # This bar's own Downloads and Settings (the owner's ask): the
+        # section bar takes the main one's place over a tracker page, and
+        # without a pair here reaching either meant pressing Back first.
+        self._build_utility_footer(layout, primary=False)
 
         self._section_labels = {}    # key -> label, for restyles on fold
         self._section_keys = None    # what the list was last filled for
@@ -852,13 +877,14 @@ class MainWindow(QMainWindow):
         hidden.move(-width, 0)
 
     def _position_update_dot(self):
-        """Top-right corner of the Settings button. Re-run on every resize
-        of that button (see eventFilter) rather than placed once: folding
-        the sidebar animates its width from 220 to 68, and a dot placed at
-        the old width would sit outside the collapsed rail."""
-        button = self.settings_btn
-        self._update_dot.move(
-            button.width() - UPDATE_DOT_SIZE - UPDATE_DOT_MARGIN, UPDATE_DOT_MARGIN)
+        """Top-right corner of every Settings button. Re-run on each
+        resize of one (see eventFilter) rather than placed once: folding
+        the sidebar animates its width from 220 to 68, and a dot placed
+        at the old width would sit outside the collapsed rail."""
+        for pair in getattr(self, "_utility_bars", ()):
+            pair["update_dot"].move(
+                pair["settings"].width() - UPDATE_DOT_SIZE - UPDATE_DOT_MARGIN,
+                UPDATE_DOT_MARGIN)
 
     # ------------------------------------------------------------------
     def _style_nav_item(self, item, name, page_name):
@@ -914,14 +940,17 @@ class MainWindow(QMainWindow):
         # usual tooltip at either width, the same way a waiting update
         # does on Settings below.
         count = f" ({self._download_count})" if self._download_count else ""
-        self.downloads_btn.setText(
-            glyph if collapsed else f"  {glyph}   Downloads{count}")
-        self.downloads_btn.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
-        self.downloads_btn.setToolTip(
-            self._download_tooltip or ("Downloads" if collapsed else ""))
-        self.downloads_btn.setProperty("collapsed", collapsed)
-        self.downloads_btn.style().unpolish(self.downloads_btn)
-        self.downloads_btn.style().polish(self.downloads_btn)
+        for pair in getattr(self, "_utility_bars", ()):
+            button = pair["downloads"]
+            button.setText(glyph if collapsed
+                           else f"  {glyph}   Downloads{count}")
+            button.setFont(theme.icon_font() if collapsed
+                           else theme.icon_font(10))
+            button.setToolTip(self._download_tooltip
+                              or ("Downloads" if collapsed else ""))
+            button.setProperty("collapsed", collapsed)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def refresh_download_indicator(self):
         """Re-read what is downloading and show (or hide) the strip.
@@ -952,28 +981,33 @@ class MainWindow(QMainWindow):
             logs.exception("Could not read download progress")
             active = None
 
+        bars = getattr(self, "_utility_bars", ())
         if active is None:
-            self.downloads_bar.hide()
-            self.downloads_dot.hide()
+            for pair in bars:
+                pair["bar"].hide()
+                pair["dot"].hide()
             count, tooltip = 0, ""
         else:
             count = int(active.get("count") or 0)
-            # The badge rides the button's own top-right corner; placed
-            # here because the button's width depends on the sidebar
-            # state and this is the one place that runs on every change.
-            # Width follows the digits - "12" in a 16px disc clips.
-            self.downloads_dot.setText(str(count) if count else "")
-            width = 16 if count < 10 else 22
-            self.downloads_dot.setFixedSize(width, 16)
-            self.downloads_dot.move(self.downloads_btn.width() - width - 2, 0)
-            self.downloads_dot.show()
-            self.downloads_dot.raise_()
             try:
                 fraction = float(active.get("progress") or 0.0)
             except (TypeError, ValueError):
                 fraction = 0.0
-            self.downloads_bar.setValue(max(0, min(1000, int(fraction * 1000))))
-            self.downloads_bar.show()
+            for pair in bars:
+                # The badge rides its button's own top-right corner;
+                # placed here because the button's width depends on the
+                # sidebar state and this is the one place that runs on
+                # every change. Width follows the digits - "12" in a
+                # 16px disc clips.
+                dot, button = pair["dot"], pair["downloads"]
+                dot.setText(str(count) if count else "")
+                width = 16 if count < 10 else 22
+                dot.setFixedSize(width, 16)
+                dot.move(button.width() - width - 2, 0)
+                dot.show()
+                dot.raise_()
+                pair["bar"].setValue(max(0, min(1000, int(fraction * 1000))))
+                pair["bar"].show()
             label = active.get("label") or "Download"
             extra = f" (+{count - 1} more)" if count > 1 else ""
             tooltip = f"{label} - {int(round(fraction * 100))}%{extra}"
@@ -998,23 +1032,27 @@ class MainWindow(QMainWindow):
         # monochrome and inherits the button's color, so it works at both
         # widths; it just renders at the label's 10.5pt here rather than
         # the collapsed rail's 14pt, matching the size the emoji had.
-        self.settings_btn.setText(
-            theme.SETTINGS_ICON if collapsed else f"  {theme.SETTINGS_ICON}   Settings")
-        self.settings_btn.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
-        # A waiting update outranks the usual tooltip at either width -
-        # the dot says something is there, this says what. Expanded, the
-        # button already reads "Settings", so there is otherwise nothing
-        # to add and the tooltip stays empty.
-        if self._pending_update_version:
-            self.settings_btn.setToolTip(
-                f"Atomic {self._pending_update_version} is available")
-        else:
-            self.settings_btn.setToolTip("Settings" if collapsed else "")
-        # Drives the [collapsed="true"] QSS rule; Qt only re-evaluates
-        # property-based selectors after an explicit unpolish/polish.
-        self.settings_btn.setProperty("collapsed", collapsed)
-        self.settings_btn.style().unpolish(self.settings_btn)
-        self.settings_btn.style().polish(self.settings_btn)
+        for pair in getattr(self, "_utility_bars", ()):
+            button = pair["settings"]
+            button.setText(theme.SETTINGS_ICON if collapsed
+                           else f"  {theme.SETTINGS_ICON}   Settings")
+            button.setFont(theme.icon_font() if collapsed
+                           else theme.icon_font(10))
+            # A waiting update outranks the usual tooltip at either
+            # width - the dot says something is there, this says what.
+            # Expanded, the button already reads "Settings", so there is
+            # otherwise nothing to add and the tooltip stays empty.
+            if self._pending_update_version:
+                button.setToolTip(
+                    f"Atomic {self._pending_update_version} is available")
+            else:
+                button.setToolTip("Settings" if collapsed else "")
+            # Drives the [collapsed="true"] QSS rule; Qt only
+            # re-evaluates property-based selectors after an explicit
+            # unpolish/polish.
+            button.setProperty("collapsed", collapsed)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def _toggle_sidebar(self):
         self._sidebar_collapsed = not self._sidebar_collapsed
@@ -1114,6 +1152,22 @@ class MainWindow(QMainWindow):
                 continue
             self._add_menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
 
+    def _open_add_menu(self):
+        """Pop the Add menu without a button to hang it on.
+
+        The + button that used to own it is gone from the sidebar (the
+        owner's ask), so Ctrl+N places the popup itself. The anchor
+        comes from `window.geometry()`, which is already in global
+        coordinates - never mapToGlobal, which divides by the *other*
+        screen's scale factor on a mixed-DPI pair (.claude/rules/ui.md).
+        """
+        self._build_add_menu()
+        frame = self.geometry()
+        sidebar = getattr(self, "sidebar", None)
+        width = sidebar.width() if sidebar is not None else SIDEBAR_WIDTH
+        self._add_menu.popup(QPoint(frame.x() + width,
+                                    frame.y() + frame.height() - 120))
+
     def _add_via(self, page_name, action):
         self.navigate_to(page_name, animate=False)
         action(self._current_page)
@@ -1163,7 +1217,8 @@ class MainWindow(QMainWindow):
             return
         version = found.get("version") or ""
         self._pending_update_version = version
-        self._update_dot.show()
+        for pair in getattr(self, "_utility_bars", ()):
+            pair["update_dot"].show()
         self._position_update_dot()
         self._style_settings_btn()
         # First time this version is seen: a toast, which is enough to
@@ -1214,15 +1269,27 @@ class MainWindow(QMainWindow):
         # page kept whatever width it was built at, and the uncovered
         # strip of window showed through down the right-hand side,
         # looking like a second sidebar had appeared out of nowhere.
-        if obj is self.container and event.type() == QEvent.Type.Resize:
+        # **getattr, not attribute access.** A filter installed while the
+        # window is still being built starts receiving events before the
+        # rest of it exists: the sidebar footers install one on their
+        # Settings button (see _build_utility_footer), which fires during
+        # _build_sidebar, and `self.container` is not assigned until
+        # after that. The AttributeError landed inside a Qt callback,
+        # where it took the whole process down with no traceback at all -
+        # exactly the failure helpers/logs.install_excepthook exists for.
+        if (obj is getattr(self, "container", None)
+                and event.type() == QEvent.Type.Resize):
             self._fit_current_page()
         # The sidebars are hand-positioned children of their holder for
         # the same reason the pages are of the container - they slide
         # over each other - so they too follow their parent's resizes
         # here (window resize, and the fold animation's width sweep).
-        if obj is self.sidebar_holder and event.type() == QEvent.Type.Resize:
+        if (obj is getattr(self, "sidebar_holder", None)
+                and event.type() == QEvent.Type.Resize):
             self._layout_sidebars()
-        if obj is self.settings_btn and event.type() == QEvent.Type.Resize:
+        if event.type() == QEvent.Type.Resize and any(
+                obj is pair["settings"]
+                for pair in getattr(self, "_utility_bars", ())):
             self._position_update_dot()
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.BackButton:
@@ -1527,10 +1594,12 @@ class MainWindow(QMainWindow):
                     show_toast(self, "Nothing To Undo")
                 return
             if event.key() == Qt.Key.Key_N:
-                # The same menu the + button opens, at the same place -
-                # setMenu means Qt positions it, so this is one call and
-                # no geometry maths (see _show_add_menu's comment).
-                self.add_btn.showMenu()
+                # The + button is gone from the sidebar (the owner's
+                # ask) but the menu it opened is not - this shortcut is
+                # what still reaches it. Popped at the sidebar's foot,
+                # from the window's own geometry rather than
+                # mapToGlobal (.claude/rules/ui.md).
+                self._open_add_menu()
                 return
             if event.key() == Qt.Key.Key_Comma:
                 self._open_settings()
@@ -1625,7 +1694,8 @@ class MainWindow(QMainWindow):
             self._show_page(target, direction=self._direction_between(current, target))
 
     def _sync_nav_highlight(self, page_name):
-        self.downloads_btn.setChecked(page_name == "downloads")
+        for pair in getattr(self, "_utility_bars", ()):
+            pair["downloads"].setChecked(page_name == "downloads")
         if page_name == "home":
             self.home_list.setCurrentRow(0)
         else:

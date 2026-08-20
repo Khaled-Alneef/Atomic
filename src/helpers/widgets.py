@@ -7,8 +7,9 @@ from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
                           QPointF, QPropertyAnimation, QRect, QRectF, QSize,
                           Qt, QTimer, QVariantAnimation)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QColor, QCursor, QDrag, QIcon, QLinearGradient,
-                         QPainter, QPainterPath, QPen, QPixmap)
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QDrag, QIcon,
+                         QLinearGradient, QPainter, QPainterPath, QPen,
+                         QPixmap, QTransform)
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
     QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
@@ -1213,11 +1214,20 @@ class HeroBanner(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         rect = self.rect()
-        clip = QPainterPath()
-        clip.addRoundedRect(QRectF(rect), theme.RADIUS_LG, theme.RADIUS_LG)
-        painter.setClipPath(clip)
-        painter.fillRect(rect, QColor(theme.SURFACE_HOVER))
+        shape = QPainterPath()
+        shape.addRoundedRect(QRectF(rect), theme.RADIUS_LG, theme.RADIUS_LG)
+        # **Filled through the path, not clipped to it.** setClipPath is
+        # not antialiased in Qt's raster engine - the clip is applied per
+        # whole pixel - so the artwork kept hard square corners under a
+        # rounded panel however large the radius (the owner's screenshot,
+        # twice). Painting each layer as a *brush* over the same path
+        # antialiases the edge properly, which is what actually rounds
+        # the picture rather than only the frame behind it.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.SURFACE_HOVER))
+        painter.drawPath(shape)
 
         def draw(key, pixmap, opacity):
             if pixmap is None or opacity <= 0.0:
@@ -1230,10 +1240,18 @@ class HeroBanner(QFrame):
             ratio = scaled.devicePixelRatio() or 1.0
             width = scaled.width() / ratio
             height = scaled.height() / ratio
+            brush = QBrush(scaled)
+            # The brush paints from the origin, so the same centring
+            # offset has to be carried as the brush's own transform -
+            # and in logical units, since the pixmap is ratio-tagged.
+            transform = QTransform()
+            transform.translate((rect.width() - width) / 2.0,
+                                (rect.height() - height) / 2.0)
+            transform.scale(1.0 / ratio, 1.0 / ratio)
+            brush.setTransform(transform)
             painter.setOpacity(opacity)
-            painter.drawPixmap(int((rect.width() - width) / 2),
-                               int((rect.height() - height) / 2),
-                               scaled)
+            painter.setBrush(brush)
+            painter.drawPath(shape)
             painter.setOpacity(1.0)
 
         draw("previous", self._previous, 1.0 - self._mix)
@@ -1244,7 +1262,8 @@ class HeroBanner(QFrame):
         for stop, alpha in HERO_BANNER_SCRIM:
             ground.setAlpha(alpha)
             gradient.setColorAt(stop, QColor(ground))
-        painter.fillRect(rect, gradient)
+        painter.setBrush(QBrush(gradient))
+        painter.drawPath(shape)
         painter.end()
 
 
