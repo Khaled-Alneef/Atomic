@@ -153,8 +153,8 @@ class GlobalSearch(QDialog):
         layout.addWidget(self.empty)
 
         self.setStyleSheet(
-            f"QDialog {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};"
-            f" border-radius: 10px; }}")
+            f"QDialog {{ background: {theme.PANEL_FILL}; border: 1px solid {theme.BORDER};"
+            f" border-radius: {theme.RADIUS}px; }}")
         self._rows = []
 
     def set_query(self, query: str):
@@ -234,7 +234,10 @@ def open_entry(parent, page_name, entry):
     from windows.tracker import open_tracker_entry
 
     if page_name in ("anime", "manga", "series"):
-        open_tracker_entry(parent, entry)
+        # The details page, not an immediate resume: someone searching a
+        # title by name is looking it up, the same intent as clicking a
+        # card's body - resuming playback is the cover button's job.
+        open_tracker_entry(parent, entry, resume=False)
     elif page_name == "games":
         _open_game(parent, entry)
     else:

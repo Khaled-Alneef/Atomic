@@ -40,16 +40,18 @@ Everything fails soft: a source that dies returns nothing and the others
 still answer.
 """
 
+import concurrent.futures
 import gzip
 import io
 import json
+import lzma
 import os
 import re
 import urllib.parse
 import urllib.request
 import zipfile
 
-from . import net, title_match
+from . import app_settings, net, title_match
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
@@ -158,6 +160,16 @@ def _unpack(raw: bytes, name_hint: str = "") -> bytes:
             return gzip.decompress(raw)[:MAX_SUBTITLE_BYTES]
         except Exception:
             return raw
+    # AnimeTosho serves every attachment xz-compressed whatever the
+    # extension says - a URL ending in .ass whose first bytes are
+    # \xfd7zXZ (measured on a ToonsHub Arabic track). Without this the
+    # bytes "decode" into codepage noise and the file is rejected as not
+    # being a subtitle.
+    if raw[:6] == b"\xfd7zXZ\x00":
+        try:
+            return lzma.decompress(raw)[:MAX_SUBTITLE_BYTES]
+        except Exception:
+            return raw
     if raw[:2] == b"PK":
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
@@ -222,8 +234,16 @@ def _parse_ass(text: str) -> list:
     cues, fields = [], None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.lower().startswith("format:") and fields is None:
-            fields = [f.strip().lower() for f in stripped.split(":", 1)[1].split(",")]
+        if stripped.lower().startswith("format:"):
+            candidate = [f.strip().lower() for f in stripped.split(":", 1)[1].split(",")]
+            # Only the *Events* format line. A real .ass file carries two
+            # `Format:` lines and the [V4+ Styles] one comes first, with
+            # ~23 style columns - taking it made every Dialogue line look
+            # short and parse to zero cues (measured on a Crunchyroll
+            # Arabic track: 344 dialogue lines, 0 cues). The Events line
+            # is the one that names Start and End.
+            if "start" in candidate and "end" in candidate:
+                fields = candidate
             continue
         if not stripped.lower().startswith("dialogue:"):
             continue
@@ -286,20 +306,28 @@ def _opensubtitles_v3(query, deadline) -> list:
     if timeout is None:
         return []
     body = json.loads(_get_text(url, timeout))
-    results = []
+    results, english = [], []
     for item in (body or {}).get("subtitles") or []:
-        if not is_arabic_code(item.get("lang")):
+        lang = str(item.get("lang") or "").lower()
+        arabic = is_arabic_code(lang)
+        # English rides along as well as Arabic now, deliberately: for
+        # seasonal anime the measured Arabic coverage here is zero, and
+        # an English track is the raw material the AI translator turns
+        # into Arabic (see the player's subtitle worker). Anything else
+        # is noise - a Vietnamese track unlocks nothing.
+        if not arabic and lang not in ("eng", "en"):
             continue
-        results.append({
+        row = {
             "source": "OpenSubtitles",
-            "name": os.path.basename(str(item.get("url") or "")) or "Arabic subtitle",
+            "name": os.path.basename(str(item.get("url") or "")) or "Subtitle",
             "release": str(item.get("id") or ""),
-            "lang": "ar",
+            "lang": "ar" if arabic else "en",
             "url": item.get("url"),
             "format": "srt",
             "rating": 0,
-        })
-    return results
+        }
+        (results if arabic else english).append(row)
+    return results + english[:4]
 
 
 _SC_RESULT_RE = re.compile(r'href="(subs/[^"]+\.html)"[^>]*>(.*?)</a>', re.S | re.I)
@@ -356,41 +384,158 @@ def _subtitlecat(query, deadline) -> list:
     return results
 
 
+# One per-language attachment link on an AnimeTosho article page:
+# `<a href="https://animetosho.org/storage/attach/...">Arabic [ara, ASS]</a>`.
+_AT_ATTACH_RE = re.compile(
+    r'<a href="(https://animetosho\.org/storage/attach/[^"]+)"[^>]*>'
+    r'([^<]{0,90})</a>', re.I)
+_AT_LANG_RE = re.compile(r"\[(\w{2,3}),\s*(\w{2,4})\]")
+
+# How many release pages one search is allowed to open, and how many
+# results are enough to stop early. Each page is a request; a search
+# that opened every one of 47 matches would be most of the wait.
+# Raised from 4/3 at the owner's ask for more Arabic on anime: this is
+# the one source that actually carries it, so two more page fetches
+# here buy more than any new source measured to date.
+_AT_MAX_PAGES = 6
+_AT_ENOUGH = 5
+
+
 def _animetosho(query, deadline) -> list:
     """AnimeTosho, for the case the other sources are worst at: anime.
 
-    Not a subtitle site - it indexes anime releases - but it exposes the
-    files attached to each release, and Arabic-subbed releases put their
-    .ass/.srt there. This is the only source measured that answers for
-    seasonal anime at all, which is why a release index is in a subtitle
-    module."""
+    Not a subtitle site - it indexes anime releases - but every release
+    page lists the subtitle tracks *inside* the release as individually
+    downloadable attachments, per language. Measured on a real seasonal
+    episode (Solo Leveling S02E05): the ToonsHub multi-sub release
+    carries 19 attachments including **Arabic [ara, ASS]** - actual
+    scanlator-grade Arabic, keyless, for an episode every subtitle site
+    measured had nothing for. This is the anime path.
+
+    The first version of this source returned the article *page* URL
+    with a `needs_page` flag that nothing ever resolved, so every one of
+    its results failed to download - a source that answers and can never
+    deliver. The page walk happens here now, bounded, and what comes
+    back is the direct attachment URL (xz-compressed - see _unpack)."""
     title = query.get("title") or ""
-    if not title:
+    episode = query.get("episode")
+    if not title or not episode:
         return []
     timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
     if timeout is None:
         return []
-    url = "https://feed.animetosho.org/json?q=" + urllib.parse.quote_plus(_search_terms(query))
+    # The fansub numbering, not S01E05: these releases write "Title - 05"
+    # or "S02E05" under the show's own season, and the plain form matches
+    # both (the feed's search is a text search).
+    terms = f"{title} {int(episode):02d}"
+    url = "https://feed.animetosho.org/json?q=" + urllib.parse.quote_plus(terms)
     body = json.loads(_get_text(url, timeout))
-    results = []
-    for item in (body or [])[:25]:
-        name = str(item.get("title") or item.get("article_title") or "")
-        # Arabic releases say so in the release name; nothing else in the
-        # feed identifies language.
-        if not re.search(r"\b(arabic|arab|ara)\b", name, re.I) and "عرب" not in name:
-            continue
-        link = item.get("article_url") or item.get("link")
+    rows = body if isinstance(body, list) else []
+    if not rows and int(query.get("season") or 0) > 1:
+        # Nothing under the plain form - the release may be filed only
+        # under SxxEyy. One extra request, and only on a miss, so an
+        # episode the first query answered costs nothing more.
+        timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+        if timeout is None:
+            return []
+        terms = f"{title} S{int(query['season']):02d}E{int(episode):02d}"
+        try:
+            body = json.loads(_get_text(
+                "https://feed.animetosho.org/json?q="
+                + urllib.parse.quote_plus(terms), timeout))
+            rows = body if isinstance(body, list) else []
+        except Exception:
+            rows = []
+
+    def episode_stated(name):
+        return re.search(rf"(?:^|[\s\-_\[(e])0?{int(episode)}(?:v\d)?(?=[\s\-_\])]|$)",
+                         name, re.I)
+
+    # Multi-sub groups first - they are the ones that carry Arabic at
+    # all, and page fetches are the budget being spent.
+    candidates = [r for r in rows
+                  if episode_stated(str(r.get("title") or ""))
+                  and title_match.similarity(title, str(r.get("title") or "")) > 0.2]
+    candidates.sort(key=lambda r: 0 if re.search(
+        r"multi|toonshub|erai", str(r.get("title") or ""), re.I) else 1)
+
+    results, pages = [], 0
+    for row in candidates:
+        if pages >= _AT_MAX_PAGES or len(results) >= _AT_ENOUGH:
+            break
+        link = row.get("link") or row.get("article_url")
         if not link:
             continue
+        timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+        if timeout is None:
+            break
+        pages += 1
+        try:
+            page = _get_text(link, timeout)
+        except Exception:
+            continue
+        release = str(row.get("title") or "")[:110]
+        for attach_url, label in _AT_ATTACH_RE.findall(page):
+            label = label.strip()
+            found = _AT_LANG_RE.search(label)
+            code = (found.group(1).lower() if found else "")
+            if not is_arabic_code(code) and "arab" not in label.lower():
+                continue
+            results.append({
+                "source": "AnimeTosho",
+                "name": f"{label} — {release}",
+                "release": release,
+                "lang": "ar",
+                "url": attach_url,
+                "format": (found.group(2).lower() if found else "ass"),
+                "rating": int(row.get("seeders") or 0),
+            })
+    return results
+
+
+def _subdl(query, deadline) -> list:
+    """SubDL, once the owner has pasted a key in Settings (API Keys).
+
+    Dark without one on purpose - the key field exists precisely so this
+    can light up without a new build. Asked by IMDb id first, which
+    cannot match the wrong title the way a name search can."""
+    key = app_settings.get_subdl_key()
+    if not key:
+        return []
+    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+    if timeout is None:
+        return []
+    params = {"api_key": key, "languages": "AR", "subs_per_page": "30"}
+    if query.get("imdb_id"):
+        params["imdb_id"] = query["imdb_id"]
+    else:
+        params["film_name"] = query.get("title") or ""
+    if query.get("episode"):
+        params["type"] = "tv"
+        params["season_number"] = str(int(query.get("season") or 1))
+        params["episode_number"] = str(int(query["episode"]))
+    else:
+        params["type"] = "movie"
+    url = "https://api.subdl.com/api/v1/subtitles?" + urllib.parse.urlencode(params)
+    body = json.loads(_get_text(url, timeout))
+    if not isinstance(body, dict) or not body.get("status"):
+        return []
+    results = []
+    for item in body.get("subtitles") or []:
+        path = str(item.get("url") or "")
+        if not path:
+            continue
+        name = str(item.get("release_name") or item.get("name") or "Arabic subtitle")
         results.append({
-            "source": "AnimeTosho",
+            "source": "SubDL",
             "name": name[:120],
             "release": name[:120],
             "lang": "ar",
-            "url": link,
+            # The API hands back a site-relative path; the files live on
+            # the dl host, zipped.
+            "url": urllib.parse.urljoin("https://dl.subdl.com/", path),
             "format": "srt",
-            "rating": int(item.get("seeders") or 0),
-            "needs_page": True,
+            "rating": 0,
         })
     return results
 
@@ -407,8 +552,11 @@ def _search_terms(query) -> str:
 
 
 # Ordered by how well they measured. Each is called inside its own
-# try/except: one source failing must never empty the list.
+# try/except: one source failing must never empty the list. SubDL leads
+# because it is the one keyed source - a result from it was asked for by
+# name, with a pasted credential, and outranks scraping.
 _SOURCES = (
+    ("SubDL", _subdl),
     ("OpenSubtitles", _opensubtitles_v3),
     ("SubtitleCat", _subtitlecat),
     ("AnimeTosho", _animetosho),
@@ -424,32 +572,46 @@ def search(title, *, year=None, season=None, episode=None, imdb_id=None,
            kind="series", deadline=None) -> list:
     """Arabic subtitles for this episode or film, best match first.
 
+    The sources run together, not in a row: AnimeTosho now walks release
+    pages and SubtitleCat walks result pages, so serially this was the
+    sum of every page fetch and the last source regularly fell off the
+    deadline. Four short-lived threads, one per source - the same shape
+    streams.find_streams uses, and for the same reason.
+
     Never raises, never returns None."""
     if deadline is None:
         deadline = net.deadline_in(24)
     query = {"title": title or "", "year": year, "season": season,
              "episode": episode, "imdb_id": imdb_id, "kind": kind}
-    results = []
-    for name, source in _SOURCES:
-        if net.step_timeout(deadline, DEFAULT_TIMEOUT) is None:
-            break
+
+    def run(pair):
+        _, source = pair
         try:
-            results.extend(source(query, deadline) or [])
+            return source(query, deadline) or []
         except Exception:
-            continue
+            return []
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(_SOURCES)) as pool:
+        for found in pool.map(run, _SOURCES):
+            results.extend(found)
     return _rank(results, query)
 
 
 def _rank(results, query) -> list:
-    """Exact episode match first, then a real translation over a machine
-    one, then whatever the source rated it."""
+    """Arabic before anything else, then exact episode match, then a real
+    translation over a machine one, then whatever the source rated it.
+
+    Language leads because English results exist here only as feedstock
+    for the AI translator - useful, but never ahead of actual Arabic."""
     wanted = ""
     if query.get("episode"):
         wanted = f"s{int(query.get('season') or 1):02d}e{int(query['episode']):02d}"
 
     def key(item):
         name = (item.get("release") or item.get("name") or "").lower()
-        return (0 if wanted and wanted in name else 1,
+        return (0 if is_arabic_code(item.get("lang")) else 1,
+                0 if wanted and wanted in name else 1,
                 1 if item.get("translated") else 0,
                 -int(item.get("rating") or 0))
 

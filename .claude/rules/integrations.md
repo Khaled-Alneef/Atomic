@@ -12,10 +12,50 @@ Read this before non-trivial integrations work (`integrations-engineer`).
 | `stremio.py` | Cinemeta + api.strem.io | anime/series search, metadata, latest aired episode, account watch progress |
 | `release_schedule.py` | - | picks the source per medium, formats hover lines |
 | `manga_sites.py` / `anime_sites.py` | user-configured | reading/video-site search across known engine shapes, generic fallback |
+| `indexers.py` | feed.animetosho.org, subsplease.org | torrent releases **by title**, for the player |
 | `updater.py` | api.github.com | release tags and the update download |
 
-No API keys anywhere. Keep it that way (the Stremio `authKey` is a
-first-party login token, not a key, and is the one accepted exception).
+## What a source is allowed to need
+
+**Revised by the owner, 19 August 2026.** The old rule here was "no API
+keys anywhere". That is no longer the constraint, and it was blocking
+the wrong things. The constraint is now:
+
+> **An API key is fine. Requiring another application to be installed is
+> not.**
+
+- **Keys are allowed.** If a source needs one, it goes in Settings for
+  the owner to paste, is stored in `settings.json` beside the Stremio
+  `authKey`, and the feature stays dark and says why until it is given
+  one. Never hardcode a key, never ship one, and never create an account
+  to obtain one - that is the owner's to do.
+- **A dependency on another installed app is not allowed.** Atomic has
+  to work on a clean machine with nothing beside it. This is why the
+  torrent engine is libtorrent *inside* the app (`torrent_engine.py`)
+  rather than Stremio's streaming server. The same bar applies to
+  anything else - no "install X first" features.
+
+**Stremio is no longer a stream source at all** (19 August 2026, the
+owner's ask). Both halves are gone from `streams.py` and must not come
+back: `ensure_local_server()`/the 127.0.0.1:11470 route, and
+`import_account_addons()`, which read the user's own Stremio addon
+collection over their account key. The server was not free even as a
+fallback - every torrent paid up to a 12s `ensure_local_server()` wait
+plus a 6s peer poll before the built-in engine was asked for anything.
+A build with no libtorrent now returns `reason="no-engine"` and the
+player says so. Torrentio/TorrentsDB stay: they speak the Stremio addon
+protocol but are public HTTP endpoints needing nothing installed.
+The Stremio *account* in Settings is still read - by `stremio.py`, for
+watch progress, and nothing else.
+
+**libtorrent is why `packaging/build.py` re-execs on Python 3.13.** There
+is no libtorrent wheel for the machine's default 3.15, so anything run
+under 3.15 reports `torrent_engine.available() == False` and every
+torrent looks broken. Test the player with the 3.13 interpreter.
+
+The reason the old rule existed still holds and is worth keeping in
+mind: a source that quietly stops answering is worse than no source, so
+whatever a key unlocks must still fail soft and say so.
 
 ## Rules
 
@@ -84,6 +124,22 @@ Don't loosen these to raise the hit rate.
 
 Respect throttles: MangaDex is spaced ~0.35s between requests and
 retried once, since the tracker fires one lookup per entry at once.
+
+**A series page is not the whole chapter list any more.** olympustaff
+printed all 248 chapters of The Beginning After the End when
+`chapter_source` was written; measured again 19 August 2026 it prints
+**40**, plus chapter 1, and hangs the rest off `?page=2..7`. The reader
+was therefore showing only the newest forty - which from inside a
+chapter reads as a list holding nothing but what was just read.
+`_page_urls`/`_more_pages` follow the paginator (six pages at a time,
+each retried once, `MAX_LIST_PAGES` 24), and the page numbers are
+*filled in* rather than taken as printed, because "1 2 3 ... 12" names
+neither 4 nor 11. Retrying matters: one of six concurrent pages failed
+on the first run and the list came back missing exactly the forty
+chapters it held - a hole in the middle of the numbering, which is worse
+than a short list because nothing says it is there. Full list measured
+at 21.7s cold, 249 chapters, no gaps; `reader.CHAPTER_LIST_TIMEOUT` was
+raised to 45s to fit it and the 6h cache means it is paid once.
 
 **Watch progress comes from Stremio and nowhere else.** This is settled;
 do not add a second source without a way to tell which one is right.
@@ -191,6 +247,92 @@ remain as a fallback. Two traps already paid for:
   is regional. Frieren's id is right and 404s from this region, so the
   resolved URL is probed before being saved and a confirmed 404 is
   discarded. Only a 404 discards - a failed probe keeps the link.
+
+## The anime indexers, and which ones this network can reach
+
+`indexers.py` asks **by title**, which is the one thing an IMDb-keyed
+addon cannot do, so it reaches fansub releases no id-based index
+carries. Two are in it, both measured returning real magnets: **Anime
+Tosho** (`feed.animetosho.org/json`, 75 rows in 0.4-2.5s, carrying
+`info_hash`, a magnet with its trackers and a seeder count) and
+**SubsPlease** (`subsplease.org/api/?f=search`, the current season).
+
+**Do not re-add Nyaa, Tokyo Toshokan, AniDex, Erai-raws or ToshiMoe as
+direct sources.** Measured 19 August 2026 from the owner's connection:
+nyaa.si times out, tokyotosho.info / anidex.info / erai-raws.info reset
+the connection before TLS, and tosho.moe / toshi.moe do not resolve at
+all. **It is not DNS** - `dns_resolve` answers for the first four
+(186.2.163.20, 172.67.214.1, 185.178.208.171, 185.178.208.159) and the
+connection still dies, which is upstream filtering nothing in this app
+can route around. All of them are reached second-hand anyway: Anime
+Tosho *is* an index over Nyaa/TokyoTosho/AniDex (its rows carry
+`nyaa_id`, `tosho_id`, `anidex_id`) and carries SubsPlease and Erai-raws
+releases under their own group tags, and the "Torrentio Anime" default
+addon is pinned to exactly those three providers and scrapes them from
+its own server. AniRena answers 200 with an empty 9KB page for every
+search shape tried - nothing to parse.
+
+**A title search can return the wrong show, and that is the whole risk.**
+`indexers.is_same_title` requires 60% of the entry title's significant
+words to appear in the release name, and `episode_match` requires the
+episode to be stated (`S01E05`, `- 05`, or a range that covers it) -
+anything else is dropped rather than offered. Measured near-miss that
+set the threshold: asking Anime Tosho for "Bleach: Thousand-Year Blood
+War 05" returns "[BlackRabbit] Bleach (2004) - S05" in **first place**.
+Don't loosen either check to raise the hit rate.
+
+## Every source is asked at once
+
+`find_streams` fans its addons, the indexers and `resolve_page` out over
+one short-lived thread pool (`_run_all`, 6 workers) under one deadline.
+It used to walk the addon table serially inside a loop over the episode
+numberings, so a lookup cost the sum of every request and one slow host
+delayed everything behind it - measured 3.7-4.5s serial against 1.3-2.6s
+for the same answers. **Only the fallback numbering stays sequential and
+conditional**, and that is deliberate: a later guess returns a
+*different episode*, so it may run only when nothing else answered.
+
+Not `lookup_pool`: that pool is four workers wide and shared with the
+tracker's page-load backfill, so the one lookup the user is watching
+would queue behind all of it.
+
+## Short waits beat long ones
+
+`streams.METADATA_TIMEOUT` and `DATA_WAIT` are both 12s, down from 45s
+and 25s. **Waiting longer never rescued a dead release; it only delayed
+a live one** - a swarm with the trackers in its magnet answers in
+seconds. What makes short waits safe is that `prepare_fastest` is now a
+*rolling* race: `RACE_WIDTH` workers pull from the candidate list and a
+worker whose release fails takes the next one immediately, so being
+wrong costs one more attempt rather than one more minute. The old
+version started a fixed batch of three and waited for it, then the
+player re-ran `prepare()` serially on the release that had just failed.
+Measured after: `find_streams` 3.4s + `prepare_fastest` 6.7s to a
+playable URL on Attack on Titan S01E05.
+
+## Subtitles: where Arabic for anime actually comes from
+
+**AnimeTosho release attachments** - measured 19 August 2026, live, on
+the owner's own titles. Multi-sub groups (ToonsHub above all, Erai-raws)
+publish every language track of a release as individually-downloadable
+attachments on the release page: Solo Leveling S02E05 carries 19
+including **Arabic [ara, ASS]**; Bleach TYBW and Wistoria answered too.
+`subtitles._animetosho` searches the feed, opens up to 4 matching
+release pages, and returns direct attachment URLs. Two traps paid for
+in the same pass:
+- attachments are **xz-compressed whatever the extension says**
+  (`\xfd7zXZ` magic, handled in `_unpack`);
+- `_parse_ass` used to take the **first** `Format:` line in the file,
+  which is the [V4+ Styles] one (~23 columns), so every real .ass parsed
+  to **zero cues**. Only the Format line naming Start/End is the events
+  one. This bug silently broke every .ass subtitle from every source.
+
+English results ride along (OpenSubtitles addon has 1-2 per anime
+episode) as feedstock for the AI translator: picking one with an AI key
+configured translates it to Arabic on the fly (`player.
+_fetch_subtitle_worker` → `ai_translate`). SubDL is implemented and
+dark until its key is pasted. TMDB ships a bundled key
+(`packaging/tmdb_token.txt`, gitignored - the owner's own).
 
 ## When a lookup looks wrong
 

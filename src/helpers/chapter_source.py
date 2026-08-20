@@ -25,6 +25,7 @@ Everything fails soft: a source that dies returns nothing and the reader
 says which, rather than spinning. Nothing here raises.
 """
 
+import concurrent.futures
 import json
 import re
 import urllib.parse
@@ -41,6 +42,17 @@ SERIES_PAGE_TIMEOUT = 25
 # Below this a chapter list is treated as a partial one and the ajax
 # endpoint is asked as well.
 MIN_TRUSTED_CHAPTERS = 3
+
+# How many extra `?page=N` pages of a chapter list to follow, and how
+# many at once. Both bounded on purpose: a series page that paginates
+# says how many pages it has, but a themed site can also print a
+# hundred, and a chapter list is not worth a hundred requests. Six at a
+# time rather than one after another because these hosts answer in
+# ~1-3s each - measured on olympustaff, six pages in 3.7s concurrently
+# against ~9s serially, which is the difference between fitting inside
+# the reader's listing budget and not.
+MAX_LIST_PAGES = 24
+LIST_PAGE_WORKERS = 6
 
 # Reading direction. Manga is drawn right-to-left; manhwa and manhua are
 # vertical scrolls that happen to read left-to-right. The reader turns
@@ -177,6 +189,102 @@ def _chapters_from_html(body: str, series_url: str, entry_type=None) -> list:
     return found
 
 
+# `<a class="page-link" href=".../series/BATE?page=3">3</a>` - a paged
+# chapter list. Matched on the query parameter rather than on the theme's
+# class names, because the number is the only part every one of these
+# Laravel-themed sites agrees on.
+_PAGE_LINK_RE = re.compile(r'href="([^"]*[?&]page=(\d+)[^"]*)"', re.I)
+
+
+def _page_urls(body: str, series_url: str) -> list:
+    """Every further page of a paginated chapter list, page 2 upward.
+
+    **A series page is no longer the whole list.** olympustaff used to
+    print all 248 chapters of The Beginning After the End in one page;
+    measured again on 19 August 2026 it prints **40**, plus chapter 1,
+    and hangs the remaining 200 off `?page=2..7`. The reader was
+    therefore showing only the newest forty - which from inside a
+    chapter looks like a list holding nothing but what was just read.
+
+    Only pages of *this* URL count: these themes also paginate comments
+    and "latest releases" strips with the same parameter, and following
+    those adds requests that can only return other series' chapters."""
+    base = series_url.split("?", 1)[0].rstrip("/")
+    numbers = set()
+    for href, number in _PAGE_LINK_RE.findall(body or ""):
+        absolute = urllib.parse.urljoin(series_url, href)
+        if absolute.split("?", 1)[0].rstrip("/") != base:
+            continue
+        try:
+            value = int(number)
+        except ValueError:
+            continue
+        if 2 <= value <= MAX_LIST_PAGES:
+            numbers.add(value)
+    if not numbers:
+        return []
+    # Filled in rather than taken as-is: a paginator that prints
+    # "1 2 3 ... 12" lists neither 4 nor 11, and asking only for the
+    # numbers it printed leaves holes in the middle of the list.
+    return [f"{base}?page={n}" for n in range(2, max(numbers) + 1)]
+
+
+def _more_pages(body: str, series_url: str, entry_type, deadline) -> list:
+    """The chapters on every page after the first, fetched together.
+
+    Concurrent, and bounded at LIST_PAGE_WORKERS - one thread per page
+    would be the same unbounded-thread mistake lookup_pool exists to
+    stop. Each page is an ordinary request against the shared deadline,
+    and a page that fails is simply skipped: a partial list is still
+    better than the forty chapters this replaces."""
+    urls = _page_urls(body, series_url)
+    if not urls:
+        return []
+    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+    if timeout is None:
+        return []
+
+    def fetch(url):
+        # Retried once, and that is not belt-and-braces: measured on
+        # olympustaff, one of six concurrent pages failed on the first
+        # run and the list came back missing exactly the forty chapters
+        # that page held - a hole in the middle of the numbering, which
+        # is worse than a short list because nothing says it is there.
+        for attempt in range(2):
+            step = net.step_timeout(deadline, timeout)
+            if step is None:
+                return ""
+            try:
+                return _get(url, step, referer=series_url)
+            except Exception:
+                continue
+        return ""
+
+    bodies = []
+    workers = min(LIST_PAGE_WORKERS, len(urls))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        bodies = list(pool.map(fetch, urls))
+    chapters = []
+    for page_body in bodies:
+        if page_body:
+            chapters.extend(_chapters_from_html(page_body, series_url, entry_type))
+    return chapters
+
+
+def _merged(*lists) -> list:
+    """Several chapter lists as one, deduped by id, newest first."""
+    seen, merged = set(), []
+    for chapters in lists:
+        for chapter in chapters or []:
+            key = chapter.get("id")
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(chapter)
+    merged.sort(key=_sort_key, reverse=True)
+    return merged
+
+
 # SWAT (meshmanga.com) and anything else on the same white-label
 # platform: a REST API behind a single-page front end. Its series page
 # contains no chapter anchors at all - the HTML scan above finds nothing
@@ -268,6 +376,12 @@ def _site_chapters(entry, deadline) -> list:
     except Exception:
         body = ""
     chapters = _chapters_from_html(body, series_url, entry_type) if body else []
+    if chapters:
+        # The rest of a paginated list - see _page_urls. Only asked for
+        # once the first page actually parsed as chapters, so a dead or
+        # unrecognised page costs no extra requests.
+        chapters = _merged(chapters, _more_pages(body, series_url, entry_type,
+                                                 deadline))
     # **Few is as wrong as none.** Madara serves a couple of chapter
     # links in the page itself and the rest only from its ajax endpoint,
     # so returning early on a non-empty list gave 3asq a one-chapter
@@ -402,7 +516,7 @@ def _store(key, chapters):
 def list_chapters(entry, *, deadline=None, refresh=False) -> list:
     """Chapters for this entry, newest first. Never raises."""
     if deadline is None:
-        deadline = net.deadline_in(25)
+        deadline = net.deadline_in(45)
     key = _cache_key(entry)
     if key and not refresh:
         cached = _cached(key)

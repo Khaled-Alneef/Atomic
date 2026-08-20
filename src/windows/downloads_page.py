@@ -1,11 +1,17 @@
 """Downloads page: what has been queued, what is running, and where it
 went.
 
-The whole page is a view over `helpers.downloads.list_jobs()` - it owns
-no state of its own beyond the folder the user last picked. Jobs live on
-disk and the worker thread writes them there as they change, so this page
-can be closed, rebuilt, or opened in the middle of a season without
-anything being lost.
+The whole page is a view over `helpers.downloads.list_groups()` - it owns
+no state of its own beyond the folder the user last picked and which
+seasons are expanded. Jobs live on disk and the worker thread writes them
+there as they change, so this page can be closed, rebuilt, or opened in
+the middle of a season without anything being lost.
+
+Rows are *groups*, not jobs. A season is queued as one job per episode
+(downloads.queue_season explains why), and drawing 28 bars for one
+request buries every other download on the page - so a season is one row
+with one averaged bar, expandable to the episodes underneath it when the
+one that failed is the thing being looked for.
 
 Polled rather than signalled, on a timer that stops itself: the download
 worker is a plain daemon thread with no Qt in it (deliberately - it has
@@ -67,6 +73,10 @@ STATE_COLOUR = {
 }
 ACTIVE_STATES = (downloads.QUEUED, downloads.RUNNING)
 
+# How far an episode row is inset under its season, so the two read as
+# one thing containing another rather than as two downloads.
+GROUP_INDENT = 18
+
 
 def saved_folder() -> str:
     """The folder the user last downloaded into, or the default one."""
@@ -92,7 +102,15 @@ def choose_folder(parent, current: str = None) -> str:
     three of them cannot drift apart on which folder they seed from -
     the last one used, which is nearly always the one wanted again."""
     start = current or saved_folder()
-    picked = QFileDialog.getExistingDirectory(parent, "Download To", start)
+    # DontUseNativeDialog is not a style choice - it is the fix for the
+    # app freezing here. The native Windows folder picker runs its own
+    # Win32 modal loop, and while the video player is open mpv owns a
+    # native child window in the same top-level; the two message loops
+    # deadlock and the app stops responding. Qt's own dialog runs inside
+    # Qt's event loop and does not.
+    picked = QFileDialog.getExistingDirectory(
+        parent, "Download To", start,
+        QFileDialog.Option.DontUseNativeDialog)
     if not picked:
         return ""
     remember_folder(picked)
@@ -127,11 +145,18 @@ class DownloadsPage(GlassPage):
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
-        # job id -> the widgets a tick can update without a rebuild.
+        # row key (job id, or group id for a season) -> the widgets a
+        # tick can update without a rebuild. Episode rows inside an
+        # expanded season are in here under their own job ids too.
         self._rows = {}
-        # (id, state) for every job as last drawn - the one thing that
+        # Every job's (id, state) as last drawn - the one thing that
         # decides whether a tick can update in place or has to rebuild.
         self._shape = None
+        # Which seasons are open. Held here rather than on the row
+        # widgets because a state change rebuilds them all, and a season
+        # collapsing itself the moment one of its episodes finished
+        # would close the list out from under whoever opened it.
+        self._expanded = set()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -167,7 +192,7 @@ class DownloadsPage(GlassPage):
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self._tick)
 
-        self._render(self._jobs())
+        self._render(self._groups())
 
     # ---- chrome -------------------------------------------------------
     def _build_folder_row(self):
@@ -196,12 +221,13 @@ class DownloadsPage(GlassPage):
 
     def _clear_finished(self):
         downloads.clear_finished()
-        self._render(self._jobs())
+        self._render(self._groups())
+        self._sync_indicator()
 
     # ---- the list -----------------------------------------------------
-    def _jobs(self):
+    def _groups(self):
         try:
-            return downloads.list_jobs()
+            return downloads.list_groups()
         except Exception:
             # A downloads.json this page cannot read must not take the
             # page down with it - an empty list is the honest answer and
@@ -209,25 +235,81 @@ class DownloadsPage(GlassPage):
             logs.exception("Could not read the download queue")
             return []
 
+    @staticmethod
+    def _row_key(row):
+        """A season is keyed by its group id, a lone job by its own id.
+
+        Both come off the jobs themselves rather than from the row, so
+        this cannot drift from what cancel_group is given."""
+        jobs = row.get("jobs") or []
+        if not jobs:
+            return None
+        return jobs[0].get("group") if row.get("kind") == "group" else jobs[0].get("id")
+
+    @staticmethod
+    def _shape_of(rows):
+        """Still every *job's* state, not the row's: an episode finishing
+        inside an expanded season changes that episode's buttons, and a
+        row-level shape would leave a Cancel button on something already
+        done."""
+        return [(job.get("id"), job.get("state"))
+                for row in rows for job in (row.get("jobs") or [])]
+
+    @staticmethod
+    def _group_state(row):
+        """The row's own state, except for a season whose episodes have
+        all been cancelled.
+
+        helpers.downloads weighs done/failed/running when it decides a
+        group's state and falls through to QUEUED otherwise, so a season
+        that was entirely cancelled comes back "queued" - which would
+        leave it drawing a progress bar and a Cancel All button that can
+        no longer do anything (measured: 5 cancelled episodes, row state
+        "queued"). The fix belongs in that function; until it lands the
+        jobs are believed over the row."""
+        jobs = row.get("jobs") or []
+        if (row.get("state") in ACTIVE_STATES and jobs
+                and not any(j.get("state") in ACTIVE_STATES for j in jobs)):
+            return downloads.CANCELLED
+        return row.get("state")
+
+    @staticmethod
+    def _any_active(rows):
+        return any(job.get("state") in ACTIVE_STATES
+                   for row in rows for job in (row.get("jobs") or []))
+
     def _tick(self):
-        jobs = self._jobs()
-        shape = [(job.get("id"), job.get("state")) for job in jobs]
+        rows = self._groups()
+        shape = self._shape_of(rows)
         if shape != self._shape:
-            self._render(jobs)
-            return
-        for job in jobs:
-            self._update_row(job)
-        if not any(job.get("state") in ACTIVE_STATES for job in jobs):
+            self._render(rows)
+        else:
+            for row in rows:
+                self._update_row(self._row_key(row), row.get("progress"),
+                                 row.get("detail"))
+                for job in row.get("jobs") or []:
+                    self._update_row(job.get("id"), job.get("progress"),
+                                     job.get("detail"))
+        # The sidebar strip is driven from here as well as from its own
+        # timer: while this page is open, this tick is the freshest read
+        # in the app and the two would otherwise disagree by a poll.
+        self._sync_indicator()
+        if not self._any_active(rows):
             self._timer.stop()
 
-    def _sync_timer(self, jobs):
-        active = any(job.get("state") in ACTIVE_STATES for job in jobs)
+    def _sync_indicator(self):
+        refresh = getattr(self.app, "refresh_download_indicator", None)
+        if callable(refresh):
+            refresh()
+
+    def _sync_timer(self, rows):
+        active = self._any_active(rows)
         if active and not self._timer.isActive():
             self._timer.start()
         elif not active and self._timer.isActive():
             self._timer.stop()
 
-    def _render(self, jobs):
+    def _render(self, rows):
         layout = self.list_layout
         while layout.count():
             item = layout.takeAt(0)
@@ -241,62 +323,89 @@ class DownloadsPage(GlassPage):
                 widget.deleteLater()
         self._rows = {}
 
-        if not jobs:
+        if not rows:
             layout.addWidget(QLabel(
                 "Nothing has been downloaded yet. Use the download button in "
                 "the player or the reader to save an episode, a season or a "
                 "chapter here.", objectName="Muted"))
-        for job in jobs:
-            layout.addWidget(self._build_row(job))
+        for row in rows:
+            layout.addWidget(self._build_row(row))
 
-        self._shape = [(job.get("id"), job.get("state")) for job in jobs]
+        self._shape = self._shape_of(rows)
         self.clear_btn.setEnabled(
-            any(job.get("state") not in ACTIVE_STATES for job in jobs))
-        self._sync_timer(jobs)
+            any(job.get("state") not in ACTIVE_STATES
+                for row in rows for job in (row.get("jobs") or [])))
+        self._sync_timer(rows)
 
-    def _build_row(self, job):
-        state = job.get("state")
+    # ---- pieces a row is made of --------------------------------------
+    def _card(self) -> QFrame:
         card = QFrame()
-        # Not a widgets.Card: a row is not clickable as a whole (its two
+        # Not a widgets.Card: a row is not clickable as a whole (its
         # buttons are), and Card's hover highlight and hand cursor would
         # promise a click that does nothing.
         card.setStyleSheet(
-            f"QFrame {{ background: {theme.SURFACE};"
+            f"QFrame {{ background: {theme.PANEL_FILL};"
             f" border: 1px solid {theme.BORDER};"
-            f" border-radius: {theme.RADIUS_SM}px; }}")
-        column = QVBoxLayout(card)
-        column.setContentsMargins(14, 11, 14, 11)
-        column.setSpacing(6)
+            f" border-radius: {theme.RADIUS}px; }}")
+        return card
 
+    @staticmethod
+    def _title_row(text, state, *, size="11pt"):
         top = QHBoxLayout()
         top.setSpacing(10)
-        label = QLabel(job.get("label") or "Download")
+        label = QLabel(text or "Download")
         label.setWordWrap(True)
         label.setStyleSheet(
-            f"color: {theme.TEXT}; font-size: 11pt; font-weight: 600;"
+            f"color: {theme.TEXT}; font-size: {size}; font-weight: 600;"
             f" background: transparent; border: none;")
         top.addWidget(label, stretch=1)
-
         badge = QLabel(STATE_TEXT.get(state, str(state or "")))
         badge.setStyleSheet(
             f"color: {STATE_COLOUR.get(state, theme.TEXT_MUTED)};"
             f" font-size: 10pt; font-weight: 700;"
             f" background: transparent; border: none;")
         top.addWidget(badge)
-        column.addLayout(top)
+        return top
+
+    @staticmethod
+    def _detail_label(text, *, wrap=True) -> QLabel:
+        label = QLabel(text or "")
+        label.setWordWrap(wrap)
+        label.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 9.5pt;"
+            f" background: transparent; border: none;")
+        return label
+
+    def _bar(self, progress, height=6) -> QProgressBar:
+        bar = QProgressBar()
+        bar.setRange(0, 1000)
+        bar.setValue(self._permille(progress))
+        bar.setTextVisible(False)
+        bar.setFixedHeight(height)
+        bar.setStyleSheet(
+            f"QProgressBar {{ background: {theme.SURFACE_HOVER};"
+            f" border: none; border-radius: {height // 2}px; }}"
+            f"QProgressBar::chunk {{ background: {theme.ACCENT_GRADIENT};"
+            f" border-radius: {height // 2}px; }}")
+        return bar
+
+    # ---- rows ---------------------------------------------------------
+    def _build_row(self, row):
+        if row.get("kind") == "group":
+            return self._build_group(row)
+        return self._build_job(row.get("jobs")[0] if row.get("jobs") else {})
+
+    def _build_job(self, job):
+        state = job.get("state")
+        card = self._card()
+        column = QVBoxLayout(card)
+        column.setContentsMargins(14, 11, 14, 11)
+        column.setSpacing(6)
+        column.addLayout(self._title_row(job.get("label"), state))
 
         bar = None
         if state == downloads.RUNNING:
-            bar = QProgressBar()
-            bar.setRange(0, 1000)
-            bar.setValue(self._permille(job))
-            bar.setTextVisible(False)
-            bar.setFixedHeight(6)
-            bar.setStyleSheet(
-                f"QProgressBar {{ background: {theme.SURFACE_HOVER};"
-                f" border: none; border-radius: 3px; }}"
-                f"QProgressBar::chunk {{ background: {theme.ACCENT};"
-                f" border-radius: 3px; }}")
+            bar = self._bar(job.get("progress"))
             column.addWidget(bar)
 
         # Skipped entirely when there is nothing to put in it - a
@@ -309,14 +418,15 @@ class DownloadsPage(GlassPage):
         if has_button or job.get("detail"):
             bottom = QHBoxLayout()
             bottom.setSpacing(8)
-            detail = QLabel(job.get("detail") or "")
-            detail.setWordWrap(True)
-            detail.setStyleSheet(
-                f"color: {theme.TEXT_MUTED}; font-size: 9.5pt;"
-                f" background: transparent; border: none;")
+            detail = self._detail_label(job.get("detail"))
             bottom.addWidget(detail, stretch=1)
             column.addLayout(bottom)
+            self._add_job_button(bottom, job, state)
 
+        self._rows[job.get("id")] = (bar, detail)
+        return card
+
+    def _add_job_button(self, bottom, job, state):
         if state in ACTIVE_STATES:
             cancel = QPushButton("Cancel", objectName="Small")
             cancel.setToolTip("Stop this download")
@@ -332,26 +442,130 @@ class DownloadsPage(GlassPage):
                 lambda _checked=False, j=dict(job): self._reveal(j))
             bottom.addWidget(reveal)
 
-        self._rows[job.get("id")] = (bar, detail)
+    def _build_group(self, row):
+        jobs = row.get("jobs") or []
+        group_id = self._row_key(row)
+        state = self._group_state(row)
+
+        card = self._card()
+        column = QVBoxLayout(card)
+        column.setContentsMargins(14, 11, 14, 11)
+        column.setSpacing(6)
+        column.addLayout(self._title_row(row.get("label"), state))
+
+        bar = None
+        if state in ACTIVE_STATES:
+            # Drawn while the season is merely queued too, unlike a lone
+            # job: two of five episodes already saved is real progress
+            # even in the second where nothing is moving.
+            bar = self._bar(row.get("progress"))
+            column.addWidget(bar)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        detail = self._detail_label(row.get("detail"))
+        bottom.addWidget(detail, stretch=1)
+
+        expanded = group_id in self._expanded
+        toggle = QPushButton("Hide Episodes" if expanded else "Show Episodes",
+                             objectName="Small")
+        toggle.setToolTip(f"The {len(jobs)} episodes in this season")
+        use_hover_cursor(toggle)
+        bottom.addWidget(toggle)
+
+        if state in ACTIVE_STATES:
+            cancel = QPushButton("Cancel All", objectName="Small")
+            cancel.setToolTip("Stop every episode in this season")
+            use_hover_cursor(cancel)
+            cancel.clicked.connect(
+                lambda _checked=False, g=group_id: self._cancel_group(g))
+            bottom.addWidget(cancel)
+        column.addLayout(bottom)
+
+        episodes = QWidget(objectName="Bare")
+        inner = QVBoxLayout(episodes)
+        inner.setContentsMargins(GROUP_INDENT, 4, 0, 0)
+        inner.setSpacing(8)
+        for job in jobs:
+            inner.addWidget(self._build_episode(job))
+        episodes.setVisible(expanded)
+        column.addWidget(episodes)
+        toggle.clicked.connect(
+            lambda _checked=False, g=group_id, w=episodes, b=toggle:
+            self._toggle_group(g, w, b))
+
+        self._rows[group_id] = (bar, detail)
         return card
 
+    def _build_episode(self, job):
+        """One episode inside an expanded season - still individually
+        cancellable, since the reason to open a season is usually the one
+        episode that is stuck or failed."""
+        state = job.get("state")
+        frame = QFrame()
+        # Styled explicitly rather than left bare: a stylesheet set on
+        # the season card applies to every QFrame under it, so without
+        # this an episode gets the card's border and reads as a separate
+        # download rather than part of one.
+        frame.setStyleSheet("QFrame { background: transparent; border: none; }")
+        column = QVBoxLayout(frame)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+
+        line = QHBoxLayout()
+        line.setSpacing(8)
+        label = QLabel(job.get("label") or "Episode")
+        label.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 10pt;"
+            f" background: transparent; border: none;")
+        line.addWidget(label, stretch=1)
+        # Not wrapped: an episode's detail is a short speed/peer line and
+        # wrapping it would grow the row taller than its own label.
+        detail = self._detail_label(job.get("detail"), wrap=False)
+        line.addWidget(detail)
+        badge = QLabel(STATE_TEXT.get(state, str(state or "")))
+        badge.setStyleSheet(
+            f"color: {STATE_COLOUR.get(state, theme.TEXT_MUTED)};"
+            f" font-size: 9pt; font-weight: 700;"
+            f" background: transparent; border: none;")
+        line.addWidget(badge)
+        self._add_job_button(line, job, state)
+        column.addLayout(line)
+
+        bar = None
+        if state == downloads.RUNNING:
+            bar = self._bar(job.get("progress"), height=4)
+            column.addWidget(bar)
+
+        self._rows[job.get("id")] = (bar, detail)
+        return frame
+
+    def _toggle_group(self, group_id, container, button):
+        showing = not container.isVisible()
+        container.setVisible(showing)
+        if showing:
+            self._expanded.add(group_id)
+        else:
+            self._expanded.discard(group_id)
+        button.setText("Hide Episodes" if showing else "Show Episodes")
+
     @staticmethod
-    def _permille(job) -> int:
+    def _permille(progress) -> int:
         try:
-            fraction = float(job.get("progress") or 0.0)
+            fraction = float(progress or 0.0)
         except (TypeError, ValueError):
             fraction = 0.0
         return max(0, min(1000, int(fraction * 1000)))
 
-    def _update_row(self, job):
-        drawn = self._rows.get(job.get("id"))
+    def _update_row(self, key, progress, detail_text):
+        drawn = self._rows.get(key)
         if not drawn:
             return
         bar, detail = drawn
         if bar is not None:
-            bar.setValue(self._permille(job))
+            bar.setValue(self._permille(progress))
         if detail is not None:
-            detail.setText(job.get("detail") or "")
+            detail.setText(detail_text or "")
 
     # ---- actions ------------------------------------------------------
     def _cancel(self, job_id):
@@ -359,7 +573,16 @@ class DownloadsPage(GlassPage):
             return
         downloads.cancel(job_id)
         show_toast(self, "Download Cancelled")
-        self._render(self._jobs())
+        self._render(self._groups())
+        self._sync_indicator()
+
+    def _cancel_group(self, group_id):
+        if not group_id:
+            return
+        downloads.cancel_group(group_id)
+        show_toast(self, "Download Cancelled")
+        self._render(self._groups())
+        self._sync_indicator()
 
     def _reveal(self, job):
         if not open_containing_folder(job):

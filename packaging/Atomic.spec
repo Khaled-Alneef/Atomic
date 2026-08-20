@@ -20,6 +20,15 @@ if not os.path.isfile(LIBMPV_FILE):
         "vendor/libmpv-2.dll is missing - the video player cannot decode "
         "without it.\nRun: python packaging/fetch_libmpv.py")
 
+# The owner's TMDB read token, bundled so nobody using Atomic needs a key
+# of their own. Deliberately read from a gitignored file rather than
+# written into source: this repository is public, and a token committed
+# to GitHub is picked up by secret scanners and revoked - which breaks
+# the feature for every copy at once. Absent, the build still succeeds
+# and the logo loader simply stays off (helpers/artwork.py fails soft).
+TMDB_TOKEN_FILE = os.path.join(SPECPATH, "tmdb_token.txt")
+
+
 
 def _app_version():
     """The version the app reports and updates against, read straight out
@@ -115,6 +124,14 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Appended to a.datas rather than listed in datas= above: build.py
+# verifies the bundle by parsing that list literally with ast, and a
+# concatenation there is not an ast.List - it aborted the build
+# outright rather than shipping something unverified, which is the
+# check doing its job. Adding it here keeps both true.
+if os.path.isfile(TMDB_TOKEN_FILE):
+    a.datas += [('tmdb_token.txt', TMDB_TOKEN_FILE, 'DATA')]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

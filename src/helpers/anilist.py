@@ -81,6 +81,20 @@ query ($search: String) {
 """
 
 
+_MANGA_ART_QUERY = """
+query ($search: String) {
+  Page(perPage: 8) {
+    media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
+      title { romaji english native }
+      synonyms
+      bannerImage
+      coverImage { extraLarge large }
+    }
+  }
+}
+"""
+
+
 class RateLimited(Exception):
     """AniList is refusing this connection outright, which is a different
     fact from "this title isn't on the list".
@@ -225,3 +239,44 @@ def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
     """Crunchyroll's own links for `title` - see fetch_external_urls,
     which this is the original and most-used case of."""
     return fetch_external_urls(title, "crunchyroll", timeout)
+
+
+def fetch_manga_artwork(title: str, timeout: int = 8):
+    """A wide banner (or failing that, the large cover) URL for a manga
+    title, or None - what the reading details page draws its ground from,
+    since reading entries have no IMDb id and so no TMDB artwork.
+
+    Same matching rule as everything else here: only an entry whose title
+    genuinely matches is considered, because a wrong *backdrop* is still
+    a page confidently dressed as a different series. The banner is
+    preferred outright - it is landscape art cut for exactly this use -
+    and the portrait cover is only the fallback for titles AniList has
+    no banner for."""
+    title = (title or "").strip()
+    if not title:
+        return None
+    try:
+        body = _post(_MANGA_ART_QUERY, {"search": title}, timeout)
+    except Exception:
+        return None
+
+    media_list = (((body.get("data") or {}).get("Page") or {}).get("media")) or []
+    scored = []
+    for media in media_list:
+        cover = media.get("coverImage") or {}
+        url = (media.get("bannerImage")
+               or cover.get("extraLarge") or cover.get("large"))
+        if not url:
+            continue
+        names = _candidate_names(media)
+        score = title_match.best_similarity(title, names)
+        if score < _MATCH_THRESHOLD:
+            continue
+        # Banner beats cover at equal match; shortest romaji breaks the
+        # remaining tie for the same base-series reason as
+        # fetch_external_urls.
+        scored.append((-score, 0 if media.get("bannerImage") else 1,
+                       len(title_match.normalize(names[0] or "")), url))
+    if not scored:
+        return None
+    return min(scored)[3]

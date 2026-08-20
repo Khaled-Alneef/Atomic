@@ -26,8 +26,8 @@ from helpers.widgets import (
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
-    IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress,
-    open_tracker_entry, shows_last_watched,
+    IN_PROGRESS_STATUSES, MANGA_TYPES, ContinueCover, attach_continue_cover,
+    format_chapter_progress, open_tracker_entry, shows_last_watched,
 )
 
 GREETING_REFRESH_MS = 60_000
@@ -815,8 +815,13 @@ class HomePage(GlassPage):
         self._hero_anim_group = group  # keep a reference so it isn't gc'd mid-animation
         group.start()
 
-    def _continue_entry(self, entry):
-        if not open_tracker_entry(self, entry):
+    def _continue_entry(self, entry, resume=True):
+        """`resume=False` is the body of a reading card - it opens the
+        chapter list instead of the chapter that was left open. The hero's
+        own Continue button and the round button on a poster's cover both
+        pass True, which is what every card here did before there were
+        two targets on one."""
+        if not open_tracker_entry(self, entry, resume=resume):
             self.app.navigate_to(PAGE_FOR_TYPE.get(entry["type"], "anime"))
 
     # ------------------------------------------------------------------
@@ -843,9 +848,22 @@ class HomePage(GlassPage):
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(6, 8, 6, 8)
 
-            cover = QLabel()
-            cover.setFixedSize(*POSTER_SIZE)
-            cover.setPixmap(images.thumbnail_or_avatar(entry.get("cover_path"), entry["title"], POSTER_SIZE))
+            pixmap = images.thumbnail_or_avatar(entry.get("cover_path"),
+                                                entry["title"], POSTER_SIZE)
+            # Reading posters carry the same two targets they carry on the
+            # Reading page: the round button on the blurred cover resumes,
+            # the rest of the card opens the chapter list. Anime and
+            # series keep the single target they have always had - there
+            # is no chapter list behind them to browse.
+            continuable = entry["type"] in MANGA_TYPES
+            if continuable:
+                cover = ContinueCover(
+                    pixmap, POSTER_SIZE,
+                    lambda en=entry: self._continue_entry(en, resume=True))
+            else:
+                cover = QLabel()
+                cover.setFixedSize(*POSTER_SIZE)
+                cover.setPixmap(pixmap)
             card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
             name = QLabel(entry["title"], objectName="CardTitle")
@@ -859,7 +877,13 @@ class HomePage(GlassPage):
                 meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
                 card_layout.addWidget(meta)
 
-            card.clicked.connect(lambda en=entry: self._continue_entry(en))
+            card.clicked.connect(
+                lambda en=entry, r=not continuable: self._continue_entry(en, resume=r))
+            if continuable:
+                # After every child exists - the relay watches each of
+                # them, since each takes the hover off the card as the
+                # pointer crosses onto it.
+                attach_continue_cover(card, cover)
             grid.addWidget(card, 0, index)
         return box
 

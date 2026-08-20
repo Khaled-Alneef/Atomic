@@ -127,14 +127,14 @@ def _parse_aired(value):
         return None
 
 
-def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: int = 6):
-    """Season/episode of the most recently aired episode, from Cinemeta's
-    full episode list for this title (the catalog search used elsewhere
-    doesn't include this - it's title/poster/year only). Used to prefill
-    a new entry's progress with "here's the newest episode out" rather
-    than leaving it blank. Specials (season 0) are skipped in favor of
-    the latest numbered-season episode when both exist. Returns
-    (season, episode) ints, or None if it can't be determined."""
+def fetch_meta(imdb_id: str, content_type: str = "series", timeout: int = 8):
+    """Cinemeta's whole meta record for one title, or None.
+
+    One keyless request carrying everything the details page draws:
+    name, description, genres, cast, runtime, releaseInfo, imdbRating,
+    and `videos[]` - every episode with its season, number, name,
+    firstAired and thumbnail. Measured on Bleach TYBW: 50 episodes,
+    all fields present."""
     url = f"{BASE_URL}/meta/{content_type}/{imdb_id}.json"
     req = urllib.request.Request(url, headers={
         "Accept": "application/json",
@@ -146,8 +146,23 @@ def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: in
             body = json.loads(net.read_text(resp, deadline))
     except Exception:
         return None
+    meta = (body or {}).get("meta")
+    return meta if isinstance(meta, dict) else None
 
-    videos = ((body.get("meta") or {}).get("videos")) or []
+
+def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: int = 6):
+    """Season/episode of the most recently aired episode, from Cinemeta's
+    full episode list for this title (the catalog search used elsewhere
+    doesn't include this - it's title/poster/year only). Used to prefill
+    a new entry's progress with "here's the newest episode out" rather
+    than leaving it blank. Specials (season 0) are skipped in favor of
+    the latest numbered-season episode when both exist. Returns
+    (season, episode) ints, or None if it can't be determined."""
+    body = fetch_meta(imdb_id, content_type, timeout)
+    if body is None:
+        return None
+
+    videos = body.get("videos") or []
     now = datetime.now(timezone.utc)
     aired = []
     for v in videos:

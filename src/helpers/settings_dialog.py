@@ -50,7 +50,7 @@ from .widgets import finish_toast, scroll_area, show_toast
 # excluding films, and pairs with "Reading" one row below - the two things
 # the tracker does.
 CATEGORIES = ["General", "Preferences", "Watching", "Reading", "Games",
-              "Data", "Keybinds", "Uninstall"]
+              "API Keys", "Data", "Keybinds", "Uninstall"]
 
 # Uninstall is a category rather than a section at the bottom of Data,
 # and it is the one row drawn in the danger colour: it deletes every
@@ -66,6 +66,13 @@ DANGER_CATEGORY = "Uninstall"
 # its content clips rather than wraps. 124 leaves margin for a wider
 # font or scale factor.
 KEYBIND_COLUMN_WIDTH = 124
+
+# The API-key page's two fixed columns, so every field starts and ends at
+# the same x rather than stepping with the service's name. Sized off the
+# longest label in app_settings.API_KEYS ("TMDB (The Movie Database)")
+# and off "Not set", both with room for a wider font or scale factor.
+API_KEY_LABEL_WIDTH = 190
+API_KEY_STATE_WIDTH = 56
 
 # Slack added to the measured height of the category rows: the selected
 # row's QSS border draws at the very edge of its box, and without a few
@@ -387,6 +394,7 @@ class SettingsDialog(QDialog):
         self.stack.addWidget(scroll_area(self._build_anime_page()))
         self.stack.addWidget(scroll_area(self._build_reading_page()))
         self.stack.addWidget(scroll_area(self._build_games_page()))
+        self.stack.addWidget(scroll_area(self._build_api_keys_page()))
         self.stack.addWidget(scroll_area(self._build_data_page()))
         self.stack.addWidget(scroll_area(self._build_keybinds_page()))
         self.stack.addWidget(scroll_area(self._build_uninstall_page()))
@@ -956,6 +964,111 @@ class SettingsDialog(QDialog):
         # here, one per directory the user fills in.
         finish_toast(self._scan_toasts.pop(key, None), self,
                      f"{label}: {launchers.import_result_message(added)}")
+
+    # ------------------------------------------------------------------
+    def _build_api_keys_page(self):
+        """One field per key in app_settings.API_KEYS.
+
+        Its own category rather than a section tacked onto Watching:
+        these keys serve three different features (artwork, subtitle
+        sources, translation) and there was previously **nowhere at all**
+        to put them - the table existed, every reader of it existed, and
+        the only way to set one was to hand-edit settings.json.
+
+        Drawn from the table, not written out by hand, so adding a source
+        is a row in app_settings and nothing here."""
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        intro = QLabel(
+            "Keys are stored on this machine only, in settings.json, and are "
+            "never sent anywhere except to the service they belong to. "
+            "Anything without a key stays off and says so rather than "
+            "failing quietly.",
+            objectName="Muted",
+        )
+        intro.setWordWrap(True)
+        form.addWidget(intro)
+
+        self.api_key_edits = {}
+        self.api_key_states = {}
+        for heading, names in app_settings.API_KEY_GROUPS:
+            form.addSpacing(18)
+            form.addWidget(QLabel(heading, objectName="SectionTitle"))
+            for name in names:
+                label, unlocks = app_settings.API_KEYS.get(name, (name, ""))
+                row = QHBoxLayout()
+                caption = QLabel(label)
+                caption.setFixedWidth(API_KEY_LABEL_WIDTH)
+                row.addWidget(caption)
+
+                edit = QLineEdit(app_settings.get_api_key(name))
+                # Password echo by default: this dialog gets opened with
+                # somebody watching often enough, and a key on screen is
+                # a key on screen. The Show tick below reveals all of
+                # them at once for the one job that needs it - checking
+                # a paste went in whole.
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+                edit.setPlaceholderText(f"Paste your {label} key")
+                edit.editingFinished.connect(
+                    lambda n=name: self._save_api_key(n))
+                row.addWidget(edit, stretch=1)
+
+                state = QLabel("", objectName="Muted")
+                state.setFixedWidth(API_KEY_STATE_WIDTH)
+                row.addWidget(state)
+                form.addLayout(row)
+
+                hint = QLabel(f"{unlocks} · {app_settings.API_KEY_HELP.get(name, '')}",
+                              objectName="Muted")
+                hint.setWordWrap(True)
+                hint.setContentsMargins(API_KEY_LABEL_WIDTH + 8, 0, 0, 4)
+                form.addWidget(hint)
+
+                self.api_key_edits[name] = edit
+                self.api_key_states[name] = state
+
+        form.addSpacing(18)
+        show_keys = QCheckBox("Show keys")
+        show_keys.toggled.connect(self._toggle_api_key_echo)
+        form.addWidget(show_keys)
+
+        note = QLabel(
+            "TMDB already has a key built into this build - only paste one "
+            "here if logos stop loading. Subtitles need at least one source "
+            "key; AI translation is what covers a title nobody has published "
+            "Arabic for, and one AI key is enough.",
+            objectName="Muted",
+        )
+        note.setWordWrap(True)
+        form.addWidget(note)
+
+        self._refresh_api_key_states()
+        form.addStretch()
+        return page
+
+    def _toggle_api_key_echo(self, shown):
+        mode = (QLineEdit.EchoMode.Normal if shown
+                else QLineEdit.EchoMode.Password)
+        for edit in self.api_key_edits.values():
+            edit.setEchoMode(mode)
+
+    def _save_api_key(self, name):
+        edit = self.api_key_edits.get(name)
+        if edit is None:
+            return
+        app_settings.set_api_key(name, edit.text().strip())
+        self._refresh_api_key_states()
+
+    def _refresh_api_key_states(self):
+        for name, state in self.api_key_states.items():
+            configured = bool(app_settings.get_api_key(name))
+            state.setText("Set" if configured else "Not set")
+            state.setStyleSheet(
+                f"color: {theme.SUCCESS if configured else theme.TEXT_DIM};"
+                f" background: transparent;")
 
     # ------------------------------------------------------------------
     def _build_data_page(self):

@@ -217,6 +217,96 @@ def set_manga_music_url(url: str):
     storage.save(SETTINGS_FILE, data)
 
 
+# Every key the user can supply, as {id: (label, what it unlocks)}. One
+# table rather than a pair of accessors each: they all behave
+# identically - stored in settings.json under `<id>_api_key`, empty by
+# default, and the feature that needs one stays dark and says so until
+# it has it - and a table is what lets Settings draw the whole list
+# without being edited every time a source is added.
+#
+# TMDB is artwork. The subtitle ones are sources. The AI ones are
+# translators: with no Arabic subtitle available for a title (which is
+# the normal case for seasonal anime - measured repeatedly), an English
+# track can be translated instead, which is the only route that does not
+# depend on somebody having published Arabic for that exact episode.
+#
+# Insertion order is the order Settings draws them, so it runs from the
+# one that changes what is on screen to the ones that change what a
+# track says.
+API_KEYS = {
+    "tmdb": ("TMDB (The Movie Database)", "Title logos and backdrops"),
+    "subdl": ("SubDL", "Arabic subtitles"),
+    "subsource": ("SubSource", "Arabic subtitles"),
+    "openai": ("OpenAI (ChatGPT)", "AI subtitle translation"),
+    "deepseek": ("DeepSeek", "AI subtitle translation"),
+    "gemini": ("Google Gemini", "AI subtitle translation"),
+    "anthropic": ("Anthropic (Claude)", "AI subtitle translation"),
+}
+
+AI_KEYS = ("openai", "deepseek", "gemini", "anthropic")
+
+# The heading each key sits under in Settings, in this order. A key with
+# no group here would simply not be drawn, so a new one has to be filed.
+API_KEY_GROUPS = (
+    ("Artwork", ("tmdb",)),
+    ("Subtitle Sources", ("subdl", "subsource")),
+    ("AI Subtitle Translation", AI_KEYS),
+)
+
+# Where the owner goes to get each one. Shown beside the field, because
+# "paste your API key" with no idea which page issues it is not an
+# instruction anybody can follow.
+API_KEY_HELP = {
+    "tmdb": "themoviedb.org/settings/api - the v4 read access token, or the v3 key",
+    "subdl": "subdl.com/panel/api",
+    "subsource": "subsource.net - account settings",
+    "openai": "platform.openai.com/api-keys",
+    "deepseek": "platform.deepseek.com/api_keys",
+    "gemini": "aistudio.google.com/apikey",
+    "anthropic": "console.anthropic.com/settings/keys",
+}
+
+
+def get_tmdb_key() -> str:
+    """The owner's TMDB API key, or "" when they have not pasted one.
+
+    Empty is a valid, expected state: the build carries a bundled read
+    token of its own (helpers/artwork._bundled_token), and this is the
+    override that replaces it when it is revoked or rate-limited."""
+    return get_api_key("tmdb")
+
+
+def set_tmdb_key(value: str):
+    set_api_key("tmdb", value)
+
+
+def get_api_key(name: str) -> str:
+    """One of API_KEYS, or "" when the user has not supplied it."""
+    return str(_load().get(f"{name}_api_key") or "")
+
+
+def set_api_key(name: str, value: str):
+    data = _load()
+    data[f"{name}_api_key"] = (value or "").strip()
+    storage.save(SETTINGS_FILE, data)
+
+
+def configured_api_keys() -> list:
+    """Which keys actually have a value - what a source or translator
+    checks before offering itself."""
+    return [name for name in API_KEYS if get_api_key(name)]
+
+
+def get_subdl_key() -> str:
+    """Kept as its own name because helpers/subtitles.py already calls
+    it; it now reads the same store as every other key."""
+    return get_api_key("subdl")
+
+
+def set_subdl_key(value: str):
+    set_api_key("subdl", value)
+
+
 def get_stremio_auth():
     """(email, auth_key) of the connected Stremio account, or (None,
     None) if not connected. Only the session key is stored - never the

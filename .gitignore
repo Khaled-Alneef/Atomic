@@ -35,3 +35,10 @@ data/
 .idea/
 Thumbs.db
 .DS_Store
+
+# The owner's TMDB read token. Bundled into Atomic.exe at build time
+# (packaging/Atomic.spec) so nobody needs their own key, but never
+# committed: this repository is public, and a token pushed to GitHub
+# is found by secret scanners and revoked - which would break the
+# feature for everyone rather than for one person.
+/packaging/tmdb_token.txt

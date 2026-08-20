@@ -19,13 +19,15 @@ import time
 import uuid
 import webbrowser
 
-from PyQt6.QtCore import QObject, QSize, Qt, QTimer
+from PyQt6.QtCore import (QEasingCurve, QEvent, QObject, QPointF, QSize, Qt,
+                          QTimer, QVariantAnimation)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import (QColor, QCursor, QIcon, QLinearGradient, QPainter,
+                         QPixmap, QPolygonF)
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
     QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
     QWidget,
 )
 
@@ -36,6 +38,7 @@ from helpers import (
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, SideScroller, defer_grid_rebuild,
     finish_toast, scroll_area, search_field, show_toast, show_undo_toast,
+    use_hover_cursor,
 )
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
@@ -397,9 +400,21 @@ def _top_window(widget):
         return None
 
 
-def open_in_app(parent, entry) -> bool:
+def open_in_app(parent, entry, resume=True) -> bool:
     """Open this entry inside Atomic - the video player for Anime/Series/
     Movie, the reader for Manga/Manhwa/Manhua.
+
+    `resume` is which of a card's two targets was pressed - the round
+    continue button on its cover, or the rest of the card - and it means
+    the corresponding thing for each medium:
+
+      * reading: False opens the reader on the chapter list instead of
+        jumping back to where reading stopped;
+      * watching: False plays the *next* episode, which is what a card
+        has always done. True goes back to an episode left part-watched
+        if there is one (player.resume_point), and falls through to the
+        same next episode when there is not - so the button is never a
+        dead control.
 
     Returns False when in-app opening isn't possible at all, so the
     caller can fall back to the browser exactly as before. Deliberately
@@ -411,19 +426,63 @@ def open_in_app(parent, entry) -> bool:
         return False
     entry_type = (entry or {}).get("type")
     try:
+        # The body of a card browses; only the continue button resumes.
+        # Browsing is the details page now - artwork, facts, and the
+        # episode/chapter list with watched marks - for reading and
+        # video alike. Before it existed the video body played the next
+        # episode, which made it indistinguishable from continue.
+        if not resume and entry_type in MANGA_TYPES + VIDEO_TYPES:
+            from windows import details
+            page = details.open_details(window, entry)
+            _wire_overlay_refresh(page, parent, entry)
+            return bool(page)
         if entry_type in MANGA_TYPES:
             from windows import reader
-            return bool(reader.open_reader(window, entry))
+            page = reader.open_reader(window, entry, resume=resume)
+            _wire_overlay_refresh(page, parent, entry)
+            return bool(page)
         if entry_type in VIDEO_TYPES:
             from windows import player
-            return bool(player.open_player(window, entry))
+            season = episode = None
+            point = player.resume_point(entry)
+            if point:
+                season, episode = point
+            page = player.open_player(window, entry, season=season,
+                                      episode=episode)
+            _wire_overlay_refresh(page, parent, entry)
+            return bool(page)
     except Exception:
         logs.exception("in-app open failed; falling back to the browser")
         return False
     return False
 
 
-def open_tracker_entry(parent, entry):
+def _wire_overlay_refresh(page, parent, entry):
+    """Tell the page that opened an overlay when that overlay closes, so
+    its cards can redraw the new progress immediately - no page switch,
+    no Sync click (the owner's ask).
+
+    Soft on both ends: a caller with no `_on_inapp_closed` (Home, a
+    test) simply is not notified, and the hook call is wrapped because
+    the page can have been rebuilt or torn down while the player ran -
+    a RuntimeError escaping a Qt slot is an abort, not a traceback."""
+    hook = getattr(parent, "_on_inapp_closed", None)
+    if page is None or not callable(hook):
+        return
+    entry_id = (entry or {}).get("id")
+
+    def notify():
+        try:
+            hook(entry_id)
+        except RuntimeError:
+            pass        # the page is gone; the next visit rebuilds anyway
+    try:
+        page.closed.connect(notify)
+    except AttributeError:
+        pass            # an overlay with no closed signal - nothing to wire
+
+
+def open_tracker_entry(parent, entry, resume=True):
     """Open an entry's page: for Manga, its matched page on its reading
     site (or that site's search results for the title, if no specific
     page was matched) - the configured Manga Music site (if any) opens
@@ -431,13 +490,16 @@ def open_tracker_entry(parent, entry):
     focus. For Anime, a saved stremio:// deep link (opens Stremio) if the
     entry uses the built-in Stremio option, or its configured Video
     Website's search results otherwise. For Series, a saved stremio://
-    link or plain URL as-is. Returns False if there's nothing to open."""
+    link or plain URL as-is. Returns False if there's nothing to open.
+
+    `resume` reaches the in-app reader only (see open_in_app); the
+    browser fallbacks below have one page to open either way."""
     # In-app first: the player for video, the reader for everything read.
     # Falls through to the browser routes below whenever that can't work
     # (no engine, an unreadable source, an import that isn't there), so
     # the behaviour every previous version had is still what happens when
     # the new path can't.
-    if open_in_app(parent, entry):
+    if open_in_app(parent, entry, resume=resume):
         return True
     if entry.get("type") in MANGA_TYPES:
         return _open_manga_entry(parent, entry)
@@ -687,6 +749,296 @@ class _StayOpenMenu(QMenu):
 # are missing, is worse than today's reset. Quitting clears it, which is
 # the visible escape hatch.
 _SESSION_VIEW_STATE = {}
+
+
+# ---- the continue control on a reading card ------------------------------
+# A reading card has two targets. The round button in the middle of its
+# cover resumes where reading stopped; everything else on the card opens
+# the chapter list. So the cover frosts over on hover - which is what
+# says the artwork has stopped being the subject and the button has
+# become it - and the button appears over the frost.
+#
+# **The blur is gone**, at the owner's ask ("do not make a blur... make
+# it icy"): the artwork stays sharp under a translucent sheet of the
+# palette's own ice, so a hovered card reads as glass laid over the
+# cover rather than the cover being degraded. One pixmap built once and
+# cross-faded by opacity - still nothing per paint.
+#
+# The frost, top to bottom, as (stop, r, g, b, a). A cover is as often
+# pale as dark and the cyan button has to read against both, so this is
+# the palette's navy with a pale ice highlight along the top - and it
+# keeps the darkening the button needs where the button actually sits.
+COVER_FROST = (
+    (0.0, 186, 222, 245, 70),      # pale ice catching the light
+    (0.35, 32, 58, 96, 150),       # the palette's navy, mid-panel
+    (1.0, 7, 14, 30, 190),         # deepest at the foot, where meta sits
+)
+CONTINUE_BUTTON_SIZE = 46
+# Freeze and thaw take different times on purpose. In: slow enough to
+# read as a transition rather than a flash while sweeping a shelf. Out:
+# noticeably quicker, because the owner's ask is that the artwork is
+# back "the moment" the pointer leaves - a thaw as slow as the freeze
+# read as the frost sticking.
+COVER_FADE_IN_MS = 220
+COVER_FADE_OUT_MS = 110
+
+
+def frosted_cover(pixmap: QPixmap) -> QPixmap:
+    """`pixmap` under the ice gradient - the hovered state of a cover.
+
+    The artwork is copied sharp (no downscale round trip any more) and
+    the frost painted over it. devicePixelRatio is carried across by
+    hand because QPixmap.copy keeps it but the paint must land in device
+    pixels (.claude/rules/ui.md)."""
+    if pixmap is None or pixmap.isNull():
+        return pixmap
+    ratio = pixmap.devicePixelRatio() or 1.0
+    frosted = QPixmap(pixmap)
+    painter = QPainter(frosted)
+    gradient = QLinearGradient(0.0, 0.0, 0.0, float(frosted.height()))
+    for stop, red, green, blue, alpha in COVER_FROST:
+        gradient.setColorAt(stop, QColor(red, green, blue, alpha))
+    painter.fillRect(frosted.rect(), gradient)
+    painter.end()
+    frosted.setDevicePixelRatio(ratio)
+    return frosted
+
+
+class _ContinueButton(QPushButton):
+    """The round resume control that appears in the middle of a hovered
+    cover.
+
+    The triangle is painted rather than set as a Segoe Fluent glyph. The
+    player's play disc uses the glyph and is right to - it is 62px. This
+    one is 46, and at that size the glyph's own side bearings put it
+    visibly left of the circle's centre, where a polygon can be placed on
+    the centre and given the small nudge a triangle needs to *look*
+    centred (its visual weight sits behind its tip)."""
+
+    def __init__(self, parent=None, tooltip="Continue from where you stopped"):
+        super().__init__(parent)
+        self.setFixedSize(CONTINUE_BUTTON_SIZE, CONTINUE_BUTTON_SIZE)
+        self.setToolTip(tooltip)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        radius = CONTINUE_BUTTON_SIZE // 2
+        # padding: 0px explicitly. The app-wide QPushButton rule sets
+        # 8px 16px, which on a small fixed square eats the whole content
+        # box - player.py and reader.py both carry the same note, from
+        # the same measured clipping.
+        self.setStyleSheet(
+            f"QPushButton {{ background: {theme.accent_gradient(0, 0, 0, 1)};"
+            f" border: none; padding: 0px; border-radius: {radius}px; }}"
+            f"QPushButton:hover {{"
+            f" background: {theme.accent_gradient(0, 0, 0, 1, hover=True)}; }}"
+            f"QPushButton:pressed {{ background: {theme.ACCENT_ACTIVE}; }}")
+        use_hover_cursor(self)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        # ON_ACCENT, never white: white on this cyan computes to 1.8:1
+        # (see the palette note at the top of theme.py).
+        painter.setBrush(QColor(theme.ON_ACCENT))
+        side = self.width()
+        height = side * 0.36
+        width = height * 0.86
+        centre_x = side / 2 + side * 0.04
+        centre_y = side / 2
+        painter.drawPolygon(QPolygonF([
+            QPointF(centre_x - width / 2, centre_y - height / 2),
+            QPointF(centre_x - width / 2, centre_y + height / 2),
+            QPointF(centre_x + width / 2, centre_y)]))
+        painter.end()
+
+
+class ContinueCover(QLabel):
+    """A cover that frosts over and offers a continue button while its
+    card is hovered.
+
+    The button is a child of this label rather than a row in the card's
+    layout, and that is the point: a layout row would make every reading
+    card taller than every other card on the page, and the whole grid
+    would reflow the moment the pointer arrived."""
+
+    def __init__(self, pixmap, size, on_continue, parent=None, tooltip=None):
+        super().__init__(parent)
+        self.setFixedSize(*size)
+        self._sharp = pixmap
+        self._frosted = None
+        # How much of the frosted copy is on screen, 0-1. Painted by
+        # hand rather than swapped with setPixmap: a swap is a step, and
+        # a step across a shelf of covers is a flash. See paintEvent.
+        self._mix = 0.0
+        self._fade = QVariantAnimation(self)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.valueChanged.connect(self._on_fade)
+        self.button = (_ContinueButton(self, tooltip) if tooltip
+                       else _ContinueButton(self))
+        # Wrapped so the callback is invoked with NO arguments.
+        # QPushButton.clicked emits `clicked(checked: bool)`, and every
+        # caller here passes a lambda whose first default argument is the
+        # entry - so Qt's bool silently *replaced the entry*, and every
+        # continue press died with "'bool' object has no attribute
+        # 'get'" (nine times in the owner's log). Fixing it here fixes
+        # every caller at once, including Home's.
+        self.button.clicked.connect(lambda checked=False: on_continue())
+        self.button.hide()
+        self.button.move((self.width() - self.button.width()) // 2,
+                         (self.height() - self.button.height()) // 2)
+
+    def _on_fade(self, value):
+        self._mix = float(value)
+        # The button belongs to the frosted state, so it arrives with it
+        # rather than a beat before: shown as soon as there is any frost
+        # to sit on, gone only once the artwork is sharp again.
+        self.button.setVisible(self._mix > 0.02)
+        self.update()
+
+    def set_hovered(self, hovered):
+        if hovered and self._frosted is None:
+            # Built on the first hover and kept, not built up front: a
+            # Reading page can hold a hundred covers, and frosting all of
+            # them at build time is a hundred paints for the one card
+            # the pointer will actually reach.
+            self._frosted = frosted_cover(self._sharp)
+        target = 1.0 if (hovered and self._frosted is not None) else 0.0
+        if abs(target - self._mix) < 1e-3:
+            return
+        self._fade.stop()
+        # Freeze slow, thaw fast - see COVER_FADE_IN_MS/_OUT_MS.
+        self._fade.setDuration(COVER_FADE_IN_MS if target > self._mix
+                               else COVER_FADE_OUT_MS)
+        # From wherever it actually is, not from 0/1: crossing back over
+        # a card mid-thaw must not restart the whole fade.
+        self._fade.setStartValue(self._mix)
+        self._fade.setEndValue(target)
+        self._fade.start()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        if self._sharp is not None and not self._sharp.isNull():
+            painter.drawPixmap(0, 0, self._sharp)
+        if self._mix > 0.0 and self._frosted is not None:
+            painter.setOpacity(self._mix)
+            painter.drawPixmap(0, 0, self._frosted)
+        painter.end()
+
+
+class _CardHoverRelay(QObject):
+    """Turns "the pointer is somewhere on this card" into one on/off for
+    a ContinueCover.
+
+    It cannot simply be the card's own Enter/Leave. Qt sends a widget
+    Leave the moment the pointer crosses onto one of its children, so a
+    card with a cover, a title and a button inside it produces a Leave
+    every time the pointer moves from one of them to the next - and the
+    button would vanish at the exact moment it was being aimed at.
+
+    So: any Enter shows, any Leave *schedules* a hide one turn of the
+    event loop later, and an Enter arriving before that turn cancels it.
+    A Leave and the Enter that follows it are delivered together, so
+    crossing between children never hides anything, while genuinely
+    leaving the card has no Enter behind it and does. This needs nothing
+    from underMouse() and does not depend on which of the pair Qt sends
+    first."""
+
+    # How often the safety poll re-checks a hovered card. Cheap - it runs
+    # only while exactly one card is frosted, and stops the moment it
+    # thaws.
+    POLL_MS = 250
+
+    def __init__(self, cover, card, parent=None):
+        super().__init__(parent)
+        self._cover = cover
+        self._card = card
+        self._leaving = False
+        self._poll = QTimer(self)
+        self._poll.setInterval(self.POLL_MS)
+        self._poll.timeout.connect(self._verify)
+
+    def _pointer_on_card(self) -> bool:
+        """Whether the widget under the cursor belongs to this card.
+
+        A widget-tree hit-test, never coordinate arithmetic: the first
+        version compared `mapFromGlobal(QCursor.pos())` against the
+        card's rect, and on this machine's mixed-DPI monitors that maps
+        through the wrong screen's scale factor (the same failure
+        .claude/rules/ui.md records for mapToGlobal). The symptom was
+        both halves of what the owner reported - a frost stuck on after
+        the pointer left, and the continue button vanishing under a
+        pointer that was still on the card - because the answer was
+        wrong in both directions depending on which monitor."""
+        under = QApplication.widgetAt(QCursor.pos())
+        while under is not None:
+            if under is self._card:
+                return True
+            under = under.parentWidget()
+        return False
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Enter:
+            self._leaving = False
+            self._cover.set_hovered(True)
+            self._poll.start()
+        elif event.type() == QEvent.Type.Leave:
+            self._leaving = True
+            QTimer.singleShot(0, self._settle)
+        return False
+
+    def _settle(self):
+        if not self._leaving:
+            return
+        try:
+            # Where the pointer actually is beats what the events said:
+            # the continue button's own hover filter and tooltip can
+            # leave the card holding a Leave with no Enter behind it
+            # while the pointer never left. See _pointer_on_card.
+            if self._pointer_on_card():
+                self._leaving = False
+                return
+            self._unhover()
+        except RuntimeError:
+            # The page rebuilt and took the cover with it - pages here are
+            # thrown away and rebuilt on every visit (.claude/rules/ui.md),
+            # so a queued callback outliving its widget is ordinary.
+            pass
+
+    def _verify(self):
+        """The backstop for the events that never come. Clicking a card
+        opens the player or the details page *over* it - the pointer
+        never moves, so no Leave ever fires, and the frost stayed on
+        under the overlay and was still there when it closed. While a
+        card is frosted this asks every quarter-second whether the
+        cursor is still genuinely on it (an overlay on top means it is
+        not - widgetAt answers with the overlay), and thaws it the
+        moment it is not."""
+        try:
+            if not self._pointer_on_card():
+                self._unhover()
+        except RuntimeError:
+            self._poll.stop()
+
+    def _unhover(self):
+        self._poll.stop()
+        self._leaving = False
+        self._cover.set_hovered(False)
+
+
+def attach_continue_cover(card, cover):
+    """Wire `cover`'s frost/button to hover anywhere on `card`.
+
+    The filter goes on the card *and* on every widget inside it, because
+    each of those steals the hover from the card as the pointer crosses
+    it - see _CardHoverRelay. An event filter rather than a Card subclass:
+    Card is shared by every page in the app, and this belongs to reading
+    cards only."""
+    relay = _CardHoverRelay(cover, card, card)
+    card.installEventFilter(relay)
+    for child in card.findChildren(QWidget):
+        child.installEventFilter(relay)
+    return relay
 
 
 class TrackerPage(GlassPage):
@@ -1787,9 +2139,17 @@ class TrackerPage(GlassPage):
         card_layout.setContentsMargins(8, 10, 8, 10)
         card_layout.setSpacing(6)
 
+        pixmap = images.thumbnail_or_avatar(entry.get("cover_path"),
+                                            entry["title"], POSTER_SIZE)
+        # No frosted cover and no round continue button on the tracker
+        # pages any more, at the owner's ask: a card here is one target -
+        # it opens the episode/chapter list (the details page), whose own
+        # big Continue button is where resuming lives. Home's sliding
+        # cards keep the cover control; ContinueCover stays exported for
+        # them, untouched.
         cover = QLabel()
         cover.setFixedSize(*POSTER_SIZE)
-        cover.setPixmap(images.thumbnail_or_avatar(entry.get("cover_path"), entry["title"], POSTER_SIZE))
+        cover.setPixmap(pixmap)
         card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         if self._select_mode:
@@ -1835,7 +2195,12 @@ class TrackerPage(GlassPage):
         if self._select_mode:
             card.clicked.connect(lambda en_id=entry.get("id"): self._toggle_selected(en_id))
         else:
-            card.clicked.connect(lambda en=entry: self._open_entry(en))
+            # One target: the details page - the episode/chapter list.
+            # Resuming is that page's Continue button. resume=False is
+            # what routes a video/reading entry there (open_in_app);
+            # types with no details page keep their old open unchanged.
+            card.clicked.connect(
+                lambda en=entry: self._open_entry(en, resume=False))
         card.rightClicked.connect(lambda event, en=entry: self._show_context_menu(event, en))
         # Dragging is off while selecting as well as while the grid is
         # narrowed: both a drag and a pick want the same left press, and
@@ -1861,9 +2226,31 @@ class TrackerPage(GlassPage):
             return ""
         return entry.get("progress") or ""
 
-    def _open_entry(self, entry):
-        if not open_tracker_entry(self, entry):
+    def _open_entry(self, entry, resume=True):
+        """Open an entry. `resume=False` is the reading card's body -
+        the chapter list rather than the chapter that was open; the round
+        button on its cover passes True."""
+        if not open_tracker_entry(self, entry, resume=resume):
             self._open_form(edit=True, entry=entry)
+
+    def _on_inapp_closed(self, entry_id):
+        """The player, reader or details page opened from here has
+        closed - pick up whatever progress it wrote and redraw, so the
+        card shows the new number the moment the overlay is gone
+        (previously it took a page switch or a Sync click).
+
+        The entry is re-read from disk rather than trusted in memory:
+        the reader and the details page work on *copies* of the entry
+        dict, so their writes reach the file and not this page's own
+        object."""
+        fresh = next((e for e in storage.load(self.DATA_FILE, [])
+                      if e.get("id") == entry_id), None)
+        if fresh:
+            entry = next((e for e in self.entries
+                          if e.get("id") == entry_id), None)
+            if entry is not None:
+                entry.update(fresh)
+        self._refresh_grid()
 
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
@@ -2414,39 +2801,14 @@ class EntryForm(QDialog):
         self.show_watched_check.toggled.connect(self._update_progress_visibility)
         form.addWidget(self.show_watched_check)
 
-        # Correcting a wrong number by hand. Progress is otherwise
-        # written only by opening something, and only ever forwards, so
-        # without this a number that went wrong - an episode matched to
-        # the wrong season, a chapter list that renumbered - could never
-        # be put right. Deliberately not a +/- stepper: this is not for
-        # counting through episodes, it is for fixing one mistake, which
-        # is why it is a typed value on an existing entry only.
-        self.correct_row = QWidget()
-        correct_layout = QHBoxLayout(self.correct_row)
-        correct_layout.setContentsMargins(0, 0, 0, 0)
-        correct_layout.setSpacing(8)
-        correct_col = QVBoxLayout()
-        correct_col.setSpacing(2)
-        correct_col.addWidget(QLabel("Correct Last Watched/Read"))
-        self.correct_spin = QDoubleSpinBox()
-        self.correct_spin.setRange(0, 99999)
-        self.correct_spin.setDecimals(1)
-        self.correct_season_spin = QSpinBox()
-        self.correct_season_spin.setRange(0, 99)
-        self.correct_season_spin.setPrefix("S")
-        inner = QHBoxLayout()
-        inner.setSpacing(6)
-        inner.addWidget(self.correct_season_spin)
-        inner.addWidget(self.correct_spin)
-        correct_col.addLayout(inner)
-        correct_layout.addLayout(correct_col)
-        correct_layout.addStretch(1)
-        form.addWidget(self.correct_row)
-        # Only ever on an entry that already exists - there is nothing to
-        # correct about one being created.
-        self.correct_row.setVisible(not self.is_new)
-        self._seed_correction()
-
+        # No "Correct Last Watched/Read" row here any more. It was a
+        # typed season/episode pair that wrote progress in either
+        # direction, and the owner asked for it gone from Add/Edit: the
+        # spinners read as a way to *count* through episodes in a form
+        # that otherwise never touches progress. The capability itself
+        # stays - `correct_progress()` and `_write_progress(...,
+        # forward_only=False)` are untouched, and are what a "mark as
+        # watched / unwatched" control hangs off.
         self.chapter_row = QWidget()
         chapter_layout = QHBoxLayout(self.chapter_row)
         chapter_layout.setContentsMargins(0, 0, 0, 0)
@@ -3005,42 +3367,6 @@ class EntryForm(QDialog):
             return format_chapter_progress(value)
         return self._original_progress
 
-    def _seed_correction(self):
-        """Pre-fill the correction with what is stored now, so leaving it
-        alone changes nothing."""
-        entry = self.entry or {}
-        is_manga = (self.type_combo.currentText() if hasattr(self, "type_combo")
-                    else entry.get("type")) in MANGA_TYPES
-        self.correct_season_spin.setVisible(not is_manga)
-        if is_manga:
-            self.correct_spin.setDecimals(1)
-            self.correct_spin.setValue(float(entry.get("last_watched_chapter") or 0.0))
-        else:
-            season, episode = parse_episode_progress(entry.get("progress"))
-            self.correct_spin.setDecimals(0)
-            self.correct_spin.setValue(float(episode or 0))
-            self.correct_season_spin.setValue(int(season or 0))
-
-    def _apply_correction(self):
-        """Write a hand-typed number, in either direction.
-
-        Only when it actually differs from what is stored - otherwise
-        opening Edit and pressing Save would rewrite progress on every
-        entry, which is how an "untouched" field quietly becomes a
-        writer."""
-        entry = self.entry or {}
-        if self.is_new or not entry.get("id"):
-            return
-        if entry.get("type") in MANGA_TYPES:
-            wanted = round(float(self.correct_spin.value()), 1)
-            if wanted and wanted != float(entry.get("last_watched_chapter") or 0.0):
-                correct_progress(entry, chapter=wanted)
-            return
-        episode = int(self.correct_spin.value())
-        season = int(self.correct_season_spin.value())
-        if episode and (season, episode) != parse_episode_progress(entry.get("progress")):
-            correct_progress(entry, season=season, episode=episode)
-
     def _save(self):
         title = self.title_combo.currentText().strip()
         if not title:
@@ -3106,8 +3432,5 @@ class EntryForm(QDialog):
             site_id=site_id,
             imdb_id=self.selected_imdb_id if is_video else None,
         )
-        # After the entry itself is written, so the correction is applied
-        # to the saved record rather than being overwritten by it.
-        self._apply_correction()
         self.on_save(self.entry, self.is_new)
         self.accept()

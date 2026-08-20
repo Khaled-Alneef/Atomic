@@ -79,14 +79,55 @@ def list_jobs() -> list:
         return [dict(job) for job in reversed(_load())]
 
 
+# Progress moves constantly; the *state* of a job changes a handful of
+# times in its life. Only the second kind is worth a disk write.
+_PROGRESS_SAVE_GAP = 2.0
+_last_progress_save = 0.0
+
+
 def _update(job_id, **fields):
+    """Update a job, writing to disk only when it is worth it.
+
+    **The write used to happen on every single update**, and a chapter
+    reports once per page - so a 21-page chapter rewrote the whole jobs
+    file 21 times, each rewrite holding the lock that the downloads page
+    and the sidebar indicator both poll twice a second. The UI thread
+    then waits on disk I/O it has no reason to touch, which is exactly
+    what a frozen window looks like while the rest of the app keeps
+    working.
+
+    A state change is always written immediately - that is the part that
+    must survive a crash. Pure progress is written at most every couple
+    of seconds, because a percentage that is two seconds stale after an
+    unexpected shutdown costs nothing."""
+    global _last_progress_save
+    changes_state = "state" in fields or "path" in fields
     with _lock:
+        target = None
         for job in _load():
             if job.get("id") == job_id:
                 job.update(fields)
-                _save()
-                return dict(job)
-    return None
+                target = dict(job)
+                break
+        if target is None:
+            return None
+        now = time.time()
+        should_save = changes_state or (now - _last_progress_save) >= _PROGRESS_SAVE_GAP
+        if should_save:
+            _last_progress_save = now
+    # Outside the lock: the readers only need the in-memory list, which
+    # is already correct by the time we get here, and holding a lock
+    # across a file write is what put the UI thread behind disk I/O.
+    if should_save:
+        _save_unlocked()
+    return target
+
+
+def _save_unlocked():
+    try:
+        storage.save(JOBS_FILE, list(_jobs or []))
+    except Exception:
+        pass
 
 
 def cancel(job_id):
@@ -135,8 +176,14 @@ def _add(job: dict) -> dict:
 
 
 def queue_episode(entry, *, season=None, episode=None, quality=None,
-                  subtitle=None, folder=None) -> dict:
-    """One episode (or a film, with season/episode left out)."""
+                  subtitle=None, folder=None, audio=None) -> dict:
+    """One episode (or a film, with season/episode left out).
+
+    `audio` is a soft preference over which *release* gets picked -
+    "en" prefers dual-audio/dub releases, "jp" (or None) the ordinary
+    original-audio fansubs. Soft because a torrent's tracks are whatever
+    the release carries; the preference reorders candidates, it cannot
+    conjure a dub that was never released (see _order_by_audio)."""
     title = entry.get("title") or "Video"
     label = title if not episode else f"{title} S{int(season or 1):02d}E{int(episode):02d}"
     return _add({
@@ -148,21 +195,130 @@ def queue_episode(entry, *, season=None, episode=None, quality=None,
         "season": season, "episode": episode,
         "quality": quality,
         "subtitle": subtitle,
+        "audio": audio,
         "folder": folder or default_folder(),
     })
 
 
 def queue_season(entry, *, season=None, episodes=(), quality=None,
-                 subtitle=None, folder=None) -> list:
-    """A whole season, as one job per episode.
+                 subtitle=None, folder=None, audio=None) -> list:
+    """A whole season, as one job per episode sharing a group.
 
     One job each rather than a single job for the lot: episodes come
     from different releases with different swarms, and a season that
     reports one failure because its ninth episode has no seeders would
-    hide the eight that worked."""
-    return [queue_episode(entry, season=season, episode=number,
-                          quality=quality, subtitle=subtitle, folder=folder)
-            for number in episodes]
+    hide the eight that worked.
+
+    They carry a shared `group` so the UI can still show one bar for
+    "season 4" while keeping each episode's own success or failure -
+    which is the whole point of splitting them."""
+    import uuid
+    group = uuid.uuid4().hex[:12]
+    numbers = [int(n) for n in episodes]
+    label = f"{entry.get('title') or 'Season'} - season {int(season or 1)}"
+    if numbers and (min(numbers), max(numbers)) != (1, len(numbers)):
+        # A chosen range, not the whole season - say which one, so the
+        # queue row reads as what was actually asked for.
+        label += f" (E{min(numbers):02d}-E{max(numbers):02d})"
+    jobs = []
+    for number in episodes:
+        job = queue_episode(entry, season=season, episode=number,
+                            quality=quality, subtitle=subtitle, folder=folder,
+                            audio=audio)
+        jobs.append(_update(job["id"], group=group, group_label=label) or job)
+    return jobs
+
+
+def list_groups() -> list:
+    """Jobs collapsed into what the user actually asked for.
+
+    A season queued as 28 jobs is one request, and a page listing 28
+    bars for it buries everything else. Each row here is either a single
+    job or a whole season, with progress averaged across its episodes
+    and a count of how many are finished."""
+    rows, groups, order = [], {}, []
+    for job in list_jobs():
+        key = job.get("group")
+        if not key:
+            rows.append({"kind": "job", "job": job, "label": job.get("label"),
+                         "progress": job.get("progress") or 0.0,
+                         "state": job.get("state"), "detail": job.get("detail"),
+                         "jobs": [job]})
+            continue
+        if key not in groups:
+            groups[key] = {"kind": "group", "label": job.get("group_label")
+                           or "Season", "jobs": []}
+            order.append(key)
+            rows.append(groups[key])
+        groups[key]["jobs"].append(job)
+
+    for key in order:
+        row = groups[key]
+        jobs = row["jobs"]
+        done = [j for j in jobs if j.get("state") == DONE]
+        failed = [j for j in jobs if j.get("state") == FAILED]
+        running = [j for j in jobs if j.get("state") == RUNNING]
+        # Averaged over the whole season, counting a finished episode as
+        # a full one - so the bar reflects the season, not whichever
+        # episode happens to be downloading now.
+        row["progress"] = (sum(1.0 if j.get("state") == DONE
+                               else (j.get("progress") or 0.0) for j in jobs)
+                           / max(len(jobs), 1))
+        # Cancelled has to be weighed here or a season nobody is
+        # downloading any more reports itself queued forever: the
+        # indicator then shows work in progress with no worker, and
+        # never comes down. A season is only still QUEUED if something
+        # in it genuinely is.
+        cancelled = [j for j in jobs if j.get("state") == CANCELLED]
+        waiting = [j for j in jobs if j.get("state") == QUEUED]
+        if running:
+            row["state"] = RUNNING
+        elif waiting:
+            row["state"] = QUEUED
+        elif len(done) == len(jobs):
+            row["state"] = DONE
+        elif cancelled and not failed and not done:
+            row["state"] = CANCELLED
+        elif failed:
+            row["state"] = FAILED
+        else:
+            # A mix of finished and abandoned: what survives is what was
+            # saved, so say Done rather than Cancelled.
+            row["state"] = DONE if done else CANCELLED
+        parts = [f"{len(done)} of {len(jobs)} episodes"]
+        if failed:
+            parts.append(f"{len(failed)} failed")
+        if running:
+            parts.append(running[0].get("detail") or "")
+        row["detail"] = " · ".join(p for p in parts if p)
+    return rows
+
+
+def cancel_group(group_id):
+    """Cancel the episodes of a season that have not finished.
+
+    Only the ones still queued or running. Cancelling a season used to
+    mark its *finished* episodes cancelled too, which threw away the one
+    thing they had: a file on disk, its Done badge and the button that
+    opens its folder. "Stop downloading this season" cannot mean
+    "forget the eight episodes already saved"."""
+    for job in list_jobs():
+        if job.get("group") == group_id and job.get("state") in (QUEUED, RUNNING):
+            cancel(job["id"])
+
+
+def active_progress():
+    """One number for "is anything downloading, and how far along" -
+    for a badge or a strip that is visible without opening the page.
+
+    None when nothing is active, so a caller can hide the indicator
+    entirely rather than showing an idle bar."""
+    rows = [r for r in list_groups() if r.get("state") in (RUNNING, QUEUED)]
+    if not rows:
+        return None
+    return {"count": len(rows),
+            "progress": sum(r.get("progress") or 0.0 for r in rows) / len(rows),
+            "label": rows[0].get("label") or ""}
 
 
 def queue_chapters(entry, chapters, *, folder=None) -> list:
@@ -234,6 +390,26 @@ def _run_queue():
                     detail="Nothing could be downloaded for this.")
 
 
+_DUB_RE = re.compile(r"dual[\s._-]?audio|multi[\s._-]?audio|\bdub(?:bed)?\b"
+                     r"|english\s*audio|\beng\b.{0,12}\baudio\b", re.I)
+
+
+def _order_by_audio(candidates, audio):
+    """Reorder releases toward the asked-for audio, without dropping any.
+
+    "en" floats releases whose names say dual-audio/dub; "jp" (the
+    original) floats the ones that do not. Reordered rather than
+    filtered: release names lie by omission all the time, and an empty
+    queue because no name said "dual audio" would be worse than the
+    wrong-order fallback these are."""
+    if audio not in ("en", "jp"):
+        return candidates
+    wants_dub = audio == "en"
+    return sorted(candidates,
+                  key=lambda s: bool(_DUB_RE.search(s.get("title") or ""))
+                  != wants_dub)
+
+
 def _run_video(job) -> str:
     from . import streams, subtitles, torrent_engine
 
@@ -247,6 +423,7 @@ def _run_video(job) -> str:
     wanted = job.get("quality")
     ordered = streams.matching_quality(found, wanted) if wanted else []
     candidates = [s for s in (ordered or found) if s.get("info_hash")]
+    candidates = _order_by_audio(candidates, job.get("audio"))
     if not candidates:
         return ""
 

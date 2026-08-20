@@ -20,8 +20,9 @@ import sys
 import threading
 from pathlib import Path
 
-from helpers import (app_settings, global_search, images, logs, native_cursor,
-                     startup, storage, theme, updater, whats_new)
+from helpers import (app_settings, downloads, global_search, images, logs,
+                     native_cursor, startup, storage, theme, updater,
+                     whats_new)
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -48,6 +49,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -141,6 +143,21 @@ GEOMETRY_SAVE_DELAY_MS = 400
 # scale factors, and it only ever applies to a window being rescued from
 # off-screen coordinates.
 TITLE_BAR_ALLOWANCE = 48
+
+# The download strip under the Downloads nav button, and how often it is
+# re-read. 4px so it reads as a progress strip rather than a second
+# button in the rail; hidden entirely when nothing is downloading.
+#
+# Polled, like the Downloads page itself, and for the same reason: the
+# download worker is a plain daemon thread with no Qt in it (deliberately
+# - it keeps running with no window open), so there is no signal to
+# connect to. It is also the only way a download queued from the player
+# or the reader can reach the sidebar at all, which is why the idle poll
+# does not stop the way the page's does - active_progress() reads a list
+# already in memory, so 2.5s of nothing costs nothing.
+DOWNLOAD_BAR_HEIGHT = 4
+DOWNLOAD_POLL_MS = 1000
+DOWNLOAD_IDLE_POLL_MS = 2500
 
 SIDEBAR_WIDTH = 220
 # Wide enough for the nav bullets and the +/gear buttons once the text
@@ -300,6 +317,10 @@ class MainWindow(QMainWindow):
         # Set before anything styles the Settings button, which reads it
         # for its tooltip. Filled in by the startup update check.
         self._pending_update_version = ""
+        # Same, for the Downloads button: how many downloads are running
+        # and what to say about them. Both empty until the first poll.
+        self._download_count = 0
+        self._download_tooltip = ""
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 20, 16, 16)
         layout.setSpacing(4)
@@ -410,8 +431,51 @@ class MainWindow(QMainWindow):
         self.downloads_btn.setCheckable(True)
         use_hover_cursor(self.downloads_btn)
         self.downloads_btn.clicked.connect(lambda: self.navigate_to("downloads"))
+        # A notification dot in the button's top-right corner while
+        # anything is downloading (the owner's ask) - readable at a
+        # glance where the count in the label is not, and the only
+        # signal the folded rail has room for. A child at a fixed
+        # offset, not a layout row, so nothing in the column moves when
+        # it appears. Mouse-transparent: it sits on its own button.
+        self.downloads_dot = QLabel(self.downloads_btn)
+        self.downloads_dot.setFixedSize(9, 9)
+        self.downloads_dot.setStyleSheet(
+            f"background: {theme.ACCENT}; border: 1px solid {theme.BG};"
+            f" border-radius: 4px;")
+        self.downloads_dot.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.downloads_dot.hide()
         self._style_downloads_btn()
         layout.addWidget(self.downloads_btn)
+
+        # Progress where it can be seen without opening the page - the
+        # thing actually asked for. A slim accent strip directly under
+        # the Downloads button, plus the count in that button's own
+        # label; the season and episode being downloaded are in the
+        # tooltip, since there is no room for a title at 220px and none
+        # at all in the folded rail.
+        #
+        # Hidden rather than zeroed when nothing is running: a bar
+        # sitting at 0% reads as a download that is stuck, and an idle
+        # sidebar should look exactly as it did before this existed. It
+        # is the only thing in the column below the stretch that changes
+        # height, so showing it lifts the Downloads button by its own
+        # 4px + the layout's 4px spacing and leaves Add/Settings put.
+        self.downloads_bar = QProgressBar()
+        self.downloads_bar.setRange(0, 1000)
+        self.downloads_bar.setTextVisible(False)
+        self.downloads_bar.setFixedHeight(DOWNLOAD_BAR_HEIGHT)
+        self.downloads_bar.setStyleSheet(
+            f"QProgressBar {{ background: {theme.SURFACE_HOVER};"
+            f" border: none; border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}"
+            f"QProgressBar::chunk {{ background: {theme.ACCENT_GRADIENT};"
+            f" border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}")
+        self.downloads_bar.hide()
+        layout.addWidget(self.downloads_bar)
+
+        self._downloads_timer = QTimer(self)
+        self._downloads_timer.timeout.connect(self.refresh_download_indicator)
+        self._downloads_timer.start(DOWNLOAD_IDLE_POLL_MS)
 
         self.add_btn = QPushButton("+", objectName="AddButton")
         self.add_btn.setFixedHeight(34)
@@ -452,6 +516,11 @@ class MainWindow(QMainWindow):
             f"background: {theme.ACCENT}; border-radius: {UPDATE_DOT_SIZE // 2}px;")
         self._update_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._update_dot.hide()
+
+        # A download left running from the last session (or queued by a
+        # player window opened before this one) should be visible on the
+        # first frame, not after the first poll.
+        self.refresh_download_indicator()
 
         return sidebar
 
@@ -499,12 +568,83 @@ class MainWindow(QMainWindow):
         (CLAUDE.md records that happening twice)."""
         collapsed = self._sidebar_collapsed
         glyph = ""   # Download, Segoe Fluent Icons
-        self.downloads_btn.setText(glyph if collapsed else f"  {glyph}   Downloads")
+        # The count goes in the label only when the label is showing; the
+        # folded rail has no room for it, which is what the strip under
+        # the button is for there. A live download's title outranks the
+        # usual tooltip at either width, the same way a waiting update
+        # does on Settings below.
+        count = f" ({self._download_count})" if self._download_count else ""
+        self.downloads_btn.setText(
+            glyph if collapsed else f"  {glyph}   Downloads{count}")
         self.downloads_btn.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
-        self.downloads_btn.setToolTip("Downloads" if collapsed else "")
+        self.downloads_btn.setToolTip(
+            self._download_tooltip or ("Downloads" if collapsed else ""))
         self.downloads_btn.setProperty("collapsed", collapsed)
         self.downloads_btn.style().unpolish(self.downloads_btn)
         self.downloads_btn.style().polish(self.downloads_btn)
+
+    def refresh_download_indicator(self):
+        """Re-read what is downloading and show (or hide) the strip.
+
+        Called by this window's own timer and, while it is open, by the
+        Downloads page's 1s tick as well - that tick is the freshest read
+        in the app and the two would otherwise disagree by a poll.
+
+        Nothing at all when active_progress() is None: no strip, no
+        count, and the tooltip back to plain "Downloads"."""
+        try:
+            active = downloads.active_progress()
+            # A season whose episodes were all cancelled still reports
+            # "queued" (helpers.downloads decides a group's state from
+            # its done/failed/running counts and falls through to
+            # QUEUED), which would leave this strip up forever after a
+            # Cancel All - measured on 5 cancelled episodes. Believing
+            # the jobs costs one more copy of a list already in memory;
+            # when that function is fixed this guard never fires.
+            if active is not None and not any(
+                    job.get("state") in (downloads.QUEUED, downloads.RUNNING)
+                    for job in downloads.list_jobs()):
+                active = None
+        except Exception:
+            # A downloads.json that cannot be read must not take the
+            # sidebar with it - no indicator is the honest answer, and
+            # the Downloads page says the same thing for the same reason.
+            logs.exception("Could not read download progress")
+            active = None
+
+        if active is None:
+            self.downloads_bar.hide()
+            self.downloads_dot.hide()
+            count, tooltip = 0, ""
+        else:
+            # The dot rides the button's own top-right corner; placed
+            # here because the button's width depends on the sidebar
+            # state and this is the one place that runs on every change.
+            self.downloads_dot.move(self.downloads_btn.width() - 13, 3)
+            self.downloads_dot.show()
+            self.downloads_dot.raise_()
+            count = int(active.get("count") or 0)
+            try:
+                fraction = float(active.get("progress") or 0.0)
+            except (TypeError, ValueError):
+                fraction = 0.0
+            self.downloads_bar.setValue(max(0, min(1000, int(fraction * 1000))))
+            self.downloads_bar.show()
+            label = active.get("label") or "Download"
+            extra = f" (+{count - 1} more)" if count > 1 else ""
+            tooltip = f"{label} - {int(round(fraction * 100))}%{extra}"
+
+        # Only when it actually changed: restyling unpolishes and
+        # re-polishes the button, and doing that every second would make
+        # it flicker under the pointer for no new information.
+        if count != self._download_count or tooltip != self._download_tooltip:
+            self._download_count = count
+            self._download_tooltip = tooltip
+            self._style_downloads_btn()
+
+        interval = DOWNLOAD_POLL_MS if active else DOWNLOAD_IDLE_POLL_MS
+        if self._downloads_timer.interval() != interval:
+            self._downloads_timer.setInterval(interval)
 
     def _style_settings_btn(self):
         collapsed = self._sidebar_collapsed

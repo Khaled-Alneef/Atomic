@@ -16,25 +16,141 @@ from PyQt6.QtWidgets import (
 from . import logs, theme
 
 
+class LogoProgress(QWidget):
+    """A title's logo that fills with its own colour as loading advances.
+
+    The logo is drawn twice from one transparent PNG: once faint, as the
+    part still to come, and once at full strength clipped to the
+    fraction loaded. So the shape is always the title, and the colour
+    arriving *is* the progress - no separate bar, and nothing that has to
+    be read to be understood.
+
+    Falls back to nothing at all when there is no logo (TMDB has none, or
+    no key is set); the player keeps its text status underneath, so this
+    only ever adds.
+
+    Left-to-right rather than bottom-up: a title treatment is a word, and
+    a word filling the way it is read is legible at a glance where a
+    rising waterline is not."""
+
+    # Raised from 0.22: over the title's own backdrop (a warm frame for
+    # Bleach) the fainter ghost blended into the picture and the logo
+    # read as broken sepia art rather than as an empty gauge waiting to
+    # fill. At 0.42 the shape is unmistakably the logo from the first
+    # frame, and the full-colour fill arriving still reads as progress.
+    GHOST_OPACITY = 0.42
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap = None
+        self._fraction = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_logo(self, path: str) -> bool:
+        pixmap = QPixmap(path) if path else QPixmap()
+        if pixmap.isNull():
+            self._pixmap = None
+            self.update()
+            return False
+        self._pixmap = pixmap
+        self.update()
+        return True
+
+    def has_logo(self) -> bool:
+        return self._pixmap is not None
+
+    def set_fraction(self, fraction: float):
+        fraction = max(0.0, min(1.0, float(fraction or 0.0)))
+        # Repaint only on a visible change: this is driven by a buffer
+        # percentage that can tick many times a second.
+        if abs(fraction - self._fraction) < 0.005:
+            return
+        self._fraction = fraction
+        self.update()
+
+    def _target_rect(self, pixmap):
+        """The logo centred and scaled to fit, keeping its aspect."""
+        available = self.rect()
+        scaled = pixmap.size()
+        scaled.scale(available.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (available.width() - scaled.width()) // 2
+        y = (available.height() - scaled.height()) // 2
+        return QRect(x, y, scaled.width(), scaled.height())
+
+    def paintEvent(self, event):
+        if self._pixmap is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        # Scaled by devicePixelRatio and tagged, or the logo blurs on any
+        # display that is not at 100% (.claude/rules/ui.md).
+        ratio = self.devicePixelRatioF()
+        target = self._target_rect(self._pixmap)
+        scaled = self._pixmap.scaled(
+            int(target.width() * ratio), int(target.height() * ratio),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
+        scaled.setDevicePixelRatio(ratio)
+
+        painter.setOpacity(self.GHOST_OPACITY)
+        painter.drawPixmap(target, scaled)
+
+        filled = int(target.width() * self._fraction)
+        if filled > 0:
+            painter.setOpacity(1.0)
+            # Clip in *widget* coordinates to the filled portion, then
+            # draw the same pixmap again - so the two halves line up
+            # exactly and the seam is a straight edge through the art
+            # rather than two differently-scaled copies.
+            painter.setClipRect(QRect(target.x(), target.y(),
+                                      filled, target.height()))
+            painter.drawPixmap(target, scaled)
+        painter.end()
+
+
 class GlassPage(QWidget):
-    """Base for a page: paints a soft dark radial-gradient backdrop
-    behind whatever layout/content the subclass adds on top of it."""
+    """Base for a page: paints the app's near-black backdrop with a soft
+    nebula bleeding in from the window's *right* edge - a deep blue core
+    with a violet bloom below it - behind whatever layout/content the
+    subclass adds on top.
+
+    Two lobes rather than one, and both centred outside (or almost
+    outside) the page: a single centred glow reads as a spotlight aimed
+    at the content, where a source sitting off the edge reads as
+    something far away that the page happens to catch the light of. Each
+    lobe fades to *alpha 0* rather than to the base colour, so the two
+    overlap into one another instead of the second one painting a visible
+    disc of base over the first."""
 
     def __init__(self, base=theme.BG, glow=theme.GLOW, parent=None):
         super().__init__(parent)
         self._base = QColor(base)
         self._glow = QColor(glow)
+        self._glow_alt = QColor(theme.GLOW_ALT)
+
+    @staticmethod
+    def _nebula(colour, center, radius, strength):
+        gradient = QRadialGradient(center, radius)
+        core = QColor(colour)
+        core.setAlpha(strength)
+        mid = QColor(colour)
+        mid.setAlpha(int(strength * 0.34))
+        edge = QColor(colour)
+        edge.setAlpha(0)
+        gradient.setColorAt(0.0, core)
+        gradient.setColorAt(0.45, mid)
+        gradient.setColorAt(1.0, edge)
+        return gradient
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), self._base)
         w, h = self.width(), self.height()
-        center = QPointF(w * 0.5, h * 0.0)
-        radius = max(w, h) * 0.95
-        gradient = QRadialGradient(center, radius)
-        gradient.setColorAt(0.0, self._glow)
-        gradient.setColorAt(1.0, self._base)
-        painter.fillRect(self.rect(), gradient)
+        span = max(w, h)
+        painter.fillRect(self.rect(), self._nebula(
+            self._glow, QPointF(w * 1.02, h * 0.28), span * 0.92, 255))
+        painter.fillRect(self.rect(), self._nebula(
+            self._glow_alt, QPointF(w * 0.94, h * 0.78), span * 0.62, 220))
         super().paintEvent(event)
 
 
@@ -472,6 +588,12 @@ class Toast(QLabel):
         # Shown before being positioned: a ToolTip-flagged window only
         # settles at its final polished size once shown, and positioning
         # against a stale size would push it past the intended corner.
+        # Parked far off-screen for that first show, though - shown at
+        # Qt's default position it painted one frame wherever the window
+        # happened to be created, which the owner saw as "a window opens
+        # and closes really fast" whenever a download was queued.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.move(-20000, -20000)
         self.show()
         self._move_to_corner(window)
         self._dismiss_timer.start(duration_ms if duration_ms else STICKY_TOAST_MAX_MS)
@@ -964,6 +1086,53 @@ class GridSelection:
 
         self._mutate(apply_change)
         return f"Restored {self._selection_count(len(removed))}"
+
+
+class MirroredGlyphButton(QPushButton):
+    """A glyph button whose icon is painted flipped left-to-right.
+
+    Built for the two exit doors (player and reader top bars). Segoe
+    Fluent's SignOut glyph walks out to the *right*, and the owner asked
+    for the door to open to the left - the direction "back" actually is
+    in this app. There is no leftward variant in the font, so the glyph
+    is painted through a mirrored transform instead of set as text.
+
+    Painting it ourselves also ends the "scratched" look for good: a
+    text glyph on a QSS-styled button is clipped by whatever padding the
+    app-wide rule leaves (player._icon_button records the measurement),
+    where a painted one is centred on the button's own rect with no
+    padding in the arithmetic at all."""
+
+    def __init__(self, glyph, tooltip, size=(38, 38), font_pt=14, parent=None):
+        super().__init__("", parent)
+        self._glyph = glyph
+        self._font_pt = font_pt
+        self.setToolTip(tooltip)
+        self.setFixedSize(*size)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none;"
+            f" padding: 0px; border-radius: {theme.RADIUS_SM}px; }}"
+            f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}")
+        use_hover_cursor(self)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)       # QSS hover/pressed fill
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        font = theme.icon_font(self._font_pt)
+        painter.setFont(font)
+        painter.setPen(QColor(theme.TEXT if self.isEnabled() else theme.TEXT_DIM))
+        # Mirror around the button's vertical centre line: translate to
+        # the right edge, flip x. Text drawn under this transform comes
+        # out left-handed, which is the whole point.
+        painter.translate(self.width(), 0)
+        painter.scale(-1.0, 1.0)
+        painter.drawText(QRect(0, 0, self.width(), self.height()),
+                         Qt.AlignmentFlag.AlignCenter, self._glyph)
+        painter.end()
 
 
 SEARCH_ICON_SIZE = 16

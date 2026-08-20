@@ -6,7 +6,12 @@ Read this before non-trivial UI work (`ui-engineer`).
 
     src/main.py              window, sidebar, navigation, page transitions, full screen
     src/windows/             one module per page - home, tracker (Anime/Reading/Series),
-                             games, link_grid (shared by apps + websites)
+                             games, link_grid (shared by apps + websites);
+                             plus three full-window overlays opened over the
+                             page stack, not in it: player, reader, details
+                             (the title page a card's body opens - facts +
+                             episode/chapter list; the round cover button
+                             resumes, and that split is settled)
     src/helpers/theme.py     palette constants + the whole app stylesheet
     src/helpers/widgets.py   GlassPage, Card, toasts, scroll_area, hover-cursor registry
     src/helpers/storage.py   JSON persistence
@@ -39,6 +44,22 @@ Read this before non-trivial UI work (`ui-engineer`).
 
 ## Traps already paid for
 
+- **Over the video, native or nothing.** mpv renders into a native child
+  window (`player.VideoSurface`), and on Windows a native child paints
+  above every non-native sibling whatever `raise_()` was told. The
+  loading logo was a plain child of the player page and had therefore
+  **never once been visible** - drawn every frame, underneath the video
+  surface. Anything that must appear over the video is either
+  `_make_native`'d itself or a child of something that is; that is what
+  `player.StartupBackdrop` is, and why the logo lives inside it.
+- **A Leave is not proof the pointer went away.** It is also what the
+  pointer arriving on a raised sibling looks like. The reader's floating
+  chapter controls are children of the page over the strip's viewport,
+  so reaching for one fired the viewport's Leave and hid the button
+  under the cursor - "the lower bar never appears". Ask where the
+  pointer actually is (`QApplication.widgetAt(QCursor.pos())`, which
+  hit-tests the widget tree and so has no scale factor in it) before
+  acting on a Leave. The same fix is in `tracker._CardHoverRelay`.
 - **Never position with `mapToGlobal()`.** On two monitors at different
   scale factors it returns coordinates divided by the *other* screen's
   factor - toasts landed 200px off. `window.geometry()` is already

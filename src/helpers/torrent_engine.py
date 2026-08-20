@@ -62,6 +62,10 @@ def unavailable_reason():
 # is also what lets the HTTP side just read the file back.
 _CACHE_DIR = os.path.join(tempfile.gettempdir(), "atomic-stream-cache")
 
+# Fixed so the Windows Firewall rule the user grants once keeps applying;
+# see the session settings for why 0 (random) re-prompts every launch.
+LISTEN_PORT = 47600
+
 # How much of the front of the file to demand before anything else.
 # mpv wants the container header and the first frames; 12MB covers the
 # moov atom of a big mp4 and a comfortable read-ahead on an mkv.
@@ -98,7 +102,13 @@ def _make_session():
     at all, and without peer discovery the swarm is invisible however
     many seeders it claims."""
     settings = {
-        "listen_interfaces": "0.0.0.0:0,[::]:0",
+        # A fixed listen port, not 0. Port 0 asks the OS for a random
+        # one every launch, and Windows Firewall keys its remembered
+        # allow-rule on the port - so a new port each session means a new
+        # firewall prompt every single time the player opens. A fixed
+        # port is prompted once and then never again. 47600 is high,
+        # unprivileged and not in any well-known service's range.
+        "listen_interfaces": f"0.0.0.0:{LISTEN_PORT},[::]:{LISTEN_PORT}",
         "alert_mask": lt.alert.category_t.error_notification
                       | lt.alert.category_t.status_notification,
         "enable_dht": True,
@@ -152,6 +162,69 @@ def session():
         return _session
 
 
+# How much watched-but-not-kept video to leave lying around. Streaming
+# writes every episode to disk and nothing ever removed it: a single
+# session of testing left 24 files and ~10GB behind, and it only ever
+# grew. A download the user actually asked for is copied to their own
+# folder, so everything in here is scratch by definition.
+CACHE_LIMIT_BYTES = 6 * 1024 * 1024 * 1024
+
+
+def trim_cache(limit: int = CACHE_LIMIT_BYTES) -> int:
+    """Delete the least recently used scratch files until under `limit`.
+
+    Returns the bytes freed. Oldest-touched first, and never a file
+    belonging to a torrent this session still has open - that would be
+    deleting the thing currently playing."""
+    if not os.path.isdir(_CACHE_DIR):
+        return 0
+    in_use = set()
+    for torrent in list(_torrents.values()):
+        try:
+            in_use.add(os.path.normcase(torrent.file_path()))
+        except Exception:
+            pass
+
+    entries = []
+    total = 0
+    for root, _dirs, files in os.walk(_CACHE_DIR):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            # st_blocks is not on Windows; st_size over-reports a sparse
+            # file, which is the safe direction - it only makes trimming
+            # more eager, never less.
+            entries.append((stat.st_atime, stat.st_size, path))
+            total += stat.st_size
+    if total <= limit:
+        return 0
+
+    freed = 0
+    for _atime, size, path in sorted(entries):
+        if total - freed <= limit:
+            break
+        if os.path.normcase(path) in in_use:
+            continue
+        try:
+            os.remove(path)
+            freed += size
+        except OSError:
+            continue
+    # Directories a torrent made for a multi-file release are left empty
+    # behind their contents; sweep them so the cache does not fill with
+    # husks.
+    for root, dirs, _files in os.walk(_CACHE_DIR, topdown=False):
+        for name in dirs:
+            try:
+                os.rmdir(os.path.join(root, name))
+            except OSError:
+                pass
+    return freed
+
+
 def prewarm():
     """Bring the session and DHT up before anything is played.
 
@@ -164,7 +237,11 @@ def prewarm():
     Cheap to call more than once - the session is built once."""
     if lt is None:
         return
-    threading.Thread(target=lambda: (session(), start_server()),
+    # Trimming rides along with the prewarm rather than getting its own
+    # trigger: it is disk work, it must not happen on the UI thread, and
+    # the moment the player opens is exactly when last session's scratch
+    # has stopped being interesting.
+    threading.Thread(target=lambda: (session(), start_server(), trim_cache()),
                      daemon=True, name="atomic-torrent-prewarm").start()
 
 

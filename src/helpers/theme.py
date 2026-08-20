@@ -14,41 +14,74 @@ from PyQt6.QtGui import QFont
 from . import storage
 
 # ---- Palette -------------------------------------------------------------
-# Six of these are fixed by the app's color spec and everything else is
-# derived from them, so the whole UI stays one family rather than drifting
-# per page:
+# The "space" theme. Six tones are fixed by the app's color spec and
+# everything else is derived from them, so the whole UI stays one family
+# rather than drifting per page:
 #
-#   TEXT #F1F1F7 · TEXT_MUTED #9495AD · SURFACE #1A1B2E
-#   SURFACE_HOVER #232442 · BORDER #34355A · ACCENT #7C6FF2
+#   TEXT #EAF1FF · TEXT_MUTED #8CA0C4 · SURFACE #121A2B
+#   SURFACE_HOVER #1B2740 · BORDER #2B3B5E · ACCENT #25D3E8
 #
-# The derived tones keep the spec's hue (a blue-violet around 237-246 deg)
-# and only move lightness - a neutral gray mixed in anywhere reads as a
-# dirty patch against these, which is what the old near-neutral palette
-# did once the specified colors sat next to it.
-BG = "#0d0e18"           # app background
-BG_ALT = "#141525"       # secondary background (page panels)
-GLOW = "#272451"         # soft purple tint used in the page glow backdrop
-SIDEBAR = "#101121"      # sidebar column
-SIDEBAR_SHEEN = "#1c1d33"  # subtle highlight at the sidebar's top edge
-SIDEBAR_DEEP = "#0a0b13"   # ...fading darker toward its bottom
-SURFACE = "#1a1b2e"      # cards / inputs ("card background")
-SURFACE_HOVER = "#232442"  # ...lifted on hover ("card elevated")
-SURFACE_ACTIVE = "#2c2d52"
-BORDER = "#34355a"
+# Every derived tone keeps the spec's hue (a deep navy around 215-225
+# deg, with the accent's cyan at ~188) and only moves lightness - a
+# neutral gray mixed in anywhere reads as a dirty patch against these,
+# the same way it did against the violet palette this replaces.
+#
+# The accent is a *cyan*, and that is why ON_ACCENT exists: white on
+# #25D3E8 computes to a 1.8:1 contrast ratio, which is unreadable, where
+# ON_ACCENT on the same fill computes to 10.3:1. Anything filled with the
+# accent (or with ACCENT_GRADIENT) takes ON_ACCENT for its text/glyph,
+# never white - that is what the violet accent could get away with and
+# this one cannot.
+BG = "#070a14"           # app background - near-black navy
+BG_ALT = "#0b1120"       # secondary background (page panels)
+# The two lobes of the nebula the page backdrop paints in from its right
+# edge (widgets.GlassPage): a blue core with a violet bloom off it.
+GLOW = "#16305e"         # deep blue core of the backdrop glow
+GLOW_ALT = "#2a1f5c"     # ...and the violet bloom beside it
+SIDEBAR = "#080d1a"      # sidebar column
+SIDEBAR_SHEEN = "#111a2e"  # subtle highlight at the sidebar's top edge
+SIDEBAR_DEEP = "#05080f"   # ...fading darker toward its bottom
+SURFACE = "#121a2b"      # cards / inputs ("card background")
+SURFACE_HOVER = "#1b2740"  # ...lifted on hover ("card elevated")
+SURFACE_ACTIVE = "#243354"
+# The lit top lip a "glass" panel catches - one step above SURFACE_HOVER
+# and used only as a gradient's first stop, never as a fill on its own.
+SURFACE_SHEEN = "#2c3f66"
+BORDER = "#2b3b5e"
 
-TEXT = "#f1f1f7"
-TEXT_MUTED = "#9495ad"
-TEXT_DIM = "#61627f"
+TEXT = "#eaf1ff"
+TEXT_MUTED = "#8ca0c4"
+TEXT_DIM = "#5a6d8f"
 
-ACCENT = "#7c6ff2"        # primary button
-ACCENT_HOVER = "#8f84f5"
-ACCENT_ACTIVE = "#6a5ce0"
-ACCENT_SOFT = "#26244a"   # tinted background for the active nav item
+ACCENT = "#25d3e8"        # primary action - bright cyan
+ACCENT_HOVER = "#54e2f2"
+ACCENT_ACTIVE = "#12b1c6"
+ACCENT_BLUE = "#3f6ffb"   # the blue end every accent gradient runs into
+ACCENT_BLUE_HOVER = "#5b86ff"
+ACCENT_SOFT = "#10273f"   # tinted background for the active nav item
+# Text/glyph color on any accent-filled surface. See the note above -
+# white on cyan is the one combination this palette cannot use.
+ON_ACCENT = "#04141c"
 
-SUCCESS = "#2ecc71"
-DANGER = "#e74c3c"
-DANGER_HOVER = "#ef6152"
-WARNING = "#f1c40f"
+SUCCESS = "#2ee0a4"
+DANGER = "#ff5470"
+DANGER_HOVER = "#ff7285"
+WARNING = "#ffc857"
+
+# Cyan -> blue, the app's primary-action fill (the sidebar's "+", the
+# accent buttons, the player's play disc). Written as functions because
+# QSS needs the gradient spelled out at each use and the direction
+# differs: a wide button reads best lit corner-to-corner, a disc from
+# its top.
+def accent_gradient(x1=0, y1=0, x2=1, y2=1, hover=False):
+    cyan = ACCENT_HOVER if hover else ACCENT
+    blue = ACCENT_BLUE_HOVER if hover else ACCENT_BLUE
+    return (f"qlineargradient(x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2},"
+            f" stop:0 {cyan}, stop:1 {blue})")
+
+
+ACCENT_GRADIENT = accent_gradient()
+ACCENT_GRADIENT_HOVER = accent_gradient(hover=True)
 
 # Glossy dark gradient used by every #Card item across the app (poster
 # grids, game icons, quick-list rows, the Home hero carousel) and by the
@@ -61,15 +94,32 @@ WARNING = "#f1c40f"
 # height) *is* SURFACE, its hover counterpart is SURFACE_HOVER, and the
 # border is BORDER. So a card reads as the specified card background,
 # with the sheen and the darker foot only shading around it.
-CARD_SHEEN = "#3e3f6b"
+CARD_SHEEN = "#33486f"
 CARD_TOP = SURFACE_HOVER
 CARD_MID = SURFACE
-CARD_BOTTOM = "#101120"
+CARD_BOTTOM = "#080d18"
 CARD_BORDER = BORDER
-CARD_HOVER_SHEEN = "#524fa0"
+# The hover sheen leans toward the accent's cyan rather than staying a
+# lighter navy: it is the one moment a card is "lit", and the border it
+# lights up with is the accent.
+CARD_HOVER_SHEEN = "#2f6f92"
 CARD_HOVER_TOP = SURFACE_ACTIVE
 CARD_HOVER_MID = SURFACE_HOVER
-CARD_HOVER_BOTTOM = "#16172a"
+CARD_HOVER_BOTTOM = "#0c1526"
+
+# One "glass panel" fill, used by everything that reads as a translucent
+# slab rather than a card: the page panels, Home's section frames, the
+# player's overlay bars. Top-lit, so the panel's lip catches light and
+# the body settles into the background - the same trick the cards use,
+# spread over a much larger area, so the sheen is far subtler (a card's
+# sheen across a 700px-wide panel reads as an uneven wash).
+def glass_fill(top=SURFACE_SHEEN, body=SURFACE, foot=None):
+    foot = foot or BG_ALT
+    return (f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {top}, stop:0.06 {body}, stop:1 {foot})")
+
+
+PANEL_FILL = glass_fill()
 
 FONT_FAMILY = "Segoe UI"
 FONT_FAMILY_EMOJI = "Segoe UI Emoji"
@@ -160,24 +210,55 @@ def nav_font():
 
 
 def _ensure_checkmark_asset() -> str:
-    """A small white checkmark PNG for QCheckBox::indicator:checked.
+    """A small checkmark PNG for QCheckBox::indicator:checked.
 
     Once any QSS is applied to ::indicator, Qt stops drawing the native
     checkmark glyph on top of it - without this, "checked" only shows as
     a subtle color swap (easy to miss). QSS url() needs forward slashes
     even on Windows, hence as_posix().
+
+    Drawn in ON_ACCENT rather than white, because the checked indicator
+    is filled with the cyan accent and a white tick on it is the same
+    unreadable pairing ON_ACCENT exists to avoid. Written under a new
+    filename ("...dark") on purpose: the old white asset is already on
+    disk in every install, and this only creates what is missing - reusing
+    the name would have left every existing install with the white tick.
     """
-    path = storage.DATA_DIR / "ui_assets" / "checkmark.png"
+    path = storage.DATA_DIR / "ui_assets" / "checkmark_dark.png"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.line([(3, 8), (6, 12), (13, 4)], fill="white", width=2, joint="curve")
+        draw.line([(3, 8), (6, 12), (13, 4)], fill=ON_ACCENT, width=2, joint="curve")
         img.save(path)
     return path.as_posix()
 
 
 CHECKMARK_PATH = _ensure_checkmark_asset()
+
+
+def _ensure_chevron_asset() -> str:
+    """A small down-chevron PNG for QComboBox::down-arrow.
+
+    Every dropdown in the app was rendering with *no* arrow at all: the
+    QSS below styles QComboBox, which turns off Qt's native primitive
+    drawing, and ::down-arrow takes an `image:` url and nothing else -
+    there was no file to point it at. The owner rightly asked how anyone
+    is meant to know the box unfolds. Drawn at 2x and referenced at half
+    size so it stays crisp on a 125%/150% display, same reason the
+    checkmark above exists as a file at all."""
+    path = storage.DATA_DIR / "ui_assets" / "chevron_down.png"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.line([(5, 9), (12, 16), (19, 9)], fill=TEXT_MUTED, width=3,
+                  joint="curve")
+        img.save(path)
+    return path.as_posix()
+
+
+CHEVRON_DOWN_PATH = _ensure_chevron_asset()
 
 
 STYLESHEET = f"""
@@ -195,7 +276,7 @@ QToolTip {{
     color: {TEXT};
     border: 1px solid {BORDER};
     padding: 4px 8px;
-    border-radius: 6px;
+    border-radius: 7px;
 }}
 QLabel {{
     background: transparent;
@@ -204,13 +285,19 @@ QLabel {{
 /* ---- Sidebar --------------------------------------------------------- */
 /* A restrained top-to-bottom sheen rather than a flat fill - just enough
    gradient to catch the light without competing with the item cards,
-   which carry the app's more pronounced gloss. */
+   which carry the app's more pronounced gloss.
+   The two right-hand corners are rounded so the column reads as a panel
+   laid on the background rather than as a wall built into the window
+   edge. Corners only - the sidebar's width, its border and everything
+   inside it are untouched, so nothing moves. */
 QWidget#Sidebar {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 {SIDEBAR_SHEEN},
         stop:0.35 {SIDEBAR},
         stop:1 {SIDEBAR_DEEP});
     border-right: 1px solid {BORDER};
+    border-top-right-radius: {RADIUS_LG}px;
+    border-bottom-right-radius: {RADIUS_LG}px;
 }}
 /* The collapse/expand chevron pinned at the sidebar's top edge. */
 QPushButton#FoldButton {{
@@ -259,24 +346,32 @@ QPushButton#NavButton[collapsed="true"] {{
     font-size: 14pt;
     font-weight: 400;
 }}
+/* The selected row is a filled pill in a lighter tone, lit from its left
+   edge with the accent's cyan - the tint fades out across the row rather
+   than flooding it, so the label still reads as text on a panel and not
+   as text on a button. */
 QPushButton#NavButton:checked {{
-    background: {ACCENT_SOFT};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {ACCENT_SOFT},
+        stop:1 {SURFACE_HOVER});
     color: {TEXT};
     border: 1px solid {ACCENT};
+    border-radius: {RADIUS}px;
 }}
 /* Just a centered "+" now, so it reads the same at either sidebar width
-   instead of having a label that only fits when expanded. */
+   instead of having a label that only fits when expanded. Cyan into
+   blue, the app's one primary-action fill. */
 QPushButton#AddButton {{
-    background: {ACCENT};
-    color: white;
+    background: {ACCENT_GRADIENT};
+    color: {ON_ACCENT};
     border: none;
-    border-radius: {RADIUS_SM}px;
+    border-radius: {RADIUS}px;
     text-align: center;
     padding: 4px;
     font-size: 16pt;
     font-weight: 700;
 }}
-QPushButton#AddButton:hover {{ background: {ACCENT_HOVER}; }}
+QPushButton#AddButton:hover {{ background: {ACCENT_GRADIENT_HOVER}; }}
 QPushButton#AddButton:pressed {{ background: {ACCENT_ACTIVE}; }}
 
 QListWidget#NavList {{
@@ -300,14 +395,17 @@ QListWidget#NavList::item:hover {{
     color: {TEXT};
 }}
 QListWidget#NavList::item:selected {{
-    background: {ACCENT_SOFT};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {ACCENT_SOFT},
+        stop:1 {SURFACE_HOVER});
     color: {TEXT};
     border: 1px solid {ACCENT};
+    border-radius: {RADIUS}px;
 }}
 
 /* ---- Generic page chrome --------------------------------------------- */
 QWidget#Panel {{
-    background: {BG_ALT};
+    background: {PANEL_FILL};
     border-radius: {RADIUS_LG}px;
 }}
 QLabel#PanelTitle {{
@@ -449,7 +547,7 @@ QFrame#Hero {{
    large, and the gloss that reads as a sheen at poster-tile size just
    reads as an uneven wash spread across something this big. */
 QWidget#SectionBox {{
-    background: {SURFACE};
+    background: {PANEL_FILL};
     border-radius: {RADIUS_LG}px;
     border: 1px solid {BORDER};
 }}
@@ -458,8 +556,13 @@ QWidget#Bare {{
 }}
 
 /* ---- Buttons ----------------------------------------------------------- */
+/* Glass rather than a flat slab: a one-step lift at the top edge that
+   settles back to the card colour, so the button catches the same light
+   the panels do. Padding and font size are exactly as they were - only
+   the fill and the corner radius moved. */
 QPushButton {{
-    background: {SURFACE};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {SURFACE_HOVER}, stop:1 {SURFACE});
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
@@ -467,35 +570,44 @@ QPushButton {{
     font-size: 10pt;
     font-weight: 600;
 }}
-QPushButton:hover {{ background: {SURFACE_HOVER}; }}
+QPushButton:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {SURFACE_ACTIVE}, stop:1 {SURFACE_HOVER});
+    border: 1px solid {ACCENT};
+}}
 QPushButton:pressed {{ background: {SURFACE_ACTIVE}; }}
 QPushButton:disabled {{ color: {TEXT_DIM}; }}
 
+/* The primary action anywhere in the app: cyan into blue, with the
+   near-black ON_ACCENT on top - white on this cyan is unreadable (see
+   the palette note). Rounded to RADIUS rather than RADIUS_SM so the ends
+   read as caps; padding is untouched, so nothing changes size. */
 QPushButton#Accent {{
-    background: {ACCENT};
-    color: white;
+    background: {ACCENT_GRADIENT};
+    color: {ON_ACCENT};
     border: none;
+    border-radius: {RADIUS}px;
     padding: 10px 18px;
     font-weight: 700;
 }}
-QPushButton#Accent:hover {{ background: {ACCENT_HOVER}; }}
+QPushButton#Accent:hover {{ background: {ACCENT_GRADIENT_HOVER}; }}
 QPushButton#Accent:pressed {{ background: {ACCENT_ACTIVE}; }}
 
 QPushButton#AccentIcon {{
-    background: {ACCENT};
-    color: white;
+    background: {ACCENT_GRADIENT};
+    color: {ON_ACCENT};
     border: none;
-    border-radius: {RADIUS_SM}px;
+    border-radius: {RADIUS}px;
     padding: 0px;
     font-size: 18pt;
     font-weight: 700;
 }}
-QPushButton#AccentIcon:hover {{ background: {ACCENT_HOVER}; }}
+QPushButton#AccentIcon:hover {{ background: {ACCENT_GRADIENT_HOVER}; }}
 QPushButton#AccentIcon:pressed {{ background: {ACCENT_ACTIVE}; }}
 
 QPushButton#Danger {{
     background: {DANGER};
-    color: white;
+    color: {ON_ACCENT};
     border: none;
 }}
 QPushButton#Danger:hover {{ background: {DANGER_HOVER}; }}
@@ -552,16 +664,28 @@ QLineEdit, QComboBox, QPlainTextEdit {{
     border-radius: {RADIUS_SM}px;
     padding: 8px 10px;
     selection-background-color: {ACCENT};
+    selection-color: {ON_ACCENT};
 }}
 QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{
     border: 1px solid {ACCENT};
 }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox::drop-down {{ border: none; width: 26px; }}
+/* Every foldable box carries a visible down-chevron at its right edge,
+   app-wide - drawn to a file because ::down-arrow accepts an image url
+   and nothing else (see _ensure_chevron_asset). Widgets that paint
+   their own arrow (the reader's chapter combo) switch this off with
+   image: none in their own stylesheet. */
+QComboBox::down-arrow {{
+    image: url({CHEVRON_DOWN_PATH});
+    width: 12px;
+    height: 12px;
+}}
 QComboBox QAbstractItemView {{
     background: {SURFACE};
     color: {TEXT};
     border: 1px solid {BORDER};
     selection-background-color: {ACCENT};
+    selection-color: {ON_ACCENT};
     outline: none;
     padding: 4px;
 }}
@@ -609,8 +733,8 @@ QTreeWidget::item:hover, QListWidget::item:hover {{
     background: {SURFACE_HOVER};
 }}
 QTreeWidget::item:selected, QListWidget::item:selected {{
-    background: {ACCENT};
-    color: white;
+    background: {ACCENT_GRADIENT};
+    color: {ON_ACCENT};
 }}
 QHeaderView::section {{
     background: {BG_ALT};
@@ -663,7 +787,7 @@ QMenu::item {{
     padding: 8px 14px;
     border-radius: 6px;
 }}
-QMenu::item:selected {{ background: {ACCENT}; color: white; }}
+QMenu::item:selected {{ background: {ACCENT_GRADIENT}; color: {ON_ACCENT}; }}
 QMenu::separator {{
     height: 1px;
     background: {BORDER};

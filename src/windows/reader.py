@@ -50,7 +50,9 @@ spawns a thread per page: unbounded per-entry threads have already
 saturated this user's whole home network once (see helpers/lookup_pool).
 """
 
+import datetime
 import os
+import re
 import urllib.error
 import urllib.request
 import webbrowser
@@ -58,17 +60,19 @@ from collections import OrderedDict
 
 from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QImage,
+                         QPainter, QPixmap)
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
+    QWidget,
 )
 
 from helpers import (downloads, images, logs, lookup_pool, net, storage,
                      theme)
-from helpers.widgets import (Card, GlassPage, finish_toast, show_toast,
-                             use_hover_cursor)
-from windows.tracker import format_chapter_progress
+from helpers.widgets import (Card, GlassPage, MirroredGlyphButton,
+                             finish_toast, show_toast, use_hover_cursor)
+from windows.tracker import correct_progress, format_chapter_progress
 
 # Imported defensively: this page is useful (and testable) with a stub
 # source injected over it, and a missing module must read as "the reader
@@ -84,7 +88,14 @@ except Exception:                                   # pragma: no cover
 # One image request, and the whole chapter-listing chain. The listing is
 # allowed longer because it is a search across a site, not one file.
 PAGE_TIMEOUT = 12.0
-CHAPTER_LIST_TIMEOUT = 25.0
+# Raised from 25s when chapter_source began following a paginated
+# chapter list. olympustaff prints 40 chapters per page and hangs the
+# other 200 off `?page=2..7`; the full list for The Beginning After the
+# End measures 21.7s cold (249 chapters, no gaps) where the first page
+# alone was 13s for 41. It is paid once per series per six hours - the
+# listing is cached - and the alternative is the list the owner
+# reported: only the newest forty chapters, ending at the one just read.
+CHAPTER_LIST_TIMEOUT = 45.0
 CHAPTER_PAGES_TIMEOUT = 20.0
 
 # Bigger than net.MAX_RESPONSE_BYTES on purpose: that ceiling is sized for
@@ -102,10 +113,27 @@ PIXMAP_BUDGET_BYTES = 192 * 1024 * 1024
 # something that costs hundreds of megabytes is not.
 MAX_DECODED_PIXELS = 40_000_000
 
-# Zoom, as a multiplier on the page's own size. 100% is the original,
-# which is also where every chapter opens.
+# Zoom, as a multiplier on the *medium's* baseline size. 100% is where
+# every chapter opens.
 ZOOM_STEP = 0.15
 ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
+
+# What 100% means, per medium, as a multiple of the image's own pixels.
+#
+# It used to be 1.0 for everything - one image pixel per device pixel -
+# and that is only right for one of the three. Manga scans are cut for
+# print and come off these sites far wider than a page needs to be read
+# at, so 100% was a page you had to zoom *out* of every time; manhwa and
+# manhua are cut as narrow phone strips and arrived slightly too small.
+# The numbers are the owner's own, measured against what he was setting
+# by hand every chapter: manga 75% of the old baseline, the two vertical
+# strips 115%.
+#
+# This is the baseline, not the zoom: the +/- controls and the label
+# still read 100% here, so "100%" means "the size this medium opens at"
+# rather than a number that has to be re-learned per series.
+MEDIUM_BASE_SCALE = {"manga": 0.75, "manhwa": 1.15, "manhua": 1.15}
+DEFAULT_BASE_SCALE = 1.0
 
 # How far outside the viewport the strip keeps pixels. This margin is
 # also what does the preloading - a slot one screen down is fetched
@@ -132,6 +160,12 @@ SAVE_POSITION_MS = 1200
 BAR_HEIGHT = 48
 BOTTOM_HEIGHT = 60      # the chapter controls, pinned to the window's floor
 BAR_REVEAL_PX = 72      # pointer this close to the top brings it back
+# Within this far of the strip's end counts as 'finished the
+# chapter', which is when the next/previous controls appear on
+# their own. Generous rather than exact: the last page of a
+# webtoon is often a tall credits panel, and the controls being
+# there slightly early is better than having to hunt for them.
+END_OF_CHAPTER_PX = 260
 BOTTOM_REVEAL_PX = 110  # ...and this close to the bottom, for that one
 SCROLL_HIDE_DELTA = 12  # px of travel before a scroll counts as intent
 
@@ -147,16 +181,24 @@ BOTTOM_GAP = 16
 # One wheel notch, in px of strip. Qt's default here is singleStep (20)
 # times the OS's wheel lines (3) = 60px, measured - which on a webtoon
 # chapter 30,000px tall is 500 notches from top to bottom. 300 was the
-# first try and the owner still called it slow on a long webtoon: at a
-# ~900px viewport that is a third of a screen per notch, so a 30,000px
-# chapter is 100 notches. 640 is a bit over two thirds of a screenful,
-# which puts the same chapter at ~47 notches without overshooting a
-# panel - a full screenful per notch reads past the join between two.
-WHEEL_STEP_PX = 640
+# first try and the owner still called it slow on a long webtoon; 640
+# overshot a panel; 460 was called still slightly too fast; 380 was the
+# next step down and the owner asked for slower again, so 320 - about a
+# third of a ~900px viewport, ~98 notches on the 31,365px Kingdom
+# chapter measured here. Raised from Qt's 60 in the first place so a
+# long webtoon does not need five hundred.
+WHEEL_STEP_PX = 320
+
+# The gap drawn between pages, per medium. Zero for the vertical strips
+# - a webtoon's panels are cut mid-image and any spacing draws a seam
+# through the artwork - and a sliver for manga only, whose pages are
+# discrete printed pages: butted hard together they read as one long
+# unbroken scan, which is what the owner asked to have visibly broken.
+MANGA_PAGE_GAP_PX = 6
 
 # Down/Up arrow, same reasoning as the wheel: 120 was a tenth of a
 # screen and unusable as a way to move down a strip.
-ARROW_SCROLL_PX = 260
+ARROW_SCROLL_PX = 200
 
 # Segoe Fluent Icons codepoints, the same family the sidebar and the
 # player use (theme.FONT_STACK_ICONS) - monochrome, so they take the
@@ -171,9 +213,13 @@ ICON_REFRESH = "\ue72c"               # Refresh
 ICON_FULLSCREEN = "\ue740"            # FullScreen
 ICON_EXIT_FULLSCREEN = "\ue73f"       # BackToWindow
 ICON_LEAVE = "\uf3b1"                 # SignOut - a door with a way out of it
+ICON_CHAPTER_LIST = "\ue8fd"          # List - the same glyph the player's
+                                      # episode list uses, so "the list of
+                                      # things to open" is one icon in both
 ICON_BROWSER = "\ue774"               # Globe
 ICON_CHEVRON_DOWN = "\ue70d"          # ChevronDown - "this opens"
 ICON_DOWNLOAD = "\ue896"              # Download
+ICON_READ = "\ue73e"                  # CheckMark - a chapter already read
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Atomic/1.0"
 
@@ -536,16 +582,145 @@ def chapter_title(chapter) -> str:
     return f"{head} - {title}" if title else head
 
 
+# A leading repetition of the chapter's own number, with whatever
+# separator the site used between it and the name.
+_LEADING_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[-:–—.)]*\s*")
+
+
+def chapter_name(chapter) -> str:
+    """The chapter's own name for the list's centre column - without the
+    number, which has a column of its own now.
+
+    3asq writes the number into the name as well ("885 - <name>", all
+    380 rows of Kingdom, measured), so leaving it there would print the
+    same number twice on every row. Only a *leading* repetition of this
+    chapter's own number is cut: olympustaff buries it mid-sentence
+    instead, and pulling numbers out of the middle of somebody's title
+    is guesswork. Falls back to the number when a source gives no name,
+    so the column is never simply blank."""
+    title = str(chapter.get("title") or "").strip()
+    number = chapter_number(chapter)
+    if title and number is not None:
+        match = _LEADING_NUMBER_RE.match(title)
+        if match and _as_number(match.group(1)) == number:
+            title = title[match.end():].strip()
+    if title:
+        return title
+    return (f"Chapter {format_chapter_progress(number)}"
+            if number is not None else "Chapter")
+
+
+def _as_number(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def chapter_published(chapter) -> str:
+    """A chapter's release date, readable - or "" when there isn't one.
+
+    Empty rather than guessed, and that is the whole point of it.
+    Measured across the owner's own entries: the scan sites put no date
+    in their markup at all, so chapter_source hands back `published: ""`
+    for every row of 3asq (380/380 blank), olympustaff and lavascans,
+    and only the meshmanga v2 API carries a real timestamp (200/200
+    filled, ISO with a Z). A plausible-looking made-up date would be
+    indistinguishable from the real ones on the same list, which is
+    worse than a blank column."""
+    raw = str(chapter.get("published") or "").strip()
+    if not raw:
+        return ""
+    try:
+        moment = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        # A plain date, or a timestamp with a space where the T should
+        # be - neither is worth its own parser, and anything else is a
+        # shape nothing here produces.
+        for shape in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                moment = datetime.datetime.strptime(raw[:len(shape) + 2], shape)
+                break
+            except ValueError:
+                continue
+        else:
+            return ""
+    return f"{moment.day} {moment.strftime('%b %Y')}"
+
+
+# The chapter row's two flanks, and they are the *same* fixed width on
+# purpose: the name between them is centred on the row only if what sits
+# on either side of it is equally wide. Unequal clusters would put its
+# centre off the row's by half their difference - the same arithmetic
+# _place_title does for the title in the top bar.
+ROW_SIDE_WIDTH = 178
+ROW_NUMBER_WIDTH = 66
+
+
+class _ElidedLabel(QLabel):
+    """A one-line label that takes whatever width the layout gives it and
+    ends in an ellipsis instead of being clipped mid-glyph.
+
+    A plain QLabel cannot do this. With word wrap off its minimum size
+    hint is the whole string, so one long chapter name would widen every
+    row in a 500-row list past the viewport; with word wrap on it becomes
+    two lines and that row is taller than the ones around it, which is
+    exactly what a list you scan down a column must not do. `Ignored` as
+    the horizontal policy is what lets the layout hand it a width rather
+    than ask it for one."""
+
+    def __init__(self, text="", parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self._full = str(text or "")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored,
+                           QSizePolicy.Policy.Preferred)
+        self.setToolTip(self._full)
+        self._elide()
+
+    def _elide(self):
+        metrics = QFontMetrics(self.font())
+        super().setText(metrics.elidedText(self._full,
+                                           Qt.TextElideMode.ElideRight,
+                                           max(0, self.width())))
+
+    def setText(self, text):
+        self._full = str(text or "")
+        self.setToolTip(self._full)
+        self._elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+
 class _ChapterListView(QWidget):
-    """The chapter picker: one Card per chapter, Arabic ones marked."""
+    """The chapter picker before reading starts: the series name, then one
+    Card per chapter laid out number / name / release date, Arabic ones
+    marked.
+
+    Right-clicking a row marks that chapter read or unread - the only
+    place on this page progress can be moved *down*, which is why it goes
+    out as a signal for the page to run through tracker.correct_progress
+    rather than being written from here."""
 
     picked = Signal(int)
+    markRequested = Signal(int, bool)     # chapter index, finished?
+    markAllRequested = Signal(bool)       # every chapter, finished?
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+
+        # The series name. It was nowhere on this page - the only copy
+        # was the top bar's, which was being elided to a single ellipsis
+        # (see _place_title), so a list of 380 Arabic chapter names
+        # carried nothing at all saying which series they belonged to.
+        self._title = QLabel("", objectName="PanelTitle")
+        self._title.setWordWrap(True)
+        self._title.setVisible(False)
+        layout.addWidget(self._title)
 
         self._notice = QLabel("", objectName="Muted")
         self._notice.setWordWrap(True)
@@ -566,11 +741,15 @@ class _ChapterListView(QWidget):
         area.setWidget(self._body)
         layout.addWidget(area, stretch=1)
 
+    def set_title(self, text):
+        self._title.setText(text or "")
+        self._title.setVisible(bool(text))
+
     def set_notice(self, text):
         self._notice.setText(text or "")
         self._notice.setVisible(bool(text))
 
-    def set_chapters(self, chapters, current=-1):
+    def set_chapters(self, chapters, current=-1, read_up_to=0.0):
         # Torn down and rebuilt rather than updated in place - a page
         # here rebuilds from scratch, the same rule the rest of the app
         # follows (.claude/rules/ui.md).
@@ -580,56 +759,128 @@ class _ChapterListView(QWidget):
             if widget is not None:
                 widget.deleteLater()
         for index, chapter in enumerate(chapters):
+            number = chapter_number(chapter)
+            read = bool(read_up_to and number is not None
+                        and number <= read_up_to)
             self._rows.insertWidget(
-                index, self._build_row(index, chapter, index == current))
+                index, self._build_row(index, chapter, index == current, read))
 
-    def _build_row(self, index, chapter, reading=False):
+    def _build_row(self, index, chapter, reading=False, read=False):
+        """One chapter: number hard left, name centred, date hard right.
+
+        Three cells rather than a run of widgets in one row, because
+        "centred" here means centred on the *row* - see ROW_SIDE_WIDTH.
+        The `group` field that used to sit in here is gone: every source
+        chapter_source builds sets it to "" (all four site shapes and the
+        MangaDex path), so it was a widget that could never have text."""
         card = Card(matte=True)
         row = QHBoxLayout(card)
         row.setContentsMargins(14, 10, 14, 10)
         row.setSpacing(12)
+        arabic = is_arabic(chapter)
 
-        title = QLabel(chapter_title(chapter), objectName="CardTitle")
-        title.setWordWrap(True)
+        left = QWidget(objectName="Bare")
+        left.setFixedWidth(ROW_SIDE_WIDTH)
+        left_row = QHBoxLayout(left)
+        left_row.setContentsMargins(0, 0, 0, 0)
+        left_row.setSpacing(8)
+        number = chapter_number(chapter)
+        number_label = QLabel(format_chapter_progress(number) if number is not None
+                              else "-", objectName="CardTitle")
+        number_label.setFixedWidth(ROW_NUMBER_WIDTH)
+        # The chapter being read is marked on the row itself rather than
+        # by selecting it: this list is rebuilt on every visit and has no
+        # selection to keep, and after scrolling 500 rows "which one am I
+        # on" is not answerable from anything else on screen.
         if reading:
-            # The chapter being read is marked on the row itself rather
-            # than by selecting it: this list is rebuilt on every visit
-            # and has no selection to keep, and after scrolling 500 rows
-            # "which one am I on" is not answerable from anything else
-            # on screen.
-            title.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 800;")
-        row.addWidget(title, stretch=1)
-
-        if reading:
-            mark = QLabel("Reading")
-            mark.setStyleSheet(
-                f"color: {theme.TEXT}; background: {theme.ACCENT}; "
-                f"border-radius: {theme.RADIUS_SM}px; padding: 2px 10px; "
-                f"font-weight: 700;")
-            row.addWidget(mark)
-
-        group = str(chapter.get("group") or "").strip()
-        if group:
-            group_label = QLabel(group, objectName="CardMeta")
-            row.addWidget(group_label)
+            number_label.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 800;")
+        left_row.addWidget(number_label)
 
         # The language is the point of this reader, so it is a badge and
-        # not a suffix on the title: the owner is scanning for the Arabic
+        # not a suffix on the name: the owner is scanning for the Arabic
         # ones, and a word at the end of a variable-length line is not
-        # something you can scan down a column.
-        badge = QLabel("عربي" if is_arabic(chapter) else
+        # something you can scan down a column. It sits in the left cell
+        # for the same reason - a column, not a ragged edge.
+        badge = QLabel("عربي" if arabic else
                        (str(chapter.get("lang") or "?").upper()))
-        arabic = is_arabic(chapter)
         badge.setStyleSheet(
-            f"color: {theme.TEXT if arabic else theme.TEXT_MUTED}; "
-            f"background: {theme.ACCENT if arabic else theme.SURFACE_HOVER}; "
+            f"color: {theme.ON_ACCENT if arabic else theme.TEXT_MUTED}; "
+            f"background: {theme.ACCENT_GRADIENT if arabic else theme.SURFACE_HOVER}; "
             f"border: 1px solid {theme.ACCENT if arabic else theme.BORDER}; "
             f"border-radius: {theme.RADIUS_SM}px; padding: 2px 10px; "
             f"font-weight: 700;")
-        row.addWidget(badge)
+        left_row.addWidget(badge)
+        left_row.addStretch()
+        row.addWidget(left)
+
+        # Elided, not wrapped - see _ElidedLabel: a name that wraps makes
+        # its row taller than the 500 around it, and one that does not
+        # elide widens every row to the longest name in the list.
+        name = _ElidedLabel(chapter_name(chapter), objectName="CardTitle")
+        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if reading:
+            name.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 800;")
+        row.addWidget(name, stretch=1)
+
+        right = QWidget(objectName="Bare")
+        right.setFixedWidth(ROW_SIDE_WIDTH)
+        right_row = QHBoxLayout(right)
+        right_row.setContentsMargins(0, 0, 0, 0)
+        right_row.setSpacing(8)
+        right_row.addStretch()
+        if reading:
+            mark = QLabel("Reading")
+            mark.setStyleSheet(
+                f"color: {theme.ON_ACCENT}; background: {theme.ACCENT_GRADIENT}; "
+                f"border-radius: {theme.RADIUS_SM}px; padding: 2px 10px; "
+                f"font-weight: 700;")
+            right_row.addWidget(mark)
+        elif read:
+            # Every chapter reading has reached carries the tick, not
+            # only the one being read - the owner's ask: the list should
+            # answer "which of these have I been through" at a glance.
+            # A glyph in the SUCCESS green, the same vocabulary the
+            # player's episode list uses for the same fact.
+            mark = QLabel(ICON_READ)
+            mark.setToolTip("Read")
+            mark.setStyleSheet(
+                f"color: {theme.SUCCESS}; font-family: {theme.FONT_STACK_ICONS}; "
+                f"font-size: 10pt; background: transparent;")
+            right_row.addWidget(mark)
+        published = chapter_published(chapter)
+        date_label = QLabel(published, objectName="CardMeta")
+        date_label.setAlignment(Qt.AlignmentFlag.AlignRight
+                                | Qt.AlignmentFlag.AlignVCenter)
+        # Kept in the layout even with nothing in it, so the flank stays
+        # its fixed width and the names down the list stay on one centre
+        # line whether or not a source dates its chapters.
+        right_row.addWidget(date_label)
+        row.addWidget(right)
 
         card.clicked.connect(lambda i=index: self.picked.emit(i))
+        card.rightClicked.connect(
+            lambda event, i=index: self._show_mark_menu(event, i))
         return card
+
+    def _show_mark_menu(self, event, index):
+        """Mark a chapter read or unread from the list.
+
+        Both wordings are always offered rather than one being worked out
+        from the stored number: "finished" and "unfinished" are the two
+        things the owner can want here, and hiding whichever one looks
+        redundant means the menu changes shape row to row on a list he is
+        scanning by position."""
+        menu = QMenu(self)
+        menu.addAction("Finished reading",
+                       lambda: self.markRequested.emit(index, True))
+        menu.addAction("Unfinished reading",
+                       lambda: self.markRequested.emit(index, False))
+        menu.addSeparator()
+        menu.addAction("Mark all as read",
+                       lambda: self.markAllRequested.emit(True))
+        menu.addAction("Mark all as unread",
+                       lambda: self.markAllRequested.emit(False))
+        menu.exec(event.globalPosition().toPoint())
 
 
 class _ChapterCombo(QComboBox):
@@ -647,11 +898,22 @@ class _ChapterCombo(QComboBox):
 
     *It marks the chapter being read.* Qt highlights the row the pointer
     is over and the row that is current, and after scrolling a
-    500-chapter list neither of those is still visibly the one open."""
+    500-chapter list neither of those is still visibly the one open.
+
+    ...and a third that is not about drawing: right-clicking a row of the
+    open list marks that chapter read or unread, so the mark is reachable
+    from inside a chapter and not only from the list page."""
+
+    markRequested = Signal(int, bool)     # chapter index, finished?
+    markAllRequested = Signal(bool)       # every chapter, finished?
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current_chapter = -1
+        # Filtered on the popup's *viewport*, not on the box: the popup is
+        # a separate top-level view with its own event stream, so a
+        # contextMenuEvent on this widget never sees a press inside it.
+        self.view().viewport().installEventFilter(self)
         # Background and border repeated from the app's own QComboBox
         # rule rather than inherited from it. Measured: with only
         # `padding-right` set here the box came out **transparent** over
@@ -662,7 +924,7 @@ class _ChapterCombo(QComboBox):
         self.setStyleSheet(
             f"QComboBox {{ background: {theme.SURFACE}; color: {theme.TEXT};"
             f" border: 1px solid {theme.BORDER};"
-            f" border-radius: {theme.RADIUS_SM}px;"
+            f" border-radius: {theme.RADIUS}px;"
             f" padding: 4px 26px 4px 10px; }}"
             f"QComboBox:hover {{ border: 1px solid {theme.ACCENT}; }}"
             f"QComboBox::drop-down {{ border: none; width: 26px; }}"
@@ -691,6 +953,29 @@ class _ChapterCombo(QComboBox):
                                                 else theme.TEXT)),
                              Qt.ItemDataRole.ForegroundRole)
         self._current_chapter = index
+
+    def eventFilter(self, obj, event):
+        if (obj is self.view().viewport()
+                and event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.RightButton):
+            row = self.view().indexAt(event.position().toPoint()).row()
+            if row >= 0:
+                menu = QMenu(self)
+                menu.addAction("Finished reading",
+                               lambda r=row: self.markRequested.emit(r, True))
+                menu.addAction("Unfinished reading",
+                               lambda r=row: self.markRequested.emit(r, False))
+                menu.addSeparator()
+                menu.addAction("Mark all as read",
+                               lambda: self.markAllRequested.emit(True))
+                menu.addAction("Mark all as unread",
+                               lambda: self.markAllRequested.emit(False))
+                menu.exec(event.globalPosition().toPoint())
+            # Swallowed either way: a right press the view sees becomes a
+            # change of current row, which on this box is a jump to that
+            # chapter - marking one must not also open it.
+            return True
+        return super().eventFilter(obj, event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -733,6 +1018,7 @@ class _StripView(QScrollArea):
 
     positionChanged = Signal()
     ranOff = Signal(int)
+    zoomRequested = Signal(int)     # +1 / -1 zoom steps (Ctrl+wheel)
 
     def __init__(self, store: _PageStore, parent=None):
         super().__init__(parent)
@@ -745,9 +1031,27 @@ class _StripView(QScrollArea):
         # first page arrives and the bar appears.
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # The reading scrollbar, restyled to actually be visible: the
+        # app-wide handle is SURFACE_HOVER, which over near-black artwork
+        # margins is a bar the owner reported as unreadable. Wider, with
+        # a lit handle and an accent hover, scoped to this view only so
+        # the rest of the app's bars stay as they are.
+        self.verticalScrollBar().setStyleSheet(
+            f"QScrollBar:vertical {{ background: {theme.BG_ALT};"
+            f" width: 14px; margin: 0px; border-left: 1px solid {theme.BORDER}; }}"
+            f"QScrollBar::handle:vertical {{ background: {theme.TEXT_DIM};"
+            f" min-height: 36px; border-radius: 6px; margin: 2px 2px; }}"
+            f"QScrollBar::handle:vertical:hover {{ background: {theme.ACCENT}; }}"
+            f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical"
+            f" {{ height: 0; }}"
+            f"QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical"
+            f" {{ background: none; }}")
         self._store = store
         self._slots = []
         self._zoom = zoom_key(1.0)
+        # See eventFilter: re-entrancy guard for the scrollbar wheel
+        # forwarding, not state anything else reads.
+        self._forwarding_wheel = False
         # The width the last decoded page came out at, in logical px.
         # Pages inside one chapter are cut to the same width, so the
         # first one that lands makes every later placeholder right.
@@ -768,6 +1072,18 @@ class _StripView(QScrollArea):
         h_bar = self.horizontalScrollBar()
         h_bar.rangeChanged.connect(
             lambda _minimum, maximum: _centre_scrollbar(h_bar, maximum))
+        # **The wheel died in the last 11px of the window and this is
+        # why.** The vertical bar is AlwaysOn, so it owns the rightmost
+        # SCROLLBAR_WIDTH px of the reading surface - and a QScrollBar
+        # handles the wheel *itself* and accepts it, so wheelEvent below
+        # never ran there. Measured on a 1400px window over a 31,365px
+        # chapter: x <= 1388 moved 460px a notch, x >= 1389 moved 60
+        # (Qt's wheelScrollLines x singleStep), which on a strip that
+        # long is 0.19% of it and reads as nothing happening at all.
+        # Filtered rather than fixed by widening the margin: the bar has
+        # to stay where it is and stay draggable.
+        for bar in (self.verticalScrollBar(), self.horizontalScrollBar()):
+            bar.installEventFilter(self)
 
     # ---- state -------------------------------------------------------
     def set_zoom(self, key):
@@ -863,7 +1179,18 @@ class _StripView(QScrollArea):
         that decodes, so a step set once would not survive the first
         image. A trackpad's pixel-delta scroll is left alone: it is
         already 1:1 with the finger and multiplying it would make the
-        strip fly."""
+        strip fly.
+
+        Ctrl+wheel is zoom, not scroll - the shortcut every browser and
+        image viewer has taught. Emitted as a request rather than acted
+        on: the zoom (and the medium baseline folded into it) belongs to
+        the page, not the view."""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            steps = event.angleDelta().y() / 120.0
+            if steps:
+                self.zoomRequested.emit(1 if steps > 0 else -1)
+            event.accept()
+            return
         if not event.pixelDelta().isNull():
             super().wheelEvent(event)
             return
@@ -874,6 +1201,36 @@ class _StripView(QScrollArea):
         bar = self.verticalScrollBar()
         bar.setValue(bar.value() - round(steps * WHEEL_STEP_PX))
         event.accept()
+
+    def set_page_gap(self, gap):
+        """The space drawn between page slots - see MANGA_PAGE_GAP_PX for
+        which media get one and why the strips must not."""
+        self._column.setSpacing(max(0, int(gap)))
+
+    def eventFilter(self, obj, event):
+        """Wheel over either scrollbar scrolls the strip, not the bar.
+
+        See the installEventFilter note in __init__: without this the
+        rightmost 11px of the window scrolled at Qt's default 60px a
+        notch while the rest of it moved WHEEL_STEP_PX, which the owner
+        reported as the wheel not working over there. Returning True
+        consumes it so the bar's own handler cannot also run and add its
+        60 on top."""
+        if (event.type() == QEvent.Type.Wheel
+                and not self._forwarding_wheel
+                and obj in (self.verticalScrollBar(), self.horizontalScrollBar())):
+            # Guarded because wheelEvent's own fall-through calls
+            # QScrollArea's handler, which hands the event straight back
+            # to the scrollbar - and without the flag that arrives here
+            # again and recurses until the stack ends. A trackpad's
+            # pixel-delta scroll takes that path on every event.
+            self._forwarding_wheel = True
+            try:
+                self.wheelEvent(event)
+            finally:
+                self._forwarding_wheel = False
+            return True
+        return super().eventFilter(obj, event)
 
     # ---- sizing ------------------------------------------------------
     def _placeholder_size(self):
@@ -990,10 +1347,20 @@ class ReaderPage(GlassPage):
     closed = Signal()
 
     def __init__(self, entry, data_file="tracker.json", parent=None,
-                 origin_page=None):
+                 origin_page=None, resume=True, chapter_number=None):
         super().__init__(parent=parent)
         self.entry = dict(entry or {})
         self.data_file = data_file
+        # Whether opening this entry jumps straight back to where reading
+        # stopped, or lands on the chapter list. The card now has two
+        # targets - the round continue button on the cover resumes, the
+        # rest of the card browses - and this is which one was pressed.
+        self.resume_on_open = bool(resume)
+        # A specific chapter to open the moment the list arrives - the
+        # details page's chapter rows pass this. It outranks resume: a
+        # row named a chapter, and opening anything else is a wrong
+        # answer, not a convenience.
+        self._open_number = chapter_number
         # Which page of the app the reader was opened from, so the door
         # button puts him back there rather than on whatever happens to
         # be underneath. None when the caller couldn't say - see
@@ -1004,19 +1371,32 @@ class ReaderPage(GlassPage):
         self.direction = "rtl"
         self._page_headers = {}
         self._run = 0
-        # Every chapter opens at the page's own size; +/- scales from
-        # there. Not remembered on the entry - the fixed baseline is the
-        # point, and a zoom left at 250% from a fortnight ago is not.
+        # Every chapter opens at 100%; +/- scales from there. Not
+        # remembered on the entry - the fixed baseline is the point, and
+        # a zoom left at 250% from a fortnight ago is not.
         self._zoom = 1.0
+        # ...and what 100% is worth for this medium (see
+        # MEDIUM_BASE_SCALE). Read off the entry's own type, so a manga
+        # and a manhwa opened one after the other each land where they
+        # are meant to without either being touched.
+        self._base_scale = MEDIUM_BASE_SCALE.get(
+            str(self.entry.get("type") or "").strip().lower(),
+            DEFAULT_BASE_SCALE)
         self._closed = False
         self._last_scroll = 0
         # The chapter controls are hover-only, so this is the one thing
         # that decides whether they are on screen - never the scroll.
         self._bottom_shown = False
+        # Why the chapter controls are showing: True when the strip
+        # reached the end rather than the pointer arriving.
+        self._bottom_at_end = False
         self._pending_start_page = 0
         self._pending_resume = None
         self._refresh_toast = None
         self._bottom_widgets = None     # see resizeEvent's guard
+        # How many times _place_title has bailed out on a bar whose
+        # layout had not run yet. Bounded there, not state anything reads.
+        self._title_retries = 0
         # Filled in the first time the download dialog opens, from the
         # folder last used anywhere in the app.
         self._download_folder = None
@@ -1048,13 +1428,33 @@ class ReaderPage(GlassPage):
 
         self._list_view = _ChapterListView()
         self._list_view.picked.connect(self.open_chapter)
+        self._list_view.markRequested.connect(self._mark_chapter)
+        self._list_view.markAllRequested.connect(self._mark_all_chapters)
+        self._list_view.set_title(self.entry.get("title") or "")
         self._strip_view = _StripView(self._store)
         self._strip_view.positionChanged.connect(self._on_position_changed)
         self._strip_view.ranOff.connect(self._on_ran_off)
+        self._strip_view.zoomRequested.connect(
+            lambda step: self._change_zoom(ZOOM_STEP * step))
+        # Manga only - see MANGA_PAGE_GAP_PX. Read once here: the type
+        # cannot change while the reader is open.
+        if str(self.entry.get("type") or "").strip().lower() == "manga":
+            self._strip_view.set_page_gap(MANGA_PAGE_GAP_PX)
 
         self._message = QWidget(objectName="Bare")
         message_column = QVBoxLayout(self._message)
         message_column.addStretch()
+        # The series name over every message this page shows, and the
+        # reason it is here rather than left to the top bar: "Loading
+        # chapter..." on its own says nothing about *which* series is
+        # loading, and the bar's own copy was being elided away to an
+        # ellipsis (see _place_title, fixed in the same change).
+        self._message_title = QLabel(self.entry.get("title") or "",
+                                     objectName="PanelTitle")
+        self._message_title.setWordWrap(True)
+        self._message_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._message_title.setVisible(bool(self.entry.get("title")))
+        message_column.addWidget(self._message_title)
         self._message_label = QLabel("", objectName="PanelSubtitle")
         self._message_label.setWordWrap(True)
         self._message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1090,6 +1490,12 @@ class ReaderPage(GlassPage):
         view.viewport().installEventFilter(self)
         view.verticalScrollBar().valueChanged.connect(self._on_scroll_value)
 
+        # Before the first chapter, not after it: the strip is born at
+        # 1.0 and rebuild() reads that value, so a manga would decode its
+        # first screenful at the old baseline and re-decode it the
+        # moment anything touched the zoom.
+        self._apply_zoom()
+
         self._show_only(self._message)
         self._set_message("Loading chapters...", browser=False)
 
@@ -1098,24 +1504,48 @@ class ReaderPage(GlassPage):
         # Scoped to the object name rather than set bare: a plain
         # `background:` on a parent propagates into every child, and the
         # buttons in here have their own QSS to keep.
+        # Rounded along the edge that faces the artwork; the two corners
+        # sitting on the window's own top edge stay square, so the bar
+        # reads as a panel laid over the page rather than a notched
+        # window frame. This one is an ordinary child widget, not a
+        # native window like the player's bars, so the corners it does
+        # not paint simply show the page behind - no mask needed.
         bar.setStyleSheet(
-            f"#ReaderBar {{ background: {theme.SURFACE}; "
-            f"border-bottom: 1px solid {theme.BORDER}; }}")
+            f"#ReaderBar {{ background: {theme.PANEL_FILL}; "
+            f"border-bottom: 1px solid {theme.BORDER}; "
+            f"border-bottom-left-radius: {theme.RADIUS_LG}px; "
+            f"border-bottom-right-radius: {theme.RADIUS_LG}px; }}")
         row = QHBoxLayout(bar)
         row.setContentsMargins(12, 6, 12, 6)
         row.setSpacing(8)
 
-        # Left: which chapter this is - the chapter's *own* number, not
-        # its position in the list. "Chapter 4 of 41" was here and is
-        # gone: on a 507-chapter One Piece listing the index says
-        # nothing, and the number is what the rest of the app tracks by.
+        # Far left: the door out, then which chapter this is. The player's
+        # top bar opens the same way (door, then the episode list), so
+        # leaving is in the same corner whichever one you are in.
+        # Painted mirrored (see widgets.MirroredGlyphButton): the Fluent
+        # SignOut glyph walks out to the right, and the owner asked for
+        # the door to lead left - and for the clipping that read as a
+        # scratched icon to be gone, which painting it ourselves settles.
+        self._leave_btn = MirroredGlyphButton(
+            ICON_LEAVE, "Leave the reader (Esc)", size=(34, 30), font_pt=12)
+        self._leave_btn.clicked.connect(self.leave)
+        row.addWidget(self._leave_btn)
+
+        # Beside the door, and the pair is deliberate: one leaves the
+        # reader, the other goes up one level to the chapter list. The
+        # jump list on the floor changes chapter without showing the
+        # list, which is a different thing and not a way back to it.
+        self._list_btn = self._glyph_button(
+            ICON_CHAPTER_LIST, "Back to the chapter list")
+        self._list_btn.clicked.connect(self.show_chapter_list)
+        row.addWidget(self._list_btn)
+
+        # The chapter's *own* number, not its position in the list.
+        # "Chapter 4 of 41" was here and is gone: on a 507-chapter One
+        # Piece listing the index says nothing, and the number is what
+        # the rest of the app tracks by.
         self._chapter_label = QLabel("", objectName="SectionTitle")
         row.addWidget(self._chapter_label)
-
-        self._browser_btn = self._glyph_button(
-            ICON_BROWSER, "Open this chapter on its site")
-        row.addWidget(self._browser_btn)
-        self._browser_btn.clicked.connect(self._open_in_browser)
         row.addStretch()
 
         # The title is centred on the *window*, so it is not in `row` at
@@ -1153,8 +1583,18 @@ class ReaderPage(GlassPage):
         # default padding these came out 89px wide against the 34px
         # icons beside them (measured), which made the right-hand
         # cluster read as two unrelated groups.
+        #
+        # ...and the padding itself has to go with the width, or the
+        # button keeps the app-wide 8px 16px inside a 34px box and clips
+        # its own "-"/"+" away to nothing - which is exactly what these
+        # two were doing (measured: an empty frame, no glyph). Same trap
+        # as _glyph_button below; the size is unchanged, only the inset.
         for button in (self._zoom_out_btn, self._zoom_in_btn):
             button.setFixedSize(34, 30)
+            # Padding only. Everything else - fill, border, font size -
+            # still comes from the app-wide rule, so these two look
+            # exactly as they were meant to, minus the clipping.
+            button.setStyleSheet("QPushButton { padding: 0px; }")
         row.addWidget(self._zoom_out_btn)
         row.addWidget(self._zoom_label)
         row.addWidget(self._zoom_in_btn)
@@ -1169,10 +1609,15 @@ class ReaderPage(GlassPage):
         self._refresh_btn.clicked.connect(self.refresh_chapter)
         row.addWidget(self._refresh_btn)
 
-        self._leave_btn = self._glyph_button(
-            ICON_LEAVE, "Leave the reader (Esc)")
-        self._leave_btn.clicked.connect(self.leave)
-        row.addWidget(self._leave_btn)
+        # Far right: the site this chapter came from. It sits at the
+        # opposite edge from the door on purpose - the two controls that
+        # take you *out* of the reader bracket the bar rather than
+        # sitting next to each other where one gets pressed for the
+        # other.
+        self._browser_btn = self._glyph_button(
+            ICON_BROWSER, "Open this chapter on its site")
+        self._browser_btn.clicked.connect(self._open_in_browser)
+        row.addWidget(self._browser_btn)
         return bar
 
     def _build_bottom(self):
@@ -1212,18 +1657,29 @@ class ReaderPage(GlassPage):
         popup.setTextElideMode(Qt.TextElideMode.ElideRight)
         use_hover_cursor(self._chapter_box)
         self._chapter_box.activated.connect(self.open_chapter)
+        # Right-clicking a row of the open jump list marks it read or
+        # unread - the same menu the list page's rows carry, so the mark
+        # is reachable from inside a chapter too.
+        self._chapter_box.markRequested.connect(self._mark_chapter)
+        self._chapter_box.markAllRequested.connect(self._mark_all_chapters)
 
         self._bottom_widgets = (self._next_btn, self._chapter_box,
                                 self._prev_btn)
         for widget in self._bottom_widgets:
             widget.setParent(self)
             widget.setVisible(False)
+            # The pointer can leave a control without ever re-entering
+            # the strip's viewport - off the side of the window, or up
+            # into the top bar - and the viewport's own Leave is the
+            # only other thing watching. Deferred a turn so the Enter
+            # onto a neighbouring control lands first.
+            widget.installEventFilter(self)
         # Solid rather than transparent: these sit on top of artwork that
         # is white as often as it is black, and a control that borrows
         # the page's colours is unreadable on half of them.
-        edge = (f"QPushButton {{ background: {theme.SURFACE};"
+        edge = (f"QPushButton {{ background: {theme.PANEL_FILL};"
                 f" color: {theme.TEXT}; border: 1px solid {theme.BORDER};"
-                f" border-radius: {theme.RADIUS_SM}px; font-weight: 600; }}"
+                f" border-radius: {theme.RADIUS}px; font-weight: 600; }}"
                 f"QPushButton:hover {{ background: {theme.SURFACE_HOVER};"
                 f" border: 1px solid {theme.ACCENT}; }}"
                 f"QPushButton:disabled {{ color: {theme.TEXT_DIM};"
@@ -1244,12 +1700,24 @@ class ReaderPage(GlassPage):
         The font family has to be named on the button itself: the glyph
         is a private-use codepoint, and in the app's default family it
         is a blank box rather than an icon (theme.FONT_STACK_ICONS is
-        the same stack the sidebar and the player use)."""
+        the same stack the sidebar and the player use).
+
+        `padding: 0px` is what makes the glyph appear at all, and it is
+        not cosmetic. A widget stylesheet is merged with the application
+        one property by property, so a rule that names no padding
+        inherits the app-wide QPushButton's `8px 16px` - which on a 34px
+        button leaves 34 - 32 = 2px of content width, and Qt renders the
+        glyph as a 2px sliver. Measured off a grab of this bar: refresh
+        painted 4 non-background pixels, the globe 22, where the +/-
+        buttons beside them (also clipped, also at the app's padding)
+        painted only their own frame. player.py already carries the same
+        note on PlayPauseButton and _season_arrow, from the same cause."""
         button = self._button(glyph, tooltip)
         button.setFixedSize(34, 30)
         button.setStyleSheet(
             f"QPushButton {{ background: transparent; border: none;"
             f" color: {theme.TEXT}; font-family: {theme.FONT_STACK_ICONS};"
+            f" padding: 0px;"
             f" font-size: 12pt; border-radius: {theme.RADIUS_SM}px; }}"
             f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
             f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}"
@@ -1304,6 +1772,13 @@ class ReaderPage(GlassPage):
         moved when the threshold is crossed, so a slow drag accumulates
         into one decision instead of flickering the bar on the jitter of
         a trackpad."""
+        # The end of the chapter is the one place the chapter controls
+        # are wanted without being asked for: finishing a chapter *is*
+        # the request to go to the next one. Checked before the movement
+        # threshold below, because the last scroll into the end can be a
+        # small one and would otherwise be swallowed.
+        self._update_end_of_chapter()
+
         delta = value - self._last_scroll
         if abs(delta) < SCROLL_HIDE_DELTA:
             return
@@ -1312,11 +1787,30 @@ class ReaderPage(GlassPage):
             self._hide_bar()
         else:
             self._reveal_bar()
-        # Deliberately not touched here. The chapter controls are hover-
-        # only: scrolling up mid-chapter to re-read a panel is not a
-        # request to jump chapters, and having them appear over the
-        # artwork every time the strip went backwards is what made them
-        # worth pinning to the floor in the first place.
+        # The chapter controls are otherwise hover-only: scrolling up
+        # mid-chapter to re-read a panel is not a request to jump
+        # chapters, and having them appear over the artwork every time
+        # the strip went backwards is what made them worth pinning to
+        # the floor in the first place.
+
+    def _update_end_of_chapter(self):
+        """Show the chapter controls once the strip reaches its end, and
+        take them away again on scrolling back up.
+
+        `_bottom_at_end` records that *this* is why they are showing, so
+        scrolling away hides them again without also yanking them out
+        from under a pointer that is genuinely hovering there."""
+        view = self._strip_view
+        bar = view.verticalScrollBar() if view is not None else None
+        if bar is None or bar.maximum() <= 0:
+            return
+        at_end = bar.value() >= bar.maximum() - END_OF_CHAPTER_PX
+        if at_end and not self._bottom_shown:
+            self._bottom_at_end = True
+            self._reveal_bottom()
+        elif not at_end and self._bottom_at_end:
+            self._bottom_at_end = False
+            self._hide_bottom()
 
     # ---- chapter controls (hover only) ---------------------------------
     def _place_bottom(self):
@@ -1349,17 +1843,71 @@ class ReaderPage(GlassPage):
             self._reveal_bottom()
 
     def _reveal_bottom(self):
+        # Guarded rather than run on every mouse move through the strip:
+        # show()+raise_() on three native-composited children, sixty
+        # times a second, is the flicker the owner saw as the bar
+        # "glitching" as much as the hide below was.
+        if self._bottom_shown:
+            return
         self._bottom_shown = True
         for widget in self._bottom_widgets:
             widget.show()
             widget.raise_()
 
     def _hide_bottom(self):
+        if not self._bottom_shown:
+            return
         if self._chapter_box.view().isVisible():
             return          # the jump list is open - don't yank it shut
         self._bottom_shown = False
         for widget in self._bottom_widgets:
             widget.hide()
+
+    def _pointer_wants_bottom(self) -> bool:
+        """Whether the pointer is on one of the three floating chapter
+        controls, or still in the strip of window they live in.
+
+        **This is the whole reason the bar looked broken.** The controls
+        are children of this page raised over the strip, so the pointer
+        arriving on one *leaves* the strip's viewport - and the Leave
+        handler hid them. Reaching for the Next Chapter button therefore
+        made it vanish under the cursor every time, which is what "the
+        lower bar does not appear" was.
+
+        Asked through QApplication.widgetAt, which hit-tests the widget
+        tree rather than comparing coordinates, so no scale factor comes
+        into it - mapToGlobal is wrong across two monitors at different
+        scales and this has to be right on both (.claude/rules/ui.md)."""
+        widgets = self._bottom_widgets or ()
+        cursor = QCursor.pos()
+        under = QApplication.widgetAt(cursor)
+        while under is not None:
+            if under in widgets:
+                return True
+            under = under.parentWidget()
+        # ...and the band itself, so sliding off the end of one control
+        # sideways - which the viewport never sees, because the pointer
+        # was never in it - does not shut the row that is still being
+        # used. Measured against the window's own geometry, which is
+        # already global, never through mapFromGlobal - that maps through
+        # the wrong screen's scale factor on this machine's mixed-DPI
+        # monitors (.claude/rules/ui.md).
+        frame = self.window().geometry()
+        return (frame.contains(cursor)
+                and cursor.y() >= frame.bottom() - BOTTOM_REVEAL_PX)
+
+    def _hide_bottom_unless_aimed_at(self):
+        # Wrapped because this is also reached from a zero-timer, and
+        # the reader can be closed and deleted between the Leave and the
+        # timer firing. An exception escaping a Qt slot is qFatal in
+        # PyQt6 - an immediate abort, not a traceback (the same trap
+        # widgets.release_hover_cursor carries).
+        try:
+            if self._closed or self._pointer_wants_bottom():
+                return
+            self._hide_bottom()
+        except RuntimeError:
+            pass
 
     # ---- chapter loading ----------------------------------------------
     def _load_chapters(self, refresh=False):
@@ -1423,14 +1971,27 @@ class ReaderPage(GlassPage):
             "" if arabic else
             "No Arabic chapters were found for this title - the chapters "
             "below are what the source has in other languages.")
-        self._list_view.set_chapters(self.chapters, self._reading_index())
+        self._list_view.set_chapters(self.chapters, self._reading_index(),
+                                     self._last_read_number())
         self._show_only(self._list_view)
         self._sync_controls()
         self._finish_refresh("Refreshed")
         if self._pending_resume is not None:
             self._reopen_pending()
             return
-        self._offer_resume()
+        # A chapter asked for by number (a details-page row) wins over
+        # everything: that click named exactly one chapter.
+        if self._open_number is not None:
+            wanted, self._open_number = self._open_number, None
+            index = self._row_for_number(wanted)
+            if index >= 0:
+                self.open_chapter(index)
+                return
+        # Only when the reader was opened *to* resume. Clicking the body
+        # of a card asks for the list; jumping straight into a chapter
+        # would be the one thing that click is not for.
+        if self.resume_on_open:
+            self._offer_resume()
 
     def _reading_index(self):
         """Which row of the chapter list is "the one being read".
@@ -1466,6 +2027,22 @@ class ReaderPage(GlassPage):
         finish_toast(self._refresh_toast, self, text)
         self._refresh_toast = None
 
+    def _drop_refresh_toast(self):
+        """Take the sticky "Refreshing..." off screen without a verdict.
+
+        Leaving the chapter (or the reader) is when the owner stopped
+        caring about the answer, and the toast otherwise sat there until
+        the 45s listing finished or the sticky ceiling closed it - the
+        reported "the refreshing alert was still there for a long time".
+        The refresh itself keeps running; only its announcement goes."""
+        toast, self._refresh_toast = self._refresh_toast, None
+        if toast is None:
+            return
+        try:
+            toast.close()
+        except RuntimeError:
+            pass        # already closed itself
+
     def _reopen_pending(self):
         """Go back to the chapter Refresh was pressed on.
 
@@ -1484,18 +2061,68 @@ class ReaderPage(GlassPage):
             self.open_chapter(index, start_page=page)
 
     def _offer_resume(self):
-        """Reopen where reading stopped, when the saved position still
-        points at a chapter that exists. Silently ignored otherwise - a
-        source can renumber or drop a chapter between sessions, and
+        """Reopen where reading stopped.
+
+        Two ways of knowing where that is, and it used to accept only
+        the first. **A saved page position exists only for a chapter
+        read inside this reader**; a series whose progress came from the
+        tracker - typed in, or marked read from the list - has a
+        last-read chapter number and no `reader_position` at all, and
+        for those the continue button landed on the chapter list, which
+        is exactly what it is not for. Measured on the owner's own file:
+        of thirteen entries, six carry a reader position and the rest
+        carry only a number.
+
+        So the position answers it when there is one, and the entry's
+        own last-read chapter answers it when there is not
+        (`_reading_index`, which matches the number exactly). Still
+        silently ignored when neither resolves to a chapter that exists -
+        a source can renumber or drop chapters between sessions, and
         opening the wrong one is worse than opening the list."""
         saved = self.entry.get("reader_position")
-        if not isinstance(saved, dict):
-            return
+        saved = saved if isinstance(saved, dict) else {}
         chapter_id = saved.get("chapter_id")
-        for index, chapter in enumerate(self.chapters):
-            if chapter.get("id") == chapter_id:
-                self.open_chapter(index, start_page=int(saved.get("page") or 0))
+        # The freshest of the two records wins. The position is written
+        # by scrolling; the chapter number by *opening* a chapter and by
+        # the list's mark-read menu - so a reader who moved on to chapter
+        # 1190 can still be holding a page position inside 1189. Opening
+        # the stale page then reads as "continue did nothing" (measured
+        # on the owner's own One Piece entry: position at 1189, number at
+        # 1190). When the number is ahead, the number is the truth.
+        try:
+            last_watched = float(self.entry.get("last_watched_chapter") or 0)
+        except (TypeError, ValueError):
+            last_watched = 0.0
+        saved_index = -1
+        if chapter_id is not None:
+            for index, chapter in enumerate(self.chapters):
+                if chapter.get("id") == chapter_id:
+                    saved_index = index
+                    break
+        try:
+            saved_number = float(saved.get("chapter_number") or 0)
+        except (TypeError, ValueError):
+            saved_number = 0.0
+        if not saved_number and saved_index >= 0:
+            # An older record without the number field - the chapter it
+            # points at knows its own.
+            saved_number = float(chapter_number(self.chapters[saved_index]) or 0)
+        if saved_index >= 0 and saved_number >= last_watched:
+            self.open_chapter(saved_index, start_page=int(saved.get("page") or 0))
+            return
+        # No stored position, a stale one, or one this source no longer
+        # lists. The last-watched *number* answers instead. Looked up
+        # directly rather than through _reading_index, which prefers the
+        # saved position's chapter id - the very record that just lost
+        # the freshness comparison above.
+        if last_watched:
+            index = self._row_for_number(last_watched)
+            if index >= 0:
+                self.open_chapter(index)
                 return
+        index = self._reading_index()
+        if index >= 0:
+            self.open_chapter(index)
 
     def open_chapter(self, index, start_page=0):
         if not (0 <= index < len(self.chapters)):
@@ -1618,6 +2245,10 @@ class ReaderPage(GlassPage):
         # nothing earlier.
         self._next_btn.setEnabled(reading and self.chapter_index > 0)
         self._prev_btn.setEnabled(reading and self.chapter_index < total - 1)
+        # Off while the list is what is already on screen - a button that
+        # goes where you are reads as broken, not as a no-op.
+        self._list_btn.setEnabled(bool(self.chapters)
+                                  and not self._list_view.isVisible())
         self._refresh_btn.setEnabled(chapter_source is not None
                                      and self._refresh_toast is None)
         self._zoom_label.setText(f"{round(self._zoom * 100)}%")
@@ -1629,15 +2260,52 @@ class ReaderPage(GlassPage):
 
         The reserve is twice the wider cluster because the label spans
         the whole bar: taking only the wider side off one end would move
-        the text's centre off the window's."""
+        the text's centre off the window's.
+
+        The series name went missing from this bar for **two** reasons,
+        and each on its own was enough to reduce every title to the 40px
+        floor - which is what the owner saw as "Th..." beside "Chapter
+        247". Both are fixed here.
+
+        *The two edges were measured off the wrong buttons.* The door is
+        the leftmost control and the globe the rightmost, so
+        `_browser_btn.right()` was ~width-12 and `width -
+        _leave_btn.left()` ~width-12 as well; the reserve came out at
+        about 2 x width. The left cluster actually ends at the chapter
+        label and the right one starts at the full-screen button, so
+        those are the two clearances.
+
+        *And they were measured before the bar's layout had run.* This is
+        reached from _sync_controls, which can fire while every child of
+        the bar is still at the default (0, 0) - `_full_btn.left()` is
+        then 0, the right clearance is the whole bar width, and the
+        reserve is twice it again. So the layout is activated first
+        (synchronous, and a no-op once it is current), and if the
+        clusters still read as unpositioned after that the label is left
+        exactly as it is and re-placed on the next turn of the event
+        loop, rather than having an ellipsis written over it against a
+        measurement that means nothing."""
         label = getattr(self, "_title_label", None)
         if label is None:
             return
         width = self._bar.width()
+        if width <= 0:
+            return
+        layout = self._bar.layout()
+        if layout is not None:
+            layout.activate()
         label.setGeometry(0, 0, width, BAR_HEIGHT)
-        left = self._browser_btn.geometry().right()
-        right = width - self._leave_btn.geometry().left()
-        reserve = 2 * max(left, right, 0) + 24
+        left = self._chapter_label.geometry().right()
+        right_start = self._full_btn.geometry().left()
+        if left <= 0 or right_start <= 0:
+            # Bounded, because a retry that can never succeed would spin
+            # a zero-timer for the life of the page.
+            if self._title_retries < 5:
+                self._title_retries += 1
+                QTimer.singleShot(0, self._place_title)
+            return
+        self._title_retries = 0
+        reserve = 2 * max(left, width - right_start, 0) + 24
         text = self.entry.get("title") or "Reader"
         metrics = QFontMetrics(label.font())
         label.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight,
@@ -1652,7 +2320,10 @@ class ReaderPage(GlassPage):
         self._apply_zoom()
 
     def _apply_zoom(self):
-        self._strip_view.set_zoom(zoom_key(self._zoom))
+        # The strip is told the *decode* scale - the label and the
+        # controls stay in the user's 100%, the medium's baseline is
+        # folded in here, once.
+        self._strip_view.set_zoom(zoom_key(self._zoom * self._base_scale))
         self._sync_controls()
 
     def _toggle_fullscreen(self):
@@ -1841,11 +2512,175 @@ class ReaderPage(GlassPage):
         show_toast(self, "Queued for Download" if len(chapters) == 1
                    else f"Queued {len(chapters)} Chapters")
 
-    # There is no "back to the chapter list" any more, and no button for
-    # it: the jump list pinned to the bottom centre does that job from
-    # inside the chapter, without leaving the page being read. The list
-    # view itself stays - it is what a title opens on when there is no
-    # saved position to resume.
+    # ---- back to the list, and marking a chapter ------------------------
+    def show_chapter_list(self):
+        """Up one level: the chapter list, without leaving the reader.
+
+        The jump list on the floor is not this. That one changes chapter
+        without ever showing the list, which is a different thing - it
+        answers "take me to 214", not "let me look at what there is". The
+        button sits beside the door because the two are the pair of ways
+        *out* of a chapter, one of them a level and one of them all the
+        way.
+
+        The position is written here rather than left to the debounce
+        timer: leaving a chapter is exactly when a reader stops
+        scrolling, and losing the last page to a 1.2s timer that had not
+        fired yet is only ever noticed a session later. chapter_index is
+        deliberately kept, so the list still marks the chapter that was
+        open and Next/Previous still answer for it."""
+        if not self.chapters:
+            return
+        self._save_timer.stop()
+        self._write_position()
+        self._drop_refresh_toast()
+        self._list_view.set_chapters(self.chapters, self._reading_index(),
+                                     self._last_read_number())
+        self._show_only(self._list_view)
+        self._sync_controls()
+
+    # ---- back / forward -------------------------------------------------
+    # The two extra buttons on the side of the mouse, which every browser
+    # and file manager on this machine already treats as "up one level"
+    # and "back into where I was". Wired to the same two steps the reader
+    # already has - the chapter list is one level above a chapter, and
+    # the reader itself is one above the list - rather than to
+    # previous/next chapter: a fourth-button click that silently changed
+    # chapter would be a very expensive way to be wrong, and Ctrl+arrow
+    # and the floor buttons already do that.
+    def go_back(self):
+        if self._in_chapter():
+            self.show_chapter_list()
+            return
+        self.leave()
+
+    def go_forward(self):
+        """Back into the chapter the list was opened from.
+
+        Only when its pages are still loaded - chapter_index survives
+        going up to the list (see show_chapter_list), so this costs
+        nothing and needs no refetch. With no chapter behind it there is
+        nothing forward of here, and it does nothing rather than opening
+        something arbitrary."""
+        if self._in_chapter() or not self._store.count():
+            return
+        if not (0 <= self.chapter_index < len(self.chapters)):
+            return
+        self._show_only(self._strip_view)
+        self._sync_controls()
+
+    def _handle_side_button(self, button) -> bool:
+        """True when `button` was one of the mouse's side buttons and has
+        been acted on. Shared by the page's own press handler and the
+        filter over the strip's viewport - a press inside the viewport
+        never reaches the page."""
+        if button == Qt.MouseButton.BackButton:
+            self.go_back()
+            return True
+        if button == Qt.MouseButton.ForwardButton:
+            self.go_forward()
+            return True
+        return False
+
+    def mousePressEvent(self, event):
+        # Reached by anything that ignored the press on its way up -
+        # the chapter list's rows and its scroll area all do, since
+        # Card only ever handles the left and right buttons.
+        if self._handle_side_button(event.button()):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def wheelEvent(self, event):
+        # The backstop for the window's absolute right edge: a wheel that
+        # lands on the page itself (past the scrollbar's own pixels, or
+        # on a floating control that ignored it) still scrolls the strip
+        # rather than dying. The strip's own handler also owns Ctrl+wheel
+        # zoom, so forwarding gets both behaviours for free.
+        if self._in_chapter():
+            self._strip_view.wheelEvent(event)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def _row_for_number(self, number):
+        for index, chapter in enumerate(self.chapters):
+            if chapter_number(chapter) == number:
+                return index
+        return -1
+
+    def _mark_chapter(self, index, finished):
+        """Mark chapter `index` read, or not read.
+
+        `correct_progress` and not `record_progress`: this is the one
+        writer allowed to move the stored number *down*, which is exactly
+        what "unfinished" is, and record_progress would refuse it in
+        silence (tracker._write_progress is forward-only by design).
+
+        "Finished" is the chapter's own number. "Unfinished" is the
+        highest number *this source actually lists* below it, not
+        `number - 1`: scanlators split chapters, so the one before 25 can
+        be 24.5 - and 0 when there is nothing earlier, which reads as
+        nothing read."""
+        if not (0 <= index < len(self.chapters)):
+            return
+        number = chapter_number(self.chapters[index])
+        if number is None:
+            show_toast(self, "This Chapter Has No Number to Record")
+            return
+        if finished:
+            target = number
+        else:
+            earlier = [n for n in (chapter_number(c) for c in self.chapters)
+                       if n is not None and n < number]
+            target = max(earlier) if earlier else 0.0
+        if not correct_progress(self.entry, chapter=target):
+            show_toast(self, "Could Not Save That Chapter")
+            return
+        # Rebuilt rather than left alone: the list marks where reading has
+        # reached, and the row it was marking is not the answer any more.
+        # While a chapter is open that mark belongs to the open one; on
+        # the list it belongs to whatever was just marked.
+        marked = (self.chapter_index
+                  if 0 <= self.chapter_index < len(self.chapters)
+                  else self._row_for_number(target))
+        self._list_view.set_chapters(self.chapters, marked,
+                                     self._last_read_number())
+        self._sync_controls()
+        show_toast(self, f"Read Up to Chapter {format_chapter_progress(target)}"
+                   if target else "Marked as Not Started")
+
+    def _last_read_number(self) -> float:
+        try:
+            return float(self.entry.get("last_watched_chapter") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _mark_all_chapters(self, finished):
+        """Every chapter read, or none of them - the menu's "mark all".
+
+        "All read" is the highest numbered chapter this source lists,
+        which is exactly what "I have read all of this" means to the
+        tracker's read-up-to model; "all unread" is zero. Both through
+        correct_progress, the one writer allowed to move the number in
+        either direction."""
+        numbers = [n for n in (chapter_number(c) for c in self.chapters)
+                   if n is not None]
+        if not numbers:
+            show_toast(self, "These Chapters Carry No Numbers to Record")
+            return
+        target = max(numbers) if finished else 0.0
+        if not correct_progress(self.entry, chapter=target):
+            show_toast(self, "Could Not Save That")
+            return
+        marked = (self.chapter_index
+                  if 0 <= self.chapter_index < len(self.chapters) else -1)
+        self._list_view.set_chapters(self.chapters, marked,
+                                     self._last_read_number())
+        self._sync_controls()
+        show_toast(self, f"Marked All Read Up to Chapter "
+                         f"{format_chapter_progress(target)}"
+                   if finished else "Marked All as Unread")
 
     # ---- persistence ---------------------------------------------------
     def _write_position(self):
@@ -1972,7 +2807,14 @@ class ReaderPage(GlassPage):
             self.setGeometry(obj.rect())
             return super().eventFilter(obj, event)
         if obj is self._strip_view.viewport():
-            if event.type() == QEvent.Type.MouseMove:
+            if event.type() == QEvent.Type.MouseButtonPress:
+                # Swallowed here rather than left to propagate: a press
+                # inside a QAbstractScrollArea's viewport does not reach
+                # this page, so mousePressEvent above never sees the one
+                # gesture the reading surface most needs it for.
+                if self._handle_side_button(event.button()):
+                    return True
+            elif event.type() == QEvent.Type.MouseMove:
                 # The viewport's own top is the page's top while a
                 # chapter is open (no layout margin there), so this
                 # needs no coordinate mapping - and mapToGlobal is
@@ -1982,20 +2824,30 @@ class ReaderPage(GlassPage):
                     self._reveal_bar()
                 # Hover is the *only* way the chapter controls come back
                 # (the owner's ask: scrolling must never summon them),
-                # so this is also the only place that shows them. The
-                # pointer moving onto the controls themselves generates
-                # no viewport move at all, which is what keeps them up
-                # while they are being aimed at.
+                # so this is also the only place that shows them.
                 if y >= self._strip_view.viewport().height() - BOTTOM_REVEAL_PX:
                     self._reveal_bottom()
                 else:
                     self._hide_bottom()
             elif event.type() == QEvent.Type.Leave:
-                # Pointer off the reading surface entirely - including
-                # out of the window. Without this they stay up wherever
-                # the last move left them.
-                self._hide_bottom()
+                # Pointer off the reading surface - which is also what
+                # the pointer arriving *on* the controls looks like from
+                # here, so where it actually went has to be asked. See
+                # _pointer_wants_bottom: hiding unconditionally is what
+                # made the bar impossible to click.
+                self._hide_bottom_unless_aimed_at()
+        elif (obj in (self._bottom_widgets or ())
+                and event.type() == QEvent.Type.Leave):
+            QTimer.singleShot(0, self._hide_bottom_unless_aimed_at)
         return super().eventFilter(obj, event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The bar's buttons only take real positions once the page is up,
+        # and _place_title measures the gap between two of them - placing
+        # it again here is what stops the title being elided against a
+        # bar whose layout had not run when _sync_controls first asked.
+        self._place_title()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2028,6 +2880,7 @@ class ReaderPage(GlassPage):
         self._closed = True
         self._save_timer.stop()
         self._write_position()
+        self._drop_refresh_toast()
         self._run += 1          # nothing still in flight may touch this
         host = getattr(self, "_host", None)
         if host is not None:
@@ -2102,8 +2955,14 @@ def _origin_page_name(window):
     return None
 
 
-def open_reader(window, entry, data_file="tracker.json"):
+def open_reader(window, entry, data_file="tracker.json", resume=True,
+                chapter_number=None):
     """Open the reader over `window`, covering the sidebar as well.
+
+    `resume=False` lands on the chapter list instead of jumping back to
+    where reading stopped. That is the difference between the two targets
+    a reading card now has: the round continue button on its cover
+    resumes, the rest of the card browses.
 
     The one entry point, and the one thing main.py needs to call. It is
     deliberately not a member of main.PAGES: this is not a section of the
@@ -2118,7 +2977,8 @@ def open_reader(window, entry, data_file="tracker.json"):
     host = window.centralWidget() if hasattr(window, "centralWidget") else window
     host = host if host is not None else getattr(window, "container", window)
     page = ReaderPage(entry, data_file, host,
-                      origin_page=_origin_page_name(window))
+                      origin_page=_origin_page_name(window), resume=resume,
+                      chapter_number=chapter_number)
     page.follow(host)
     page.show()
     page.raise_()
