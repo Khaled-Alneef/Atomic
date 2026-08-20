@@ -8,6 +8,7 @@ files the other pages read/write (tracker.json's/series.json's
 
 import threading
 from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -16,7 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (game_launch, global_search, images, launchers,
-                     nav_config, storage, theme)
+                     lookup_pool, nav_config, storage, theme)
 from helpers.widgets import (
     Card, GlassPage, HeroBanner, SideScroller, inform, scroll_area,
     search_field, use_hover_cursor,
@@ -77,6 +78,12 @@ class _HeroSignals(QObject):
     backdrop = pyqtSignal(str, str)
 
 
+class _GameSignals(QObject):
+    # game id -> local Steam cover path, back from the lookup pool so
+    # the storage write and the redraw stay on the UI thread.
+    cover = pyqtSignal(str, str)
+
+
 def _greeting():
     hour = datetime.now().hour
     if hour < 12:
@@ -111,6 +118,8 @@ class HomePage(GlassPage):
         self.games = launchers.backfill_launch_commands(self.games)
         self.websites = storage.load(WEBSITES_FILE, [])
         self.apps = storage.load(APPS_FILE, [])
+        self._game_signals = _GameSignals()
+        self._game_signals.cover.connect(self._on_game_cover)
 
         # Sections the user has hidden *and* asked to keep off Home (see
         # nav_config.home_hidden_sections). Applied to what gets drawn
@@ -267,6 +276,7 @@ class HomePage(GlassPage):
         recent_games = [] if "games" in hidden else self._recent_games()
         if recent_games:
             pos = nav_config.nav_position("games")
+            self._backfill_game_covers(recent_games)
             self._games_grid = self._build_games_grid(recent_games)
             self._games_section = self._build_section("Games", self._games_grid)
             sections.append((pos, self._games_section))
@@ -585,29 +595,44 @@ class HomePage(GlassPage):
         same two sources the details page grounds itself with. Never
         raises; a title with no landscape art anywhere just keeps the
         banner's flat panel."""
-        path = None
+        entry_id = str(entry.get("id") or "")
         try:
             if entry.get("type") in MANGA_TYPES:
                 from helpers import anilist
                 url = anilist.fetch_manga_artwork(entry.get("title") or "")
                 found = images.download(url) if url else None
-                path = str(found) if found else None
-            elif entry.get("imdb_id"):
-                from helpers import artwork
-                path = (artwork.backdrop_fast_path(entry)
-                        or artwork.backdrop_path(entry))
+                if found:
+                    self._hero_signals.backdrop.emit(entry_id, str(found))
+                return
+            if not entry.get("imdb_id"):
+                return
+            from helpers import artwork
+            # Both sizes, in that order - the details page's pattern,
+            # and the fix for a soft slider: the small w780 copy used to
+            # be taken with `or`, so the full-resolution original was
+            # never fetched at all and a ~1200px-wide banner was drawn
+            # from a 780px image. Now the small one fills the banner
+            # immediately and the original replaces it when it lands.
+            quick = artwork.backdrop_fast_path(entry)
+            if quick:
+                self._hero_signals.backdrop.emit(entry_id, str(quick))
+            full = artwork.backdrop_path(entry)
+            if full:
+                self._hero_signals.backdrop.emit(entry_id, str(full))
         except Exception:
-            path = None
-        if path:
-            self._hero_signals.backdrop.emit(str(entry.get("id") or ""),
-                                             str(path))
+            return          # no art anywhere just keeps the flat panel
 
     def _on_hero_backdrop(self, entry_id, path):
+        # Whether this slide already had art: the sharp original landing
+        # over the small copy is the *same picture*, so it swaps without
+        # a cross-fade - dissolving a photo into itself reads as a
+        # flicker. Only a genuinely new slide fades.
+        upgrade = entry_id in self._hero_backdrops
         self._hero_backdrops[entry_id] = path
         if str(self._hero_entry().get("id") or "") != entry_id:
             return
         try:
-            self._hero_banner.set_backdrop(path)
+            self._hero_banner.set_backdrop(path, fade=not upgrade)
         except RuntimeError:
             pass    # the page was torn down under the fetch
 
@@ -708,26 +733,34 @@ class HomePage(GlassPage):
 
     def _build_games_grid(self, games):
         # No #SectionBox frame here either - see _build_poster_grid.
+        #
+        # Poster tiles at the watch cards' own size (the owner's ask),
+        # drawing the Steam cover helpers/game_art resolves rather than
+        # the extracted .exe icon - a 32px shell icon stretched across a
+        # 160px tile is mush. A game with no cover yet keeps the letter
+        # avatar and gains its art the next time the Games page runs its
+        # backfill.
         box = QWidget(objectName="Bare")
         outer = QVBoxLayout(box)
         outer.setContentsMargins(16, 16, 16, 16)
 
-        grid = QGridLayout()
+        strip = QWidget(objectName="Bare")
+        grid = QHBoxLayout(strip)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(10)
-        grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        outer.addLayout(grid)
 
-        for index, game in enumerate(games):
+        for game in games:
             card = Card(hoverable=True)
             card.setObjectName("HomeItem")
-            card.setFixedWidth(96)
+            card.setFixedWidth(POSTER_SIZE[0] + 20)
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(6, 10, 6, 10)
+            card_layout.setContentsMargins(6, 8, 6, 8)
 
-            icon = QLabel()
-            icon.setFixedSize(*ICON_SIZE)
-            icon.setPixmap(images.thumbnail_or_avatar(game.get("icon"), game["name"], ICON_SIZE))
-            card_layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
+            cover = QLabel()
+            cover.setFixedSize(*POSTER_SIZE)
+            cover.setPixmap(images.thumbnail_or_avatar(
+                game.get("cover"), game["name"], POSTER_SIZE))
+            card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
             name = QLabel(game["name"], objectName="CardTitle")
             name.setWordWrap(True)
@@ -735,7 +768,25 @@ class HomePage(GlassPage):
             card_layout.addWidget(name)
 
             card.clicked.connect(lambda g=game: self._launch_game(g))
-            grid.addWidget(card, 0, index)
+            grid.addWidget(card)
+        grid.addStretch()
+
+        # The poster rows' own recipe (see _build_poster_grid): at this
+        # width a full library no longer fits across the page, so the
+        # row scrolls sideways behind SideScroller's arrows instead of
+        # being cut off at the edge.
+        area = QScrollArea(objectName="Bare")
+        area.setWidget(strip)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.viewport().setAutoFillBackground(False)
+        strip.setAutoFillBackground(False)
+        strip.adjustSize()
+        area.setFixedHeight(strip.sizeHint().height()
+                            + area.horizontalScrollBar().sizeHint().height())
+        outer.addWidget(SideScroller(area))
         return box
 
     def _launch_game(self, game):
@@ -793,6 +844,47 @@ class HomePage(GlassPage):
             return
         self._games_grid = self._swap_in(
             self._games_grid, self._build_games_grid(self._recent_games()))
+
+    def _backfill_game_covers(self, games):
+        """Resolve Steam covers for the games this row draws.
+
+        The Games page does this for the whole library; Home does it for
+        the handful it shows, because Home is very often the only page
+        visited and a row of letter avatars is exactly what the poster
+        tiles were meant to replace. game_art caches hits and
+        authoritative misses on disk, so this costs a stat per game
+        after the first run."""
+        wanted = [g for g in games
+                  if not (g.get("cover") and Path(g["cover"]).exists())]
+        if not wanted:
+            return
+        for game in wanted:
+            lookup_pool.submit(self._game_cover_worker, game.get("id"),
+                               game.get("name") or "", game.get("path"))
+
+    def _game_cover_worker(self, game_id, name, install_path):
+        # Never raises - an exception here kills the pool's worker.
+        try:
+            from helpers import game_art
+            path = game_art.fetch_cover(name, install_path=install_path)
+        except Exception:
+            path = None
+        if path and game_id:
+            self._game_signals.cover.emit(game_id, str(path))
+
+    def _on_game_cover(self, game_id, path):
+        game = next((g for g in self.games if g.get("id") == game_id), None)
+        if game is None:
+            return
+        game["cover"] = path
+        # One field on one entry - the Games page and Settings hold
+        # their own copies of this file (see _launch_game).
+        storage.update_entry(GAMES_FILE, game_id, {"cover": path})
+        # Redrawn rather than one pixmap swapped: this row is rebuilt
+        # wholesale anyway (_refresh_games_row) and holding label
+        # references across that rebuild is what .claude/rules/ui.md
+        # warns against.
+        self._refresh_games_row()
 
     def _refresh_quick_list(self, data_file):
         """Redraw one Quick Apps/Websites list after something in it was

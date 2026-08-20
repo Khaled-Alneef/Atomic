@@ -4,14 +4,15 @@ import math
 import weakref
 
 from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
-                          QPointF, QPropertyAnimation, QRect, QRectF, Qt,
-                          QTimer, QVariantAnimation)
+                          QPointF, QPropertyAnimation, QRect, QRectF, QSize,
+                          Qt, QTimer, QVariantAnimation)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QColor, QDrag, QIcon, QLinearGradient, QPainter,
-                         QPainterPath, QPen, QPixmap)
+from PyQt6.QtGui import (QColor, QCursor, QDrag, QIcon, QLinearGradient,
+                         QPainter, QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QToolTip, QVBoxLayout, QWidget,
+    QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
+    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+    QSlider, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import logs, theme
@@ -1175,21 +1176,37 @@ class HeroBanner(QFrame):
             self.update()
         return incoming is not None
 
+    def has_backdrop(self) -> bool:
+        """Whether art is on screen - what a caller upgrading a small
+        copy to the sharp original asks before deciding to cross-fade."""
+        return self._backdrop is not None
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
 
     def _scaled_for(self, key, pixmap, size):
+        # Cut at devicePixelRatio and tagged with it, or the banner is
+        # rendered at logical size and stretched by Qt on any non-100%
+        # display - which is what made the owner's slider look soft
+        # (.claude/rules/ui.md). The cache key carries the ratio too, so
+        # dragging the window to a differently-scaled monitor re-cuts
+        # rather than reusing the other screen's pixmap.
+        #
         # Keyed with the size it was cut for, because the expanding
         # scale never *equals* the rect - one axis overshoots - so
         # comparing the result's own size would rescale every paint.
+        ratio = self.devicePixelRatioF() or 1.0
         cached = self._scaled.get(key)
-        if cached is None or cached[0] != size:
+        if cached is None or cached[0] != (size, ratio):
+            target = QSize(max(1, int(size.width() * ratio)),
+                           max(1, int(size.height() * ratio)))
             scaled = pixmap.scaled(
-                size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation)
-            cached = (size, scaled)
+            scaled.setDevicePixelRatio(ratio)
+            cached = ((size, ratio), scaled)
             self._scaled[key] = cached
         return cached[1]
 
@@ -1206,9 +1223,16 @@ class HeroBanner(QFrame):
             if pixmap is None or opacity <= 0.0:
                 return
             scaled = self._scaled_for(key, pixmap, rect.size())
+            # Centred on the pixmap's *logical* size: it carries a
+            # devicePixelRatio now, so width()/height() are device
+            # pixels and using them raw would offset the art by a
+            # quarter of the banner on a 150% display.
+            ratio = scaled.devicePixelRatio() or 1.0
+            width = scaled.width() / ratio
+            height = scaled.height() / ratio
             painter.setOpacity(opacity)
-            painter.drawPixmap(int((rect.width() - scaled.width()) / 2),
-                               int((rect.height() - scaled.height()) / 2),
+            painter.drawPixmap(int((rect.width() - width) / 2),
+                               int((rect.height() - height) / 2),
                                scaled)
             painter.setOpacity(1.0)
 
@@ -1411,6 +1435,104 @@ class _SmoothWheel(QObject):
         self._anim.start()
         event.accept()
         return True
+
+
+class _EdgeWheelRelay(QObject):
+    """A wheel notch over a page's dead margins scrolls the page.
+
+    The gap this closes: a page's scroll area does not reach the window
+    edge, so the strip to the *right of the scrollbar* (and the header
+    band above the content) belongs to the page widget, which scrolls
+    nothing. A notch there did nothing at all - the owner's report, with
+    the pointer parked at the far right of the window.
+
+    Installed once on the application, not per page, because "all pages"
+    is the ask and every page grows its own scroll areas. It is
+    deliberately timid about what it takes over:
+
+      * a pointer genuinely inside something that can scroll vertically
+        is left completely alone - that widget's own handling wins;
+      * controls that answer the wheel themselves (combo boxes, spin
+        boxes, sliders) keep it, or picking a season would scroll the
+        page instead of changing seasons;
+      * a page with nothing scrollable under the pointer's own window
+        gets nothing - the notch falls through as before.
+
+    The relayed event is sent to the target's viewport, which is what
+    _SmoothWheel filters, so a relayed notch glides exactly like a
+    direct one rather than jumping."""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self._relaying = False
+
+    @staticmethod
+    def _scrolls_vertically(area) -> bool:
+        try:
+            bar = area.verticalScrollBar()
+        except RuntimeError:
+            return False
+        return (bar is not None and area.isVisible()
+                and bar.maximum() > bar.minimum())
+
+    def _target_for(self, widget):
+        """The scroll area a notch over `widget` should move: the
+        nearest one among the widget's ancestors' children, searching
+        outward. Outward rather than from the window down, so a notch in
+        a dialog's margin scrolls that dialog's list and not the page
+        behind it."""
+        node = widget
+        depth = 0
+        while node is not None and depth < 12:
+            for area in node.findChildren(QAbstractScrollArea):
+                if self._scrolls_vertically(area):
+                    return area
+            node = node.parentWidget()
+            depth += 1
+        return None
+
+    def eventFilter(self, obj, event):
+        if self._relaying or event.type() != QEvent.Type.Wheel:
+            return False
+        if event.angleDelta().y() == 0:
+            return False        # horizontal / trackpad pixel scrolling
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.ShiftModifier):
+            return False        # zoom and the horizontal chord
+        # widgetAt hit-tests the real widget tree, so it has no scale
+        # factor in it (.claude/rules/ui.md on mapToGlobal).
+        widget = QApplication.widgetAt(QCursor.pos())
+        if widget is None:
+            return False
+        node = widget
+        while node is not None:
+            if isinstance(node, (QComboBox, QAbstractSpinBox, QSlider)):
+                return False    # these answer the wheel themselves
+            if isinstance(node, QAbstractScrollArea):
+                if self._scrolls_vertically(node):
+                    return False        # it can scroll; leave it alone
+                # A scroll area with nothing to scroll (a short list) is
+                # not a reason to stop looking - the page behind it may
+                # still have somewhere to go.
+            node = node.parentWidget()
+        area = self._target_for(widget)
+        if area is None:
+            return False
+        self._relaying = True
+        try:
+            QApplication.sendEvent(area.viewport(), event)
+        finally:
+            self._relaying = False
+        return True
+
+
+def install_edge_wheel(app) -> QObject:
+    """Make the wheel work over page margins app-wide - see
+    _EdgeWheelRelay. Returns the filter so the caller can keep it
+    alive; call once, from main()."""
+    relay = _EdgeWheelRelay(app)
+    app.installEventFilter(relay)
+    return relay
 
 
 def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:

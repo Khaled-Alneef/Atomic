@@ -68,12 +68,25 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from helpers import (downloads, images, logs, lookup_pool, net, storage,
-                     theme)
+from helpers import (downloads, history, images, logs, lookup_pool, net,
+                     storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
                              finish_toast, frameless_dialog, show_toast,
                              use_hover_cursor)
 from windows.tracker import correct_progress, format_chapter_progress
+
+
+def _mark_history(entry, numbers, read: bool):
+    """Tick (or untick) these chapters in History - the store that also
+    holds titles with no saved entry, and the only one that can record
+    single chapters rather than one read-up-to number. Never raises: a
+    history write must not cost a mark."""
+    try:
+        marks = [history.chapter_key(n) for n in numbers if n is not None]
+        if marks:
+            history.set_watched(entry, marks, read)
+    except Exception:
+        logs.exception("could not write the reading history")
 
 # Imported defensively: this page is useful (and testable) with a stub
 # source injected over it, and a missing module must read as "the reader
@@ -2180,6 +2193,17 @@ class ReaderPage(GlassPage):
         self.direction = (payload.get("direction") or "rtl").lower()
         self._page_headers = dict(payload.get("headers") or {})
         self._store.configure(pages, self._page_headers)
+        # Every chapter that actually opens is read history - stepping
+        # from 12 to 13 inside the reader is as much "I read that" as
+        # opening 13 from the list was.
+        if 0 <= self.chapter_index < len(self.chapters):
+            number = chapter_number(self.chapters[self.chapter_index])
+            if number is not None:
+                _mark_history(self.entry, [number], True)
+                try:
+                    history.touch(self.entry, progress=f"Ch {number:g}")
+                except Exception:
+                    pass
         self._show_chapter(start_page=self._pending_start_page)
 
     def _show_chapter(self, start_page=0):
@@ -2659,7 +2683,17 @@ class ReaderPage(GlassPage):
             earlier = [n for n in (chapter_number(c) for c in self.chapters)
                        if n is not None and n < number]
             target = max(earlier) if earlier else 0.0
-        if not correct_progress(self.entry, chapter=target):
+        # The History tick, explicitly and in both directions: the write
+        # that rides along inside correct_progress only ever *adds* one,
+        # for the chapter it is given - so unmarking 25 (which stores
+        # 24.5) would leave 25's own tick standing and the details page
+        # would go on calling it read.
+        _mark_history(self.entry, [number], finished)
+        # An unsaved title has no entry to write a number onto, and
+        # correct_progress says so by returning False - but the mark was
+        # still recorded, in History. Only a *saved* title failing here
+        # is a real failure worth a toast.
+        if not correct_progress(self.entry, chapter=target) and self.entry.get("id"):
             show_toast(self, "Could Not Save That Chapter")
             return
         # Rebuilt rather than left alone: the list marks where reading has
@@ -2695,7 +2729,11 @@ class ReaderPage(GlassPage):
             show_toast(self, "These Chapters Carry No Numbers to Record")
             return
         target = max(numbers) if finished else 0.0
-        if not correct_progress(self.entry, chapter=target):
+        # Every chapter's tick, not just the highest - see _mark_chapter.
+        _mark_history(self.entry, numbers, finished)
+        # See _mark_chapter: an unsaved title records into History only,
+        # and that is not a failure.
+        if not correct_progress(self.entry, chapter=target) and self.entry.get("id"):
             show_toast(self, "Could Not Save That")
             return
         marked = (self.chapter_index
@@ -3001,6 +3039,19 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
     no state to get stuck in the hidden half."""
     host = window.centralWidget() if hasattr(window, "centralWidget") else window
     host = host if host is not None else getattr(window, "container", window)
+    # Opening is what Read History records - the owner opened chapters
+    # and found the section empty, because the only writer was the
+    # mark-as-read path. The chapter tick rides along when one was asked
+    # for by number; resuming records the title and lets the reader's
+    # own marking tick the chapter it lands on.
+    try:
+        shown = (f"Ch {float(chapter_number):g}"
+                 if chapter_number is not None else None)
+        history.touch(entry, progress=shown)
+        if chapter_number is not None:
+            history.set_watched(entry, history.chapter_key(chapter_number), True)
+    except Exception:
+        logs.exception("could not record the reading history")
     page = ReaderPage(entry, data_file, host,
                       origin_page=_origin_page_name(window), resume=resume,
                       chapter_number=chapter_number)

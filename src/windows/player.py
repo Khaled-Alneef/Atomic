@@ -2212,7 +2212,11 @@ class PlayerPage(GlassPage):
                      "paused-for-cache", "cache-buffering-state"):
             self.handle.observe_property(name, self._mpv_property)
         self.handle.register_event_callback(self._mpv_event)
-        self.handle["sub-font-size"] = self._sub_size
+        # Both levers, and the delay too - an .ass needs sub-scale
+        # rather than sub-font-size (see _apply_sub_style), and the
+        # delay used not to be applied at all until the first nudge.
+        self._apply_sub_style()
+        self._apply_sub_delay()
         # Lift mpv's soft-volume ceiling from its 130 default so the
         # slider's right half can boost to 200% (see the volume slider).
         try:
@@ -2465,8 +2469,11 @@ class PlayerPage(GlassPage):
             return
         try:
             self.handle.sub_add(path, "select")
-            self.handle["sub-font-size"] = self._sub_size
-            self.handle["sub-delay"] = self._sub_delay
+            # Re-applied after the add, not before: a freshly selected
+            # track starts from mpv's defaults, and an .ass needs the
+            # scale lever rather than the font-size one.
+            self._apply_sub_style()
+            self._apply_sub_delay()
             self.handle["sub-visibility"] = True
         except Exception:
             logs.exception("sub-add failed")
@@ -3146,21 +3153,59 @@ class PlayerPage(GlassPage):
 
     def _nudge_delay(self, delta):
         self._sub_delay = round(self._sub_delay + delta, 2)
-        if self.handle is not None:
-            try:
-                self.handle["sub-delay"] = self._sub_delay
-            except Exception:
-                logs.exception("Subtitle delay change failed")
+        self._apply_sub_delay()
         self._update_stepper("set_delay_text", self._delay_text())
 
     def _nudge_size(self, delta):
         self._sub_size = max(SUB_SIZE_MIN, min(SUB_SIZE_MAX, self._sub_size + delta))
-        if self.handle is not None:
-            try:
-                self.handle["sub-font-size"] = self._sub_size
-            except Exception:
-                logs.exception("Subtitle size change failed")
+        self._apply_sub_style()
         self._update_stepper("set_size_text", str(self._sub_size))
+
+    def _apply_sub_delay(self):
+        """Push the delay onto every subtitle mpv is showing.
+
+        The secondary track as well as the primary: a release with a
+        muxed signs track and a loaded Arabic one shows both, and moving
+        only the primary leaves half the screen out of step."""
+        if self.handle is None:
+            return
+        for prop in ("sub-delay", "secondary-sub-delay"):
+            try:
+                self.handle[prop] = self._sub_delay
+            except Exception:
+                # secondary-sub-delay does not exist on every mpv; the
+                # primary is the one that must not fail quietly.
+                if prop == "sub-delay":
+                    logs.exception("Subtitle delay change failed")
+
+    def _apply_sub_style(self):
+        """Size the subtitles, whichever renderer is drawing them.
+
+        **`sub-font-size` does not touch an .ass** - that is the owner's
+        bug report, and it is mpv working as designed: ASS/SSA is drawn
+        by libass from the script's own styles, and the `sub-*` font
+        options apply to plain text only. `sub-scale` is the one that
+        reaches it, because mpv's `sub-ass-override` defaults to
+        `scale` (read back from this build's mpv, not assumed), which
+        means "the script's styles, multiplied by sub-scale".
+
+        So both are set, from one number: the font size for SRT and the
+        equivalent multiplier for ASS. Measured on this build's mpv with
+        a generated .ass and .srt - sub-delay already moved both, which
+        is why only the size needed a second lever."""
+        if self.handle is None:
+            return
+        try:
+            self.handle["sub-font-size"] = self._sub_size
+        except Exception:
+            logs.exception("Subtitle size change failed")
+        try:
+            # Relative to mpv's own default, so "55" stays 1.0 and the
+            # stepper's numbers keep meaning what they always meant.
+            self.handle["sub-scale"] = round(
+                self._sub_size / float(SUB_SIZE_DEFAULT), 3)
+        except Exception:
+            logs.exception("Subtitle scale change failed")
 
     def _update_stepper(self, name, text):
         """Write a new value into a stepper row if that row is still on
@@ -4105,6 +4150,24 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     it was entered from, and rebuilding a tracker page costs a full
     reload of its covers."""
     host = window.centralWidget() if hasattr(window, "centralWidget") else window
+    # History is written on *open*, not only when the watched threshold
+    # is crossed: the owner played things and found Watch History empty,
+    # because the only writer was _check_watched at 90% of the runtime.
+    # Opening it is the thing History is meant to remember.
+    try:
+        from helpers import history
+        from windows.tracker import format_episode_progress
+        shown = (format_episode_progress(int(season or 0), int(episode))
+                 if episode else None)
+        history.touch(entry, progress=shown)
+        # The tick, only for an episode actually named - a film has no
+        # episode to tick and is remembered by the touch above.
+        if episode:
+            history.set_watched(entry, history.episode_key(season, episode),
+                                True)
+    except Exception:
+        logs.exception("could not record the watch history")
+
     existing = getattr(window, "_player_page", None)
     if existing is not None:
         try:

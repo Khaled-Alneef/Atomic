@@ -321,6 +321,69 @@ def discover_reading(query: str = "", limit: int = 30, deadline=None) -> list:
     return rows[:limit]
 
 
+def discover_reading_sites(query: str = "", limit: int = 30,
+                           deadline=None) -> list:
+    """Reading rows from the user's **own** sites - what Discover shows
+    now (the owner's ask: the four configured sites, not MangaDex).
+
+    An empty query browses every site's current listing; a typed one
+    searches them all. Rows carry `url`, `site_id` and `site_name` on
+    top of the usual shape, which is the point: a card picked here opens
+    that site's chapter list directly rather than asking again where to
+    read it.
+
+    MangaDex is not consulted at all. It remains the chapter-source
+    fallback inside chapter_source, and answers the genre queries below
+    - it is only no longer what fills the Discover grid.
+
+    Rows are interleaved by site rather than concatenated, so the first
+    screenful shows all four sites instead of thirty rows of whichever
+    answered first."""
+    from . import manga_sites
+    if limit <= 0:
+        return []
+    if deadline is None:
+        deadline = net.deadline_in(READING_BUDGET)
+    query = (query or "").strip()
+    try:
+        if query:
+            found = manga_sites.search_all(query, timeout=READING_TIMEOUT)
+        else:
+            found = manga_sites.browse_all(limit=limit, deadline=deadline)
+    except Exception:
+        return []
+
+    by_site = {}
+    for row in found or []:
+        if not (row.get("title") or "").strip():
+            continue
+        by_site.setdefault(row.get("site_name") or "", []).append(row)
+    interleaved, index = [], 0
+    while len(interleaved) < limit and by_site:
+        for name in list(by_site):
+            rows = by_site[name]
+            if index < len(rows):
+                interleaved.append(rows[index])
+            if index >= len(rows) - 1:
+                by_site.pop(name, None)
+        index += 1
+
+    out = []
+    for row in interleaved[:limit]:
+        out.append({
+            "title": row["title"].strip(),
+            "year": "",
+            "poster": row.get("cover_url") or "",
+            "imdb_id": "",
+            "type": "Manga",
+            # What makes the card open chapters on the site it came from.
+            "url": row.get("url") or "",
+            "site_id": row.get("site_id"),
+            "site_name": row.get("site_name") or "",
+        })
+    return out
+
+
 # ------------------------------------------------------------------
 # reading genres - MangaDex tags, for the details pages' genre buttons
 

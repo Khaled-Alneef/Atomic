@@ -421,6 +421,242 @@ def probe_site(site: dict, timeout: int = 6, titles=None) -> str:
         return RESOLVES_UNREACHABLE
 
 
+# ---------------------------------------------------------------------
+# Browsing a site, rather than searching it
+#
+# Discover's reading rows come from the user's own sites now (the
+# owner's ask - "all the manga from the 4 sites, not MangaDex"), which
+# needs a *listing*, and every engine above is a search. Measured live
+# 21 August 2026 against the four configured sites:
+#
+#   3asq       /            186KB  1.4s   31 series links
+#   TeamX      /            294KB  0.7s   57 series links
+#   LavaScans  /manga/      218KB  3.4s   36 series links
+#   SWAT       (no HTML)                  Next.js app, 0 links in 69KB
+#
+# So three are scraped from a listing page and SWAT is asked through the
+# same /v2/api/v2/series/ REST endpoint _search_v2_api uses - with the
+# search term dropped, which is exactly a browse. That split is why this
+# tries the API first for every site: a site that answers it needs no
+# HTML at all, and the ones that do not fall through in one failed
+# request.
+
+# Where a listing lives, in the order worth trying. The site's own front
+# page leads deliberately: on all three HTML sites it carries the most
+# series links of any path measured, because it is the "latest updates"
+# wall. The rest are the conventional archive paths.
+_BROWSE_PATHS = ("", "manga/", "series/", "manga-list/")
+
+# A link that points at a series rather than a chapter, a tag or a page.
+# Anchored at the end so ".../manga/slug/chapter-12" - which every card
+# on a latest-updates wall also carries - is not mistaken for the series.
+_SERIES_URL_RE = re.compile(
+    r"/(?:manga|series|comic|comics|webtoon|title)/[^/?#]+/?$", re.I)
+# Bounded like _AJAX_SEARCH_CARD_RE: an anchor body is small, and an
+# unbounded .*? across a 300KB page is how a scraper starts costing
+# seconds (see the catastrophic-backtracking note in planning.md).
+_ANCHOR_RE = re.compile(r'<a\b[^>]*?href="([^"]{1,400})"[^>]{0,400}>(.{0,1200}?)</a>',
+                        re.DOTALL | re.I)
+_IMG_SRC_RE = re.compile(
+    r'<img\b[^>]*?\b(?:data-src|data-lazy-src|src)="([^"]{1,600})"', re.I)
+_IMG_ALT_RE = re.compile(r'<img\b[^>]*?\balt="([^"]{1,300})"', re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+# Words that mean this anchor is a chapter link, not a series - checked
+# against the *title*, since a card's chapter row sits inside the same
+# listing block.
+_CHAPTER_WORD_RE = re.compile(r"^\s*(?:chapter|ch\.?|فصل|الفصل)\b", re.I)
+
+
+# An alt/anchor text that is really a filename, not a title. Measured:
+# 3asq's cards carry alt="cover_250x350" / "01-02" / "00" and TeamX's
+# carry the slider's file stem ("tigers", "aura", ".Teamx"), so trusting
+# alt text alone filled a whole Discover row with junk names.
+_FILENAME_RE = re.compile(
+    r"^(?:[\w.\-]+\.(?:jpe?g|png|webp|gif)"      # any image filename
+    r"|.*\d+\s*[x×]\s*\d+.*"                      # "cover_250x350"
+    r"|[\d\s.\-_]+"                               # "01-02", "00"
+    r"|\.\w+)$", re.I)
+_ANCHOR_TITLE_ATTR_RE = re.compile(r'<a\b[^>]*?\btitle="([^"]{1,300})"', re.I)
+
+
+# A long digit run leading a card's text - LavaScans prefixes each one
+# with a ten-digit id ("2072267132 Super God Pet Beast Shop"). Six or
+# more digits, so a title that genuinely starts with a number ("86",
+# "20th Century Boys") keeps it.
+_LEADING_ID_RE = re.compile(r"^\d{6,}[\s.\-:]*")
+
+
+def _clean_text(value: str) -> str:
+    text = " ".join(html.unescape(_TAG_RE.sub(" ", value or "")).split())
+    return _LEADING_ID_RE.sub("", text).strip()
+
+
+def _looks_like_title(text: str) -> bool:
+    """Whether this string is plausibly a series name rather than an
+    image filename or a chapter label."""
+    text = (text or "").strip()
+    if len(text) < 2 or len(text) > 120:
+        return False
+    if _CHAPTER_WORD_RE.match(text) or _FILENAME_RE.match(text):
+        return False
+    # Must carry at least one letter in some alphabet - these sites are
+    # Arabic as often as not, so this cannot be an ASCII test.
+    return any(character.isalpha() for character in text)
+
+
+def _title_from_slug(url: str) -> str:
+    """"Kengan Ashura" out of ".../manga/kengan-ashura/".
+
+    The one title source every one of these sites agrees on, and the
+    fallback when a card's alt text turns out to be a filename. A purely
+    numeric slug (SWAT's ids) yields nothing, which is correct - that
+    site is read through its API, where real titles come with the row."""
+    slug = urllib.parse.unquote(
+        urllib.parse.urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1])
+    words = [w for w in re.split(r"[-_+]+", slug) if w]
+    if not words or all(w.isdigit() for w in words):
+        return ""
+    # Only ASCII words are title-cased: .title() on Arabic is a no-op at
+    # best and mangles nothing, but leaving it alone is the honest move.
+    pretty = " ".join(w.title() if w.isascii() else w for w in words)
+    return pretty if _looks_like_title(pretty) else ""
+
+
+def _browse_v2_api(base_url: str, limit: int, timeout: int) -> list:
+    """SWAT's REST listing - _search_v2_api with no search term."""
+    url = (f"{base_url}v2/api/v2/series/?page_size={max(1, min(int(limit), 60))}"
+           f"&ordering=-views")
+    body = json.loads(_get(url, timeout))
+    if not isinstance(body, dict):
+        return []
+    rows = []
+    for record in body.get("results") or []:
+        if not record.get("title") or record.get("id") is None:
+            continue
+        poster = record.get("poster") or {}
+        rows.append({"title": record["title"],
+                     "url": f"{base_url}series/{record['id']}",
+                     "cover_url": poster.get("medium") or poster.get("thumbnail"),
+                     "latest_chapter": None})
+    return rows
+
+
+def _browse_html(base_url: str, path: str, limit: int, timeout: int) -> list:
+    """Series cards scraped off one listing page.
+
+    Deliberately shape-agnostic rather than one parser per theme: every
+    one of these sites renders a card as an anchor to the series with
+    the cover image inside it, and the alt text on that image is the
+    title. Where an anchor carries no image, its own text is the title -
+    that is the second anchor of the same card (the heading link), which
+    is why results are merged by URL rather than taken one per anchor."""
+    body = _get(base_url + path, timeout)
+    found = {}
+    order = []
+    for match in _ANCHOR_RE.finditer(body):
+        href, inner = match.group(1), match.group(2)
+        url = urllib.parse.urljoin(base_url, html.unescape(href))
+        if not _SERIES_URL_RE.search(urllib.parse.urlsplit(url).path):
+            continue
+        if url not in found:
+            found[url] = {"title": "", "url": url, "cover_url": None,
+                          "latest_chapter": None}
+            order.append(url)
+        record = found[url]
+
+        # Title candidates in descending trust, and the order is
+        # measured rather than assumed. The anchor's own text and its
+        # title attribute name the series when they exist, and are
+        # preferred because they carry the *Arabic* name on the Arabic
+        # sites. The URL slug comes next: it is the one source all three
+        # HTML sites agree on. **alt text is last on purpose** - 3asq
+        # renders alt="cover_250x350" and TeamX the slider's file stem
+        # ("tigers", "aura", "ops"), so trusting it above the slug filled
+        # two of four Discover rows with filenames.
+        if not record["title"]:
+            attr = _ANCHOR_TITLE_ATTR_RE.search(match.group(0))
+            alt = _IMG_ALT_RE.search(inner)
+            for candidate in (_clean_text(inner),
+                              _clean_text(attr.group(1) if attr else ""),
+                              _title_from_slug(url),
+                              _clean_text(alt.group(1) if alt else "")):
+                if _looks_like_title(candidate):
+                    record["title"] = candidate
+                    break
+        image = _IMG_SRC_RE.search(inner)
+        if image and not record["cover_url"]:
+            record["cover_url"] = _strip_wp_size_suffix(
+                urllib.parse.urljoin(base_url, html.unescape(image.group(1))))
+
+    rows = [found[url] for url in order if found[url]["title"]]
+    # Cards with artwork fill the row first, the rest behind them and
+    # both in the page's own order: this feeds a wall of poster tiles,
+    # and a letter avatar among real covers reads as a broken image
+    # rather than as a title with no art on its site.
+    covered = [r for r in rows if r.get("cover_url")]
+    bare = [r for r in rows if not r.get("cover_url")]
+    return (covered + bare)[:limit]
+
+
+def browse_site(site: dict, limit: int = 30, timeout: int = 8,
+                deadline=None) -> list:
+    """What this site is currently publishing, as search-shaped rows.
+
+    Returns [] for a site that answers neither the API nor any listing
+    path - a Discover row that cannot reach a site shows nothing from
+    it, never an error. Bounded by `deadline` across the whole attempt
+    chain for the same reason search_site is: four paths at 8s each is
+    not an 8s wait."""
+    base_url = site.get("base_url")
+    if not base_url:
+        return []
+    step = net.step_timeout(deadline, timeout) if deadline else timeout
+    if step is None:
+        return []
+    try:
+        rows = _browse_v2_api(base_url, limit, step)
+        if rows:
+            return rows
+    except Exception:
+        pass            # not an API site; fall through to the HTML paths
+    for path in _BROWSE_PATHS:
+        step = net.step_timeout(deadline, timeout) if deadline else timeout
+        if step is None:
+            break
+        try:
+            rows = _browse_html(base_url, path, limit, step)
+        except Exception:
+            rows = []
+        # Three or more is a listing; one or two is a stray link on a
+        # page that is not one.
+        if len(rows) >= 3:
+            return rows
+    return []
+
+
+def browse_all(limit: int = 30, timeout: int = 8, deadline=None) -> list:
+    """Every configured site's current listing, in parallel, each row
+    tagged with the site it came from - which is what lets a Discover
+    card open its chapters on that site and no other."""
+    sites = list_sites()
+    if not sites:
+        return []
+    rows = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(sites)) as pool:
+        jobs = {pool.submit(browse_site, site, limit, timeout, deadline): site
+                for site in sites}
+        for job in concurrent.futures.as_completed(jobs):
+            site = jobs[job]
+            try:
+                found = job.result()
+            except Exception:
+                found = []
+            for row in found:
+                rows.append({**row, "site_id": site["id"],
+                             "site_name": site["name"]})
+    return rows
+
+
 def search_all(query: str, timeout: int = 6) -> list:
     """Search every configured site in parallel; returns a flat list of
     {title, url, cover_url, site_id, site_name}."""

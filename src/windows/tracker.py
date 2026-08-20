@@ -33,8 +33,8 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (
-    anilist, anime_sites, app_settings, images, logs, lookup_pool, manga_sites,
-    release_schedule, storage, stremio, theme,
+    anilist, anime_sites, app_settings, history, images, logs, lookup_pool,
+    manga_sites, release_schedule, storage, stremio, theme,
 )
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, HeroBanner, SideScroller, confirm,
@@ -159,16 +159,19 @@ PREVIEW_SIZE = (90, 120)
 # reads as a list rather than a second poster grid.
 SCHEDULE_COVER_SIZE = (46, 62)
 
-# The three sub-sections every tracker page carries. "saved" is the page
-# as it has always been - the sort row, the search, the sections grid,
-# select mode and drag-reorder all live there and nowhere else; the other
-# two are read-only views built on demand. Discover leads the tuple (the
-# owner's ask): this order is what the section sidebar lists, top to
-# bottom, until the user drags their own.
+# The sub-sections every tracker page carries. "saved" is the page as it
+# has always been - the sort row, the search, the sections grid, select
+# mode and drag-reorder all live there and nowhere else; the rest are
+# read-only views built on demand. Discover leads the tuple and is where
+# these pages open (the owner's ask): this order is what the section
+# sidebar lists, top to bottom, until the user drags their own.
 TAB_SAVED = "saved"
 TAB_DISCOVER = "discover"
+TAB_HISTORY = "history"
 TAB_SCHEDULE = "schedule"
-TABS = ((TAB_DISCOVER, "Discover"), (TAB_SAVED, "Saved"), (TAB_SCHEDULE, "Schedule"))
+TABS = ((TAB_DISCOVER, "Discover"), (TAB_SAVED, "Saved"),
+        (TAB_HISTORY, "History"), (TAB_SCHEDULE, "Schedule"))
+DEFAULT_TAB = TAB_DISCOVER
 
 # How many titles one Discover row asks for. Bounded because every one of
 # them is a poster download queued onto the shared lookup pool.
@@ -384,6 +387,28 @@ def record_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
                            chapter=chapter, forward_only=True)
 
 
+def _record_history(entry, *, season=None, episode=None, chapter=None):
+    """Note an open in History, and tick what was opened.
+
+    Never raises and never blocks the write it rides along with: a
+    history file that cannot be written costs a list, not playback.
+    Ticks forward only in the sense that opening something marks it -
+    unticking is a deliberate act through the details page's menu."""
+    try:
+        if entry.get("type") in MANGA_TYPES:
+            mark = history.chapter_key(chapter)
+            shown = f"Ch {float(chapter):g}" if chapter is not None else None
+        else:
+            mark = history.episode_key(season, episode)
+            shown = (format_episode_progress(int(season or 0), int(episode))
+                     if episode else None)
+        history.touch(entry, progress=shown)
+        if mark:
+            history.set_watched(entry, mark, True)
+    except Exception:
+        pass
+
+
 def _write_progress(entry, *, season=None, episode=None, chapter=None,
                     forward_only: bool = True) -> bool:
     """Record what was just opened onto `entry` - the single place
@@ -410,10 +435,17 @@ def _write_progress(entry, *, season=None, episode=None, chapter=None,
     Deliberately *not* refused: an entry whose progress Stremio also
     syncs. Atomic played it, so Atomic knows; the sync is held to the
     same forward-only rule at its own end (_on_progress_synced) rather
-    than the two overwriting each other in turn."""
-    if not isinstance(entry, dict) or not entry.get("id"):
+    than the two overwriting each other in turn.
+
+    History is written first and under none of these rules: an unsaved
+    title has no id and a film has no episode, and both of those are
+    still things the user watched (see helpers/history)."""
+    if not isinstance(entry, dict):
         return False
     entry_type = entry.get("type")
+    _record_history(entry, season=season, episode=episode, chapter=chapter)
+    if not entry.get("id"):
+        return False
     if not tracks_progress(entry_type):
         return False
 
@@ -1176,6 +1208,32 @@ def attach_continue_cover(card, cover):
 # Harbor").
 
 
+def _history_when(stamp) -> str:
+    """"Just now" / "3h ago" / "12 Aug" for a history row's timestamp.
+    Relative near the present, absolute past a week - which is how a
+    person actually reads "when did I watch this"."""
+    text = str(stamp or "").strip()
+    if not text:
+        return ""
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    gap = datetime.now(timezone.utc) - when
+    minutes = gap.total_seconds() / 60
+    if minutes < 2:
+        return "Just now"
+    if minutes < 60:
+        return f"{int(minutes)}m ago"
+    if minutes < 60 * 24:
+        return f"{int(minutes // 60)}h ago"
+    if gap.days < 7:
+        return f"{gap.days}d ago"
+    return when.astimezone().strftime("%d %b")
+
+
 def discover_entry(item, entry_type):
     """A catalog row (a Discover card, a genre-browse pick) as an entry
     dict the details page (and a quick save) can hold. Deliberately
@@ -1192,10 +1250,14 @@ def discover_entry(item, entry_type):
         "latest_available": "",
         "last_watched_chapter": None,
         "show_last_watched": True,
-        "url": "",
+        # The site a reading row came from, carried through so the
+        # details page lists that site's chapters straight away instead
+        # of asking where to read it (the owner's ask). Empty for the
+        # video rows, which have no such binding.
+        "url": item.get("url") or "",
         "cover_url": item.get("poster") or None,
         "cover_path": None,
-        "site_id": None,
+        "site_id": item.get("site_id"),
         "imdb_id": item.get("imdb_id") or None,
     }
 
@@ -1300,7 +1362,7 @@ class TrackerPage(GlassPage):
         # ticks. There is no in-page switcher any more - the section
         # sidebar main.py slides in over these pages drives this through
         # set_active_section, so nothing here paints tab state.
-        self._active_tab = TAB_SAVED
+        self._active_tab = DEFAULT_TAB
 
         # The Schedule rows' countdown labels, refreshed in place while
         # that section is on screen - a countdown that only moved when
@@ -1491,11 +1553,24 @@ class TrackerPage(GlassPage):
         self.schedule_tab.setVisible(False)
         layout.addWidget(self.schedule_tab, stretch=1)
 
+        # History: what has actually been opened, saved or not (see
+        # helpers/history). Built on arrival like the two above.
+        self.history_tab = QWidget(objectName="Bare")
+        self._history_layout = QVBoxLayout(self.history_tab)
+        self._history_layout.setContentsMargins(0, 0, 0, 0)
+        self._history_layout.setSpacing(14)
+        self.history_tab.setVisible(False)
+        layout.addWidget(self.history_tab, stretch=1)
+
         self._refresh_grid()
         # Last, after every tab's shell exists and the grid has been
         # drawn: restoring a remembered Discover *is* showing it, so this
         # is what fires that tab's first lookup.
-        self._set_tab(remembered.get("tab", TAB_SAVED))
+        # Discover is where these pages open (the owner's ask) - the
+        # session's remembered section still wins, so walking away from
+        # Saved and back does not throw you into Discover mid-task; it
+        # is only the default for a page arrived at fresh.
+        self._set_tab(remembered.get("tab", DEFAULT_TAB))
         if self.SUPPORTS_PROGRESS_SYNC:
             self._backfill_missing_latest_available()
         self._backfill_sharper_covers()
@@ -1775,12 +1850,13 @@ class TrackerPage(GlassPage):
         the restore path at the end of __init__, where the remembered
         section has to be applied over the default."""
         if key not in dict(TABS):
-            key = TAB_SAVED
+            key = DEFAULT_TAB
         self._active_tab = key
         self.title_label.setText(dict(TABS)[key])
         self.saved_tab.setVisible(key == TAB_SAVED)
         self.discover_tab.setVisible(key == TAB_DISCOVER)
         self.schedule_tab.setVisible(key == TAB_SCHEDULE)
+        self.history_tab.setVisible(key == TAB_HISTORY)
         if key == TAB_DISCOVER:
             self._show_discover()
         elif key == TAB_SCHEDULE:
@@ -1789,6 +1865,11 @@ class TrackerPage(GlassPage):
             # lookup landing, an entry saved or deleted) with nothing
             # that would tell a built list to catch up.
             self._build_schedule()
+        elif key == TAB_HISTORY:
+            # Same reasoning, more so: history.json is written by the
+            # player, the reader and the details page, none of which
+            # tell this page anything.
+            self._build_history()
         self._remember_view_state()
 
     def _search_query(self) -> str:
@@ -3076,7 +3157,11 @@ class TrackerPage(GlassPage):
                 return
         try:
             if kind == "reading":
-                found = discover.discover_reading(query=query, limit=DISCOVER_LIMIT)
+                # The user's own four sites, not MangaDex (the owner's
+                # ask) - and each row remembers which site it came from,
+                # so pressing it opens that site's chapters directly.
+                found = discover.discover_reading_sites(query=query,
+                                                        limit=DISCOVER_LIMIT)
             else:
                 found = discover.discover_video(kind, query=query,
                                                 limit=DISCOVER_LIMIT)
@@ -3379,22 +3464,30 @@ class TrackerPage(GlassPage):
         id for the video kinds (artwork caches it on disk, so a revisit
         costs a stat), AniList's banner for reading - the same two
         sources the details page grounds itself with. Never raises."""
-        path = None
         try:
             if entry_type in MANGA_TYPES:
                 url = anilist.fetch_manga_artwork(item.get("title") or "")
                 found = images.download(url) if url else None
-                path = str(found) if found else None
-            elif item.get("imdb_id"):
-                from helpers import artwork
-                probe = {"imdb_id": item.get("imdb_id"),
-                         "title": item.get("title") or ""}
-                path = (artwork.backdrop_fast_path(probe)
-                        or artwork.backdrop_path(probe))
+                if found:
+                    self._discover_signals.featured_backdrop.emit(str(found), run)
+                return
+            if not item.get("imdb_id"):
+                return
+            from helpers import artwork
+            probe = {"imdb_id": item.get("imdb_id"),
+                     "title": item.get("title") or ""}
+            # Small copy first, then the full-resolution original - the
+            # details page's pattern. Taking the small one with `or`
+            # (what this did) meant the original was never fetched and a
+            # banner far wider than 780px was drawn from a 780px image.
+            quick = artwork.backdrop_fast_path(probe)
+            if quick:
+                self._discover_signals.featured_backdrop.emit(str(quick), run)
+            full = artwork.backdrop_path(probe)
+            if full:
+                self._discover_signals.featured_backdrop.emit(str(full), run)
         except Exception:
-            path = None
-        if path:
-            self._discover_signals.featured_backdrop.emit(str(path), run)
+            return          # no art just keeps the banner's flat panel
 
     def _on_featured_backdrop(self, path, run):
         if run != self._discover_run:
@@ -3403,7 +3496,10 @@ class TrackerPage(GlassPage):
         if banner is None:
             return
         try:
-            banner.set_backdrop(path)
+            # No fade for the sharp original arriving over the small
+            # copy - it is the same picture, and dissolving a photo into
+            # itself reads as a flicker.
+            banner.set_backdrop(path, fade=not banner.has_backdrop())
         except RuntimeError:
             pass    # the tab rebuilt under the fetch
 
@@ -3670,6 +3766,149 @@ class TrackerPage(GlassPage):
             logs.exception("opening details from the schedule failed")
             return
         _wire_overlay_refresh(page, self, entry)
+
+    # ------------------------------------------------------------------
+    # History: what has actually been opened, saved or not.
+
+    def _history_rows(self) -> list:
+        """This page's history rows, newest first. Narrowed to the types
+        this page owns, so Watch never lists manga and Read never lists
+        episodes."""
+        return history.recent(self.ENTRY_TYPES)
+
+    def _build_history(self):
+        _clear_layout(self._history_layout)
+        rows = self._history_rows()
+        if not rows:
+            self._history_layout.addWidget(QLabel(
+                "Nothing here yet. Anything you play or read shows up "
+                "here - including titles you have not saved.",
+                objectName="Muted"))
+            self._history_layout.addStretch(1)
+            return
+
+        header = QHBoxLayout()
+        header.addWidget(QLabel(
+            f"{len(rows)} title{'s' if len(rows) != 1 else ''}",
+            objectName="Muted"))
+        header.addStretch(1)
+        clear_btn = QPushButton("Clear History")
+        use_hover_cursor(clear_btn)
+        clear_btn.clicked.connect(self._clear_history)
+        header.addWidget(clear_btn)
+        self._history_layout.addLayout(header)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setSpacing(8)
+        body_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        for row in rows:
+            body_layout.addWidget(self._build_history_row(row))
+        self._history_layout.addWidget(scroll_area(body), stretch=1)
+
+    def _build_history_row(self, row):
+        card = Card(hoverable=True, matte=True)
+        # Same lift as the schedule rows, same reason: SURFACE on this
+        # page's SURFACE panel is invisible without the old border.
+        card.setStyleSheet(
+            f"QFrame#Card {{ background: {theme.SURFACE_HOVER}; }}"
+            f"QFrame#Card:hover {{ background: {theme.SURFACE_ACTIVE}; }}")
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(10, 8, 14, 8)
+        layout.setSpacing(12)
+
+        cover = QLabel()
+        cover.setFixedSize(*SCHEDULE_COVER_SIZE)
+        cover.setPixmap(images.thumbnail_or_avatar(
+            row.get("cover_path"), row.get("title") or "", SCHEDULE_COVER_SIZE))
+        layout.addWidget(cover)
+
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        column.addWidget(QLabel(row.get("title") or "", objectName="CardTitle"))
+        ticks = len(row.get("watched") or ())
+        reading = row.get("type") in MANGA_TYPES
+        bits = [row.get("progress") or "",
+                (f"{ticks} {'chapter' if reading else 'episode'}"
+                 f"{'s' if ticks != 1 else ''} marked") if ticks else ""]
+        column.addWidget(QLabel("  ·  ".join(b for b in bits if b),
+                                objectName="CardMeta"))
+        layout.addLayout(column, stretch=1)
+
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        when = QLabel(_history_when(row.get("last_opened")), objectName="CardMeta")
+        when.setAlignment(Qt.AlignmentFlag.AlignRight)
+        right.addWidget(when)
+        # Says which store this title lives in. A history row for
+        # something unsaved is the case this whole section exists for,
+        # so it is labelled rather than left to look identical to a
+        # saved one.
+        saved = self._find_saved(row.get("title")) is not None
+        tag = QLabel("In Saved" if saved else "Not saved")
+        tag.setAlignment(Qt.AlignmentFlag.AlignRight)
+        tag.setStyleSheet(
+            f"color: {theme.ACCENT if saved else theme.TEXT_DIM};"
+            f" background: transparent; font-size: 8pt; font-weight: 700;")
+        right.addWidget(tag)
+        layout.addLayout(right)
+
+        card.clicked.connect(lambda r=row: self._open_history_row(r))
+        card.rightClicked.connect(
+            lambda event, r=row: self._history_menu(event, r))
+        return card
+
+    def _history_entry(self, row):
+        """A history row as an entry the details page can hold: the
+        saved entry when there is one (so progress marks and Save state
+        are real), else a transient record built from what History
+        stored."""
+        found = self._find_saved(row.get("title"))
+        if found is not None:
+            return found
+        entry_type = row.get("type") or self.ENTRY_TYPES[0]
+        entry = discover_entry({"title": row.get("title"),
+                                "poster": row.get("cover_url"),
+                                "imdb_id": row.get("imdb_id")}, entry_type)
+        # The site binding a reading title was opened with, so the
+        # chapter list comes straight back rather than asking again.
+        entry["url"] = row.get("url") or ""
+        entry["site_id"] = row.get("site_id")
+        entry["cover_path"] = row.get("cover_path")
+        return entry
+
+    def _open_history_row(self, row):
+        window = _top_window(self)
+        if window is None:
+            return
+        entry = self._history_entry(row)
+        try:
+            from windows import details
+            page = details.open_details(window, entry)
+        except Exception:
+            logs.exception("opening details from history failed")
+            return
+        _wire_overlay_refresh(page, self, entry)
+
+    def _history_menu(self, event, row):
+        menu = _StayOpenMenu(self)
+        remove = menu.addAction("Remove from History")
+        chosen = menu.exec(event.globalPosition().toPoint())
+        if chosen is remove:
+            if history.forget(row.get("key")):
+                show_toast(self, "Removed from History")
+                self._build_history()
+
+    def _clear_history(self):
+        if not confirm(self, "Clear History",
+                       "Forget every title in History? The episode and "
+                       "chapter marks stored here go with them. Saved "
+                       "entries and their progress are untouched.",
+                       yes_text="Clear", danger=True):
+            return
+        history.clear()
+        self._build_history()
+        show_toast(self, "History Cleared")
 
     # ------------------------------------------------------------------
     def _open_form(self, edit=False, entry=None, initial_title="", default_type=None):

@@ -159,6 +159,28 @@ def safe_name(text: str, fallback: str = "download") -> str:
     return cleaned[:120] or fallback
 
 
+def saved_name(title, *, number=None, season=None, fallback="download") -> str:
+    """The owner's naming scheme for everything kept:
+
+        [Atomic] (Name) (EpisodeOrChapter) (Season)
+
+    Parts with nothing to say are dropped rather than written empty - a
+    film has no episode and a chapter has no season, and "( )" in a
+    filename reads as a bug. The release's own name is deliberately not
+    used any more: it carried the group, the resolution and the hash,
+    so a folder of episodes sorted by whoever released them instead of
+    by episode number.
+
+    No extension - the caller appends the source's own, since that is
+    the one part of a release name worth keeping."""
+    parts = [f"({safe_name(title, fallback)})"]
+    if number is not None and str(number).strip() != "":
+        parts.append(f"({safe_name(number)})")
+    if season is not None and str(season).strip() != "":
+        parts.append(f"({safe_name(season)})")
+    return "[Atomic] " + " ".join(parts)
+
+
 # ----------------------------------------------------------- queueing
 
 def _add(job: dict) -> dict:
@@ -512,7 +534,15 @@ def _run_video(job) -> str:
         time.sleep(1.5)
 
     source = state.get("path")
-    target = os.path.join(folder, safe_name(os.path.basename(source)))
+    # The owner's scheme, not the release's own name - see saved_name.
+    # The extension is the release's, because that is the part that says
+    # what the file actually is.
+    extension = os.path.splitext(source)[1] or ".mkv"
+    target = os.path.join(folder, saved_name(
+        entry.get("title") or "Video",
+        number=(f"E{int(episode):02d}" if episode else None),
+        season=(f"S{int(season):02d}" if season and episode else None),
+        fallback="Video") + extension)
     _update(job_id, detail="Saving...")
     # Copy rather than move: the engine may still be serving this file
     # to a player, and pulling it out from under mpv mid-frame is a
@@ -567,8 +597,13 @@ def _run_chapter(job) -> str:
     folder = os.path.join(job.get("folder") or default_folder(),
                           safe_name(entry.get("title") or "Manga"))
     os.makedirs(folder, exist_ok=True)
-    target = os.path.join(folder,
-                          safe_name(f"{entry.get('title')} - {chapter.get('number')}") + ".cbz")
+    # The owner's scheme (see saved_name). A chapter carries no season,
+    # so that part is simply absent rather than written empty.
+    number = chapter.get("number")
+    target = os.path.join(folder, saved_name(
+        entry.get("title") or "Manga",
+        number=(f"C{number}" if number is not None else None),
+        fallback="Manga") + ".cbz")
 
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         for index, url in enumerate(pages, 1):

@@ -55,7 +55,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import (confirm, release_stale_hover_cursors, show_toast,
+from helpers.widgets import (confirm, install_edge_wheel,
+                             release_stale_hover_cursors, show_toast,
                              take_live_redo, take_live_undo, use_hover_cursor)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
@@ -189,6 +190,7 @@ SECTION_ICONS = {
     "saved": "\uE8F1",     # Library
     "discover": "\uE721",  # Search
     "schedule": "\uE787",  # Calendar
+    "history": "\uE81C",   # History (the clock-with-arrow)
 }
 
 # The fold toggle's two faces - single Fluent chevrons, drawn large
@@ -1773,6 +1775,10 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     theme.apply_theme(app)
+    # The wheel over a page's dead margins - the strip right of the
+    # scrollbar above all (the owner's ask). One filter for every page,
+    # kept alive by the app it is parented to.
+    install_edge_wheel(app)
 
     # Before the window exists: the pages it builds each load their own
     # file, and the move has to be finished before either looks.

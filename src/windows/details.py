@@ -35,14 +35,15 @@ from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import (app_settings, artwork, images, logs, lookup_pool, net,
-                     storage, theme)
-from helpers.widgets import (Card, GlassPage, confirm, frameless_dialog,
-                             scroll_area, show_toast, use_hover_cursor)
+from helpers import (app_settings, artwork, history, images, logs, lookup_pool,
+                     net, storage, theme)
+from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
+                             frameless_dialog, scroll_area, show_toast,
+                             use_hover_cursor)
 
 try:
     from helpers import stremio
@@ -81,6 +82,9 @@ ICON_BACK = "\ue72b"                  # Back arrow
 ICON_FULLSCREEN = "\ue740"
 ICON_EXIT_FULLSCREEN = "\ue73f"
 ICON_SEARCH = "\ue721"
+# The list panel's re-ask button - the same Refresh glyph the reader's
+# top bar carries, so "look again" is one shape across the app.
+ICON_REFRESH = "\ue72c"
 ICON_PLAY_GLYPH = "\ue768"
 
 
@@ -207,10 +211,14 @@ def _site_resolve_worker(signals, run, site, title):
     signals.site_resolved.emit(run, fields, site_name)
 
 
-def _chapters_worker(signals, run, entry):
+def _chapters_worker(signals, run, entry, refresh=False):
+    """`refresh` skips chapter_source's six-hour disk cache - what the
+    panel's refresh button passes, and the only way a title that
+    published an hour ago shows its new chapter today."""
     try:
         chapters = chapter_source.list_chapters(
-            entry, deadline=net.deadline_in(CHAPTER_LIST_TIMEOUT))
+            entry, deadline=net.deadline_in(CHAPTER_LIST_TIMEOUT),
+            refresh=refresh)
     except Exception:
         logs.exception("details chapter listing failed")
         chapters = None
@@ -309,6 +317,12 @@ class DetailsPage(GlassPage):
         # offers the configured reading sites first (the owner's ask),
         # and this stays True until one is picked and answers.
         self._site_choice_pending = False
+        # Per-episode/chapter ticks from helpers/history - what lets an
+        # *unsaved* title be marked watched at all, and what lets a
+        # saved one be ticked out of order (its progress is one number,
+        # which cannot say "5 and 7 but not 6"). Read once here and kept
+        # in step by _mark_history.
+        self._history_marks = history.watched_keys(self.entry)
 
         self._signals = _Signals()
         self._signals.meta.connect(self._on_meta)
@@ -491,11 +505,26 @@ class DetailsPage(GlassPage):
             use_hover_cursor(button)
             button.clicked.connect(lambda checked=False, s=step: self._step_season(s))
         self._season_box = QComboBox()
+        # Wide enough for a two-digit season plus the drop arrow. Without
+        # this the box is sized for "Season 2" and "Season 22" is cut off
+        # mid-word (the owner's screenshot): QComboBox sizes to its
+        # *current* item, and the padding and arrow are not counted by
+        # the length hint, hence a floor as well.
+        self._season_box.setMinimumContentsLength(11)
+        self._season_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._season_box.setMinimumWidth(150)
         self._season_box.setStyleSheet(
             f"QComboBox {{ background: {theme.SURFACE}; color: {theme.TEXT};"
             f" border: 1px solid {theme.BORDER}; border-radius: {theme.RADIUS}px;"
             f" padding: 8px 16px; font-weight: 700; font-size: 12pt; }}"
-            f"QComboBox:hover {{ border: 1px solid {theme.ACCENT}; }}")
+            f"QComboBox:hover {{ border: 1px solid {theme.ACCENT}; }}"
+            # The popup list, too: it inherits none of the above, and at
+            # its default width the same two-digit names clipped.
+            f"QComboBox QAbstractItemView {{ background: {theme.SURFACE};"
+            f" color: {theme.TEXT}; border: 1px solid {theme.BORDER};"
+            f" selection-background-color: {theme.SURFACE_ACTIVE};"
+            f" outline: none; padding: 4px; }}")
         use_hover_cursor(self._season_box)
         self._season_box.activated.connect(self._pick_season)
         header.addWidget(self._prev_btn)
@@ -503,6 +532,23 @@ class DetailsPage(GlassPage):
         header.addWidget(self._season_box)
         header.addStretch(1)
         header.addWidget(self._next_btn)
+        # Re-ask the source for this list (the owner's ask). Both lists
+        # are cached - chapters on disk for six hours, the episode meta
+        # by the session - so a title that has just published something
+        # otherwise shows a stale list with no way to say "look again".
+        # widgets.GlyphButton, not a QPushButton carrying the glyph as
+        # text: this rendered as an empty box on the owner's screen, and
+        # reader._glyph_button records exactly why. A widget stylesheet
+        # merges with the app-wide one property by property, so a rule
+        # that names no padding inherits QPushButton's `8px 16px` - on a
+        # 38px button that leaves ~6px of content width and Qt draws a
+        # clipped box instead of the icon. GlyphButton paints the glyph
+        # onto its own rect, with no padding in the arithmetic at all.
+        self._refresh_btn = GlyphButton(
+            ICON_REFRESH,
+            "Look for new " + ("chapters" if self._is_reading else "episodes"))
+        self._refresh_btn.clicked.connect(self._refresh_list)
+        header.addWidget(self._refresh_btn)
         column.addLayout(header)
         if self._is_reading:
             # One flat chapter list - seasons are a video concept.
@@ -592,6 +638,7 @@ class DetailsPage(GlassPage):
     def _on_meta(self, run, meta):
         if run != self._run or self._closed:
             return
+        self._finish_refresh()
         if not meta:
             self._panel_note.setText(
                 "The episode list couldn't be loaded. Check the connection "
@@ -631,6 +678,7 @@ class DetailsPage(GlassPage):
     def _on_chapters(self, run, chapters):
         if run != self._run or self._closed:
             return
+        self._finish_refresh()
         self._chapters = list(chapters or [])
         if not self._chapters:
             self._panel_note.setText("No chapters were found for this title.")
@@ -693,9 +741,21 @@ class DetailsPage(GlassPage):
         self._fill_genre_buttons([str(n) for n in names][:5])
 
     def _open_genre_browse(self, genre):
-        dialog = _GenreBrowseDialog(self, genre, self._is_reading)
-        dialog.open_title = self._open_browsed_title
-        dialog.exec()
+        """Open the genre as its own full page over the window - not a
+        dialog (the owner's ask). Hosted on the central widget like this
+        page is, so it covers the sidebar the same way and Back/Escape
+        lands here again."""
+        window = self.window()
+        host = (window.centralWidget() if hasattr(window, "centralWidget")
+                else window)
+        host = host if host is not None else window
+        page = GenreBrowsePage(genre, self._is_reading, host)
+        page.open_title = self._open_browsed_title
+        page.follow(host)
+        page.show()
+        page.raise_()
+        page.setFocus()
+        return page
 
     def _open_browsed_title(self, item, entry_type):
         """A pick from the genre browse opens its own details page over
@@ -797,6 +857,46 @@ class DetailsPage(GlassPage):
         else:
             self._fill_episode_rows()
 
+    def _refresh_list(self):
+        """Ask the source for this list again (the panel's refresh
+        button). Reading skips chapter_source's six-hour disk cache;
+        video simply re-fetches the Cinemeta meta, which is not cached.
+        The button disables itself until the answer lands, so a series
+        of impatient presses cannot stack lookups."""
+        if self._closed or self._site_choice_pending:
+            return
+        self._run += 1
+        self._refresh_btn.setEnabled(False)
+        self._clear_rows()
+        self._panel_note.setVisible(True)
+        self._panel_note.setText("Looking for new "
+                                 + ("chapters..." if self._is_reading
+                                    else "episodes..."))
+        if self._is_reading:
+            if chapter_source is None:
+                self._finish_refresh("No chapter source in this build.")
+                return
+            lookup_pool.submit(_chapters_worker, self._signals, self._run,
+                               dict(self.entry), True)
+        elif self.entry.get("imdb_id") and stremio is not None:
+            kind = "movie" if self.entry.get("type") == "Movie" else "series"
+            lookup_pool.submit(_meta_worker, self._signals, self._run,
+                               self.entry.get("imdb_id"), kind)
+        else:
+            self._finish_refresh("This entry has no matched title, so there "
+                                 "is nothing to refresh.")
+
+    def _finish_refresh(self, message=""):
+        """Re-arm the refresh button once an answer (or a refusal) has
+        landed. Guarded: the panel can be torn down under a lookup."""
+        try:
+            self._refresh_btn.setEnabled(True)
+        except RuntimeError:
+            return
+        if message:
+            self._panel_note.setVisible(True)
+            self._panel_note.setText(message)
+
     # ---- picking a reading site (Discover titles) ---------------------
     def _reading_site_choices(self) -> list:
         try:
@@ -894,10 +994,16 @@ class DetailsPage(GlassPage):
                 continue
             aired = _aired(video.get("firstAired") or video.get("released"))
             upcoming = bool(aired and aired > now)
-            watched = (not upcoming and watched_episode
-                       and (season < watched_season
-                            or (season == watched_season
-                                and number <= watched_episode)))
+            # Either store may say watched: the entry's progress number
+            # (saved titles) or an explicit History tick (which is all
+            # an unsaved title has, and what an out-of-order tick on a
+            # saved one writes).
+            watched = not upcoming and (
+                (watched_episode
+                 and (season < watched_season
+                      or (season == watched_season
+                          and number <= watched_episode)))
+                or history.episode_key(season, number) in self._history_marks)
             badge = ("upcoming", "UPCOMING") if upcoming else (
                 ("watched", "WATCHED") if watched else None)
             self._rows.insertWidget(shown, self._row_card(
@@ -930,7 +1036,10 @@ class DetailsPage(GlassPage):
                 title = f"{title}  · عربي"
             if wanted and wanted not in title.lower():
                 continue
-            read = number is not None and read_up_to and number <= read_up_to
+            # Same two stores as the episode rows - see there.
+            read = number is not None and (
+                (read_up_to and number <= read_up_to)
+                or history.chapter_key(number) in self._history_marks)
             self._rows.insertWidget(shown, self._row_card(
                 title, chapter_published(chapter),
                 ("watched", "READ") if read else None,
@@ -1164,6 +1273,13 @@ class DetailsPage(GlassPage):
                 self.entry.update(fresh)
         except Exception:
             logs.exception("details page could not re-read the entry")
+        # The ticks too: playing an episode writes one whether or not
+        # this title is saved, and an unsaved title has nothing else to
+        # re-read (see helpers/history).
+        try:
+            self._history_marks = history.watched_keys(self.entry)
+        except Exception:
+            pass
         if self._is_reading:
             read = self._last_read()
             total = len({c.get("number") for c in self._chapters})
@@ -1199,7 +1315,10 @@ class DetailsPage(GlassPage):
         except ImportError:                             # pragma: no cover
             return
         watched_season, watched_episode = self._progress()
-        already = (watched_season, watched_episode) >= (season, episode)
+        # Either store counts, exactly as the row badge reads them.
+        already = ((watched_episode
+                    and (watched_season, watched_episode) >= (season, episode))
+                   or history.episode_key(season, episode) in self._history_marks)
         menu = QMenu(self)
         # The explicit way into the source list while auto-pick is on -
         # the left click plays right away then (see _start_episode).
@@ -1215,6 +1334,8 @@ class DetailsPage(GlassPage):
             self._open_source_picker(season, episode)
             return
         if chosen is mark:
+            watched = not already
+            episodes = [episode]
             if already:
                 if episode <= 1:
                     target = ((season - 1, self._aired_last_episode(season - 1))
@@ -1224,21 +1345,61 @@ class DetailsPage(GlassPage):
             else:
                 target = (season, episode)
         elif chosen is mark_all:
+            watched, episodes = True, self._season_episodes(season)
             target = (season, max(1, self._aired_last_episode(season)))
         elif chosen is clear_all:
+            watched, episodes = False, self._season_episodes(season)
             target = ((season - 1, self._aired_last_episode(season - 1))
                       if season > 1 else (0, 0))
         else:
             return
-        if target[1] <= 0:
-            # Nothing watched at all: cleared directly, because
-            # correct_progress refuses a zero episode.
-            self._clear_video_progress()
-        elif not correct_progress(self.entry, season=target[0],
-                                  episode=target[1]):
-            show_toast(self, "Could Not Save That")
-            return
+
+        # History first, and unconditionally: it is the only store an
+        # unsaved title has, and it is what makes a per-episode tick
+        # possible at all - the entry's single progress number cannot
+        # say "5 and 7 but not 6".
+        self._mark_history([history.episode_key(season, number)
+                            for number in episodes], watched)
+        if self.entry.get("id"):
+            if target[1] <= 0:
+                # Nothing watched at all: cleared directly, because
+                # correct_progress refuses a zero episode.
+                self._clear_video_progress()
+            elif not correct_progress(self.entry, season=target[0],
+                                      episode=target[1]):
+                show_toast(self, "Could Not Save That")
+                return
         self._fill_rows()
+
+    def _season_episodes(self, season) -> list:
+        """Every episode number this page knows of in `season` - what
+        "mark all" ticks. Read off the loaded meta rather than counted,
+        so a season with gaps ticks exactly what exists."""
+        numbers = []
+        for video in self._videos:
+            if int(video.get("season") or 0) != int(season or 0):
+                continue
+            number = int(video.get("number") or video.get("episode") or 0)
+            if number:
+                numbers.append(number)
+        return numbers
+
+    def _mark_history(self, marks, watched: bool):
+        """Write ticks and keep the page's cached set in step. The title
+        is touched either way, so marking something watched is itself
+        enough to put it in History - which is the point for a title
+        that was never saved."""
+        marks = [m for m in marks if m]
+        if not marks:
+            return
+        try:
+            history.set_watched(self.entry, marks, watched)
+            if watched:
+                self._history_marks.update(marks)
+            else:
+                self._history_marks.difference_update(marks)
+        except Exception:
+            logs.exception("details page could not write history")
 
     def _clear_video_progress(self):
         from helpers import storage
@@ -1262,7 +1423,8 @@ class DetailsPage(GlassPage):
         if number is None:
             return
         from windows.reader import chapter_number
-        already = bool(self._last_read() and number <= self._last_read())
+        already = bool((self._last_read() and number <= self._last_read())
+                       or history.chapter_key(number) in self._history_marks)
         menu = QMenu(self)
         mark = menu.addAction("Mark as Unread" if already else "Mark as Read")
         menu.addSeparator()
@@ -1273,18 +1435,26 @@ class DetailsPage(GlassPage):
                    (chapter_number(c) for c in self._chapters)
                    if c_num is not None]
         if chosen is mark:
+            read, marked = not already, [number]
             if already:
                 earlier = [n for n in numbers if n < number]
                 target = max(earlier) if earlier else 0.0
             else:
                 target = number
         elif chosen is mark_all:
+            read, marked = True, numbers
             target = max(numbers) if numbers else 0.0
         elif chosen is clear_all:
+            read, marked = False, numbers
             target = 0.0
         else:
             return
-        if not correct_progress(self.entry, chapter=target):
+
+        # See _episode_menu: History is written whether or not this
+        # title is saved, and is the only store when it is not.
+        self._mark_history([history.chapter_key(n) for n in marked], read)
+        if self.entry.get("id") and not correct_progress(self.entry,
+                                                         chapter=target):
             show_toast(self, "Could Not Save That")
             return
         read = self._last_read()
@@ -1594,6 +1764,10 @@ class DetailsPage(GlassPage):
             show_toast(self, "Could Not Save That")
             self.entry.pop("id", None)
             return
+        # History and the tracker are one story about the same title -
+        # a row already in History gains the new entry's id rather than
+        # sitting there looking unsaved forever.
+        history.link_entry(self.entry)
         self._save_btn.setText("Saved to My List")
         self._save_btn.setEnabled(False)
         show_toast(self, f"'{self.entry.get('title')}' Added to Saved")
@@ -1708,39 +1882,60 @@ class _GenreBrowseSignals(QObject):
     done = Signal()
 
 
-# One poster number for the browse rows - the Schedule rows' size, the
-# smallest cover the app draws anywhere.
-_BROWSE_COVER_SIZE = (46, 62)
-_BROWSE_LIMIT = 20
+# The genre page's grid: the tracker's own poster size, so a genre
+# browse and Discover are visibly the same surface. Written out rather
+# than imported from windows.tracker - that module imports this one at
+# call time and a top-level import each way is a cycle.
+_BROWSE_POSTER_SIZE = (160, 216)
+_BROWSE_COLUMNS = 6
+_BROWSE_LIMIT = 30
 
 
-class _GenreBrowseDialog(QDialog):
-    """Everything else filed under one genre - what pressing a genre
-    button opens (the owner's ask). Video genres come from Cinemeta's
-    own genre catalogs (series and movies, one section each); reading
-    genres from MangaDex's tag browse. Each row opens that title's
-    details page over the current one, the same transient-entry road a
-    Discover card takes."""
+class GenreBrowsePage(GlassPage):
+    """Everything else filed under one genre - a full page, the shape
+    Discover has (the owner's ask: "a page like discovery, not a small
+    window"). Opened over the window like the details page and the
+    reader, with the same Back/Escape way out.
 
-    def __init__(self, parent, genre, is_reading):
-        super().__init__(parent)
+    Video genres come from Cinemeta's own genre catalogs (series and
+    movies, a row each); reading genres from MangaDex's tag browse. A
+    poster opens that title's details page over this one, the same
+    transient-entry road a Discover card takes."""
+
+    closed = Signal()
+
+    def __init__(self, genre, is_reading, host):
+        super().__init__(parent=host)
         self._genre = str(genre)
         self._is_reading = bool(is_reading)
-        self._covers = {}         # row key -> (label, title), for posters
+        self._covers = {}         # poster key -> (label, title)
         self._next_key = 0
+        self._closed = False
+        self._sections = {}       # row label -> the grid to fill
         self.open_title = None    # set by the caller
 
-        self.setModal(True)
-        self.resize(560, 680)
         column = QVBoxLayout(self)
-        column.setContentsMargins(22, 18, 22, 18)
-        column.setSpacing(10)
+        column.setContentsMargins(28, 20, 28, 20)
+        column.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        # GlyphButton for the same reason the refresh control is one -
+        # see _build_panel: a text glyph on a QSS button inherits the
+        # app-wide padding and clips to a box.
+        back = GlyphButton(ICON_BACK, "Back", size=(40, 40))
+        back.clicked.connect(self.leave)
+        header.addWidget(back)
+        heading = QLabel(self._genre, objectName="PanelTitle")
+        header.addWidget(heading)
+        header.addStretch(1)
+        column.addLayout(header)
 
         self._body_host = QWidget(objectName="Bare")
         self._body_host.setStyleSheet("background: transparent; border: none;")
         self._body = QVBoxLayout(self._body_host)
-        self._body.setContentsMargins(0, 0, 6, 0)
-        self._body.setSpacing(6)
+        self._body.setContentsMargins(0, 0, 8, 0)
+        self._body.setSpacing(16)
         self._body.addStretch(1)
         area = scroll_area(self._body_host)
         area.setStyleSheet("background: transparent; border: none;")
@@ -1753,16 +1948,6 @@ class _GenreBrowseDialog(QDialog):
             f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
         column.addWidget(self._note)
 
-        close_row = QHBoxLayout()
-        close_row.addStretch(1)
-        close_btn = QPushButton("Close")
-        use_hover_cursor(close_btn)
-        close_btn.clicked.connect(self.reject)
-        close_row.addWidget(close_btn)
-        column.addLayout(close_row)
-
-        frameless_dialog(self, title=self._genre)
-
         self._signals = _GenreBrowseSignals()
         self._signals.rows.connect(self._on_rows)
         self._signals.poster.connect(self._on_poster)
@@ -1771,9 +1956,44 @@ class _GenreBrowseDialog(QDialog):
         import threading
         threading.Thread(target=self._fetch_worker, daemon=True).start()
 
+    # ---- the overlay contract, same as DetailsPage --------------------
+    def follow(self, host):
+        self._host = host
+        host.installEventFilter(self)
+        self.setGeometry(host.rect())
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "_host", None) and event.type() == QEvent.Type.Resize:
+            self.setGeometry(obj.rect())
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.leave()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.BackButton:
+            self.leave()
+            return
+        super().mousePressEvent(event)
+
+    def leave(self):
+        if self._closed:
+            return
+        self._closed = True
+        host = getattr(self, "_host", None)
+        if host is not None:
+            host.removeEventFilter(self)
+        self.closed.emit()
+        self.hide()
+        self.deleteLater()
+
+    # ---- filling it ---------------------------------------------------
     def _fetch_worker(self):
-        # Never raises; every section reports what it found, and `done`
-        # closes the looking-note whatever happened.
+        # Never raises; every row reports what it found, and `done`
+        # clears the looking-note whatever happened.
         from helpers import discover
         try:
             if self._is_reading:
@@ -1790,52 +2010,54 @@ class _GenreBrowseDialog(QDialog):
         self._signals.done.emit()
 
     def _on_rows(self, label, rows):
-        if not rows:
+        if self._closed or not rows:
             return
         self._got_rows = True
         insert_at = self._body.count() - 1
         if label:
-            heading = QLabel(label.upper())
-            heading.setStyleSheet(
-                f"color: {theme.TEXT_MUTED}; font-size: 10pt; font-weight: 700;"
-                f" letter-spacing: 1px; background: transparent; border: none;"
-                f" padding: 6px 2px 0px 2px;")
+            heading = QLabel(label, objectName="SectionTitle")
             self._body.insertWidget(insert_at, heading)
             insert_at += 1
-        for item in rows:
-            self._body.insertWidget(insert_at, self._build_row(item))
-            insert_at += 1
+        grid_host = QWidget(objectName="Bare")
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(12)
+        grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        for index, item in enumerate(rows):
+            grid.addWidget(self._build_card(item),
+                           index // _BROWSE_COLUMNS, index % _BROWSE_COLUMNS)
+        self._body.insertWidget(insert_at, grid_host)
 
-    def _build_row(self, item):
+    def _build_card(self, item):
+        """One poster tile - the Discover grid's own card, so the two
+        pages read as the same surface."""
         title = (item.get("title") or "").strip()
-        card = Card(matte=True, hoverable=True)
-        row = QHBoxLayout(card)
-        row.setContentsMargins(12, 8, 12, 8)
-        row.setSpacing(12)
+        card = Card(hoverable=True)
+        card.setFixedWidth(_BROWSE_POSTER_SIZE[0] + 20)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(6, 8, 6, 8)
+        layout.setSpacing(6)
 
         cover = QLabel()
-        cover.setFixedSize(*_BROWSE_COVER_SIZE)
+        cover.setFixedSize(*_BROWSE_POSTER_SIZE)
         cover.setPixmap(images.thumbnail_or_avatar(None, title,
-                                                   _BROWSE_COVER_SIZE))
-        row.addWidget(cover)
+                                                   _BROWSE_POSTER_SIZE))
+        layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        text = QVBoxLayout()
-        text.setSpacing(2)
-        head = QLabel(title)
-        head.setStyleSheet(f"color: {theme.TEXT}; font-weight: 600;"
-                           f" font-size: 12pt; background: transparent;"
-                           f" border: none;")
-        text.addWidget(head)
-        bits = [str(item.get("year") or "").strip(),
-                str(item.get("type") or "").strip()]
+        name = QLabel(title, objectName="CardTitle")
+        name.setWordWrap(True)
+        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(name)
+
+        bits = [str(item.get("year") or "").strip()]
         rating = str(item.get("imdbRating") or "").strip()
         if rating:
             bits.append(f"★ {rating}")
-        meta = QLabel("  ·  ".join(b for b in bits if b))
-        meta.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 10pt;"
-                           f" background: transparent; border: none;")
-        text.addWidget(meta)
-        row.addLayout(text, stretch=1)
+        meta_text = "  ·  ".join(b for b in bits if b)
+        if meta_text:
+            meta = QLabel(meta_text, objectName="CardMeta")
+            meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(meta)
 
         poster_url = item.get("poster") or ""
         if poster_url:
@@ -1865,11 +2087,13 @@ class _GenreBrowseDialog(QDialog):
         cover, title = pair
         try:
             cover.setPixmap(images.thumbnail_or_avatar(path, title,
-                                                       _BROWSE_COVER_SIZE))
+                                                       _BROWSE_POSTER_SIZE))
         except RuntimeError:
-            pass          # the dialog closed under the download
+            pass          # the page closed under the download
 
     def _on_done(self):
+        if self._closed:
+            return
         if self._got_rows:
             self._note.setVisible(False)
         else:
@@ -1878,7 +2102,6 @@ class _GenreBrowseDialog(QDialog):
 
     def _pick(self, item):
         callback = self.open_title
-        self.accept()
         if callable(callback):
             callback(item, item.get("type")
                      or ("Manga" if self._is_reading else "Series"))
