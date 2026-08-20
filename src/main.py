@@ -202,6 +202,41 @@ FOLD_CLOSE_ICON = "\uE76B"      # ChevronLeft - points at the folding edge
 FOLD_OPEN_ICON = "\uE76C"       # ChevronRight - points back out
 
 
+class _MouseNavFilter(QObject):
+    """Mouse buttons 4 and 5 as back/forward, everywhere.
+
+    Installed on the application rather than on the pages (the owner's
+    ask: "in the whole app even in the player or reader mode"). The
+    window's own eventFilter only ever saw presses on the container and
+    the sidebar, so the two overlays that cover the container - the
+    player and the reader - answered neither button.
+
+    One caveat worth stating: mpv renders into a native child window,
+    and clicks landing on the video surface itself do not travel through
+    Qt's event system at all (see player.VideoSurface). The buttons work
+    over every Qt surface, the player's own bars included; over the bare
+    picture the player's pointer poll is what sees the mouse."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.MouseButtonPress:
+            return False
+        try:
+            button = event.button()
+        except Exception:
+            return False
+        if button == Qt.MouseButton.BackButton:
+            self._window.navigate_back()
+            return True
+        if button == Qt.MouseButton.ForwardButton:
+            self._window.navigate_forward()
+            return True
+        return False
+
+
 class _UpdateCheckSignals(QObject):
     # The startup check runs off the UI thread; this carries its answer
     # back onto it. Nothing but the update dict (or None) crosses - a
@@ -1152,6 +1187,66 @@ class MainWindow(QMainWindow):
                 continue
             self._add_menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
 
+    def _top_overlay(self):
+        """The full-window surface currently covering the pages, if any.
+
+        The player, the reader, the details page and the genre browse
+        are hand-placed children of the central widget rather than
+        entries in the page stack, so "what is on top" cannot be read
+        from the history - it is whichever of them is visible."""
+        host = self.centralWidget()
+        player = getattr(self, "_player_page", None)
+        if player is not None:
+            try:
+                if not player.isHidden():
+                    return player
+            except RuntimeError:
+                pass
+        if host is None:
+            return None
+        newest = None
+        for child in host.children():
+            # isHidden, not isVisible: isVisible is False for every child
+            # while the top-level window itself is not shown, which is
+            # true of a minimised window and of any offscreen run. What
+            # is actually being asked is whether this overlay hid itself
+            # - which is exactly what leave() does.
+            if not isinstance(child, QWidget) or child.isHidden():
+                continue
+            # Anything that knows how to leave itself is an overlay;
+            # duck-typed rather than imported, so main.py does not gain
+            # a top-level import of every page that can cover it.
+            if callable(getattr(child, "leave", None)):
+                newest = child
+        return newest
+
+    def navigate_back(self):
+        """Mouse button 4, from anywhere.
+
+        Over an overlay it leaves that surface - the player, the reader,
+        the details page - because the thing on screen is what "back"
+        plainly means there. Over an ordinary page it is history back,
+        exactly as Alt+Left has always been."""
+        overlay = self._top_overlay()
+        if overlay is None:
+            self.go_back()
+            return
+        for name in ("close_player", "leave"):
+            action = getattr(overlay, name, None)
+            if callable(action):
+                try:
+                    action()
+                except Exception:
+                    logs.exception("Could not leave the overlay")
+                return
+        self.go_back()
+
+    def navigate_forward(self):
+        """Mouse button 5. An overlay has nothing to go forward *to*, so
+        this is history forward and only that."""
+        if self._top_overlay() is None:
+            self.go_forward()
+
     def _open_add_menu(self):
         """Pop the Add menu without a button to hang it on.
 
@@ -1855,6 +1950,17 @@ def main():
     _merge_anime_into_series()
 
     window = MainWindow()
+    # Mouse 4/5 as back/forward across every surface, overlays included
+    # (see _MouseNavFilter). Parented to the window, so it lives exactly
+    # as long as the thing it navigates.
+    app.installEventFilter(_MouseNavFilter(window))
+    # Anything still queued when the app last closed starts again now
+    # (the owner's ask). _load has already turned a stale RUNNING back
+    # into QUEUED; nothing was waking the worker.
+    try:
+        downloads.resume_pending()
+    except Exception:
+        logs.exception("Could not resume the download queue")
     # Full screen only for a launch Windows itself started at sign-in
     # (the registered command carries startup.STARTUP_FLAG, nothing else
     # does) - opening the app by hand is unaffected by that setting.

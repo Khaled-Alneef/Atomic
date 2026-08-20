@@ -271,7 +271,9 @@ ICON_VOLUME = "\ue767"
 ICON_MUTED = "\ue74f"
 ICON_FULLSCREEN = "\ue740"
 ICON_EXIT_FULLSCREEN = "\ue73f"
-ICON_SUBTITLES = "\ued1e"
+ICON_SUBTITLES = "\uf2b7"   # Translate - this opens the
+                            # subtitle search, including the AI
+                            # translation rows (the owner's ask).
 # Leaving the player, at the far left of the top bar. E72B is Back -
 # the plain left arrow, the same glyph the details page's back button
 # carries (the owner's ask: a normal back arrow, not E892's
@@ -279,7 +281,12 @@ ICON_SUBTITLES = "\ued1e"
 # glyph two rows apart and read as the same control twice).
 # reader.py's leave button carries the identical glyph, so every
 # overlay opens with the same way out.
-ICON_EXIT = "\ue72b"
+# The way out of the player. The same single chevron the sidebar folds
+# with (main.FOLD_CLOSE_ICON), at the owner's ask: leaving and folding
+# both mean "collapse this back to where it came from", and the reader
+# and the details page's back button now carry it too, so one shape
+# means "back" everywhere.
+ICON_EXIT = "\ue76b"
 # The episode-list opener, immediately right of the door. E8FD is
 # BulletedList, the same glyph the reader's chapter-list button carries.
 ICON_EPISODE_LIST = "\ue8fd"
@@ -293,7 +300,12 @@ ICON_DOWNLOAD = "\ue896"
 # mark rather than "the audio and subtitle tracks inside this file" -
 # a speaker is the symbol asked for. Distinct from the mute button's
 # E767 so the two controls never read as the same one twice.
-ICON_EMBEDDED = "\ue995"
+ICON_EMBEDDED = "\ue9d9"    # Audio wave - the owner asked for a
+                            # pulse: this button opens the release's
+                            # own audio and subtitle tracks, so an
+                            # audio mark says more than a translate
+                            # one (which now marks the subtitle
+                            # search below).
 # The globe, for the settings button - the owner's ask. E774 is the
 # same glyph the reader's open-in-browser button carries.
 ICON_SETTINGS_GLOBE = "\ue774"
@@ -2512,7 +2524,7 @@ class PlayerPage(GlassPage):
         self._set_subtitle_count(len([s for s in self._subtitles
                                       if str(s.get("lang", "")).lower().startswith("ar")]))
         if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
-            self._open_subtitle_panel()      # rebuild in place with the results
+            self._open_subtitle_panel(rebuild=True)   # in place, with the results
 
     def _on_subtitle_file(self, path, label, run):
         if self._closing or run != self._run or self.handle is None:
@@ -2532,7 +2544,7 @@ class PlayerPage(GlassPage):
         self._subtitle_label = label
         show_toast(self._toast_anchor(), "Subtitle Loaded")
         if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
-            self._open_subtitle_panel()
+            self._open_subtitle_panel(rebuild=True)
 
     def _on_failed(self, message, run):
         if self._closing or run != self._run:
@@ -2875,6 +2887,8 @@ class PlayerPage(GlassPage):
         and the preset stops in one row - the small window the owner
         sketched, in the app's own theme."""
         panel = self._new_panel("Playback Speed", "speed")
+        if panel is None:
+            return          # the same button closed it
 
         value = QLabel(f"{self._speed:g}x")
         value.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3038,7 +3052,7 @@ class PlayerPage(GlassPage):
             # and this is the confirmation - or the correction, when mpv
             # refused the track - arriving a beat later.
             if self._panel is not None and getattr(self._panel, "kind", "") == "tracks":
-                self._open_tracks_panel()
+                self._open_tracks_panel(rebuild=True)
         elif name == "paused-for-cache":
             # Only ever a note, never an error: a stalled buffer usually
             # recovers, and a dialog for it would fire constantly on a
@@ -3117,7 +3131,23 @@ class PlayerPage(GlassPage):
             self._panel = None
         self.setFocus()
 
-    def _new_panel(self, title, kind):
+    def _new_panel(self, title, kind, rebuild=False):
+        """A fresh overlay panel, or None when this button just closed
+        its own.
+
+        Pressing Sources, Subtitles or any other lower-bar button while
+        that button's panel is already up used to tear it down and build
+        an identical one - which looks like nothing happening, and left
+        no way to dismiss a panel except clicking the video (the owner's
+        ask). The same button is now a toggle; a *different* button
+        still swaps straight to its own panel.
+
+        Callers must handle None by returning - see every _open_*_panel
+        below."""
+        if (not rebuild and self._panel is not None
+                and getattr(self._panel, "kind", "") == kind):
+            self._close_panel()
+            return None
         self._close_panel()
         panel = OverlayPanel(self, title)
         panel.kind = kind
@@ -3126,8 +3156,10 @@ class PlayerPage(GlassPage):
         self._panel = panel
         return panel
 
-    def _open_subtitle_panel(self):
-        panel = self._new_panel("Arabic Subtitles", "subs")
+    def _open_subtitle_panel(self, rebuild=False):
+        panel = self._new_panel("Arabic Subtitles", "subs", rebuild)
+        if panel is None:
+            return          # the same button closed it
         panel.add_row("Off", "No external subtitle", self._subtitles_off,
                       selected=self._subtitle_label == "Off")
 
@@ -3165,6 +3197,37 @@ class PlayerPage(GlassPage):
                     panel.add_row(label, " · ".join(parts),
                                   lambda checked=False, r=item: self._pick_subtitle(r),
                                   selected=label == self._subtitle_label)
+
+        # **AI translation, said out loud.** Picking a non-Arabic
+        # subtitle has always run it through the configured translator,
+        # but nothing in this panel ever said so - the owner pasted keys
+        # for every provider, saw no "AI" anywhere, and reasonably
+        # concluded the feature was dead. These rows are the same picks
+        # as the "Other Languages" group above, listed again under a
+        # name that says what they will become.
+        translator = ""
+        try:
+            if ai_translate is not None and ai_translate.available():
+                translator = ai_translate.label(ai_translate.default_provider())
+        except Exception:
+            translator = ""
+        if translator and other:
+            panel.add_group(f"ARABIC  ·  TRANSLATED BY {translator.upper()}")
+            for index, item in enumerate(other, start=1):
+                source_name = item.get("display_name") or item.get("release") or ""
+                label = f"Arabic (AI) {index} {translator}"
+                panel.add_row(
+                    label, f"translated from {source_name}",
+                    lambda checked=False, r=item: self._pick_subtitle(r),
+                    selected=label == self._subtitle_label)
+        elif other and ai_translate is not None:
+            # A key would turn these into Arabic; say where to add one
+            # rather than leaving the English rows looking pointless.
+            panel.add_group("ARABIC  ·  AI TRANSLATION")
+            panel.add_message(
+                "Add an OpenAI, DeepSeek, Gemini or Anthropic key in "
+                "Settings > API Keys to translate the subtitles above "
+                "into Arabic.")
         panel.finish()
 
         # Delay first, size second: resyncing a mismatched Arabic release
@@ -3197,7 +3260,10 @@ class PlayerPage(GlassPage):
             except Exception:
                 logs.exception("Turning subtitles off failed")
         self._subtitle_label = "Off"
-        self._open_subtitle_panel()
+        # Rebuilt, not toggled: this runs from the panel's own "Off" row,
+        # and the point is to move the highlight onto it - closing the
+        # panel under the press would look like the click missed.
+        self._open_subtitle_panel(rebuild=True)
 
     def _pick_subtitle(self, result):
         if subtitles_module is None:
@@ -3274,8 +3340,11 @@ class PlayerPage(GlassPage):
         except RuntimeError:
             pass
 
-    def _open_tracks_panel(self):
-        panel = self._new_panel("Audio and Subtitle Tracks", "tracks")
+    def _open_tracks_panel(self, rebuild=False):
+        panel = self._new_panel("Audio and Subtitle Tracks", "tracks",
+                                rebuild)
+        if panel is None:
+            return          # the same button closed it
         audio = [t for t in self._tracks if t.get("type") == "audio"]
         subs = [t for t in self._tracks if t.get("type") == "sub"]
         if not audio and not subs:
@@ -3328,7 +3397,7 @@ class PlayerPage(GlassPage):
                                      and entry.get("id") == picked)
         if kind == "audio":
             self._update_audio_pill()
-        self._open_tracks_panel()
+        self._open_tracks_panel(rebuild=True)
 
     def _open_settings_panel(self):
         """The gear: the controls that do not earn a button of their own
@@ -3340,6 +3409,8 @@ class PlayerPage(GlassPage):
         controls a hand's width apart is the same crowding that took the
         globe and the resolution screen off the row."""
         panel = self._new_panel("Settings", "settings")
+        if panel is None:
+            return          # the same button closed it
         panel.add_group("PLAYBACK")
         current = {}
         if 0 <= self._stream_index < len(self._streams):
@@ -3371,6 +3442,8 @@ class PlayerPage(GlassPage):
         `self._streams_view` holds which level is on screen: None for the
         resolution list, a quality string for the sources under it."""
         panel = self._new_panel("Resolution & Source", "streams")
+        if panel is None:
+            return          # the same button closed it
         if not self._streams:
             panel.add_message("No sources were found.")
             panel.finish()
@@ -3498,6 +3571,8 @@ class PlayerPage(GlassPage):
         middle of a film is a heavier interruption than the panel the
         same buttons beside it already open."""
         panel = self._new_panel("Download", "download")
+        if panel is None:
+            return          # the same button closed it
         self._dl_default_quality()
 
         if self.episode:

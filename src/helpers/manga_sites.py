@@ -551,13 +551,35 @@ def _clean_text(value: str) -> str:
     return _LEADING_ID_RE.sub("", text).strip()
 
 
+def _is_gibberish(text: str) -> bool:
+    """A single long ASCII word with almost no vowels - a slug that was
+    never a title.
+
+    TeamX carries a few of these ("Gchfdtbnquj", which the owner met in
+    Discover on a series with 239 chapters), and nothing else on the
+    listing page names them, so the honest move is to drop the card
+    rather than show a keyboard-mash as a series.
+
+    Deliberately narrow: one word, at least eight characters, ASCII
+    only, under 15% vowels. Real one-word titles clear it comfortably -
+    "Lookism" is 43% vowels, "Berserk" 29% - and non-Latin titles are
+    never even considered, since the ratio means nothing there."""
+    word = (text or "").strip()
+    if " " in word or len(word) < 8 or not word.isascii() or not word.isalpha():
+        return False
+    vowels = sum(1 for character in word.lower() if character in "aeiouy")
+    return vowels / len(word) < 0.15
+
+
 def _looks_like_title(text: str) -> bool:
     """Whether this string is plausibly a series name rather than an
-    image filename or a chapter label."""
+    image filename, a chapter label or an unreadable slug."""
     text = (text or "").strip()
     if len(text) < 2 or len(text) > 120:
         return False
     if _CHAPTER_WORD_RE.match(text) or _FILENAME_RE.match(text):
+        return False
+    if _is_gibberish(text):
         return False
     # Must carry at least one letter in some alphabet - these sites are
     # Arabic as often as not, so this cannot be an ASCII test.

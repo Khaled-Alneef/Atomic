@@ -42,6 +42,10 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
+# Held by the user rather than stopped. Distinct from CANCELLED because
+# the pieces already fetched are kept and the job can be started again
+# where it left off (the owner's ask for a pause button).
+PAUSED = "paused"
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
@@ -50,6 +54,9 @@ _lock = threading.RLock()
 _jobs = None
 _worker = None
 _cancelled = set()
+# Job ids the user has held. Checked in the same places as _cancelled,
+# but a paused job keeps its partial data and can be started again.
+_paused = set()
 
 
 # ---------------------------------------------------------------- store
@@ -133,6 +140,52 @@ def _save_unlocked():
 def cancel(job_id):
     _cancelled.add(job_id)
     _update(job_id, state=CANCELLED)
+
+
+def pause(job_id):
+    """Hold a job. A running one stops at its next progress tick and
+    keeps whatever it has fetched - the torrent engine holds the pieces,
+    so resuming continues rather than starting over."""
+    _paused.add(job_id)
+    _update(job_id, state=PAUSED)
+
+
+def resume(job_id):
+    """Put a paused job back in the queue, and make sure a worker is
+    awake to take it."""
+    _paused.discard(job_id)
+    _update(job_id, state=QUEUED)
+    _ensure_worker()
+
+
+def pause_group(group_id):
+    for job in list_jobs():
+        if job.get("group") == group_id and job.get("state") in (QUEUED, RUNNING):
+            pause(job["id"])
+
+
+def resume_group(group_id):
+    for job in list_jobs():
+        if job.get("group") == group_id and job.get("state") == PAUSED:
+            resume(job["id"])
+
+
+def resume_pending():
+    """Start work again on whatever was still queued when the app last
+    closed - the owner's ask ("make it continue downloading if I close
+    and re-open the app").
+
+    _load already turns a stale RUNNING back into QUEUED, so the queue
+    is honest by the time this looks; all that was missing was anything
+    waking the worker at startup. Paused jobs stay paused: the user held
+    those on purpose, and a restart is not consent to resume them."""
+    try:
+        waiting = [job for job in _load() if job.get("state") == QUEUED]
+    except Exception:
+        return 0
+    if waiting:
+        _ensure_worker()
+    return len(waiting)
 
 
 def clear_finished():
@@ -293,10 +346,16 @@ def list_groups() -> list:
         # in it genuinely is.
         cancelled = [j for j in jobs if j.get("state") == CANCELLED]
         waiting = [j for j in jobs if j.get("state") == QUEUED]
+        held = [j for j in jobs if j.get("state") == PAUSED]
         if running:
             row["state"] = RUNNING
         elif waiting:
             row["state"] = QUEUED
+        elif held:
+            # Nothing running or queued but something held: the season
+            # reads as paused, which is what its button then offers to
+            # undo.
+            row["state"] = PAUSED
         elif len(done) == len(jobs):
             row["state"] = DONE
         elif cancelled and not failed and not done:
@@ -411,6 +470,8 @@ def _run_queue():
             continue
         if job_id in _cancelled:
             _update(job_id, state=CANCELLED)
+        elif job_id in _paused:
+            pass        # pause() already set the state; nothing failed
         elif path:
             _update(job_id, state=DONE, progress=1.0, path=path,
                     detail=os.path.basename(path))
@@ -523,6 +584,13 @@ def _run_video(job) -> str:
         if job_id in _cancelled:
             torrent_engine.release(info_hash)
             return ""
+        if job_id in _paused:
+            # Held, not stopped: the torrent stays added, so the pieces
+            # already fetched are still there when this is resumed. The
+            # job's state was set to PAUSED by pause() - returning ""
+            # here must not be read as a failure, which is why the
+            # queue checks _paused before it judges the result.
+            return ""
         state = torrent_engine.file_progress(info_hash)
         if not state:
             return ""
@@ -602,7 +670,9 @@ def _run_chapter(job) -> str:
     number = chapter.get("number")
     target = os.path.join(folder, saved_name(
         entry.get("title") or "Manga",
-        number=(f"C{number}" if number is not None else None),
+        # "CH12", not "C12" (the owner's ask) - "C" alone read as a
+        # part or volume marker beside the episodes' "E".
+        number=(f"CH{number}" if number is not None else None),
         fallback="Manga") + ".cbz")
 
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:

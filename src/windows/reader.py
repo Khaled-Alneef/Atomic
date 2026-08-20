@@ -229,11 +229,12 @@ ARROW_SCROLL_PX = 200
 ICON_REFRESH = "\ue72c"               # Refresh
 ICON_FULLSCREEN = "\ue740"            # FullScreen
 ICON_EXIT_FULLSCREEN = "\ue73f"       # BackToWindow
-ICON_LEAVE = "\ue72b"                 # Back - the plain left arrow, the
-                                      # same glyph the player's exit and
-                                      # the details page's back carry (the
-                                      # owner's ask: a normal back arrow,
-                                      # not the previous-track shape)
+ICON_LEAVE = "\ue76b"                 # ChevronLeft - the sidebar's own
+                                      # fold glyph (main.FOLD_CLOSE_ICON),
+                                      # which the player's exit and the
+                                      # details page's back now carry too,
+                                      # so one shape means "back" across
+                                      # the whole app (the owner's ask)
 ICON_CHAPTER_LIST = "\ue8fd"          # List - the same glyph the player's
                                       # episode list uses, so "the list of
                                       # things to open" is one icon in both

@@ -78,7 +78,11 @@ _LTR_MARK = chr(0x200E)
 
 # Fluent glyphs, as escapes on purpose (see reader.py - a re-encoding
 # tool turns the bare characters into mojibake, and it has happened).
-ICON_BACK = "\ue72b"                  # Back arrow
+ICON_BACK = "\ue76b"                  # ChevronLeft - the sidebar's own
+                                      # fold glyph, which the player's
+                                      # exit and the reader's leave now
+                                      # carry too, so one shape means
+                                      # "back" everywhere (owner's ask)
 ICON_FULLSCREEN = "\ue740"
 ICON_EXIT_FULLSCREEN = "\ue73f"
 ICON_SEARCH = "\ue721"
@@ -214,11 +218,21 @@ def _site_resolve_worker(signals, run, site, title):
 def _chapters_worker(signals, run, entry, refresh=False):
     """`refresh` skips chapter_source's six-hour disk cache - what the
     panel's refresh button passes, and the only way a title that
-    published an hour ago shows its new chapter today."""
+    published an hour ago shows its new chapter today.
+
+    The first page is drawn as soon as it parses rather than after the
+    whole paginated list is in: a full list is up to twenty-four more
+    fetches (21.7s measured on olympustaff), and the newest chapters -
+    the ones on page one - are what someone opening a series is nearly
+    always after. Every emission is a superset of the last, so the panel
+    just refills."""
+    def partial(found):
+        signals.chapters.emit(run, list(found or []))
+
     try:
         chapters = chapter_source.list_chapters(
             entry, deadline=net.deadline_in(CHAPTER_LIST_TIMEOUT),
-            refresh=refresh)
+            refresh=refresh, on_partial=partial)
     except Exception:
         logs.exception("details chapter listing failed")
         chapters = None
@@ -593,12 +607,49 @@ class DetailsPage(GlassPage):
         area.viewport().setStyleSheet("background: transparent;")
         column.addWidget(area, stretch=1)
 
-        self._panel_note = QLabel("Loading...")
+        # Centred over the list rather than tucked under it. "Finding
+        # sources for S01E07..." used to sit in the bottom-left corner,
+        # where it read as a footnote and was easy to miss entirely (the
+        # owner's ask).
+        #
+        # A child of the scroll area's viewport, not a row in the column:
+        # rows come and go with every refill (_clear_rows empties that
+        # layout), and a note living in it would be destroyed by the
+        # first list it was meant to describe. As an overlay it is
+        # positioned by _layout_panel_note on every viewport resize.
+        self._panel_note = QLabel("Loading...", area.viewport())
         self._panel_note.setWordWrap(True)
+        self._panel_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._panel_note.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; background: transparent; border: none;")
-        column.addWidget(self._panel_note)
+            f"color: {theme.TEXT_MUTED}; background: transparent;"
+            f" border: none; font-size: 11.5pt;")
+        self._panel_note.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._note_viewport = area.viewport()
+        self._layout_panel_note()
         return panel
+
+    def resizeEvent(self, event):
+        # The note is an overlay child of the list viewport, so it is
+        # placed by hand rather than by a layout; the page resizing is
+        # what the viewport resizing follows from.
+        super().resizeEvent(event)
+        self._layout_panel_note()
+
+    def _layout_panel_note(self):
+        """Keep the note on the middle of the list's viewport."""
+        viewport = getattr(self, "_note_viewport", None)
+        note = getattr(self, "_panel_note", None)
+        if viewport is None or note is None:
+            return
+        try:
+            width = max(80, viewport.width() - 40)
+            height = note.heightForWidth(width) or note.sizeHint().height()
+            note.setGeometry(20, max(0, (viewport.height() - height) // 2),
+                             width, height)
+            note.raise_()
+        except RuntimeError:
+            pass        # the panel is being torn down
 
     # ---- lookups ----------------------------------------------------------
     def _start_lookups(self):
@@ -1130,12 +1181,30 @@ class DetailsPage(GlassPage):
             args=(self._signals, self._run, dict(self.entry), season, episode),
             daemon=True).start()
         self._search.clear()
+        self._sync_season_controls()
         self._fill_rows()
 
     def _close_source_picker(self):
         self._source_pick = None
         self._search.clear()
+        self._sync_season_controls()
         self._fill_rows()
+
+    def _sync_season_controls(self):
+        """Hide the season picker and its Prev/Next while the source
+        list is up (the owner's ask).
+
+        They steer the *episode* list, and stepping a season under a
+        list of sources for one episode of the season you just left is
+        an offer that cannot mean anything. The Back row inside the
+        source list is the way out of it."""
+        picking = self._source_pick is not None
+        reading = self._is_reading
+        for widget in (self._season_box, self._prev_btn, self._next_btn):
+            try:
+                widget.setVisible(not picking and not reading)
+            except RuntimeError:
+                pass        # the panel is being torn down
 
     def _on_sources(self, run, found, key):
         if run != self._run or self._closed:
@@ -1909,8 +1978,11 @@ class _GenreBrowseSignals(QObject):
 # than imported from windows.tracker - that module imports this one at
 # call time and a top-level import each way is a cycle.
 _BROWSE_POSTER_SIZE = (160, 216)
-_BROWSE_COLUMNS = 6
-_BROWSE_LIMIT = 30
+# Nine across (the owner's ask): at six the grid left a wide empty gutter
+# on the right of a maximised window, so the rows read as half-filled.
+_BROWSE_COLUMNS = 9
+# Enough to fill those rows rather than leave the last one ragged.
+_BROWSE_LIMIT = 36
 
 
 class GenreBrowsePage(GlassPage):

@@ -63,8 +63,10 @@ STATE_TEXT = {
     downloads.DONE: "Done",
     downloads.FAILED: "Failed",
     downloads.CANCELLED: "Cancelled",
+    downloads.PAUSED: "Paused",
 }
 STATE_COLOUR = {
+    downloads.PAUSED: theme.TEXT_MUTED,
     downloads.QUEUED: theme.TEXT_MUTED,
     downloads.RUNNING: theme.ACCENT,
     downloads.DONE: theme.SUCCESS,
@@ -435,8 +437,29 @@ class DownloadsPage(GlassPage):
 
     def _add_job_button(self, bottom, job, state):
         if state in ACTIVE_STATES:
+            # Pause beside Cancel (the owner's ask). The difference is
+            # what happens to the bytes already fetched: pausing keeps
+            # them and can be resumed, cancelling gives them up.
+            hold = QPushButton("Pause", objectName="Small")
+            hold.setToolTip("Hold this download - what has arrived is kept")
+            use_hover_cursor(hold)
+            hold.clicked.connect(
+                lambda _checked=False, i=job.get("id"): self._pause(i))
+            bottom.addWidget(hold)
             cancel = QPushButton("Cancel", objectName="Small")
             cancel.setToolTip("Stop this download")
+            use_hover_cursor(cancel)
+            cancel.clicked.connect(
+                lambda _checked=False, i=job.get("id"): self._cancel(i))
+            bottom.addWidget(cancel)
+        elif state == downloads.PAUSED:
+            go = QPushButton("Resume", objectName="Small")
+            go.setToolTip("Carry on from where this stopped")
+            use_hover_cursor(go)
+            go.clicked.connect(
+                lambda _checked=False, i=job.get("id"): self._resume(i))
+            bottom.addWidget(go)
+            cancel = QPushButton("Cancel", objectName="Small")
             use_hover_cursor(cancel)
             cancel.clicked.connect(
                 lambda _checked=False, i=job.get("id"): self._cancel(i))
@@ -481,8 +504,26 @@ class DownloadsPage(GlassPage):
         bottom.addWidget(toggle)
 
         if state in ACTIVE_STATES:
+            hold = QPushButton("Pause All", objectName="Small")
+            hold.setToolTip("Hold this season - what has arrived is kept")
+            use_hover_cursor(hold)
+            hold.clicked.connect(
+                lambda _checked=False, g=group_id: self._pause_group(g))
+            bottom.addWidget(hold)
             cancel = QPushButton("Cancel All", objectName="Small")
             cancel.setToolTip("Stop every episode in this season")
+            use_hover_cursor(cancel)
+            cancel.clicked.connect(
+                lambda _checked=False, g=group_id: self._cancel_group(g))
+            bottom.addWidget(cancel)
+        elif state == downloads.PAUSED:
+            go = QPushButton("Resume All", objectName="Small")
+            go.setToolTip("Carry on with every held episode")
+            use_hover_cursor(go)
+            go.clicked.connect(
+                lambda _checked=False, g=group_id: self._resume_group(g))
+            bottom.addWidget(go)
+            cancel = QPushButton("Cancel All", objectName="Small")
             use_hover_cursor(cancel)
             cancel.clicked.connect(
                 lambda _checked=False, g=group_id: self._cancel_group(g))
@@ -580,6 +621,38 @@ class DownloadsPage(GlassPage):
             return
         downloads.cancel(job_id)
         show_toast(self, "Download Cancelled")
+        self._render(self._groups())
+        self._sync_indicator()
+
+    def _pause(self, job_id):
+        if not job_id:
+            return
+        downloads.pause(job_id)
+        show_toast(self, "Download Paused")
+        self._render(self._groups())
+        self._sync_indicator()
+
+    def _resume(self, job_id):
+        if not job_id:
+            return
+        downloads.resume(job_id)
+        show_toast(self, "Download Resumed")
+        self._render(self._groups())
+        self._sync_indicator()
+
+    def _pause_group(self, group_id):
+        if not group_id:
+            return
+        downloads.pause_group(group_id)
+        show_toast(self, "Season Paused")
+        self._render(self._groups())
+        self._sync_indicator()
+
+    def _resume_group(self, group_id):
+        if not group_id:
+            return
+        downloads.resume_group(group_id)
+        show_toast(self, "Season Resumed")
         self._render(self._groups())
         self._sync_indicator()
 

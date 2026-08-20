@@ -363,7 +363,7 @@ def _v2_api_pages(chapter, deadline) -> list:
     return [i.get("image") for i in ordered if i.get("image")]
 
 
-def _site_chapters(entry, deadline) -> list:
+def _site_chapters(entry, deadline, on_partial=None) -> list:
     series_url = (entry or {}).get("url") or ""
     if not series_url.startswith("http"):
         return []
@@ -388,6 +388,18 @@ def _site_chapters(entry, deadline) -> list:
         body = ""
     chapters = _chapters_from_html(body, series_url, entry_type) if body else []
     if chapters:
+        # **The first page is handed over before the rest are fetched.**
+        # A full list is six more page fetches at a time up to
+        # MAX_LIST_PAGES, and on olympustaff that measured 21.7s for 249
+        # chapters - during which the reader showed nothing at all. The
+        # first page is already the newest forty, which is what someone
+        # opening a series is nearly always reaching for, so it goes to
+        # the caller now and the rest arrives underneath it.
+        if on_partial is not None:
+            try:
+                on_partial(list(chapters))
+            except Exception:
+                pass        # a caller that cannot draw must not stop the fetch
         # The rest of a paginated list - see _page_urls. Only asked for
         # once the first page actually parsed as chapters, so a dead or
         # unrecognised page costs no extra requests.
@@ -524,8 +536,14 @@ def _store(key, chapters):
     storage.save(CACHE_FILE, store)
 
 
-def list_chapters(entry, *, deadline=None, refresh=False) -> list:
-    """Chapters for this entry, newest first. Never raises."""
+def list_chapters(entry, *, deadline=None, refresh=False,
+                  on_partial=None) -> list:
+    """Chapters for this entry, newest first. Never raises.
+
+    `on_partial(chapters)` is called with the first page as soon as it
+    parses, before the rest of a paginated list is fetched - see
+    _site_chapters. A cached answer is complete already and reports
+    nothing partial."""
     if deadline is None:
         deadline = net.deadline_in(45)
     key = _cache_key(entry)
@@ -535,7 +553,7 @@ def list_chapters(entry, *, deadline=None, refresh=False) -> list:
             return cached
     chapters = []
     try:
-        chapters = _site_chapters(entry, deadline)
+        chapters = _site_chapters(entry, deadline, on_partial)
     except Exception:
         chapters = []
     if not chapters:

@@ -155,6 +155,13 @@ FILTER_ICON_HEIGHT = 18
 
 POSTER_SIZE = (160, 216)
 PREVIEW_SIZE = (90, 120)
+# Pins a run of text to a left-to-right base direction. Needed wherever
+# a number sits beside Arabic content: Qt shapes digits with the
+# paragraph's resolved direction, so "3 titles" on a page of Arabic rows
+# came out as "٣ titles" (the owner asked what that character was).
+# chr(), not the literal - an invisible codepoint does not survive a
+# tool re-encoding this file (CLAUDE.md records that happening twice).
+_LTR_MARK = chr(0x200E)
 # The cover on a Schedule row - small enough that a screenful of rows
 # reads as a list rather than a second poster grid.
 SCHEDULE_COVER_SIZE = (46, 62)
@@ -840,13 +847,27 @@ def _clear_layout(layout):
     The Saved grid's own _refresh_grid deliberately still does it the old
     way: it has always worked there, its rebuild is followed by a layout
     pass either way, and this task is not the place to change what that
-    page does."""
+    page does.
+
+    **Nested layouts are emptied too, and that is a bug fix.** An item
+    holding a layout answers `widget()` with None, so a header added
+    with `addLayout` survived every rebuild: History's "N titles" line
+    and its Clear button stayed on screen as a floating label, and
+    clearing the history left the *old count* sitting above the empty
+    section (the owner reported both). Recursing into the child layout
+    empties it before it is dropped, so nothing it held outlives the
+    rebuild."""
     while layout.count():
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
             widget.setParent(None)
             widget.deleteLater()
+            continue
+        child = item.layout()
+        if child is not None:
+            _clear_layout(child)
+            child.deleteLater()
 
 
 class _DiscoverSignals(QObject):
@@ -864,6 +885,11 @@ class _DiscoverSignals(QObject):
     poster = Signal(str, int, str, int)
     # The hero banner's ground - a local backdrop path, run.
     featured_backdrop = Signal(str, int)
+    # A History row's cover: the history key, the downloaded path. No
+    # run number - History is not a search, so nothing can arrive
+    # "under a later query"; the key is what says which row it belongs
+    # to and a stale one simply matches nothing.
+    history_cover = Signal(str, str)
 
 
 class _StayOpenMenu(QMenu):
@@ -1342,6 +1368,10 @@ class TrackerPage(GlassPage):
         self._discover_signals.results.connect(self._on_discover_results)
         self._discover_signals.poster.connect(self._on_discover_poster)
         self._discover_signals.featured_backdrop.connect(self._on_featured_backdrop)
+        self._discover_signals.history_cover.connect(self._on_history_cover)
+        # History row key -> (cover label, title), refilled by every
+        # _build_history; nothing in it outlives that rebuild.
+        self._history_covers = {}
         # Which Discover lookup is the current one. Everything a lookup
         # produces - a row's results, each poster download - carries this
         # number and is dropped if it no longer matches, so a slow row
@@ -3277,17 +3307,30 @@ class TrackerPage(GlassPage):
 
     def _request_poster(self, kind, index, item, run):
         url = (item or {}).get("poster")
-        if not url:
+        # A reading row can arrive with no cover at all: the Madara
+        # search endpoint returns titles and links only, which is why a
+        # search for "kingdom" drew a wall of letter avatars while the
+        # browsed rows all had art (the owner's screenshot). The series
+        # page does carry one, so it is fetched here - lazily, per card,
+        # and only for the rows that need it.
+        page_url = (item or {}).get("url") or ""
+        if not url and not page_url.startswith("http"):
             return
         # The shared, bounded pool: a row is up to DISCOVER_LIMIT images
         # and a page can have two rows, so a thread each is exactly the
         # shape that once put 651 connections in flight (see lookup_pool).
-        lookup_pool.submit(self._fetch_discover_poster, kind, index, url, run)
+        lookup_pool.submit(self._fetch_discover_poster, kind, index, url, run,
+                           page_url)
 
-    def _fetch_discover_poster(self, kind, index, url, run):
+    def _fetch_discover_poster(self, kind, index, url, run, page_url=""):
         # Must never raise - see _discover_row_worker.
+        path = None
         try:
-            path = images.download(url)
+            if not url and page_url:
+                details = manga_sites.fetch_manga_details(page_url) or {}
+                url = details.get("cover_url") or ""
+            if url:
+                path = images.download(url)
         except Exception:
             path = None
         self._discover_signals.poster.emit(kind, index, str(path) if path else "", run)
@@ -3776,8 +3819,31 @@ class TrackerPage(GlassPage):
         episodes."""
         return history.recent(self.ENTRY_TYPES)
 
+    def _history_cover_worker(self, key, url):
+        # Never raises - an exception here kills the pool's worker.
+        try:
+            path = images.download(url)
+        except Exception:
+            path = None
+        if path and key:
+            self._discover_signals.history_cover.emit(str(key), str(path))
+
+    def _on_history_cover(self, key, path):
+        pair = self._history_covers.get(key)
+        if pair is None:
+            return
+        label, title = pair
+        try:
+            label.setPixmap(images.thumbnail_or_avatar(path, title,
+                                                       SCHEDULE_COVER_SIZE))
+        except RuntimeError:
+            pass        # the section rebuilt under the download
+
     def _build_history(self):
         _clear_layout(self._history_layout)
+        # Emptied with the rows it names - nothing in it outlives the
+        # rebuild that filled it (.claude/rules/ui.md).
+        self._history_covers = {}
         rows = self._history_rows()
         if not rows:
             self._history_layout.addWidget(QLabel(
@@ -3788,8 +3854,13 @@ class TrackerPage(GlassPage):
             return
 
         header = QHBoxLayout()
+        # Led by a left-to-right mark. Without it Qt shapes the count
+        # with the *paragraph's* resolved direction, and on a page whose
+        # rows are Arabic titles that turns "3" into the Arabic-Indic
+        # "٣" - the owner's screenshot, asking what the character before
+        # "titles" was. The same LRM trick details._row_card uses.
         header.addWidget(QLabel(
-            f"{len(rows)} title{'s' if len(rows) != 1 else ''}",
+            f"{_LTR_MARK}{len(rows)} title{'s' if len(rows) != 1 else ''}",
             objectName="Muted"))
         header.addStretch(1)
         clear_btn = QPushButton("Clear History")
@@ -3821,6 +3892,16 @@ class TrackerPage(GlassPage):
         cover.setFixedSize(*SCHEDULE_COVER_SIZE)
         cover.setPixmap(images.thumbnail_or_avatar(
             row.get("cover_path"), row.get("title") or "", SCHEDULE_COVER_SIZE))
+        # A title that was never saved has no downloaded cover_path -
+        # only the remote cover_url its Discover card was drawn from -
+        # so History showed art for saved titles and a letter avatar for
+        # everything else (the owner's screenshot: Lookism with a cover
+        # in Discover and none here). Fetch it the same way the Discover
+        # rows do; images.download caches, so this is one request ever.
+        if not row.get("cover_path") and row.get("cover_url"):
+            self._history_covers[row.get("key")] = (cover, row.get("title") or "")
+            lookup_pool.submit(self._history_cover_worker, row.get("key"),
+                               row.get("cover_url"))
         layout.addWidget(cover)
 
         column = QVBoxLayout()
