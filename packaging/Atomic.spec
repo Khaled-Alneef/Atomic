@@ -21,12 +21,25 @@ if not os.path.isfile(LIBMPV_FILE):
         "without it.\nRun: python packaging/fetch_libmpv.py")
 
 # The owner's TMDB read token, bundled so nobody using Atomic needs a key
-# of their own. Deliberately read from a gitignored file rather than
-# written into source: this repository is public, and a token committed
-# to GitHub is picked up by secret scanners and revoked - which breaks
-# the feature for every copy at once. Absent, the build still succeeds
-# and the logo loader simply stays off (helpers/artwork.py fails soft).
+# of their own - ever (the owner's standing requirement). Deliberately
+# read from a gitignored file rather than written into source: this
+# repository is public, and a token committed to GitHub is picked up by
+# secret scanners and revoked - which breaks the feature for every copy
+# at once. The build used to succeed without the file, artwork silently
+# dark; it now stops, exactly like the libmpv check above, because a
+# tokenless exe is one that asks users for a TMDB key - the outcome this
+# file exists to prevent. On a new machine, copy the file over privately
+# (USB) from the machine that has it; never commit it.
 TMDB_TOKEN_FILE = os.path.join(SPECPATH, "tmdb_token.txt")
+if not os.path.isfile(TMDB_TOKEN_FILE):
+    raise SystemExit(
+        "packaging/tmdb_token.txt is missing - the exe would ship without "
+        "the TMDB token and users would need their own key.\nThe repo "
+        "carries it encrypted as packaging/tmdb_token.txt.enc; restore it "
+        "with the owner's passphrase:\n  openssl enc -d -aes-256-cbc "
+        "-pbkdf2 -iter 200000 -in packaging/tmdb_token.txt.enc "
+        "-out packaging/tmdb_token.txt\n(Never commit the decrypted file - "
+        "it is gitignored on purpose.)")
 
 
 
@@ -100,7 +113,13 @@ a = Analysis(
            # system, and analysing a 120MB DLL costs build time for an
            # answer that is always empty. helpers/video_backend.py looks
            # for it in sys._MEIPASS, which is exactly here.
-           (LIBMPV_FILE, '.')],
+           (LIBMPV_FILE, '.'),
+           # In the literal list, not appended to a.datas afterwards (the
+           # old shape, from when the file was optional): build.py's
+           # bundle check verifies exactly this list, so being in it is
+           # what makes a stale or missing token a rejected build rather
+           # than a quietly artwork-less exe.
+           (TMDB_TOKEN_FILE, '.')],
     # python-mpv is loaded by helpers/video_backend.py only after the DLL
     # directory is registered, so the import is inside a function and
     # PyInstaller's static analysis never sees it. libtorrent is imported
@@ -124,14 +143,6 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-# Appended to a.datas rather than listed in datas= above: build.py
-# verifies the bundle by parsing that list literally with ast, and a
-# concatenation there is not an ast.List - it aborted the build
-# outright rather than shipping something unverified, which is the
-# check doing its job. Adding it here keeps both true.
-if os.path.isfile(TMDB_TOKEN_FILE):
-    a.datas += [('tmdb_token.txt', TMDB_TOKEN_FILE, 'DATA')]
-
 pyz = PYZ(a.pure)
 
 exe = EXE(
