@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from . import theme, updater, widgets
+from . import updater, widgets
 
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
@@ -183,7 +183,6 @@ class UpdateSummaryDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Atomic Updated")
         self.setMinimumWidth(self.WIDTH)
-        theme.apply_dark_titlebar(self)
 
         body = QVBoxLayout(self)
         body.setContentsMargins(self.MARGIN_H, 18, self.MARGIN_H, 16)
@@ -231,6 +230,9 @@ class UpdateSummaryDialog(QDialog):
         body.addLayout(button_row)
 
         self._size_to_notes(area, notes)
+        # No title heading: the body opens with its own "Atomic is now
+        # version X" SectionTitle.
+        widgets.frameless_dialog(self)
 
     def _size_to_notes(self, area, notes):
         """Give the scroll area exactly the height its notes need, capped

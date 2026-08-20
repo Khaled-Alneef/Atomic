@@ -128,6 +128,21 @@ def has_run_before() -> bool:
                  if k not in ("updated_from", "last_seen_version")})
 
 
+def get_setup_completed_at() -> str:
+    """When the first-run setup was finished, skipped, or waived because
+    the install already held data - ISO timestamp, or "" while it has
+    never been decided, which is what tells setup_wizard to offer
+    itself. One flag for every outcome on purpose: however the wizard
+    was left, it must never appear twice."""
+    return _load().get("setup_completed_at") or ""
+
+
+def set_setup_completed_at(when: str):
+    data = _load()
+    data["setup_completed_at"] = when or ""
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_notified_update_version() -> str:
     """The version the startup update check has already announced, or ""
     if it never has.
@@ -264,6 +279,21 @@ API_KEY_HELP = {
     "deepseek": "platform.deepseek.com/api_keys",
     "gemini": "aistudio.google.com/apikey",
     "anthropic": "console.anthropic.com/settings/keys",
+}
+
+# The same destinations as full URLs, for the "Get a key" links the
+# first-run wizard (and anything else) can open in the browser - the
+# help strings above are display text and would need guessing a scheme
+# to be clickable. Keyed identically to API_KEYS; a key with no row here
+# simply gets no link, never a broken one.
+API_KEY_URLS = {
+    "tmdb": "https://www.themoviedb.org/settings/api",
+    "subdl": "https://subdl.com/panel/api",
+    "subsource": "https://subsource.net",
+    "openai": "https://platform.openai.com/api-keys",
+    "deepseek": "https://platform.deepseek.com/api_keys",
+    "gemini": "https://aistudio.google.com/apikey",
+    "anthropic": "https://console.anthropic.com/settings/keys",
 }
 
 

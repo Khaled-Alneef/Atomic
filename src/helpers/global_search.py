@@ -138,6 +138,12 @@ class GlobalSearch(QDialog):
         # it and every keystroke still arrives there.
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Translucent, so the border-radius below leaves genuinely
+        # transparent corners rather than square slabs of window - the
+        # same treatment widgets.frameless_dialog gives the app's modal
+        # dialogs (this panel keeps its own flags: it must not grab
+        # focus, and dragging a suggestion list would be wrong).
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)

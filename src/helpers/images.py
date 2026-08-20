@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 
@@ -134,6 +134,38 @@ def load_thumbnail(path, size=(64, 64)):
         return None
 
 
+def _corner_radius(size) -> int:
+    """The clip radius for a thumbnail at `size`: theme.RADIUS on
+    poster-sized art, proportionally tighter on small icons - a 28px
+    quick-list icon under the full 12px radius is most of the way to a
+    circle, which is not "rounded corners" any more."""
+    return max(2, min(theme.RADIUS, min(size) // 4))
+
+
+def _round_corners(img):
+    """Clip `img` to the app's rounded-corner tile shape, in place on a
+    copy's alpha channel.
+
+    Done here, at the one decode path every thumbnail passes through,
+    rather than as a paint-time mask in each page - Harbor's tiles are
+    the rounded artwork itself, and one clip in one place cannot drift
+    per page. The mask is drawn 4x and LANCZOS'd down because PIL's
+    rounded_rectangle is not antialiased, and at 1x the arc renders as
+    a visible staircase against the near-black ground. Multiplied into
+    the existing alpha rather than replacing it, so art that already
+    carries transparency keeps it."""
+    scale = 4
+    mask = Image.new("L", (img.width * scale, img.height * scale), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle(
+        (0, 0, img.width * scale - 1, img.height * scale - 1),
+        radius=_corner_radius(img.size) * scale, fill=255)
+    mask = mask.resize(img.size, Image.LANCZOS)
+    rounded = img.copy()
+    rounded.putalpha(ImageChops.multiply(img.getchannel("A"), mask))
+    return rounded
+
+
 def letter_avatar(text: str, size=(64, 64)):
     """A colored circle with the first letter of `text` - the fallback
     used whenever no real image/icon/cover is available."""
@@ -208,12 +240,16 @@ def _evict(cache):
 
 
 def _fitted(path, size, stamp):
-    """The decoded, resized PIL image for `path`, cached. Safe to call
-    from a background thread - it touches no Qt types."""
+    """The decoded, resized PIL image for `path`, cached - with the
+    corners already clipped (see _round_corners), so the rounding is
+    paid once per decode and the cache holds the finished tile. Safe to
+    call from a background thread - it touches no Qt types."""
     key = (str(path), stamp, size)
     if key in _FITTED:
         return _FITTED[key]
     img = load_thumbnail(path, size)
+    if img is not None:
+        img = _round_corners(img)
     _evict(_FITTED)
     _FITTED[key] = img
     return img

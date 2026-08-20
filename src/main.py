@@ -21,8 +21,8 @@ import threading
 from pathlib import Path
 
 from helpers import (app_settings, downloads, global_search, images, logs,
-                     native_cursor, startup, storage, theme, updater,
-                     whats_new)
+                     native_cursor, setup_wizard, startup, storage, theme,
+                     updater, whats_new)
 from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -41,7 +41,6 @@ from PyQt6.QtGui import QCursor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QMessageBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -56,7 +55,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import (release_stale_hover_cursors, show_toast,
+from helpers.widgets import (confirm, release_stale_hover_cursors, show_toast,
                              take_live_redo, take_live_undo, use_hover_cursor)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
@@ -164,6 +163,20 @@ SIDEBAR_WIDTH = 220
 # labels are dropped (see _set_sidebar_collapsed).
 SIDEBAR_COLLAPSED_WIDTH = 68
 SIDEBAR_ANIM_MS = 180
+
+# Glyphs for the contextual section sidebar that replaces the main one
+# over any page exposing SECTIONS (the tracker pages). Segoe Fluent/MDL2
+# codepoints written as escapes, not the characters themselves, since a
+# private-use literal does not survive a tool re-encoding this file
+# (CLAUDE.md records that happening twice). The fallback for a section
+# key not named here is theme.NAV_BULLET, so an unmapped section still
+# gets a readable row in the collapsed rail.
+SECTION_BACK_ICON = "\uE72B"    # Back (left-pointing arrow)
+SECTION_ICONS = {
+    "saved": "\uE8F1",     # Library
+    "discover": "\uE721",  # Search
+    "schedule": "\uE787",  # Calendar
+}
 
 
 class _UpdateCheckSignals(QObject):
@@ -280,7 +293,7 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        root_layout.addWidget(self._build_sidebar())
+        root_layout.addWidget(self._build_sidebars())
 
         self.container = QWidget()
         root_layout.addWidget(self.container, stretch=1)
@@ -309,9 +322,36 @@ class MainWindow(QMainWindow):
         QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
     # ------------------------------------------------------------------
-    def _build_sidebar(self):
-        sidebar = QWidget(objectName="Sidebar")
-        sidebar.setFixedWidth(SIDEBAR_WIDTH)
+    def _build_sidebars(self):
+        """The sidebar column: a fixed-width holder carrying both bars -
+        the main sidebar and the contextual section bar - as manually
+        positioned children that slide over each other on a swap (see
+        _sync_section_sidebar). The holder, not a bar, is what sits in
+        the window's layout and what the fold animation drives, so a
+        swap never changes the column's width and nothing to its right
+        moves. It shares the bars' objectName on purpose: every palette
+        colour is opaque, so painting the same gradient panel underneath
+        costs nothing while settled, and mid-swap - when both bars are
+        short of the right edge and a strip between them and the page
+        would otherwise show bare window background - that strip shows
+        sidebar instead."""
+        holder = QWidget(objectName="Sidebar")
+        holder.setFixedWidth(SIDEBAR_WIDTH)
+        self.sidebar_holder = holder
+        # Which bar owns the column, and the swap animation in flight if
+        # one is. _layout_sidebars is the single place geometry is
+        # derived from these.
+        self._section_bar_showing = False
+        self._swap_group = None
+        self._build_sidebar(holder)
+        self._build_section_sidebar(holder)
+        return holder
+
+    def _build_sidebar(self, parent):
+        # Parented at construction rather than reparented after: a
+        # setParent later marks the widget hidden and it would need an
+        # explicit show(), which is one more thing to forget.
+        sidebar = QWidget(objectName="Sidebar", parent=parent)
         self.sidebar = sidebar
         self._sidebar_collapsed = False
         # Set before anything styles the Settings button, which reads it
@@ -427,7 +467,11 @@ class MainWindow(QMainWindow):
         # there. A NavButton for the same reason Settings is one: it is
         # already proven to render at both sidebar widths.
         self.downloads_btn = QPushButton(objectName="NavButton")
-        self.downloads_btn.setFixedHeight(34)
+        # 40, with Add/Settings below and the section bar's rows: the
+        # nav rows above grew to Harbor's more generous height, and a
+        # 34px row under a column of 44px ones read as a different
+        # control rather than the same list continuing.
+        self.downloads_btn.setFixedHeight(40)
         self.downloads_btn.setCheckable(True)
         use_hover_cursor(self.downloads_btn)
         self.downloads_btn.clicked.connect(lambda: self.navigate_to("downloads"))
@@ -482,7 +526,7 @@ class MainWindow(QMainWindow):
         self._downloads_timer.start(DOWNLOAD_IDLE_POLL_MS)
 
         self.add_btn = QPushButton("+", objectName="AddButton")
-        self.add_btn.setFixedHeight(34)
+        self.add_btn.setFixedHeight(40)
         self.add_btn.setToolTip("Add")
         use_hover_cursor(self.add_btn)
         # setMenu, not clicked -> menu.exec(...): Qt then places the popup
@@ -499,7 +543,7 @@ class MainWindow(QMainWindow):
         self.settings_btn = QPushButton(objectName="NavButton")
         # Matches the Add button above it, and gives the collapsed gear
         # glyph room to render without being clipped.
-        self.settings_btn.setFixedHeight(34)
+        self.settings_btn.setFixedHeight(40)
         use_hover_cursor(self.settings_btn)
         self.settings_btn.clicked.connect(self._open_settings)
         self._style_settings_btn()
@@ -526,7 +570,202 @@ class MainWindow(QMainWindow):
         # first frame, not after the first poll.
         self.refresh_download_indicator()
 
-        return sidebar
+    # ---- The contextual section sidebar ------------------------------
+    def _build_section_sidebar(self, parent):
+        """The bar that takes the main sidebar's place over a sectioned
+        page: Back on top, a separator, then one checkable NavButton per
+        entry of the page's SECTIONS. Built once, hidden; the section
+        buttons themselves are (re)built per page by
+        _sync_section_buttons, since SECTIONS is read generically off
+        whatever page is showing rather than assumed to be the
+        tracker's three."""
+        bar = QWidget(objectName="Sidebar", parent=parent)
+        self.section_sidebar = bar
+        layout = QVBoxLayout(bar)
+        # The main sidebar's own margins/spacing, so rows here sit at
+        # exactly the x its rows do and the swap reads as one column
+        # changing contents, not two different panels.
+        layout.setContentsMargins(16, 20, 16, 16)
+        layout.setSpacing(4)
+
+        self.section_back_btn = QPushButton(objectName="NavButton")
+        self.section_back_btn.setFixedHeight(40)
+        self.section_back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        use_hover_cursor(self.section_back_btn)
+        self.section_back_btn.clicked.connect(self._section_back)
+        layout.addWidget(self.section_back_btn)
+
+        layout.addSpacing(6)
+        separator = QFrame()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"background: {theme.BORDER}; border: none;")
+        layout.addWidget(separator)
+        layout.addSpacing(6)
+
+        # The per-page section buttons land in here.
+        self._section_btn_layout = QVBoxLayout()
+        self._section_btn_layout.setContentsMargins(0, 0, 0, 0)
+        self._section_btn_layout.setSpacing(4)
+        layout.addLayout(self._section_btn_layout)
+        layout.addStretch()
+
+        self._section_buttons = {}   # key -> (button, label)
+        self._section_keys = None    # what the buttons were last built for
+        self._style_section_bar()
+        bar.hide()
+
+    def _style_section_bar(self):
+        """Same two-width treatment as the Downloads/Settings buttons:
+        glyph and label when the sidebar is open, glyph alone in the
+        collapsed rail with the label moved to a tooltip. Called on
+        build, on rebuild of the section buttons, and from
+        _toggle_sidebar - not on every navigation, since unpolish/polish
+        makes a button flicker when repeated for no new information."""
+        collapsed = self._sidebar_collapsed
+
+        def apply(button, glyph, label):
+            button.setText(glyph if collapsed else f"  {glyph}   {label}")
+            button.setFont(theme.icon_font() if collapsed else theme.icon_font(10))
+            button.setToolTip(label if collapsed else "")
+            button.setProperty("collapsed", collapsed)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+        apply(self.section_back_btn, SECTION_BACK_ICON, "Back")
+        for key, (button, label) in self._section_buttons.items():
+            apply(button, SECTION_ICONS.get(key, theme.NAV_BULLET), label)
+
+    def _sync_section_buttons(self, page):
+        """Make the section buttons match `page`: rebuild them when its
+        SECTIONS differ from what is built (cheap - it never happens
+        between the three tracker pages, which share one tuple), and
+        re-derive the checks from the page's own current_section() every
+        time - each page remembers its own section in session state, so
+        crossing from Anime to Reading can change the check without any
+        button being clicked."""
+        sections = tuple(getattr(page, "SECTIONS", ()) or ())
+        keys = tuple(key for key, _label in sections)
+        if keys != self._section_keys:
+            while self._section_btn_layout.count():
+                item = self._section_btn_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            self._section_buttons = {}
+            for key, label in sections:
+                button = QPushButton(objectName="NavButton")
+                button.setFixedHeight(40)
+                button.setCheckable(True)
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                use_hover_cursor(button)
+                button.clicked.connect(
+                    lambda _checked=False, k=key: self._on_section_clicked(k))
+                self._section_btn_layout.addWidget(button)
+                self._section_buttons[key] = (button, label)
+            self._section_keys = keys
+            self._style_section_bar()
+        getter = getattr(page, "current_section", None)
+        current = getter() if callable(getter) else None
+        for key, (button, _label) in self._section_buttons.items():
+            button.setChecked(key == current)
+
+    def _on_section_clicked(self, key):
+        """Switch the showing page's section - never navigate. The checks
+        are re-read off the page afterwards rather than trusted to the
+        click, because the page may coerce an unknown key back to its
+        default."""
+        page = self._current_page
+        setter = getattr(page, "set_active_section", None)
+        if callable(setter):
+            setter(key)
+        self._sync_section_buttons(page)
+
+    def _section_back(self):
+        """The Back button is history back - the same move as Alt+Left
+        and the mouse's back button - with Home as the fallback for a
+        history that has nowhere earlier to go (only possible when the
+        very first page shown was a sectioned one)."""
+        if self._history_index > 0:
+            self.go_back()
+        else:
+            self.navigate_to("home")
+
+    def _settle_swap(self):
+        """Stop any swap in flight and snap both bars to the settled
+        geometry for the current _section_bar_showing. Also the finish
+        handler of every swap - one place computes end-state geometry,
+        so an interrupted swap and a completed one land identically."""
+        if self._swap_group is not None:
+            self._swap_group.stop()
+            self._swap_group = None
+        width = self.sidebar_holder.width()
+        shown = self.section_sidebar if self._section_bar_showing else self.sidebar
+        hidden = self.sidebar if self._section_bar_showing else self.section_sidebar
+        hidden.hide()
+        hidden.move(-width, 0)
+        shown.move(0, 0)
+        shown.show()
+
+    def _sync_section_sidebar(self, page, animate=True):
+        """Give the column to whichever bar `page` calls for: the section
+        bar over a page exposing SECTIONS, the main one over everything
+        else. Both slides use the left edge - the outgoing bar slides
+        out beneath while the incoming one slides in on top - and the
+        holder's width never changes, so the page content to the right
+        does not move (measured: see the swap harness)."""
+        sectioned = getattr(page, "SECTIONS", None) is not None
+        if sectioned:
+            self._sync_section_buttons(page)
+        if sectioned == self._section_bar_showing:
+            return
+        self._settle_swap()
+        self._section_bar_showing = sectioned
+        incoming = self.section_sidebar if sectioned else self.sidebar
+        outgoing = self.sidebar if sectioned else self.section_sidebar
+        holder = self.sidebar_holder
+        width, height = holder.width(), holder.height()
+        incoming.resize(width, height)
+        outgoing.resize(width, height)
+        # Instant when asked (the startup page, refresh_current_page) and
+        # before the window has real geometry, where an animation would
+        # ease between meaningless rectangles.
+        if not animate or width <= 0 or not self.isVisible():
+            self._settle_swap()
+            return
+        incoming.move(-width, 0)
+        incoming.show()
+        incoming.raise_()
+        group = QParallelAnimationGroup(self)
+        for bar, x_from, x_to in ((outgoing, 0, -width), (incoming, -width, 0)):
+            anim = QPropertyAnimation(bar, b"pos", self)
+            anim.setDuration(SIDEBAR_ANIM_MS)
+            anim.setStartValue(QPoint(x_from, 0))
+            anim.setEndValue(QPoint(x_to, 0))
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            group.addAnimation(anim)
+        # stop() does not emit finished, so a swap interrupted by
+        # _settle_swap cannot run this a second time.
+        group.finished.connect(self._settle_swap)
+        self._swap_group = group
+        group.start()
+
+    def _layout_sidebars(self):
+        """Track the holder: both bars are positioned by hand (they
+        slide over each other on a swap) rather than sitting in a
+        layout, so nothing resizes them automatically - the same reason
+        the pages follow self.container in eventFilter. Mid-swap only
+        sizes are touched; the animation owns x, and _settle_swap
+        re-derives positions when it ends."""
+        holder = self.sidebar_holder
+        width, height = holder.width(), holder.height()
+        for bar in (self.sidebar, self.section_sidebar):
+            bar.resize(width, height)
+        if self._swap_group is not None:
+            return
+        shown = self.section_sidebar if self._section_bar_showing else self.sidebar
+        hidden = self.sidebar if self._section_bar_showing else self.section_sidebar
+        shown.move(0, 0)
+        hidden.move(-width, 0)
 
     def _position_update_dot(self):
         """Top-right corner of the Settings button. Re-run on every resize
@@ -539,17 +778,26 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _style_nav_item(self, item, name, page_name):
-        """Expanded rows keep the bullet+label they always had; collapsed
-        ones swap to that section's own glyph, centred in the rail, with
-        the label moved to a tooltip since there's no room to show it."""
+        """Harbor's row language: the section's own Fluent glyph leads
+        the label when expanded (replacing the one-shape-for-every-row
+        ◈ bullet), and the collapsed rail shows the same glyph alone,
+        centred, with the label moved to a tooltip - one symbol per
+        section at both widths. The expanded font is a two-family chain
+        (theme.nav_row_font): the glyph resolves from the icon face and
+        the label falls through to the nav face, because an item
+        carries exactly one font."""
+        glyph = theme.NAV_ICONS.get(page_name, theme.NAV_BULLET)
         if self._sidebar_collapsed:
-            item.setText(theme.NAV_ICONS.get(page_name, theme.NAV_BULLET))
+            item.setText(glyph)
             item.setFont(theme.icon_font())
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setToolTip(name)
         else:
-            item.setText(f"{theme.NAV_BULLET}  {name}")
-            item.setFont(theme.nav_font())
+            # Two spaces, not three: with the wider glyph leading, three
+            # pushed "Movies & Series" past the 220px column and elided
+            # it (measured on a real-window grab).
+            item.setText(f"{glyph}  {name}")
+            item.setFont(theme.nav_row_font())
             item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             item.setToolTip("")
 
@@ -689,6 +937,10 @@ class MainWindow(QMainWindow):
         self.logo_label.setVisible(not collapsed)
         self._style_downloads_btn()
         self._style_settings_btn()
+        # The section bar can only be off screen while this button is
+        # reachable, but the collapsed state has to be waiting on it when
+        # a tracker page next slides it in.
+        self._style_section_bar()
 
         # Restyled in place rather than rebuilt, so the user's drag order
         # and the current selection both survive the fold.
@@ -713,14 +965,19 @@ class MainWindow(QMainWindow):
         target = SIDEBAR_COLLAPSED_WIDTH if collapsed else SIDEBAR_WIDTH
         # setFixedWidth pins min and max together, so the animation drives
         # maximumWidth and drags minimumWidth along with it - animating
-        # only one would let the other clamp the result.
-        anim = QPropertyAnimation(self.sidebar, b"maximumWidth", self)
+        # only one would let the other clamp the result. The holder, not
+        # the bar: the bars are its manually placed children now
+        # (_build_sidebars) and follow every width change through
+        # _layout_sidebars, so this stays one animation however many
+        # bars are in the column.
+        anim = QPropertyAnimation(self.sidebar_holder, b"maximumWidth", self)
         anim.setDuration(SIDEBAR_ANIM_MS)
-        anim.setStartValue(self.sidebar.width())
+        anim.setStartValue(self.sidebar_holder.width())
         anim.setEndValue(target)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.valueChanged.connect(lambda value: self.sidebar.setMinimumWidth(int(value)))
-        anim.finished.connect(lambda: self.sidebar.setFixedWidth(target))
+        anim.valueChanged.connect(
+            lambda value: self.sidebar_holder.setMinimumWidth(int(value)))
+        anim.finished.connect(lambda: self.sidebar_holder.setFixedWidth(target))
         self._sidebar_anim = anim  # keep a reference so it isn't gc'd mid-animation
         anim.start()
 
@@ -844,17 +1101,10 @@ class MainWindow(QMainWindow):
         next launch; there is no "stop asking", because the way to stop
         it is to install the update, which is one click away in the same
         dialog."""
-        box = QMessageBox(self)
-        box.setWindowTitle("Update Available")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText(f"Atomic {version} is available.")
-        box.setInformativeText("You are running "
-                               f"{updater.APP_VERSION}. Updating keeps your entries.")
-        install = box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-        theme.apply_dark_titlebar(box)
-        box.exec()
-        if box.clickedButton() is install:
+        if confirm(self, "Update Available",
+                   f"Atomic {version} is available.\n\nYou are running "
+                   f"{updater.APP_VERSION}. Updating keeps your entries.",
+                   yes_text="Open Settings", no_text="Later"):
             self._open_settings()
 
     def refresh_current_page(self):
@@ -879,6 +1129,12 @@ class MainWindow(QMainWindow):
         # looking like a second sidebar had appeared out of nowhere.
         if obj is self.container and event.type() == QEvent.Type.Resize:
             self._fit_current_page()
+        # The sidebars are hand-positioned children of their holder for
+        # the same reason the pages are of the container - they slide
+        # over each other - so they too follow their parent's resizes
+        # here (window resize, and the fold animation's width sweep).
+        if obj is self.sidebar_holder and event.type() == QEvent.Type.Resize:
+            self._layout_sidebars()
         if obj is self.settings_btn and event.type() == QEvent.Type.Resize:
             self._position_update_dot()
         if event.type() == QEvent.Type.MouseButtonPress:
@@ -1305,6 +1561,13 @@ class MainWindow(QMainWindow):
         new_page.setParent(self.container)
         self._current_page = new_page
 
+        # The sidebar column follows the page. Here rather than in
+        # navigate_to, so every route to a page - history back/forward,
+        # refresh_current_page, the very first page at startup - swaps
+        # the bars too; matching `animate` keeps the two slides together
+        # and makes the startup case instant.
+        self._sync_section_sidebar(new_page, animate=animate)
+
         rect = self.container.rect()
         if not animate or old_page is None:
             new_page.setGeometry(rect)
@@ -1411,6 +1674,12 @@ def main():
     # above, and this launch is precisely the one that came from a
     # relaunch. Does nothing unless this launch followed an update.
     whats_new.show_if_updated(window)
+    # First-ever launch only: offer the setup wizard over the visible
+    # window. Armed after whats_new on purpose - that dialog is modal,
+    # and a timer armed before it would fire inside its nested event
+    # loop. Existing installs are stamped silently and never see it
+    # (the decision lives in setup_wizard._offer, not here).
+    setup_wizard.show_on_first_run(window)
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())

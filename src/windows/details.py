@@ -35,11 +35,12 @@ from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from helpers import artwork, images, logs, lookup_pool, net, theme
-from helpers.widgets import Card, GlassPage, scroll_area, show_toast, use_hover_cursor
+from helpers.widgets import (Card, GlassPage, confirm, frameless_dialog,
+                             scroll_area, show_toast, use_hover_cursor)
 
 try:
     from helpers import stremio
@@ -61,7 +62,7 @@ ROW_HEIGHT = 72
 
 # The scrim over the backdrop, top to bottom - heavier than the player's
 # loading frame because real text sits on this one.
-SCRIM = ((0.0, 7, 10, 20, 200), (0.45, 7, 10, 20, 170), (1.0, 7, 10, 20, 232))
+SCRIM = ((0.0, 14, 12, 9, 200), (0.45, 14, 12, 9, 170), (1.0, 14, 12, 9, 232))
 
 CHAPTER_LIST_TIMEOUT = 45.0
 
@@ -200,7 +201,7 @@ def _badge(text, kind) -> QLabel:
     """WATCHED / READ in the accent, UPCOMING in the success green - the
     two states the owner's reference picture colours differently."""
     colours = {"watched": (theme.ON_ACCENT, theme.ACCENT_GRADIENT, theme.ACCENT),
-               "upcoming": ("#04140c", theme.SUCCESS, theme.SUCCESS)}
+               "upcoming": ("#0d1206", theme.SUCCESS, theme.SUCCESS)}
     fg, bg, border = colours[kind]
     label = QLabel(text)
     label.setStyleSheet(
@@ -389,7 +390,7 @@ class DetailsPage(GlassPage):
         panel = QFrame()
         panel.setFixedWidth(PANEL_WIDTH)
         panel.setStyleSheet(
-            f"QFrame {{ background: rgba(10, 15, 28, 210);"
+            f"QFrame {{ background: rgba(17, 14, 10, 210);"
             f" border: 1px solid {theme.BORDER};"
             f" border-radius: {theme.RADIUS_LG}px; }}")
         column = QVBoxLayout(panel)
@@ -1082,12 +1083,13 @@ class DetailsPage(GlassPage):
 
     def _dialog_shell(self, title):
         dialog = QDialog(self)
-        dialog.setWindowTitle(title)
         dialog.setMinimumWidth(520)
-        theme.apply_dark_titlebar(dialog)
         column = QVBoxLayout(dialog)
         column.setContentsMargins(20, 18, 20, 18)
         column.setSpacing(12)
+        # With the layout already in place, so the heading lands at its
+        # top and the caller's rows append after it.
+        frameless_dialog(dialog, title=title)
         return dialog, column
 
     @staticmethod
@@ -1229,11 +1231,10 @@ class DetailsPage(GlassPage):
                                             episode=numbers[0], audio=audio,
                                             folder=folder_of())
                 else:
-                    if QMessageBox.question(
+                    if not confirm(
                             dialog, "Download Episodes",
                             f"Queue {len(numbers)} episodes of season "
-                            f"{season} for download?"
-                    ) != QMessageBox.StandardButton.Yes:
+                            f"{season} for download?"):
                         return
                     downloads.queue_season(self.entry, season=season,
                                            episodes=numbers, audio=audio,
@@ -1323,10 +1324,9 @@ class DetailsPage(GlassPage):
 
         def start():
             chapters = picked()
-            if len(chapters) > 1 and QMessageBox.question(
+            if len(chapters) > 1 and not confirm(
                     dialog, "Download Chapters",
-                    f"Queue {len(chapters)} chapters for download?"
-            ) != QMessageBox.StandardButton.Yes:
+                    f"Queue {len(chapters)} chapters for download?"):
                 return
             try:
                 downloads.queue_chapters(self.entry, chapters,

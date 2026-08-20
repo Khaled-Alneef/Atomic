@@ -15,13 +15,14 @@ from PyQt6.QtCore import QObject, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMenu, QPushButton, QVBoxLayout, QWidget,
 )
 
 from helpers import app_settings, game_launch, images, launchers, storage, theme
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
-    finish_toast, scroll_area, search_field, show_toast, show_undo_toast,
+    Card, CardDragReorder, GlassPage, GridSelection, confirm,
+    defer_grid_rebuild, finish_toast, frameless_dialog, inform, scroll_area,
+    search_field, show_toast, show_undo_toast,
 )
 from windows.link_grid import (
     CARD_MARGINS, CARD_WIDTH, THUMB_SIZE, CardTextLabel, grid_columns,
@@ -259,7 +260,10 @@ class GamesPage(GridSelection, GlassPage):
         self._refresh_grid()
 
     def _build_card(self, game, draggable=True):
-        card = Card(hoverable=True, matte=True)
+        # No matte any more: a plain #Card is the frameless tile now
+        # (theme.py) - icon and name floating on the ground, box only on
+        # hover - the same Harbor language the poster grids and Home use.
+        card = Card(hoverable=True)
         card.setFixedWidth(CARD_WIDTH)
         card.setToolTip(game["name"])
         layout = QVBoxLayout(card)
@@ -319,9 +323,9 @@ class GamesPage(GridSelection, GlassPage):
     def _import_from_launchers(self):
         dirs = app_settings.get_launcher_dirs()
         if not any(dirs.values()):
-            QMessageBox.information(
-                self, "Import from Launchers",
-                "Add at least one launcher's install directory in Settings > Games first.")
+            inform(self, "Import from Launchers",
+                   "Add at least one launcher's install directory in "
+                   "Settings > Games first.")
             return
         if self._scan_toast is not None:
             return  # a scan is already running - let it finish
@@ -352,7 +356,7 @@ class GamesPage(GridSelection, GlassPage):
         try:
             game_launch.run(game)
         except OSError as exc:
-            QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
+            inform(self, "Games", f"Couldn't launch this game:\n{exc}")
             return
         game["last_played"] = storage.now_iso()
         storage.update_entry(DATA_FILE, game.get("id"), {"last_played": game["last_played"]})
@@ -371,7 +375,8 @@ class GamesPage(GridSelection, GlassPage):
 
 
     def _remove(self, game):
-        if QMessageBox.question(self, "Remove Game", f"Remove '{game['name']}' from the list?") != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Remove Game",
+                       f"Remove '{game['name']}' from the list?"):
             return
 
         # Copied whole before the removal - _mutate re-reads the file into
@@ -413,8 +418,9 @@ class EditGameForm(QDialog):
         self.icon_path = game.get("icon")
 
         self.setWindowTitle("Edit Game")
-        self.setFixedSize(420, 380)
-        theme.apply_dark_titlebar(self)
+        # 410 tall, up from the framed 380: the panel carries its own
+        # heading now, where the native title bar used to.
+        self.setFixedSize(420, 410)
 
         form = QVBoxLayout(self)
         form.setContentsMargins(24, 20, 24, 16)
@@ -462,6 +468,7 @@ class EditGameForm(QDialog):
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)
 
+        frameless_dialog(self, title=self.windowTitle())
         self.exec()
 
     def _browse_path(self):
@@ -475,7 +482,7 @@ class EditGameForm(QDialog):
             self.icon_path = icon_path
             self._refresh_preview()
         else:
-            QMessageBox.information(self, "Games", "Couldn't detect an icon for this path.")
+            inform(self, "Games", "Couldn't detect an icon for this path.")
 
     def _choose_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose an image", "", IMAGE_FILTER)
@@ -491,7 +498,7 @@ class EditGameForm(QDialog):
         name = self.name_edit.text().strip()
         path = self.path_edit.text().strip()
         if not name or not path:
-            QMessageBox.warning(self, "Games", "Name and path can't be empty.")
+            inform(self, "Games", "Name and path can't be empty.")
             return
         if Path(path) != Path(self.game.get("path") or ""):
             # Pointing the entry somewhere else has to drop the command

@@ -7,11 +7,11 @@ from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
                           QPointF, QPropertyAnimation, QRect, QRectF, Qt,
                           QTimer, QVariantAnimation)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QColor, QDrag, QIcon, QLinearGradient, QPainter, QPen,
-                         QPixmap, QRadialGradient)
+from PyQt6.QtGui import (QColor, QDrag, QIcon, QLinearGradient, QPainter,
+                         QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QToolTip, QWidget,
+    QLineEdit, QPushButton, QScrollArea, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import logs, theme
@@ -147,48 +147,23 @@ class LogoProgress(QWidget):
 
 
 class GlassPage(QWidget):
-    """Base for a page: paints the app's near-black backdrop with a soft
-    nebula bleeding in from the window's *right* edge - a deep blue core
-    with a violet bloom below it - behind whatever layout/content the
-    subclass adds on top.
+    """Base for a page: one flat, uniform near-black ground behind
+    whatever layout/content the subclass adds on top.
 
-    Two lobes rather than one, and both centred outside (or almost
-    outside) the page: a single centred glow reads as a spotlight aimed
-    at the content, where a source sitting off the edge reads as
-    something far away that the page happens to catch the light of. Each
-    lobe fades to *alpha 0* rather than to the base colour, so the two
-    overlap into one another instead of the second one painting a visible
-    disc of base over the first."""
+    The radial "nebula" glow that used to bleed in from the right edge
+    is gone at the owner's ask ("make it all the same color, remove the
+    gold in the top") - under the gold palette the lobes read as a stain
+    on the frame rather than distant light. The glow parameters are kept
+    in the signature so no caller changes; they simply no longer paint.
+    """
 
     def __init__(self, base=theme.BG, glow=theme.GLOW, parent=None):
         super().__init__(parent)
         self._base = QColor(base)
-        self._glow = QColor(glow)
-        self._glow_alt = QColor(theme.GLOW_ALT)
-
-    @staticmethod
-    def _nebula(colour, center, radius, strength):
-        gradient = QRadialGradient(center, radius)
-        core = QColor(colour)
-        core.setAlpha(strength)
-        mid = QColor(colour)
-        mid.setAlpha(int(strength * 0.34))
-        edge = QColor(colour)
-        edge.setAlpha(0)
-        gradient.setColorAt(0.0, core)
-        gradient.setColorAt(0.45, mid)
-        gradient.setColorAt(1.0, edge)
-        return gradient
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), self._base)
-        w, h = self.width(), self.height()
-        span = max(w, h)
-        painter.fillRect(self.rect(), self._nebula(
-            self._glow, QPointF(w * 1.02, h * 0.28), span * 0.92, 255))
-        painter.fillRect(self.rect(), self._nebula(
-            self._glow_alt, QPointF(w * 0.94, h * 0.78), span * 0.62, 220))
         super().paintEvent(event)
 
 
@@ -489,6 +464,14 @@ class CardDragReorder(QObject):
                 cards.append(widget)
             elif isinstance(widget, QScrollArea) and widget.widget() is not None:
                 cards.extend(self._cards_in(widget.widget().layout()))
+            elif (isinstance(widget, SideScroller)
+                  and widget.content_widget() is not None):
+                # The strip's scroll area is a hand-positioned child of
+                # the SideScroller - no layout anywhere on the way down,
+                # so the walk below cannot reach it. Measured: with the
+                # tracker's sections wrapped in SideScrollers, _cards()
+                # found 0 cards and a drag had nothing to drop on.
+                cards.extend(self._cards_in(widget.content_widget().layout()))
             elif widget is not None and widget.layout() is not None:
                 cards.extend(self._cards_in(widget.layout()))
             elif item.layout() is not None:
@@ -1059,10 +1042,8 @@ class GridSelection:
         ids = set(self._selected_ids)
         if not ids:
             return
-        if QMessageBox.question(
-                self, f"Delete {self.SELECTION_NOUN[1].capitalize()}",
-                f"Delete {self._selection_count(len(ids))}?"
-        ) != QMessageBox.StandardButton.Yes:
+        if not confirm(self, f"Delete {self.SELECTION_NOUN[1].capitalize()}",
+                       f"Delete {self._selection_count(len(ids))}?"):
             return
         removed = []   # (index, record) as they were on disk, for undo
 
@@ -1431,6 +1412,12 @@ class SideScroller(QWidget):
         self.setFixedHeight(area.maximumHeight())
         self._sync_arrows()
 
+    def content_widget(self):
+        """The widget the wrapped area scrolls - what a walk over the
+        row's contents (CardDragReorder._cards_in) descends into,
+        since nothing here is reachable through layouts."""
+        return self._area.widget()
+
     def _row_height(self):
         """The card area's height - the scrollbar's strip along the
         bottom is not somewhere an arrow should be centred against, or
@@ -1479,3 +1466,192 @@ class SideScroller(QWidget):
         self._anim.setStartValue(bar.value())
         self._anim.setEndValue(target)
         self._anim.start()
+
+
+# ---- Frameless dialogs ---------------------------------------------------
+# Every dialog in the app is a rounded, borderless panel (the owner's ask:
+# "all windows like settings have round edges and no upper bar"). Only the
+# main window keeps its native title bar.
+
+# How near the dialog's edge a press counts as a resize grab rather than a
+# move, on dialogs that were resizable under their native frame.
+_RESIZE_BAND = 6
+
+# The panel ground is BG - the exact ground every dialog's contents were
+# built on - not SURFACE or BG_ALT. Two reasons, both hit: inputs and
+# lists are themselves SURFACE and would read as holes on a SURFACE
+# ground; and the app stylesheet fills every plain QWidget child with
+# BG, so on any *other* panel tone each full-bleed child shows as a
+# darker patch (measured on SettingsDialog's stacked pages against a
+# BG_ALT panel). The 1px border and the rounded corners are what
+# separate the panel from the window behind it.
+_DIALOG_FILL = theme.BG
+
+
+class _FramelessShell(QObject):
+    """The chrome a frameless dialog loses, put back by hand: the rounded
+    panel it paints itself as, drag-anywhere-to-move, and edge-resize.
+
+    An event filter rather than a subclass so one call retrofits every
+    existing QDialog in the app - SettingsDialog, the entry forms, the
+    download dialogs - without touching their class hierarchies.
+
+    Painting happens here (consuming the Paint event) instead of QSS
+    border-radius on the dialog: the app stylesheet's QDialog background
+    fill is a square over the whole window rect, and a setMask cut gives
+    jagged corners on a 125% display - an antialiased QPainterPath on a
+    translucent window is what renders clean."""
+
+    def __init__(self, dialog):
+        super().__init__(dialog)
+        self._dialog = dialog
+        self._drag = None  # (global pos at press, window pos at press)
+        dialog.installEventFilter(self)
+
+    # ---- geometry helpers -------------------------------------------
+    def _resizable(self):
+        return self._dialog.minimumSize() != self._dialog.maximumSize()
+
+    def _edges_at(self, pos):
+        """Which window edges a point is within grabbing distance of."""
+        edges = Qt.Edge(0)
+        rect = self._dialog.rect()
+        if pos.x() <= _RESIZE_BAND:
+            edges |= Qt.Edge.LeftEdge
+        elif pos.x() >= rect.width() - _RESIZE_BAND:
+            edges |= Qt.Edge.RightEdge
+        if pos.y() <= _RESIZE_BAND:
+            edges |= Qt.Edge.TopEdge
+        elif pos.y() >= rect.height() - _RESIZE_BAND:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    # ---- events ------------------------------------------------------
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind == QEvent.Type.Paint:
+            self._paint_panel()
+            return True   # the QSS square background fill must not run
+        if (kind == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton):
+            # Presses on interactive children never arrive here - a
+            # button or field accepts its own press. What does arrive is
+            # the panel ground, layout gaps and labels, which is exactly
+            # the "anywhere that is not a control" the native title bar
+            # used to be.
+            if self._resizable():
+                edges = self._edges_at(event.position().toPoint())
+                if edges and self._dialog.windowHandle() is not None:
+                    self._dialog.windowHandle().startSystemResize(edges)
+                    return True
+            self._drag = (event.globalPosition().toPoint(),
+                          self._dialog.pos())
+            return True
+        if (kind == QEvent.Type.MouseMove and self._drag is not None
+                and event.buttons() & Qt.MouseButton.LeftButton):
+            # The delta between the press's global point and this move's,
+            # applied to where the window sat at the press - never
+            # mapToGlobal arithmetic, which is divided by the wrong
+            # screen's scale factor on a mixed-DPI pair.
+            start_global, start_pos = self._drag
+            offset = event.globalPosition().toPoint() - start_global
+            self._dialog.move(start_pos + offset)
+            return True
+        if kind == QEvent.Type.MouseButtonRelease:
+            self._drag = None
+        return False
+
+    def _paint_panel(self):
+        painter = QPainter(self._dialog)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Half-pixel inset so the 1px border pen straddles its own line
+        # instead of being clipped by the window edge.
+        rect = QRectF(self._dialog.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, theme.RADIUS_LG, theme.RADIUS_LG)
+        painter.fillPath(path, QColor(_DIALOG_FILL))
+        painter.setPen(QPen(QColor(theme.BORDER)))
+        painter.drawPath(path)
+        painter.end()
+
+
+def frameless_dialog(dialog, title=""):
+    """Make `dialog` a frameless rounded panel: no native title bar, no
+    X/minimize/maximize, soft RADIUS_LG corners, draggable by its own
+    ground, edge-resizable if it was resizable before.
+
+    Esc keeps rejecting - QDialog's own key handling is untouched.
+
+    `title` puts a small heading at the top of the panel *and* remains
+    the windowTitle (taskbar/Alt-Tab still name the window). Pass it only
+    for dialogs whose native bar was their one name - dialogs that
+    already draw their own header (Settings, the wizard, What's New)
+    must not be titled twice. Call after the dialog's layout exists, or
+    the heading has nowhere to go."""
+    dialog.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+    # Translucent, so the corners outside the painted rounding really
+    # are see-through rather than square slabs of the QSS background.
+    dialog.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    _FramelessShell(dialog)
+    if title:
+        dialog.setWindowTitle(title)
+        layout = dialog.layout()
+        if layout is not None and hasattr(layout, "insertWidget"):
+            layout.insertWidget(0, QLabel(title, objectName="DialogTitle"))
+    return dialog
+
+
+def _message_dialog(parent, title, text, accept_text, reject_text=None,
+                    danger=False, default_reject=False):
+    """The one shape behind confirm/inform - a small frameless panel with
+    the message and an accent action, replacing the natively-framed
+    QMessageBox stock dialogs."""
+    dialog = QDialog(parent)
+    body = QVBoxLayout(dialog)
+    body.setContentsMargins(24, 20, 24, 18)
+    body.setSpacing(14)
+    label = QLabel(text)
+    label.setWordWrap(True)
+    body.addWidget(label)
+
+    row = QHBoxLayout()
+    row.setSpacing(10)
+    row.addStretch()
+    quiet = None
+    if reject_text:
+        quiet = QPushButton(reject_text)
+        quiet.clicked.connect(dialog.reject)
+        use_hover_cursor(quiet)
+        row.addWidget(quiet)
+    accent = QPushButton(accept_text,
+                         objectName="Danger" if danger else "Accent")
+    accent.clicked.connect(dialog.accept)
+    use_hover_cursor(accent)
+    row.addWidget(accent)
+    body.addLayout(row)
+
+    # Enter lands on the accent action - except where a caller says the
+    # accidental Return keypress must not be the destructive one
+    # (Restore Data, Uninstall), which keep their old default-No.
+    default = quiet if (default_reject and quiet is not None) else accent
+    default.setDefault(True)
+    default.setFocus()
+    dialog.setMinimumWidth(400)
+    frameless_dialog(dialog, title=title)
+    return dialog
+
+
+def confirm(parent, title, text, yes_text="Yes", no_text="No",
+            danger=False, default_no=False) -> bool:
+    """A themed yes/no question. True only on the accent answer; Esc,
+    the quiet button and closing all mean no - the same contract as
+    `QMessageBox.question(...) == Yes`."""
+    dialog = _message_dialog(parent, title, text, yes_text, no_text,
+                             danger=danger, default_reject=default_no)
+    return dialog.exec() == QDialog.DialogCode.Accepted
+
+
+def inform(parent, title, text, ok_text="OK"):
+    """A themed notice with one OK. For what a toast is too quiet for;
+    Enter and Esc both dismiss it."""
+    _message_dialog(parent, title, text, ok_text).exec()

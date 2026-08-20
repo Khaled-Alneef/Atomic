@@ -342,10 +342,14 @@ class DownloadsPage(GlassPage):
         card = QFrame()
         # Not a widgets.Card: a row is not clickable as a whole (its
         # buttons are), and Card's hover highlight and hand cursor would
-        # promise a click that does nothing.
+        # promise a click that does nothing. Borderless like every list
+        # row now (the Harbor pass), so the fill carries the shape alone
+        # - and it is SURFACE_HOVER, not PANEL_FILL, because this page's
+        # #Panel ground *is* PANEL_FILL and a same-colour slab with no
+        # border is invisible (measured on the offscreen render).
         card.setStyleSheet(
-            f"QFrame {{ background: {theme.PANEL_FILL};"
-            f" border: 1px solid {theme.BORDER};"
+            f"QFrame {{ background: {theme.SURFACE_HOVER};"
+            f" border: none;"
             f" border-radius: {theme.RADIUS}px; }}")
         return card
 
@@ -382,8 +386,11 @@ class DownloadsPage(GlassPage):
         bar.setValue(self._permille(progress))
         bar.setTextVisible(False)
         bar.setFixedHeight(height)
+        # The track is SURFACE, one step under the row it sits in - it
+        # was SURFACE_HOVER when the rows were SURFACE, and keeping that
+        # would sink it into the lifted row fill above.
         bar.setStyleSheet(
-            f"QProgressBar {{ background: {theme.SURFACE_HOVER};"
+            f"QProgressBar {{ background: {theme.SURFACE};"
             f" border: none; border-radius: {height // 2}px; }}"
             f"QProgressBar::chunk {{ background: {theme.ACCENT_GRADIENT};"
             f" border-radius: {height // 2}px; }}")

@@ -64,14 +64,15 @@ from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QImage,
                          QPainter, QPixmap)
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
+    QMenu, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
     QWidget,
 )
 
 from helpers import (downloads, images, logs, lookup_pool, net, storage,
                      theme)
-from helpers.widgets import (Card, GlassPage, GlyphButton,
-                             finish_toast, show_toast, use_hover_cursor)
+from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
+                             finish_toast, frameless_dialog, show_toast,
+                             use_hover_cursor)
 from windows.tracker import correct_progress, format_chapter_progress
 
 # Imported defensively: this page is useful (and testable) with a stub
@@ -2415,12 +2416,13 @@ class ReaderPage(GlassPage):
         current = candidates.index(reading) if reading >= 0 else 0
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Download Chapters")
         dialog.setMinimumWidth(560)
-        theme.apply_dark_titlebar(dialog)
         column = QVBoxLayout(dialog)
         column.setContentsMargins(20, 18, 20, 18)
         column.setSpacing(12)
+        # Called with the layout already in place so the heading lands at
+        # its top; the rows below then append after it.
+        frameless_dialog(dialog, title="Download Chapters")
 
         scope = QComboBox()
         scope.addItems(["This Chapter", "A Range of Chapters"])
@@ -2518,10 +2520,9 @@ class ReaderPage(GlassPage):
         # Asked once, with the count, and only for a range: this list can
         # run to several hundred chapters, and queueing all of One Piece
         # must not be a single click on the wrong row.
-        if len(chapters) > 1 and QMessageBox.question(
+        if len(chapters) > 1 and not confirm(
                 dialog, "Download Chapters",
-                f"Queue {len(chapters)} chapters for download?"
-        ) != QMessageBox.StandardButton.Yes:
+                f"Queue {len(chapters)} chapters for download?"):
             return
         try:
             downloads.queue_chapters(self.entry, chapters,

@@ -1,7 +1,8 @@
 """Shared dark theme for the whole app: palette constants + one big Qt
 stylesheet (QSS). Call `apply_theme(app)` once on the QApplication, and
-`apply_dark_titlebar(widget)` on every top-level window/dialog so Windows
-draws its native title bar in dark mode too.
+`apply_dark_titlebar(widget)` on the main window so Windows draws its
+native title bar in dark mode. Dialogs no longer have a native bar at
+all - they go through `widgets.frameless_dialog` instead.
 """
 
 import ctypes
@@ -14,103 +15,94 @@ from PyQt6.QtGui import QFont
 from . import storage
 
 # ---- Palette -------------------------------------------------------------
-# The "space" theme. Six tones are fixed by the app's color spec and
-# everything else is derived from them, so the whole UI stays one family
-# rather than drifting per page:
+# The "gold and black" theme (in the mood of the Harbor client). Six
+# tones are fixed by the app's color spec and everything else is derived
+# from them, so the whole UI stays one family rather than drifting per
+# page:
 #
-#   TEXT #EAF1FF · TEXT_MUTED #8CA0C4 · SURFACE #121A2B
-#   SURFACE_HOVER #1B2740 · BORDER #2B3B5E · ACCENT #25D3E8
+#   TEXT #F3EEE3 · TEXT_MUTED #B1A48B · SURFACE #1A1712
+#   SURFACE_HOVER #262117 · BORDER #3D3423 · ACCENT #F0B73F
 #
-# Every derived tone keeps the spec's hue (a deep navy around 215-225
-# deg, with the accent's cyan at ~188) and only moves lightness - a
-# neutral gray mixed in anywhere reads as a dirty patch against these,
-# the same way it did against the violet palette this replaces.
+# Every derived tone keeps the spec's hue (a warm near-black around
+# 35-45 deg at low saturation, with the accent's gold at ~41) and only
+# moves lightness - a neutral gray mixed in anywhere reads as a dirty
+# patch against these, the same way it did against the navy palette
+# this replaces.
 #
-# The accent is a *cyan*, and that is why ON_ACCENT exists: white on
-# #25D3E8 computes to a 1.8:1 contrast ratio, which is unreadable, where
-# ON_ACCENT on the same fill computes to 10.3:1. Anything filled with the
-# accent (or with ACCENT_GRADIENT) takes ON_ACCENT for its text/glyph,
-# never white - that is what the violet accent could get away with and
-# this one cannot.
-BG = "#070a14"           # app background - near-black navy
-BG_ALT = "#0b1120"       # secondary background (page panels)
+# The accent is a *gold*, and that is why ON_ACCENT exists: white on
+# #F0B73F computes to a 1.8:1 contrast ratio - the exact same trap the
+# cyan it replaces had - where ON_ACCENT on the same fill computes to
+# 10.6:1 (and 7.4:1 on the gradient's deeper amber end, measured, not
+# eyeballed). Anything filled with the accent (or with ACCENT_GRADIENT)
+# takes ON_ACCENT for its text/glyph, never white.
+BG = "#0e0c09"           # app background - near-black, warm
+BG_ALT = "#14110c"       # secondary background (page panels)
 # The two lobes of the nebula the page backdrop paints in from its right
-# edge (widgets.GlassPage): a blue core with a violet bloom off it.
-GLOW = "#16305e"         # deep blue core of the backdrop glow
-GLOW_ALT = "#2a1f5c"     # ...and the violet bloom beside it
-SIDEBAR = "#080d1a"      # sidebar column
-SIDEBAR_SHEEN = "#111a2e"  # subtle highlight at the sidebar's top edge
-SIDEBAR_DEEP = "#05080f"   # ...fading darker toward its bottom
-SURFACE = "#121a2b"      # cards / inputs ("card background")
-SURFACE_HOVER = "#1b2740"  # ...lifted on hover ("card elevated")
-SURFACE_ACTIVE = "#243354"
+# edge (widgets.GlassPage): a gold core with an ember bloom off it.
+GLOW = "#5e4318"         # deep gold core of the backdrop glow
+GLOW_ALT = "#5c2a16"     # ...and the ember bloom beside it
+SIDEBAR = "#0b0a07"      # sidebar column
+SIDEBAR_SHEEN = "#191510"  # subtle highlight at the sidebar's top edge
+SIDEBAR_DEEP = "#070605"   # ...fading darker toward its bottom
+SURFACE = "#1a1712"      # cards / inputs ("card background")
+SURFACE_HOVER = "#262117"  # ...lifted on hover ("card elevated")
+SURFACE_ACTIVE = "#332b1c"
 # The lit top lip a "glass" panel catches - one step above SURFACE_HOVER
 # and used only as a gradient's first stop, never as a fill on its own.
-SURFACE_SHEEN = "#2c3f66"
-BORDER = "#2b3b5e"
+SURFACE_SHEEN = "#403520"
+BORDER = "#3d3423"
 
-TEXT = "#eaf1ff"
-TEXT_MUTED = "#8ca0c4"
-TEXT_DIM = "#5a6d8f"
+TEXT = "#f3eee3"
+TEXT_MUTED = "#b1a48b"
+TEXT_DIM = "#79705c"
 # Pure white, for text sitting directly over video/artwork (the player's
-# top bar) where the palette's blue-tinted TEXT reads as dingy against a
+# top bar) where the palette's warm-tinted TEXT reads as dingy against a
 # bright frame. Not for text on the app's own surfaces - TEXT is
 # calibrated against those.
 TEXT_OVER_MEDIA = "#ffffff"
 
-ACCENT = "#25d3e8"        # primary action - bright cyan
-ACCENT_HOVER = "#54e2f2"
-ACCENT_ACTIVE = "#12b1c6"
-ACCENT_BLUE = "#3f6ffb"   # the blue end every accent gradient runs into
-ACCENT_BLUE_HOVER = "#5b86ff"
-ACCENT_SOFT = "#10273f"   # tinted background for the active nav item
+ACCENT = "#f0b73f"        # primary action - warm gold
+ACCENT_HOVER = "#f7c95f"
+ACCENT_ACTIVE = "#d99b21"
+# The deeper amber end every accent gradient runs into. The name keeps
+# the "blue" it had when the gradient ran cyan->blue, on purpose: every
+# consumer refers to the token, and renaming it would touch files this
+# values-only re-theme must not.
+ACCENT_BLUE = "#de901f"
+ACCENT_BLUE_HOVER = "#eba43c"
+ACCENT_SOFT = "#33270e"   # tinted background for the active nav item
 # Text/glyph color on any accent-filled surface. See the note above -
-# white on cyan is the one combination this palette cannot use.
-ON_ACCENT = "#04141c"
+# white on gold is the one combination this palette cannot use.
+ON_ACCENT = "#140e02"
 
 SUCCESS = "#2ee0a4"
 DANGER = "#ff5470"
 DANGER_HOVER = "#ff7285"
-WARNING = "#ffc857"
+# Shifted toward orange-red from the old amber #ffc857, which on this
+# palette would have been a near-twin of the gold accent (hue 43 vs 41).
+# At hue ~21 it stays a "warning" orange while reading as its own color
+# beside both ACCENT and the pinker DANGER.
+WARNING = "#ff8a4a"
 
-# Cyan -> blue, the app's primary-action fill (the sidebar's "+", the
-# accent buttons, the player's play disc). Written as functions because
-# QSS needs the gradient spelled out at each use and the direction
-# differs: a wide button reads best lit corner-to-corner, a disc from
-# its top.
+# Gold -> deeper amber, the app's primary-action fill (the sidebar's
+# "+", the accent buttons, the player's play disc). Written as functions
+# because QSS needs the gradient spelled out at each use and the
+# direction differs: a wide button reads best lit corner-to-corner, a
+# disc from its top.
 def accent_gradient(x1=0, y1=0, x2=1, y2=1, hover=False):
-    cyan = ACCENT_HOVER if hover else ACCENT
-    blue = ACCENT_BLUE_HOVER if hover else ACCENT_BLUE
+    gold = ACCENT_HOVER if hover else ACCENT
+    amber = ACCENT_BLUE_HOVER if hover else ACCENT_BLUE
     return (f"qlineargradient(x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2},"
-            f" stop:0 {cyan}, stop:1 {blue})")
+            f" stop:0 {gold}, stop:1 {amber})")
 
 
 ACCENT_GRADIENT = accent_gradient()
 ACCENT_GRADIENT_HOVER = accent_gradient(hover=True)
 
-# Glossy dark gradient used by every #Card item across the app (poster
-# grids, game icons, quick-list rows, the Home hero carousel) and by the
-# #SectionBox frames that group them on Home - darker than a flat fill,
-# with a highlight band near the top that reads as a sheen rather than
-# matte.
-#
-# Anchored to the palette above rather than being its own set of colors:
-# the gradient's dominant band (MID, which covers most of a card's
-# height) *is* SURFACE, its hover counterpart is SURFACE_HOVER, and the
-# border is BORDER. So a card reads as the specified card background,
-# with the sheen and the darker foot only shading around it.
-CARD_SHEEN = "#33486f"
-CARD_TOP = SURFACE_HOVER
-CARD_MID = SURFACE
-CARD_BOTTOM = "#080d18"
-CARD_BORDER = BORDER
-# The hover sheen leans toward the accent's cyan rather than staying a
-# lighter navy: it is the one moment a card is "lit", and the border it
-# lights up with is the accent.
-CARD_HOVER_SHEEN = "#2f6f92"
-CARD_HOVER_TOP = SURFACE_ACTIVE
-CARD_HOVER_MID = SURFACE_HOVER
-CARD_HOVER_BOTTOM = "#0c1526"
+# The CARD_* glossy-gradient family is gone with the boxes it painted:
+# tiles are frameless in the Harbor language (see the #Card rules below)
+# and the one remaining card fill is the flat SURFACE the matte variant
+# always used.
 
 # One "glass panel" fill, used by everything that reads as a translucent
 # slab rather than a card: the page panels, Home's section frames, the
@@ -119,9 +111,12 @@ CARD_HOVER_BOTTOM = "#0c1526"
 # spread over a much larger area, so the sheen is far subtler (a card's
 # sheen across a 700px-wide panel reads as an uneven wash).
 def glass_fill(top=SURFACE_SHEEN, body=SURFACE, foot=None):
-    foot = foot or BG_ALT
-    return (f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-            f" stop:0 {top}, stop:0.06 {body}, stop:1 {foot})")
+    """One flat panel colour now - the lit top lip and the darker foot
+    are gone at the owner's ask ("make it all the same color"): under
+    the gold palette the warm sheen at a panel's top edge read as a gold
+    stain rather than glass. Signature kept so no caller changes; only
+    `body` decides the colour."""
+    return body
 
 
 PANEL_FILL = glass_fill()
@@ -141,19 +136,20 @@ FONT_FAMILY_NAV_FALLBACKS = (FONT_FAMILY_NAV, "Segoe UI Semibold", "Segoe UI")
 FONT_STACK_NAV = ", ".join(f'"{name}"' for name in FONT_FAMILY_NAV_FALLBACKS)
 NAV_FONT_SIZE = 13
 
-# Bullet marker prefixed onto every sidebar nav label (Home + each
-# section) in place of the old rasterized arrow-glyph icon column - as
-# plain text it always matches FONT_FAMILY_NAV/color/size exactly,
-# instead of a separately-rendered PNG that could fall out of sync.
+# Fallback marker for a nav row whose section has no glyph in NAV_ICONS
+# below. Expanded rows lead with the section's own Fluent glyph now
+# (Harbor's icon+label rows); the bullet only ever appears for an
+# unmapped key, so a new section still gets a readable row.
 NAV_BULLET = "◈"
 
-# Per-section glyphs, shown in place of the bullet+label when the
-# sidebar is collapsed (the expanded sidebar keeps the bullets).
-# Deliberately from the Segoe icon fonts that ship with Windows rather
-# than emoji: these are monochrome and inherit whatever color the QSS
-# gives the row, so they pick up the nav's normal/hover/selected colors
-# automatically, while emoji would render in their own fixed colors and
-# clash with the theme.
+# Per-section glyphs: beside the label when the sidebar is expanded,
+# alone and centred when it is collapsed - one symbol per section at
+# both widths, so folding the rail never swaps the icon out from under
+# the user. Deliberately from the Segoe icon fonts that ship with
+# Windows rather than emoji: these are monochrome and inherit whatever
+# color the QSS gives the row, so they pick up the nav's normal/hover/
+# selected colors automatically, while emoji would render in their own
+# fixed colors and clash with the theme.
 FONT_FAMILY_ICONS = "Segoe Fluent Icons"
 FONT_FAMILY_ICON_FALLBACKS = (FONT_FAMILY_ICONS, "Segoe MDL2 Assets", FONT_FAMILY)
 # Same chain in the form a QSS font-family property wants. Needed
@@ -214,6 +210,17 @@ def nav_font():
                 fallbacks=FONT_FAMILY_NAV_FALLBACKS)
 
 
+def nav_row_font():
+    """An expanded nav row's font: glyph + label in one QListWidgetItem,
+    which carries exactly one font. The icon face leads the fallback
+    chain so the Fluent glyph resolves from it, and - because Segoe
+    Fluent Icons carries no Latin letters (the Settings button already
+    relies on this, see the #NavButton QSS note) - the label falls
+    through to the nav face beside it."""
+    return font(NAV_FONT_SIZE, QFont.Weight.Bold, FONT_FAMILY_ICONS,
+                fallbacks=(FONT_FAMILY_ICONS, *FONT_FAMILY_NAV_FALLBACKS))
+
+
 def _ensure_checkmark_asset() -> str:
     """A small checkmark PNG for QCheckBox::indicator:checked.
 
@@ -223,13 +230,14 @@ def _ensure_checkmark_asset() -> str:
     even on Windows, hence as_posix().
 
     Drawn in ON_ACCENT rather than white, because the checked indicator
-    is filled with the cyan accent and a white tick on it is the same
+    is filled with the gold accent and a white tick on it is the same
     unreadable pairing ON_ACCENT exists to avoid. Written under a new
-    filename ("...dark") on purpose: the old white asset is already on
-    disk in every install, and this only creates what is missing - reusing
-    the name would have left every existing install with the white tick.
+    filename ("...gold") on purpose, the second rename for the same
+    reason as the first ("...dark"): this only creates what is missing,
+    so a recolored asset under the old name would never be drawn - every
+    existing install would keep its cyan-era tick forever.
     """
-    path = storage.DATA_DIR / "ui_assets" / "checkmark_dark.png"
+    path = storage.DATA_DIR / "ui_assets" / "checkmark_gold.png"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
@@ -251,8 +259,14 @@ def _ensure_chevron_asset() -> str:
     there was no file to point it at. The owner rightly asked how anyone
     is meant to know the box unfolds. Drawn at 2x and referenced at half
     size so it stays crisp on a 125%/150% display, same reason the
-    checkmark above exists as a file at all."""
-    path = storage.DATA_DIR / "ui_assets" / "chevron_down.png"
+    checkmark above exists as a file at all.
+
+    "...warm" filename: drawn in TEXT_MUTED, which the gold re-theme
+    changed, and this function only creates what is missing - under the
+    old name every existing install would keep its blue-grey chevron
+    (the checkmark above carries the same trap, already paid for once).
+    """
+    path = storage.DATA_DIR / "ui_assets" / "chevron_down_warm.png"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         img = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
@@ -329,7 +343,7 @@ QPushButton#NavButton {{
     background: transparent;
     color: {TEXT_MUTED};
     border: none;
-    border-radius: {RADIUS_SM}px;
+    border-radius: {RADIUS}px;
     text-align: left;
     padding: 7px 12px;
     font-family: {FONT_STACK_ICONS};
@@ -351,21 +365,21 @@ QPushButton#NavButton[collapsed="true"] {{
     font-size: 14pt;
     font-weight: 400;
 }}
-/* The selected row is a filled pill in a lighter tone, lit from its left
-   edge with the accent's cyan - the tint fades out across the row rather
-   than flooding it, so the label still reads as text on a panel and not
-   as text on a button. */
+/* The active row is Harbor's: a full-width rounded pill in a soft
+   neutral from the warm surface family, label lifted to TEXT - no
+   accent border, no gradient. The fill alone says "you are here"; the
+   accent stays reserved for actions and hovers, which is what keeps a
+   sidebar of one active row and six muted ones reading calm the way
+   the reference does. */
 QPushButton#NavButton:checked {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {ACCENT_SOFT},
-        stop:1 {SURFACE_HOVER});
+    background: {SURFACE_HOVER};
     color: {TEXT};
-    border: 1px solid {ACCENT};
+    border: none;
     border-radius: {RADIUS}px;
 }}
 /* Just a centered "+" now, so it reads the same at either sidebar width
-   instead of having a label that only fits when expanded. Cyan into
-   blue, the app's one primary-action fill. */
+   instead of having a label that only fits when expanded. Gold into
+   amber, the app's one primary-action fill. */
 QPushButton#AddButton {{
     background: {ACCENT_GRADIENT};
     color: {ON_ACCENT};
@@ -385,12 +399,18 @@ QListWidget#NavList {{
     padding: 0px;
     outline: none;
 }}
+/* Taller rows than the app's other lists, on purpose - Harbor's nav
+   breathes. The transparent resting border reserves the pill's space
+   so nothing shifts when a row becomes the active one. 8px horizontal,
+   down from 12: the leading glyph is wider than the bullet it
+   replaced, and at 12 the longest label ("Movies & Series") elided -
+   measured on a real-window grab. */
 QListWidget#NavList::item {{
     background: transparent;
     color: {TEXT_MUTED};
     border: 1px solid transparent;
-    border-radius: {RADIUS_SM}px;
-    padding: 9px 12px;
+    border-radius: {RADIUS}px;
+    padding: 11px 8px;
     font-family: {FONT_STACK_NAV};
     font-size: {NAV_FONT_SIZE}pt;
     font-weight: 700;
@@ -399,12 +419,12 @@ QListWidget#NavList::item:hover {{
     background: {SURFACE};
     color: {TEXT};
 }}
+/* Same soft pill as #NavButton:checked above - one active-row language
+   for both bars, per the Harbor reference. */
 QListWidget#NavList::item:selected {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {ACCENT_SOFT},
-        stop:1 {SURFACE_HOVER});
+    background: {SURFACE_HOVER};
     color: {TEXT};
-    border: 1px solid {ACCENT};
+    border: 1px solid transparent;
     border-radius: {RADIUS}px;
 }}
 
@@ -469,35 +489,35 @@ QLabel#KeyPlus {{
 }}
 
 /* ---- Cards ------------------------------------------------------------ */
+/* Tiles are frameless, Harbor's language: the rounded artwork itself
+   floats on the ground (images.py clips every thumbnail to the same
+   radius) with the title under it, and there is no box at all until
+   the pointer arrives. Hover is a tile's one lit moment - the gold
+   ring plus ACCENT_SOFT's tinted lift, the same pair #HomeItem below
+   has always used, so Home and the tracker grids read as one system.
+   The transparent resting border reserves the ring's space so nothing
+   reflows on mouse-over. Used by the Anime/Reading/Series poster
+   grids, Discover's rows, and the Games/Apps/Websites tiles. */
 QFrame#Card {{
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 {CARD_SHEEN},
-        stop:0.18 {CARD_TOP},
-        stop:0.6 {CARD_MID},
-        stop:1 {CARD_BOTTOM});
+    background: transparent;
     border-radius: {RADIUS}px;
-    border: 1px solid {CARD_BORDER};
+    border: 1px solid transparent;
 }}
 QFrame#Card[hoverable="true"]:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 {CARD_HOVER_SHEEN},
-        stop:0.18 {CARD_HOVER_TOP},
-        stop:0.6 {CARD_HOVER_MID},
-        stop:1 {CARD_HOVER_BOTTOM});
+    background: {ACCENT_SOFT};
     border: 1px solid {ACCENT};
 }}
-/* Matte variant of the same card, opted into per widget (Card(matte=
-   True), or the property set directly on a plain #Card frame) - flat
-   SURFACE fill instead of the gradient above, so no sheen and no
-   darkened foot, just the palette's card background.
-
-   Used by Home, Games, Apps and Websites; the Anime/Reading/Series
-   poster grids stay glossy. Both selectors below outrank the gradient
-   rules on specificity (same id, one more attribute), which is what
-   lets one #Card rule set override the other. */
+/* Matte variant (Card(matte=True), or the property set directly on a
+   plain #Card frame) - the *row* treatment now: details' episode and
+   chapter rows, the reader's chapter list, the player's overlay rows,
+   Discover's featured panel and the Schedule rows. Harbor rows are
+   borderless, so the flat SURFACE fill carries the shape alone and the
+   border only exists on hover, as the same accent ring the tiles get.
+   Both selectors outrank the frameless rules above on specificity
+   (same id, one more attribute). */
 QFrame#Card[matte="true"] {{
     background: {SURFACE};
-    border: 1px solid {BORDER};
+    border: 1px solid transparent;
 }}
 QFrame#Card[matte="true"][hoverable="true"]:hover {{
     background: {SURFACE_HOVER};
@@ -548,13 +568,13 @@ QFrame#Hero {{
    Apps, Websites) instead of a frame behind every individual item
    inside it - the items themselves are styled #Bare now.
 
-   Matte like the rest of Home: a flat SURFACE fill. These frames are
-   large, and the gloss that reads as a sheen at poster-tile size just
-   reads as an uneven wash spread across something this big. */
+   A flat fill and no border: Harbor's panels are soft rounded slabs
+   with nothing drawn around them, and the 1px ring this carried made
+   it the last outlined box on a page that no longer has any. */
 QWidget#SectionBox {{
     background: {PANEL_FILL};
     border-radius: {RADIUS_LG}px;
-    border: 1px solid {BORDER};
+    border: none;
 }}
 QWidget#Bare {{
     background: transparent;
@@ -583,8 +603,8 @@ QPushButton:hover {{
 QPushButton:pressed {{ background: {SURFACE_ACTIVE}; }}
 QPushButton:disabled {{ color: {TEXT_DIM}; }}
 
-/* The primary action anywhere in the app: cyan into blue, with the
-   near-black ON_ACCENT on top - white on this cyan is unreadable (see
+/* The primary action anywhere in the app: gold into amber, with the
+   near-black ON_ACCENT on top - white on this gold is unreadable (see
    the palette note). Rounded to RADIUS rather than RADIUS_SM so the ends
    read as caps; padding is untouched, so nothing changes size. */
 QPushButton#Accent {{
@@ -800,8 +820,20 @@ QMenu::separator {{
 }}
 
 /* ---- Dialogs --------------------------------------------------------------- */
+/* The square QDialog fill never paints on the app's own dialogs any
+   more - widgets.frameless_dialog consumes the Paint event and draws
+   the rounded panel itself. The rule stays for any stray dialog that
+   hasn't been through it, so that still opens dark rather than white. */
 QDialog {{ background: {BG}; }}
 QMessageBox {{ background: {BG}; }}
+/* The small heading widgets.frameless_dialog puts inside a panel whose
+   native title bar was its only name. */
+QLabel#DialogTitle {{
+    color: {TEXT};
+    font-size: 13pt;
+    font-weight: 700;
+    background: transparent;
+}}
 
 /* ---- Splitters / Separators ------------------------------------------------ */
 QFrame[frameShape="4"], QFrame[frameShape="5"] {{ color: {BORDER}; }}

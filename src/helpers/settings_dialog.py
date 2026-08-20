@@ -29,7 +29,7 @@ from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import (
@@ -37,7 +37,8 @@ from . import (
     manga_sites, nav_config, startup, storage, theme, uninstall,
     updater,
 )
-from .widgets import finish_toast, scroll_area, show_toast
+from .widgets import (confirm, finish_toast, frameless_dialog, inform,
+                      scroll_area, show_toast)
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
 # and the page's settings serve all three media. The
@@ -317,10 +318,12 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.resize(920, 640)
         self.setMinimumSize(760, 560)
-        theme.apply_dark_titlebar(self)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        # 1px, not 0: the dialog is a frameless rounded panel now and
+        # paints its own 1px border at the window edge - a flush child
+        # (the sidebar) would sit on top of that line.
+        outer.setContentsMargins(1, 1, 1, 1)
         outer.setSpacing(0)
 
         body = QHBoxLayout()
@@ -377,18 +380,34 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(close_btn)
         content_col.addLayout(btn_row)
 
-        content_wrap = QWidget()
+        # Bare, or the app stylesheet's opaque QWidget fill paints this
+        # wrapper's square corners over the frameless panel's rounded
+        # right edge (measured: both right corners came back alpha 255).
+        content_wrap = QWidget(objectName="Bare")
         content_wrap.setLayout(content_col)
         body.addWidget(content_wrap, stretch=1)
 
         self._refresh_sites()
 
+        # No title heading: the content column already opens with its
+        # own "Settings" PanelTitle.
+        frameless_dialog(self)
         self.exec()
 
     # ------------------------------------------------------------------
     def _build_category_sidebar(self):
         sidebar = QWidget(objectName="Sidebar")
         sidebar.setFixedWidth(210)
+        # The shared #Sidebar rule rounds only the right corners (in the
+        # main window its left edge is the screen edge). Here the left
+        # edge is the dialog's rounded corner, and the sidebar's square
+        # corners would paint over the transparent rounding - so this
+        # copy rounds its left corners too. Merged property-by-property
+        # with the app rule, so the gradient and right radii stay.
+        sidebar.setStyleSheet(
+            f"QWidget#Sidebar {{"
+            f" border-top-left-radius: {theme.RADIUS_LG}px;"
+            f" border-bottom-left-radius: {theme.RADIUS_LG}px; }}")
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(14, 20, 14, 16)
         layout.setSpacing(4)
@@ -955,9 +974,21 @@ class SettingsDialog(QDialog):
                 row.addWidget(state)
                 form.addLayout(row)
 
-                hint = QLabel(f"{unlocks} · {app_settings.API_KEY_HELP.get(name, '')}",
-                              objectName="Muted")
+                hint_text = (f"{unlocks} · "
+                             f"{app_settings.API_KEY_HELP.get(name, '')}")
+                # The same "Get a key" link the first-run wizard carries,
+                # from the same URL table, so the two never drift apart.
+                url = app_settings.API_KEY_URLS.get(name, "")
+                if url:
+                    hint_text = (f'<a href="{url}" style="color: '
+                                 f'{theme.ACCENT};">Get a key ↗</a>'
+                                 f" · {hint_text}")
+                hint = QLabel(hint_text, objectName="Muted")
                 hint.setWordWrap(True)
+                if url:
+                    hint.setOpenExternalLinks(True)
+                    hint.setTextInteractionFlags(
+                        Qt.TextInteractionFlag.TextBrowserInteraction)
                 hint.setContentsMargins(API_KEY_LABEL_WIDTH + 8, 0, 0, 4)
                 form.addWidget(hint)
 
@@ -1087,9 +1118,8 @@ class SettingsDialog(QDialog):
         gone."""
         files = sorted(p for p in storage.DATA_DIR.glob(_BACKUP_GLOB) if p.is_file())
         if not files:
-            QMessageBox.information(
-                self, "Back Up Data",
-                "There is nothing saved to back up yet.")
+            inform(self, "Back Up Data",
+                   "There is nothing saved to back up yet.")
             return
 
         suggested = str(Path.home() / f"Atomic Backup {datetime.now():%Y-%m-%d}.zip")
@@ -1110,10 +1140,9 @@ class SettingsDialog(QDialog):
             # A dialog rather than a toast: a backup the user believes
             # they have and doesn't is the failure this whole feature is
             # meant to prevent.
-            QMessageBox.warning(
-                self, "Back Up Data",
-                "Could not write the backup there. Try another folder - a "
-                "system folder or a full drive will refuse.")
+            inform(self, "Back Up Data",
+                   "Could not write the backup there. Try another folder - a "
+                   "system folder or a full drive will refuse.")
             return
 
         show_toast(self, f"Backed Up {len(files)} Files")
@@ -1135,21 +1164,19 @@ class SettingsDialog(QDialog):
         try:
             restored = _read_backup(Path(path))
         except _BackupError as exc:
-            QMessageBox.warning(self, "Restore Data", str(exc))
+            inform(self, "Restore Data", str(exc))
             return
 
         names = ", ".join(sorted(restored))
         # Defaulting to No, like Uninstall and unlike Clear Data: this one
         # overwrites files the user did not name, and the accidental
         # Return keypress must not be the one that does it.
-        if QMessageBox.warning(
-            self, "Restore Data",
-            f"Replace what is saved now with this backup?\n\n{names}\n\n"
-            f"Everything currently in those files is overwritten. This "
-            f"cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+        if not confirm(
+                self, "Restore Data",
+                f"Replace what is saved now with this backup?\n\n{names}\n\n"
+                f"Everything currently in those files is overwritten. This "
+                f"cannot be undone.",
+                danger=True, default_no=True):
             return
 
         for name, data in sorted(restored.items()):
@@ -1212,12 +1239,11 @@ class SettingsDialog(QDialog):
     def _clear_checked_categories(self):
         checked = [CLEAR_CATEGORIES[i] for i, cb in enumerate(self.clear_checks) if cb.isChecked()]
         if not checked:
-            QMessageBox.information(self, "Clear Data", "Check at least one category first.")
+            inform(self, "Clear Data", "Check at least one category first.")
             return
         names = ", ".join(name for name, _file, _predicate in checked)
-        if QMessageBox.question(
-            self, "Clear Data", f"Clear all {names} entries? This cannot be undone."
-        ) != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Clear Data",
+                       f"Clear all {names} entries? This cannot be undone."):
             return
 
         # Anime and Reading share tracker.json - load/save it once for
@@ -1239,19 +1265,16 @@ class SettingsDialog(QDialog):
         main_window = self.parent()
         if main_window is not None and hasattr(main_window, "refresh_current_page"):
             main_window.refresh_current_page()
-        QMessageBox.information(self, "Clear Data", f"{names} cleared.")
+        inform(self, "Clear Data", f"{names} cleared.")
 
     def _uninstall(self):
-        confirm = QMessageBox.warning(
-            self, "Uninstall Atomic",
-            "This permanently deletes every saved Atomic file on this PC "
-            "(all Anime/Reading/Series/Games/Apps/Websites entries, site "
-            "lists, and settings) and removes the app itself. This cannot "
-            "be undone.\n\nThe app will close immediately. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
+        if not confirm(
+                self, "Uninstall Atomic",
+                "This permanently deletes every saved Atomic file on this PC "
+                "(all Anime/Reading/Series/Games/Apps/Websites entries, site "
+                "lists, and settings) and removes the app itself. This cannot "
+                "be undone.\n\nThe app will close immediately. Continue?",
+                danger=True, default_no=True):
             return
         uninstall.run()
         QApplication.instance().quit()
@@ -1388,7 +1411,7 @@ class SettingsDialog(QDialog):
     def _edit_site(self):
         site_id = self._selected_site_id()
         if not site_id:
-            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            inform(self, "Reading Websites", "Select a website first.")
             return
         dialog = SiteForm(self, "Website", manga_sites.get_site(site_id))
         if dialog.result_data:
@@ -1414,17 +1437,17 @@ class SettingsDialog(QDialog):
     def _check_site(self):
         site_id = self._selected_site_id()
         if not site_id:
-            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            inform(self, "Reading Websites", "Select a website first.")
             return
         self._probe_site_async("reading", site_id)
 
     def _remove_site(self):
         site_id = self._selected_site_id()
         if not site_id:
-            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            inform(self, "Reading Websites", "Select a website first.")
             return
         site = manga_sites.get_site(site_id)
-        if QMessageBox.question(self, "Remove Website", f"Remove '{site['name']}'?") == QMessageBox.StandardButton.Yes:
+        if confirm(self, "Remove Website", f"Remove '{site['name']}'?"):
             manga_sites.remove_site(site_id)
             self._refresh_sites()
 
@@ -1441,7 +1464,7 @@ class SettingsDialog(QDialog):
             self.startup_check.blockSignals(True)
             self.startup_check.setChecked(not checked)
             self.startup_check.blockSignals(False)
-            QMessageBox.critical(self, "Settings", f"Couldn't update startup setting:\n{exc}")
+            inform(self, "Settings", f"Couldn't update startup setting:\n{exc}")
         # Whichever way that went, the fullscreen option follows the
         # checkbox's *actual* state - including the rolled-back one above.
         self._sync_fullscreen_startup_check()
@@ -1483,8 +1506,9 @@ class SiteForm(QDialog):
         super().__init__(parent)
         self.result_data = None
         self.setWindowTitle(f"Edit {kind}" if site else f"Add {kind}")
-        self.setFixedSize(360, 210)
-        theme.apply_dark_titlebar(self)
+        # 240 tall, up from the 210 the natively-framed version needed:
+        # the panel now carries its own heading where the title bar was.
+        self.setFixedSize(360, 240)
 
         form = QVBoxLayout(self)
         form.setContentsMargins(20, 18, 20, 16)
@@ -1512,13 +1536,14 @@ class SiteForm(QDialog):
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)
 
+        frameless_dialog(self, title=self.windowTitle())
         self.exec()
 
     def _save(self):
         name = self.name_edit.text().strip()
         url = self.url_edit.text().strip()
         if not name or not url:
-            QMessageBox.warning(self, "Websites", "Name and URL are required.")
+            inform(self, "Websites", "Name and URL are required.")
             return
         self.result_data = (name, url)
         self.accept()

@@ -312,11 +312,18 @@ def active_progress():
     for a badge or a strip that is visible without opening the page.
 
     None when nothing is active, so a caller can hide the indicator
-    entirely rather than showing an idle bar."""
+    entirely rather than showing an idle bar.
+
+    `count` is the exact number of episodes/chapters still queued or
+    running - the owner's ask. It counted *groups* before, so a whole
+    season downloading read "(1)", which answered "how many requests"
+    when the question on a badge is "how many files are left"."""
     rows = [r for r in list_groups() if r.get("state") in (RUNNING, QUEUED)]
     if not rows:
         return None
-    return {"count": len(rows),
+    remaining = [job for row in rows for job in (row.get("jobs") or [])
+                 if job.get("state") in (RUNNING, QUEUED)]
+    return {"count": len(remaining) or len(rows),
             "progress": sum(r.get("progress") or 0.0 for r in rows) / len(rows),
             "label": rows[0].get("label") or ""}
 

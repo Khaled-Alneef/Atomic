@@ -14,15 +14,15 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from helpers import (game_launch, global_search, images, launchers,
                      nav_config, storage, theme)
 from helpers.widgets import (
-    Card, GlassPage, SideScroller, hold_hover_cursor, release_hover_cursor,
-    scroll_area, search_field,
+    Card, GlassPage, SideScroller, hold_hover_cursor, inform,
+    release_hover_cursor, scroll_area, search_field,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
@@ -953,7 +953,7 @@ class HomePage(GlassPage):
         try:
             game_launch.run(game)
         except OSError as exc:
-            QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
+            inform(self, "Games", f"Couldn't launch this game:\n{exc}")
             return
         game["last_played"] = storage.now_iso()
         self._resort_after_delay(self._refresh_games_row)

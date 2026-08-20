@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from datetime import datetime, timedelta, timezone
 
 from PyQt6.QtCore import (QEasingCurve, QEvent, QObject, QPointF, QSize, Qt,
                           QTimer, QVariantAnimation)
@@ -27,7 +28,7 @@ from PyQt6.QtGui import (QColor, QCursor, QIcon, QLinearGradient, QPainter,
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
     QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
+    QMenu, QPushButton, QScrollArea, QVBoxLayout,
     QWidget,
 )
 
@@ -36,10 +37,18 @@ from helpers import (
     release_schedule, storage, stremio, theme,
 )
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, SideScroller, defer_grid_rebuild,
-    finish_toast, scroll_area, search_field, show_toast, show_undo_toast,
-    use_hover_cursor,
+    Card, CardDragReorder, GlassPage, SideScroller, confirm,
+    defer_grid_rebuild, finish_toast, frameless_dialog, inform, scroll_area,
+    search_field, show_toast, show_undo_toast, use_hover_cursor,
 )
+
+# Soft, for the same reason reader.py soft-imports chapter_source: a
+# build (or a working tree) without it must lose the Discover tab's
+# contents and say so, not take the whole tracker down at import time.
+try:
+    from helpers import discover
+except Exception:                                   # pragma: no cover
+    discover = None
 
 SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updated"]
 
@@ -146,6 +155,30 @@ FILTER_ICON_HEIGHT = 18
 
 POSTER_SIZE = (160, 216)
 PREVIEW_SIZE = (90, 120)
+# The cover on a Schedule row - small enough that a screenful of rows
+# reads as a list rather than a second poster grid.
+SCHEDULE_COVER_SIZE = (46, 62)
+
+# The three sub-sections every tracker page carries. "saved" is the page
+# as it has always been - the sort row, the search, the sections grid,
+# select mode and drag-reorder all live there and nowhere else; the other
+# two are read-only views built on demand.
+TAB_SAVED = "saved"
+TAB_DISCOVER = "discover"
+TAB_SCHEDULE = "schedule"
+TABS = ((TAB_SAVED, "Saved"), (TAB_DISCOVER, "Discover"), (TAB_SCHEDULE, "Schedule"))
+
+# How many titles one Discover row asks for. Bounded because every one of
+# them is a poster download queued onto the shared lookup pool.
+DISCOVER_LIMIT = 30
+# Typing here is debounced far longer than the entry form's title search
+# (SEARCH_DEBOUNCE_MS, 250): that one fills a dropdown the user is
+# staring at mid-word, this one rebuilds rows of poster cards and fires
+# a catalog search per row.
+DISCOVER_DEBOUNCE_MS = 450
+# Tall enough to read as the page's own search bar rather than a field in
+# a form, and rounded to half its height so it is a true pill.
+DISCOVER_SEARCH_HEIGHT = 46
 # 450 originally; halved at the owner's ask ("the suggestion search is
 # too slow") - the debounce was a flat 450ms added on top of the network
 # round trip before a search even started. 250 still coalesces normal
@@ -726,6 +759,43 @@ class _ScheduleSignals(QObject):
     resolved = Signal(str, object, object, int)
 
 
+def _clear_layout(layout):
+    """Empty a layout, with what was in it gone from the screen *now*.
+
+    `setParent(None)` before `deleteLater()`, and that order is the
+    point: deleteLater only queues the destruction, and the widget goes
+    on painting until the event loop gets round to the deferred delete.
+    Measured on the Discover tab - re-running a search drew the new
+    "Results" heading directly over the old "Popular Now" one, both
+    legible at once. Unparenting hides it in the same call.
+
+    The Saved grid's own _refresh_grid deliberately still does it the old
+    way: it has always worked there, its rebuild is followed by a layout
+    pass either way, and this task is not the place to change what that
+    page does."""
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.setParent(None)
+            widget.deleteLater()
+
+
+class _DiscoverSignals(QObject):
+    # Discover's two crossings back to the UI thread. Both carry the run
+    # number that asked for them, for the same reason the schedule
+    # lookups do: typing fires a new lookup per debounce pause, and a
+    # slow row answering after the query moved on would otherwise fill
+    # the rows under a different search.
+    #
+    # results: row kind ("anime"/"series"/"movie"/"reading"), the rows'
+    # dicts as helpers/discover returns them, run.
+    results = Signal(str, list, int)
+    # poster: row kind, index within that row, the cached file path ("" =
+    # nothing downloaded), run.
+    poster = Signal(str, int, str, int)
+
+
 class _StayOpenMenu(QMenu):
     """A menu that stays open while its checkable items are ticked.
 
@@ -770,13 +840,14 @@ _SESSION_VIEW_STATE = {}
 # cross-faded by opacity - still nothing per paint.
 #
 # The frost, top to bottom, as (stop, r, g, b, a). A cover is as often
-# pale as dark and the cyan button has to read against both, so this is
-# the palette's navy with a pale ice highlight along the top - and it
-# keeps the darkening the button needs where the button actually sits.
+# pale as dark and the gold button has to read against both, so this is
+# the palette's warm smoke with a pale champagne highlight along the
+# top - and it keeps the darkening the button needs where the button
+# actually sits.
 COVER_FROST = (
-    (0.0, 186, 222, 245, 70),      # pale ice catching the light
-    (0.35, 32, 58, 96, 150),       # the palette's navy, mid-panel
-    (1.0, 7, 14, 30, 190),         # deepest at the foot, where meta sits
+    (0.0, 245, 233, 205, 70),      # pale champagne catching the light
+    (0.35, 61, 50, 30, 150),       # the palette's warm smoke, mid-panel
+    (1.0, 16, 13, 8, 190),         # deepest at the foot, where meta sits
 )
 CONTINUE_BUTTON_SIZE = 46
 # Freeze and thaw take different times on purpose. In: slow enough to
@@ -800,6 +871,12 @@ def frosted_cover(pixmap: QPixmap) -> QPixmap:
     ratio = pixmap.devicePixelRatio() or 1.0
     frosted = QPixmap(pixmap)
     painter = QPainter(frosted)
+    # SourceAtop, not the default SourceOver: covers come rounded now
+    # (images._round_corners), and an over-composite would paint the
+    # frost into the transparent corners too - square frost corners
+    # hanging past rounded art. Atop lands only where the art has
+    # pixels, so the frost inherits the clip for free.
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceAtop)
     gradient = QLinearGradient(0.0, 0.0, 0.0, float(frosted.height()))
     for stop, red, green, blue, alpha in COVER_FROST:
         gradient.setColorAt(stop, QColor(red, green, blue, alpha))
@@ -851,7 +928,7 @@ class _ContinueButton(QPushButton):
         painter.setPen(Qt.PenStyle.NoPen)
         # The triangle follows the fill: accent while the ring is empty,
         # ON_ACCENT once the hover fills it - never white, which on this
-        # cyan computes to 1.8:1 (see the palette note in theme.py).
+        # gold computes to 1.8:1 (see the palette note in theme.py).
         painter.setBrush(QColor(theme.ON_ACCENT if self.underMouse()
                                 else theme.ACCENT))
         side = self.width()
@@ -1077,6 +1154,20 @@ class TrackerPage(GlassPage):
     # Which release-schedule source the hover tooltip's "next episode/
     # chapter" lines come from for this page - see helpers/release_schedule.
     MEDIUM = release_schedule.MEDIUM_ANIME
+    # The rows the Discover tab draws, as (kind, row label, entry type).
+    # `kind` is what helpers/discover is asked for - the special
+    # "reading" asks discover_reading, everything else discover_video -
+    # and `entry type` is what the Add form opens on when one of that
+    # row's cards is picked. A page with more than one row labels them
+    # (Movies & Series shows two); a page with one doesn't, since a
+    # heading over a single row only repeats the page's own title.
+    DISCOVER_ROWS = (("anime", "Anime", "Anime"),)
+    # The page's sub-sections, published for main.py's contextual section
+    # sidebar - its presence is how a page is detected as sectioned, and
+    # current_section/set_active_section below are how it is driven. The
+    # same tuple as TABS on purpose: a second set of keys beside
+    # TAB_SAVED/TAB_DISCOVER/TAB_SCHEDULE would only drift from them.
+    SECTIONS = TABS
 
     def __init__(self, app):
         super().__init__(parent=None)
@@ -1116,6 +1207,31 @@ class TrackerPage(GlassPage):
 
         self._schedule_signals = _ScheduleSignals()
         self._schedule_signals.resolved.connect(self._on_schedule_resolved)
+
+        self._discover_signals = _DiscoverSignals()
+        self._discover_signals.results.connect(self._on_discover_results)
+        self._discover_signals.poster.connect(self._on_discover_poster)
+        # Which Discover lookup is the current one. Everything a lookup
+        # produces - a row's results, each poster download - carries this
+        # number and is dropped if it no longer matches, so a slow row
+        # answering after the query moved on cannot fill the rows under a
+        # different search (the same rule as _refresh_run above).
+        self._discover_run = 0
+        self._discover_built = False
+        # (kind, index) -> the drawn card's cover label, its title and the
+        # size that cover was built at, so an arriving poster can replace
+        # one pixmap instead of rebuilding a row. Nothing in here outlives
+        # the rebuild that filled it.
+        self._discover_cards = {}
+        self._discover_holders = {}
+        self._discover_query = ""
+
+        # Which sub-section is on screen. Restored from the session store
+        # at the end of __init__ like the search text and the filter
+        # ticks. There is no in-page switcher any more - the section
+        # sidebar main.py slides in over these pages drives this through
+        # set_active_section, so nothing here paints tab state.
+        self._active_tab = TAB_SAVED
 
         self.entries = _migrate(storage.load(self.DATA_FILE, []), self.DATA_FILE)
         # What was on disk when this page loaded. _save_entries needs it
@@ -1172,6 +1288,27 @@ class TrackerPage(GlassPage):
         add_btn.clicked.connect(self._open_form)
         header.addWidget(add_btn)
         layout.addLayout(header)
+
+        # No tab bar between the header and the content: switching
+        # sub-sections is the section sidebar's job (main.py), which
+        # replaced the pill row that briefly lived here - one switcher,
+        # not two.
+
+        # Everything below is one tab's worth of page. The Saved one is
+        # this page exactly as it was - the same widgets in the same
+        # order, at the same spacing - only now inside a container of its
+        # own instead of directly in the panel, so the other two tabs can
+        # take its place by being shown while it is hidden. A hidden
+        # widget contributes neither size nor spacing to a QVBoxLayout,
+        # which is why these are three siblings rather than a
+        # QStackedWidget: a stack sizes itself to the *largest* page, so
+        # Discover's content would have set Saved's minimum height.
+        self.saved_tab = QWidget(objectName="Bare")
+        saved_layout = QVBoxLayout(self.saved_tab)
+        saved_layout.setContentsMargins(0, 0, 0, 0)
+        saved_layout.setSpacing(14)   # the panel's own spacing, so the
+                                      # rows below sit exactly as they did
+        layout.addWidget(self.saved_tab, stretch=1)
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
@@ -1234,9 +1371,9 @@ class TrackerPage(GlassPage):
         self.select_btn.setToolTip("Pick several entries and change or delete them at once")
         self.select_btn.clicked.connect(self._toggle_select_mode)
         top_row.addWidget(self.select_btn)
-        layout.addLayout(top_row)
+        saved_layout.addLayout(top_row)
 
-        layout.addWidget(self._build_selection_bar())
+        saved_layout.addWidget(self._build_selection_bar())
 
         self.grid_body = QWidget()
         # One row per section, each scrolling sideways on its own, rather
@@ -1248,12 +1385,33 @@ class TrackerPage(GlassPage):
         self.grid_layout = QVBoxLayout(self.grid_body)
         self.grid_layout.setSpacing(18)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(scroll_area(self.grid_body), stretch=1)
+        saved_layout.addWidget(scroll_area(self.grid_body), stretch=1)
 
         self._drag_reorder = CardDragReorder(
             self.grid_body, self._begin_custom_order, self._drop_reorder)
 
+        # Empty shells: neither is filled until its tab is first shown
+        # (see _set_tab), so a page that is never taken off Saved does no
+        # Discover work at all - no catalog request, no poster download.
+        self.discover_tab = QWidget(objectName="Bare")
+        self._discover_layout = QVBoxLayout(self.discover_tab)
+        self._discover_layout.setContentsMargins(0, 0, 0, 0)
+        self._discover_layout.setSpacing(14)
+        self.discover_tab.setVisible(False)
+        layout.addWidget(self.discover_tab, stretch=1)
+
+        self.schedule_tab = QWidget(objectName="Bare")
+        self._schedule_layout = QVBoxLayout(self.schedule_tab)
+        self._schedule_layout.setContentsMargins(0, 0, 0, 0)
+        self._schedule_layout.setSpacing(14)
+        self.schedule_tab.setVisible(False)
+        layout.addWidget(self.schedule_tab, stretch=1)
+
         self._refresh_grid()
+        # Last, after every tab's shell exists and the grid has been
+        # drawn: restoring a remembered Discover *is* showing it, so this
+        # is what fires that tab's first lookup.
+        self._set_tab(remembered.get("tab", TAB_SAVED))
         if self.SUPPORTS_PROGRESS_SYNC:
             self._backfill_missing_latest_available()
         self._backfill_sharper_covers()
@@ -1501,11 +1659,52 @@ class TrackerPage(GlassPage):
             "search": self.search_box.text(),
             "status": set(self._status_filter),
             "type": set(self._type_filter),
+            "tab": self._active_tab,
         }
 
     def _on_search_text_changed(self, _text):
         self._remember_view_state()
         self._search_timer.start()
+
+    # ------------------------------------------------------------------
+    # The three sub-sections.
+    #
+    # Their switcher lives outside the page: main.py slides a section
+    # sidebar in over any page exposing SECTIONS and drives these two
+    # methods. The pill bar that briefly sat under the header is gone -
+    # the sidebar is the one way to switch, so nothing in here paints
+    # which section is active.
+    def current_section(self) -> str:
+        """The active section's key, for the section sidebar's checks."""
+        return self._active_tab
+
+    def set_active_section(self, key):
+        """Show one sub-section - exactly what clicking the old pill
+        did, the lazy first build of Discover/Schedule included, and
+        remembered in the session store (see _set_tab)."""
+        self._set_tab(key)
+
+    def _set_tab(self, key):
+        """Show one sub-section.
+
+        Does the work even when `key` is already active: this is also
+        the restore path at the end of __init__, where the remembered
+        section has to be applied over the default."""
+        if key not in dict(TABS):
+            key = TAB_SAVED
+        self._active_tab = key
+        self.saved_tab.setVisible(key == TAB_SAVED)
+        self.discover_tab.setVisible(key == TAB_DISCOVER)
+        self.schedule_tab.setVisible(key == TAB_SCHEDULE)
+        if key == TAB_DISCOVER:
+            self._show_discover()
+        elif key == TAB_SCHEDULE:
+            # Rebuilt on every visit rather than kept: it is read
+            # entirely off self.entries, and those move under it (a
+            # lookup landing, an entry saved or deleted) with nothing
+            # that would tell a built list to catch up.
+            self._build_schedule()
+        self._remember_view_state()
 
     def _search_query(self) -> str:
         # getattr because _refresh_grid can run before the box exists on
@@ -1876,10 +2075,8 @@ class TrackerPage(GlassPage):
                    if entry.get("id") in self._selected_ids]
         if not removed:
             return
-        if QMessageBox.question(
-                self, "Delete Entries",
-                f"Delete {self._entry_count(len(removed))}?"
-        ) != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete Entries",
+                       f"Delete {self._entry_count(len(removed))}?"):
             return
         gone = {entry.get("id") for _index, entry in removed}
         # In place, not a rebind: the schedule and cover lookups already
@@ -2117,12 +2314,21 @@ class TrackerPage(GlassPage):
         event up to the page, which is what should scroll); Shift+wheel,
         the bar itself, and the arrows SideScroller lays over each end
         move the row."""
+        return self._build_card_strip([self._build_card(entry) for entry in group])
+
+    def _build_card_strip(self, cards):
+        """The sideways-scrolling row itself, given the cards to fill it.
+
+        Split out from _build_section_strip so the Discover rows are the
+        same strip with different cards in it - height maths, scrollbar
+        allowance and SideScroller wrapping included - rather than a
+        second row mechanism that would drift from this one."""
         strip = QWidget(objectName="Bare")
         strip_layout = QHBoxLayout(strip)
         strip_layout.setContentsMargins(0, 0, 0, 0)
         strip_layout.setSpacing(14)
-        for entry in group:
-            strip_layout.addWidget(self._build_card(entry))
+        for card in cards:
+            strip_layout.addWidget(card)
         strip_layout.addStretch()
 
         area = QScrollArea(objectName="Bare")
@@ -2278,6 +2484,11 @@ class TrackerPage(GlassPage):
             if entry is not None:
                 entry.update(fresh)
         self._refresh_grid()
+        # The overlay can have moved progress on, which moves a schedule
+        # row's wording with it - rebuild only when that tab is the one
+        # actually on screen.
+        if self._active_tab == TAB_SCHEDULE:
+            self._build_schedule()
 
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
@@ -2444,8 +2655,7 @@ class TrackerPage(GlassPage):
 
         if not silent:
             if not found:
-                QMessageBox.information(self, "Sync Progress",
-                                        self._not_found_message(reason))
+                inform(self, "Sync Progress", self._not_found_message(reason))
                 return
             self._save_entries()
             self._refresh_grid()
@@ -2577,7 +2787,7 @@ class TrackerPage(GlassPage):
         defer_grid_rebuild(self._refresh_grid)
 
     def _delete_entry(self, entry):
-        if QMessageBox.question(self, "Delete Entry", f"Delete '{entry['title']}'?") != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete Entry", f"Delete '{entry['title']}'?"):
             return
         # By id, not list.remove(): two entries compare equal to Python
         # the moment their fields match, and the index is wanted anyway so
@@ -2608,11 +2818,633 @@ class TrackerPage(GlassPage):
         return f"Restored '{entry['title']}'"
 
     # ------------------------------------------------------------------
-    def _open_form(self, edit=False, entry=None):
+    # Discover: the catalog, rather than your list.
+    #
+    # Laid out after the Harbor client's Discover page at the owner's ask
+    # - a wide pill search bar, one large "featured" card built from the
+    # top result, then rows of poster cards carrying chips drawn on the
+    # artwork - but in Atomic's own palette throughout. Not one colour
+    # here is a literal: a borrowed layout must not arrive with a
+    # borrowed accent.
+    #
+    # Nothing in this tab writes an entry. Picking a card opens the
+    # ordinary Add form with the title filled in, so the matching, cover
+    # download and link resolution that form already does all run exactly
+    # as they do for a title typed by hand - one save path, not two.
+    def _discover_key(self) -> str:
+        """This page's slot in lookup_pool's newest-wins queue.
+
+        Per page, so Anime looking something up doesn't cancel Reading's
+        row - and one key for the *whole* tab, not one per row: a key
+        holds a single pending job and drops whatever it replaces, so two
+        rows submitted under one key would be one row."""
+        return f"discover-{self._view_state_key()}"
+
+    def _show_discover(self):
+        """Build the tab the first time it is looked at, and only then.
+
+        Every later visit shows what is already there: the rows survive
+        a tab switch, so walking to Schedule and back is not another
+        catalog request and another thirty poster downloads."""
+        if self._discover_built:
+            return
+        self._build_discover_tab()
+        self._discover_built = True
+        self._start_discover("")
+
+    def _build_discover_tab(self):
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        self.discover_search = search_field(f"Search {self.TITLE.lower()}...")
+        self.discover_search.setFixedHeight(DISCOVER_SEARCH_HEIGHT)
+        # A pill, where the app's own QLineEdit rule is a RADIUS_SM box.
+        # Spelled out per widget rather than added to theme.py, which is
+        # not this task's to touch - and every value in it is a token.
+        self.discover_search.setStyleSheet(
+            f"QLineEdit {{ background: {theme.SURFACE}; color: {theme.TEXT};"
+            f" border: 1px solid {theme.BORDER};"
+            f" border-radius: {DISCOVER_SEARCH_HEIGHT // 2}px;"
+            f" padding: 6px 18px; font-size: 11pt; }}"
+            f"QLineEdit:focus {{ border: 1px solid {theme.ACCENT}; }}")
+        # Debounced, and long (see DISCOVER_DEBOUNCE_MS): every pause
+        # rebuilds rows of poster cards behind a catalog request.
+        self._discover_timer = QTimer(self)
+        self._discover_timer.setSingleShot(True)
+        self._discover_timer.setInterval(DISCOVER_DEBOUNCE_MS)
+        self._discover_timer.timeout.connect(self._on_discover_search)
+        self.discover_search.textChanged.connect(
+            lambda _text: self._discover_timer.start())
+        search_row.addWidget(self.discover_search, stretch=1)
+        self._discover_layout.addLayout(search_row)
+
+        self.discover_body = QWidget()
+        self._discover_body_layout = QVBoxLayout(self.discover_body)
+        self._discover_body_layout.setSpacing(16)
+        self._discover_body_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._discover_layout.addWidget(scroll_area(self.discover_body), stretch=1)
+
+    def _on_discover_search(self):
+        query = self.discover_search.text().strip()
+        # Against the query the current rows were built from, not against
+        # the box's previous text: typing a space and taking it away
+        # again debounces to the same search, and re-running it would
+        # throw away rows to redraw the identical ones.
+        if query == self._discover_query:
+            return
+        self._start_discover(query)
+
+    def _start_discover(self, query):
+        """Draw the tab's skeleton for `query` and fire the one lookup
+        that fills it. Empty query means "what's popular" - the contract
+        helpers/discover answers a blank search with."""
+        self._discover_run += 1
+        run = self._discover_run
+        self._discover_query = query
+        self._discover_cards = {}
+        self._discover_holders = {}
+        _clear_layout(self._discover_body_layout)
+
+        if discover is None:
+            # The one honest thing to say. A source that quietly answers
+            # nothing is indistinguishable from a catalog with nothing in
+            # it (.claude/rules/integrations.md).
+            self._discover_body_layout.addWidget(QLabel(
+                "Discover isn't available in this build.", objectName="Muted"))
+            return
+
+        # Filled by the first row's results, hidden until then - an empty
+        # frame reserving space above a row that may never answer reads
+        # as something that failed to load.
+        self._discover_featured = QWidget(objectName="Bare")
+        featured_layout = QVBoxLayout(self._discover_featured)
+        featured_layout.setContentsMargins(0, 0, 0, 0)
+        featured_layout.setSpacing(8)
+        self._discover_featured.setVisible(False)
+        self._discover_body_layout.addWidget(self._discover_featured)
+
+        labelled = len(self.DISCOVER_ROWS) > 1
+        for kind, label, _entry_type in self.DISCOVER_ROWS:
+            section = QWidget(objectName="Bare")
+            column = QVBoxLayout(section)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(2)
+            column.addWidget(QLabel(self._discover_heading(label, labelled),
+                                    objectName="SectionTitle"))
+            column.addWidget(QLabel(self._discover_subheading(), objectName="Muted"))
+            holder = QWidget(objectName="Bare")
+            holder_layout = QVBoxLayout(holder)
+            holder_layout.setContentsMargins(0, 8, 0, 0)
+            holder_layout.setSpacing(0)
+            holder_layout.addWidget(QLabel("Looking around...", objectName="Muted"))
+            column.addWidget(holder)
+            self._discover_holders[kind] = holder
+            self._discover_body_layout.addWidget(section)
+
+        lookup_pool.submit_latest(self._discover_key(), self._discover_worker,
+                                  query, run)
+
+    def _discover_heading(self, label, labelled) -> str:
+        if self._discover_query:
+            return f"{label} Results" if labelled else "Results"
+        return f"Popular {label}" if labelled else "Popular Now"
+
+    def _discover_subheading(self) -> str:
+        return (f"Matches for '{self._discover_query}'" if self._discover_query
+                else "What the catalog is watching")
+
+    def _discover_worker(self, query, run):
+        """Every row of this page, one job.
+
+        Must never raise - an uncaught exception here kills the pool's
+        worker thread - and must report *every* row even when a source
+        answers nothing, or a row that never reports sits on "Looking
+        around..." for good."""
+        for kind, _label, _entry_type in self.DISCOVER_ROWS:
+            try:
+                if kind == "reading":
+                    found = discover.discover_reading(query=query, limit=DISCOVER_LIMIT)
+                else:
+                    found = discover.discover_video(kind, query=query,
+                                                    limit=DISCOVER_LIMIT)
+            except Exception:
+                found = None
+            rows = [item for item in (found or []) if isinstance(item, dict)]
+            self._discover_signals.results.emit(kind, rows, run)
+
+    def _on_discover_results(self, kind, results, run):
+        if run != self._discover_run:
+            return
+        holder = self._discover_holders.get(kind)
+        if holder is None:
+            return
+        entry_type = next((t for k, _l, t in self.DISCOVER_ROWS if k == kind),
+                          self.ENTRY_TYPES[0])
+        rows = list(results)
+        # The top of the first row is drawn large instead of being
+        # repeated behind itself in the strip below.
+        if rows and kind == self.DISCOVER_ROWS[0][0]:
+            self._fill_featured(rows[0], entry_type, run)
+            rows = rows[1:]
+        if rows:
+            cards = [self._build_discover_card(kind, index, item, entry_type, run)
+                     for index, item in enumerate(rows)]
+            content = self._build_card_strip(cards)
+        else:
+            content = QLabel(
+                f"Nothing found for '{self._discover_query}'."
+                if self._discover_query else "Nothing to show right now.",
+                objectName="Muted")
+        self._replace_content(holder, content)
+
+    @staticmethod
+    def _replace_content(holder, widget):
+        layout = holder.layout()
+        _clear_layout(layout)
+        layout.addWidget(widget)
+
+    # ---- the cards ---------------------------------------------------
+    def _saved_titles(self):
+        """This page's titles, lowercased, for "is it already saved".
+
+        Title, not id: a Discover result carries a catalog's ids and the
+        entry was very likely added from the same catalog, but it may
+        equally have been typed in by hand - and the thing the user is
+        looking at is the title."""
+        return {(entry.get("title") or "").strip().lower()
+                for entry in self.entries if entry.get("type") in self.ENTRY_TYPES}
+
+    def _chip(self, parent, text, accent=True):
+        """A little label drawn *on* the artwork - Harbor's shape, this
+        palette's colours. Mouse-transparent for the same reason the
+        selection badge is: the card is what handles the click, and a
+        chip that took the press would leave a hole in its own target."""
+        chip = QLabel(text, parent)
+        chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        if accent:
+            chip.setStyleSheet(
+                f"background: {theme.ACCENT_GRADIENT}; color: {theme.ON_ACCENT};"
+                f" border-radius: {theme.RADIUS_SM}px; padding: 2px 8px;"
+                f" font-size: 8pt; font-weight: 700;")
+        else:
+            chip.setStyleSheet(
+                f"background: {theme.BG}; color: {theme.TEXT};"
+                f" border: 1px solid {theme.BORDER};"
+                f" border-radius: {theme.RADIUS_SM}px; padding: 2px 7px;"
+                f" font-size: 8pt; font-weight: 700;")
+        chip.adjustSize()
+        # A child added to an already-visible parent does not show
+        # itself - which is the case when _sync_discover_saved puts a
+        # Saved chip on a card the user is looking at.
+        chip.show()
+        return chip
+
+    def _place_saved_badge(self, record):
+        """Put the Saved chip on one card's artwork, where that card
+        keeps it: the top-left corner on a row card, and the foot of the
+        featured one, whose top-left already carries FEATURED. The
+        height has to be measured rather than assumed - the chip is
+        sized by its font and its stylesheet padding."""
+        chip = self._chip(record["cover"], "Saved")
+        if record.get("badge_at_foot"):
+            chip.move(8, record["size"][1] - chip.height() - 8)
+        else:
+            chip.move(8, 8)
+        record["badge"] = chip
+        return chip
+
+    @staticmethod
+    def _rating_text(item) -> str:
+        """"★ 7.4" from a Cinemeta row's imdbRating, or "".
+
+        The star is plain text, like the sidebar's own ◈ bullet
+        (theme.NAV_BULLET) - not the missing-glyph case the filter
+        button's "▽" turned out to be, which was a *button label* Qt
+        laid out beside its menu arrow."""
+        raw = (item or {}).get("imdbRating")
+        if raw in (None, ""):
+            return ""
+        try:
+            # One decimal, not :g like the chapter numbers elsewhere here:
+            # a rating of 7.0 is written "7.0" everywhere it is published,
+            # and ":g" renders it "7", which reads as a different number.
+            return f"★ {float(raw):.1f}"
+        except (TypeError, ValueError):
+            text = str(raw).strip()
+            return f"★ {text}" if text else ""
+
+    def _request_poster(self, kind, index, item, run):
+        url = (item or {}).get("poster")
+        if not url:
+            return
+        # The shared, bounded pool: a row is up to DISCOVER_LIMIT images
+        # and a page can have two rows, so a thread each is exactly the
+        # shape that once put 651 connections in flight (see lookup_pool).
+        lookup_pool.submit(self._fetch_discover_poster, kind, index, url, run)
+
+    def _fetch_discover_poster(self, kind, index, url, run):
+        # Must never raise - see _discover_worker.
+        try:
+            path = images.download(url)
+        except Exception:
+            path = None
+        self._discover_signals.poster.emit(kind, index, str(path) if path else "", run)
+
+    def _on_discover_poster(self, kind, index, path, run):
+        if run != self._discover_run or not path:
+            return
+        record = self._discover_cards.get((kind, index))
+        if not record:
+            return
+        try:
+            record["cover"].setPixmap(images.thumbnail_or_avatar(
+                path, record["title"], record["size"]))
+        except RuntimeError:
+            pass    # the row was rebuilt under it; the new one asks again
+
+    def _build_discover_card(self, kind, index, item, entry_type, run):
+        title_text = (item.get("title") or "").strip()
+        card = Card(hoverable=True)
+        card.setFixedWidth(POSTER_SIZE[0] + 20)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(8, 10, 8, 10)
+        card_layout.setSpacing(6)
+
+        # The letter avatar stands in until the download lands - the same
+        # placeholder a saved entry with no cover keeps for good, so a
+        # loading card and a coverless one look alike rather than a
+        # loading card looking broken.
+        cover = QLabel()
+        cover.setFixedSize(*POSTER_SIZE)
+        cover.setPixmap(images.thumbnail_or_avatar(None, title_text, POSTER_SIZE))
+        card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        record = {"cover": cover, "title": title_text, "size": POSTER_SIZE,
+                  "badge": None, "badge_at_foot": False}
+        if title_text.lower() in self._saved_titles():
+            self._place_saved_badge(record)
+        rating = self._rating_text(item)
+        if rating:
+            chip = self._chip(cover, rating, accent=False)
+            chip.move(8, POSTER_SIZE[1] - chip.height() - 8)
+
+        title = QLabel(title_text, objectName="CardTitle")
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        card_layout.addWidget(title)
+
+        year = str(item.get("year") or "").strip()
+        if year:
+            year_label = QLabel(year, objectName="CardMeta")
+            year_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            card_layout.addWidget(year_label)
+
+        card.clicked.connect(
+            lambda it=item, et=entry_type: self._on_discover_pick(it, et))
+        self._discover_cards[(kind, index)] = record
+        self._request_poster(kind, index, item, run)
+        return card
+
+    def _fill_featured(self, item, entry_type, run):
+        holder = getattr(self, "_discover_featured", None)
+        if holder is None:
+            return
+        layout = holder.layout()
+        _clear_layout(layout)
+        layout.addWidget(QLabel("Top Result" if self._discover_query else "Featured",
+                                objectName="SectionTitle"))
+        layout.addWidget(self._build_featured_card(item, entry_type, run))
+        holder.setVisible(True)
+
+    def _build_featured_card(self, item, entry_type, run):
+        """The top result at full size: poster on the left, the facts and
+        an Add button beside it.
+
+        Matte rather than the poster grid's glossy fill - that gradient
+        is tuned to a 216px-tall tile, and stretched across a wide short
+        panel its sheen band reads as an uneven wash (the same reason
+        Home's section frames are matte)."""
+        title_text = (item.get("title") or "").strip()
+        card = Card(hoverable=True, matte=True)
+        # One step up the surface family: this page's #Panel ground is
+        # already SURFACE, and with the matte border gone (the Harbor
+        # pass) a SURFACE slab vanished into it entirely - measured on
+        # the offscreen render. Border states still come from the app
+        # sheet, so hover keeps its accent ring.
+        card.setStyleSheet(
+            f"QFrame#Card {{ background: {theme.SURFACE_HOVER}; }}"
+            f"QFrame#Card:hover {{ background: {theme.SURFACE_ACTIVE}; }}")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(14, 14, 14, 14)
+        row.setSpacing(18)
+
+        cover = QLabel()
+        cover.setFixedSize(*POSTER_SIZE)
+        cover.setPixmap(images.thumbnail_or_avatar(None, title_text, POSTER_SIZE))
+        row.addWidget(cover, alignment=Qt.AlignmentFlag.AlignTop)
+        self._chip(cover, "FEATURED").move(8, 8)
+        record = {"cover": cover, "title": title_text, "size": POSTER_SIZE,
+                  "badge": None, "badge_at_foot": True}
+        if title_text.lower() in self._saved_titles():
+            self._place_saved_badge(record)
+
+        column = QVBoxLayout()
+        column.setSpacing(8)
+        title = QLabel(title_text, objectName="HeroTitle")
+        title.setWordWrap(True)
+        column.addWidget(title)
+
+        facts = QHBoxLayout()
+        facts.setSpacing(8)
+        year = str(item.get("year") or "").strip()
+        if year:
+            facts.addWidget(QLabel(year, objectName="CardMeta"))
+        rating = self._rating_text(item)
+        if rating:
+            # Not _chip: this one sits on the panel, not on artwork, so
+            # it is a laid-out widget rather than a positioned child.
+            chip = QLabel(rating)
+            chip.setStyleSheet(
+                f"background: {theme.BG}; color: {theme.TEXT};"
+                f" border: 1px solid {theme.BORDER};"
+                f" border-radius: {theme.RADIUS_SM}px; padding: 2px 8px;"
+                f" font-size: 9pt; font-weight: 700;")
+            facts.addWidget(chip)
+        facts.addStretch()
+        column.addLayout(facts)
+        # One line saying what this card *is*, rather than repeating the
+        # title's own facts. Without it the panel is a title, a year and
+        # a button against a poster's full height, and the empty middle
+        # read as something that had failed to load.
+        column.addWidget(QLabel(
+            f"Closest match for '{self._discover_query}'" if self._discover_query
+            else "Top of the catalog right now", objectName="Muted"))
+
+        saved = title_text.lower() in self._saved_titles()
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 6, 0, 0)
+        add_btn = QPushButton("In Saved" if saved else "Add to Saved",
+                              objectName="Accent")
+        add_btn.clicked.connect(
+            lambda _checked=False, it=item, et=entry_type: self._on_discover_pick(it, et))
+        use_hover_cursor(add_btn)
+        buttons.addWidget(add_btn)
+        buttons.addStretch()
+        column.addLayout(buttons)
+        # The stretch goes last, so the block reads as one group at the
+        # top of the panel instead of a title and a button pinned to
+        # opposite ends of it with a hole between.
+        column.addStretch()
+        row.addLayout(column, stretch=1)
+
+        card.clicked.connect(
+            lambda it=item, et=entry_type: self._on_discover_pick(it, et))
+        self._discover_cards[("featured", 0)] = record
+        self._request_poster("featured", 0, item, run)
+        return card
+
+    def _on_discover_pick(self, item, entry_type):
+        """Open the Add form on this title - or say it is already there.
+
+        Saved-ness is re-read here rather than trusted from the chip
+        drawn at build time: the entry may have been added since, from
+        this very tab."""
+        title_text = (item.get("title") or "").strip()
+        if title_text.lower() in self._saved_titles():
+            show_toast(self, "Already in Saved")
+            return
+        self._open_form(initial_title=title_text, default_type=entry_type)
+
+    def _sync_discover_saved(self):
+        """Put a Saved chip on any Discover card whose title has since
+        been added. Only ever adds one: a card cannot become unsaved
+        while this tab is up (deleting happens on Saved, which rebuilds
+        the whole page's grid anyway)."""
+        if not self._discover_cards:
+            return
+        saved = self._saved_titles()
+        for record in self._discover_cards.values():
+            if record.get("badge") is not None:
+                continue
+            if record["title"].lower() not in saved:
+                continue
+            try:
+                self._place_saved_badge(record)
+            except RuntimeError:
+                pass    # the row went away under it
+
+    # ------------------------------------------------------------------
+    # Schedule: what this page's own entries say is coming.
+    #
+    # No network at all. Every row is read off an entry's stored
+    # `next_release`, which the page's own lookups fill in and cache
+    # (see _refresh_schedules) - so this tab is a second reading of what
+    # the card tooltips already say, never a second source that could
+    # disagree with them.
+    def _schedule_rows(self):
+        """[(when, entry)] for everything still to come, soonest first."""
+        now = datetime.now(timezone.utc)
+        rows = []
+        for entry in self.entries:
+            if entry.get("type") not in self.ENTRY_TYPES:
+                continue
+            stored = entry.get("next_release")
+            if not isinstance(stored, dict) or not stored.get("at"):
+                continue
+            try:
+                when = datetime.fromisoformat(stored["at"])
+            except (TypeError, ValueError):
+                continue
+            # A naive timestamp is read as UTC, exactly as
+            # release_schedule._parse does - a hand-edited or older data
+            # file may carry one, and comparing it to an aware `now`
+            # would raise inside a slot.
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if when <= now:
+                continue
+            rows.append((when, entry))
+        rows.sort(key=lambda pair: pair[0])
+        return rows
+
+    @staticmethod
+    def _schedule_group(when) -> str:
+        """Which band a release falls in, in *local* time - the day the
+        user would call it, not the UTC date it is stored as."""
+        today = datetime.now().astimezone().date()
+        day = when.astimezone().date()
+        if day == today:
+            return "Today"
+        if day == today + timedelta(days=1):
+            return "Tomorrow"
+        if day <= today + timedelta(days=6):
+            return "This Week"
+        return "Later"
+
+    def _build_schedule(self):
+        _clear_layout(self._schedule_layout)
+        rows = self._schedule_rows()
+        if not rows:
+            self._schedule_layout.addWidget(QLabel(
+                "Nothing scheduled yet - schedules fill in as your Saved "
+                "entries are looked up.", objectName="Muted"))
+            self._schedule_layout.addStretch()
+            return
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setSpacing(8)
+        body_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # The rows are already ascending, so the bands come out in order
+        # and a heading is needed only where the band changes.
+        current = None
+        for when, entry in rows:
+            band = self._schedule_group(when)
+            if band != current:
+                current = band
+                label = QLabel(band, objectName="Muted")
+                label.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent;"
+                                    f" font-weight: 700; padding-top: 6px;")
+                body_layout.addWidget(label)
+            body_layout.addWidget(self._build_schedule_row(entry, when))
+        self._schedule_layout.addWidget(scroll_area(body), stretch=1)
+
+    def _schedule_coming(self, entry) -> str:
+        """What is coming, in the wording that medium uses."""
+        stored = entry.get("next_release") or {}
+        if entry.get("type") in MANGA_TYPES:
+            try:
+                return f"Ch {float(stored.get('chapter')):g}"
+            except (TypeError, ValueError):
+                return "Next chapter"
+        try:
+            episode = int(stored.get("episode"))
+        except (TypeError, ValueError):
+            return "Next episode"
+        # format_episode_progress, not a format string of this tab's
+        # own: it is what every other number on this page is written
+        # with, and it already knows that a source with no season
+        # numbering says "E05" rather than claiming season zero.
+        return format_episode_progress(int(stored.get("season") or 0), episode) or "Next episode"
+
+    def _build_schedule_row(self, entry, when):
+        card = Card(hoverable=True, matte=True)
+        # Same lift as the featured card, same reason: SURFACE on this
+        # page's SURFACE panel is invisible without the old border.
+        card.setStyleSheet(
+            f"QFrame#Card {{ background: {theme.SURFACE_HOVER}; }}"
+            f"QFrame#Card:hover {{ background: {theme.SURFACE_ACTIVE}; }}")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(10, 8, 14, 8)
+        row.setSpacing(12)
+
+        cover = QLabel()
+        cover.setFixedSize(*SCHEDULE_COVER_SIZE)
+        cover.setPixmap(images.thumbnail_or_avatar(
+            entry.get("cover_path"), entry.get("title") or "", SCHEDULE_COVER_SIZE))
+        row.addWidget(cover)
+
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        column.addWidget(QLabel(entry.get("title") or "", objectName="CardTitle"))
+        column.addWidget(QLabel(self._schedule_coming(entry), objectName="CardMeta"))
+        row.addLayout(column, stretch=1)
+
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        slot = QLabel(release_schedule.format_slot(when.astimezone()),
+                      objectName="CardMeta")
+        slot.setAlignment(Qt.AlignmentFlag.AlignRight)
+        right.addWidget(slot)
+        countdown = QLabel(release_schedule.format_countdown(
+            when - datetime.now(timezone.utc)))
+        countdown.setAlignment(Qt.AlignmentFlag.AlignRight)
+        countdown.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 700;"
+                                f" font-size: 9pt; background: transparent;")
+        right.addWidget(countdown)
+        if (entry.get("next_release") or {}).get("estimated"):
+            # Said out loud, not implied: a manga date is extrapolated
+            # from release history (see mangadex._predict), and a
+            # projection stated as fact is the failure that flag exists
+            # to prevent.
+            tag = QLabel("Estimated", objectName="Muted")
+            tag.setAlignment(Qt.AlignmentFlag.AlignRight)
+            tag.setStyleSheet(f"color: {theme.TEXT_DIM}; background: transparent;"
+                              f" font-size: 8pt;")
+            right.addWidget(tag)
+        row.addLayout(right)
+
+        card.clicked.connect(lambda en=entry: self._open_schedule_entry(en))
+        return card
+
+    def _open_schedule_entry(self, entry):
+        """A schedule row opens the entry's details page - the same
+        target the card's body has on Saved.
+
+        Soft, like every other route into an overlay here: an import
+        error must leave the row inert rather than take a slot down with
+        it."""
+        window = _top_window(self)
+        if window is None:
+            return
+        try:
+            from windows import details
+            page = details.open_details(window, entry)
+        except Exception:
+            logs.exception("opening details from the schedule failed")
+            return
+        _wire_overlay_refresh(page, self, entry)
+
+    # ------------------------------------------------------------------
+    def _open_form(self, edit=False, entry=None, initial_title="", default_type=None):
+        """`initial_title`/`default_type` are Discover's: a picked card
+        opens this form already searching for that title, on the type of
+        the row it came from (Movies & Series has one row of each)."""
         if edit and entry is None:
             return
-        EntryForm(self, entry if edit else None, default_type=self.ENTRY_TYPES[0], type_options=self.TYPE_OPTIONS,
-                  on_save=self._on_form_save)
+        EntryForm(self, entry if edit else None,
+                  default_type=default_type or self.ENTRY_TYPES[0],
+                  type_options=self.TYPE_OPTIONS,
+                  on_save=self._on_form_save, initial_title=initial_title)
 
     def _on_form_save(self, entry, is_new):
         entry["updated_at"] = storage.now_iso()
@@ -2635,6 +3467,10 @@ class TrackerPage(GlassPage):
         self._save_entries()
         self._refresh_grid()
         self._refresh_schedules()
+        # A title added from Discover is still on screen behind this
+        # form; without this it would go on offering to add what it has
+        # just added.
+        self._sync_discover_saved()
 
 
 class AnimePage(TrackerPage):
@@ -2643,6 +3479,7 @@ class AnimePage(TrackerPage):
     TITLE = "Anime"
     TYPE_OPTIONS = ["Anime"]
     MEDIUM = release_schedule.MEDIUM_ANIME
+    DISCOVER_ROWS = (("anime", "Anime", "Anime"),)
 
 
 class MangaPage(TrackerPage):
@@ -2653,6 +3490,10 @@ class MangaPage(TrackerPage):
     PROGRESS_COLUMNS = ["Last Released Chapter"]
     SUPPORTS_PROGRESS_SYNC = False
     MEDIUM = release_schedule.MEDIUM_MANGA
+    # "reading" is the one kind that goes to discover_reading rather than
+    # discover_video; the entry type is Manga, which is the first of the
+    # three reading flavours and the one the form opens on.
+    DISCOVER_ROWS = (("reading", "Manga", "Manga"),)
 
 
 class SeriesPage(TrackerPage):
@@ -2662,6 +3503,10 @@ class SeriesPage(TrackerPage):
     TITLE = "Movies & Series"
     TYPE_OPTIONS = ["Series", "Movie"]
     MEDIUM = release_schedule.MEDIUM_SERIES
+    # Two rows, because films and shows are two Cinemeta catalogs and
+    # picking from one has to open the form on that type - the same
+    # split _search_catalogs already makes in the Add form.
+    DISCOVER_ROWS = (("series", "Series", "Series"), ("movie", "Movies", "Movie"))
 
 
 class _SearchSignals(QObject):
@@ -2673,7 +3518,13 @@ class _SearchSignals(QObject):
 
 
 class EntryForm(QDialog):
-    def __init__(self, parent, entry, default_type, type_options, on_save):
+    def __init__(self, parent, entry, default_type, type_options, on_save,
+                 initial_title=""):
+        """`initial_title` opens a *new* entry already searching for that
+        title - what the Discover tab hands over when a card is picked.
+        It goes through the same path a keystroke does (see the end of
+        this method), so the cover, the link and the id all come from the
+        existing matching code rather than from anything Discover knows."""
         super().__init__(parent)
         self.on_save = on_save
         self.entry = entry
@@ -2744,9 +3595,10 @@ class EntryForm(QDialog):
         # and 506px on a reading type (which keeps Last Released Chapter
         # and the Reading Website dropdown), and the Type dropdown can
         # turn one into the other while the dialog is open - so it is
-        # sized for the taller case, not the current one.
-        self.setFixedSize(460, 530)
-        theme.apply_dark_titlebar(self)
+        # sized for the taller case, not the current one. 562, up from
+        # the framed version's 530: the frameless panel carries its own
+        # heading now, where the native title bar used to.
+        self.setFixedSize(460, 562)
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -2920,6 +3772,17 @@ class EntryForm(QDialog):
         form.addLayout(btn_row)
 
         self._update_labels()
+        if initial_title and self.is_new:
+            self.title_combo.setCurrentText(initial_title)
+            # _on_title_edited by hand, because setCurrentText does not
+            # fire textEdited - that signal is user input only. Calling
+            # it rather than _trigger_search directly is the point: it is
+            # the whole keystroke path, debounce included, so a prefilled
+            # title searches exactly as a typed one does. The timer fires
+            # inside the exec() below.
+            self._on_title_edited(initial_title)
+            self._refresh_preview()
+        frameless_dialog(self, title=self.windowTitle())
         self.exec()
 
     # ------------------------------------------------------------------
@@ -3411,7 +4274,7 @@ class EntryForm(QDialog):
     def _save(self):
         title = self.title_combo.currentText().strip()
         if not title:
-            QMessageBox.warning(self, "Tracker", "Title can't be empty.")
+            inform(self, "Tracker", "Title can't be empty.")
             return
 
         # The Video Website's page for this title is resolved in a

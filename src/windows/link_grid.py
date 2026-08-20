@@ -16,14 +16,15 @@ from PyQt6.QtCore import QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QVBoxLayout, QWidget,
 )
 
 from helpers import child_process, images, storage, theme
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
-    scroll_area, search_field, show_toast, show_undo_toast,
+    Card, CardDragReorder, GlassPage, GridSelection, confirm,
+    defer_grid_rebuild, frameless_dialog, inform, scroll_area, search_field,
+    show_toast, show_undo_toast,
 )
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
@@ -461,7 +462,10 @@ class LinkGridPage(GridSelection, GlassPage):
         self._refresh_grid()
 
     def _build_card(self, entry, draggable=True):
-        card = Card(hoverable=True, matte=True)
+        # No matte any more: a plain #Card is the frameless tile now
+        # (theme.py) - icon and name floating on the ground, box only on
+        # hover - the same Harbor language the poster grids and Home use.
+        card = Card(hoverable=True)
         card.setFixedWidth(CARD_WIDTH)
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -561,7 +565,7 @@ class LinkGridPage(GridSelection, GlassPage):
             self._refresh_grid()
 
     def _remove_entry(self, entry):
-        if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Remove", f"Remove '{entry['name']}'?"):
             return
 
         # The whole record, copied before it is dropped: the cards holding
@@ -704,8 +708,9 @@ class EntryForm(QDialog):
         self._icon_signals.ready.connect(self._on_site_icon_ready)
 
         self.setWindowTitle("Edit Entry" if entry else "Add Entry")
-        self.setFixedSize(420, 560)
-        theme.apply_dark_titlebar(self)
+        # 590 tall, up from the framed 560: the panel carries its own
+        # heading now, where the native title bar used to.
+        self.setFixedSize(420, 590)
 
         form = QVBoxLayout(self)
         form.setContentsMargins(24, 20, 24, 16)
@@ -754,6 +759,7 @@ class EntryForm(QDialog):
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)
 
+        frameless_dialog(self, title=self.windowTitle())
         self.exec()
 
     def _on_primary_target_changed(self, target_data):
@@ -799,7 +805,7 @@ class EntryForm(QDialog):
         name = self.name_edit.text().strip()
         targets = [t for t in (row.get() for row in self.rows) if t]
         if not name or not targets:
-            QMessageBox.warning(self, "Links", "Name and at least one URL/app are required.")
+            inform(self, "Links", "Name and at least one URL/app are required.")
             return
 
         if self.is_new:

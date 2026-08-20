@@ -62,14 +62,15 @@ from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
                          QLinearGradient, QPainter, QPen, QPixmap,
                          QPolygonF, QRegion)
 from PyQt6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
 from helpers import (app_settings, artwork, downloads, logs, net, storage,
                      theme, video_backend)
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
-                             scroll_area, show_toast, use_hover_cursor)
+                             confirm, scroll_area, show_toast,
+                             use_hover_cursor)
 
 # Soft imports. These two modules are written alongside this page and a
 # tree without them must still import `windows.player` - main.py imports
@@ -227,7 +228,7 @@ _VK_LBUTTON = 0x01
 # bar slab at all). Near-black on purpose: antialiased text edges blend
 # toward the key colour, and a dark fringe is invisible where a magenta
 # one would not be. Must not collide with any colour actually drawn -
-# theme's nearest is BG #070a14.
+# theme's nearest is BG #0e0c09.
 KEY_COLOR = "#020202"
 _KEY_COLORREF = 0x020202        # COLORREF is 0x00BBGGRR - grey, so equal
 
@@ -729,7 +730,7 @@ class StartupBackdrop(QWidget):
     # daylight backdrop cannot swallow either the logo or the message box
     # that sits on top of it, light enough that the picture is still a
     # picture rather than a texture.
-    SCRIM = ((0.0, 7, 10, 20, 190), (0.45, 7, 10, 20, 150), (1.0, 7, 10, 20, 215))
+    SCRIM = ((0.0, 14, 12, 9, 190), (0.45, 14, 12, 9, 150), (1.0, 14, 12, 9, 215))
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1024,9 +1025,12 @@ class OverlayPanel(QFrame):
 
     def add_row(self, title, subtitle, on_click, selected=False, chevron=False):
         card = Card(matte=True)
+        # Rows are borderless at rest now (the Harbor pass); the border
+        # stays 1px in both states so picking one shifts nothing, and
+        # the accent ring remains what says "this is the one in use".
         card.setStyleSheet(
             f"QFrame#Card {{ background: {theme.SURFACE_HOVER};"
-            f" border: 1px solid {theme.ACCENT if selected else theme.BORDER};"
+            f" border: 1px solid {theme.ACCENT if selected else 'transparent'};"
             f" border-radius: {theme.RADIUS}px; }}")
         # Outer row so a drill-down chevron can sit against the right edge
         # while the title/subtitle stack keeps the left. A plain VBox card
@@ -1425,7 +1429,7 @@ class PlayerPage(GlassPage):
         layout.addWidget(self.episodes_btn)
 
         self.title_label = QLabel("")
-        # Pure white (the owner's ask), not the palette's blue-tinted
+        # Pure white (the owner's ask), not the palette's warm-tinted
         # TEXT - see theme.TEXT_OVER_MEDIA. The size rides in both
         # places on purpose: QSS font properties win the resolve, so the
         # stylesheet carries size/weight, while NoAntialias - which QSS
@@ -1454,7 +1458,7 @@ class PlayerPage(GlassPage):
 
         self.source_label = QLabel("")
         # White like the title (the owner's ask - TEXT_MUTED is a dark
-        # blue-grey that disappeared into bright frames); smaller size
+        # muted grey that disappeared into bright frames); smaller size
         # keeps it reading as secondary. Hard-edged for the same reason
         # as the title, size in QSS for the same reason as the title.
         self.source_label.setFont(_hard_edge_font(10.5))
@@ -1997,7 +2001,11 @@ class PlayerPage(GlassPage):
         elif watched:
             fill, edge, text = theme.SURFACE_HOVER, theme.SUCCESS, theme.TEXT
         else:
-            fill, edge, text = theme.SURFACE_HOVER, theme.BORDER, theme.TEXT
+            # Borderless at rest (the Harbor pass): the states that mean
+            # something keep their edges - accent for playing, SUCCESS
+            # for watched - and the plain rows stop competing with them.
+            # 1px transparent so no row is a pixel taller than another.
+            fill, edge, text = theme.SURFACE_HOVER, "transparent", theme.TEXT
         card = Card(matte=True, hoverable=not upcoming)
         card.setStyleSheet(
             f"QFrame#Card {{ background: {fill};"
@@ -2025,7 +2033,7 @@ class PlayerPage(GlassPage):
         if upcoming:
             badge = QLabel("UPCOMING")
             badge.setStyleSheet(
-                f"color: #04140c; background: {theme.SUCCESS};"
+                f"color: #0d1206; background: {theme.SUCCESS};"
                 f" border-radius: {theme.RADIUS_SM}px; padding: 2px 8px;"
                 f" font-weight: 700; font-size: 8.5pt;")
             layout.addWidget(badge)
@@ -3516,11 +3524,10 @@ class PlayerPage(GlassPage):
         try:
             if self._dl_scope == "season" and self.episode:
                 numbers = list(range(1, self._episode_count() + 1))
-                if QMessageBox.question(
+                if not confirm(
                         self, "Download Season",
                         f"Queue all {len(numbers)} episodes of season "
-                        f"{int(self.season or 1)} for download?"
-                ) != QMessageBox.StandardButton.Yes:
+                        f"{int(self.season or 1)} for download?"):
                     return
                 downloads.queue_season(
                     self.entry, season=self.season, episodes=numbers,
