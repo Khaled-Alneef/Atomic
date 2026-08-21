@@ -21,25 +21,30 @@ if not os.path.isfile(LIBMPV_FILE):
         "without it.\nRun: python packaging/fetch_libmpv.py")
 
 # The owner's TMDB read token, bundled so nobody using Atomic needs a key
-# of their own - ever (the owner's standing requirement). Deliberately
-# read from a gitignored file rather than written into source: this
-# repository is public, and a token committed to GitHub is picked up by
-# secret scanners and revoked - which breaks the feature for every copy
-# at once. The build used to succeed without the file, artwork silently
-# dark; it now stops, exactly like the libmpv check above, because a
-# tokenless exe is one that asks users for a TMDB key - the outcome this
-# file exists to prevent. On a new machine, copy the file over privately
-# (USB) from the machine that has it; never commit it.
+# of their own - ever (the owner's standing requirement).
+#
+# **It is committed to the repository now** (see .gitignore, which
+# records why). It was gitignored, with an encrypted copy beside it for
+# moving between machines, and that failed the first time it mattered:
+# a second machine could not build, the passphrase was not to hand, and
+# no released exe carried the token to recover from - v1.10 predates the
+# bundling by two days. So this check should now only ever fire on a
+# tree where the file was deleted by hand.
+#
+# The build stops rather than continuing without it, exactly like the
+# libmpv check above: a tokenless exe is one that asks users for a TMDB
+# key, which is the outcome this whole arrangement exists to prevent. It
+# used to succeed with artwork silently dark.
 TMDB_TOKEN_FILE = os.path.join(SPECPATH, "tmdb_token.txt")
 if not os.path.isfile(TMDB_TOKEN_FILE):
     raise SystemExit(
         "packaging/tmdb_token.txt is missing - the exe would ship without "
-        "the TMDB token and users would need their own key.\nThe repo "
-        "carries it encrypted as packaging/tmdb_token.txt.enc; restore it "
-        "with the owner's passphrase:\n  openssl enc -d -aes-256-cbc "
-        "-pbkdf2 -iter 200000 -in packaging/tmdb_token.txt.enc "
-        "-out packaging/tmdb_token.txt\n(Never commit the decrypted file - "
-        "it is gitignored on purpose.)")
+        "the TMDB token and users would need their own key.\nIt is "
+        "committed to the repository, so this usually means it was "
+        "deleted locally:\n  git checkout -- packaging/tmdb_token.txt\n"
+        "The older encrypted copy is still there as a fallback:\n"
+        "  openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 "
+        "-in packaging/tmdb_token.txt.enc -out packaging/tmdb_token.txt")
 
 
 

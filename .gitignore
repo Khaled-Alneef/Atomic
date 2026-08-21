@@ -36,9 +36,19 @@ data/
 Thumbs.db
 .DS_Store
 
-# The owner's TMDB read token. Bundled into Atomic.exe at build time
-# (packaging/Atomic.spec) so nobody needs their own key, but never
-# committed: this repository is public, and a token pushed to GitHub
-# is found by secret scanners and revoked - which would break the
-# feature for everyone rather than for one person.
-/packaging/tmdb_token.txt
+# The owner's TMDB read token is *committed* now, at
+# packaging/tmdb_token.txt, and is deliberately not ignored here.
+#
+# It used to be ignored, with the encrypted tmdb_token.txt.enc beside it
+# as the way to move it between machines. That broke down the first time
+# it was actually needed: a second machine could not build, the
+# passphrase was not to hand, and no released exe carried the token to
+# recover it from either - v1.10 was tagged two days before the bundling
+# existed. The owner's call, 21 August 2026, was to commit it plainly.
+#
+# The risk that decision accepts is not that someone uses the key - it
+# is that a scanner finds it and TMDB revokes it, which blanks artwork
+# for every copy at once. If that happens, the fix is a new key from
+# themoviedb.org/settings/api, not a hunt for a bug. And it is in the
+# history from now on, so removing the file later does not unpublish it;
+# rotating the key is what does.
