@@ -524,7 +524,11 @@ class MainWindow(QMainWindow):
         a tracker page meant going Back first - the owner's ask), and
         _sync_fold_buttons keeps the pair reading the same state."""
         button = QPushButton(objectName="FoldButton")
-        button.setFixedSize(28, 28)
+        # 24, down from 28, at the owner's ask ("just a bit smaller").
+        # Both bars keep the one size: they sit one above the other on
+        # Read and Watch, where two chevrons of different sizes read as
+        # two different controls.
+        button.setFixedSize(24, 24)
         use_hover_cursor(button)
         button.clicked.connect(self._toggle_sidebar)
         return button
@@ -1988,6 +1992,16 @@ def main():
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())
+    # Same idea, same moment, for the Discover rows: the owner's "it
+    # takes a few sec to show the lists" was never a slow fetch, only a
+    # fetch that had not been started until the page was opened. Warmed
+    # here, Read and Watch draw their rows on the first paint. Onto the
+    # bounded pool, so it cannot crowd out anything a visible page asks
+    # for (see tracker.prewarm_discover).
+    try:
+        tracker_module.prewarm_discover()
+    except Exception:
+        logs.exception("Could not prewarm the Discover rows")
     # Last, and on its own delay: the one thing here nobody is waiting
     # for. After whats_new deliberately - that dialog is modal, so a
     # timer armed before it would tick inside its nested event loop.

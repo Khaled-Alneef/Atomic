@@ -56,6 +56,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from collections import OrderedDict
@@ -192,6 +193,11 @@ SCROLL_HIDE_DELTA = 12  # px of travel before a scroll counts as intent
 # than left to sizeHint so _place_bottom can do its arithmetic before any
 # of them has been shown.
 BOTTOM_CONTROL_HEIGHT = 34
+# Where the door button lands, for the reader and the player alike -
+# the owner's ask, replacing "back to whatever page this was opened
+# from". main.PAGES' key, not a title.
+HOME_PAGE = "home"
+
 BOTTOM_STEP_WIDTH = 170
 CHAPTER_BOX_WIDTH = 460     # wide on purpose - chapter names are long
 BOTTOM_GAP = 16
@@ -1725,20 +1731,22 @@ class ReaderPage(GlassPage):
         showing nothing but background. Positioned by hand in
         _place_bottom - there is no layout here to join (see the top bar).
 
-        Which edge is which follows the reading direction, not Western
-        UI habit: this is right-to-left content, so *next* is to the left
-        and *previous* to the right, the same way Ctrl+Left is already
-        the next chapter. Both carry the word as well as the chevron, so
-        the position never has to be interpreted. The *plain* arrows are
-        the one deliberate mismatch: the owner asked for Right = next and
-        Left = previous, keyboard habit over reading direction - see
-        keyPressEvent."""
-        self._next_btn = self._button("‹  Next Chapter",
-                                      "Next chapter (Right, or Ctrl+Left)")
-        self._next_btn.clicked.connect(lambda: self.step_chapter(1))
-        self._prev_btn = self._button("Previous Chapter  ›",
+        Which edge is which used to follow the reading direction - next
+        on the left, because the content is right-to-left. The owner
+        asked for the two swapped, so it is now the keyboard's sense on
+        screen too: **previous on the left, next on the right**, matching
+        the plain Left/Right arrows in keyPressEvent. The chevrons flip
+        with the buttons - each still points the way its press moves -
+        and both carry the word as well, so the position never has to be
+        interpreted. Ctrl+arrow keeps the older reading-direction sense
+        and is therefore the one thing left that does not match the
+        edges."""
+        self._prev_btn = self._button("‹  Previous Chapter",
                                       "Previous chapter (Left, or Ctrl+Right)")
         self._prev_btn.clicked.connect(lambda: self.step_chapter(-1))
+        self._next_btn = self._button("Next Chapter  ›",
+                                      "Next chapter (Right, or Ctrl+Left)")
+        self._next_btn.clicked.connect(lambda: self.step_chapter(1))
 
         self._chapter_box = _ChapterCombo(self)
         self._chapter_box.setToolTip("Jump to a chapter")
@@ -1760,8 +1768,9 @@ class ReaderPage(GlassPage):
         self._chapter_box.markRequested.connect(self._mark_chapter)
         self._chapter_box.markAllRequested.connect(self._mark_all_chapters)
 
-        self._bottom_widgets = (self._next_btn, self._chapter_box,
-                                self._prev_btn)
+        # Listed left to right, the order they now sit in on the floor.
+        self._bottom_widgets = (self._prev_btn, self._chapter_box,
+                                self._next_btn)
         for widget in self._bottom_widgets:
             widget.setParent(self)
             widget.setVisible(False)
@@ -1922,9 +1931,9 @@ class ReaderPage(GlassPage):
         # x=0 and flush against the right edge, not inset: "pinned hard
         # to the far left and far right edges" is the ask, and an inset
         # of even 8px reads as floating rather than pinned.
-        self._next_btn.setGeometry(0, y, BOTTOM_STEP_WIDTH,
+        self._prev_btn.setGeometry(0, y, BOTTOM_STEP_WIDTH,
                                    BOTTOM_CONTROL_HEIGHT)
-        self._prev_btn.setGeometry(width - BOTTOM_STEP_WIDTH, y,
+        self._next_btn.setGeometry(width - BOTTOM_STEP_WIDTH, y,
                                    BOTTOM_STEP_WIDTH, BOTTOM_CONTROL_HEIGHT)
         # Centred on the window, which is the same centre the artwork is
         # drawn on - and capped, so it stays a control rather than
@@ -2992,17 +3001,22 @@ class ReaderPage(GlassPage):
         self._sync_fullscreen_glyph()
 
     def leave(self):
-        """Close the reader and go back to wherever the manga was opened
-        from - Home, or the Reading page.
+        """Close the reader and land on Home.
+
+        **Home, not the page this was opened from** - the owner's ask,
+        for the reader and the player alike. It used to return to
+        `origin_page`, which was usually the Reading shelf; the attribute
+        is still recorded because it costs nothing and says where the
+        reader came from, but nothing routes on it any more.
 
         The sidebar needs nothing put back: it was never modified, only
-        covered, so it reappears the moment this widget is hidden. The
-        *page* underneath is the part that can be wrong. It is normally
-        still the one the entry was opened from, and navigate_to no-ops
-        when it is; it is only not when something navigated behind the
-        reader while it was open (the updater's dialog, a global search),
-        and landing on that page instead of the shelf he came from is
-        what the door button is meant to rule out."""
+        covered, so it reappears the moment this widget is hidden.
+
+        Navigating happens *after* hide() and off a zero-timer, because
+        it rebuilds a whole page: doing it inline made the press hold the
+        reader on screen for the length of that build (see LEAVE_NAV_MS),
+        which is what "the back button is still slow" was. The reader is
+        gone in the frame after the click either way."""
         if self._closed:
             return
         self._closed = True
@@ -3017,14 +3031,24 @@ class ReaderPage(GlassPage):
         self.hide()
         window = self.window()
         navigate = getattr(window, "navigate_to", None)
-        if self.origin_page and callable(navigate):
+
+        def land():
+            # Deliberately holds no reference to the reader - it is
+            # deleteLater'd below and may well be gone by the time this
+            # runs. A dead window raises RuntimeError, which is the
+            # normal case on app shutdown, not an error worth a log.
             try:
-                navigate(self.origin_page, animate=False)
+                if callable(navigate):
+                    navigate(HOME_PAGE, animate=False)
+                page = getattr(window, "_current_page", None)
+                if page is not None:
+                    page.setFocus()
+            except RuntimeError:
+                pass
             except Exception:
-                logs.exception("reader could not return to its origin page")
-        page = getattr(window, "_current_page", None)
-        if page is not None:
-            page.setFocus()
+                logs.exception("reader could not return to Home")
+
+        QTimer.singleShot(0, land)
         self.deleteLater()
 
 
@@ -3137,6 +3161,64 @@ def _default_browser_exe() -> str:
     except Exception:
         _BROWSER_EXE = ""      # no association to read: leave it alone
     return _BROWSER_EXE
+
+
+def _autoplay_url(url: str) -> str:
+    """The configured music URL, rewritten to start playing on its own.
+
+    The owner's ask: "make the music URL when on Youtube or any other
+    play the video directly, do not make the user go to the browser and
+    press play by himself."
+
+    **YouTube watch pages cannot be made to autoplay** - `autoplay=1` on
+    /watch is ignored, and that is deliberate on YouTube's side. The
+    embed player is the form that honours it, so a watch link, a youtu.be
+    link or a playlist link is rewritten to /embed/ with autoplay set,
+    carrying the playlist along when there is one. Anything else gets a
+    plain `autoplay=1`, which the sites that support it read and the
+    rest ignore as an unknown parameter.
+
+    Not a guarantee, and it cannot be one from here: browsers block
+    *unmuted* autoplay until a site has earned it, so a YouTube the
+    owner plays daily starts and a cold domain may still want one click.
+    This is the best a link can do without shipping a player - mpv is in
+    the app but has no yt-dlp behind it (see helpers/video_backend), so
+    it cannot open a YouTube page at all.
+
+    Never raises: an unparseable URL comes back exactly as it went in."""
+    if not str(url or "").lower().startswith(("http://", "https://")):
+        # A custom scheme (spotify:, a launcher URI) or plain nonsense -
+        # both are for ShellExecute to judge, not for this to rewrite.
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.netloc.lower().removeprefix("www.")
+        query = dict(urllib.parse.parse_qsl(parts.query))
+        video = ""
+        if host in ("youtube.com", "m.youtube.com", "music.youtube.com"):
+            if parts.path == "/watch":
+                video = query.get("v", "")
+            elif parts.path.startswith("/embed/"):
+                video = parts.path[len("/embed/"):]
+        elif host == "youtu.be":
+            video = parts.path.lstrip("/")
+        playlist = query.get("list", "")
+        if video or playlist:
+            # videoseries is the embed player's name for "a playlist
+            # with no particular video picked out".
+            wanted = {"autoplay": "1", "rel": "0"}
+            if playlist:
+                wanted["list"] = playlist
+            return urllib.parse.urlunsplit((
+                "https", "www.youtube.com",
+                f"/embed/{video or 'videoseries'}",
+                urllib.parse.urlencode(wanted), ""))
+        query["autoplay"] = "1"
+        return urllib.parse.urlunsplit((
+            parts.scheme or "https", parts.netloc, parts.path,
+            urllib.parse.urlencode(query), parts.fragment))
+    except Exception:
+        return url
 
 
 def _window_exe(hwnd) -> str:
@@ -3257,6 +3339,8 @@ def _open_music_quietly(window):
     if time.monotonic() - _MUSIC_OPENED_AT < _MUSIC_REOPEN_S:
         return
     _MUSIC_OPENED_AT = time.monotonic()
+    # Opened in a form that starts itself - see _autoplay_url.
+    url = _autoplay_url(url)
     # Read *before* the launch: a browser window that already held the
     # foreground is one the owner put there, and is the one window
     # _hush_browser_window must not touch.

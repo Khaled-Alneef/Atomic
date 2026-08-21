@@ -69,7 +69,7 @@ from PyQt6.QtWidgets import (
 from helpers import (app_settings, artwork, downloads, logs, net, storage,
                      theme, video_backend)
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
-                             confirm, scroll_area, show_toast,
+                             confirm, finish_toast, scroll_area, show_toast,
                              use_hover_cursor)
 
 # Soft imports. These two modules are written alongside this page and a
@@ -853,15 +853,46 @@ class SeekBar(QWidget):
         self._duration = float(value or 0.0)
         self.update()
 
+    def _column_of(self, value) -> int:
+        """Which pixel column `value` seconds lands on, or -1 with no
+        duration yet. What decides whether a repaint would change
+        anything at all."""
+        if self._duration <= 0:
+            return -1
+        left, span = self._track_span()
+        share = max(0.0, min(1.0, float(value) / self._duration))
+        return int(left + span * share)
+
     def set_position(self, value):
+        """**Repaints only when the bar would actually look different.**
+
+        mpv reports `time-pos` many times a second, and this used to
+        call update() on every one of them. This bar is a *native child
+        window* over the video surface (see the module docstring), so
+        each of those was a native repaint competing with mpv's own
+        rendering for the same frames - the owner's "frames drop when a
+        video is playing". A progress bar that moves one pixel every
+        second or so does not need sixty repaints in that second: on a
+        24-minute episode across a 1000px bar the thumb advances one
+        column roughly every 1.4s, and that is now exactly how often
+        this paints. Nothing on screen changes, because a sub-pixel move
+        had nothing to draw."""
         if self._dragging:
             return          # the thumb belongs to the pointer mid-drag
-        self._position = float(value or 0.0)
-        self.update()
+        value = float(value or 0.0)
+        moved = self._column_of(value) != self._column_of(self._position)
+        self._position = value
+        if moved:
+            self.update()
 
     def set_buffered(self, value):
-        self._buffered = float(value or 0.0)
-        self.update()
+        # Same rule, same reason: the buffered shading is redrawn only
+        # when its edge reaches a new column.
+        value = float(value or 0.0)
+        moved = self._column_of(value) != self._column_of(self._buffered)
+        self._buffered = value
+        if moved:
+            self.update()
 
     def _track_span(self):
         """(left edge, usable width) of the track - see EDGE."""
@@ -1002,12 +1033,34 @@ class PlayPauseButton(QPushButton):
 # owner's ask; the keyboard's ←/→ still seek.
 
 
+def _clear_layout(layout):
+    """Take everything out of `layout`, nested layouts included.
+
+    Recursive because the panel's footer holds stepper *layouts*, not
+    just widgets, and a takeAt loop that only looks at item.widget()
+    leaves those behind - they would stack up on every refill."""
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.setParent(None)
+            widget.deleteLater()
+            continue
+        child = item.layout()
+        if child is not None:
+            _clear_layout(child)
+            child.deleteLater()
+
+
 class OverlayPanel(QFrame):
     """The popup the subtitle/track/quality buttons open.
 
     Native for the same reason the controls are (see module docstring),
     and therefore opaque: it sits over the video, and a native child
-    window cannot be blended against another native child window."""
+    window cannot be blended against another native child window.
+
+    Refilled rather than replaced when its contents change - see
+    `reset`, and the flashing it exists to stop."""
 
     closed = Signal()
 
@@ -1026,11 +1079,13 @@ class OverlayPanel(QFrame):
 
         header = QHBoxLayout()
         header.setSpacing(6)
-        label = QLabel(title)
-        label.setStyleSheet(
+        # Kept on self so reset() can retitle a panel it is refilling
+        # instead of building a new one.
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet(
             f"color: {theme.TEXT}; font-size: 13pt; font-weight: 700;"
             f" background: transparent; border: none;")
-        header.addWidget(label)
+        header.addWidget(self.title_label)
         header.addStretch(1)
         close_btn = _icon_button("", "Close", size=30, font_pt=11)
         close_btn.clicked.connect(self.closed.emit)
@@ -1042,16 +1097,44 @@ class OverlayPanel(QFrame):
         self.body_layout = QVBoxLayout(self.body)
         self.body_layout.setContentsMargins(0, 0, 0, 0)
         self.body_layout.setSpacing(6)
-        area = scroll_area(self.body)
-        area.setStyleSheet("background: transparent; border: none;")
-        area.viewport().setStyleSheet("background: transparent;")
-        outer.addWidget(area, stretch=1)
+        self.area = scroll_area(self.body)
+        self.area.setStyleSheet("background: transparent; border: none;")
+        self.area.viewport().setStyleSheet("background: transparent;")
+        outer.addWidget(self.area, stretch=1)
 
         # Vertical: the footer holds full-width stepper rows now, and two
         # of them side by side left the value column 40px wide.
         self.footer_layout = QVBoxLayout()
         self.footer_layout.setSpacing(6)
         outer.addLayout(self.footer_layout)
+
+    def reset(self, title=None):
+        """Empty the body and footer so this panel can be refilled
+        without being destroyed.
+
+        **This is what stops the source list "opening several small
+        windows".** A redraw used to mean a whole new OverlayPanel, and
+        these are *native* child windows over the video: each rebuild
+        tore one down and put another up, and a freshly created native
+        overlay paints at Qt's default geometry for a frame before
+        _show_panel moves it - the same one-frame corner box _show_status
+        already documents. At one redraw per lookup that was rare enough
+        to miss; progressive stream and subtitle results made it one per
+        *batch*, which is several flashes per lookup and exactly what
+        the owner reported. Refilling creates no window at all.
+
+        The scroll offset is kept: a list that grows while it is being
+        read must not jump back to the top under the pointer."""
+        bar = self.area.verticalScrollBar()
+        offset = bar.value() if bar is not None else 0
+        _clear_layout(self.body_layout)
+        _clear_layout(self.footer_layout)
+        if title:
+            self.title_label.setText(title)
+        if bar is not None:
+            # After the refill has laid out - setting it now would clamp
+            # the value against the emptied body's range, which is 0.
+            QTimer.singleShot(0, lambda: bar.setValue(offset))
 
     def add_group(self, name):
         label = QLabel(name)
@@ -1065,13 +1148,32 @@ class OverlayPanel(QFrame):
         card = Card(matte=True)
 
         # Rows are borderless at rest now (the Harbor pass); the border
-        # stays 1px in both states so picking one shifts nothing, and
+        # stays 1px in every state so picking one shifts nothing, and
         # the accent ring remains what says "this is the one in use".
+        #
+        # **The hover rule has to be written here.** A widget's own
+        # stylesheet beats the application one for that widget, so the
+        # app's `#Card[matte][hoverable]:hover` never reached these rows
+        # - measured, a hovered unselected row painted 0 accent pixels,
+        # identical to an unhovered one. And since the resting fill was
+        # SURFACE_HOVER already, hovering changed nothing at all: the
+        # owner's "add a hover when the mouse touch the buttons".
+        #
+        # Hover deliberately does *not* borrow the accent ring the way
+        # the app rule does. Selection is the accent; hover is a lift in
+        # the fill plus a neutral edge, so a row under the pointer can
+        # never be mistaken for the row in use.
         def paint(is_selected):
+            rest = theme.SURFACE_HOVER if is_selected else theme.SURFACE
+            hover = theme.SURFACE_ACTIVE if is_selected else theme.SURFACE_HOVER
+            ring = theme.ACCENT if is_selected else "transparent"
+            hover_ring = theme.ACCENT if is_selected else theme.BORDER
             card.setStyleSheet(
-                f"QFrame#Card {{ background: {theme.SURFACE_HOVER};"
-                f" border: 1px solid"
-                f" {theme.ACCENT if is_selected else 'transparent'};"
+                f"QFrame#Card {{ background: {rest};"
+                f" border: 1px solid {ring};"
+                f" border-radius: {theme.RADIUS}px; }}"
+                f"QFrame#Card:hover {{ background: {hover};"
+                f" border: 1px solid {hover_ring};"
                 f" border-radius: {theme.RADIUS}px; }}")
             head.setStyleSheet(
                 f"color: {theme.ACCENT if is_selected else theme.TEXT};"
@@ -1276,6 +1378,9 @@ class PlayerPage(GlassPage):
         self._dead_sources = set()
         self._subtitles = []
         self._subtitle_label = "Off"
+        # The sticky toast a subtitle pick raises, held until that pick
+        # finishes - see _pick_subtitle.
+        self._sub_toast = None
         self._sub_delay = 0.0
         # Said once per player, not once per nudge - see _apply_sub_delay.
         self._delay_warned = False
@@ -1348,7 +1453,11 @@ class PlayerPage(GlassPage):
         self._work.meta_ready.connect(self._on_meta)
         self._work.stream_prepared.connect(self._on_stream_prepared)
         self._work.failed.connect(self._on_failed)
-        self._work.note.connect(self._on_failed)
+        # Its own slot, not _on_failed: a note is a *step* of the
+        # subtitle job, and it belongs in the sticky toast that job is
+        # already holding rather than in a 2s box of its own that fades
+        # while the translator is still working (see _pick_subtitle).
+        self._work.note.connect(self._on_sub_note)
 
         # Cinemeta's real season/episode map, once it arrives: what the
         # season list, the prev/next bounds and the wrong-episode guard
@@ -2543,14 +2652,27 @@ class PlayerPage(GlassPage):
             if (not lang.startswith("ar") and ai_translate is not None
                     and ai_translate.available()):
                 provider = ai_translate.default_provider()
-                self._work.note.emit(
-                    f"Translating to Arabic With {ai_translate.label(provider)}...",
-                    run)
+                name = ai_translate.label(provider)
+                self._work.note.emit(f"Translating to Arabic With {name}...",
+                                     run)
                 cues = subtitles_module.parse(text, fmt)
                 translated = None
                 try:
+                    # **Say how far along it is.** A full episode is
+                    # hundreds of cues in batches, which is minutes; the
+                    # owner saw the "Translating..." line, then nothing,
+                    # and reasonably read a long silence as a failure.
+                    # `progress` has always been on translate() and was
+                    # simply never passed. Emitted through the note
+                    # signal, so the worker thread never touches a
+                    # widget (rules/integrations.md).
+                    def told(done, total):
+                        self._work.note.emit(
+                            f"Translating to Arabic With {name}... "
+                            f"{done}/{total}", run)
+
                     translated = ai_translate.translate(
-                        cues, provider=provider,
+                        cues, provider=provider, progress=told,
                         cancelled=lambda: self._closing or run != self._run)
                 except ai_translate.TranslationFailed as failure:
                     # **Say which provider said no, and what it said.**
@@ -2625,7 +2747,10 @@ class PlayerPage(GlassPage):
             self._refresh_streams_panel()
             return
         self._streams_started = True
-        self._play_stream(0)
+        # A list handed in by the details page is a source the user
+        # picked by hand, with their choice at index 0 - start that
+        # one alone rather than racing five others against it.
+        self._play_stream(0, solo=self._given_streams is not None)
 
     def _merge_streams(self, incoming):
         """Fold a later batch into the list playback is already using.
@@ -2682,7 +2807,7 @@ class PlayerPage(GlassPage):
             self.handle["sub-visibility"] = True
         except Exception:
             logs.exception("sub-add failed")
-            show_toast(self._toast_anchor(), "Subtitle Could Not Be Loaded")
+            self._finish_sub_toast("Subtitle Could Not Be Loaded")
             return
         # mpv accepts sub_add and then quietly leaves the old track
         # primary if it could not parse the file. Without this the panel
@@ -2691,10 +2816,10 @@ class PlayerPage(GlassPage):
         # reads as "the delay does nothing on this one".
         if not self._external_sub_selected(path):
             logs.warning(f"mpv did not select the loaded subtitle {path}")
-            show_toast(self._toast_anchor(), "That Subtitle Could Not Be Read")
+            self._finish_sub_toast("That Subtitle Could Not Be Read")
             return
         self._subtitle_label = label
-        show_toast(self._toast_anchor(), "Subtitle Loaded")
+        self._finish_sub_toast("Subtitle Loaded")
         if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
             self._open_subtitle_panel(rebuild=True)
 
@@ -2725,6 +2850,13 @@ class PlayerPage(GlassPage):
 
     def _on_failed(self, message, run):
         if self._closing or run != self._run:
+            return
+        # A subtitle pick's sticky toast is the one box the user is
+        # already watching, so a failure goes *into* it rather than
+        # beside it - otherwise "Loading Subtitle..." sits there for its
+        # full two minutes with the reason in a box that has faded.
+        if getattr(self, "_sub_toast", None) is not None:
+            self._finish_sub_toast(message)
             return
         show_toast(self._toast_anchor(), message)
 
@@ -2761,7 +2893,7 @@ class PlayerPage(GlassPage):
         self.audio_pill.setVisible(bool(audio))
 
     # ---- playback ----------------------------------------------------
-    def _play_stream(self, index, resume_at=None):
+    def _play_stream(self, index, resume_at=None, solo=False):
         if self.handle is None or not self._streams:
             return
         index = max(0, min(index, len(self._streams) - 1))
@@ -2782,12 +2914,13 @@ class PlayerPage(GlassPage):
         # the server.
         if not stream.get("url") and stream.get("info_hash") and streams_module:
             self._show_loading_soon("Connecting to the source...")
-            self._spawn(self._prepare_stream_worker, index, resume_at, self._run)
+            self._spawn(self._prepare_stream_worker, index, resume_at,
+                        self._run, solo)
             return
 
         self._load_into_mpv(stream, resume_at)
 
-    def _prepare_stream_worker(self, index, resume_at, run):
+    def _prepare_stream_worker(self, index, resume_at, run, solo=False):
         """Never raises - a dead worker here leaves the page on
         "Connecting..." with nothing coming.
 
@@ -2809,15 +2942,30 @@ class PlayerPage(GlassPage):
         Nothing is re-prepared afterwards. There used to be a serial
         `prepare(chosen)` behind the race for the case where it returned
         None - which is the case where that exact release had *just*
-        failed, so it re-ran the whole wait to fail again."""
+        failed, so it re-ran the whole wait to fail again.
+
+        **`solo` turns the race off, and a deliberate pick sets it.**
+        Racing is right when Atomic chose the source itself: a swarm's
+        advertised seeders say nothing about whether it answers, and
+        finding that out serially cost 45s. It is wrong when the *user*
+        picked a release out of the source list, for two reasons
+        measured on House of the Dragon S02E05: the six releases start
+        together and split one connection, so the 1876-seeder release
+        the owner deliberately chose downloaded at a sixth of the rate
+        it could - "it takes ages to load" - and whichever of the six
+        answered first is what played, quietly overriding the choice
+        that `_play_stream_choice` promises not to re-rank. A solo pick
+        that genuinely fails still falls through to _try_next_source,
+        which races the rest as before."""
         try:
             chosen = self._streams[index]
-            others = [s for i, s in enumerate(self._streams)
-                      if i != index and i not in self._dead_sources
-                      and s.get("kind") != "drm"
-                      and _canonical_quality(s.get("quality"))
-                      == _canonical_quality(chosen.get("quality"))]
-            if hasattr(streams_module, "prepare_fastest"):
+            others = [] if solo else [
+                s for i, s in enumerate(self._streams)
+                if i != index and i not in self._dead_sources
+                and s.get("kind") != "drm"
+                and _canonical_quality(s.get("quality"))
+                == _canonical_quality(chosen.get("quality"))]
+            if others and hasattr(streams_module, "prepare_fastest"):
                 stream = streams_module.prepare_fastest(
                     [chosen] + others, season=self.season, episode=self.episode)
             else:
@@ -3341,6 +3489,18 @@ class PlayerPage(GlassPage):
                 and getattr(self._panel, "kind", "") == kind):
             self._close_panel()
             return None
+        if (rebuild and self._panel is not None
+                and getattr(self._panel, "kind", "") == kind):
+            # Same panel, new contents: refill the native window that is
+            # already up instead of destroying it and putting an
+            # identical one in its place. See OverlayPanel.reset - with
+            # progressive results this path now runs several times per
+            # lookup, and each swap was a visible flash.
+            try:
+                self._panel.reset(title)
+                return self._panel
+            except RuntimeError:
+                pass        # deleted under us; fall through to a new one
         self._close_panel()
         panel = OverlayPanel(self, title)
         panel.kind = kind
@@ -3363,9 +3523,9 @@ class PlayerPage(GlassPage):
             panel.add_message(
                 "Searching..." if subtitles_module is not None
                 else "Subtitle search is not available in this build.")
-        for group, items in (("Arabic", arabic), ("Other Languages", other)):
+        def add_language_group(group, items):
             if not items:
-                continue
+                return
             by_source = {}
             for item in items:
                 by_source.setdefault(item.get("source") or "Unknown", []).append(item)
@@ -3390,6 +3550,14 @@ class PlayerPage(GlassPage):
                     panel.add_row(label, " · ".join(parts),
                                   lambda checked=False, r=item: self._pick_subtitle(r),
                                   selected=label == self._subtitle_label)
+
+        # **Every Arabic row first, whatever produced it** - the owner's
+        # ask ("move the ARABIC by any source above all other
+        # languages"). Arabic already sat above Other Languages; what did
+        # not was the AI-translated Arabic below, which is Arabic too and
+        # was the last thing on a long list. So: real Arabic, then
+        # translated Arabic, then everything else.
+        add_language_group("Arabic", arabic)
 
         # **AI translation, said out loud.** Picking a non-Arabic
         # subtitle has always run it through the configured translator,
@@ -3421,6 +3589,8 @@ class PlayerPage(GlassPage):
                 "Add an OpenAI, DeepSeek, Gemini or Anthropic key in "
                 "Settings > API Keys to translate the subtitles above "
                 "into Arabic.")
+        # Last, under both Arabic groups.
+        add_language_group("Other Languages", other)
         panel.finish()
 
         # Delay first, size second: resyncing a mismatched Arabic release
@@ -3459,10 +3629,56 @@ class PlayerPage(GlassPage):
         self._open_subtitle_panel(rebuild=True)
 
     def _pick_subtitle(self, result):
+        """Load one subtitle, saying so until it has actually loaded.
+
+        **Sticky, not a 2s toast.** Picking a non-Arabic row runs the
+        whole file through the AI translator, which for a 400-cue
+        episode is minutes, not moments - and the old transient toast
+        said "Translating to Arabic With OpenAI..." and then vanished
+        long before anything happened. The owner reported exactly that:
+        an alert, and then no subtitle and no explanation. One toast now
+        lives for the whole job and is handed each step's wording, so
+        the end of it is always visible - loaded, or why not."""
         if subtitles_module is None:
             return
-        show_toast(self._toast_anchor(), "Loading Subtitle...")
+        self._drop_sub_toast()
+        self._sub_toast = show_toast(self._toast_anchor(),
+                                     "Loading Subtitle...", duration_ms=None)
         self._spawn(self._fetch_subtitle_worker, result, self._run)
+
+    def _drop_sub_toast(self):
+        """Close a subtitle toast still up from an earlier pick, so two
+        picks in a row do not stack two sticky boxes in the corner."""
+        toast, self._sub_toast = getattr(self, "_sub_toast", None), None
+        if toast is None:
+            return
+        try:
+            toast.close()
+        except RuntimeError:
+            pass        # already gone on the C++ side
+
+    def _finish_sub_toast(self, text):
+        """Put `text` into the live subtitle toast and let it fade."""
+        toast, self._sub_toast = getattr(self, "_sub_toast", None), None
+        finish_toast(toast, self._toast_anchor(), text)
+
+    def _on_sub_note(self, message, run):
+        """A step of the subtitle job, into the toast already up.
+
+        Never fades on its own: the job is still running, and the
+        translator's own progress lands here too."""
+        if self._closing or run != self._run:
+            return
+        toast = getattr(self, "_sub_toast", None)
+        if toast is None:
+            self._sub_toast = show_toast(self._toast_anchor(), message,
+                                         duration_ms=None)
+            return
+        try:
+            toast.set_text(message, None)
+        except RuntimeError:
+            self._sub_toast = show_toast(self._toast_anchor(), message,
+                                         duration_ms=None)
 
     def _nudge_delay(self, delta):
         self._sub_delay = round(self._sub_delay + delta, 2)
@@ -3669,8 +3885,22 @@ class PlayerPage(GlassPage):
         rows = getattr(panel, "track_rows", None) if panel is not None else None
         if not rows or getattr(panel, "kind", "") != "tracks":
             return False
-        selected = {("aid" if t.get("type") == "audio" else "sid", t.get("id"))
-                    for t in self._tracks if t.get("selected")}
+        # **Only audio and sub tracks, and that filter is the whole of a
+        # shipped bug.** This read `"aid" if type == "audio" else "sid"`
+        # over every selected track, so mpv's *video* track - always
+        # selected - became ("sid", <video id>). mpv numbers ids per
+        # type, so the video track is id 1 and the first subtitle is
+        # also id 1: the forged key lit that subtitle whenever a video
+        # was playing, while no_sub below correctly lit Off as well.
+        # Two rows lit at once in the subtitle group, which is exactly
+        # what the owner reported ("it selected both and it is
+        # confusing") - and it needed no clicking to appear.
+        selected = set()
+        for track in self._tracks:
+            kind = track.get("type")
+            if kind in ("audio", "sub") and track.get("selected"):
+                selected.add(("aid" if kind == "audio" else "sid",
+                              track.get("id")))
         no_sub = not any(t.get("type") == "sub" and t.get("selected")
                          for t in self._tracks)
         try:
@@ -4092,7 +4322,9 @@ class PlayerPage(GlassPage):
         exactly when this gets used, and restarting from zero would make
         it useless."""
         self._close_panel()
-        self._play_stream(index, resume_at=self._position)
+        # Picked by hand from the sources panel - same rule as a
+        # pick off the details page (see _prepare_stream_worker).
+        self._play_stream(index, resume_at=self._position, solo=True)
 
     def _show_panel(self, panel):
         self._panel_guard = time.monotonic()
@@ -4650,6 +4882,9 @@ class PlayerPage(GlassPage):
         self._save_timer.stop()
         self._loading_delay.stop()
         self._close_panel()
+        # A sticky subtitle toast outlives this page otherwise - it is
+        # parented to the window, and nothing would ever finish it.
+        self._drop_sub_toast()
         # Cursor first: the surface is about to go away, and a widget
         # that dies holding the blank cursor leaves Windows painting it
         # over whatever comes next.
@@ -4666,6 +4901,28 @@ class PlayerPage(GlassPage):
             self.on_close()
         self.closed.emit()
         self.hide()
+        # Land on Home, the owner's ask - the same rule the reader's
+        # door follows (reader.HOME_PAGE). Off a zero-timer and holding
+        # no reference to this page, because navigating rebuilds a whole
+        # page and doing it inline would keep the player on screen for
+        # the length of that build.
+        window = self.window()
+        navigate = getattr(window, "navigate_to", None)
+
+        def land():
+            try:
+                if callable(navigate):
+                    from windows.reader import HOME_PAGE
+                    navigate(HOME_PAGE, animate=False)
+                page = getattr(window, "_current_page", None)
+                if page is not None:
+                    page.setFocus()
+            except RuntimeError:
+                pass        # the window went away first - app shutdown
+            except Exception:
+                logs.exception("player could not return to Home")
+
+        QTimer.singleShot(0, land)
         self.deleteLater()
 
     def closeEvent(self, event):

@@ -68,6 +68,72 @@ query ($search: String) {
 }
 """
 
+# Everything airing in a window, rather than one title's next episode.
+# `airingAt` is a unix timestamp and the sort is by it, so the first page
+# is simply "what is out next" across the whole catalogue - which is what
+# the Schedule tab needs to show more than the user's own saved shows.
+_UPCOMING_QUERY = """
+query ($from: Int, $to: Int, $perPage: Int) {
+  Page(perPage: $perPage) {
+    airingSchedules(airingAt_greater: $from, airingAt_lesser: $to,
+                    sort: TIME) {
+      episode
+      airingAt
+      media {
+        title { romaji english native }
+        coverImage { large }
+        format
+        isAdult
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_upcoming_airing(hours: int = 168, limit: int = 40,
+                          timeout: int = 8) -> list:
+    """What airs next across AniList, soonest first.
+
+    The Schedule tab's "everything else" - the rows that are not the
+    owner's own saved shows. Each row is
+    {title, episode, at (aware UTC datetime), cover_url}.
+
+    Adult titles are dropped, and so are the formats nobody schedules a
+    week around (music videos above all). Fails soft to [] and lets
+    RateLimited through for the caller to say out loud, exactly as
+    fetch_next_episode does - a schedule that quietly shows only saved
+    rows because AniList said 403 is the failure this project has
+    already shipped once."""
+    now = int(time.time())
+    try:
+        data = _post(_UPCOMING_QUERY,
+                     {"from": now, "to": now + int(hours) * 3600,
+                      "perPage": max(1, min(int(limit), 50))}, timeout)
+    except RateLimited:
+        raise
+    except Exception:
+        return []
+    page = ((data or {}).get("data") or {}).get("Page") or {}
+    out = []
+    for row in page.get("airingSchedules") or []:
+        media = row.get("media") or {}
+        if media.get("isAdult") or media.get("format") in ("MUSIC",):
+            continue
+        titles = media.get("title") or {}
+        title = (titles.get("english") or titles.get("romaji")
+                 or titles.get("native") or "").strip()
+        if not title or not row.get("airingAt"):
+            continue
+        out.append({
+            "title": title,
+            "episode": int(row.get("episode") or 0),
+            "at": datetime.fromtimestamp(int(row["airingAt"]), timezone.utc),
+            "cover_url": (media.get("coverImage") or {}).get("large") or "",
+        })
+    return out[:limit]
+
+
 _EXTERNAL_LINKS_QUERY = """
 query ($search: String) {
   Page(perPage: 10) {

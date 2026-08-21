@@ -274,6 +274,19 @@ def _external_cover(title: str, timeout: int):
     return found
 
 
+def cover_for_title(title: str, timeout: int = 6):
+    """A cover for a title with no page to scrape at all, or None.
+
+    `_external_cover` under a public name. `fetch_manga_details` is the
+    usual way in, but a Discover row can carry neither a cover *nor* a
+    series URL - some site search shapes return a title and nothing else
+    - and those cards had no route to art of any kind. Same strict title
+    matching, same session cache, same fail-soft: a title neither
+    catalogue carries keeps None, because a confidently wrong cover is
+    worse than a letter avatar."""
+    return _external_cover(title, timeout)
+
+
 def _swat_series_details(base_url: str, series_id: str, timeout: int):
     try:
         body = json.loads(_get(f"{base_url}v2/api/v2/series/{series_id}/", timeout))

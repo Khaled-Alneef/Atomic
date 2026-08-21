@@ -195,6 +195,62 @@ DISCOVER_LIMIT = 30
 # shown forever.
 _DISCOVER_CACHE = {}
 _DISCOVER_CACHE_TTL_S = 15 * 60
+
+# Every browse row the two tracker pages draw, as (kind, fetch). Named
+# once here because prewarm_discover and _discover_row_worker have to
+# agree on both the cache key and the call, and a row that drifted
+# between them would warm one key and read another.
+_BROWSE_ROWS = (
+    ("reading", lambda: discover.discover_reading_sites(
+        query="", limit=DISCOVER_LIMIT)),
+    ("reading_latest", lambda: discover.discover_reading_latest(
+        limit=DISCOVER_LIMIT)),
+    ("anime", lambda: discover.discover_video("anime", query="",
+                                              limit=DISCOVER_LIMIT)),
+    ("series", lambda: discover.discover_video("series", query="",
+                                               limit=DISCOVER_LIMIT)),
+    ("movie", lambda: discover.discover_video("movie", query="",
+                                              limit=DISCOVER_LIMIT)),
+)
+
+
+def prewarm_discover():
+    """Fetch every Discover browse row before anyone opens Read or Watch.
+
+    **The owner's ask**: opening either page and waiting "a few sec" for
+    the lists. Nothing about the fetch is slow - measured, a row answers
+    in well under a second - it simply had not *started* until the page
+    was opened and asked for it. So it starts at launch instead, while
+    the window is sitting on Home doing nothing.
+
+    Writes the same (kind, "") keys `_discover_row_worker` reads, so a
+    warmed page finds its rows in hand and draws them on the first
+    paint rather than showing "Looking around...".
+
+    Onto the shared four-worker pool, never a thread per row: this is
+    the same rule every other background fan-out here follows
+    (lookup_pool), and it also means these queue *behind* anything a
+    visible page has already asked for. Each job is wrapped - a pool
+    worker that raises takes every queued lookup with it - and a key
+    that is already fresh is skipped, so this costs nothing on a second
+    call."""
+    now = time.monotonic()
+    for kind, fetch in _BROWSE_ROWS:
+        cached = _DISCOVER_CACHE.get((kind, ""))
+        if cached and now - cached[0] < _DISCOVER_CACHE_TTL_S:
+            continue
+        lookup_pool.submit(_prewarm_row, kind, fetch)
+
+
+def _prewarm_row(kind, fetch):
+    """One warmed row. Never raises, never reports to any page - the
+    cache is the whole product, and whichever page opens next reads it."""
+    try:
+        rows = [row for row in (fetch() or []) if isinstance(row, dict)]
+    except Exception:
+        return          # a row that cannot answer simply stays unwarmed
+    if rows:
+        _DISCOVER_CACHE[(kind, "")] = (time.monotonic(), rows)
 # Typing here is debounced far longer than the entry form's title search
 # (SEARCH_DEBOUNCE_MS, 250): that one fills a dropdown the user is
 # staring at mid-word, this one rebuilds rows of poster cards and fires
@@ -901,6 +957,9 @@ class _DiscoverSignals(QObject):
     # "under a later query"; the key is what says which row it belongs
     # to and a stale one simply matches nothing.
     history_cover = Signal(str, str)
+    # The Schedule tab's catalogue-wide rows - everything airing
+    # soon, not only what is saved. [row dicts], run.
+    schedule_upcoming = Signal(object, int)
 
 
 class _StayOpenMenu(QMenu):
@@ -1329,6 +1388,12 @@ class TrackerPage(GlassPage):
     # (Movies & Series shows two); a page with one doesn't, since a
     # heading over a single row only repeats the page's own title.
     DISCOVER_ROWS = (("anime", "Anime", "Anime"),)
+    # Per-row heading/subheading overrides, and the rows that only
+    # make sense while browsing - see MangaPage for the one page
+    # that uses them.
+    DISCOVER_HEADINGS = {}
+    DISCOVER_SUBHEADINGS = {}
+    DISCOVER_BROWSE_ONLY = ()
     # The page's sub-sections, published for main.py's contextual section
     # sidebar - its presence is how a page is detected as sectioned, and
     # current_section/set_active_section below are how it is driven. The
@@ -1378,6 +1443,12 @@ class TrackerPage(GlassPage):
         self._discover_signals = _DiscoverSignals()
         self._discover_signals.results.connect(self._on_discover_results)
         self._discover_signals.poster.connect(self._on_discover_poster)
+        self._discover_signals.schedule_upcoming.connect(
+            self._on_schedule_upcoming)
+        # The Schedule tab's catalogue-wide rows, and whether they
+        # have been asked for this visit (see _request_schedule_upcoming).
+        self._schedule_upcoming = []
+        self._schedule_upcoming_asked = False
         self._discover_signals.featured_backdrop.connect(self._on_featured_backdrop)
         self._discover_signals.history_cover.connect(self._on_history_cover)
         # History row key -> (cover label, title), refilled by every
@@ -1812,9 +1883,11 @@ class TrackerPage(GlassPage):
                 # Bounded, like every other per-entry loop here: this one
                 # downloads a full-size image per entry, so it is the
                 # heaviest of them to fire all at once.
-                lookup_pool.submit(self._fetch_sharper_cover, entry["id"], wanted)
+                lookup_pool.submit(self._fetch_sharper_cover, entry["id"],
+                                   wanted, "", entry.get("title") or "")
 
-    def _fetch_sharper_cover(self, entry_id, new_url, page_url=""):
+    def _fetch_sharper_cover(self, entry_id, new_url, page_url="",
+                             title=""):
         # Must never raise: an uncaught exception here would kill the
         # background thread silently.
         #
@@ -1824,8 +1897,13 @@ class TrackerPage(GlassPage):
         # Discover card itself uses (_fetch_discover_poster).
         try:
             if not new_url and page_url:
-                details = manga_sites.fetch_manga_details(page_url) or {}
+                details = manga_sites.fetch_manga_details(
+                    page_url, title=title) or {}
                 new_url = details.get("cover_url") or ""
+            # Nothing on the page and nothing beside it: ask the
+            # catalogues by name rather than leaving a blank tile.
+            if not new_url and title:
+                new_url = manga_sites.cover_for_title(title) or ""
             path = images.download(new_url) if new_url else None
         except Exception:
             path = None
@@ -3205,15 +3283,23 @@ class TrackerPage(GlassPage):
         self._discover_featured.setVisible(False)
         self._discover_body_layout.addWidget(self._discover_featured)
 
-        labelled = len(self.DISCOVER_ROWS) > 1
-        for kind, label, _entry_type in self.DISCOVER_ROWS:
+        # Browse-only rows are left out entirely while a search is
+        # running, rather than shown empty: "Latest" cannot answer a
+        # query, and a heading over "Nothing found" reads as a
+        # broken row (see DISCOVER_BROWSE_ONLY).
+        rows = [row for row in self.DISCOVER_ROWS
+                if not (self._discover_query
+                        and row[0] in self.DISCOVER_BROWSE_ONLY)]
+        labelled = len(rows) > 1
+        for kind, label, _entry_type in rows:
             section = QWidget(objectName="Bare")
             column = QVBoxLayout(section)
             column.setContentsMargins(0, 0, 0, 0)
             column.setSpacing(2)
-            column.addWidget(QLabel(self._discover_heading(label, labelled),
+            column.addWidget(QLabel(self._discover_heading(kind, label, labelled),
                                     objectName="SectionTitle"))
-            column.addWidget(QLabel(self._discover_subheading(), objectName="Muted"))
+            column.addWidget(QLabel(self._discover_subheading(kind),
+                                    objectName="Muted"))
             holder = QWidget(objectName="Bare")
             holder_layout = QVBoxLayout(holder)
             holder_layout.setContentsMargins(0, 8, 0, 0)
@@ -3229,18 +3315,23 @@ class TrackerPage(GlassPage):
         # Cinemeta, so the merged three-row page paid ~4s where the
         # slowest single row is all it has to. submit_latest keyed per
         # row keeps the newest-wins behaviour typing relies on.
-        for kind, _label, _entry_type in self.DISCOVER_ROWS:
+        for kind, _label, _entry_type in rows:
             lookup_pool.submit_latest(f"{self._discover_key()}-{kind}",
                                       self._discover_row_worker, kind, query, run)
 
-    def _discover_heading(self, label, labelled) -> str:
+    def _discover_heading(self, kind, label, labelled) -> str:
         if self._discover_query:
             return f"{label} Results" if labelled else "Results"
+        named = self.DISCOVER_HEADINGS.get(kind)
+        if named:
+            return named
         return f"Popular {label}" if labelled else "Popular Now"
 
-    def _discover_subheading(self) -> str:
-        return (f"Matches for '{self._discover_query}'" if self._discover_query
-                else "What the catalog is watching")
+    def _discover_subheading(self, kind="") -> str:
+        if self._discover_query:
+            return f"Matches for '{self._discover_query}'"
+        return (self.DISCOVER_SUBHEADINGS.get(kind)
+                or "What the catalog is watching")
 
     def _discover_row_worker(self, kind, query, run):
         """One row's rows, cached for the session.
@@ -3262,7 +3353,14 @@ class TrackerPage(GlassPage):
             if time.monotonic() - stamp < _DISCOVER_CACHE_TTL_S:
                 return
         try:
-            if kind == "reading":
+            if kind == "reading_latest":
+                # MangaDex by newest chapter, not the site browse
+                # above - see discover.discover_reading_latest for
+                # why a second site-browse row would have been the
+                # same titles twice.
+                found = discover.discover_reading_latest(
+                    limit=DISCOVER_LIMIT)
+            elif kind == "reading":
                 # The user's own four sites, not MangaDex (the owner's
                 # ask) - and each row remembers which site it came from,
                 # so pressing it opens that site's chapters directly.
@@ -3414,21 +3512,41 @@ class TrackerPage(GlassPage):
         # page does carry one, so it is fetched here - lazily, per card,
         # and only for the rows that need it.
         page_url = (item or {}).get("url") or ""
-        if not url and not page_url.startswith("http"):
+        title = (item or {}).get("title") or ""
+        # A title alone is now enough to try: the catalogues are asked by
+        # name, so a row with neither art nor a series URL is no longer
+        # a guaranteed blank (see _fetch_discover_poster).
+        if not url and not page_url.startswith("http") and not title:
             return
         # The shared, bounded pool: a row is up to DISCOVER_LIMIT images
         # and a page can have two rows, so a thread each is exactly the
         # shape that once put 651 connections in flight (see lookup_pool).
         lookup_pool.submit(self._fetch_discover_poster, kind, index, url, run,
-                           page_url)
+                           page_url, title)
 
-    def _fetch_discover_poster(self, kind, index, url, run, page_url=""):
-        # Must never raise - see _discover_row_worker.
+    def _fetch_discover_poster(self, kind, index, url, run, page_url="",
+                               title=""):
+        """Resolve one card's art, in three widening steps.
+
+        **The title is passed now, and that is the fix.** Step two asks
+        the site's own series page, which falls back to MangaDex and
+        AniList when the page carries no cover - but only ever under the
+        title it is *given*, and every caller here used to give none. It
+        then matched on `_title_from_slug(page_url)`, a URL slug, against
+        a 0.85 threshold: an Arabic or transliterated slug misses, so
+        the cover came back None and the card stayed blank (the owner's
+        wall of empty tiles in Discover). Step three covers the rows
+        that have no series URL to scrape either.
+
+        Must never raise - see _discover_row_worker."""
         path, resolved = None, ""
         try:
             if not url and page_url:
-                details = manga_sites.fetch_manga_details(page_url) or {}
+                details = manga_sites.fetch_manga_details(
+                    page_url, title=title) or {}
                 url = resolved = details.get("cover_url") or ""
+            if not url and title:
+                url = resolved = manga_sites.cover_for_title(title) or ""
             if url:
                 path = images.download(url)
         except Exception:
@@ -3716,7 +3834,8 @@ class TrackerPage(GlassPage):
             # The poster lands as the entry's cover through the same
             # download-then-update path the sharper-cover backfill uses.
             lookup_pool.submit(self._fetch_sharper_cover, entry["id"],
-                               entry.get("cover_url") or "", page_url)
+                               entry.get("cover_url") or "", page_url,
+                               entry.get("title") or "")
         show_toast(self, f"'{title_text}' Added to Saved")
         return True
 
@@ -3755,8 +3874,66 @@ class TrackerPage(GlassPage):
     # (see _refresh_schedules) - so this tab is a second reading of what
     # the card tooltips already say, never a second source that could
     # disagree with them.
+    # Anime is the only medium with a published forward schedule, so
+    # the Watch page is the only one that fills the catalogue rows. The
+    # Read page keeps a saved-only Schedule on purpose - see
+    # _schedule_rows.
+    SCHEDULE_UPCOMING = False
+
+    def _request_schedule_upcoming(self):
+        """Ask AniList what airs next, once per visit, off the UI thread.
+
+        Cached on the page for the length of the visit: switching tabs
+        rebuilds the section, and re-asking on every switch would be a
+        request per glance. Never blocks the build - the section draws
+        the saved rows now and gains the rest when this lands."""
+        if not self.SCHEDULE_UPCOMING or self._schedule_upcoming_asked:
+            return
+        self._schedule_upcoming_asked = True
+        run = self._discover_run
+        lookup_pool.submit(self._schedule_upcoming_worker, run)
+
+    def _schedule_upcoming_worker(self, run):
+        """Must never raise - it runs on a shared pool worker, and an
+        uncaught exception takes every queued lookup with it."""
+        rows = []
+        try:
+            from helpers import anilist
+            rows = anilist.fetch_upcoming_airing(hours=168, limit=40)
+        except Exception:
+            # Includes RateLimited: the schedule simply keeps the saved
+            # rows, which is the honest answer and not an error dialog.
+            rows = []
+        for row in rows:
+            try:
+                path = images.download(row.get("cover_url") or "")
+                row["cover_path"] = str(path) if path else None
+            except Exception:
+                row["cover_path"] = None
+        self._discover_signals.schedule_upcoming.emit(rows, run)
+
+    def _on_schedule_upcoming(self, rows, run):
+        if run != self._discover_run:
+            return
+        self._schedule_upcoming = list(rows or [])
+        # Only redraw the section the user is actually looking at.
+        if self._active_tab == TAB_SCHEDULE:
+            self._build_schedule()
+
     def _schedule_rows(self):
-        """[(when, entry)] for everything still to come, soonest first."""
+        """[(when, entry, saved)] for everything still to come.
+
+        Sorted by time, and **within one clock slot the saved ones
+        lead** - the owner's ask. Sorting on (when, not saved) does
+        both at once: a saved show and an unsaved one airing in the
+        same half-hour come out saved-first, and the schedule still
+        reads as a clock down the page.
+
+        The unsaved rows come from _schedule_upcoming, which the
+        Watch page fills from AniList; the Read page leaves it empty
+        because nobody publishes scanlation dates and this project
+        will not print a guess as a schedule (rules/integrations.md).
+        """
         now = datetime.now(timezone.utc)
         rows = []
         for entry in self.entries:
@@ -3777,8 +3954,28 @@ class TrackerPage(GlassPage):
                 when = when.replace(tzinfo=timezone.utc)
             if when <= now:
                 continue
-            rows.append((when, entry))
-        rows.sort(key=lambda pair: pair[0])
+            rows.append((when, entry, True))
+        saved_titles = {(e.get("title") or "").strip().lower()
+                        for _w, e, _s in rows}
+        for item in getattr(self, "_schedule_upcoming", None) or []:
+            when = item.get("at")
+            title = (item.get("title") or "").strip()
+            if not when or not title or when <= now:
+                continue
+            # Title-matched against the saved rows, the same rule
+            # _find_saved uses: the saved row carries the owner's
+            # own progress and cover and must not be duplicated by
+            # a catalogue row for the same show.
+            if title.lower() in saved_titles:
+                continue
+            rows.append((when, {
+                "title": title,
+                "type": "Anime",
+                "cover_path": item.get("cover_path") or None,
+                "next_release": {"episode": item.get("episode") or 0,
+                                 "season": 0},
+            }, False))
+        rows.sort(key=lambda row: (row[0], not row[2]))
         return rows
 
     @staticmethod
@@ -3814,6 +4011,7 @@ class TrackerPage(GlassPage):
     def _build_schedule(self):
         _clear_layout(self._schedule_layout)
         self._schedule_countdowns = []
+        self._request_schedule_upcoming()
         rows = self._schedule_rows()
         if not rows:
             self._schedule_layout.addWidget(QLabel(
@@ -3829,7 +4027,7 @@ class TrackerPage(GlassPage):
         # The rows are already ascending, so the bands come out in order
         # and a heading is needed only where the band changes.
         current = None
-        for when, entry in rows:
+        for when, entry, saved in rows:
             band = self._schedule_group(when)
             if band != current:
                 current = band
@@ -3837,7 +4035,8 @@ class TrackerPage(GlassPage):
                 label.setStyleSheet(f"color: {theme.TEXT_MUTED}; background: transparent;"
                                     f" font-weight: 700; padding-top: 6px;")
                 body_layout.addWidget(label)
-            body_layout.addWidget(self._build_schedule_row(entry, when))
+            body_layout.addWidget(
+                self._build_schedule_row(entry, when, saved))
         self._schedule_layout.addWidget(scroll_area(body), stretch=1)
 
     def _schedule_coming(self, entry) -> str:
@@ -3858,7 +4057,7 @@ class TrackerPage(GlassPage):
         # numbering says "E05" rather than claiming season zero.
         return format_episode_progress(int(stored.get("season") or 0), episode) or "Next episode"
 
-    def _build_schedule_row(self, entry, when):
+    def _build_schedule_row(self, entry, when, saved=True):
         card = Card(hoverable=True, matte=True)
         # Same lift as the featured card, same reason: SURFACE on this
         # page's SURFACE panel is invisible without the old border.
@@ -3877,7 +4076,22 @@ class TrackerPage(GlassPage):
 
         column = QVBoxLayout()
         column.setSpacing(2)
-        column.addWidget(QLabel(entry.get("title") or "", objectName="CardTitle"))
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(QLabel(entry.get("title") or "",
+                                   objectName="CardTitle"))
+        if saved:
+            # Which of these are the owner's own - the schedule
+            # lists the whole catalogue now, and without this a
+            # tracked show reads exactly like one never heard of.
+            chip = QLabel("Saved")
+            chip.setStyleSheet(
+                f"color: {theme.ON_ACCENT}; background: {theme.ACCENT};"
+                f" border-radius: {theme.RADIUS_SM}px; padding: 1px 8px;"
+                f" font-size: 8pt; font-weight: 700;")
+            title_row.addWidget(chip, alignment=Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch(1)
+        column.addLayout(title_row)
         column.addWidget(QLabel(self._schedule_coming(entry), objectName="CardMeta"))
         row.addLayout(column, stretch=1)
 
@@ -4166,7 +4380,17 @@ class MangaPage(TrackerPage):
     # "reading" is the one kind that goes to discover_reading rather than
     # discover_video; the entry type is Manga, which is the first of the
     # three reading flavours and the one the form opens on.
-    DISCOVER_ROWS = (("reading", "Manga", "Manga"),)
+    DISCOVER_ROWS = (("reading", "Manga", "Manga"),
+                     ("reading_latest", "Latest", "Manga"))
+    # "Popular <label>" is the default wording and is wrong for
+    # both of these, so both name themselves.
+    DISCOVER_HEADINGS = {"reading": "Popular Now",
+                         "reading_latest": "Latest"}
+    DISCOVER_SUBHEADINGS = {"reading_latest":
+                            "Where the newest chapters landed"}
+    # Latest is a browse, not an answer to a query - a typed search
+    # would return the same titles as the row above it.
+    DISCOVER_BROWSE_ONLY = ("reading_latest",)
 
 
 class SeriesPage(TrackerPage):
@@ -4179,6 +4403,9 @@ class SeriesPage(TrackerPage):
     # is rewritten to the showing section's name by _set_tab anyway.
     TITLE = "Watch"
     TYPE_OPTIONS = ["Anime", "Series", "Movie"]
+    # The one page with a real forward schedule to show beyond its
+    # own saved rows (AniList's airing calendar).
+    SCHEDULE_UPCOMING = True
     # One row per kind. Anime and Series are both Cinemeta's series
     # catalog underneath (discover.py's genre chain does the splitting);
     # picking from a row opens the form on that row's type - the same
@@ -4772,7 +4999,13 @@ class EntryForm(QDialog):
                 # and/or chapter count (e.g. Madara's AJAX search returns
                 # titles/links only) - fetch them from the matched page/
                 # detail endpoint instead of leaving them blank.
-                threading.Thread(target=self._resolve_manga_details, args=(result["url"],), daemon=True).start()
+                # The title goes with it: without one the catalogue
+                # fallback inside fetch_manga_details matches on the URL
+                # slug, which misses for anything not named in English.
+                threading.Thread(
+                    target=self._resolve_manga_details,
+                    args=(result["url"], result.get("title") or ""),
+                    daemon=True).start()
         elif result.get("stremio_url"):
             # Saved regardless of which Video Website ends up selected
             # below, so progress-syncing keeps working even for entries
@@ -4842,10 +5075,11 @@ class EntryForm(QDialog):
         self._refresh_preview()
         self._set_status_part("cover", "" if path else "Couldn't download the cover image")
 
-    def _resolve_manga_details(self, page_url):
+    def _resolve_manga_details(self, page_url, title=""):
         details = {}
         try:
-            details = manga_sites.fetch_manga_details(page_url)
+            details = manga_sites.fetch_manga_details(page_url,
+                                                      title=title)
         except Exception:
             pass
         self._signals.manga_details_resolved.emit(

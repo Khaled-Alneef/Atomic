@@ -321,6 +321,39 @@ def discover_reading(query: str = "", limit: int = 30, deadline=None) -> list:
     return rows[:limit]
 
 
+def discover_reading_latest(limit: int = 30, deadline=None) -> list:
+    """Manga whose newest chapter landed most recently - the "Latest"
+    row beside "Popular Now" on the Read page (the owner's ask).
+
+    **A different source on purpose.** Popular Now is filled by browsing
+    the user's own reading sites, and a site's front page is already
+    roughly "what updated lately" - so a Latest row built the same way
+    would have printed the same titles under a second heading and taught
+    nobody anything. MangaDex can order by the actual chapter timestamp,
+    which is the question being asked.
+
+    Same browse content-ratings and the same shared throttle as every
+    other call here (mangadex._get). Fails soft to [] like its
+    neighbours - a Latest row that cannot answer is a missing row, never
+    an error."""
+    if limit <= 0:
+        return []
+    if deadline is None:
+        deadline = net.deadline_in(READING_BUDGET)
+    step = net.step_timeout(deadline, READING_TIMEOUT)
+    if step is None:
+        return []
+    count = min(int(limit), _MANGADEX_MAX_LIMIT)
+    url = (f"{mangadex.BASE_URL}/manga?limit={count}&includes[]=cover_art"
+           f"&order[latestUploadedChapter]=desc{_BROWSE_RATINGS}")
+    try:
+        body = mangadex._get(url, step)
+    except Exception:
+        return []
+    rows = [row for row in (_reading_row(m) for m in (body or {}).get("data") or []) if row]
+    return rows[:limit]
+
+
 def discover_reading_sites(query: str = "", limit: int = 30,
                            deadline=None) -> list:
     """Reading rows from the user's **own** sites - what Discover shows

@@ -339,7 +339,10 @@ QPushButton#FoldButton {{
     border-radius: {RADIUS_SM}px;
     padding: 2px;
     font-family: {FONT_STACK_ICONS};
-    font-size: 14pt;
+    /* 12pt against the button's 24px box (main._build_fold_button).
+       The glyph shrank with the button - at 14pt in a 24px box the
+       chevron touches the padding and the hover square clips it. */
+    font-size: 12pt;
     font-weight: 400;
 }}
 QPushButton#FoldButton:hover {{

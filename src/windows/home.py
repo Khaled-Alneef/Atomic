@@ -25,8 +25,8 @@ from helpers.widgets import (
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
     IN_PROGRESS_STATUSES, MANGA_TYPES, POSTER_SIZE, VIDEO_TYPES,
-    ContinueCover, attach_continue_cover, format_chapter_progress,
-    open_tracker_entry, shows_last_watched,
+    ContinueCover, _progress_data_file, attach_continue_cover,
+    format_chapter_progress, open_tracker_entry, shows_last_watched,
 )
 
 GREETING_REFRESH_MS = 60_000
@@ -450,7 +450,21 @@ class HomePage(GlassPage):
             return hero
 
         self._hero_index = 0
+        # Seeded from the entries themselves before anything is
+        # fetched. The ground for a reading title costs an AniList query
+        # *and* a banner download, with no small-copy fast path like the
+        # video types have - so an unseeded Home paid the whole of it on
+        # every single visit, which is the owner's "Kingdom WAN image
+        # takes so long". Resolved once, remembered on the entry, and
+        # from then on the slide is painted from disk on the first frame.
         self._hero_backdrops = {}
+        for hero in self._hero_entries:
+            stored = hero.get("hero_backdrop")
+            try:
+                if stored and Path(stored).exists():
+                    self._hero_backdrops[hero.get("id")] = stored
+            except OSError:
+                pass        # an unreadable path is simply not a cache hit
         self._hero_signals = _HeroSignals()
         self._hero_signals.backdrop.connect(self._on_hero_backdrop)
 
@@ -536,8 +550,13 @@ class HomePage(GlassPage):
 
         # Every slide's backdrop starts fetching now, its own thread each
         # (they are one cached file apiece after the first run), so
-        # rotating never waits on the network.
+        # rotating never waits on the network. A slide whose ground was
+        # already remembered above is skipped outright - that is the
+        # whole saving: no AniList round trip and no download for a
+        # picture that is sitting on disk.
         for entry in self._hero_entries:
+            if entry.get("id") in self._hero_backdrops:
+                continue
             threading.Thread(target=self._hero_backdrop_worker,
                              args=(dict(entry),), daemon=True).start()
         self._show_hero_slide(0, fade=False)
@@ -629,12 +648,33 @@ class HomePage(GlassPage):
         # flicker. Only a genuinely new slide fades.
         upgrade = entry_id in self._hero_backdrops
         self._hero_backdrops[entry_id] = path
+        self._remember_hero_backdrop(entry_id, path)
         if str(self._hero_entry().get("id") or "") != entry_id:
             return
         try:
             self._hero_banner.set_backdrop(path, fade=not upgrade)
         except RuntimeError:
             pass    # the page was torn down under the fetch
+
+    def _remember_hero_backdrop(self, entry_id, path):
+        """Write a resolved backdrop onto its entry, so the next visit
+        (and the next run) draws it without asking the network again.
+
+        Through update_entry, never a whole-list write: Home holds
+        copies of entries owned by two different files and several
+        pages, and writing a list back from here is exactly the defect
+        .claude/rules/ui.md records. Failing is fine - it only costs one
+        re-resolve."""
+        entry = next((e for e in self._hero_entries
+                      if str(e.get("id") or "") == entry_id), None)
+        if entry is None or entry.get("hero_backdrop") == path:
+            return
+        entry["hero_backdrop"] = path
+        try:
+            storage.update_entry(_progress_data_file(entry), entry.get("id"),
+                                 {"hero_backdrop": path})
+        except Exception:
+            pass
 
     def _continue_entry(self, entry, resume=True):
         """`resume=False` is the body of a reading card - it opens the

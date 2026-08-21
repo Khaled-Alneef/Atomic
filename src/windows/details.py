@@ -1333,31 +1333,28 @@ class DetailsPage(GlassPage):
         self._fill_rows()
 
     def _fill_source_rows(self):
-        """The sources for the picked episode: a back row, then every
-        release in one list, most seeders first.
+        """The sources for the picked episode: a back row, then one
+        heading per resolution - 4K first, then 1080p, and so on - with
+        that resolution's releases under it, most seeders first.
 
-        **The per-resolution headings are gone, and that is the owner's
-        ask rather than a tidy-up.** They asked for the list "from top
-        to bottom based on seeds num", and the headings were the only
-        reason it was not: sorting *inside* each group was measured to
-        change nothing - across their four real titles, all sixteen
-        resolution groups already printed seeder-descending, because the
-        addons return roughly sorted rows and Python's sort is stable.
-        What actually broke the descent was the jump between headings.
-        Measured on House of the Dragon S02E05: the 4K group ran
-        939 -> 304 -> 170 ... -> 38, and then the 1080P heading started
-        again at 1876. Read down the column, the numbers went up.
+        **Grouped, and sorted by seeders only inside a group.** This was
+        briefly one flat list ordered by seeders across the whole set,
+        reading the owner's "from top to bottom based on seeds num" as a
+        global order; they asked for the headings back. So the shape is
+        the original one and the ordering rule applies within each
+        heading, which is what `streams.list_sort_key` is for - the
+        addons return roughly sorted rows and `_rank` caps seeders at
+        200 outside the preferred resolution, so without it the order
+        inside a group is whatever arrived first.
 
-        So one flat list ordered by streams.list_sort_key, with the
-        resolution moved onto each row as its first field - it was the
-        only thing a heading carried that a row could not:
+        Seeder counts therefore restart at each heading, by design: on
+        House of the Dragon S02E05 the 4K group runs 939 down to 38 and
+        the 1080P heading then starts again at 1876. That is the group
+        boundary doing its job, not a sort failing.
 
-            1080p · 1876 seeders · 2.1 GB · <release title>
-
-        Nothing was lost by dropping them. Resolution is still filterable
-        through the search box (it matches the row text), and the
-        player's own drill-down panel keeps the by-resolution view for
-        picking a resolution deliberately."""
+        The resolution stays on each row as well as in its heading, so a
+        row still says what it is when the heading has scrolled off, and
+        the search box matches it."""
         self._clear_rows()
         pick = self._source_pick or {}
         season, episode = pick.get("season"), pick.get("episode")
@@ -1385,32 +1382,51 @@ class DetailsPage(GlassPage):
         except Exception:                               # pragma: no cover
             streams_helper = None
         wanted = self._search.text().strip().lower()
-        visible = []
-        for stream in streams_found:
-            # The resolution is part of what is searched now that it is
-            # a field on the row rather than a heading - typing "2160"
-            # is how someone narrows to 4K with the groups gone.
-            text = (f"{_quality_label(stream.get('quality'))} "
-                    f"{stream.get('source') or ''} "
-                    f"{stream.get('title') or ''}").lower()
-            if wanted and wanted not in text:
+        # One bucket per resolution, in the order qualities() ranks them
+        # (best first), plus a trailing "" for releases that state none.
+        groups = (streams_helper.qualities(streams_found)
+                  if streams_helper else [])
+        if any(not _quality_label(s.get("quality")) for s in streams_found):
+            groups = list(groups) + [""]
+        for quality in groups:
+            visible = []
+            for stream in streams_found:
+                if _quality_label(stream.get("quality")) != quality:
+                    continue
+                # The resolution is searched as well as the source and
+                # the release name, so typing "2160" narrows to 4K.
+                text = (f"{_quality_label(stream.get('quality'))} "
+                        f"{stream.get('source') or ''} "
+                        f"{stream.get('title') or ''}").lower()
+                if wanted and wanted not in text:
+                    continue
+                visible.append(stream)
+            if not visible:
                 continue
-            visible.append(stream)
-        if streams_helper is not None:
-            visible.sort(key=streams_helper.list_sort_key)
-        for stream in visible:
-            seeders = int(stream.get("seeders") or 0)
-            size = ""
-            if streams_helper:
-                size = streams_helper.format_size(stream.get("size_bytes"))
-            parts = [p for p in
-                     (_quality_label(stream.get("quality")) or "Other",
-                      f"{seeders} seeders" if seeders else "",
-                      size, (stream.get("title") or "").strip()[:70]) if p]
-            self._rows.insertWidget(shown, self._row_card(
-                stream.get("source") or "Source", " · ".join(parts), None,
-                lambda s=stream: self._play_stream_choice(s)))
+            # Most seeders first *within this heading* - the owner's ask.
+            if streams_helper is not None:
+                visible.sort(key=streams_helper.list_sort_key)
+            heading = QLabel("4K (2160p)" if quality == "2160p"
+                             else (quality or "Other").upper())
+            heading.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; font-size: 11pt; font-weight: 700;"
+                f" letter-spacing: 1px; background: transparent; border: none;"
+                f" padding: 6px 2px 0px 2px;")
+            self._rows.insertWidget(shown, heading)
             shown += 1
+            for stream in visible:
+                seeders = int(stream.get("seeders") or 0)
+                size = ""
+                if streams_helper:
+                    size = streams_helper.format_size(stream.get("size_bytes"))
+                parts = [p for p in
+                         (_quality_label(stream.get("quality")) or "Other",
+                          f"{seeders} seeders" if seeders else "",
+                          size, (stream.get("title") or "").strip()[:70]) if p]
+                self._rows.insertWidget(shown, self._row_card(
+                    stream.get("source") or "Source", " · ".join(parts), None,
+                    lambda s=stream: self._play_stream_choice(s)))
+                shown += 1
         if shown > 1 and pick.get("looking"):
             # Say that the list is still growing. Not the panel note -
             # that is centred over the viewport and would sit on top of
@@ -2003,23 +2019,31 @@ class DetailsPage(GlassPage):
         # that stays coverless on Saved and Home forever (the owner's
         # Kingdom (WAN) report).
         page_url = (self.entry.get("url") or "") if self._is_reading else ""
-        if self.entry.get("cover_url") or page_url:
+        title = self.entry.get("title") or ""
+        # A reading title with neither art nor a page still has a
+        # name, and the catalogues answer to that (cover_for_title).
+        if self.entry.get("cover_url") or page_url or (title and self._is_reading):
             lookup_pool.submit(self._saved_cover_worker, self._signals,
                                self.entry["id"], data_file,
-                               self.entry.get("cover_url") or "", page_url)
+                               self.entry.get("cover_url") or "", page_url,
+                               title if self._is_reading else "")
 
     @staticmethod
-    def _saved_cover_worker(signals, entry_id, data_file, url, page_url=""):
+    def _saved_cover_worker(signals, entry_id, data_file, url, page_url="",
+                            title=""):
         """Download the poster the Discover row carried - or, for a
         reading title that never carried one, the cover its series page
         names - off the UI thread; the write happens back on it. Never
         raises."""
         resolved = ""
         try:
+            from helpers import manga_sites
             if not url and page_url:
-                from helpers import manga_sites
-                found = manga_sites.fetch_manga_details(page_url) or {}
+                found = manga_sites.fetch_manga_details(
+                    page_url, title=title) or {}
                 url = resolved = found.get("cover_url") or ""
+            if not url and title:
+                url = resolved = manga_sites.cover_for_title(title) or ""
             path = images.download(url) if url else None
         except Exception:
             path = None

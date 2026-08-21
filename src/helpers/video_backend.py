@@ -130,6 +130,17 @@ def default_options() -> dict:
         "sub_font": ARABIC_FONTS[0],
         "sub_ass_override": "scale",  # keep .ass styling, honour our size
         "sub_auto": "no",             # we choose subtitles explicitly
+        # No embedded subtitle track selected when a file opens, ever -
+        # the owner's ask. `sub_auto: no` above only stops mpv picking up
+        # a .srt sitting *beside* the file; a track inside the container
+        # was still auto-selected, so an English or Chinese sub burned
+        # itself over the picture on release after release. "no" is not
+        # "hidden": nothing is chosen at all, which is what makes Off the
+        # honest state in the tracks panel on load. Picking a row still
+        # sets sid, and an external subtitle is still added with
+        # `select` (player._apply_subtitle), so both routes in are
+        # untouched.
+        "sid": "no",
         # Arabic .srt files are very often Windows-1256. We transcode to
         # UTF-8 before handing a file over (see helpers/subtitles.py), so
         # this is the belt to that braces - and "auto" is safe because a
