@@ -700,7 +700,11 @@ class _WorkBridge(QObject):
     was fired for, so an answer from a superseded episode cannot be
     counted toward the current one - the same rule the tracker's lookups
     follow."""
-    streams_ready = Signal(object, int)     # list | None
+    # list | None, run, still-looking. The last flag separates a partial
+    # batch from the finished list: only the finished one may say "no
+    # playable source was found", and only a partial may be held back
+    # waiting for a better resolution.
+    streams_ready = Signal(object, int, bool)
     subs_ready = Signal(object, int)        # list
     sub_file_ready = Signal(str, str, int)  # path, label, run
     logo_ready = Signal(str, int)           # local png path, run
@@ -1056,7 +1060,8 @@ class OverlayPanel(QFrame):
             f" background: transparent; border: none; padding-top: 4px;")
         self.body_layout.addWidget(label)
 
-    def add_row(self, title, subtitle, on_click, selected=False, chevron=False):
+    def add_row(self, title, subtitle, on_click, selected=False, chevron=False,
+                index=None):
         card = Card(matte=True)
 
         # Rows are borderless at rest now (the Harbor pass); the border
@@ -1106,7 +1111,14 @@ class OverlayPanel(QFrame):
                 f" background: transparent; border: none;")
             outer.addWidget(arrow, alignment=Qt.AlignmentFlag.AlignVCenter)
         card.clicked.connect(on_click)
-        self.body_layout.addWidget(card)
+        if index is None:
+            self.body_layout.addWidget(card)
+        else:
+            # For callers keeping a live panel in step with changing data
+            # (the tracks panel): a row joins its group in place instead
+            # of the whole panel being torn down and rebuilt - see
+            # PlayerPage._sync_track_rows for why rebuilding is not free.
+            self.body_layout.insertWidget(index, card)
         return card
 
     def add_message(self, text):
@@ -1247,6 +1259,11 @@ class PlayerPage(GlassPage):
         self.handle = None
         self._streams = []
         self._stream_index = 0
+        # Whether _streams is the list playback is already running
+        # against. Once it is, later batches from the same lookup may
+        # only *add* to it - see _merge_streams for why replacing it
+        # would move _stream_index and _dead_sources under themselves.
+        self._streams_started = False
         # Set here as well as in _load_into_mpv: mpv's property callbacks
         # start arriving the moment the instance exists, which is before
         # any file is loaded, and reading these from there would be an
@@ -2412,11 +2429,24 @@ class PlayerPage(GlassPage):
         self.seek_bar.set_buffered(0)
         self._refresh_title_label()
         self._fill_episode_bar()
+        # The outgoing episode's sources, and everything that indexes
+        # into them. Cleared here rather than in _on_streams because
+        # that now arrives several times per episode (partial batches),
+        # so it can no longer be the thing that starts a fresh list.
+        # _dead_sources especially: an index proven dead in the previous
+        # episode would otherwise skip a live source in this one.
+        self._streams = []
+        self._streams_started = False
+        self._stream_index = 0
+        self._dead_sources = set()
+        self._streams_view = None
         self._subtitles = []
         self._set_subtitle_count(None)
 
         if self._given_streams is not None:
-            self._on_streams(self._given_streams, self._run)
+            # A finished list handed in by the details page's picker -
+            # there is no lookup behind it, so nothing more is coming.
+            self._on_streams(self._given_streams, self._run, False)
         elif streams_module is None:
             self._show_status("No stream sources are available in this build.")
         else:
@@ -2431,15 +2461,27 @@ class PlayerPage(GlassPage):
 
     def _find_streams_worker(self, run):
         """Never raises: an exception here would kill the thread silently
-        and the page would sit on "Looking for a source..." forever."""
+        and the page would sit on "Looking for a source..." forever.
+
+        Each source's releases are handed over as they land, not once
+        the whole fan-out is done - measured on the owner's entries, the
+        first addon answers in 0.3-0.8s while the slowest source finishes
+        1.9-2.6s later, and up to the whole budget when one hangs. Every
+        batch is the full ranked list so far, so _on_streams either
+        starts on it or folds it into the list already playing."""
+        def partial(found):
+            if not self._closing and run == self._run:
+                self._work.streams_ready.emit(list(found or []), run, True)
+
         try:
             found = streams_module.find_streams(
                 self.entry, season=self.season, episode=self.episode,
-                deadline=net.deadline_in(STREAM_BUDGET_S))
-            self._work.streams_ready.emit(list(found or []), run)
+                deadline=net.deadline_in(STREAM_BUDGET_S),
+                on_partial=partial)
+            self._work.streams_ready.emit(list(found or []), run, False)
         except Exception:
             logs.exception("Stream lookup failed")
-            self._work.streams_ready.emit([], run)
+            self._work.streams_ready.emit([], run, False)
 
     def _search_subtitles(self):
         if subtitles_module is None:
@@ -2539,22 +2581,84 @@ class PlayerPage(GlassPage):
         return path
 
     # ---- results back on the UI thread -------------------------------
-    def _on_streams(self, found, run):
+    def _on_streams(self, found, run, looking=False):
+        """One batch of sources - a partial one, or the finished list.
+
+        `find_streams` reports every source as it answers, so this runs
+        several times per episode. Three cases: playback has already
+        started and the batch only adds to the list; nothing has started
+        and the batch is worth starting on; or nothing has started and it
+        is not, in which case it is held and the next batch is awaited.
+        An empty list is always the final answer - the fan-out never
+        reports a batch it does not have."""
         if self._closing or run != self._run:
             return
-        self._streams = list(found or [])
-        if not self._streams:
+        incoming = list(found or [])
+        if self._streams_started:
+            self._merge_streams(incoming)
+            return
+        if not incoming and looking:
+            return              # the fan-out never reports an empty batch
+        if not incoming:
             self._show_status(
                 "No playable source was found for this episode.\n"
                 "Try again, or open it on its site.")
             return
-        drm = [s for s in self._streams if s.get("kind") == "drm"]
-        playable = [s for s in self._streams if s.get("kind") != "drm"]
-        if not playable:
-            self._show_drm(drm[0])
-            return
+        drm = [s for s in incoming if s.get("kind") == "drm"]
+        playable = [s for s in incoming if s.get("kind") != "drm"]
         self._streams = playable + drm
+        if not playable:
+            # DRM only. The DRM row is put in before the fan-out starts,
+            # so a batch holding nothing else means that source answered
+            # nothing yet - a later one still might, so only the
+            # finished list is allowed to say so out loud.
+            if not looking:
+                self._show_drm(drm[0])
+            return
+        # A partial that does not yet carry the preferred resolution is
+        # held rather than played: starting on the first batch to arrive
+        # would start 720p while the 1080p the user asked for was two
+        # tenths of a second behind it, and that plays for the whole
+        # episode. See streams.has_preferred_resolution.
+        if (looking and streams_module is not None
+                and not streams_module.has_preferred_resolution(playable)):
+            self._refresh_streams_panel()
+            return
+        self._streams_started = True
         self._play_stream(0)
+
+    def _merge_streams(self, incoming):
+        """Fold a later batch into the list playback is already using.
+
+        Replacing the list is the obvious move and it is wrong:
+        `_stream_index` points into it, `_dead_sources` holds its
+        indices, and `_on_stream_prepared` writes the prepared stream
+        back *by index*. A re-ranked list moves all three under them, so
+        a late source answering would silently switch which release is
+        playing. New rows go on the end instead, ahead of the DRM rows
+        that have to stay last - every existing playable index is
+        untouched by that."""
+        if streams_module is None:
+            return          # nothing can have produced a second batch
+        known = {streams_module.stream_key(s) for s in self._streams}
+        added = [s for s in incoming
+                 if s.get("kind") != "drm"
+                 and streams_module.stream_key(s) not in known]
+        if not added:
+            return
+        cut = len(self._streams)
+        while cut and self._streams[cut - 1].get("kind") == "drm":
+            cut -= 1
+        self._streams[cut:cut] = added
+        self._refresh_streams_panel()
+
+    def _refresh_streams_panel(self):
+        """Redraw the Resolution & Source panel in place if it is open,
+        so a source that answers late appears in a list already being
+        read. rebuild=True for the reason _drill_streams gives - without
+        it the reopen hits the same-kind toggle and closes the panel."""
+        if self._panel is not None and getattr(self._panel, "kind", "") == "streams":
+            self._open_streams_panel(rebuild=True)
 
     def _on_subtitles(self, found, run):
         if self._closing or run != self._run:
@@ -3123,13 +3227,15 @@ class PlayerPage(GlassPage):
             # An open tracks panel follows mpv's own answer: the pick
             # already moved the highlight optimistically (_pick_track),
             # and this is the confirmation - or the correction, when mpv
-            # refused the track - arriving a beat later. Repainted rather
-            # than rebuilt, unless the track list itself changed: mpv
-            # emits track-list on every sub_add too, and tearing four
-            # native windows down over the video each time is what the
-            # owner saw as the panel flickering.
+            # refused the track - arriving a beat later. Rows are synced
+            # and repainted in place, never rebuilt for a joined or lost
+            # track: mpv emits track-list on every sub_add too, and
+            # tearing four native windows down over the video each time
+            # is what the owner saw as the panel flickering. The rebuild
+            # remains only for a change the panel structurally cannot
+            # absorb (see _sync_track_rows).
             if self._panel is not None and getattr(self._panel, "kind", "") == "tracks":
-                if not self._highlight_tracks():
+                if not (self._sync_track_rows() and self._highlight_tracks()):
                     self._open_tracks_panel(rebuild=True)
         elif name == "paused-for-cache":
             # Only ever a note, never an error: a stalled buffer usually
@@ -3455,7 +3561,7 @@ class PlayerPage(GlassPage):
         subs = [t for t in self._tracks if t.get("type") == "sub"]
         # Row cards by (property, track id), so a later pick moves the
         # highlight through card.set_selected instead of rebuilding the
-        # whole panel - see _highlight_tracks.
+        # whole panel - see _sync_track_rows/_highlight_tracks.
         panel.track_rows = {}
         if not audio and not subs:
             panel.add_message("This source has no selectable tracks.")
@@ -3483,12 +3589,75 @@ class PlayerPage(GlassPage):
         panel.finish()
         self._show_panel(panel)
 
+    def _sync_track_rows(self) -> bool:
+        """Add or remove rows on the open tracks panel so they match
+        `self._tracks`, without tearing the panel down.
+
+        mpv re-emits track-list whenever a track joins or leaves - every
+        external subtitle load does (sub_add fires mid-playback when a
+        download or AI translation lands), and the old answer was
+        `_open_tracks_panel(rebuild=True)`: a deleteLater of a native
+        child window over the running video, measured as the panel
+        visibly stuttering while the user was in it picking a track. A
+        joined track is instead inserted at the end of its own group
+        (mpv numbers new tracks upward, so that is also id order) and
+        the panel re-laid to fit - a geometry change on the live native
+        window, not a teardown.
+
+        Returns False when only a rebuild can represent the change: no
+        tracks panel is open, a whole group would have to appear (a
+        panel built without any subtitles has no SUBTITLES header or Off
+        row to insert under), or the cards are already deleted C++
+        objects behind live Python names (the panel closed under us)."""
+        panel = self._panel
+        rows = getattr(panel, "track_rows", None) if panel is not None else None
+        if rows is None or getattr(panel, "kind", "") != "tracks":
+            return False
+        current = {("aid" if t.get("type") == "audio" else "sid", t.get("id")): t
+                   for t in self._tracks if t.get("type") in ("audio", "sub")}
+        added = [key for key in current if key not in rows]
+        gone = [key for key in rows
+                if key != ("sid", None) and key not in current]
+        if not added and not gone:
+            return True
+        try:
+            layout = panel.body_layout
+            for key in gone:
+                card = rows.pop(key)
+                card.hide()      # deleteLater is a frame away; hide now
+                card.deleteLater()
+            for key in sorted(added,
+                              key=lambda k: (0 if k[0] == "aid" else 1, k[1])):
+                prop, track = key[0], current[key]
+                # After the last surviving row of the same group. The Off
+                # row anchors an empty subtitle group - it is keyed
+                # ("sid", None), so a first external sub lands under it.
+                anchor = max((layout.indexOf(card)
+                              for k, card in rows.items() if k[0] == prop),
+                             default=-1)
+                if anchor < 0:
+                    return False    # the whole group is new: rebuild
+                rows[key] = panel.add_row(
+                    self._track_label(track), track.get("codec") or "",
+                    lambda checked=False, p=prop, t=track:
+                        self._pick_track(p, t),
+                    index=anchor + 1)
+        except RuntimeError:
+            return False
+        # Grow (or shrink) the panel to its new content - resizing the
+        # live native window is smooth where recreating it is not.
+        self._layout_overlays()
+        return True
+
     def _highlight_tracks(self) -> bool:
         """Repaint the open tracks panel's rows from `self._tracks`.
 
-        Returns False when there is no panel to repaint, or when its rows
-        no longer describe the current track list (mpv gained or lost a
-        track) - the caller then rebuilds.
+        A pure repaint: `_sync_track_rows` has already made the row set
+        match the track list, so every pass covers every row - which is
+        what keeps exactly one row lit per group, with Off lit only
+        while no sub track is selected. Returns False when there is no
+        tracks panel, or its cards are deleted C++ objects (the panel
+        closed between the event and this call).
 
         This exists because rebuilding stutters. `_pick_track` used to
         call `_open_tracks_panel(rebuild=True)`, which deleteLater'd the
@@ -3500,10 +3669,6 @@ class PlayerPage(GlassPage):
         rows = getattr(panel, "track_rows", None) if panel is not None else None
         if not rows or getattr(panel, "kind", "") != "tracks":
             return False
-        wanted = {("aid" if t.get("type") == "audio" else "sid", t.get("id"))
-                  for t in self._tracks if t.get("type") in ("audio", "sub")}
-        if wanted - (set(rows) - {("sid", None)}):
-            return False          # a track appeared that has no row
         selected = {("aid" if t.get("type") == "audio" else "sid", t.get("id"))
                     for t in self._tracks if t.get("selected")}
         no_sub = not any(t.get("type") == "sub" and t.get("selected")
@@ -3529,9 +3694,24 @@ class PlayerPage(GlassPage):
         if self.handle is None:
             return
         try:
-            self.handle[prop] = "no" if track is None else int(track.get("id"))
-            if prop == "sid" and track is not None:
-                self.handle["sub-visibility"] = True
+            # Asynchronous on purpose: mpv applies an embedded track
+            # switch on its core thread, and the synchronous property
+            # write held this (UI) thread through the decoder
+            # reconfigure - felt as the panel hitching right as a row
+            # was clicked. The return value was never the feedback
+            # anyway; mpv's track-list observation is what confirms or
+            # corrects the pick (see _on_property).
+            if hasattr(self.handle, "command_async"):
+                self.handle.command_async(
+                    "set", prop,
+                    "no" if track is None else str(int(track.get("id"))))
+                if prop == "sid" and track is not None:
+                    self.handle.command_async("set", "sub-visibility", "yes")
+            else:
+                self.handle[prop] = ("no" if track is None
+                                     else int(track.get("id")))
+                if prop == "sid" and track is not None:
+                    self.handle["sub-visibility"] = True
         except Exception:
             logs.exception("Track change failed")
         # The local list's `selected` flags are updated here, before the
@@ -3549,9 +3729,10 @@ class PlayerPage(GlassPage):
                                      and entry.get("id") == picked)
         if kind == "audio":
             self._update_audio_pill()
-        # In place when the rows still fit the track list; a rebuild is
-        # the fallback, not the normal path (see _highlight_tracks).
-        if not self._highlight_tracks():
+        # In place, always: rows are added or removed to match the track
+        # list and then repainted. A rebuild is only for a change the
+        # panel structurally cannot absorb (see _sync_track_rows).
+        if not (self._sync_track_rows() and self._highlight_tracks()):
             self._open_tracks_panel(rebuild=True)
 
     def _open_settings_panel(self):
@@ -3632,8 +3813,12 @@ class PlayerPage(GlassPage):
             matches = streams_module.matching_quality(self._streams, quality)
             if not matches:
                 continue
-            best = matches[0]
-            seeders = int(best.get("seeders") or 0)
+            # The most any release at this resolution has, not the first
+            # row's - _rank caps seeders at 200 outside the preferred
+            # resolution, so "up to N" read off matches[0] was regularly
+            # not the largest number in the group it claimed to describe.
+            seeders = max((int(m.get("seeders") or 0) for m in matches),
+                          default=0)
             label = "4K (2160p)" if quality == "2160p" else quality
             panel.add_row(
                 label,
@@ -3666,6 +3851,14 @@ class PlayerPage(GlassPage):
                        if streams_module else [])
         else:
             sources = [s for s in self._streams if not (s.get("quality") or "")]
+        # Most seeders first. The list is in _rank order, which caps
+        # seeders at 200 outside the preferred resolution and now also
+        # carries late-arriving sources appended on the end - so without
+        # this the counts printed down the panel run in no order. Same
+        # rule as the details page's source list (streams.list_sort_key)
+        # so the two cannot disagree about what "best" means.
+        if streams_module is not None:
+            sources = sorted(sources, key=streams_module.list_sort_key)
         for stream in sources:
             index = self._streams.index(stream)
             seeders = int(stream.get("seeders") or 0)

@@ -96,7 +96,12 @@ class _Signals(QObject):
     meta = Signal(int, object)          # run, Cinemeta meta dict or None
     art = Signal(int, str, str)         # run, "logo"/"backdrop", local path
     chapters = Signal(int, object)      # run, chapter list or None
-    sources = Signal(int, object, object)  # run, stream list, (season, ep)
+    # run, stream list, (season, ep), still-looking. The last flag is
+    # what separates "here is more" from "that is all there is": a
+    # partial batch holding nothing playable must leave the note saying
+    # "Finding sources...", while the final one saying the same thing
+    # means no source was found.
+    sources = Signal(int, object, object, bool)
     # A reading title's MangaDex genre tags - run, [names]. Video pages
     # get genres free with the Cinemeta meta; this is the reading pair.
     reading_genres = Signal(int, object)
@@ -143,16 +148,27 @@ def _art_worker(signals, run, entry):
 
 def _sources_worker(signals, run, entry, season, episode):
     """Everything playable for one episode - what the source picker
-    lists. Its own thread (the user is watching this one), never raises."""
+    lists. Its own thread (the user is watching this one), never raises.
+
+    Each source's releases go up as they land rather than the whole
+    fan-out at the end - the owner's "the sourcing is still slow".
+    Measured on their own entries: the first addon's rows are in hand
+    after 0.3-0.8s and this panel used to show nothing until the slowest
+    source finished, 1.9-2.6s later and up to the whole budget when one
+    hung. Every batch is a superset of the last, so the panel just
+    refills - the same shape _chapters_worker above already uses."""
+    def partial(found):
+        signals.sources.emit(run, list(found or []), (season, episode), True)
+
     try:
         from helpers import streams as streams_module
         found = streams_module.find_streams(
             entry, season=season, episode=episode,
-            deadline=net.deadline_in(24))
+            deadline=net.deadline_in(24), on_partial=partial)
     except Exception:
         logs.exception("details source lookup failed")
         found = []
-    signals.sources.emit(run, list(found or []), (season, episode))
+    signals.sources.emit(run, list(found or []), (season, episode), False)
 
 
 def _reading_art_worker(signals, run, entry):
@@ -244,6 +260,16 @@ def _chapters_worker(signals, run, entry, refresh=False):
         signals.chapters.emit(run, None)
         return
     signals.chapters.emit(run, list(chapters or []))
+
+
+def _quality_label(value) -> str:
+    """A stream's resolution as one word, for a source row.
+
+    "4k" and "2160p" are the same thing said two ways, and in a list
+    that no longer groups by resolution they would read as two different
+    ones sitting apart in the same column."""
+    quality = str(value or "").strip().lower()
+    return "2160p" if quality == "4k" else quality
 
 
 def _pretty_date(value) -> str:
@@ -397,7 +423,8 @@ class DetailsPage(GlassPage):
 
         # The source-picker step: filled in when an episode row is
         # clicked, cleared by its back row or by picking a source.
-        # {"season", "episode", "streams" (None while looking)}.
+        # {"season", "episode", "streams" (None until the first batch
+        # lands), "looking" (more sources still out)}.
         self._source_pick = None
         # A Discover reading title with no site yet: the list panel
         # offers the configured reading sites first (the owner's ask),
@@ -1251,11 +1278,11 @@ class DetailsPage(GlassPage):
             self._open_source_picker(season, episode)
 
     def _open_source_picker(self, season, episode):
-        """Swap the list panel to this episode's sources, grouped by
-        resolution - nothing plays until one is chosen."""
+        """Swap the list panel to this episode's sources, best first -
+        nothing plays until one is chosen."""
         import threading
         self._source_pick = {"season": season, "episode": episode,
-                             "streams": None}
+                             "streams": None, "looking": True}
         self._run += 1
         threading.Thread(
             target=_sources_worker,
@@ -1287,20 +1314,50 @@ class DetailsPage(GlassPage):
             except RuntimeError:
                 pass        # the panel is being torn down
 
-    def _on_sources(self, run, found, key):
+    def _on_sources(self, run, found, key, looking):
         if run != self._run or self._closed:
             return
         pick = self._source_pick
         if not pick or (pick.get("season"), pick.get("episode")) != tuple(key):
             return
-        pick["streams"] = [s for s in (found or [])
-                           if s.get("kind") != "drm"]
+        playable = [s for s in (found or []) if s.get("kind") != "drm"]
+        if looking and not playable:
+            # A batch carrying only the DRM row is not an answer yet.
+            # Storing it would flip the note to "No playable source was
+            # found" while the fan-out is still running, and the next
+            # batch would flip it back - a panel that says the lookup
+            # failed and then unsays it.
+            return
+        pick["streams"] = playable
+        pick["looking"] = bool(looking)
         self._fill_rows()
 
     def _fill_source_rows(self):
-        """The sources for the picked episode: a back row, then one
-        heading per resolution with its files under it - source name,
-        seeders, size and the release line, exactly what choosing needs."""
+        """The sources for the picked episode: a back row, then every
+        release in one list, most seeders first.
+
+        **The per-resolution headings are gone, and that is the owner's
+        ask rather than a tidy-up.** They asked for the list "from top
+        to bottom based on seeds num", and the headings were the only
+        reason it was not: sorting *inside* each group was measured to
+        change nothing - across their four real titles, all sixteen
+        resolution groups already printed seeder-descending, because the
+        addons return roughly sorted rows and Python's sort is stable.
+        What actually broke the descent was the jump between headings.
+        Measured on House of the Dragon S02E05: the 4K group ran
+        939 -> 304 -> 170 ... -> 38, and then the 1080P heading started
+        again at 1876. Read down the column, the numbers went up.
+
+        So one flat list ordered by streams.list_sort_key, with the
+        resolution moved onto each row as its first field - it was the
+        only thing a heading carried that a row could not:
+
+            1080p · 1876 seeders · 2.1 GB · <release title>
+
+        Nothing was lost by dropping them. Resolution is still filterable
+        through the search box (it matches the row text), and the
+        player's own drill-down panel keeps the by-resolution view for
+        picking a resolution deliberately."""
         self._clear_rows()
         pick = self._source_pick or {}
         season, episode = pick.get("season"), pick.get("episode")
@@ -1328,44 +1385,45 @@ class DetailsPage(GlassPage):
         except Exception:                               # pragma: no cover
             streams_helper = None
         wanted = self._search.text().strip().lower()
-        groups = (streams_helper.qualities(streams_found)
-                  if streams_helper else [])
-        if any(not (s.get("quality") or "") for s in streams_found):
-            groups = groups + [""]
-        for quality in groups:
-            members = [s for s in streams_found
-                       if (("2160p" if (s.get("quality") or "").lower() == "4k"
-                            else (s.get("quality") or "").lower()) == quality)]
-            if not members:
+        visible = []
+        for stream in streams_found:
+            # The resolution is part of what is searched now that it is
+            # a field on the row rather than a heading - typing "2160"
+            # is how someone narrows to 4K with the groups gone.
+            text = (f"{_quality_label(stream.get('quality'))} "
+                    f"{stream.get('source') or ''} "
+                    f"{stream.get('title') or ''}").lower()
+            if wanted and wanted not in text:
                 continue
-            visible = []
-            for stream in members:
-                text = f"{stream.get('source') or ''} {stream.get('title') or ''}".lower()
-                if wanted and wanted not in text:
-                    continue
-                visible.append(stream)
-            if not visible:
-                continue
-            heading = QLabel("4K (2160p)" if quality == "2160p"
-                             else (quality or "Other").upper())
-            heading.setStyleSheet(
-                f"color: {theme.TEXT_MUTED}; font-size: 11pt; font-weight: 700;"
-                f" letter-spacing: 1px; background: transparent; border: none;"
-                f" padding: 6px 2px 0px 2px;")
-            self._rows.insertWidget(shown, heading)
+            visible.append(stream)
+        if streams_helper is not None:
+            visible.sort(key=streams_helper.list_sort_key)
+        for stream in visible:
+            seeders = int(stream.get("seeders") or 0)
+            size = ""
+            if streams_helper:
+                size = streams_helper.format_size(stream.get("size_bytes"))
+            parts = [p for p in
+                     (_quality_label(stream.get("quality")) or "Other",
+                      f"{seeders} seeders" if seeders else "",
+                      size, (stream.get("title") or "").strip()[:70]) if p]
+            self._rows.insertWidget(shown, self._row_card(
+                stream.get("source") or "Source", " · ".join(parts), None,
+                lambda s=stream: self._play_stream_choice(s)))
             shown += 1
-            for stream in visible:
-                seeders = int(stream.get("seeders") or 0)
-                size = ""
-                if streams_helper:
-                    size = streams_helper.format_size(stream.get("size_bytes"))
-                parts = [p for p in
-                         (f"{seeders} seeders" if seeders else "",
-                          size, (stream.get("title") or "").strip()[:70]) if p]
-                self._rows.insertWidget(shown, self._row_card(
-                    stream.get("source") or "Source", " · ".join(parts), None,
-                    lambda s=stream: self._play_stream_choice(s)))
-                shown += 1
+        if shown > 1 and pick.get("looking"):
+            # Say that the list is still growing. Not the panel note -
+            # that is centred over the viewport and would sit on top of
+            # the rows it is talking about. Without it a list that
+            # suddenly gains twenty rows reads as a glitch rather than
+            # as the slow source finally answering.
+            still = QLabel("Still looking for more sources...")
+            still.setStyleSheet(
+                f"color: {theme.TEXT_DIM}; font-size: 10pt;"
+                f" background: transparent; border: none;"
+                f" padding: 10px 2px 4px 2px;")
+            self._rows.insertWidget(shown, still)
+            shown += 1
         self._panel_note.setVisible(shown <= 1)
         if shown <= 1:
             self._panel_note.setText("Nothing matches that search.")
@@ -1893,10 +1951,22 @@ class DetailsPage(GlassPage):
 
         The id stamped here is what flips every "is it saved" check in
         the app, this button's own visibility rule included; the page
-        that opened this one adopts the new row when the overlay closes
-        (tracker._on_inapp_closed reads the id off the shared entry
-        dict, which is why it is written in place rather than onto a
-        copy)."""
+        that opened this one adopts the new row when the overlay closes.
+
+        **This docstring used to claim the id reaches the caller's own
+        dict because it is "written in place rather than onto a copy".
+        It is not: `__init__` does `self.entry = dict(entry or {})`, so
+        the stamp lands on this page's copy and the opener's dict never
+        sees it.** Believed rather than checked, that sentence cost a
+        real bug - a title saved off Discover stayed invisible in Saved
+        until the page was rebuilt, because tracker's overlay-close hook
+        read the id off the dict that never gained one, and worse, an
+        unadopted row of the page's own type is what _save_entries reads
+        as "this page deleted it". The hook now falls back to reading
+        `page.entry["id"]` off the overlay itself (see
+        tracker._wire_overlay_refresh); the copy stays, because sharing
+        the dict would let a page the user never saved write through to
+        the grid behind it."""
         if self.entry.get("id"):
             return
         try:

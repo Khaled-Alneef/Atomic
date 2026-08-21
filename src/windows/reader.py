@@ -11,9 +11,10 @@ Four things decide almost everything in here:
     page-turning mode existed beside it and is gone: the owner reads
     manhwa and Arabic manga scans, both of which are read as a strip,
     and a second surface only ever meant a second set of bugs. What is
-    left of direction is which arrow key means "next chapter" - Arabic
-    and manga are read right to left, so that is the **left** one, and
-    the Next Chapter button sits on the left edge for the same reason.
+    left of direction is on-screen placement: Arabic and manga are read
+    right to left, so the Next Chapter button sits on the **left** edge
+    and Ctrl+Left steps forward. The *plain* arrows go the other way -
+    Right = next, Left = previous, the owner's ask - see keyPressEvent.
   * **Reading order is not list order.** chapter_source hands chapters
     back newest first, so the next chapter to read is at index **- 1**.
     step_chapter is the one place that inversion lives; it shipped
@@ -53,6 +54,7 @@ saturated this user's whole home network once (see helpers/lookup_pool).
 import datetime
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -68,8 +70,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from helpers import (app_settings, downloads, history, images, logs,
-                     lookup_pool, net, storage, theme)
+from helpers import (app_settings, child_process, downloads, history, images,
+                     logs, lookup_pool, net, storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
                              finish_toast, frameless_dialog, show_toast,
                              use_hover_cursor)
@@ -755,6 +757,12 @@ class _ChapterListView(QWidget):
         self._rows.setSpacing(6)
         self._rows.addStretch()
 
+        # What the rows were built from, and one handle per row for
+        # restyling in place - see set_chapters for why the rows are
+        # kept rather than rebuilt on every visit.
+        self._built_from = None
+        self._row_state = []
+
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
@@ -772,29 +780,93 @@ class _ChapterListView(QWidget):
         self._notice.setVisible(bool(text))
 
     def set_chapters(self, chapters, current=-1, read_up_to=0.0):
-        # Torn down and rebuilt rather than updated in place - a page
-        # here rebuilds from scratch, the same rule the rest of the app
-        # follows (.claude/rules/ui.md).
+        """Rebuild only when the chapter list itself changed; otherwise
+        restyle the rows already built.
+
+        This used to tear down and rebuild every row on every call,
+        following the app's "pages rebuild from scratch" rule - but this
+        list is not a page visit: it is re-entered on every Back press
+        from inside a chapter, and a real list runs to hundreds of rows
+        (249 measured for The Beginning After the End). Measured with
+        250 fabricated chapters, offscreen: 426ms to rebuild plus 422ms
+        of first-show polish for the fresh rows inside _show_only -
+        which was the whole of "the back button takes ages". Between
+        two visits the only thing that changes is which row is being
+        read and which carry the tick, so exactly those rows are
+        restyled in place (the same idea as the player's OverlayPanel
+        rows), and the scroll position survives for free."""
+        chapters = list(chapters)
+        if chapters == self._built_from:
+            self._update_marks(current, read_up_to)
+            return
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._row_state = []
         for index, chapter in enumerate(chapters):
-            number = chapter_number(chapter)
+            self._rows.insertWidget(index, self._build_row(index, chapter))
+        self._built_from = chapters
+        self._update_marks(current, read_up_to)
+
+    def _update_marks(self, current=-1, read_up_to=0.0):
+        """Move the "Reading" pill and the read ticks without touching
+        the rows themselves. Only rows whose state actually changed are
+        restyled - setStyleSheet re-polishes a widget, and re-polishing
+        all ~250 would buy back a chunk of the rebuild just avoided."""
+        for index, row in enumerate(self._row_state):
+            reading = index == current
+            number = row["number"]
             read = bool(read_up_to and number is not None
                         and number <= read_up_to)
-            self._rows.insertWidget(
-                index, self._build_row(index, chapter, index == current, read))
+            if reading != row["reading"] or read != row["read"]:
+                self._apply_row_state(row, reading, read)
 
-    def _build_row(self, index, chapter, reading=False, read=False):
+    def _apply_row_state(self, row, reading, read):
+        # The chapter being read is marked on the row itself rather than
+        # by selecting it: this list keeps no selection, and after
+        # scrolling 500 rows "which one am I on" is not answerable from
+        # anything else on screen.
+        row["reading"], row["read"] = reading, read
+        accent = (f"color: {theme.ACCENT}; font-weight: 800;"
+                  if reading else "")
+        row["number_label"].setStyleSheet(accent)
+        row["name"].setStyleSheet(accent)
+        mark = row["mark"]
+        if reading:
+            mark.setText("Reading")
+            mark.setToolTip("")
+            mark.setStyleSheet(
+                f"color: {theme.ON_ACCENT}; background: {theme.ACCENT_GRADIENT}; "
+                f"border-radius: {theme.RADIUS_SM}px; padding: 2px 10px; "
+                f"font-weight: 700;")
+        elif read:
+            # Every chapter reading has reached carries the tick, not
+            # only the one being read - the owner's ask: the list should
+            # answer "which of these have I been through" at a glance.
+            # A glyph in the SUCCESS green, the same vocabulary the
+            # player's episode list uses for the same fact.
+            mark.setText(ICON_READ)
+            mark.setToolTip("Read")
+            mark.setStyleSheet(
+                f"color: {theme.SUCCESS}; font-family: {theme.FONT_STACK_ICONS}; "
+                f"font-size: 10pt; background: transparent;")
+        mark.setVisible(reading or read)
+
+    def _build_row(self, index, chapter):
         """One chapter: number hard left, name centred, date hard right.
 
         Three cells rather than a run of widgets in one row, because
         "centred" here means centred on the *row* - see ROW_SIDE_WIDTH.
         The `group` field that used to sit in here is gone: every source
         chapter_source builds sets it to "" (all four site shapes and the
-        MangaDex path), so it was a widget that could never have text."""
+        MangaDex path), so it was a widget that could never have text.
+
+        Built state-less on purpose: everything that changes between
+        visits (the Reading pill, the tick, the accent) is applied by
+        _apply_row_state, so the rows can be kept and restyled instead
+        of rebuilt - see set_chapters."""
         card = Card(matte=True)
         row = QHBoxLayout(card)
         row.setContentsMargins(14, 10, 14, 10)
@@ -810,12 +882,6 @@ class _ChapterListView(QWidget):
         number_label = QLabel(format_chapter_progress(number) if number is not None
                               else "-", objectName="CardTitle")
         number_label.setFixedWidth(ROW_NUMBER_WIDTH)
-        # The chapter being read is marked on the row itself rather than
-        # by selecting it: this list is rebuilt on every visit and has no
-        # selection to keep, and after scrolling 500 rows "which one am I
-        # on" is not answerable from anything else on screen.
-        if reading:
-            number_label.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 800;")
         left_row.addWidget(number_label)
 
         # The language is the point of this reader, so it is a badge and
@@ -840,8 +906,6 @@ class _ChapterListView(QWidget):
         # elide widens every row to the longest name in the list.
         name = _ElidedLabel(chapter_name(chapter), objectName="CardTitle")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        if reading:
-            name.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 800;")
         row.addWidget(name, stretch=1)
 
         right = QWidget(objectName="Bare")
@@ -850,25 +914,13 @@ class _ChapterListView(QWidget):
         right_row.setContentsMargins(0, 0, 0, 0)
         right_row.setSpacing(8)
         right_row.addStretch()
-        if reading:
-            mark = QLabel("Reading")
-            mark.setStyleSheet(
-                f"color: {theme.ON_ACCENT}; background: {theme.ACCENT_GRADIENT}; "
-                f"border-radius: {theme.RADIUS_SM}px; padding: 2px 10px; "
-                f"font-weight: 700;")
-            right_row.addWidget(mark)
-        elif read:
-            # Every chapter reading has reached carries the tick, not
-            # only the one being read - the owner's ask: the list should
-            # answer "which of these have I been through" at a glance.
-            # A glyph in the SUCCESS green, the same vocabulary the
-            # player's episode list uses for the same fact.
-            mark = QLabel(ICON_READ)
-            mark.setToolTip("Read")
-            mark.setStyleSheet(
-                f"color: {theme.SUCCESS}; font-family: {theme.FONT_STACK_ICONS}; "
-                f"font-size: 10pt; background: transparent;")
-            right_row.addWidget(mark)
+        # The Reading pill / read tick, hidden until _apply_row_state
+        # gives it a state. A hidden QLabel takes no space in the row,
+        # so a bare row lays out exactly as it did when the mark was
+        # only created on demand.
+        mark = QLabel()
+        mark.setVisible(False)
+        right_row.addWidget(mark)
         published = chapter_published(chapter)
         date_label = QLabel(published, objectName="CardMeta")
         date_label.setAlignment(Qt.AlignmentFlag.AlignRight
@@ -882,6 +934,9 @@ class _ChapterListView(QWidget):
         card.clicked.connect(lambda i=index: self.picked.emit(i))
         card.rightClicked.connect(
             lambda event, i=index: self._show_mark_menu(event, i))
+        self._row_state.append({"number": number, "number_label": number_label,
+                                "name": name, "mark": mark,
+                                "reading": False, "read": False})
         return card
 
     def _show_mark_menu(self, event, index):
@@ -1674,12 +1729,15 @@ class ReaderPage(GlassPage):
         UI habit: this is right-to-left content, so *next* is to the left
         and *previous* to the right, the same way Ctrl+Left is already
         the next chapter. Both carry the word as well as the chevron, so
-        the position never has to be interpreted."""
+        the position never has to be interpreted. The *plain* arrows are
+        the one deliberate mismatch: the owner asked for Right = next and
+        Left = previous, keyboard habit over reading direction - see
+        keyPressEvent."""
         self._next_btn = self._button("‹  Next Chapter",
-                                      "Next chapter (Ctrl+Left)")
+                                      "Next chapter (Right, or Ctrl+Left)")
         self._next_btn.clicked.connect(lambda: self.step_chapter(1))
         self._prev_btn = self._button("Previous Chapter  ›",
-                                      "Previous chapter (Ctrl+Right)")
+                                      "Previous chapter (Left, or Ctrl+Right)")
         self._prev_btn.clicked.connect(lambda: self.step_chapter(-1))
 
         self._chapter_box = _ChapterCombo(self)
@@ -2825,15 +2883,21 @@ class ReaderPage(GlassPage):
             return
         view = self._strip_view
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-            # Right-to-left content, so the *left* arrow is forward -
-            # the same direction the Next Chapter button sits in at the
-            # bottom-left. There is one surface now, so this no longer
-            # depends on a mode.
-            forward = key == Qt.Key.Key_Left
             if control:
-                self.step_chapter(1 if forward else -1)
+                # Ctrl keeps the sense it has always had, which follows
+                # the reading direction: right-to-left content, so
+                # Ctrl+Left is the *next* chapter - the side the Next
+                # button sits on.
+                self.step_chapter(1 if key == Qt.Key.Key_Left else -1)
             else:
-                view.step(forward)
+                # Plain arrows step *chapters* now, not pages (the
+                # owner's ask), and by keyboard habit: Right is next,
+                # Left is previous. That is deliberately the opposite
+                # of the on-screen sides - Next sits bottom-*left*
+                # because the content reads right-to-left - so don't
+                # "fix" this back to match the buttons. Page stepping
+                # still lives on Space/PageDown and Backspace/PageUp.
+                self.step_chapter(1 if key == Qt.Key.Key_Right else -1)
             return
         if key in (Qt.Key.Key_Space, Qt.Key.Key_PageDown):
             view.step(True)
@@ -3024,6 +3088,140 @@ def _origin_page_name(window):
 _MUSIC_OPENED_AT = float("-inf")
 _MUSIC_REOPEN_S = 10 * 60
 
+# How long after the launch to keep watching for the music window, and
+# how often to look. A cold browser can take over a second to put its
+# first window up, and some put a splash up before the real one - so the
+# sweep keeps going for the whole window rather than stopping on the
+# first hit (see _hush_browser_window).
+_MUSIC_HUSH_S = 4.0
+_MUSIC_HUSH_STEP_MS = 120
+
+# The default browser's file name, resolved once and then remembered -
+# including the failure, as "".
+_BROWSER_EXE = None
+
+
+def _default_browser_exe() -> str:
+    """Lowercased file name of whatever opens an http:// link on this
+    machine ("brave.exe", "chrome.exe", ...), or "" if it can't be read.
+
+    Read from the user's own file association rather than matched
+    against a list of known browsers: the music URL is opened through
+    ShellExecute, so the window that appears belongs to exactly this
+    program - and being sure of that is what makes it safe to minimize
+    it (see _hush_browser_window)."""
+    global _BROWSER_EXE
+    if _BROWSER_EXE is not None:
+        return _BROWSER_EXE
+    _BROWSER_EXE = ""
+    if os.name != "nt":
+        return _BROWSER_EXE
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\Shell\Associations"
+                r"\UrlAssociations\http\UserChoice") as key:
+            prog_id = winreg.QueryValueEx(key, "ProgId")[0]
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                            rf"{prog_id}\shell\open\command") as key:
+            command = (winreg.QueryValueEx(key, "")[0] or "").strip()
+        # '"C:\\...\\brave.exe" -- "%1"', or an unquoted path followed by
+        # its arguments. Taking the quoted head rather than splitting on
+        # spaces, because Program Files has one in it.
+        if command.startswith('"'):
+            exe = command[1:].split('"', 1)[0]
+        else:
+            exe = command.split(" ", 1)[0]
+        _BROWSER_EXE = os.path.basename(exe).lower()
+    except Exception:
+        _BROWSER_EXE = ""      # no association to read: leave it alone
+    return _BROWSER_EXE
+
+
+def _window_exe(hwnd) -> str:
+    """Lowercased file name of the process owning `hwnd`, or ""."""
+    import ctypes
+    from ctypes import wintypes
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    # PROCESS_QUERY_LIMITED_INFORMATION. Not PROCESS_QUERY_INFORMATION:
+    # the limited form is the one a normal process is allowed to open on
+    # another process of the same user, and the browser is one.
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(512)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size)):
+            return ""
+        return os.path.basename(buffer.value).lower()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _refront(window):
+    """Pull Atomic back over whatever just took the foreground."""
+    try:
+        if window.isMinimized():
+            window.showNormal()
+        window.raise_()
+        window.activateWindow()
+        if os.name == "nt":
+            import ctypes
+            # activateWindow is a request Windows is free to ignore for
+            # a process that no longer holds the foreground; asking
+            # user32 directly is the stronger form, and its worst case
+            # is a taskbar flash rather than a buried app.
+            ctypes.windll.user32.SetForegroundWindow(int(window.winId()))
+    except Exception:
+        pass        # a closed window mid-timer is not worth a log
+
+
+def _hush_browser_window(window, was_foreground):
+    """Put the music window down as soon as it comes up.
+
+    **The show hint does nothing, and that is what this exists for.**
+    ShellExecuteW is asked for SW_SHOWMINNOACTIVE, but a browser opens a
+    normal, focused window regardless - measured, and it does the same
+    when asked for SW_HIDE outright, on both a cold start and a handoff
+    to an already-running instance. So what the owner saw as "a small
+    window opens then closes fast" was never a window closing: it was
+    the browser appearing and then being *covered* half a second later
+    by the re-foreground below. The flash was the gap between the two.
+
+    The window is therefore minimized rather than asked to arrive
+    minimized. Deliberately narrow about which one: only a window that
+    belongs to this machine's own default http handler *and* was not
+    already the foreground window before the launch. A browser the owner
+    was reading when the reader opened is left where it was, and no
+    other application can be caught by this at all. With no association
+    to read, nothing is touched and the behaviour is what it always
+    was."""
+    exe = _default_browser_exe()
+    if not exe or os.name != "nt":
+        return
+    import ctypes
+    user32 = ctypes.windll.user32
+    deadline = time.monotonic() + _MUSIC_HUSH_S
+
+    def sweep():
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if hwnd and hwnd != was_foreground and _window_exe(hwnd) == exe:
+                user32.ShowWindow(hwnd, 6)      # SW_MINIMIZE
+                _refront(window)
+            if time.monotonic() < deadline:
+                QTimer.singleShot(_MUSIC_HUSH_STEP_MS, sweep)
+        except Exception:
+            pass    # a window that died mid-sweep is not worth a log
+
+    QTimer.singleShot(_MUSIC_HUSH_STEP_MS, sweep)
+
 
 def _open_music_quietly(window):
     """Open the configured reading-music URL (Settings) behind the app.
@@ -3031,15 +3229,19 @@ def _open_music_quietly(window):
     The setting promises music *alongside* reading, but a plain
     webbrowser.open fronts the browser, which buried the reader the
     moment it opened (the owner's report) - the music is to be heard,
-    not looked at. ShellExecuteW with SW_SHOWMINNOACTIVE (7) asks
-    Windows for a minimized, un-activated window; browsers routinely
-    ignore that show hint when the URL lands in an already-running
-    instance, so the hint alone is not the fix. The part that must
-    actually work is the re-foreground: shortly after, Atomic
-    re-activates itself and pulls the reader back over whatever the
-    browser did. Twice, because a cold browser can take more than half
-    a second to steal focus - a re-front that fires before the theft
-    fixes nothing. Never raises; no music URL means nothing happens.
+    not looked at.
+
+    ShellExecuteW is still asked for SW_SHOWMINNOACTIVE (7), but that
+    hint is now known to buy nothing: measured, a browser opens a
+    normal focused window whether it is asked for 7 or for SW_HIDE, on
+    a cold start and on a handoff alike. Two things actually work, in
+    this order - _hush_browser_window minimizes the window the launch
+    brought up, and the re-foregrounds below pull Atomic back over
+    whatever held the screen in the meantime. Twice, because a cold
+    browser can take more than half a second to steal focus and a
+    re-front that fires before the theft fixes nothing.
+
+    Never raises; no music URL means nothing happens.
 
     Throttled: the details page opens a reader per chapter row clicked,
     and the browser route this mirrors was only ever hit once per
@@ -3052,39 +3254,33 @@ def _open_music_quietly(window):
         url = ""
     if not url:
         return
-    import time
     if time.monotonic() - _MUSIC_OPENED_AT < _MUSIC_REOPEN_S:
         return
     _MUSIC_OPENED_AT = time.monotonic()
+    # Read *before* the launch: a browser window that already held the
+    # foreground is one the owner put there, and is the one window
+    # _hush_browser_window must not touch.
+    was_foreground = 0
     try:
         if os.name == "nt":
             import ctypes
-            ctypes.windll.shell32.ShellExecuteW(None, "open", url, None,
-                                                None, 7)  # SW_SHOWMINNOACTIVE
+            was_foreground = ctypes.windll.user32.GetForegroundWindow()
+            # ShellExecute hands the child this process's environment,
+            # which still carries PyInstaller's bootloader variables -
+            # fatal for any child that is itself a PyInstaller build.
+            # See helpers/child_process.
+            with child_process.clean_environ():
+                ctypes.windll.shell32.ShellExecuteW(
+                    None, "open", url, None, None, 7)  # SW_SHOWMINNOACTIVE
         else:
             webbrowser.open(url)
     except Exception:
         logs.exception("could not open the reading-music URL")
         return
 
-    def refront():
-        try:
-            if window.isMinimized():
-                window.showNormal()
-            window.raise_()
-            window.activateWindow()
-            if os.name == "nt":
-                import ctypes
-                # activateWindow is a request Windows is free to ignore
-                # for a process that no longer holds the foreground;
-                # asking user32 directly is the stronger form, and its
-                # worst case is a taskbar flash rather than a buried app.
-                ctypes.windll.user32.SetForegroundWindow(int(window.winId()))
-        except Exception:
-            pass        # a closed window mid-timer is not worth a log
-
-    QTimer.singleShot(500, refront)
-    QTimer.singleShot(1500, refront)
+    _hush_browser_window(window, was_foreground)
+    QTimer.singleShot(500, lambda: _refront(window))
+    QTimer.singleShot(1500, lambda: _refront(window))
 
 
 def open_reader(window, entry, data_file="tracker.json", resume=True,

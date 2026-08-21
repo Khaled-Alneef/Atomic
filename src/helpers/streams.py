@@ -743,41 +743,46 @@ def _ask_addon(addon, kind, stream_id, deadline) -> list:
     return found
 
 
-# When a fan-out may stop waiting for the sources still out.
+# How long the fan-out may run before the fallback numbering is given
+# whatever is left of the caller's budget.
 #
-# **Measured, 21 August 2026, Frieren S01E05 cold, each source alone:**
-#
-#     Torrentio           68 rows   0.34s
-#     TorrentsDB          50 rows   0.37s
-#     indexers            12 rows   1.82s
-#     Torrentio Anime      0 rows  12.40s
-#
-# 118 releases are in hand after four tenths of a second, and the whole
-# call took 6.37s - all of it waiting on a source that answered with
-# nothing. So the rule is: once ENOUGH_RESULTS releases are in *and* the
-# floor has passed, stop waiting and rank what arrived.
-#
-# **Which sources are worth waiting for is not the same question as
-# which are fast.** A first attempt used a flat 2.5s floor before any
-# early return, and A/B'd against waiting for everything it was a wash
-# on the median - because the floor delayed the lookups where every
-# source was quick. What actually matters is that the title-keyed
-# indexers are the only source reaching fansub releases no id-based
-# addon carries (exactly what anime needs), so *they* are waited for
-# while a slow addon is not. Marked per job by find_streams; an
-# unmarked job is optional.
-ENOUGH_RESULTS = 8
+# **Measured, 21 August 2026, the owner's own entries, eight cold runs:**
+# every source that was going to answer had answered inside 2.6s -
+# Torrentio 0.38-1.34s, TorrentsDB 0.30-0.52s, Torrentio Anime
+# 0.37-2.35s, the indexers 0.49-2.57s. The recorded worst case is a
+# source answering *nothing* after 12.40s. So ten seconds cuts that tail
+# without cutting a real answer, and what remains of the caller's budget
+# is left for the fallback numbering - which only runs when nothing
+# answered at all, and must not be starved by a source that hung.
+FANOUT_BUDGET_S = 10.0
 
 
-def _run_all(jobs, deadline, *, enough=ENOUGH_RESULTS) -> list:
+# **There used to be an early return here and it is gone on purpose.**
+# The rule was: once every *essential* job has reported and ENOUGH_RESULTS
+# releases are in hand, abandon the stragglers. It existed because the
+# caller got one list at the end, so every second spent waiting was a
+# second of empty screen.
+#
+# `on_partial` removes that trade entirely - rows are on screen from the
+# first source that answers, and a late arrival only ever *adds* to a
+# list already being read. What the early return cost, measured on House
+# of the Dragon S02E05: the run that broke early returned **62 streams**
+# where the run that waited returned **110**, because TorrentsDB's 80
+# rows were abandoned a quarter of a second before they landed. Which
+# 48 releases the owner is offered should not depend on a race.
+#
+# So the fan-out now waits for every source, bounded by FANOUT_BUDGET_S
+# rather than by a result count.
+
+
+def _run_all(jobs, deadline, *, on_result=None) -> list:
     """Every job at once, results flattened, nothing raising out.
 
-    `jobs` are callables, optionally `(callable, essential)` pairs. Once
-    every *essential* job has reported and there are `enough` results in
-    hand, the optional stragglers are abandoned rather than waited for -
-    measured, that is a source answering nothing after twelve seconds
-    while 118 releases had been in hand since the fourth tenth of the
-    first. Pass `enough=None` to wait for everything.
+    `on_result`, if given, is called with the accumulated results each
+    time a job reports - that is what lets a caller draw the sources it
+    has while the rest are still out. It is called on *this* thread, one
+    call at a time, and a callback that raises is swallowed: a caller
+    that cannot draw must not kill the lookup.
 
     A plain ThreadPoolExecutor rather than lookup_pool: that pool is
     shared with the tracker's per-entry background lookups and is
@@ -786,18 +791,16 @@ def _run_all(jobs, deadline, *, enough=ENOUGH_RESULTS) -> list:
     pool exists for the length of one lookup and then goes away.
 
     Not used as a context manager on purpose: `with` shuts the pool down
-    waiting, which would block on the very stragglers this exists to
-    stop waiting for. They are left to finish into a result nobody
-    reads, bounded by their own per-request timeouts."""
+    waiting, which would block on a straggler past the deadline. Those
+    are left to finish into a result nobody reads, bounded by their own
+    per-request timeouts."""
     if not jobs:
         return []
-    pairs = [job if isinstance(job, tuple) else (job, False) for job in jobs]
     results = []
-    workers = min(LOOKUP_WORKERS, len(pairs))
+    workers = min(LOOKUP_WORKERS, len(jobs))
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = {pool.submit(job): essential for job, essential in pairs}
-        waiting_for = sum(1 for essential in futures.values() if essential)
+        futures = [pool.submit(job) for job in jobs]
         # `deadline` is a monotonic timestamp (net.deadline_in), so what
         # is left is simply the difference - floored, because a deadline
         # already past still has to let the completed jobs be collected.
@@ -807,14 +810,18 @@ def _run_all(jobs, deadline, *, enough=ENOUGH_RESULTS) -> list:
         try:
             for future in concurrent.futures.as_completed(futures,
                                                           timeout=remaining):
-                if futures.get(future):
-                    waiting_for -= 1
                 try:
-                    results.extend(future.result() or [])
+                    found = future.result() or []
                 except Exception:
                     continue        # one dead source is not a dead lookup
-                if enough and waiting_for <= 0 and len(results) >= enough:
-                    break
+                if not found:
+                    continue
+                results.extend(found)
+                if on_result is not None:
+                    try:
+                        on_result(list(results))
+                    except Exception:
+                        pass
         except concurrent.futures.TimeoutError:
             pass                    # the deadline is the answer
     finally:
@@ -869,7 +876,8 @@ def _cache_put(key, results):
     _RESULT_CACHE[key] = (time.monotonic(), [dict(s) for s in results])
 
 
-def find_streams(entry, *, season=None, episode=None, deadline=None) -> list:
+def find_streams(entry, *, season=None, episode=None, deadline=None,
+                 on_partial=None) -> list:
     """Everything playable for this entry, best first.
 
     **Every source is asked at the same time.** This used to walk the
@@ -879,6 +887,17 @@ def find_streams(entry, *, season=None, episode=None, deadline=None) -> list:
     title-keyed indexers all go out together and the deadline bounds the
     lot; only the *fallback* numbering is still sequential, because it
     must not run at all when the real numbering answered (see below).
+
+    **`on_partial` gets the ranked list so far every time a source
+    reports**, which is what the owner's "the sourcing is still slow"
+    actually was: measured on the owner's entries, the first addon's
+    rows are in hand after 0.30-0.78s and the caller was shown nothing
+    until the slowest source finished at 1.9-2.6s (and up to the whole
+    budget when one hung). Nothing about the fan-out was slow - the
+    *reporting* was all-or-nothing. Same shape as subtitles.search, and
+    for the same reason. Every batch is the full ranked list so far, so
+    a reader just redraws; a batch is never empty, so an empty list is
+    always the final answer.
 
     Answers are cached in memory for a short while (see _RESULT_CACHE),
     which is what makes the player's next-episode prefetch and a
@@ -892,6 +911,10 @@ def find_streams(entry, *, season=None, episode=None, deadline=None) -> list:
         return cached
     if deadline is None:
         deadline = net.deadline_in(20)
+    # The fan-out's own bound. Deliberately not the caller's whole
+    # budget: the fallback numbering runs *after* it and would otherwise
+    # be starved by one source that hung (see FANOUT_BUDGET_S).
+    fanout_deadline = min(deadline, net.deadline_in(FANOUT_BUDGET_S))
     results = []
 
     drm = _drm_stream(entry or {})
@@ -924,7 +947,8 @@ def find_streams(entry, *, season=None, episode=None, deadline=None) -> list:
         primary = attempts[0] if attempts else None
         stream_id = (imdb_id if primary is None
                      else f"{imdb_id}:{primary[0]}:{primary[1]}")
-        jobs += [(lambda a=addon, i=stream_id: _ask_addon(a, kind, i, deadline))
+        jobs += [(lambda a=addon, i=stream_id:
+                  _ask_addon(a, kind, i, fanout_deadline))
                  for addon in usable]
 
     # The indexers go out in the same breath as the addons rather than
@@ -932,23 +956,31 @@ def find_streams(entry, *, season=None, episode=None, deadline=None) -> list:
     # can be the only thing that answers for an entry Cinemeta never
     # matched. Only for something with an episode or a name to ask for.
     if indexers is not None and (entry or {}).get("title"):
-        # Marked essential: this is the one source that answers by
-        # *title*, so it reaches fansub releases no id-keyed addon
-        # carries, and abandoning it to save a second would quietly cost
-        # anime its best releases (see _run_all).
-        jobs.append(((lambda: indexers.search(entry, season=season,
-                                              episode=episode,
-                                              deadline=deadline)), True))
+        # This is the one source that answers by *title*, so it reaches
+        # fansub releases no id-keyed addon carries. It is also
+        # routinely the slowest (0.49-2.57s measured), which is exactly
+        # why it must not be the thing the whole list waits behind.
+        jobs.append(lambda: indexers.search(entry, season=season,
+                                            episode=episode,
+                                            deadline=fanout_deadline))
 
     # A saved page URL is worth digging into as well - it is the only
     # route for the sites the user configured themselves.
     page_url = (entry or {}).get("url") or ""
     if page_url.startswith("http") and not drm:
-        # Essential for the same reason as the indexers: the user's own
-        # configured site is a route nothing else in this list has.
-        jobs.append(((lambda: resolve_page(page_url, deadline=deadline)), True))
+        jobs.append(lambda: resolve_page(page_url, deadline=fanout_deadline))
 
-    results.extend(_run_all(jobs, deadline))
+    # Whatever was already in `results` before the fan-out started - the
+    # DRM row for an entry pinned to Netflix or Crunchyroll. It belongs
+    # in every partial as well as in the final list: it is the
+    # *explanation*, and a batch without it reads as "nothing found".
+    before = list(results)
+
+    def on_result(accumulated):
+        on_partial(_rank(before + list(accumulated)))
+
+    results.extend(_run_all(jobs, fanout_deadline,
+                            on_result=None if on_partial is None else on_result))
 
     # The fallback numbering, and only if nothing answered. It stays
     # sequential and conditional on purpose: a later guess returns a
@@ -959,13 +991,20 @@ def find_streams(entry, *, season=None, episode=None, deadline=None) -> list:
     # (an entry pinned to Netflix or Crunchyroll always gets one), and
     # treating that as "already answered" once skipped the whole addon
     # loop, so those entries found no torrents at all.
+    #
+    # Partials do not change that rule and must not: what makes it safe
+    # is that it runs only when *nothing* real answered, in which case
+    # no partial was ever emitted either - the fan-out only reports
+    # batches it actually has. So a caller drawing partials is never
+    # shown the real numbering and the guessed one mixed together.
     playable = [s for s in results if s.get("kind") != "drm"]
     if not playable and len(attempts) > 1:
         fallback = attempts[1]
         stream_id = f"{imdb_id}:{fallback[0]}:{fallback[1]}"
         results.extend(_run_all(
             [(lambda a=addon, i=stream_id: _ask_addon(a, kind, i, deadline))
-             for addon in usable], deadline))
+             for addon in usable], deadline,
+            on_result=None if on_partial is None else on_result))
 
     ranked = _rank(results)
     _cache_put(cache_key, ranked)
@@ -988,13 +1027,77 @@ def _rank(streams: list) -> list:
         return _default_pick_key(stream, preferred)
     seen, unique = set(), []
     for stream in sorted(streams, key=key):
-        marker = (stream.get("url") or stream.get("info_hash")
-                  or (stream.get("kind"), stream.get("title")))
+        marker = stream_key(stream)
         if marker in seen:
             continue
         seen.add(marker)
         unique.append(stream)
     return unique
+
+
+def stream_key(stream):
+    """What makes two rows the same release.
+
+    Used to dedupe a ranked list, and by a caller drawing partials to
+    tell which rows of a later batch it has not already got - a batch is
+    always the whole list so far, so without this every redraw would be
+    a full re-add."""
+    stream = stream or {}
+    return (stream.get("url") or stream.get("info_hash")
+            or (stream.get("kind"), stream.get("title")))
+
+
+def list_sort_key(stream):
+    """How one resolution's releases are ordered in a *visible* source
+    list. Smaller sorts first.
+
+    Not _default_pick_key: that one decides what plays and leads with
+    the preferred resolution, which says nothing inside a group that is
+    already one resolution - and it caps seeders at _SEEDER_CEILING, so
+    every release above 200 ties and their printed order is whatever
+    the sources happened to return. Measured across the owner's four
+    real titles (sixteen resolution groups) that order came out
+    descending anyway on the day, the addons being roughly
+    seeder-sorted already; what makes this necessary rather than
+    belt-and-braces is the player's panel, which appends late-arriving
+    sources behind the ranked ones.
+
+    Raw seeders first, then the smaller file between equals (the same
+    tiebreak _default_pick_key uses within the preferred resolution, so
+    the list agrees with what auto-play would choose), then the title so
+    two rows tying on both cannot swap places between redraws - which
+    with progressive results would be a list rearranging itself under
+    the pointer. A release stating no usable size sorts after the sized
+    ones rather than winning on a zero."""
+    stream = stream or {}
+    size = int(stream.get("size_bytes") or 0)
+    return (-int(stream.get("seeders") or 0),
+            size if size >= _MIN_REAL_SIZE else float("inf"),
+            (stream.get("title") or "").lower())
+
+
+def has_preferred_resolution(streams) -> bool:
+    """Whether this batch already carries the resolution Settings asks
+    for - the test for whether a *partial* answer is worth starting
+    playback on rather than waiting for the rest of the fan-out.
+
+    Starting on the first partial unconditionally is not free: a batch
+    holding only 720p would start 720p, and the 1080p that landed two
+    tenths of a second later would sit unwatched for the whole episode.
+    Once the preferred resolution is present no later arrival can beat
+    it, because resolution wins outright in _default_pick_key.
+
+    "best" answers False on purpose: which resolution is highest is not
+    knowable until every source has reported, so that preference
+    genuinely has to wait."""
+    try:
+        preferred = app_settings.get_preferred_resolution()
+    except Exception:
+        preferred = "1080p"
+    if not preferred or preferred == "best":
+        return False
+    return preferred in qualities([s for s in streams or []
+                                   if s.get("kind") != "drm"])
 
 
 def qualities(streams) -> list:

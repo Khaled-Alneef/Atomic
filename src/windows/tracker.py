@@ -585,8 +585,16 @@ def _wire_overlay_refresh(page, parent, entry):
             # it opened: a Discover title arrives here with no id at all
             # and gains one if the details page's Save writes it, and a
             # captured None would leave the page unable to pick the new
-            # entry up.
-            hook((entry or {}).get("id"))
+            # entry up. Asked of the overlay's own dict as well: the
+            # details page works on a *copy* (`self.entry = dict(entry)`
+            # in its __init__), so the id its Save stamps in place never
+            # reaches the dict this closure holds - measured: the row hit
+            # disk, closed fired, and the hook still got None, which is
+            # why a title saved off Discover didn't show in Saved until
+            # the page was rebuilt.
+            page_entry = getattr(page, "entry", None)
+            fallback = page_entry.get("id") if isinstance(page_entry, dict) else None
+            hook((entry or {}).get("id") or fallback)
         except RuntimeError:
             pass        # the page is gone; the next visit rebuilds anyway
     try:
@@ -1912,6 +1920,12 @@ class TrackerPage(GlassPage):
         self.history_tab.setVisible(key == TAB_HISTORY)
         if key == TAB_DISCOVER:
             self._show_discover()
+        elif key == TAB_SAVED:
+            # The same self-healing the sections below get by rebuilding:
+            # the details page (and the other tracker page sharing this
+            # file) writes straight to disk, and before this the Saved
+            # grid only ever redrew what the page already held.
+            self._adopt_disk_rows()
         elif key == TAB_SCHEDULE:
             # Rebuilt on every visit rather than kept: it is read
             # entirely off self.entries, and those move under it (a
@@ -2716,6 +2730,45 @@ class TrackerPage(GlassPage):
         # actually on screen.
         if self._active_tab == TAB_SCHEDULE:
             self._build_schedule()
+
+    def _adopt_disk_rows(self):
+        """Fold whatever DATA_FILE has gained since this page was built
+        into self.entries - the Saved tab's version of the rebuild that
+        Discover/Schedule/History get on every visit (_set_tab). The
+        details page writes a Discover save straight to disk, and until
+        the overlay hands _on_inapp_closed a usable id the page holds no
+        trace of it - the row stayed invisible until a page rebuild, and
+        worse, a reorder's _save_entries would read "on disk, my type,
+        not held" as "this page just deleted it" and erase the entry.
+
+        Merges instead of swapping the list: in-flight schedule/cover
+        lookups hold references to the dicts already in self.entries
+        (_on_schedule_resolved finds its entry there by id), so held
+        dicts are updated in place and only genuinely new rows appended.
+        """
+        held = {e.get("id"): e for e in self.entries if e.get("id")}
+        changed = added = False
+        for row in storage.load(self.DATA_FILE, []):
+            row_id = row.get("id")
+            if not row_id:
+                continue
+            entry = held.get(row_id)
+            if entry is not None:
+                if any(entry.get(key) != value for key, value in row.items()):
+                    entry.update(row)
+                    changed = True
+            elif row.get("type") in self.ENTRY_TYPES:
+                self.entries.append(row)
+                held[row_id] = row
+                changed = added = True
+        if added:
+            # New rows have nothing cached, so this fires lookups for
+            # exactly them (needs_refresh skips everything else) - and
+            # any built Discover card for the title earns its chip.
+            self._refresh_schedules()
+            self._sync_discover_saved()
+        if changed:
+            self._refresh_grid()
 
     def _show_context_menu(self, event, entry):
         menu = QMenu(self)
