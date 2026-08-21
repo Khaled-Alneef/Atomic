@@ -1,0 +1,170 @@
+{"t": 1.0172, "event": "CREATE", "hwnd": 1837742, "pid": 9756, "exe": "explorer.exe", "class": "OleMainThreadWndClass", "text": "OLEChannelWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 1.5052, "event": "CREATE", "hwnd": 2886058, "pid": 9756, "exe": "explorer.exe", "class": "OleMainThreadWndClass", "text": "OLEChannelWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 1.5069, "event": "CREATE", "hwnd": 920192, "pid": 9756, "exe": "explorer.exe", "class": "OleMainThreadWndClass", "text": "OLEChannelWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 1.5072, "event": "CREATE", "hwnd": 985706, "pid": 9756, "exe": "explorer.exe", "class": "OleMainThreadWndClass", "text": "OLEChannelWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 1.9585, "event": "DESTROY", "hwnd": 2492806, "pid": 0, "exe": "?"}
+{"t": 5.4079, "event": "CREATE", "hwnd": 2558342, "pid": 804, "exe": "powershell.exe", "class": "OleMainThreadWndClass", "text": "OleMainThreadWndName", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 5.8035, "event": "DESTROY", "hwnd": 2558342, "pid": 0, "exe": "?"}
+{"t": 7.5518, "event": "DESTROY", "hwnd": 5899202, "pid": 0, "exe": "?"}
+{"t": 7.552, "event": "DESTROY", "hwnd": 1444440, "pid": 0, "exe": "?"}
+{"t": 7.8808, "event": "CREATE", "hwnd": 1509976, "pid": 7984, "exe": "powershell.exe", "class": "OleMainThreadWndClass", "text": "OleMainThreadWndName", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 7.9409, "event": "CREATE", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x86000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 7.9472, "event": "SHOW", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 338, 1033], "visible": true}
+{"t": 7.9496, "event": "CREATE", "hwnd": 2752530, "pid": 16800, "exe": "brave.exe", "class": "Chrome_WidgetWin_0", "text": "", "style": "0x8c000000", "exstyle": "0x80", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 7.9505, "event": "CREATE", "hwnd": 2623878, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 5964738, "toplevel": false, "rect": [-1, 1010, 0, 1011], "visible": true}
+{"t": 7.9508, "event": "SHOW", "hwnd": 2623878, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 5964738, "toplevel": false, "rect": [-1, 1010, 0, 1011], "visible": true}
+{"t": 7.9867, "event": "HIDE", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe"}
+{"t": 8.7064, "event": "CREATE", "hwnd": 1378928, "pid": 15920, "exe": "python.exe", "class": "OleMainThreadWndClass", "text": "OleMainThreadWndName", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 8.7069, "event": "CREATE", "hwnd": 1116748, "pid": 15920, "exe": "python.exe", "class": "Qt6111PowerDummyWindow", "text": "QtPowerDummyWindow", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [234, 234, 1674, 987], "visible": false}
+{"t": 8.707, "event": "CREATE", "hwnd": 5900160, "pid": 15920, "exe": "python.exe", "class": "Qt6111ClipboardView", "text": "QtClipboardView", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [26, 26, 1466, 779], "visible": false}
+{"t": 8.7083, "event": "CREATE", "hwnd": 1968856, "pid": 15920, "exe": "python.exe", "class": "IME", "text": "Default IME", "style": "0x8c000000", "exstyle": "0x0", "parent": 1640882, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 8.7101, "event": "CREATE", "hwnd": 1640882, "pid": 15920, "exe": "python.exe", "class": "Qt6111ScreenChangeObserverWindow", "text": "", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [26, 26, 1466, 779], "visible": false}
+{"t": 8.7193, "event": "CREATE", "hwnd": 723572, "pid": 15920, "exe": "python.exe", "class": "Qt6111ThemeChangeObserverWindow", "text": "", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [52, 52, 1492, 805], "visible": false}
+{"t": 8.7194, "event": "CREATE", "hwnd": 854638, "pid": 15920, "exe": "python.exe", "class": "QEventDispatcherWin32_Internal_Widget140711986720560", "text": "", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [0, 0, 136, 39], "visible": false}
+{"t": 8.9745, "event": "CREATE", "hwnd": 985726, "pid": 15920, "exe": "python.exe", "class": "Qt6111QWindowIcon", "text": "python", "style": "0x86cf0000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [312, 65, 1608, 944], "visible": false}
+{"t": 8.9748, "event": "CREATE", "hwnd": 854366, "pid": 15920, "exe": "python.exe", "class": "_q_titlebar", "text": "_q_titlebar", "style": "0x4c00000", "exstyle": "0x8080120", "parent": 0, "toplevel": true, "rect": [0, 0, 1296, 39], "visible": false}
+{"t": 9.0254, "event": "CREATE", "hwnd": 658054, "pid": 15920, "exe": "python.exe", "class": "QEventDispatcherWin32_Internal_Widget140711986720560", "text": "", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [0, 0, 136, 39], "visible": false}
+{"t": 9.0257, "event": "CREATE", "hwnd": 658060, "pid": 15920, "exe": "python.exe", "class": "QEventDispatcherWin32_Internal_Widget140711986720560", "text": "", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [0, 0, 136, 39], "visible": false}
+{"t": 9.0258, "event": "CREATE", "hwnd": 461462, "pid": 15920, "exe": "python.exe", "class": "QEventDispatcherWin32_Internal_Widget140711986720560", "text": "", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [0, 0, 136, 39], "visible": false}
+{"t": 9.0259, "event": "CREATE", "hwnd": 658058, "pid": 15920, "exe": "python.exe", "class": "QEventDispatcherWin32_Internal_Widget140711986720560", "text": "", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [0, 0, 136, 39], "visible": false}
+{"t": 9.9452, "event": "SHOW", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 338, 1033], "visible": true}
+{"t": 9.9718, "event": "HIDE", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe"}
+{"t": 10.0151, "event": "SHOW", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 10.1343, "event": "HIDE", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe"}
+{"t": 10.3239, "event": "SHOW", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 10.6371, "event": "CREATE", "hwnd": 592508, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x46300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 10.7001, "event": "SHOW", "hwnd": 985726, "pid": 15920, "exe": "python.exe", "class": "Qt6111QWindowIcon", "text": "Atomic", "style": "0x97cf0000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [-8, -8, 1928, 1040], "visible": true}
+{"t": 10.7029, "event": "CREATE", "hwnd": 1771996, "pid": 15920, "exe": "python.exe", "class": "CicMarshalWndClass", "text": "CicMarshalWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 10.7129, "event": "CREATE", "hwnd": 395896, "pid": 15920, "exe": "python.exe", "class": "MSCTFIME UI", "text": "MSCTFIME UI", "style": "0x8c000000", "exstyle": "0x0", "parent": 1968856, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 10.8082, "event": "CREATE", "hwnd": 395912, "pid": 9756, "exe": "explorer.exe", "class": "OleMainThreadWndClass", "text": "OLEChannelWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 10.8084, "event": "CREATE", "hwnd": 592516, "pid": 9756, "exe": "explorer.exe", "class": "OleMainThreadWndClass", "text": "OLEChannelWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 11.2913, "event": "HIDE", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe"}
+{"t": 21.3017, "event": "DESTROY", "hwnd": 5964738, "pid": 4768, "exe": "brave.exe"}
+{"t": 21.3035, "event": "DESTROY", "hwnd": 2752530, "pid": 0, "exe": "?"}
+{"t": 22.1764, "event": "CREATE", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x86000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 22.1865, "event": "SHOW", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 338, 1033], "visible": true}
+{"t": 22.1871, "event": "CREATE", "hwnd": 6030274, "pid": 16800, "exe": "brave.exe", "class": "Chrome_WidgetWin_0", "text": "", "style": "0x8c000000", "exstyle": "0x80", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 22.1932, "event": "CREATE", "hwnd": 2689414, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 2818066, "toplevel": false, "rect": [-1, 1010, 338, 1033], "visible": true}
+{"t": 22.1936, "event": "SHOW", "hwnd": 2689414, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 2818066, "toplevel": false, "rect": [-1, 1010, 338, 1033], "visible": true}
+{"t": 22.2241, "event": "HIDE", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe"}
+{"t": 29.9483, "event": "SHOW", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 29.9635, "event": "HIDE", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe"}
+{"t": 30.1172, "event": "SHOW", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 30.1976, "event": "HIDE", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe"}
+{"t": 34.3391, "event": "SHOW", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 34.3518, "event": "HIDE", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe"}
+{"t": 39.2253, "event": "SHOW", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 39.3632, "event": "HIDE", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe"}
+{"t": 40.8144, "event": "DESTROY", "hwnd": 395912, "pid": 9756, "exe": "explorer.exe"}
+{"t": 40.8294, "event": "DESTROY", "hwnd": 592516, "pid": 0, "exe": "?"}
+{"t": 43.2541, "event": "CREATE", "hwnd": 658052, "pid": 16060, "exe": "taskhostw.exe", "class": "COMTASKSWINDOWCLASS", "text": "Task Host Window", "style": "0x4c00000", "exstyle": "0x100", "parent": 0, "toplevel": true, "rect": [0, 0, 136, 39], "visible": false}
+{"t": 48.3082, "event": "SHOW", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 48.986, "event": "CREATE", "hwnd": 461448, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x46300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 49.8572, "event": "HIDE", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.0056, "event": "HIDE", "hwnd": 1902648, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.0059, "event": "DESTROY", "hwnd": 2818066, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.0094, "event": "DESTROY", "hwnd": 6030274, "pid": 0, "exe": "?"}
+{"t": 54.0189, "event": "SHOW", "hwnd": 592508, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x56300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 1920, 1032], "visible": true}
+{"t": 54.094, "event": "CREATE", "hwnd": 6095810, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x86000000", "exstyle": "0x200080", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 54.1075, "event": "SHOW", "hwnd": 6095810, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "Translate this page?", "style": "0x96000000", "exstyle": "0x200080", "parent": 461386, "toplevel": false, "rect": [1191, 72, 1506, 133], "visible": true}
+{"t": 54.1124, "event": "CREATE", "hwnd": 2754950, "pid": 16800, "exe": "brave.exe", "class": "Chrome_WidgetWin_0", "text": "", "style": "0x8c000000", "exstyle": "0x80", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 54.1132, "event": "CREATE", "hwnd": 2883602, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 2754950, "toplevel": false, "rect": [0, 0, 1, 1], "visible": false}
+{"t": 54.1186, "event": "SHOW", "hwnd": 2883602, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 6095810, "toplevel": false, "rect": [1191, 72, 1192, 73], "visible": true}
+{"t": 54.3711, "event": "HIDE", "hwnd": 592508, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.3802, "event": "SHOW", "hwnd": 461448, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x56300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 1920, 1032], "visible": true}
+{"t": 54.5461, "event": "CREATE", "hwnd": 723570, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x86000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 54.5528, "event": "SHOW", "hwnd": 723570, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 259, 1033], "visible": true}
+{"t": 54.5576, "event": "CREATE", "hwnd": 526524, "pid": 16800, "exe": "brave.exe", "class": "Chrome_WidgetWin_0", "text": "", "style": "0x8c000000", "exstyle": "0x80", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 54.5591, "event": "CREATE", "hwnd": 1313384, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 723570, "toplevel": false, "rect": [-1, 1010, 0, 1011], "visible": true}
+{"t": 54.5592, "event": "SHOW", "hwnd": 1313384, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 723570, "toplevel": false, "rect": [-1, 1010, 0, 1011], "visible": true}
+{"t": 54.5926, "event": "HIDE", "hwnd": 6095810, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.5939, "event": "DESTROY", "hwnd": 6095810, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.5967, "event": "DESTROY", "hwnd": 2754950, "pid": 0, "exe": "?"}
+{"t": 54.6616, "event": "HIDE", "hwnd": 723570, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.993, "event": "HIDE", "hwnd": 461448, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.9947, "event": "DESTROY", "hwnd": 723570, "pid": 4768, "exe": "brave.exe"}
+{"t": 54.9978, "event": "DESTROY", "hwnd": 526524, "pid": 0, "exe": "?"}
+{"t": 55.0019, "event": "SHOW", "hwnd": 592508, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x56300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 1920, 1032], "visible": true}
+{"t": 55.2938, "event": "HIDE", "hwnd": 592508, "pid": 4768, "exe": "brave.exe"}
+{"t": 55.3005, "event": "SHOW", "hwnd": 5964824, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x56300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 1920, 1032], "visible": true}
+{"t": 55.3637, "event": "CREATE", "hwnd": 592060, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x86000000", "exstyle": "0x200080", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 55.374, "event": "SHOW", "hwnd": 592060, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "Translate this page?", "style": "0x96000000", "exstyle": "0x200080", "parent": 461386, "toplevel": false, "rect": [1191, 72, 1506, 133], "visible": true}
+{"t": 55.3788, "event": "CREATE", "hwnd": 1378920, "pid": 16800, "exe": "brave.exe", "class": "Chrome_WidgetWin_0", "text": "", "style": "0x8c000000", "exstyle": "0x80", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 55.3796, "event": "CREATE", "hwnd": 789106, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 1378920, "toplevel": false, "rect": [0, 0, 1, 1], "visible": false}
+{"t": 55.3855, "event": "SHOW", "hwnd": 789106, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 592060, "toplevel": false, "rect": [1191, 72, 1192, 73], "visible": true}
+{"t": 55.4769, "event": "CREATE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x86000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 55.4838, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 271, 1033], "visible": true}
+{"t": 55.4889, "event": "CREATE", "hwnd": 2820486, "pid": 16800, "exe": "brave.exe", "class": "Chrome_WidgetWin_0", "text": "", "style": "0x8c000000", "exstyle": "0x80", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 55.4892, "event": "CREATE", "hwnd": 2949138, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 6161346, "toplevel": false, "rect": [-1, 1010, 0, 1011], "visible": true}
+{"t": 55.4893, "event": "SHOW", "hwnd": 2949138, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 6161346, "toplevel": false, "rect": [-1, 1010, 0, 1011], "visible": true}
+{"t": 55.4965, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 55.8023, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 259, 1033], "visible": true}
+{"t": 55.8222, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 58.6471, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 115, 1033], "visible": true}
+{"t": 58.6649, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 58.6768, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 338, 1033], "visible": true}
+{"t": 58.693, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 59.4354, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 174, 1033], "visible": true}
+{"t": 59.4765, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 59.8029, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 115, 1033], "visible": true}
+{"t": 59.9806, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 60.2277, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 415, 1033], "visible": true}
+{"t": 60.3109, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 60.4808, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 415, 1033], "visible": true}
+{"t": 60.5297, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 60.6001, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 415, 1033], "visible": true}
+{"t": 60.7266, "event": "HIDE", "hwnd": 985726, "pid": 15920, "exe": "python.exe"}
+{"t": 60.7345, "event": "CREATE", "hwnd": 2034230, "pid": 9756, "exe": "explorer.exe", "class": "OleMainThreadWndClass", "text": "OLEChannelWnd", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 60.7457, "event": "DESTROY", "hwnd": 854366, "pid": 15920, "exe": "python.exe"}
+{"t": 60.7477, "event": "DESTROY", "hwnd": 985726, "pid": 0, "exe": "?"}
+{"t": 60.7977, "event": "DESTROY", "hwnd": 5900160, "pid": 0, "exe": "?"}
+{"t": 60.7995, "event": "DESTROY", "hwnd": 658060, "pid": 0, "exe": "?"}
+{"t": 60.7997, "event": "DESTROY", "hwnd": 461462, "pid": 15920, "exe": "python.exe"}
+{"t": 60.801, "event": "DESTROY", "hwnd": 658058, "pid": 0, "exe": "?"}
+{"t": 60.8012, "event": "DESTROY", "hwnd": 658054, "pid": 15920, "exe": "python.exe"}
+{"t": 60.8023, "event": "DESTROY", "hwnd": 854638, "pid": 0, "exe": "?"}
+{"t": 60.828, "event": "DESTROY", "hwnd": 1116748, "pid": 0, "exe": "?"}
+{"t": 60.8281, "event": "DESTROY", "hwnd": 1640882, "pid": 0, "exe": "?"}
+{"t": 60.9042, "event": "DESTROY", "hwnd": 395896, "pid": 0, "exe": "?"}
+{"t": 60.9047, "event": "DESTROY", "hwnd": 1968856, "pid": 0, "exe": "?"}
+{"t": 60.9049, "event": "DESTROY", "hwnd": 723572, "pid": 0, "exe": "?"}
+{"t": 60.905, "event": "DESTROY", "hwnd": 1378928, "pid": 0, "exe": "?"}
+{"t": 60.905, "event": "DESTROY", "hwnd": 1771996, "pid": 0, "exe": "?"}
+{"t": 61.0303, "event": "DESTROY", "hwnd": 1509976, "pid": 0, "exe": "?"}
+{"t": 61.5235, "event": "DESTROY", "hwnd": 985706, "pid": 0, "exe": "?"}
+{"t": 61.5237, "event": "DESTROY", "hwnd": 920192, "pid": 0, "exe": "?"}
+{"t": 61.5534, "event": "DESTROY", "hwnd": 1837742, "pid": 0, "exe": "?"}
+{"t": 61.5789, "event": "DESTROY", "hwnd": 2886058, "pid": 0, "exe": "?"}
+{"t": 61.6766, "event": "CREATE", "hwnd": 2951594, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x46300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 0, 115], "visible": false}
+{"t": 61.7797, "event": "HIDE", "hwnd": 592060, "pid": 4768, "exe": "brave.exe"}
+{"t": 61.781, "event": "DESTROY", "hwnd": 592060, "pid": 4768, "exe": "brave.exe"}
+{"t": 61.7827, "event": "DESTROY", "hwnd": 1378920, "pid": 0, "exe": "?"}
+{"t": 61.9681, "event": "HIDE", "hwnd": 5964824, "pid": 4768, "exe": "brave.exe"}
+{"t": 61.9688, "event": "SHOW", "hwnd": 2951594, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x56300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 1920, 1032], "visible": true}
+{"t": 62.4321, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 64.0742, "event": "HIDE", "hwnd": 2951594, "pid": 4768, "exe": "brave.exe"}
+{"t": 64.0758, "event": "SHOW", "hwnd": 5964824, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x56300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 1920, 1032], "visible": true}
+{"t": 64.1078, "event": "CREATE", "hwnd": 657596, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x86000000", "exstyle": "0x200080", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 64.1219, "event": "SHOW", "hwnd": 657596, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "Translate this page?", "style": "0x96000000", "exstyle": "0x200080", "parent": 461386, "toplevel": false, "rect": [1191, 72, 1506, 133], "visible": true}
+{"t": 64.1315, "event": "CREATE", "hwnd": 1444456, "pid": 16800, "exe": "brave.exe", "class": "Chrome_WidgetWin_0", "text": "", "style": "0x8c000000", "exstyle": "0x80", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 64.132, "event": "CREATE", "hwnd": 854642, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x48000000", "exstyle": "0x280024", "parent": 657596, "toplevel": false, "rect": [0, 0, 1, 1], "visible": false}
+{"t": 64.1362, "event": "SHOW", "hwnd": 854642, "pid": 16800, "exe": "brave.exe", "class": "Intermediate D3D Window", "text": "", "style": "0x58000000", "exstyle": "0x280024", "parent": 657596, "toplevel": false, "rect": [1191, 72, 1192, 73], "visible": true}
+{"t": 64.6088, "event": "CREATE", "hwnd": 1903278, "pid": 1476, "exe": "powershell.exe", "class": "OleMainThreadWndClass", "text": "OleMainThreadWndName", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 64.8007, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 97, 1033], "visible": true}
+{"t": 65.0456, "event": "DESTROY", "hwnd": 1903278, "pid": 0, "exe": "?"}
+{"t": 65.0806, "event": "CREATE", "hwnd": 1968814, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x46300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 0, 115], "visible": false}
+{"t": 65.224, "event": "HIDE", "hwnd": 657596, "pid": 4768, "exe": "brave.exe"}
+{"t": 65.2241, "event": "DESTROY", "hwnd": 657596, "pid": 4768, "exe": "brave.exe"}
+{"t": 65.2257, "event": "DESTROY", "hwnd": 1444456, "pid": 0, "exe": "?"}
+{"t": 65.4193, "event": "CREATE", "hwnd": 723132, "pid": 6252, "exe": "powershell.exe", "class": "OleMainThreadWndClass", "text": "OleMainThreadWndName", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 65.4989, "event": "HIDE", "hwnd": 5964824, "pid": 4768, "exe": "brave.exe"}
+{"t": 65.5018, "event": "SHOW", "hwnd": 1968814, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x56300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 115, 1920, 1032], "visible": true}
+{"t": 65.7933, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 65.8946, "event": "DESTROY", "hwnd": 723132, "pid": 0, "exe": "?"}
+{"t": 66.1479, "event": "CREATE", "hwnd": 788668, "pid": 20196, "exe": "powershell.exe", "class": "OleMainThreadWndClass", "text": "OleMainThreadWndName", "style": "0x8c000000", "exstyle": "0x0", "parent": 0, "toplevel": true, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 67.5094, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 97, 1033], "visible": true}
+{"t": 67.5666, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 67.5819, "event": "SHOW", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe", "class": "Chrome_WidgetWin_1", "text": "", "style": "0x96000000", "exstyle": "0x82000a0", "parent": 461386, "toplevel": false, "rect": [-1, 1010, 97, 1033], "visible": true}
+{"t": 67.6207, "event": "HIDE", "hwnd": 6161346, "pid": 4768, "exe": "brave.exe"}
+{"t": 69.8531, "event": "CREATE", "hwnd": 1509992, "pid": 4768, "exe": "brave.exe", "class": "Chrome_RenderWidgetHostHWND", "text": "Chrome Legacy Window", "style": "0x46300000", "exstyle": "0x20", "parent": 461386, "toplevel": false, "rect": [0, 0, 0, 0], "visible": false}
+{"t": 70.1259, "event": "DESTROY", "hwnd": 1902648, "pid": 0, "exe": "?"}

@@ -29,6 +29,7 @@ same thing for video and the owner rightly called that broken.
 """
 
 import datetime
+import re
 import uuid
 
 from PyQt6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer
@@ -108,6 +109,10 @@ class _Signals(QObject):
     # Resolving a Discover reading title on a picked site - run, the
     # fields to store ({url, site_id}) or None, the site's name.
     site_resolved = Signal(int, object, str)
+    # An entry that arrived with no id, matched against the catalog
+    # by title - run, the imdb id ("" = nothing matched well
+    # enough). See DetailsPage._on_resolved_id.
+    resolved_id = Signal(int, str)
     # A just-saved entry's downloaded cover: entry id, data file, the
     # cover URL it came from ("" when the entry already knew it), local
     # path. Crossed back so the storage write happens on the UI thread
@@ -123,6 +128,37 @@ def _meta_worker(signals, run, imdb_id, content_type):
         logs.exception("details meta lookup failed")
         meta = None
     signals.meta.emit(run, meta)
+
+
+def _resolve_id_worker(signals, run, title, entry_type):
+    """Find the catalog id for a title that arrived without one.
+
+    Never raises - lookup_pool workers die silently (see that module).
+
+    Matched, not merely searched. An episode list belonging to some
+    *other* show is worse than no episode list, because nothing on the
+    page would say it was the wrong show - so a candidate has to clear
+    the same 0.8 similarity bar the rest of this app uses, and anything
+    below it comes back empty and gets the honest message."""
+    found = ""
+    try:
+        from helpers import discover, title_match
+        wanted = (title or "").strip()
+        kinds = (("movie",) if entry_type == "Movie" else ("anime", "series"))
+        for kind in kinds:
+            rows = discover.discover_video(kind, query=wanted, limit=6) or []
+            best, score = None, 0.0
+            for row in rows:
+                value = title_match.similarity(wanted, row.get("title") or "")
+                if value > score:
+                    best, score = row, value
+            if best is not None and score >= 0.8 and best.get("imdb_id"):
+                found = best["imdb_id"]
+                break
+    except Exception:
+        logs.exception("details id lookup failed")
+        found = ""
+    signals.resolved_id.emit(run, found)
 
 
 def _art_worker(signals, run, entry):
@@ -270,6 +306,23 @@ def _quality_label(value) -> str:
     ones sitting apart in the same column."""
     quality = str(value or "").strip().lower()
     return "2160p" if quality == "4k" else quality
+
+
+def _episode_rating(value) -> str:
+    """An episode's IMDb rating as "IMDb 8.5", or "" when there is none.
+
+    Cinemeta hands this over as a *string*, and uses "0" (not null, not
+    a missing key) for anything unrated - every "Inside the Episode"
+    row carries it. So a zero is dropped rather than printed, and so is
+    anything that will not parse: a rating is only worth showing when it
+    is a real one."""
+    try:
+        score = float(str(value).strip())
+    except (TypeError, ValueError):
+        return ""
+    if score <= 0:
+        return ""
+    return f"IMDb {score:g}"
 
 
 def _pretty_date(value) -> str:
@@ -445,6 +498,7 @@ class DetailsPage(GlassPage):
         self._signals.saved_cover.connect(self._on_saved_cover)
         self._signals.reading_genres.connect(self._on_reading_genres)
         self._signals.site_resolved.connect(self._on_site_resolved)
+        self._signals.resolved_id.connect(self._on_resolved_id)
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -757,10 +811,44 @@ class DetailsPage(GlassPage):
             kind = "movie" if self.entry.get("type") == "Movie" else "series"
             lookup_pool.submit(_meta_worker, self._signals, self._run,
                                self.entry.get("imdb_id"), kind)
+        elif stremio is not None and (self.entry.get("title") or "").strip():
+            # **No id, but a title - so look the title up rather than
+            # giving up.** This used to go straight to the note below,
+            # which is what the owner saw opening an anime from the
+            # Schedule: a page headed "That Time I Got Reincarnated as a
+            # Slime Season 4" over an empty list saying there was no
+            # matched title. Anything that arrives without an id gets
+            # one asked for here - a Schedule row, a hand-added entry, a
+            # row from a catalog that never carried one - and the list
+            # fills when it lands. The note only claims "no matched
+            # title" once that lookup has actually failed (see
+            # _on_resolved_id).
+            self._panel_note.setText("Looking this title up...")
+            lookup_pool.submit(_resolve_id_worker, self._signals, self._run,
+                               self.entry.get("title"), self.entry.get("type"))
         else:
             self._panel_note.setText(
                 "This entry has no matched title, so there is no episode "
                 "list to show. Continue below still opens it.")
+
+    def _on_resolved_id(self, run, imdb_id):
+        """The title lookup landed. An id means the episode list can be
+        fetched exactly as a saved entry's is; no id means the honest
+        message, now that it has been earned."""
+        if run != self._run or self._closed:
+            return
+        if not imdb_id:
+            self._panel_note.setText(
+                "This entry has no matched title, so there is no episode "
+                "list to show. Continue below still opens it.")
+            return
+        # Written onto the entry, not just used once: the player, the
+        # download panel and progress syncing all read imdb_id off it,
+        # and re-deriving it per feature would be three more lookups.
+        self.entry["imdb_id"] = imdb_id
+        kind = "movie" if self.entry.get("type") == "Movie" else "series"
+        lookup_pool.submit(_meta_worker, self._signals, self._run,
+                           imdb_id, kind)
 
     def _on_meta(self, run, meta):
         if run != self._run or self._closed:
@@ -996,11 +1084,25 @@ class DetailsPage(GlassPage):
             item = self._rows.takeAt(0)
             widget = item.widget()
             if widget is not None:
-                # setParent(None) as well as deleteLater, in that order -
-                # taken out of the layout, a card stays a visible child
-                # at its old geometry until the event loop gets to the
-                # delete, and a refill painted over half-dead rows
-                # (player._fill_episode_bar hit exactly this).
+                # **hide() first, then setParent(None), then the
+                # delete - all three, in this order.** insertWidget
+                # queues _q_showIfNotHidden() on a row while the list's
+                # parent is visible; a partial-batch refill clears the
+                # rows before the event loop drains it, and
+                # setParent(None) hides the row but *clears*
+                # WA_WState_ExplicitShowHide - so the queued call sees
+                # "hidden, but not explicitly hidden", shows a widget
+                # that no longer has a parent, and Qt gives it a framed
+                # desktop window of its own. White for its first frame,
+                # then gone: measured on House of the Dragon S02E05, 84
+                # of them in two seconds, one per source row, 0 after
+                # this line. That is the owner's "many windows pop-ups
+                # while fetching, white bg".
+                #
+                # setParent(None) still has to be here: a deleteLater'd
+                # row goes on painting at its old geometry until the
+                # delete lands (player._fill_episode_bar hit that).
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
 
@@ -1170,8 +1272,20 @@ class DetailsPage(GlassPage):
             # READ on the chapter rows.
             badge = ("upcoming", "UPCOMING") if upcoming else (
                 ("watched", "DONE") if watched else None)
+            # The episode's own rating, beside the date. Cinemeta
+            # carries it per video already - measured 59/59 on House of
+            # the Dragon and 373/373 on Bleach - so this is free: no
+            # request, no second source that could disagree with the
+            # list it is printed on. "0" is Cinemeta's way of saying
+            # unrated (every behind-the-scenes row carries it), and an
+            # unrated episode shows nothing rather than a zero.
+            meta_line = _pretty_date(video.get("firstAired")
+                                     or video.get("released"))
+            stars = _episode_rating(video.get("rating"))
+            if stars:
+                meta_line = f"{meta_line}   ·   {stars}" if meta_line else stars
             self._rows.insertWidget(shown, self._row_card(
-                title, _pretty_date(video.get("firstAired") or video.get("released")),
+                title, meta_line,
                 badge,
                 (None if upcoming
                  else lambda s=season, e=number: self._start_episode(s, e)),
@@ -2175,9 +2289,24 @@ class _GenreBrowseSignals(QObject):
 _BROWSE_POSTER_SIZE = (160, 216)
 # Nine across (the owner's ask): at six the grid left a wide empty gutter
 # on the right of a maximised window, so the rows read as half-filled.
+# The *most* columns worth drawing, not the number always drawn. The
+# grid takes its column count from the viewport now (see
+# GenreBrowsePage._columns_for): nine fixed columns is 9*180 + 8*12 =
+# 1716px of cards, and on the owner's 1873px window the sidebar leaves
+# about 1633px - so the last column sat off the right edge and the page
+# could only be read by scrolling sideways (their report).
 _BROWSE_COLUMNS = 9
+_BROWSE_MIN_COLUMNS = 2
+_BROWSE_GRID_SPACING = 12
 # Enough to fill those rows rather than leave the last one ragged.
 _BROWSE_LIMIT = 36
+
+# One genre's rows, kept for the session: (genre, kind) -> rows. A genre
+# is one press away from every details page, and a catalog's answer does
+# not move inside a sitting - re-asking made every visit pay the full
+# round trip again. Bounded, because browsing can touch many.
+_GENRE_CACHE = {}
+_GENRE_CACHE_MAX = 24
 
 
 class GenreBrowsePage(GlassPage):
@@ -2201,6 +2330,10 @@ class GenreBrowsePage(GlassPage):
         self._next_key = 0
         self._closed = False
         self._sections = {}       # row label -> the grid to fill
+        # Every grid built, with its cards, so a resize can re-flow them
+        # into a new column count instead of scrolling sideways.
+        self._grids = []
+        self._columns = 0
         self.open_title = None    # set by the caller
 
         column = QVBoxLayout(self)
@@ -2232,8 +2365,13 @@ class GenreBrowsePage(GlassPage):
         self._body.setContentsMargins(0, 0, 8, 0)
         self._body.setSpacing(16)
         self._body.addStretch(1)
-        area = scroll_area(self._body_host)
-        column.addWidget(area, stretch=1)
+        self._area = scroll_area(self._body_host)
+        # Never sideways: the grid re-flows to whatever width there is
+        # (see _columns_for), so a horizontal bar could only ever mean
+        # the re-flow failed.
+        self._area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        column.addWidget(self._area, stretch=1)
 
         self._note = QLabel(f"Looking for {self._genre} titles...")
         self._note.setWordWrap(True)
@@ -2285,22 +2423,136 @@ class GenreBrowsePage(GlassPage):
 
     # ---- filling it ---------------------------------------------------
     def _fetch_worker(self):
-        # Never raises; every row reports what it found, and `done`
-        # clears the looking-note whatever happened.
+        """Fill the page, asking every catalog at once.
+
+        **The two video catalogs used to be asked one after the other**,
+        in a loop, so opening a genre cost their *sum* - and each is a
+        full Cinemeta round trip. They go out together now and each row
+        is drawn the moment it lands, the same shape
+        streams.find_streams and subtitles.search already use here.
+
+        Answers are cached per (genre, kind) for the session, so
+        re-opening a genre - one press away from every details page -
+        costs no request at all. Never raises; `done` clears the
+        looking-note whatever happened."""
+        import threading
         from helpers import discover
+
+        def one(kind, label):
+            key = (self._genre, kind)
+            rows = _GENRE_CACHE.get(key)
+            if rows is None:
+                try:
+                    rows = (discover.discover_reading_genre(
+                                self._genre, limit=_BROWSE_LIMIT)
+                            if kind == "reading" else
+                            discover.discover_video(kind, genre=self._genre,
+                                                    limit=_BROWSE_LIMIT))
+                    rows = list(rows or [])
+                except Exception:
+                    logs.exception("genre browse lookup failed")
+                    rows = []
+                if rows:
+                    if len(_GENRE_CACHE) >= _GENRE_CACHE_MAX:
+                        _GENRE_CACHE.clear()
+                    _GENRE_CACHE[key] = rows
+            try:
+                self._signals.rows.emit(label, list(rows))
+            except RuntimeError:
+                pass        # the page closed under the fetch
+
+        jobs = ([("reading", "")] if self._is_reading
+                else [("series", "Series"), ("movie", "Movies")])
+        threads = [threading.Thread(target=one, args=job, daemon=True)
+                   for job in jobs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
         try:
-            if self._is_reading:
-                rows = discover.discover_reading_genre(self._genre,
-                                                       limit=_BROWSE_LIMIT)
-                self._signals.rows.emit("", list(rows or []))
-            else:
-                for kind, label in (("series", "Series"), ("movie", "Movies")):
-                    rows = discover.discover_video(kind, genre=self._genre,
-                                                   limit=_BROWSE_LIMIT)
-                    self._signals.rows.emit(label, list(rows or []))
-        except Exception:
-            logs.exception("genre browse lookup failed")
-        self._signals.done.emit()
+            self._signals.done.emit()
+        except RuntimeError:
+            pass
+
+    def _columns_for(self, width) -> int:
+        """How many poster columns fit in `width`.
+
+        Clamped at the top so a very wide window does not stretch one
+        thin line across it, and at the bottom so a narrow one wraps
+        rather than clipping a card in half."""
+        card = _BROWSE_POSTER_SIZE[0] + 20
+        step = card + _BROWSE_GRID_SPACING
+        fits = int((max(0, width) + _BROWSE_GRID_SPACING) // step)
+        return max(_BROWSE_MIN_COLUMNS, min(_BROWSE_COLUMNS, fits))
+
+    def _viewport_width(self) -> int:
+        area = getattr(self, "_area", None)
+        if area is not None:
+            try:
+                return area.viewport().width()
+            except RuntimeError:
+                pass
+        return self.width()
+
+    def _reflow(self, columns):
+        """Re-place every card into `columns` columns.
+
+        Cheap enough for a resize: the widgets already exist and only
+        their grid coordinates change, so nothing is rebuilt, re-styled
+        or re-decoded - which is what makes it safe from resizeEvent.
+
+        **Taken out of the layout first.** `addWidget` on a widget a
+        QGridLayout already holds does not move it, it adds a second
+        entry for it - so re-adding alone left every card occupying its
+        old cell as well as its new one, and the grid kept the width of
+        the widest arrangement it had ever had. Measured: re-flowing
+        1633px down to 900px produced a 699px horizontal scroll range,
+        which is the sideways scrolling this whole change exists to
+        remove. The stale columns are zeroed for the same reason - a
+        QGridLayout never forgets a column index it has been given, and
+        an emptied one keeps its minimum width."""
+        previous = self._columns
+        self._columns = columns
+        for grid, cards in self._grids:
+            try:
+                for card in cards:
+                    grid.removeWidget(card)
+                for index, card in enumerate(cards):
+                    grid.addWidget(card, index // columns, index % columns)
+                for extra in range(columns, max(previous, columns) + 1):
+                    grid.setColumnMinimumWidth(extra, 0)
+                    grid.setColumnStretch(extra, 0)
+                grid.invalidate()
+                parent = grid.parentWidget()
+                if parent is not None:
+                    parent.adjustSize()
+            except RuntimeError:
+                continue      # that section went away under a rebuild
+
+    def _sync_columns(self):
+        """Re-flow if the width now says a different column count.
+
+        **Called from more than resizeEvent, and that is the point.**
+        Rows can land before the scroll area has ever been laid out, when
+        `viewport().width()` is still a placeholder - measured, a page
+        opened at 1633px built its grid three columns wide because that
+        is what the not-yet-sized viewport claimed, and nothing corrected
+        it unless the window was afterwards resized by hand. So the count
+        is re-taken on show, after every batch of rows, and on resize."""
+        columns = self._columns_for(self._viewport_width())
+        if columns != self._columns:
+            self._reflow(columns)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # After this turn of the event loop: the geometry the layout
+        # gives the viewport is not final until the show has been
+        # processed.
+        QTimer.singleShot(0, self._sync_columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_columns()
 
     def _on_rows(self, label, rows):
         if self._closed or not rows:
@@ -2314,12 +2566,18 @@ class GenreBrowsePage(GlassPage):
         grid_host = QWidget(objectName="Bare")
         grid = QGridLayout(grid_host)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(12)
+        grid.setSpacing(_BROWSE_GRID_SPACING)
         grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        for index, item in enumerate(rows):
-            grid.addWidget(self._build_card(item),
-                           index // _BROWSE_COLUMNS, index % _BROWSE_COLUMNS)
+        columns = self._columns or self._columns_for(self._viewport_width())
+        self._columns = columns
+        cards = [self._build_card(item) for item in rows]
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // columns, index % columns)
+        self._grids.append((grid, cards))
         self._body.insertWidget(insert_at, grid_host)
+        # The width this was built against may have been a placeholder;
+        # re-take it once this turn of the event loop has laid out.
+        QTimer.singleShot(0, self._sync_columns)
 
     def _build_card(self, item):
         """One poster tile - the Discover grid's own card, so the two

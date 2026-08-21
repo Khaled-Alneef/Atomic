@@ -75,8 +75,14 @@ def download(url: str, timeout: int = 8):
     if path.exists():
         return path
     try:
+        # net.ascii_url, not the raw string: a cover whose filename
+        # carries a non-ASCII character - an Arabic-Indic digit, a
+        # superscript - makes urllib raise before it connects, so the
+        # tile drew empty next to art that was there all along. Cached
+        # under the URL as it was given, so this is a transport detail
+        # rather than a second identity for the same image.
         req = urllib.request.Request(
-            url, headers={"User-Agent": "Mozilla/5.0 PC-App/1.0"}
+            net.ascii_url(url), headers={"User-Agent": "Mozilla/5.0 PC-App/1.0"}
         )
         deadline = net.deadline_in(timeout)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -228,17 +234,87 @@ def _evict(cache):
             cache.pop(old_key, None)
 
 
+# Finished tiles, on disk, so they survive the process.
+#
+# **Both caches above are in memory only, and that was the whole of a
+# slow cold start.** Profiled on the owner's real library: building the
+# main window cost 569ms of an 822ms launch, and the profile was almost
+# entirely PIL - 148 ImagingDecoder.decode calls (126ms), 24 resizes
+# (94ms), 36 converts (57ms), all under _fitted. Every launch decoded
+# every full-size original again and threw the result away on exit.
+#
+# A tile is small, already scaled and already corner-clipped, so reading
+# one back is a fraction of decoding a multi-megapixel JPEG and resizing
+# it. Keyed on the source path, its mtime+size stamp and the target
+# size, so an edited or replaced image can never be served stale.
+_TILE_DIR = CACHE_DIR / "tiles"
+
+# Bounded, and by count rather than bytes: a tile is a few KB, and the
+# owner's library is hundreds of covers at two or three sizes each.
+_TILE_MAX = 1500
+
+
+def _tile_path(path, size, stamp):
+    key = f"{path}|{stamp}|{size[0]}x{size[1]}"
+    digest = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()
+    return _TILE_DIR / f"{digest}.png"
+
+
+def _prune_tiles():
+    """Drop the oldest tiles once there are too many. Best-effort: a
+    cache that cannot be pruned is a disk-space problem, never a reason
+    to fail a page."""
+    try:
+        files = sorted(_TILE_DIR.glob("*.png"), key=lambda f: f.stat().st_mtime)
+    except OSError:
+        return
+    for old in files[:max(0, len(files) - _TILE_MAX)]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
 def _fitted(path, size, stamp):
     """The decoded, resized PIL image for `path`, cached - with the
     corners already clipped (see _round_corners), so the rounding is
-    paid once per decode and the cache holds the finished tile. Safe to
-    call from a background thread - it touches no Qt types."""
+    paid once per decode and the cache holds the finished tile.
+
+    Three tiers now: the process-lifetime dict, then the on-disk tile
+    (see _TILE_DIR), then an actual decode. Safe to call from a
+    background thread - it touches no Qt types, and a torn or
+    half-written tile file is treated as a miss rather than an error."""
     key = (str(path), stamp, size)
     if key in _FITTED:
         return _FITTED[key]
-    img = load_thumbnail(path, size)
-    if img is not None:
-        img = _round_corners(img)
+
+    tile = _tile_path(path, size, stamp)
+    img = None
+    try:
+        if tile.is_file():
+            with Image.open(tile) as opened:
+                img = opened.convert("RGBA")
+    except Exception:
+        img = None          # corrupt or truncated: fall through and redo
+        try:
+            tile.unlink()
+        except OSError:
+            pass
+
+    if img is None:
+        img = load_thumbnail(path, size)
+        if img is not None:
+            img = _round_corners(img)
+            try:
+                _TILE_DIR.mkdir(parents=True, exist_ok=True)
+                # Written beside the target and moved into place, so a
+                # reader on another thread never sees a partial file.
+                temporary = tile.with_suffix(".part")
+                img.save(temporary, "PNG")
+                temporary.replace(tile)
+            except Exception:
+                pass        # pure optimization - a miss just decodes again
+
     _evict(_FITTED)
     _FITTED[key] = img
     return img
@@ -264,6 +340,9 @@ def prewarm(specs):
                 _fitted(path, tuple(size), _stamp(path))
             except Exception:
                 continue
+        # Once per launch, off the UI thread, after the tiles that
+        # matter have been written.
+        _prune_tiles()
 
     threading.Thread(target=worker, daemon=True).start()
 

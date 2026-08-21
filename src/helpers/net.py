@@ -19,6 +19,7 @@ copy is how the first fix failed to reach the other five files.
 """
 
 import time
+import urllib.parse
 
 # Generous for what any of these actually return - AniList's largest
 # response is a few hundred KB, a cover a couple of MB - and low enough
@@ -62,6 +63,37 @@ def read_text(resp, deadline: float, max_bytes: int = MAX_RESPONSE_BYTES) -> str
     character in a title is a cosmetic problem, a raised UnicodeDecode-
     Error is a lookup that silently returns nothing."""
     return read_bytes(resp, deadline, max_bytes).decode("utf-8", "replace")
+
+
+# Characters that already mean something in a URL and must survive being
+# quoted; `%` is among them so a URL that is *already* percent-encoded
+# isn't encoded a second time ("%20" -> "%2520").
+_URL_SAFE = "/%:@&=+$,;~!*'()?[]#"
+
+
+def ascii_url(url: str) -> str:
+    """`url` with any non-ASCII character percent-encoded.
+
+    urllib will not send one otherwise: http.client encodes the request
+    line as ASCII and raises UnicodeEncodeError before a connection is
+    even opened - a failure that looks like "the host said no" to every
+    fail-soft caller here. **Measured 21 August 2026 on two of the
+    owner's blank Discover tiles**: the covers were found and were real,
+    but Mangalek names its files
+    "large_o-o-u-u-o-o³u-956_20260410200043-1.webp" and
+    "boukoku-no-oujo-ga-negau-no-wa-1-١-110x150.jpg", so downloading them
+    raised and the tile stayed empty with the art sitting right there.
+
+    The host is left as it is: a non-ASCII domain needs IDNA rather than
+    percent-encoding, and no source here has one."""
+    if not url or url.isascii():
+        return url
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((
+        parts.scheme, parts.netloc,
+        urllib.parse.quote(parts.path, safe=_URL_SAFE),
+        urllib.parse.quote(parts.query, safe=_URL_SAFE),
+        urllib.parse.quote(parts.fragment, safe=_URL_SAFE)))
 
 
 def deadline_in(timeout: float) -> float:

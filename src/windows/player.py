@@ -1043,6 +1043,11 @@ def _clear_layout(layout):
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
+            # hide() before the unparent - see details._clear_rows for
+            # the whole story: without it a queued show lands on a
+            # parentless widget and Qt gives it a desktop window of its
+            # own, which is what flashed white during a fetch.
+            widget.hide()
             widget.setParent(None)
             widget.deleteLater()
             continue
@@ -2091,6 +2096,10 @@ class PlayerPage(GlassPage):
                 # painted a second "Episode 4" card over the rows below,
                 # stretched down the panel. Unparenting removes it from
                 # the screen on this line rather than eventually.
+                # hide() before the unparent - see details._clear_rows:
+                # a queued show landing on a parentless widget becomes a
+                # framed desktop window, flashing white.
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
         self._episode_rows = {}
@@ -4817,8 +4826,24 @@ class PlayerPage(GlassPage):
             # Long lists still cap at PANEL_MAX_HEIGHT and scroll.
             wanted = (self._panel.body.sizeHint().height()
                       + self._panel.footer_layout.sizeHint().height() + 96)
-            height = max(150, min(PANEL_MAX_HEIGHT, wanted,
-                                  rect.height() - CONTROLS_HEIGHT - 80))
+            # **Grow-only while the panel stays open**, which is what
+            # stops "the resolution and sources window goes too small
+            # when I press 4K or 1080p". Drilling into one resolution
+            # replaces a list of every release with a handful, and a
+            # height taken from that content alone collapsed the box to
+            # near the 150px floor - under the pointer, mid-read. Since
+            # panels are refilled rather than rebuilt now
+            # (OverlayPanel.reset), the same measurement could also land
+            # while the body was momentarily empty, which is the floor
+            # exactly. So a panel never shrinks during one opening; the
+            # floor resets when a panel of a different kind opens, and
+            # the cap and the scrolling are unchanged.
+            floor = getattr(self._panel, "grown_height", 0)
+            height = max(150, floor,
+                         min(PANEL_MAX_HEIGHT, wanted,
+                             rect.height() - CONTROLS_HEIGHT - 80))
+            height = min(height, rect.height() - CONTROLS_HEIGHT - 80)
+            self._panel.grown_height = height
             self._panel.setGeometry(rect.width() - width - 24,
                                     rect.height() - CONTROLS_HEIGHT - height - 10,
                                     width, height)

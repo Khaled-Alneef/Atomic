@@ -321,6 +321,10 @@ class DownloadsPage(GlassPage):
                 # deleteLater'd row stays a visible child at its old
                 # geometry until the event loop gets to it, which the
                 # player's episode list already had to be fixed for.
+                # hide() before the unparent - see details._clear_rows:
+                # a queued show landing on a parentless widget becomes a
+                # framed desktop window, flashing white.
+                widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
         self._rows = {}

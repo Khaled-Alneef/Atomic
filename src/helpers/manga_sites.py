@@ -17,6 +17,7 @@ import html
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -203,10 +204,12 @@ def fetch_manga_details(page_url: str, timeout: int = 6, title: str = None):
     search hit. Returns {"cover_url": ..., "latest_chapter": ...}, either
     possibly None.
 
-    When the page itself yields no cover, an external catalogue is asked
-    for one - see _external_cover. `title` is optional because the
-    tracker calls this with a page URL and nothing else; the URL slug
-    stands in for it."""
+    When the page itself yields no cover, the site's own Madara endpoint
+    is asked for the series card (_madara_card_details), and only then an
+    external catalogue (_external_cover) - the site's own art for this
+    exact slug before anyone else's art for a matching title. `title` is
+    optional because the tracker calls this with a page URL and nothing
+    else; the URL slug stands in for it."""
     swat_match = _SWAT_SERIES_URL_RE.match(page_url)
     if swat_match:
         details = _swat_series_details(swat_match.group(1), swat_match.group(2),
@@ -214,9 +217,128 @@ def fetch_manga_details(page_url: str, timeout: int = 6, title: str = None):
     else:
         details = _scrape_manga_page(page_url, timeout)
     if not details.get("cover_url"):
+        # The site's own art, off the endpoint that still answers when
+        # its pages don't - see _madara_card_details. Asked before any
+        # catalogue, because it is this site's own cover for this exact
+        # series rather than a title match against somebody else's.
+        card = _madara_card_details(page_url, timeout)
+        if card.get("cover_url"):
+            details["cover_url"] = card["cover_url"]
+            details["latest_chapter"] = (details.get("latest_chapter")
+                                          or card.get("latest_chapter"))
+    if not details.get("cover_url"):
         details["cover_url"] = _external_cover(
             title or _title_from_slug(page_url), timeout)
     return details
+
+
+# A series page path across the shapes these sites use - the slug is what
+# the Madara endpoint below is asked for.
+_SERIES_SLUG_RE = re.compile(
+    r"^/(?:manga|series|comic|comics|webtoon|title)/([^/?#]+)/?$", re.I)
+
+# Series page URL -> what its card gave, for the session. A throttle
+# again rather than a speed-up: Discover rebuilds its whole grid on every
+# visit, so without this a second look at the same wall re-asks the site
+# for thirty cards it has already answered - and this host measurably
+# slows down under repeat load (a run of five straight after twelve
+# earlier calls took 47.7s where the first took 8.1s).
+#
+# **Hits only.** _external_covers remembers its misses because a
+# catalogue that does not carry a title will not carry it a minute later;
+# a miss here is usually one slow response, and remembering it would
+# freeze a blank tile in place for the whole session.
+_card_details = {}
+_CARD_CACHE_MAX = 300
+
+
+def _madara_card_details(page_url: str, timeout: int) -> dict:
+    """Cover (and latest chapter, if the card prints one) for a series
+    whose own page yielded nothing, from Madara's `madara_load_more`
+    endpoint.
+
+    **Measured 21 August 2026 on the owner's five blank Discover tiles -
+    every one of them a Mangalek row.** mangalik.net 403s every page a
+    non-browser client asks for: the series page, /manga/, /?s=, the feed
+    and the sitemap alike, only the home page answering at all. Its
+    admin-ajax.php does not - the search action already used here answers
+    200 (which is how those rows reached Discover carrying a title, a URL
+    and no cover), and this action answers 200 *with the card's cover
+    image in it*. The site has the art; only its HTML pages refuse to
+    serve it.
+
+    Asked by post slug (`vars[name]`), never by title, and the card is
+    read only if its own link points back at that same slug - an exact
+    identity, so unlike the catalogue fallback there is no title match
+    involved and no wrong cover to inherit. Fails soft into no cover on
+    any site that is not Madara-shaped, which costs one POST on a path
+    that had already produced nothing."""
+    parts = urllib.parse.urlsplit(page_url or "")
+    slug_match = _SERIES_SLUG_RE.match(urllib.parse.unquote(parts.path))
+    empty = {"cover_url": None, "latest_chapter": None}
+    if not slug_match or not parts.netloc:
+        return empty
+    if page_url in _card_details:
+        return _card_details[page_url]
+    slug = slug_match.group(1)
+    # A purely numeric slug is an API site's series id (SWAT's
+    # /series/1607561), never a WordPress post name - the same reasoning
+    # as _title_from_slug. Asking would spend a request to be told no.
+    if slug.isdigit():
+        return empty
+    # Retried once, for the same reason the MangaDex client and the
+    # chapter-list pages are: **measured 2 failures in 12 back-to-back
+    # calls**, both "response body over the time budget" at ~7s, and both
+    # answering in under 3s on the very next attempt. A cover that exists
+    # and is skipped over a slow second is the failure worth spending one
+    # extra request on.
+    body = None
+    for attempt in range(2):
+        try:
+            body = _post_text(f"{parts.scheme}://{parts.netloc}/wp-admin/admin-ajax.php", {
+                "action": "madara_load_more",
+                "page": 0,
+                "template": "madara-core/content/content-archive",
+                "vars[post_type]": "wp-manga",
+                "vars[name]": slug,
+                "vars[posts_per_page]": 1,
+                "vars[paged]": 1,
+            }, timeout)
+            break
+        except Exception:
+            if attempt:
+                return empty
+    if not body:
+        return empty
+
+    cover_url = None
+    for match in _ANCHOR_RE.finditer(body):
+        href = html.unescape(match.group(1))
+        link = _SERIES_SLUG_RE.match(
+            urllib.parse.unquote(urllib.parse.urlsplit(href).path))
+        # Identity, not similarity: a different slug means the endpoint
+        # answered with a listing rather than this series, and its cover
+        # belongs to some other title.
+        if not link or link.group(1).lower() != slug.lower():
+            continue
+        image = _IMG_SRC_RE.search(match.group(2))
+        if image:
+            cover_url = _strip_wp_size_suffix(
+                urllib.parse.urljoin(page_url, html.unescape(image.group(1))))
+            break
+
+    # Same heuristic as _scrape_manga_page: the card lists its newest
+    # chapters as links under the series' own path.
+    prefix = page_url.rstrip("/") + "/"
+    numbers = [float(n) for n in
+               re.findall(re.escape(prefix) + r"([0-9]+(?:\.[0-9]+)?)/", body)]
+    found = {"cover_url": cover_url,
+             "latest_chapter": max(numbers) if numbers else None}
+    if cover_url:
+        if len(_card_details) >= _CARD_CACHE_MAX:
+            _card_details.clear()
+        _card_details[page_url] = found
+    return found
 
 
 # Normalized title -> cover URL or None, for the session.
@@ -299,11 +421,29 @@ def _swat_series_details(base_url: str, series_id: str, timeout: int):
     }
 
 
+# Hosts whose series pages answered 403 this session. Mangalek refuses
+# every non-browser client (six header shapes were tried, up to a full
+# Chrome set with Referer and Sec-Fetch), and a Discover grid is thirty
+# rows of one site - measured, those refusals cost 0.6-24.5s each before
+# the fallback below is even reached. Remembered per host rather than per
+# URL for that reason, and only for the session, so a site that starts
+# answering again is retried on the next launch.
+_forbidden_hosts = set()
+
+
 def _scrape_manga_page(page_url: str, timeout: int):
+    empty = {"cover_url": None, "latest_chapter": None}
+    host = urllib.parse.urlsplit(page_url or "").netloc
+    if host and host in _forbidden_hosts:
+        return empty
     try:
         body = _get(page_url, timeout)
+    except urllib.error.HTTPError as error:
+        if host and error.code in (401, 403):
+            _forbidden_hosts.add(host)
+        return empty
     except Exception:
-        return {"cover_url": None, "latest_chapter": None}
+        return empty
 
     madara_match = _MADARA_COVER_RE.search(body)
     if madara_match:
@@ -327,20 +467,28 @@ def _scrape_manga_page(page_url: str, timeout: int):
 # Each takes (base_url, query, timeout) and returns a list of
 # {title, url, cover_url}, or raises on network/parse failure.
 
-def _post_json(url: str, fields: dict, timeout: int):
+def _post_text(url: str, fields: dict, timeout: int, accept: str = "*/*") -> str:
     data = urllib.parse.urlencode(fields).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={
         "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
+        "Accept": accept,
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
     deadline = net.deadline_in(timeout)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(net.read_text(resp, deadline))
+        return net.read_text(resp, deadline)
+
+
+def _post_json(url: str, fields: dict, timeout: int):
+    return json.loads(_post_text(url, fields, timeout, "application/json"))
 
 
 def _get(url: str, timeout: int, extra_headers: dict = None) -> str:
-    req = urllib.request.Request(url, headers={
+    # net.ascii_url: these sites are Arabic, and a series URL carrying an
+    # Arabic slug makes urllib raise UnicodeEncodeError before it
+    # connects - which every fail-soft caller here reads as "the site
+    # said nothing".
+    req = urllib.request.Request(net.ascii_url(url), headers={
         "Accept": "application/json, text/html, */*",
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
         **(extra_headers or {}),
