@@ -55,6 +55,10 @@ MIN_TRUSTED_CHAPTERS = 3
 MAX_LIST_PAGES = 24
 LIST_PAGE_WORKERS = 6
 
+# How long one *other* site may be searched for this title before the
+# sweep moves on - see _other_site_chapters.
+OTHER_SITE_BUDGET = 5.0
+
 # Reading direction. Manga is drawn right-to-left; manhwa and manhua are
 # vertical scrolls that happen to read left-to-right. The reader turns
 # "rtl" into right-to-left paging and "ltr" into a continuous strip,
@@ -490,13 +494,37 @@ def _mangadex_chapters(entry, deadline) -> list:
 
 
 def _mangadex_id(title: str, timeout: float):
-    query = urllib.parse.urlencode({"title": title, "limit": 5})
-    body = json.loads(_get(f"{mangadex.BASE_URL}/manga?{query}", timeout))
-    for row in (body or {}).get("data") or []:
-        titles = (row.get("attributes") or {}).get("title") or {}
-        alternatives = [v for v in titles.values() if isinstance(v, str)]
-        if title_match.best_similarity(title, alternatives) >= 0.85:
-            return row.get("id")
+    """MangaDex's id for a title, or None.
+
+    Two things measured 21 August 2026, both of which had to change for
+    this to answer at all:
+
+      * **Follower order, not MangaDex's default relevance.** Asked for
+        "Kingdom" with the default ordering, the top five are five
+        unrelated isekai and *Kingdom* is not among them - so this
+        returned None for the clean title just as it did for the tagged
+        one. Ordered by followedCount the real series is second. Same
+        finding, same fix, as discover.discover_reading.
+      * **The site's group tag has to come off on the retry.** "Kingdom
+        (WAN)" is the owner's own entry title; see
+        title_match.search_variants.
+
+    Each variant is tried on its own: a failed request on the first must
+    not cost the second, since the caller's `except` would swallow both."""
+    for query in title_match.search_variants(title):
+        url = f"{mangadex.BASE_URL}/manga?" + urllib.parse.urlencode(
+            [("title", query), ("limit", 5), ("order[followedCount]", "desc")])
+        try:
+            body = json.loads(_get(url, timeout))
+        except Exception:
+            continue
+        for row in (body or {}).get("data") or []:
+            titles = (row.get("attributes") or {}).get("title") or {}
+            alternatives = [v for v in titles.values() if isinstance(v, str)]
+            # Scored against the full title the user has - normalize()
+            # drops the tag on both sides, so nothing is lost by it.
+            if title_match.best_similarity(title, alternatives) >= 0.85:
+                return row.get("id")
     return None
 
 
@@ -585,7 +613,13 @@ def _other_site_chapters(entry, deadline) -> list:
 
     Title-matched at 0.85 - the same bar the schedule lookups use -
     because reading someone else's series is a worse failure here than
-    showing nothing."""
+    showing nothing. The *query* is retried with the source site's group
+    tag stripped, which is a different thing: measured 21 August 2026,
+    searching the five other sites for the owner's own "Kingdom (WAN)"
+    found the title on none of them, because "(WAN)" is 3asq's
+    scanlation group and no other site's catalogue has heard of it. The
+    0.85 scoring below is unaffected either way - normalize() already
+    drops the tag on both sides."""
     title = (entry or {}).get("title") or ""
     if not title.strip():
         return []
@@ -595,16 +629,46 @@ def _other_site_chapters(entry, deadline) -> list:
             continue
         if net.step_timeout(deadline, DEFAULT_TIMEOUT) is None:
             break
-        try:
-            found = manga_sites.search_site(site, title, deadline=deadline)
-        except Exception:
-            continue
-        best, best_score = None, 0.0
+        # One budget per site, covering both title variants together.
+        # Without it a site answering neither spends four engines twice
+        # over out of the reader's single deadline, and the MangaDex rung
+        # below never gets asked at all: measured 21 August 2026, the
+        # six-site sweep for "Kingdom (WAN)" cost 35.6s of a 45s budget.
+        # 5s is generous against what a site that *does* answer costs
+        # now that the working engine is tried first - every measured hit
+        # was under 2s (3asq 0.5s, TeamX 1.1s, SWAT 0.3s, Lava 1.5s).
+        site_deadline = min(deadline, net.deadline_in(OTHER_SITE_BUDGET))
+        found = []
+        for query in title_match.search_variants(title):
+            try:
+                found = manga_sites.search_site(site, query,
+                                                deadline=site_deadline)
+            except Exception:
+                found = []
+            if found:
+                break
+        # **Ties are broken by the shortest title, not by search order.**
+        # normalize() drops bracketed tags on both sides, which is what
+        # makes "Kingdom (WAN)" match "Kingdom" - and it makes a
+        # *language edition* match just as perfectly. Measured 21 August
+        # 2026: 3asq answers "One Piece" with One Piece (French), One
+        # Piece and One Piece (English) among seven rows, the first
+        # three all scoring 1.00, and taking the first 1.00 read the
+        # French edition - 14 chapters for a series that has 508.
+        #
+        # The normalized length ranks first (base series over sequel,
+        # the rule anilist.fetch_external_urls already uses) and the raw
+        # length breaks what is left, because that is the only one of
+        # the two that can see the bracket at all: "One Piece (French)"
+        # and "One Piece" both normalize to nine characters.
+        best, best_key = None, None
         for row in found or []:
-            score = title_match.similarity(title, row.get("title") or "")
-            if score > best_score:
-                best, best_score = row, score
-        if best is None or best_score < 0.85 or not best.get("url"):
+            name = row.get("title") or ""
+            key = (-title_match.similarity(title, name),
+                   len(title_match.normalize(name)), len(name))
+            if best_key is None or key < best_key:
+                best, best_key = row, key
+        if best is None or -best_key[0] < 0.85 or not best.get("url"):
             continue
         probe = dict(entry)
         probe["url"] = best["url"]

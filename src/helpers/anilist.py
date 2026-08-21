@@ -241,42 +241,77 @@ def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
     return fetch_external_urls(title, "crunchyroll", timeout)
 
 
-def fetch_manga_artwork(title: str, timeout: int = 8):
-    """A wide banner (or failing that, the large cover) URL for a manga
-    title, or None - what the reading details page draws its ground from,
-    since reading entries have no IMDb id and so no TMDB artwork.
+def _manga_art(title: str, timeout: int, banner_first: bool):
+    """Best-matching AniList manga art for `title`, or None.
 
-    Same matching rule as everything else here: only an entry whose title
-    genuinely matches is considered, because a wrong *backdrop* is still
-    a page confidently dressed as a different series. The banner is
-    preferred outright - it is landscape art cut for exactly this use -
-    and the portrait cover is only the fallback for titles AniList has
-    no banner for."""
+    `banner_first` asks for the landscape banner and falls back to the
+    cover - a page background. False keeps the portrait cover only,
+    which is what a poster tile needs: a banner dropped into a portrait
+    box shows the middle third of a wide image.
+
+    The search is retried with the reading site's group tag stripped.
+    Measured 21 August 2026: AniList answers "Kingdom (WAN)" - the
+    owner's own entry title - with nothing at all, and "Kingdom" with
+    the banner. See title_match.search_variants.
+
+    Same matching rule as everything else here: only an entry whose
+    title genuinely matches is considered, because a wrong backdrop is
+    still a page confidently dressed as a different series."""
     title = (title or "").strip()
     if not title:
         return None
-    try:
-        body = _post(_MANGA_ART_QUERY, {"search": title}, timeout)
-    except Exception:
-        return None
+    for query in title_match.search_variants(title):
+        try:
+            body = _post(_MANGA_ART_QUERY, {"search": query}, timeout)
+        except RateLimited:
+            # The block is on the connection, not the query: a second
+            # variant buys another 403 and another throttle wait.
+            return None
+        except Exception:
+            # Anything else is this one request failing. Measured: the
+            # first variant timed out at 8.4s and the stripped retry
+            # never ran, so "Kingdom (WAN)" reported no artwork on a
+            # title AniList answers for.
+            continue
 
-    media_list = (((body.get("data") or {}).get("Page") or {}).get("media")) or []
-    scored = []
-    for media in media_list:
-        cover = media.get("coverImage") or {}
-        url = (media.get("bannerImage")
-               or cover.get("extraLarge") or cover.get("large"))
-        if not url:
-            continue
-        names = _candidate_names(media)
-        score = title_match.best_similarity(title, names)
-        if score < _MATCH_THRESHOLD:
-            continue
-        # Banner beats cover at equal match; shortest romaji breaks the
-        # remaining tie for the same base-series reason as
-        # fetch_external_urls.
-        scored.append((-score, 0 if media.get("bannerImage") else 1,
-                       len(title_match.normalize(names[0] or "")), url))
-    if not scored:
-        return None
-    return min(scored)[3]
+        media_list = (((body.get("data") or {}).get("Page") or {}).get("media")) or []
+        scored = []
+        for media in media_list:
+            cover = media.get("coverImage") or {}
+            banner = media.get("bannerImage")
+            url = ((banner or cover.get("extraLarge") or cover.get("large"))
+                   if banner_first
+                   else (cover.get("extraLarge") or cover.get("large")))
+            if not url:
+                continue
+            names = _candidate_names(media)
+            # Scored against the title the user actually has, never the
+            # stripped query: normalize() drops the tag on both sides,
+            # so the full string loses nothing and stays the thing being
+            # matched.
+            score = title_match.best_similarity(title, names)
+            if score < _MATCH_THRESHOLD:
+                continue
+            # Banner beats cover at equal match; shortest romaji breaks
+            # the remaining tie for the same base-series reason as
+            # fetch_external_urls.
+            scored.append((-score, 0 if (banner_first and banner) else 1,
+                           len(title_match.normalize(names[0] or "")), url))
+        if scored:
+            return min(scored)[3]
+    return None
+
+
+def fetch_manga_artwork(title: str, timeout: int = 8):
+    """A wide banner (or failing that, the large cover) URL for a manga
+    title, or None - what the reading details page draws its ground from,
+    since reading entries have no IMDb id and so no TMDB artwork."""
+    return _manga_art(title, timeout, banner_first=True)
+
+
+def fetch_manga_cover(title: str, timeout: int = 8):
+    """The portrait cover only - the last fallback for a card whose own
+    reading site served no cover art (manga_sites._external_cover).
+    Never the banner: it would be cropped to its middle in a poster
+    box, which reads as a broken image rather than as a cover."""
+    return _manga_art(title, timeout, banner_first=False)

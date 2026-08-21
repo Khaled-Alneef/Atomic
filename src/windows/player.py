@@ -155,6 +155,11 @@ SUB_SIZE_MIN, SUB_SIZE_MAX, SUB_SIZE_STEP = 28, 90, 4
 SUB_SIZE_DEFAULT = 55          # mpv's own default for sub-font-size
 SUB_DELAY_STEP = 0.1
 
+# Hold-to-repeat on the +/- steppers. See _stepper_button: a tenth of a
+# second per click is unusable for a release seconds out of sync.
+STEPPER_REPEAT_DELAY_MS = 350
+STEPPER_REPEAT_MS = 120
+
 # Where mpv puts the subtitle line, as a percentage of frame height
 # (100 = hard against the bottom, which is mpv's default). The controls
 # are a faint veil now, not a slab, but a subtitle *behind* them is
@@ -1053,13 +1058,26 @@ class OverlayPanel(QFrame):
 
     def add_row(self, title, subtitle, on_click, selected=False, chevron=False):
         card = Card(matte=True)
+
         # Rows are borderless at rest now (the Harbor pass); the border
         # stays 1px in both states so picking one shifts nothing, and
         # the accent ring remains what says "this is the one in use".
-        card.setStyleSheet(
-            f"QFrame#Card {{ background: {theme.SURFACE_HOVER};"
-            f" border: 1px solid {theme.ACCENT if selected else 'transparent'};"
-            f" border-radius: {theme.RADIUS}px; }}")
+        def paint(is_selected):
+            card.setStyleSheet(
+                f"QFrame#Card {{ background: {theme.SURFACE_HOVER};"
+                f" border: 1px solid"
+                f" {theme.ACCENT if is_selected else 'transparent'};"
+                f" border-radius: {theme.RADIUS}px; }}")
+            head.setStyleSheet(
+                f"color: {theme.ACCENT if is_selected else theme.TEXT};"
+                f" font-size: 11pt; font-weight: 600;"
+                f" background: transparent; border: none;")
+
+        # Handed back on the card so a caller can move the highlight
+        # without rebuilding the panel. Rebuilding is what made picking a
+        # track stutter: it deleteLater'd four native child windows over
+        # a running video and built them again, one frame later.
+        card.set_selected = paint
         # Outer row so a drill-down chevron can sit against the right edge
         # while the title/subtitle stack keeps the left. A plain VBox card
         # had no column to pin the chevron to.
@@ -1071,9 +1089,7 @@ class OverlayPanel(QFrame):
         column.setSpacing(2)
         head = QLabel(title)
         head.setWordWrap(True)
-        head.setStyleSheet(
-            f"color: {theme.ACCENT if selected else theme.TEXT}; font-size: 11pt;"
-            f" font-weight: 600; background: transparent; border: none;")
+        paint(selected)
         column.addWidget(head)
         if subtitle:
             sub = QLabel(subtitle)
@@ -1170,6 +1186,15 @@ class OverlayPanel(QFrame):
         button = QPushButton(glyph)
         button.setToolTip(tooltip)
         button.setFixedSize(64 if wide else 36, 36)
+        # Hold to repeat. Delay moves in tenths of a second, so a release
+        # out of sync by five seconds was fifty separate clicks - which
+        # is what "sub-delay has no effect" actually was on the owner's
+        # Bleach subtitle. At 120ms a held button covers 0.8s of delay
+        # per second held, and 350ms before the first repeat is long
+        # enough that a single deliberate tap stays a single step.
+        button.setAutoRepeat(True)
+        button.setAutoRepeatDelay(STEPPER_REPEAT_DELAY_MS)
+        button.setAutoRepeatInterval(STEPPER_REPEAT_MS)
         button.setStyleSheet(
             # padding:0 - see PlayPauseButton; the app-wide 8px 16px padding
             # would otherwise clip a glyph on a button this small.
@@ -1235,7 +1260,14 @@ class PlayerPage(GlassPage):
         self._subtitles = []
         self._subtitle_label = "Off"
         self._sub_delay = 0.0
+        # Said once per player, not once per nudge - see _apply_sub_delay.
+        self._delay_warned = False
         self._sub_size = SUB_SIZE_DEFAULT
+        # None, not SUB_POS_CLEAR: the first _set_sub_position must reach
+        # mpv even if it asks for what mpv's default already is.
+        self._sub_pos = None
+        # id(widget) -> (hwnd, alpha) already applied. See _veil.
+        self._veiled = {}
         self._tracks = []
         self._duration = 0.0
         self._position = 0.0
@@ -2473,17 +2505,24 @@ class PlayerPage(GlassPage):
                     f"Translating to Arabic With {ai_translate.label(provider)}...",
                     run)
                 cues = subtitles_module.parse(text, fmt)
-                translated = ai_translate.translate(
-                    cues, provider=provider,
-                    cancelled=lambda: self._closing or run != self._run)
+                translated = None
+                try:
+                    translated = ai_translate.translate(
+                        cues, provider=provider,
+                        cancelled=lambda: self._closing or run != self._run)
+                except ai_translate.TranslationFailed as failure:
+                    # **Say which provider said no, and what it said.**
+                    # This used to be a bare "Translation Failed" for
+                    # every cause, which is how four pasted keys - three
+                    # accounts out of credit, one naming a model Google
+                    # had retired - looked like a dead feature instead of
+                    # four different billing problems.
+                    logs.warning(f"AI translation failed: {failure.reason}")
+                    self._work.note.emit(
+                        f"AI Translation Failed - {failure.reason}", run)
                 if translated:
                     text, fmt = ai_translate.to_srt(translated), "srt"
                     label = f"{label} (AI Arabic)"
-                else:
-                    # Loaded untranslated rather than dropped - an English
-                    # track beats a toast and nothing on screen.
-                    self._work.note.emit(
-                        "Translation Failed - Loading the Original", run)
             path = self._write_subtitle(text, fmt)
             self._work.sub_file_ready.emit(path, label, run)
         except Exception:
@@ -2541,10 +2580,44 @@ class PlayerPage(GlassPage):
             logs.exception("sub-add failed")
             show_toast(self._toast_anchor(), "Subtitle Could Not Be Loaded")
             return
+        # mpv accepts sub_add and then quietly leaves the old track
+        # primary if it could not parse the file. Without this the panel
+        # said "Subtitle Loaded", moved its highlight, and the picture
+        # kept showing whatever was there before - which from the chair
+        # reads as "the delay does nothing on this one".
+        if not self._external_sub_selected(path):
+            logs.warning(f"mpv did not select the loaded subtitle {path}")
+            show_toast(self._toast_anchor(), "That Subtitle Could Not Be Read")
+            return
         self._subtitle_label = label
         show_toast(self._toast_anchor(), "Subtitle Loaded")
         if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
             self._open_subtitle_panel(rebuild=True)
+
+    def _external_sub_selected(self, path) -> bool:
+        """Is the file just handed to sub_add the primary sub track?
+
+        Answered from mpv's own track list rather than from the fact that
+        sub_add returned - measured on mpv v0.41, `sub-add <file> select`
+        is what selects it, and its silent failure mode is a track list
+        that never gained the file. A track list mpv has not published
+        yet is treated as success: refusing on a race would be a false
+        alarm on every fast machine."""
+        try:
+            tracks = list(self.handle.track_list or [])
+        except Exception:
+            return True
+        subs = [t for t in tracks if t.get("type") == "sub"]
+        if not subs:
+            return True
+        target = os.path.normcase(os.path.abspath(str(path)))
+        for track in subs:
+            name = track.get("external-filename")
+            if not name:
+                continue
+            if os.path.normcase(os.path.abspath(str(name))) == target:
+                return bool(track.get("selected"))
+        return True
 
     def _on_failed(self, message, run):
         if self._closing or run != self._run:
@@ -3050,9 +3123,14 @@ class PlayerPage(GlassPage):
             # An open tracks panel follows mpv's own answer: the pick
             # already moved the highlight optimistically (_pick_track),
             # and this is the confirmation - or the correction, when mpv
-            # refused the track - arriving a beat later.
+            # refused the track - arriving a beat later. Repainted rather
+            # than rebuilt, unless the track list itself changed: mpv
+            # emits track-list on every sub_add too, and tearing four
+            # native windows down over the video each time is what the
+            # owner saw as the panel flickering.
             if self._panel is not None and getattr(self._panel, "kind", "") == "tracks":
-                self._open_tracks_panel(rebuild=True)
+                if not self._highlight_tracks():
+                    self._open_tracks_panel(rebuild=True)
         elif name == "paused-for-cache":
             # Only ever a note, never an error: a stalled buffer usually
             # recovers, and a dialog for it would fire constantly on a
@@ -3143,7 +3221,16 @@ class PlayerPage(GlassPage):
         still swaps straight to its own panel.
 
         Callers must handle None by returning - see every _open_*_panel
-        below."""
+        below.
+
+        **Every reopen that is not a bar-button press must pass
+        rebuild=True.** The toggle keys on the panel *kind*, so a panel
+        redrawing itself - a drill-down, a picked row, a search result
+        landing - looks identical to the button being pressed again and
+        shuts instead. Shipped in 1.10.12 on both the streams drill-down
+        (`_drill_streams`) and every Download row (`_dl_set`). The full
+        list of internal reopens: _open_subtitle_panel, _open_tracks_panel,
+        _open_streams_panel, _open_download_panel."""
         if (not rebuild and self._panel is not None
                 and getattr(self._panel, "kind", "") == kind):
             self._close_panel()
@@ -3286,7 +3373,16 @@ class PlayerPage(GlassPage):
 
         The secondary track as well as the primary: a release with a
         muxed signs track and a loaded Arabic one shows both, and moving
-        only the primary leaves half the screen out of step."""
+        only the primary leaves half the screen out of step.
+
+        **Read back, don't assume.** "The delay does nothing on this
+        subtitle" was investigated against real mpv (v0.41): the write is
+        accepted and applied for one external .srt, for two, and with a
+        secondary track selected - the step being a tenth of a second
+        with no hold-to-repeat was the whole story. But a silent write is
+        the one thing that would have made that investigation
+        unnecessary, so the value is read back now and a disagreement is
+        said out loud once rather than logged into nothing."""
         if self.handle is None:
             return
         for prop in ("sub-delay", "secondary-sub-delay"):
@@ -3297,6 +3393,16 @@ class PlayerPage(GlassPage):
                 # primary is the one that must not fail quietly.
                 if prop == "sub-delay":
                     logs.exception("Subtitle delay change failed")
+        try:
+            actual = float(self.handle["sub-delay"])
+        except Exception:
+            return
+        if abs(actual - self._sub_delay) < 0.001 or self._delay_warned:
+            return
+        self._delay_warned = True
+        logs.warning(f"mpv kept sub-delay at {actual:.2f} after being asked"
+                     f" for {self._sub_delay:.2f}")
+        show_toast(self._toast_anchor(), "This Player Refused the Subtitle Delay")
 
     def _apply_sub_style(self):
         """Size the subtitles, whichever renderer is drawing them.
@@ -3347,24 +3453,70 @@ class PlayerPage(GlassPage):
             return          # the same button closed it
         audio = [t for t in self._tracks if t.get("type") == "audio"]
         subs = [t for t in self._tracks if t.get("type") == "sub"]
+        # Row cards by (property, track id), so a later pick moves the
+        # highlight through card.set_selected instead of rebuilding the
+        # whole panel - see _highlight_tracks.
+        panel.track_rows = {}
         if not audio and not subs:
             panel.add_message("This source has no selectable tracks.")
         if audio:
             panel.add_group("AUDIO")
             for track in audio:
-                panel.add_row(self._track_label(track),
-                              track.get("codec") or "",
-                              lambda checked=False, t=track: self._pick_track("aid", t),
-                              selected=bool(track.get("selected")))
+                panel.track_rows[("aid", track.get("id"))] = panel.add_row(
+                    self._track_label(track), track.get("codec") or "",
+                    lambda checked=False, t=track: self._pick_track("aid", t),
+                    selected=bool(track.get("selected")))
         if subs:
             panel.add_group("SUBTITLES IN THIS FILE")
-            panel.add_row("Off", "", lambda: self._pick_track("sid", None))
+            # `selected=` was missing here, so Off was the one row that
+            # could never light up - the owner's report. "No sub track
+            # chosen" is exactly what Off means, so it is selected when
+            # nothing else in this group is.
+            panel.track_rows[("sid", None)] = panel.add_row(
+                "Off", "", lambda: self._pick_track("sid", None),
+                selected=not any(t.get("selected") for t in subs))
             for track in subs:
-                panel.add_row(self._track_label(track), track.get("codec") or "",
-                              lambda checked=False, t=track: self._pick_track("sid", t),
-                              selected=bool(track.get("selected")))
+                panel.track_rows[("sid", track.get("id"))] = panel.add_row(
+                    self._track_label(track), track.get("codec") or "",
+                    lambda checked=False, t=track: self._pick_track("sid", t),
+                    selected=bool(track.get("selected")))
         panel.finish()
         self._show_panel(panel)
+
+    def _highlight_tracks(self) -> bool:
+        """Repaint the open tracks panel's rows from `self._tracks`.
+
+        Returns False when there is no panel to repaint, or when its rows
+        no longer describe the current track list (mpv gained or lost a
+        track) - the caller then rebuilds.
+
+        This exists because rebuilding stutters. `_pick_track` used to
+        call `_open_tracks_panel(rebuild=True)`, which deleteLater'd the
+        panel - a native child window over a running video - and built a
+        fresh one, and mpv's own track-list confirmation a beat later did
+        it a second time. Two teardowns per click of a native window
+        above the video surface is exactly the flicker the owner saw."""
+        panel = self._panel
+        rows = getattr(panel, "track_rows", None) if panel is not None else None
+        if not rows or getattr(panel, "kind", "") != "tracks":
+            return False
+        wanted = {("aid" if t.get("type") == "audio" else "sid", t.get("id"))
+                  for t in self._tracks if t.get("type") in ("audio", "sub")}
+        if wanted - (set(rows) - {("sid", None)}):
+            return False          # a track appeared that has no row
+        selected = {("aid" if t.get("type") == "audio" else "sid", t.get("id"))
+                    for t in self._tracks if t.get("selected")}
+        no_sub = not any(t.get("type") == "sub" and t.get("selected")
+                         for t in self._tracks)
+        try:
+            for key, card in rows.items():
+                card.set_selected(
+                    no_sub if key == ("sid", None) else key in selected)
+        except RuntimeError:
+            # The panel was closed between the click and this call; its
+            # cards are deleted C++ objects behind live Python names.
+            return False
+        return True
 
     @staticmethod
     def _track_label(track):
@@ -3397,7 +3549,10 @@ class PlayerPage(GlassPage):
                                      and entry.get("id") == picked)
         if kind == "audio":
             self._update_audio_pill()
-        self._open_tracks_panel(rebuild=True)
+        # In place when the rows still fit the track list; a rebuild is
+        # the fallback, not the normal path (see _highlight_tracks).
+        if not self._highlight_tracks():
+            self._open_tracks_panel(rebuild=True)
 
     def _open_settings_panel(self):
         """The gear: the controls that do not earn a button of their own
@@ -3427,11 +3582,15 @@ class PlayerPage(GlassPage):
         self._show_panel(panel)
 
     def _open_streams_root(self):
-        """Open the resolution panel at its top level (the pill / gear)."""
+        """Open the resolution panel at its top level (the pill / gear).
+
+        No `rebuild`: this is the *button* path, so pressing the pill
+        while the resolution panel is already up toggles it shut, which
+        is what every other bar button does."""
         self._streams_view = None
         self._open_streams_panel()
 
-    def _open_streams_panel(self):
+    def _open_streams_panel(self, rebuild=False):
         """Resolution & Source, as a drill-down.
 
         A real lookup comes back with thirty-odd streams and listing them
@@ -3441,7 +3600,7 @@ class PlayerPage(GlassPage):
         opens the individual sources at it (`streams.matching_quality`).
         `self._streams_view` holds which level is on screen: None for the
         resolution list, a quality string for the sources under it."""
-        panel = self._new_panel("Resolution & Source", "streams")
+        panel = self._new_panel("Resolution & Source", "streams", rebuild)
         if panel is None:
             return          # the same button closed it
         if not self._streams:
@@ -3527,9 +3686,15 @@ class PlayerPage(GlassPage):
 
     def _drill_streams(self, view):
         """Move between the resolution list (None) and one resolution's
-        sources (a quality), rebuilding the panel in place."""
+        sources (a quality), rebuilding the panel in place.
+
+        **rebuild=True is the whole point of this call.** Without it the
+        reopen lands on `_new_panel`'s same-kind toggle and the panel
+        that was drilling *closes* instead - the 1.10.12 regression the
+        owner reported as "clicking 4K shuts the panel". Every internal
+        reopen carries it; only a bar button leaves it False."""
         self._streams_view = view
-        self._open_streams_panel()
+        self._open_streams_panel(rebuild=True)
 
     # ---- downloading -------------------------------------------------
     def _download_folder(self):
@@ -3562,7 +3727,7 @@ class PlayerPage(GlassPage):
         self._dl_quality = preferred if preferred in available else None
         return self._dl_quality
 
-    def _open_download_panel(self):
+    def _open_download_panel(self, rebuild=False):
         """Scope, resolution and subtitle in one panel, then Download.
 
         An OverlayPanel rather than a QDialog, like every other choice in
@@ -3570,7 +3735,7 @@ class PlayerPage(GlassPage):
         video (see the module docstring), and a modal dialog in the
         middle of a film is a heavier interruption than the panel the
         same buttons beside it already open."""
-        panel = self._new_panel("Download", "download")
+        panel = self._new_panel("Download", "download", rebuild)
         if panel is None:
             return          # the same button closed it
         self._dl_default_quality()
@@ -3685,7 +3850,11 @@ class PlayerPage(GlassPage):
         setattr(self, f"_dl_{field}", value)
         if field == "quality":
             self._dl_quality_set = True
-        self._open_download_panel()      # rebuild in place, with the new pick
+        # rebuild=True, same reason as _drill_streams: an internal reopen
+        # of the panel's own kind would otherwise hit the toggle and shut
+        # it, so every scope/quality/audio/subtitle pick closed the
+        # Download panel instead of moving its highlight.
+        self._open_download_panel(rebuild=True)
 
     def _dl_pick_folder(self):
         from windows import downloads_page
@@ -3693,7 +3862,7 @@ class PlayerPage(GlassPage):
         if not picked:
             return
         self._dl_folder = picked
-        self._open_download_panel()
+        self._open_download_panel(rebuild=True)
 
     def _dl_start(self):
         folder = self._download_folder()
@@ -3867,8 +4036,29 @@ class PlayerPage(GlassPage):
         return self._window or self
 
     # ---- controls visibility -----------------------------------------
+    def _veil(self, widget, alpha):
+        """Give `widget` its DWM alpha, but only when that is actually
+        needed.
+
+        The reapplication exists because Qt destroys and recreates a
+        native child window on a reparent or a screen change, and the
+        recreated one has none of the extended style, so the bar silently
+        goes back to opaque. That means the trigger is the *handle*
+        changing, not the passing of a tick - so the handle is what is
+        remembered. Measured at 0.41ms a pair of calls, which was being
+        paid 5.5 times a second for as long as the pointer kept moving."""
+        try:
+            hwnd = int(widget.winId())
+        except RuntimeError:
+            return
+        if self._veiled.get(id(widget)) == (hwnd, alpha):
+            return
+        if _set_window_alpha(widget, alpha):
+            self._veiled[id(widget)] = (hwnd, alpha)
+
     def _wake_controls(self):
-        if not self.controls.isVisible():
+        was_hidden = not self.controls.isVisible()
+        if was_hidden:
             # Same order as _show_status, for the same reason: a native
             # child window that is shown before it is placed paints once
             # where it used to be. Only on the way back from hidden - this
@@ -3877,21 +4067,24 @@ class PlayerPage(GlassPage):
             self._layout_overlays()
         self.controls.show()
         self.top_bar.show()
-        self.controls.raise_()
-        self.top_bar.raise_()
+        if was_hidden:
+            # Same reasoning as the veil above: a raise_ is a
+            # SetWindowPos on a native window sitting over the video, and
+            # nothing can have got above these two while they were
+            # already up - everything that raises itself over them
+            # (_show_backdrop, the episode bar, a panel) re-raises them
+            # itself, or is raised again below.
+            self.controls.raise_()
+            self.top_bar.raise_()
         if self._episode_bar is not None and self._episode_bar.isVisible():
             self._episode_bar.raise_()
-            _set_window_alpha(self._episode_bar, BAR_ALPHA)
+            self._veil(self._episode_bar, BAR_ALPHA)
         if self._panel is not None:
             self._panel.raise_()
-        # Reapplied on every wake, not once at build time: Qt destroys and
-        # recreates a native child window on a reparent or a screen
-        # change, and the recreated one has none of the extended style,
-        # so the bar silently goes back to opaque. Both bars wear the
-        # same low-alpha near-black veil now (see _build_top_bar for why
-        # the top bar's colour-keying is gone).
-        _set_window_alpha(self.controls, CONTROLS_VEIL_ALPHA)
-        _set_window_alpha(self.top_bar, CONTROLS_VEIL_ALPHA)
+        # Both bars wear the same low-alpha near-black veil now (see
+        # _build_top_bar for why the top bar's colour-keying is gone).
+        self._veil(self.controls, CONTROLS_VEIL_ALPHA)
+        self._veil(self.top_bar, CONTROLS_VEIL_ALPHA)
         # Deliberate, and reversed on every path that hides them again:
         # this is not the sticky-hand-cursor trap in .claude/rules/ui.md,
         # which is about a widget keeping a cursor it no longer earns.
@@ -3901,10 +4094,15 @@ class PlayerPage(GlassPage):
         self._idle_timer.start(CONTROLS_HIDE_MS)
 
     def _set_sub_position(self, value):
-        if self.handle is None:
+        # Written only when it changes: this is called from every wake,
+        # and a property write costs mpv a subtitle re-render. Remembered
+        # rather than read back, because the read is the same round trip
+        # as the write.
+        if self.handle is None or value == self._sub_pos:
             return
         try:
             self.handle["sub-pos"] = value
+            self._sub_pos = value
         except Exception:
             logs.exception("Subtitle position change failed")
 
@@ -3957,10 +4155,31 @@ class PlayerPage(GlassPage):
             return False
 
     def _poll_pointer(self):
+        """Wake the controls when the pointer moves *on this player*.
+
+        The window test is the fix for "it starts glitching when the
+        cursor is on other apps or desktop". This used to wake on any
+        movement anywhere on screen, so working in another application
+        held the bars up over the video indefinitely - the idle timer was
+        re-armed 5.5 times a second (measured, POINTER_POLL_MS 180) and
+        never got to fire - and each of those wakes paid two raise_ calls
+        and two SetLayeredWindowAttributes on native windows sitting over
+        the video surface.
+
+        For the record, because it was the first suspect and it is
+        wrong: that per-tick work is not itself expensive. Measured
+        against a real 1080p60 gpu-vo render - 2x raise_ 1.02ms median,
+        2x SetLayeredWindowAttributes 0.41ms, sub-pos write 0.14ms, and
+        over 3 alternated 10s runs mpv dropped 0 frames and a 16ms
+        heartbeat timer ran 0 late frames either way. What the churn
+        actually costs is the bars never going away."""
         position = QCursor.pos()
-        if position != self._last_pointer:
-            self._last_pointer = position
-            self._wake_controls()
+        if position == self._last_pointer:
+            return
+        self._last_pointer = position
+        if not self._widget_rect(self).contains(position):
+            return
+        self._wake_controls()
 
     # ---- click to play/pause -----------------------------------------
     def _over_video(self, position) -> bool:

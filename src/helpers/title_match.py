@@ -35,6 +35,32 @@ def search_query(text: str) -> str:
     return " ".join(cleaned.split()) or (text or "").strip()
 
 
+def search_variants(text: str) -> list:
+    """The strings to send an external catalog for one tracked title, in
+    order: the title exactly as the user's own site wrote it, then the
+    same with the site's group tag dropped.
+
+    **Measured 21 August 2026 on the owner's own entry "Kingdom (WAN)"** -
+    "(WAN)" is the scanlation group's tag on 3asq, not part of the name,
+    and every external lookup that sent the literal string came back
+    empty: MangaDex answered it with five unrelated isekai and nothing
+    called Kingdom, AniList answered it with no artwork at all, and
+    `discover.reading_genres` returned [] where "Kingdom" returns
+    Historical / Action / Drama. Searching the other five configured
+    sites for it found the title on none of them.
+
+    The full title still goes first, and this is a *retry* rather than a
+    replacement, because brackets are occasionally part of the real name
+    ("Kingdom (2013)") and only the untouched string can match that.
+
+    Scoring needs none of this - `normalize` already drops the tag on
+    both sides, so "Kingdom (WAN)" scores 1.00 against "Kingdom". It is
+    only the query text an external search engine takes literally."""
+    full = " ".join((text or "").split())
+    stripped = search_query(full)
+    return [full] if not full or stripped == full else [full, stripped]
+
+
 def similarity(query: str, candidate: str) -> float:
     """0.0-1.0 for how well `candidate` matches `query`, after
     normalizing both. One title fully containing the other scores near

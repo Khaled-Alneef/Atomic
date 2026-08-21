@@ -1264,6 +1264,21 @@ class HeroBanner(QFrame):
             gradient.setColorAt(stop, QColor(ground))
         painter.setBrush(QBrush(gradient))
         painter.drawPath(shape)
+        # A hairline of BORDER around the shape, because the rounding is
+        # real but was unreadable: measured in the full Discover
+        # composition (offscreen grab, loud magenta art), the left
+        # corner pixel differed from the banner's interior by 27 summed
+        # channels out of 765 - the 242-alpha scrim above turns the left
+        # half into the page's own BG, so the curve had nothing to read
+        # against and the owner reported square corners twice. The
+        # stroke path is inset half a pixel so the pen isn't clipped by
+        # the widget edge.
+        edge = QPainterPath()
+        edge.addRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5),
+                            theme.RADIUS_LG, theme.RADIUS_LG)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(theme.BORDER), 1.0))
+        painter.drawPath(edge)
         painter.end()
 
 

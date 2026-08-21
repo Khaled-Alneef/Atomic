@@ -347,7 +347,10 @@ def discover_reading_sites(query: str = "", limit: int = 30,
     query = (query or "").strip()
     try:
         if query:
-            found = manga_sites.search_all(query, timeout=READING_TIMEOUT)
+            # Its own budget, not READING_TIMEOUT: this one runs while
+            # the user is typing, and manga_sites bounds it to answer
+            # early rather than waiting on the slowest of six sites.
+            found = manga_sites.search_all(query)
         else:
             found = manga_sites.browse_all(limit=limit, deadline=deadline)
     except Exception:
@@ -426,24 +429,32 @@ def reading_genres(title: str, limit: int = 6) -> list:
         return []
     try:
         from . import title_match
-        url = (f"{mangadex.BASE_URL}/manga?limit=5"
-               f"&order[followedCount]=desc"
-               f"&title={urllib.parse.quote(title)}")
-        body = mangadex._get(url, READING_TIMEOUT)
-        for manga in (body or {}).get("data") or []:
-            attributes = manga.get("attributes") or {}
-            if title_match.similarity(title, _reading_title(attributes)) < 0.85:
-                continue
-            names = []
-            for tag in attributes.get("tags") or []:
-                tag_attributes = tag.get("attributes") or {}
-                if tag_attributes.get("group") != "genre":
+        # Retried with the reading site's group tag stripped. Measured
+        # 21 August 2026 on the owner's own entry: "Kingdom (WAN)"
+        # returned [] in 0.39s while "Kingdom" returns Historical /
+        # Action / Drama - the tag is 3asq's scanlation group, and
+        # MangaDex takes the query string literally. The 0.85 match
+        # below never needed loosening; normalize() already drops the
+        # tag on both sides of the comparison.
+        for query in title_match.search_variants(title):
+            url = (f"{mangadex.BASE_URL}/manga?limit=5"
+                   f"&order[followedCount]=desc"
+                   f"&title={urllib.parse.quote(query)}")
+            body = mangadex._get(url, READING_TIMEOUT)
+            for manga in (body or {}).get("data") or []:
+                attributes = manga.get("attributes") or {}
+                if title_match.similarity(title, _reading_title(attributes)) < 0.85:
                     continue
-                name = (tag_attributes.get("name") or {}).get("en")
-                if name:
-                    names.append(str(name).strip())
-            if names:
-                return names[:limit]
+                names = []
+                for tag in attributes.get("tags") or []:
+                    tag_attributes = tag.get("attributes") or {}
+                    if tag_attributes.get("group") != "genre":
+                        continue
+                    name = (tag_attributes.get("name") or {}).get("en")
+                    if name:
+                        names.append(str(name).strip())
+                if names:
+                    return names[:limit]
         return []
     except Exception:
         return []

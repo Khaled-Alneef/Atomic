@@ -271,6 +271,27 @@ def seed_default_addons() -> list:
 METADATA_TIMEOUT = 12.0
 DATA_WAIT = 12.0
 
+# The budgets a release gets while there are still untried candidates
+# behind it in the race.
+#
+# Measured 21 August 2026 against the owner's connection, on a real
+# 2160p lookup (Solo Leveling S01E03, five 2160p torrents): a live
+# release published its metadata in 1.66, 2.06 and 3.46 seconds, and the
+# winner's first piece landed 1.61s after that - the whole
+# prepare_fastest took 3.67s. A dead release, by contrast, costs exactly
+# the budget and nothing else: timed at 12.04s against a 12.0s
+# metadata_timeout, 7.02s against 7.0, 5.01s against 5.0.
+#
+# So a lane sitting on a dead release for twelve seconds is a lane not
+# trying the next candidate, and halving the budget while a queue exists
+# covers twice as much of the list in the same wall clock. The *last*
+# candidates keep the full twelve: by then there is nothing better to
+# move on to, and a slow-but-live release is worth the wait when it is
+# the only thing left. 6.0 rather than 4.0 because the slowest live
+# metadata measured was 3.46s and one sample is not a distribution.
+QUEUED_METADATA_TIMEOUT = 6.0
+QUEUED_DATA_WAIT = 6.0
+
 # How many releases are in flight at once, and how long the whole race
 # may take. Six, up from four: each one is mostly idle while it waits
 # for a tracker, so width is nearly free, and the bandwidth only
@@ -439,8 +460,16 @@ def prepare_fastest(candidates, *, season=None, episode=None,
                 candidate = live[cursor[0]]
                 cursor[0] += 1
                 started.append(candidate.get("info_hash"))
+                # Anything still untried behind this one? If so this
+                # release gets the short budget - see
+                # QUEUED_METADATA_TIMEOUT for the numbers behind that.
+                queued = cursor[0] < len(live)
             try:
-                got = prepare(candidate, season=season, episode=episode)
+                got = prepare(
+                    candidate, season=season, episode=episode,
+                    metadata_timeout=(QUEUED_METADATA_TIMEOUT if queued
+                                      else METADATA_TIMEOUT),
+                    data_wait=QUEUED_DATA_WAIT if queued else DATA_WAIT)
             except Exception:
                 continue
             if not got.get("url"):

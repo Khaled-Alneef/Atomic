@@ -1,8 +1,9 @@
-"""Image loading, caching, and placeholder-avatar helpers shared by the
+"""Image loading, caching, and placeholder-tile helpers shared by the
 Websites, Apps, Games, and Tracker windows.
 
-Pillow does the actual image work (thumbnailing, letter avatars); the
-result is converted to a QPixmap right before it's handed to a Qt widget.
+Pillow does the actual image work (thumbnailing, the blank fallback
+tile); the result is converted to a QPixmap right before it's handed to
+a Qt widget.
 """
 
 import hashlib
@@ -12,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 
@@ -20,8 +21,6 @@ from . import icon_extract, net, storage, theme
 
 CACHE_DIR = storage.DATA_DIR / "image_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-_AVATAR_COLORS = [theme.ACCENT, "#2e86de", "#10ac84", "#ee5253", "#8e44ad", "#e67e22", "#0abde3"]
 
 
 def _asset_dir() -> Path:
@@ -94,7 +93,7 @@ def fetch_site_icon(url: str, timeout: int = 6):
     public favicon-lookup service if that fails (unreachable, wrong
     content type, site doesn't serve one at the default path). Returns a
     cached Path, or None - callers fall back to thumbnail_or_avatar's
-    letter avatar either way."""
+    blank tile either way."""
     parsed = urllib.parse.urlparse(url if "://" in url else f"//{url}", scheme="https")
     if not parsed.netloc:
         return None
@@ -166,27 +165,17 @@ def _round_corners(img):
     return rounded
 
 
-def letter_avatar(text: str, size=(64, 64)):
-    """A colored circle with the first letter of `text` - the fallback
-    used whenever no real image/icon/cover is available."""
-    letter = (text or "?").strip()[:1].upper() or "?"
-    seed = sum(text.encode("utf-8")) if text else 0
-    color = _AVATAR_COLORS[seed % len(_AVATAR_COLORS)]
-
-    img = Image.new("RGBA", size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((0, 0, size[0] - 1, size[1] - 1), fill=color)
-    try:
-        font = ImageFont.truetype("segoeuib.ttf", int(size[1] * 0.45))
-    except Exception:
-        font = ImageFont.load_default()
-    bbox = draw.textbbox((0, 0), letter, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text(
-        ((size[0] - tw) / 2 - bbox[0], (size[1] - th) / 2 - bbox[1]),
-        letter, font=font, fill="#ffffff",
-    )
-    return img
+def blank_tile(size=(64, 64)):
+    """An empty flat tile in the thumbnails' own rounded shape - the
+    fallback whenever no real image/icon/cover is available. It replaced
+    the coloured first-letter avatar at the owner's ask ("completely
+    empty until the image loads, whole app"): a wall of letters read as
+    content of its own, where a quiet SURFACE_HOVER slab reads as space
+    an image will fill."""
+    color = theme.SURFACE_HOVER.lstrip("#")
+    rgb = tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+    img = Image.new("RGBA", size, rgb + (255,))
+    return _round_corners(img)
 
 
 def to_pixmap(img: Image.Image) -> QPixmap:
@@ -222,7 +211,7 @@ def _stamp(path):
     """The file's mtime/size, so a cover that gets re-downloaded at the
     same path (see tracker's sharper-cover backfill) is re-read rather
     than served stale from an earlier render. None means missing or
-    unreadable - callers fall through to the letter avatar."""
+    unreadable - callers fall through to the blank tile."""
     try:
         stat = Path(path).stat()
         return (stat.st_mtime_ns, stat.st_size)
@@ -281,20 +270,22 @@ def prewarm(specs):
 
 def thumbnail_or_avatar(path, label_text, size=(64, 64)) -> QPixmap:
     """Best-effort thumbnail: try to load `path` as an image, and fall
-    back to a letter avatar generated from `label_text`.
+    back to blank_tile's empty rounded slab. `label_text` no longer
+    shapes the fallback (it drew a letter avatar once); the name and
+    signature stay so no caller changes.
 
     Cached - QPixmap is implicitly shared, so handing the same one to
     several widgets copies a handle, not the pixels."""
     size = tuple(size)
     stamp = _stamp(path) if path else None
-    key = (str(path) if path else None, stamp, label_text, size)
+    key = (str(path) if path else None, stamp, size)
     cached = _PIXMAP.get(key)
     if cached is not None:
         return cached
 
     img = _fitted(path, size, stamp) if path else None
     if img is None:
-        img = letter_avatar(label_text, size)
+        img = blank_tile(size)
     pixmap = to_pixmap(img)
     _evict(_PIXMAP)
     _PIXMAP[key] = pixmap

@@ -27,7 +27,7 @@ from PyQt6.QtGui import (QColor, QCursor, QIcon, QLinearGradient, QPainter,
                          QPixmap, QPolygonF)
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
-    QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QScrollArea, QVBoxLayout,
     QWidget,
 )
@@ -881,8 +881,11 @@ class _DiscoverSignals(QObject):
     # dicts as helpers/discover returns them, run.
     results = Signal(str, list, int)
     # poster: row kind, index within that row, the cached file path ("" =
-    # nothing downloaded), run.
-    poster = Signal(str, int, str, int)
+    # nothing downloaded), the cover URL the file came from ("" when the
+    # row already carried one - it is only reported when the worker had
+    # to resolve it from the series page, so the UI thread can write it
+    # back onto the row's dict; see _on_discover_poster), run.
+    poster = Signal(str, int, str, str, int)
     # The hero banner's ground - a local backdrop path, run.
     featured_backdrop = Signal(str, int)
     # A History row's cover: the history key, the downloaded path. No
@@ -1594,13 +1597,13 @@ class TrackerPage(GlassPage):
 
         self._refresh_grid()
         # Last, after every tab's shell exists and the grid has been
-        # drawn: restoring a remembered Discover *is* showing it, so this
-        # is what fires that tab's first lookup.
-        # Discover is where these pages open (the owner's ask) - the
-        # session's remembered section still wins, so walking away from
-        # Saved and back does not throw you into Discover mid-task; it
-        # is only the default for a page arrived at fresh.
-        self._set_tab(remembered.get("tab", DEFAULT_TAB))
+        # drawn: showing Discover *is* what fires that tab's first
+        # lookup. Always Discover, every visit (the owner, twice - the
+        # remembered-section design was tried and reversed): these pages
+        # open on Discover no matter which section was up when the user
+        # walked away. Search text and the filter ticks are still
+        # restored from the session store above; only the section isn't.
+        self._set_tab(DEFAULT_TAB)
         if self.SUPPORTS_PROGRESS_SYNC:
             self._backfill_missing_latest_available()
         self._backfill_sharper_covers()
@@ -1780,22 +1783,42 @@ class TrackerPage(GlassPage):
         else ever re-derives cover_path from cover_url after the initial
         save. Silently re-download the sharper original in the
         background, same one-time-catch-up pattern as
-        _backfill_missing_latest_available."""
+        _backfill_missing_latest_available.
+
+        The same catch-up also fills a cover that never landed at all
+        (the owner's "Kingdom (WAN)" report): an entry can hold a
+        cover_url with cover_path still None - the save-time download
+        failed once, or the title was saved before its poster resolved -
+        and, before this, nothing ever retried, so Saved and Home drew
+        the blank tile forever while the Discover card showed the art."""
         for entry in self.entries:
-            if entry["type"] not in MANGA_TYPES:
-                continue
-            upgraded = manga_sites.upgrade_cover_url(entry.get("cover_url"))
-            if upgraded and upgraded != entry.get("cover_url"):
+            wanted = None
+            if entry["type"] in MANGA_TYPES:
+                upgraded = manga_sites.upgrade_cover_url(entry.get("cover_url"))
+                if upgraded and upgraded != entry.get("cover_url"):
+                    wanted = upgraded
+            if (wanted is None and entry.get("type") in self.ENTRY_TYPES
+                    and entry.get("cover_url") and not entry.get("cover_path")):
+                wanted = entry["cover_url"]
+            if wanted:
                 # Bounded, like every other per-entry loop here: this one
                 # downloads a full-size image per entry, so it is the
                 # heaviest of them to fire all at once.
-                lookup_pool.submit(self._fetch_sharper_cover, entry["id"], upgraded)
+                lookup_pool.submit(self._fetch_sharper_cover, entry["id"], wanted)
 
-    def _fetch_sharper_cover(self, entry_id, new_url):
+    def _fetch_sharper_cover(self, entry_id, new_url, page_url=""):
         # Must never raise: an uncaught exception here would kill the
         # background thread silently.
+        #
+        # `page_url` is the reading-row fallback: a Madara-style search
+        # result names no cover at all, so a save can arrive here with
+        # no URL and only the series page to ask - the same lookup the
+        # Discover card itself uses (_fetch_discover_poster).
         try:
-            path = images.download(new_url)
+            if not new_url and page_url:
+                details = manga_sites.fetch_manga_details(page_url) or {}
+                new_url = details.get("cover_url") or ""
+            path = images.download(new_url) if new_url else None
         except Exception:
             path = None
         if path:
@@ -3221,7 +3244,12 @@ class TrackerPage(GlassPage):
         if rows:
             cards = [self._build_discover_card(kind, index, item, entry_type, run)
                      for index, item in enumerate(rows)]
-            content = self._build_card_strip(cards)
+            # Browsing keeps the sideways strips; a typed search wraps
+            # into a grid instead (the owner's ask: "when the row is
+            # full start a new row") - thirty matches on one sideways
+            # line hides all but the first handful.
+            content = (self._build_card_grid(cards) if self._discover_query
+                       else self._build_card_strip(cards))
         else:
             content = QLabel(
                 f"Nothing found for '{self._discover_query}'."
@@ -3234,6 +3262,25 @@ class TrackerPage(GlassPage):
         layout = holder.layout()
         _clear_layout(layout)
         layout.addWidget(widget)
+
+    def _build_card_grid(self, cards):
+        """Search results as a wrapping grid - the genre-browse page's
+        shape, not the strips'. Column count is taken from the body's
+        real width at build time; a search re-runs this whole build, so
+        there is no live re-wrap to keep correct, only this one. The
+        fallback is for a body that hasn't been laid out yet (results
+        landing before the first show), where width() is meaningless."""
+        span = POSTER_SIZE[0] + 20 + 14           # card + grid spacing
+        width = self.discover_body.width()
+        columns = max(2, width // span) if width > span else 5
+        host = QWidget(objectName="Bare")
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(14)
+        grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        for index, card in enumerate(cards):
+            grid.addWidget(card, index // columns, index % columns)
+        return host
 
     # ---- the cards ---------------------------------------------------
     def _saved_titles(self):
@@ -3324,23 +3371,34 @@ class TrackerPage(GlassPage):
 
     def _fetch_discover_poster(self, kind, index, url, run, page_url=""):
         # Must never raise - see _discover_row_worker.
-        path = None
+        path, resolved = None, ""
         try:
             if not url and page_url:
                 details = manga_sites.fetch_manga_details(page_url) or {}
-                url = details.get("cover_url") or ""
+                url = resolved = details.get("cover_url") or ""
             if url:
                 path = images.download(url)
         except Exception:
             path = None
-        self._discover_signals.poster.emit(kind, index, str(path) if path else "", run)
+        self._discover_signals.poster.emit(kind, index,
+                                           str(path) if path else "",
+                                           resolved, run)
 
-    def _on_discover_poster(self, kind, index, path, run):
+    def _on_discover_poster(self, kind, index, path, resolved_url, run):
         if run != self._discover_run or not path:
             return
         record = self._discover_cards.get((kind, index))
         if not record:
             return
+        # A cover the worker had to dig out of the series page is written
+        # back onto the row's dict, on this thread with every other
+        # reader of it: discover_entry copies `poster` into cover_url at
+        # pick/save time, and without this a reading row whose search
+        # result carried no art (the Madara shape) saved with
+        # cover_url=None - its card showed the cover, Saved and Home
+        # never did (the Kingdom (WAN) report).
+        if resolved_url and not (record.get("item") or {}).get("poster"):
+            record["item"]["poster"] = resolved_url
         try:
             record["cover"].setPixmap(images.thumbnail_or_avatar(
                 path, record["title"], record["size"]))
@@ -3355,7 +3413,7 @@ class TrackerPage(GlassPage):
         card_layout.setContentsMargins(8, 10, 8, 10)
         card_layout.setSpacing(6)
 
-        # The letter avatar stands in until the download lands - the same
+        # The blank tile stands in until the download lands - the same
         # placeholder a saved entry with no cover keeps for good, so a
         # loading card and a coverless one look alike rather than a
         # loading card looking broken.
@@ -3364,8 +3422,11 @@ class TrackerPage(GlassPage):
         cover.setPixmap(images.thumbnail_or_avatar(None, title_text, POSTER_SIZE))
         card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
+        # `item` is the same dict the click lambda captures, so a poster
+        # URL resolved late (see _on_discover_poster) reaches a later
+        # pick/save through it.
         record = {"cover": cover, "title": title_text, "size": POSTER_SIZE,
-                  "badge": None, "badge_at_foot": False}
+                  "item": item, "badge": None, "badge_at_foot": False}
         if title_text.lower() in self._saved_titles():
             self._place_saved_badge(record)
         rating = self._rating_text(item)
@@ -3593,11 +3654,16 @@ class TrackerPage(GlassPage):
         entry = self._discover_entry(item, entry_type)
         entry["id"] = str(uuid.uuid4())
         self._on_form_save(entry, True)
-        if entry.get("cover_url"):
+        # A reading row can arrive with no cover_url (its own card had
+        # to resolve one from the series page) - hand the page URL along
+        # so the same resolve happens for the save, instead of the entry
+        # sitting coverless forever.
+        page_url = (entry.get("url") or "") if entry_type in MANGA_TYPES else ""
+        if entry.get("cover_url") or page_url:
             # The poster lands as the entry's cover through the same
             # download-then-update path the sharper-cover backfill uses.
             lookup_pool.submit(self._fetch_sharper_cover, entry["id"],
-                               entry["cover_url"])
+                               entry.get("cover_url") or "", page_url)
         show_toast(self, f"'{title_text}' Added to Saved")
         return True
 

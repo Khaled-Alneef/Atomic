@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from . import net, title_match
 
 BASE_URL = "https://api.mangadex.org"
+COVERS_URL = "https://uploads.mangadex.org/covers"
 
 # MangaDex allows ~5 requests/second globally and resets connections on a
 # burst; the tracker fires one lookup per entry in its own thread, so
@@ -124,6 +125,54 @@ def _search(title: str, timeout: int) -> list:
             scored.append((score, manga))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [manga for _, manga in scored[:_MAX_CANDIDATES]]
+
+
+def fetch_cover_url(title: str, timeout: int = 8):
+    """MangaDex's own cover art for a title, or None.
+
+    The first fallback for a manga whose reading site served no cover
+    (see manga_sites._external_cover). Measured 21 August 2026 on the
+    title the owner reported missing one, "I Want to Stop Killing":
+    MangaDex matches it at 1.00 and carries the art, while its only
+    configured site (Mangalek) 403s every series page.
+
+    The same 0.85 bar as the schedule lookups, and scored against the
+    user's own title while the *query* is retried tag-stripped
+    (title_match.search_variants) - a cover from the wrong series is
+    worse than a letter avatar, so a near-miss returns None.
+
+    `.512.jpg` is MangaDex's own thumbnailer, not a crop: measured 200
+    at 59.1KB against 47.9KB for that title's original, and it is the
+    size a poster tile actually draws."""
+    title = (title or "").strip()
+    if not title:
+        return None
+    for query in title_match.search_variants(title):
+        url = (f"{BASE_URL}/manga?limit=5&includes[]=cover_art"
+               f"&order[relevance]=desc"
+               f"&title={urllib.parse.quote(query)}{_RATINGS}")
+        try:
+            body = _get(url, timeout)
+        except Exception:
+            continue    # this one request failed; the retry is still worth it
+        best, best_score = None, 0.0
+        for manga in body.get("data") or []:
+            score = title_match.best_similarity(title, _titles_of(manga))
+            if score < _MATCH_THRESHOLD or score <= best_score:
+                continue
+            file_name = None
+            for relationship in manga.get("relationships") or []:
+                if relationship.get("type") == "cover_art":
+                    file_name = (relationship.get("attributes") or {}).get("fileName")
+                    break
+            # fileName only exists because of includes[]=cover_art -
+            # without it the relationship is an id and a type.
+            if file_name and manga.get("id"):
+                best = f"{COVERS_URL}/{manga['id']}/{file_name}.512.jpg"
+                best_score = score
+        if best:
+            return best
+    return None
 
 
 def _chapter_feed(manga_id: str, timeout: int) -> dict:

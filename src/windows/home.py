@@ -914,7 +914,15 @@ class HomePage(GlassPage):
 
             icon = QLabel()
             icon.setFixedSize(*ROW_ICON_SIZE)
-            icon.setPixmap(images.thumbnail_or_avatar(entry.get("image"), entry["name"], ROW_ICON_SIZE))
+            # `art` before `image`, exactly as the Apps page draws its own
+            # tiles (link_grid): `art` is the iTunes 512px artwork, `image`
+            # the extracted shell icon, and Home preferring `image` is why
+            # the same app wore two different icons on the two pages (the
+            # owner's Wand report). Websites entries have no `art` and
+            # keep their favicon through the fallback.
+            icon.setPixmap(images.thumbnail_or_avatar(
+                entry.get("art") or entry.get("image"), entry["name"],
+                ROW_ICON_SIZE))
             row_layout.addWidget(icon)
             row_layout.addWidget(QLabel(entry["name"]))
             row_layout.addStretch()

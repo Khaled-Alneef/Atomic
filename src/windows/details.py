@@ -31,7 +31,7 @@ same thing for video and the owner rightly called that broken.
 import datetime
 import uuid
 
-from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPixmap
 from PyQt6.QtWidgets import (
@@ -103,10 +103,11 @@ class _Signals(QObject):
     # Resolving a Discover reading title on a picked site - run, the
     # fields to store ({url, site_id}) or None, the site's name.
     site_resolved = Signal(int, object, str)
-    # A just-saved entry's downloaded cover: entry id, data file, local
+    # A just-saved entry's downloaded cover: entry id, data file, the
+    # cover URL it came from ("" when the entry already knew it), local
     # path. Crossed back so the storage write happens on the UI thread
     # with every other writer, not from the pool.
-    saved_cover = Signal(str, str, str)
+    saved_cover = Signal(str, str, str, str)
 
 
 def _meta_worker(signals, run, imdb_id, content_type):
@@ -235,7 +236,13 @@ def _chapters_worker(signals, run, entry, refresh=False):
             refresh=refresh, on_partial=partial)
     except Exception:
         logs.exception("details chapter listing failed")
-        chapters = None
+        # None, not []: an exception here is "the lookup failed", and
+        # collapsing it into an empty list made a dead connection read
+        # as "this title has no chapters" - with no retry, since the
+        # page believed it had its answer. _on_chapters retries a None
+        # once and only then says so.
+        signals.chapters.emit(run, None)
+        return
     signals.chapters.emit(run, list(chapters or []))
 
 
@@ -305,6 +312,65 @@ def _badge(text, kind) -> QLabel:
     return label
 
 
+class _PanelNote(QLabel):
+    """The status note centred over the list panel's viewport.
+
+    It is a viewport child placed by hand (a layout row would be
+    destroyed by every refill - see _build_panel), and the by-hand
+    placement used to hold two bugs the owner saw as one clipped,
+    off-centre message: the geometry was computed in the page's
+    resizeEvent from the viewport's size *at that moment*, which is
+    stale (the splitter's layout settles after the page's own resize),
+    and nothing re-ran the layout when the text changed, so a long
+    error kept a short predecessor's box. Now the note watches the
+    viewport's own Resize - never stale - and re-lays itself on every
+    setText."""
+
+    def __init__(self, text, viewport):
+        super().__init__(text, viewport)
+        self._viewport = viewport
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # The size is set programmatically rather than in the
+        # stylesheet: the wrapped height below comes from fontMetrics(),
+        # which does not see a QSS font-size.
+        font = self.font()
+        font.setPointSizeF(11.5)
+        self.setFont(font)
+        self.setStyleSheet(f"color: {theme.TEXT_MUTED};"
+                           f" background: transparent; border: none;")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        viewport.installEventFilter(self)
+        self.relayout()
+
+    def eventFilter(self, obj, event):
+        if obj is self._viewport and event.type() in (QEvent.Type.Resize,
+                                                      QEvent.Type.Show):
+            self.relayout()
+        return False
+
+    def setText(self, text):
+        super().setText(text)
+        self.relayout()
+
+    def relayout(self):
+        try:
+            width = max(80, self._viewport.width() - 40)
+            # Ints, not the enums: TextFlag and AlignmentFlag are
+            # different enum types in PyQt6 and cannot be |'d directly.
+            flags = (int(Qt.TextFlag.TextWordWrap.value)
+                     | int(Qt.AlignmentFlag.AlignHCenter.value))
+            wrapped = self.fontMetrics().boundingRect(
+                QRect(0, 0, width, 0), flags, self.text())
+            height = max(wrapped.height(), self.fontMetrics().height())
+            self.setGeometry(20,
+                             max(0, (self._viewport.height() - height) // 2),
+                             width, height)
+            self.raise_()
+        except RuntimeError:
+            pass        # the panel is being torn down
+
+
 class DetailsPage(GlassPage):
     """One entry, full screen: facts on the left, the episode or chapter
     list on the right."""
@@ -324,6 +390,10 @@ class DetailsPage(GlassPage):
         self._chapters = []
         self._season = 0
         self._is_reading = self.entry.get("type") in MANGA_TYPES
+        # One-shot latches for the silent retry each list lookup gets
+        # (see _on_meta/_on_chapters); re-armed by every fresh start.
+        self._meta_retried = False
+        self._chapters_retried = False
 
         # The source-picker step: filled in when an episode row is
         # clicked, cleared by its back row or by picking a source.
@@ -596,15 +666,20 @@ class DetailsPage(GlassPage):
         self._search.textChanged.connect(lambda _t: self._search_timer.start(220))
         column.addWidget(self._search)
 
+        # No inline "background: transparent" on the host/area here: a
+        # declaration-only stylesheet on a widget cascades to every
+        # descendant and outranks the app stylesheet, which was silently
+        # killing the row Cards' matte fill and their hover ring
+        # (measured: with the sheet on the area, a hovered #Card painted
+        # nothing; without it, the ACCENT ring and ACCENT_SOFT fill).
+        # theme.py's QScrollArea and #Bare rules already make the area
+        # and host transparent without touching their children.
         self._rows_host = QWidget(objectName="Bare")
-        self._rows_host.setStyleSheet("background: transparent; border: none;")
         self._rows = QVBoxLayout(self._rows_host)
         self._rows.setContentsMargins(0, 0, 6, 0)
         self._rows.setSpacing(6)
         self._rows.addStretch(1)
         area = scroll_area(self._rows_host)
-        area.setStyleSheet("background: transparent; border: none;")
-        area.viewport().setStyleSheet("background: transparent;")
         column.addWidget(area, stretch=1)
 
         # Centred over the list rather than tucked under it. "Finding
@@ -615,46 +690,18 @@ class DetailsPage(GlassPage):
         # A child of the scroll area's viewport, not a row in the column:
         # rows come and go with every refill (_clear_rows empties that
         # layout), and a note living in it would be destroyed by the
-        # first list it was meant to describe. As an overlay it is
-        # positioned by _layout_panel_note on every viewport resize.
-        self._panel_note = QLabel("Loading...", area.viewport())
-        self._panel_note.setWordWrap(True)
-        self._panel_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._panel_note.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; background: transparent;"
-            f" border: none; font-size: 11.5pt;")
-        self._panel_note.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._note_viewport = area.viewport()
-        self._layout_panel_note()
+        # first list it was meant to describe. _PanelNote lays itself
+        # out - see its docstring for the two bugs the by-hand placement
+        # used to have.
+        self._panel_note = _PanelNote("Loading...", area.viewport())
         return panel
-
-    def resizeEvent(self, event):
-        # The note is an overlay child of the list viewport, so it is
-        # placed by hand rather than by a layout; the page resizing is
-        # what the viewport resizing follows from.
-        super().resizeEvent(event)
-        self._layout_panel_note()
-
-    def _layout_panel_note(self):
-        """Keep the note on the middle of the list's viewport."""
-        viewport = getattr(self, "_note_viewport", None)
-        note = getattr(self, "_panel_note", None)
-        if viewport is None or note is None:
-            return
-        try:
-            width = max(80, viewport.width() - 40)
-            height = note.heightForWidth(width) or note.sizeHint().height()
-            note.setGeometry(20, max(0, (viewport.height() - height) // 2),
-                             width, height)
-            note.raise_()
-        except RuntimeError:
-            pass        # the panel is being torn down
 
     # ---- lookups ----------------------------------------------------------
     def _start_lookups(self):
         import threading
         self._run += 1
+        self._meta_retried = False
+        self._chapters_retried = False
         if self.entry.get("imdb_id"):
             # A dedicated thread, not lookup_pool - see _art_worker.
             threading.Thread(target=_art_worker,
@@ -691,12 +738,26 @@ class DetailsPage(GlassPage):
     def _on_meta(self, run, meta):
         if run != self._run or self._closed:
             return
-        self._finish_refresh()
         if not meta:
+            # One silent retry before admitting defeat: the owner
+            # reported the list "sometimes fetches nothing" on titles
+            # that load fine a moment later - a single flaky Cinemeta
+            # answer, and the page treated it as final. The note keeps
+            # its loading text while the retry runs; the refresh button
+            # stays disarmed for the same reason.
+            if not self._meta_retried and self.entry.get("imdb_id"):
+                self._meta_retried = True
+                kind = ("movie" if self.entry.get("type") == "Movie"
+                        else "series")
+                lookup_pool.submit(_meta_worker, self._signals, self._run,
+                                   self.entry.get("imdb_id"), kind)
+                return
+            self._finish_refresh()
             self._panel_note.setText(
                 "The episode list couldn't be loaded. Check the connection "
                 "and reopen this page.")
             return
+        self._finish_refresh()
         self._meta = meta
         self._videos = [v for v in (meta.get("videos") or [])
                         if isinstance(v, dict)]
@@ -731,8 +792,24 @@ class DetailsPage(GlassPage):
     def _on_chapters(self, run, chapters):
         if run != self._run or self._closed:
             return
+        if chapters is None:
+            # The lookup *failed* (see _chapters_worker) - distinct from
+            # a title that genuinely has no chapters. One silent retry,
+            # without refresh=True even if a refresh asked: letting the
+            # disk cache answer the second attempt turns "error" into a
+            # slightly stale list, which is the better failure.
+            if not self._chapters_retried:
+                self._chapters_retried = True
+                lookup_pool.submit(_chapters_worker, self._signals,
+                                   self._run, dict(self.entry))
+                return
+            self._finish_refresh()
+            self._panel_note.setText(
+                "The chapter list couldn't be loaded. Check the "
+                "connection and press the refresh button to try again.")
+            return
         self._finish_refresh()
-        self._chapters = list(chapters or [])
+        self._chapters = list(chapters)
         if not self._chapters:
             self._panel_note.setText("No chapters were found for this title.")
             return
@@ -919,6 +996,8 @@ class DetailsPage(GlassPage):
         if self._closed or self._site_choice_pending:
             return
         self._run += 1
+        self._meta_retried = False
+        self._chapters_retried = False
         self._refresh_btn.setEnabled(False)
         self._clear_rows()
         self._panel_note.setVisible(True)
@@ -991,6 +1070,7 @@ class DetailsPage(GlassPage):
     def _pick_mangadex(self):
         self._site_choice_pending = False
         self._run += 1
+        self._chapters_retried = False
         self._panel_note.setVisible(True)
         self._panel_note.setText("Loading...")
         lookup_pool.submit(_chapters_worker, self._signals, self._run,
@@ -1021,6 +1101,7 @@ class DetailsPage(GlassPage):
         self._site_choice_pending = False
         self._panel_note.setText(f"Loading chapters from {site_name}...")
         self._run += 1
+        self._chapters_retried = False
         lookup_pool.submit(_chapters_worker, self._signals, self._run,
                            dict(self.entry))
 
@@ -1845,29 +1926,49 @@ class DetailsPage(GlassPage):
         self._save_btn.setText("Saved to My List")
         self._save_btn.setEnabled(False)
         show_toast(self, f"'{self.entry.get('title')}' Added to Saved")
-        if self.entry.get("cover_url"):
+        # A reading title picked off Discover can arrive with no
+        # cover_url at all (the Madara search shape names none) - its
+        # own card resolved the art from the series page, so the save
+        # does the same through page_url rather than storing an entry
+        # that stays coverless on Saved and Home forever (the owner's
+        # Kingdom (WAN) report).
+        page_url = (self.entry.get("url") or "") if self._is_reading else ""
+        if self.entry.get("cover_url") or page_url:
             lookup_pool.submit(self._saved_cover_worker, self._signals,
                                self.entry["id"], data_file,
-                               self.entry["cover_url"])
+                               self.entry.get("cover_url") or "", page_url)
 
     @staticmethod
-    def _saved_cover_worker(signals, entry_id, data_file, url):
-        """Download the poster the Discover row carried, off the UI
-        thread; the write happens back on it. Never raises."""
+    def _saved_cover_worker(signals, entry_id, data_file, url, page_url=""):
+        """Download the poster the Discover row carried - or, for a
+        reading title that never carried one, the cover its series page
+        names - off the UI thread; the write happens back on it. Never
+        raises."""
+        resolved = ""
         try:
-            path = images.download(url)
+            if not url and page_url:
+                from helpers import manga_sites
+                found = manga_sites.fetch_manga_details(page_url) or {}
+                url = resolved = found.get("cover_url") or ""
+            path = images.download(url) if url else None
         except Exception:
             path = None
         if path:
-            signals.saved_cover.emit(entry_id, data_file, str(path))
+            signals.saved_cover.emit(entry_id, data_file, resolved, str(path))
 
-    def _on_saved_cover(self, entry_id, data_file, path):
+    def _on_saved_cover(self, entry_id, data_file, url, path):
+        fields = {"cover_path": path}
+        if url:
+            # The worker had to resolve the URL itself - record it, so
+            # the tracker's sharper-cover backfill has something to
+            # re-derive from later.
+            fields["cover_url"] = url
         try:
-            storage.update_entry(data_file, entry_id, {"cover_path": path})
+            storage.update_entry(data_file, entry_id, fields)
         except Exception:
             logs.exception("details page could not record the cover")
         if self.entry.get("id") == entry_id:
-            self.entry["cover_path"] = path
+            self.entry.update(fields)
 
     def _continue(self):
         """Resume where watching/reading stopped - the page's primary
@@ -2025,15 +2126,19 @@ class GenreBrowsePage(GlassPage):
         header.addStretch(1)
         column.addLayout(header)
 
+        # Deliberately no inline stylesheet on the host or the area: the
+        # declaration-only sheet that used to sit here cascaded into
+        # every descendant and outranked the app stylesheet, so these
+        # poster Cards never painted their #Card hover ring - the one
+        # visual where Discover's identical cards did (the owner's
+        # report). theme.py's QScrollArea/#Bare rules keep the ground
+        # transparent without reaching the children.
         self._body_host = QWidget(objectName="Bare")
-        self._body_host.setStyleSheet("background: transparent; border: none;")
         self._body = QVBoxLayout(self._body_host)
         self._body.setContentsMargins(0, 0, 8, 0)
         self._body.setSpacing(16)
         self._body.addStretch(1)
         area = scroll_area(self._body_host)
-        area.setStyleSheet("background: transparent; border: none;")
-        area.viewport().setStyleSheet("background: transparent;")
         column.addWidget(area, stretch=1)
 
         self._note = QLabel(f"Looking for {self._genre} titles...")

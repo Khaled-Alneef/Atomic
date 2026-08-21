@@ -16,11 +16,12 @@ import concurrent.futures
 import html
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 import uuid
 
-from . import net, storage
+from . import anilist, mangadex, net, storage, title_match
 
 SITES_FILE = "manga_sites.json"
 
@@ -193,18 +194,84 @@ def _strip_wp_size_suffix(url):
     return _WP_SIZE_SUFFIX_RE.sub("", url, count=1) if url else url
 
 
-def fetch_manga_details(page_url: str, timeout: int = 6):
+def fetch_manga_details(page_url: str, timeout: int = 6, title: str = None):
     """Best-effort cover + latest-chapter number for a specific manga
     page - used when the engine that matched it didn't already provide
     them (Madara's search endpoint gives neither; SWAT's search endpoint
     gives neither but its per-series detail endpoint does). Called
     lazily, only for the one result the user actually picks, not every
     search hit. Returns {"cover_url": ..., "latest_chapter": ...}, either
-    possibly None."""
+    possibly None.
+
+    When the page itself yields no cover, an external catalogue is asked
+    for one - see _external_cover. `title` is optional because the
+    tracker calls this with a page URL and nothing else; the URL slug
+    stands in for it."""
     swat_match = _SWAT_SERIES_URL_RE.match(page_url)
     if swat_match:
-        return _swat_series_details(swat_match.group(1), swat_match.group(2), timeout)
-    return _scrape_manga_page(page_url, timeout)
+        details = _swat_series_details(swat_match.group(1), swat_match.group(2),
+                                       timeout)
+    else:
+        details = _scrape_manga_page(page_url, timeout)
+    if not details.get("cover_url"):
+        details["cover_url"] = _external_cover(
+            title or _title_from_slug(page_url), timeout)
+    return details
+
+
+# Normalized title -> cover URL or None, for the session.
+#
+# **Not an optimization - a throttle.** A Madara search returns rows
+# carrying no cover at all, so a reading search in Discover can ask this
+# for twenty titles at once, and MangaDex spaces every request 0.35s
+# apart behind one shared lock (mangadex._MIN_REQUEST_GAP). Without
+# this, revisiting the same row re-asks both catalogues for an answer
+# that has not changed and cannot. Bounded, because it is a convenience
+# cache and not a library. **A miss is remembered too**: a title neither
+# catalogue carries is the case that costs two full requests.
+_external_covers = {}
+_EXTERNAL_COVER_CACHE_MAX = 300
+
+
+def _external_cover(title: str, timeout: int):
+    """A cover for a title whose own site page yielded none.
+
+    **The owner's ask, on "I Want to Stop Killing"** - measured 21
+    August 2026, that title is carried by exactly one configured site
+    (Mangalek), whose series pages 403 every non-browser client, so the
+    scrape above returns nothing and the card drew a letter avatar.
+    MangaDex matches the same title at 1.00 and carries cover art;
+    AniList carries it too.
+
+    MangaDex first: it is the closer catalogue for scanlated manga and
+    its bar here is the strict 0.85. AniList (0.8, portrait cover rather
+    than the wide banner) is the second ask. Both fail soft and a title
+    matching neither keeps None, because a confidently wrong cover is
+    worse than no cover at all.
+
+    Two extra requests, and only ever for a page that produced no cover
+    - a normal search result already carries one and never reaches
+    here."""
+    title = (title or "").strip()
+    if not title:
+        return None
+    key = title_match.normalize(title)
+    if key in _external_covers:
+        return _external_covers[key]
+    try:
+        found = mangadex.fetch_cover_url(title, timeout)
+    except Exception:
+        found = None
+    if not found:
+        try:
+            found = anilist.fetch_manga_cover(title, timeout)
+        except Exception:
+            found = None
+    if key:
+        if len(_external_covers) >= _EXTERNAL_COVER_CACHE_MAX:
+            _external_covers.clear()
+        _external_covers[key] = found
+    return found
 
 
 def _swat_series_details(base_url: str, series_id: str, timeout: int):
@@ -393,6 +460,41 @@ def _search_ajax_html(base_url: str, query: str, timeout: int) -> list:
 
 
 _ENGINES = (_search_madara, _search_ajaxy, _search_v2_api, _search_ajax_html)
+_ENGINES_BY_NAME = {engine.__name__: engine for engine in _ENGINES}
+
+
+def _engine_order(site: dict):
+    """The engines to try for this site, the one that answered last time
+    first.
+
+    Three of the four are always a wasted round trip to an endpoint the
+    site does not have, and until now every search paid all three again.
+    Measured 21 August 2026, the whole chain against the one engine that
+    actually answers: TeamX 3.24s -> 1.10s and 5.63s -> 4.56s, SWAT
+    1.03s -> 0.26s and 2.96s -> 0.36s, Lava Scans 1.93s -> 1.53s.
+
+    Still the whole list, not just the remembered one: a site can change
+    theme, and falling back costs exactly what it used to."""
+    remembered = _ENGINES_BY_NAME.get(site.get("search_engine") or "")
+    if not remembered:
+        return _ENGINES
+    return (remembered,) + tuple(e for e in _ENGINES if e is not remembered)
+
+
+def _remember_engine(site: dict, engine):
+    """Record which engine answered, on the site itself.
+
+    update_entry rather than writing the whole list back - see
+    .claude/rules/ui.md - and only when it changed, so an ordinary
+    search writes nothing at all."""
+    name = engine.__name__
+    if site.get("search_engine") == name:
+        return
+    site["search_engine"] = name
+    try:
+        storage.update_entry(SITES_FILE, site.get("id"), {"search_engine": name})
+    except Exception:
+        pass        # a site being probed before it is saved has no row yet
 
 
 def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list:
@@ -408,7 +510,7 @@ def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list
     base_url = site.get("base_url")
     if not query or not base_url:
         return []
-    for engine in _ENGINES:
+    for engine in _engine_order(site):
         step = net.step_timeout(deadline, timeout)
         if step is None:
             break
@@ -417,6 +519,7 @@ def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list
         except Exception:
             results = []
         if results:
+            _remember_engine(site, engine)
             return results
     return []
 
@@ -754,23 +857,72 @@ def browse_all(limit: int = 30, timeout: int = 8, deadline=None) -> list:
     return rows
 
 
-def search_all(query: str, timeout: int = 6) -> list:
+# What an interactive search is allowed to cost. Measured 21 August
+# 2026 over the owner's six configured sites, *before* any of this:
+# search_all took 9.37s ("kingdom"), 2.83s ("solo") and 11.04s ("I Want
+# to Stop Killing"), because it waited for every site and handed each
+# one no deadline at all - so four engines at a full timeout apiece
+# could cost 24s on one dead host. Per-site worst measured: TeamX 12.0s,
+# Azora 10.6s, both while returning nothing.
+SEARCH_TIMEOUT = 4
+SEARCH_BUDGET = 6.0
+
+# Enough rows to fill the strip, from enough sites that the answer is
+# not one site's catalogue. **Below EARLY_SITES nothing returns early**,
+# and that is the whole safeguard: a title carried by exactly one site -
+# measured, "I Want to Stop Killing" is on Mangalek and nowhere else -
+# must not be dropped for being alone, so a thin answer waits out the
+# full budget instead.
+EARLY_RESULTS = 12
+EARLY_SITES = 3
+
+
+def search_all(query: str, timeout: int = SEARCH_TIMEOUT,
+               budget: float = SEARCH_BUDGET, deadline=None) -> list:
     """Search every configured site in parallel; returns a flat list of
-    {title, url, cover_url, site_id, site_name}."""
+    {title, url, cover_url, site_id, site_name}.
+
+    Bounded twice over, because this is what runs while someone is
+    typing. Every site shares one `deadline`, so no site can cost more
+    than the budget however many engines it works through; and the fan-
+    out stops as soon as there is honestly enough to show (see
+    EARLY_RESULTS / EARLY_SITES) rather than waiting on the slowest.
+
+    Stragglers are abandoned, never waited for - the same rule as
+    streams._run_all. They cannot linger: they are bounded by the same
+    deadline their requests were given."""
     sites = list_sites()
     if not (query or "").strip() or not sites:
         return []
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(sites)) as pool:
-        future_to_site = {pool.submit(search_site, site, query, timeout): site for site in sites}
-        for future in concurrent.futures.as_completed(future_to_site):
-            site = future_to_site[future]
-            try:
-                site_results = future.result()
-            except Exception:
-                site_results = []
-            for r in site_results:
-                results.append({**r, "site_id": site["id"], "site_name": site["name"]})
+    if deadline is None:
+        deadline = net.deadline_in(budget)
+
+    results, answered = [], 0
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(sites))
+    try:
+        jobs = {pool.submit(search_site, site, query, timeout, deadline): site
+                for site in sites}
+        try:
+            for job in concurrent.futures.as_completed(
+                    jobs, timeout=max(0.0, deadline - time.monotonic())):
+                site = jobs[job]
+                try:
+                    found = job.result()
+                except Exception:
+                    found = []
+                if found:
+                    answered += 1
+                for row in found:
+                    results.append({**row, "site_id": site["id"],
+                                    "site_name": site["name"]})
+                if len(results) >= EARLY_RESULTS and answered >= EARLY_SITES:
+                    break
+        except concurrent.futures.TimeoutError:
+            pass    # the budget is the answer; whatever arrived is the result
+    finally:
+        # wait=False on purpose: see the straggler note above. Waiting
+        # here would put the whole point of the early return back.
+        pool.shutdown(wait=False, cancel_futures=True)
     return results
 
 

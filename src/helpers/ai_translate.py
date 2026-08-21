@@ -58,15 +58,26 @@ PROVIDERS = {
         "label": "DeepSeek",
     },
     "gemini": {
+        # gemini-3.6-flash, not gemini-2.0-flash. The old id is retired:
+        # measured 21 August 2026 against the owner's own key, it answers
+        # 404 "This model models/gemini-2.0-flash is no longer available.
+        # Please update your code to use models/gemini-3.6-flash", and
+        # gemini-2.5-flash is closed to new users with the same message.
+        # gemini-3.6-flash answered in 3.25s and parsed cleanly.
         "url": ("https://generativelanguage.googleapis.com/v1beta/models/"
-                "gemini-2.0-flash:generateContent"),
-        "model": "gemini-2.0-flash",
+                "gemini-3.6-flash:generateContent"),
+        "model": "gemini-3.6-flash",
         "style": "gemini",
         "label": "Google Gemini",
     },
     "anthropic": {
         "url": "https://api.anthropic.com/v1/messages",
-        "model": "claude-3-5-haiku-20241022",
+        # claude-3-5-haiku-20241022 is retired. claude-haiku-4-5 is the
+        # current cheap, fast model, which is what this job wants - it is
+        # a translation, not a reasoning task. Not verified live: the
+        # owner's Anthropic key answers 400 "credit balance is too low"
+        # before a model id is ever looked at.
+        "model": "claude-haiku-4-5",
         "style": "anthropic",
         "label": "Anthropic",
     },
@@ -91,6 +102,56 @@ _SYSTEM = (
     "already Arabic, return it unchanged. Reply as JSON: "
     '{"lines": [{"i": <number>, "t": "<arabic>"}]}'
 )
+
+
+class TranslationFailed(Exception):
+    """Why the translation did not happen, in words a person can act on.
+
+    Modelled on `anilist.RateLimited` and for the same reason: this used
+    to return None for every possible failure, and the player said
+    "Translation Failed - Loading the Original" with nothing else. The
+    owner had four keys pasted, saw that message, and had no way to learn
+    that three accounts were out of credit and the fourth named a model
+    Google had retired. A silent failure that looks like a bug in the
+    feature is worse than the feature saying what is wrong."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _reason_for(provider, error) -> str:
+    """One HTTP failure, said in the user's terms.
+
+    The bodies quoted here were all measured on 21 August 2026 against
+    the owner's own keys - every provider failed, each differently, and
+    none of it reached the screen."""
+    name = label(provider)
+    if isinstance(error, urllib.error.HTTPError):
+        body = ""
+        try:
+            body = error.read().decode("utf-8", "replace")[:600]
+        except Exception:
+            pass
+        lowered = body.lower()
+        if error.code in (401, 403) or "invalid_api_key" in lowered:
+            return f"{name} rejected the key"
+        if (error.code == 402 or "insufficient_quota" in lowered
+                or "insufficient balance" in lowered
+                or "credit balance is too low" in lowered):
+            return f"{name} has no credit left"
+        if error.code == 429:
+            return f"{name} is rate limiting or out of quota"
+        if error.code == 404 and "model" in lowered:
+            # Google names the replacement in the body; carrying it
+            # through means the next report says what to change to.
+            return f"{name} has retired this model"
+        if error.code >= 500:
+            return f"{name} is down ({error.code})"
+        return f"{name} refused the request ({error.code})"
+    if isinstance(error, urllib.error.URLError):
+        return f"{name} could not be reached"
+    return f"{name} failed ({type(error).__name__})"
 
 
 def providers_available() -> list:
@@ -225,7 +286,14 @@ def _parse(reply, expected_indexes):
 
 
 def translate(cues, *, provider=None, progress=None, cancelled=None):
-    """Arabic versions of `cues`, or None if it could not be done.
+    """Arabic versions of `cues`.
+
+    Raises `TranslationFailed` with a reason rather than returning None
+    on failure; returns None only when there is nothing to do or the work
+    was cancelled. Every configured provider is tried in turn, starting
+    with the one asked for - the owner has four keys pasted and three
+    accounts out of credit, and giving up on the first is how a working
+    fourth key went unused.
 
     `progress(done, total)` is called as batches complete so the player
     can say how far along it is - a 24 minute episode is 300-400 lines
@@ -234,11 +302,30 @@ def translate(cues, *, provider=None, progress=None, cancelled=None):
     the work rather than paying for the rest of it."""
     if not cues:
         return None
-    provider = provider or default_provider()
-    key = app_settings.get_api_key(provider) if provider else ""
-    if not provider or not key:
+    order = []
+    for name in ([provider] if provider else []) + providers_available():
+        if name and name not in order and app_settings.get_api_key(name):
+            order.append(name)
+    if not order:
         return None
 
+    reasons = []
+    for name in order:
+        try:
+            return _translate_with(name, cues, progress, cancelled)
+        except _Cancelled:
+            return None
+        except TranslationFailed as failure:
+            reasons.append(failure.reason)
+    raise TranslationFailed("; ".join(reasons))
+
+
+class _Cancelled(Exception):
+    """The episode was left. Not a failure - nothing to report."""
+
+
+def _translate_with(provider, cues, progress, cancelled):
+    key = app_settings.get_api_key(provider)
     ready = cached(cues, provider)
     if ready:
         if progress:
@@ -249,21 +336,24 @@ def translate(cues, *, provider=None, progress=None, cancelled=None):
     total = len(cues)
     for start in range(0, total, BATCH_SIZE):
         if cancelled and cancelled():
-            return None
+            raise _Cancelled()
         batch = [(i, cues[i]["text"]) for i in range(start, min(start + BATCH_SIZE, total))]
         wanted = {i for i, _ in batch}
         got = {}
+        last_error = None
         for attempt in range(MAX_RETRIES + 1):
             try:
                 got = _parse(_ask(provider, key, batch, REQUEST_TIMEOUT), wanted)
-            except Exception:
-                got = {}
+            except Exception as error:
+                last_error, got = error, {}
             # Every line back, or try once more. A short batch means the
             # model dropped lines, and accepting it would leave gaps.
             if len(got) == len(wanted):
                 break
         if not got:
-            return None
+            raise TranslationFailed(
+                _reason_for(provider, last_error) if last_error is not None
+                else f"{label(provider)} returned nothing usable")
         translated.update(got)
         if progress:
             progress(min(start + BATCH_SIZE, total), total)

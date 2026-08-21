@@ -68,8 +68,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from helpers import (downloads, history, images, logs, lookup_pool, net,
-                     storage, theme)
+from helpers import (app_settings, downloads, history, images, logs,
+                     lookup_pool, net, storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
                              finish_toast, frameless_dialog, show_toast,
                              use_hover_cursor)
@@ -3019,6 +3019,74 @@ def _origin_page_name(window):
     return None
 
 
+# When the music URL was last opened, and how long before another reader
+# open is allowed to open it again (see _open_music_quietly's throttle).
+_MUSIC_OPENED_AT = float("-inf")
+_MUSIC_REOPEN_S = 10 * 60
+
+
+def _open_music_quietly(window):
+    """Open the configured reading-music URL (Settings) behind the app.
+
+    The setting promises music *alongside* reading, but a plain
+    webbrowser.open fronts the browser, which buried the reader the
+    moment it opened (the owner's report) - the music is to be heard,
+    not looked at. ShellExecuteW with SW_SHOWMINNOACTIVE (7) asks
+    Windows for a minimized, un-activated window; browsers routinely
+    ignore that show hint when the URL lands in an already-running
+    instance, so the hint alone is not the fix. The part that must
+    actually work is the re-foreground: shortly after, Atomic
+    re-activates itself and pulls the reader back over whatever the
+    browser did. Twice, because a cold browser can take more than half
+    a second to steal focus - a re-front that fires before the theft
+    fixes nothing. Never raises; no music URL means nothing happens.
+
+    Throttled: the details page opens a reader per chapter row clicked,
+    and the browser route this mirrors was only ever hit once per
+    sitting - un-throttled, working through a series would stack a new
+    music tab (and two focus fights) on every single chapter."""
+    global _MUSIC_OPENED_AT
+    try:
+        url = app_settings.get_manga_music_url()
+    except Exception:
+        url = ""
+    if not url:
+        return
+    import time
+    if time.monotonic() - _MUSIC_OPENED_AT < _MUSIC_REOPEN_S:
+        return
+    _MUSIC_OPENED_AT = time.monotonic()
+    try:
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.shell32.ShellExecuteW(None, "open", url, None,
+                                                None, 7)  # SW_SHOWMINNOACTIVE
+        else:
+            webbrowser.open(url)
+    except Exception:
+        logs.exception("could not open the reading-music URL")
+        return
+
+    def refront():
+        try:
+            if window.isMinimized():
+                window.showNormal()
+            window.raise_()
+            window.activateWindow()
+            if os.name == "nt":
+                import ctypes
+                # activateWindow is a request Windows is free to ignore
+                # for a process that no longer holds the foreground;
+                # asking user32 directly is the stronger form, and its
+                # worst case is a taskbar flash rather than a buried app.
+                ctypes.windll.user32.SetForegroundWindow(int(window.winId()))
+        except Exception:
+            pass        # a closed window mid-timer is not worth a log
+
+    QTimer.singleShot(500, refront)
+    QTimer.singleShot(1500, refront)
+
+
 def open_reader(window, entry, data_file="tracker.json", resume=True,
                 chapter_number=None):
     """Open the reader over `window`, covering the sidebar as well.
@@ -3053,6 +3121,10 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
             history.set_watched(entry, history.chapter_key(chapter_number), True)
     except Exception:
         logs.exception("could not record the reading history")
+    # The music site opens with the reader, exactly as the browser route
+    # opens it beside the reading tab (tracker._open_manga_entry) - but
+    # quietly, behind the app, since the reading surface is *this* page.
+    _open_music_quietly(window)
     page = ReaderPage(entry, data_file, host,
                       origin_page=_origin_page_name(window), resume=resume,
                       chapter_number=chapter_number)
