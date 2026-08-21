@@ -90,6 +90,10 @@ game_cover_size = tracker_module.POSTER_SIZE
 app_art_size = (link_grid_module.POSTER_ART_SIZE[0],
                 link_grid_module.POSTER_ART_SIZE[0])
 
+# The one page every way out of a section lands on - the section Back
+# button here, and the reader's and player's doors (reader.HOME_PAGE).
+HOME_PAGE_NAME = "home"
+
 PAGES = {
     "home": HomePage,
     # No "anime" page: it merged into "series" (one watch page under the
@@ -829,14 +833,20 @@ class MainWindow(QMainWindow):
         self._sync_section_list(page)
 
     def _section_back(self):
-        """The Back button is history back - the same move as Alt+Left
-        and the mouse's back button - with Home as the fallback for a
-        history that has nowhere earlier to go (only possible when the
-        very first page shown was a sectioned one)."""
-        if self._history_index > 0:
-            self.go_back()
-        else:
-            self.navigate_to("home")
+        """The Back button on a section bar goes **Home**, always.
+
+        It used to be history back, which is why it could land anywhere
+        - Read after Watch, or the page a global search came from - and
+        the owner asked for one destination: "when going back from read
+        or watch make it always go to the home page not the last
+        visited". The reader's and the player's doors already land there
+        (reader.HOME_PAGE), so this makes every way out of a section
+        agree.
+
+        History back itself is untouched and still on Alt+Left and the
+        mouse's back button, which are the two places it reads as
+        "undo my last move" rather than as "leave this section"."""
+        self.navigate_to(HOME_PAGE_NAME)
 
     def _settle_swap(self):
         """Stop any swap in flight and snap both bars to the settled

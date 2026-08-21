@@ -768,6 +768,11 @@ class _ChapterListView(QWidget):
         # kept rather than rebuilt on every visit.
         self._built_from = None
         self._row_state = []
+        # Which build is current, so chunks queued by a superseded one
+        # stop rather than filling the list with the wrong series, and
+        # the marks the chunks have to apply as they land.
+        self._build_token = 0
+        self._marks = (-1, 0.0)
 
         area = QScrollArea()
         area.setWidgetResizable(True)
@@ -784,6 +789,11 @@ class _ChapterListView(QWidget):
     def set_notice(self, text):
         self._notice.setText(text or "")
         self._notice.setVisible(bool(text))
+
+    # How many rows to build before giving the event loop a turn. Big
+    # enough to fill any viewport at once, small enough that a turn
+    # never costs a visible frame.
+    CHUNK = 80
 
     def set_chapters(self, chapters, current=-1, read_up_to=0.0):
         """Rebuild only when the chapter list itself changed; otherwise
@@ -805,16 +815,53 @@ class _ChapterListView(QWidget):
         if chapters == self._built_from:
             self._update_marks(current, read_up_to)
             return
+        self._build_token += 1
+        token = self._build_token
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
         self._row_state = []
-        for index, chapter in enumerate(chapters):
-            self._rows.insertWidget(index, self._build_row(index, chapter))
         self._built_from = chapters
-        self._update_marks(current, read_up_to)
+        self._marks = (current, read_up_to)
+        # **The first screenful now, the rest on the event loop.**
+        # Building every row up front is linear in a number this app
+        # does not control: measured, One Piece's 1150 chapters cost
+        # 1473ms to build and another 317ms to first-show, so opening a
+        # chapter on a long series froze for most of two seconds on rows
+        # nobody had scrolled to yet. The first chunk covers any
+        # viewport, and reaches past the chapter being read so scrolling
+        # to it works immediately.
+        first = self.CHUNK
+        if current is not None and current >= 0:
+            first = max(first, int(current) + 5)
+        self._build_rows(0, min(first, len(chapters)), token)
+        if first < len(chapters):
+            QTimer.singleShot(0, lambda: self._build_more(first, token))
+
+    def _build_rows(self, start, stop, token):
+        """One chunk of rows, unless a newer build has superseded this."""
+        if token != self._build_token:
+            return
+        chapters = self._built_from or []
+        for index in range(start, min(stop, len(chapters))):
+            self._rows.insertWidget(index,
+                                    self._build_row(index, chapters[index]))
+        self._update_marks(*self._marks)
+
+    def _build_more(self, start, token):
+        """The next chunk, then hand the event loop back. Chained on a
+        zero timer rather than a loop: the point is that the reader stays
+        responsive - and scrolling, clicking or leaving mid-fill all get
+        their turn between chunks."""
+        if token != self._build_token:
+            return
+        chapters = self._built_from or []
+        stop = min(start + self.CHUNK, len(chapters))
+        self._build_rows(start, stop, token)
+        if stop < len(chapters):
+            QTimer.singleShot(0, lambda: self._build_more(stop, token))
 
     def _update_marks(self, current=-1, read_up_to=0.0):
         """Move the "Reading" pill and the read ticks without touching
@@ -1553,8 +1600,19 @@ class ReaderPage(GlassPage):
                                      objectName="PanelTitle")
         self._message_title.setWordWrap(True)
         self._message_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._message_title.setVisible(bool(self.entry.get("title")))
+        # **Added to the layout before it is made visible, and that
+        # order is the whole of a reported bug.** setVisible(True) on a
+        # widget that has no parent yet does not "mark it visible for
+        # later" - Qt shows it *now*, and a parentless widget is a
+        # top-level window, so this put a framed 640x480 window titled
+        # "python" on screen for the instant between here and the
+        # addWidget below. Measured with a SetWinEventHook: one
+        # Qt6111QWindowIcon with its own _q_titlebar, created and shown
+        # every time a chapter was opened - the owner's "a pop-up small
+        # window appears then closes in a moment". addWidget reparents
+        # it, after which visibility means what it reads as.
         message_column.addWidget(self._message_title)
+        self._message_title.setVisible(bool(self.entry.get("title")))
         self._message_label = QLabel("", objectName="PanelSubtitle")
         self._message_label.setWordWrap(True)
         self._message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

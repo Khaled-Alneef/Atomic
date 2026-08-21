@@ -113,6 +113,10 @@ class _Signals(QObject):
     # by title - run, the imdb id ("" = nothing matched well
     # enough). See DetailsPage._on_resolved_id.
     resolved_id = Signal(int, str)
+    # A season's episode ratings from TMDB, when Cinemeta had none -
+    # run, (imdb_id, season) key, {episode_number: score}. See
+    # DetailsPage._on_episode_ratings.
+    episode_ratings = Signal(int, object, object)
     # A just-saved entry's downloaded cover: entry id, data file, the
     # cover URL it came from ("" when the entry already knew it), local
     # path. Crossed back so the storage write happens on the UI thread
@@ -128,6 +132,24 @@ def _meta_worker(signals, run, imdb_id, content_type):
         logs.exception("details meta lookup failed")
         meta = None
     signals.meta.emit(run, meta)
+
+
+def _episode_ratings_worker(signals, run, imdb_id, season, videos):
+    """TMDB's per-episode ratings for one season, off the UI thread.
+
+    Never raises - lookup_pool workers die silently. Cinemeta carries a
+    real per-episode rating for some series and the string "0" for every
+    episode of others (Attack on Titan, House of the Dragon), and TMDB
+    is the second source for exactly those. Cached on disk per series by
+    ratings.py, so a season already fetched costs no request."""
+    mapping = {}
+    try:
+        from helpers import ratings
+        mapping = ratings.episode_ratings(imdb_id, season, videos) or {}
+    except Exception:
+        logs.exception("details TMDB ratings lookup failed")
+        mapping = {}
+    signals.episode_ratings.emit(run, (imdb_id, season), mapping)
 
 
 def _resolve_id_worker(signals, run, title, entry_type):
@@ -308,21 +330,37 @@ def _quality_label(value) -> str:
     return "2160p" if quality == "4k" else quality
 
 
-def _episode_rating(value) -> str:
-    """An episode's IMDb rating as "IMDb 8.5", or "" when there is none.
+def _year_text(value) -> str:
+    """A release year as it should read, or "".
 
-    Cinemeta hands this over as a *string*, and uses "0" (not null, not
-    a missing key) for anything unrated - every "Inside the Episode"
-    row carries it. So a zero is dropped rather than printed, and so is
-    anything that will not parse: a rating is only worth showing when it
-    is a real one."""
+    Cinemeta writes an unfinished run as "2022-" with a trailing dash
+    (an en dash, U+2013) and a finished one as "2020-2023". The dash
+    means "and still going", but on a card with nothing after it, it
+    reads as a truncation - the owner asked for it gone. A real range
+    keeps its dash; only a dangling one is dropped."""
+    text = str(value or "").strip()
+    while text and text[-1] in "-\u2012\u2013\u2014\u2015 ":
+        text = text[:-1].strip()
+    return text
+
+
+def _episode_rating(value, source="IMDb") -> str:
+    """An episode's rating as "IMDb 8.5" / "TMDB 8.1", or "" when there
+    is none.
+
+    `source` is named because the number is not always IMDb's: Cinemeta
+    ships IMDb ratings (and the string "0" for unrated), but where it has
+    none TMDB is the fallback and its scale differs - so a TMDB number
+    labelled "IMDb" would be a quiet lie (see DetailsPage._season_ratings).
+    A zero or an unparseable value shows nothing: a rating is only worth
+    printing when it is a real one."""
     try:
         score = float(str(value).strip())
     except (TypeError, ValueError):
         return ""
     if score <= 0:
         return ""
-    return f"IMDb {score:g}"
+    return f"{source} {score:g}"
 
 
 def _pretty_date(value) -> str:
@@ -466,6 +504,12 @@ class DetailsPage(GlassPage):
         self._backdrop_size = None
         self._meta = None
         self._videos = []
+        # TMDB ratings for the season on screen, when Cinemeta had none.
+        # Keyed (imdb_id, season) so flipping seasons re-asks, and the
+        # seasons already fetched are remembered so a flip back is free.
+        self._tmdb_ratings = {}
+        self._tmdb_ratings_key = None
+        self._tmdb_ratings_asked = set()
         self._chapters = []
         self._season = 0
         self._is_reading = self.entry.get("type") in MANGA_TYPES
@@ -499,6 +543,7 @@ class DetailsPage(GlassPage):
         self._signals.reading_genres.connect(self._on_reading_genres)
         self._signals.site_resolved.connect(self._on_site_resolved)
         self._signals.resolved_id.connect(self._on_resolved_id)
+        self._signals.episode_ratings.connect(self._on_episode_ratings)
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -939,7 +984,7 @@ class DetailsPage(GlassPage):
     def _fill_facts(self):
         meta = self._meta or {}
         parts = [str(meta.get("runtime") or "").strip(),
-                 str(meta.get("releaseInfo") or meta.get("year") or "").strip()]
+                 _year_text(meta.get("releaseInfo") or meta.get("year"))]
         rating = str(meta.get("imdbRating") or "").strip()
         if rating:
             parts.append(f"★ {rating} IMDb")
@@ -1234,6 +1279,73 @@ class DetailsPage(GlassPage):
         lookup_pool.submit(_chapters_worker, self._signals, self._run,
                            dict(self.entry))
 
+    def _season_ratings(self, season, rows):
+        """(( {number: score}, label ) for this season's rows.
+
+        **One source for the whole season, never mixed within a list.**
+        Cinemeta's numbers are IMDb's; TMDB's differ by 0.4-0.6, so a
+        list carrying some of each would compare unlike things. Cinemeta
+        wins the season when it actually rated most of it; otherwise
+        TMDB, fetched once in the background and remembered. TMDB coming
+        back empty (Bleach: Thousand-Year Blood War has its own sparse
+        TMDB entity) falls back to whatever Cinemeta did have, so a
+        season is never left blank when a real rating exists somewhere."""
+        cine = {}
+        for video in rows:
+            number = int(video.get("number") or video.get("episode") or 0)
+            try:
+                score = float(str(video.get("rating")).strip())
+            except (TypeError, ValueError):
+                continue
+            if score > 0:
+                cine[number] = score
+        if rows and len(cine) >= 0.6 * len(rows):
+            return cine, "IMDb"
+
+        imdb = (self.entry.get("imdb_id")
+                or (self._meta or {}).get("imdb_id") or "").strip()
+        if not imdb:
+            return cine, "IMDb"
+
+        key = (imdb, season)
+        if self._tmdb_ratings_key == key and self._tmdb_ratings:
+            return dict(self._tmdb_ratings), "TMDB"
+
+        # An instant answer off the disk cache (no socket), then the
+        # network in the background if that missed. Asked once per
+        # (series, season) per page.
+        tmdb = {}
+        try:
+            from helpers import ratings
+            tmdb = ratings.cached_episode_ratings(imdb, season,
+                                                  self._videos) or {}
+        except Exception:
+            tmdb = {}
+        if tmdb:
+            self._tmdb_ratings = tmdb
+            self._tmdb_ratings_key = key
+            return dict(tmdb), "TMDB"
+        if key not in self._tmdb_ratings_asked:
+            self._tmdb_ratings_asked.add(key)
+            lookup_pool.submit(_episode_ratings_worker, self._signals,
+                               self._run, imdb, season, list(self._videos))
+        # Nothing yet - show Cinemeta's if it had any, and let the
+        # fetch fill the rest in when it lands.
+        return cine, "IMDb"
+
+    def _on_episode_ratings(self, run, key, mapping):
+        """A season's TMDB ratings arrived: keep them and redraw the
+        rows, unless the page moved on (a new lookup, a different entry)
+        or the user has since flipped to another season."""
+        if run != self._run or self._closed:
+            return
+        if not mapping:
+            return          # TMDB had nothing; the Cinemeta draw stands
+        self._tmdb_ratings = dict(mapping)
+        self._tmdb_ratings_key = key
+        if key[1] == int(self._season or 0) and self._source_pick is None:
+            self._fill_episode_rows()
+
     def _fill_episode_rows(self):
         self._clear_rows()
         wanted = self._search.text().strip().lower()
@@ -1248,6 +1360,7 @@ class DetailsPage(GlassPage):
                 None, lambda: self._start_episode(None, None)))
             self._panel_note.setVisible(False)
             return
+        rating_map, rating_label = self._season_ratings(season, rows)
         shown = 0
         for video in rows:
             number = int(video.get("number") or video.get("episode") or 0)
@@ -1281,7 +1394,7 @@ class DetailsPage(GlassPage):
             # unrated episode shows nothing rather than a zero.
             meta_line = _pretty_date(video.get("firstAired")
                                      or video.get("released"))
-            stars = _episode_rating(video.get("rating"))
+            stars = _episode_rating(rating_map.get(number), rating_label)
             if stars:
                 meta_line = f"{meta_line}   ·   {stars}" if meta_line else stars
             self._rows.insertWidget(shown, self._row_card(
@@ -2216,10 +2329,29 @@ class DetailsPage(GlassPage):
         ratio = self.devicePixelRatioF() or 1.0
         if (self._backdrop_scaled is None
                 or self._backdrop_size != (rect.size(), ratio)):
+            # **Scaled to the width, not to cover the whole page.**
+            # Covering meant taking whichever of width/height needed the
+            # bigger factor, and for reading that is always the height:
+            # AniList's manga banners are 1900x400 (measured - Kingdom
+            # 1900x400, Solo Leveling 1900x492) and there is no larger
+            # asset, so filling a 1600x900 page upscaled them 2.25x.
+            # That is the owner's "the read ep list bg image is blurry".
+            #
+            # Width-scaling changes nothing for the video pages, whose
+            # TMDB backdrops are 16:9 and land on exactly the same
+            # rectangle they always did (1920x1080 -> 1600x900 is the
+            # same factor either way, and still a *downscale*). A short
+            # banner is now drawn sharp across the top instead, with the
+            # scrim below it doing what it already does.
             target = QSize(max(1, int(rect.width() * ratio)),
                            max(1, int(rect.height() * ratio)))
+            source = self._backdrop.size()
+            covers = (source.height() * target.width()
+                      >= source.width() * target.height())
             self._backdrop_scaled = self._backdrop.scaled(
-                target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                target,
+                (Qt.AspectRatioMode.KeepAspectRatioByExpanding if covers
+                 else Qt.AspectRatioMode.KeepAspectRatio),
                 Qt.TransformationMode.SmoothTransformation)
             self._backdrop_scaled.setDevicePixelRatio(ratio)
             self._backdrop_size = (rect.size(), ratio)
@@ -2228,8 +2360,11 @@ class DetailsPage(GlassPage):
         # device pixels once it carries a ratio.
         width = scaled.width() / ratio
         height = scaled.height() / ratio
-        painter.drawPixmap(int((rect.width() - width) / 2),
-                           int((rect.height() - height) / 2), scaled)
+        # Anchored to the top when it is shorter than the page: the art
+        # belongs behind the title, and centring a 337px band in a 900px
+        # page floats it in the middle of nothing.
+        top = 0 if height < rect.height() else int((rect.height() - height) / 2)
+        painter.drawPixmap(int((rect.width() - width) / 2), top, scaled)
         gradient = QLinearGradient(0.0, 0.0, 0.0, float(rect.height()))
         for stop, red, green, blue, alpha in SCRIM:
             gradient.setColorAt(stop, QColor(red, green, blue, alpha))
@@ -2600,7 +2735,7 @@ class GenreBrowsePage(GlassPage):
         name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(name)
 
-        bits = [str(item.get("year") or "").strip()]
+        bits = [_year_text(item.get("year"))]
         rating = str(item.get("imdbRating") or "").strip()
         if rating:
             bits.append(f"★ {rating}")

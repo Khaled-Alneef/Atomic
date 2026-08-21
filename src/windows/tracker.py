@@ -196,6 +196,70 @@ DISCOVER_LIMIT = 30
 _DISCOVER_CACHE = {}
 _DISCOVER_CACHE_TTL_S = 15 * 60
 
+# The same browse rows, kept on disk so the *first* visit after a launch
+# is instant too - not only the second. The in-memory cache is warmed at
+# launch (prewarm_discover) but that fetch takes a few seconds to finish,
+# and a user who opens Read straight away still waited; last session's
+# rows on disk cover exactly that gap. Only the browse rows (query "")
+# are persisted - a typed search is transient - and each is stamped with
+# wall-clock time, since a monotonic stamp means nothing across runs.
+# The worker already shows a stale list and refreshes it in place, so a
+# day-old disk row is drawn at once and quietly corrected.
+_DISCOVER_CACHE_FILE = "discover_cache.json"
+_DISCOVER_DISK_TTL_S = 24 * 60 * 60
+_discover_disk_loaded = False
+
+
+def _load_discover_cache():
+    """Fold last session's browse rows into the in-memory cache, once.
+
+    A disk entry D seconds old is given an in-memory monotonic stamp of
+    now-D, so the existing TTL/refresh logic treats it exactly as it
+    would a row fetched D seconds ago - fresh enough to serve, stale
+    enough to refresh past _DISCOVER_CACHE_TTL_S. Fails soft: a missing
+    or corrupt file just means a cold start, the way it always was."""
+    global _discover_disk_loaded
+    if _discover_disk_loaded:
+        return
+    _discover_disk_loaded = True
+    try:
+        stored = storage.load(_DISCOVER_CACHE_FILE, {})
+        if not isinstance(stored, dict):
+            return
+        wall = time.time()
+        mono = time.monotonic()
+        for kind, entry in stored.items():
+            if not isinstance(entry, dict):
+                continue
+            rows = entry.get("rows")
+            at = entry.get("at")
+            if not rows or not isinstance(rows, list) or at is None:
+                continue
+            age = wall - float(at)
+            if age < 0 or age > _DISCOVER_DISK_TTL_S:
+                continue
+            # Don't clobber a fresher row already fetched this run.
+            key = (kind, "")
+            if key in _DISCOVER_CACHE:
+                continue
+            _DISCOVER_CACHE[key] = (mono - age,
+                                    [r for r in rows if isinstance(r, dict)])
+    except Exception:
+        return
+
+
+def _save_discover_row(kind, rows):
+    """Write one browse row through to disk. Best-effort; a cache that
+    cannot be written is a convenience lost, never an error."""
+    try:
+        stored = storage.load(_DISCOVER_CACHE_FILE, {})
+        if not isinstance(stored, dict):
+            stored = {}
+        stored[kind] = {"at": time.time(), "rows": list(rows)}
+        storage.save(_DISCOVER_CACHE_FILE, stored)
+    except Exception:
+        return
+
 # Every browse row the two tracker pages draw, as (kind, fetch). Named
 # once here because prewarm_discover and _discover_row_worker have to
 # agree on both the cache key and the call, and a row that drifted
@@ -234,12 +298,20 @@ def prewarm_discover():
     worker that raises takes every queued lookup with it - and a key
     that is already fresh is skipped, so this costs nothing on a second
     call."""
+    _load_discover_cache()
     now = time.monotonic()
     for kind, fetch in _BROWSE_ROWS:
         cached = _DISCOVER_CACHE.get((kind, ""))
         if cached and now - cached[0] < _DISCOVER_CACHE_TTL_S:
             continue
         lookup_pool.submit(_prewarm_row, kind, fetch)
+    # The Watch Schedule's calendar gets the same treatment (the owner's
+    # "the schedule is taking too long to load"): warmed at launch so the
+    # tab's first build finds its rows in hand. Covers are not fetched
+    # here - the tab downloads the few it is missing when actually
+    # opened.
+    if _cached_upcoming_calendar() is None:
+        lookup_pool.submit(_fetch_upcoming_calendar)
 
 
 def _prewarm_row(kind, fetch):
@@ -251,6 +323,104 @@ def _prewarm_row(kind, fetch):
         return          # a row that cannot answer simply stays unwarmed
     if rows:
         _DISCOVER_CACHE[(kind, "")] = (time.monotonic(), rows)
+        _save_discover_row(kind, rows)
+
+
+# The Watch Schedule's airing calendar, module-side like _DISCOVER_CACHE
+# and for the same reason: pages rebuild from scratch on every visit
+# (.claude/rules/ui.md), so rows kept only on the page died with it and
+# every walk back to the tab re-asked AniList for the same week.
+# Measured 21 August 2026 on the owner's data: the calendar answers in
+# ~0.5s warm but took 7.8s on the session's first call, re-paid per
+# visit before this cache. Only "upcoming" lives here - the Read page's
+# rows share _DISCOVER_CACHE's ("reading_latest", "") key with the
+# Discover tab's Latest row (same fetch both times), which
+# prewarm_discover already warms at launch. Cover downloads write their
+# local path back onto these cached dicts, so art survives rebuilds too.
+_SCHEDULE_UPCOMING_CACHE = {}
+
+# How many latest-chapter rows the Read schedule lists - fewer than the
+# DISCOVER_LIMIT the shared cache holds; the schedule is a list, not a
+# poster grid.
+SCHEDULE_RELEASED_LIMIT = 20
+
+
+def _stamp_cached_covers(rows):
+    """Fill cover_path for every row whose art is already on disk - a
+    stat apiece, never a download. Rows the disk doesn't have keep None
+    and are fetched one pool job each (_queue_schedule_covers): the old
+    loop downloaded every cover serially *before* the rows were emitted,
+    so the section showed nothing until the last of 40 downloads -
+    measured 73s with a cold cover cache against 0.5s for the calendar
+    itself, and that was the owner's "taking too long"."""
+    for row in rows or []:
+        if row.get("cover_path"):
+            continue
+        url = row.get("cover_url") or ""
+        path = images.cache_path_for_url(url) if url else None
+        row["cover_path"] = (str(path)
+                             if path is not None and path.exists() else None)
+
+
+def _cached_upcoming_calendar():
+    """The airing calendar if a fresh one is in hand - never a fetch."""
+    cached = _SCHEDULE_UPCOMING_CACHE.get("upcoming")
+    if cached and time.monotonic() - cached[0] < _DISCOVER_CACHE_TTL_S:
+        return cached[1]
+    return None
+
+
+def _fetch_upcoming_calendar():
+    """AniList's airing week as schedule rows, cached. Never raises - it
+    runs on pool workers (prewarm_discover and the schedule's own
+    fetch), and RateLimited deliberately reads as no rows: the schedule
+    keeps its saved rows, the honest answer and not an error dialog."""
+    try:
+        rows = anilist.fetch_upcoming_airing(hours=168, limit=40)
+    except Exception:
+        return []
+    _stamp_cached_covers(rows)
+    if rows:
+        _SCHEDULE_UPCOMING_CACHE["upcoming"] = (time.monotonic(), rows)
+    return rows
+
+
+def _prepare_released_rows(found):
+    rows = []
+    for item in (found or [])[:SCHEDULE_RELEASED_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        item["cover_url"] = item.get("poster") or ""
+        rows.append(item)
+    _stamp_cached_covers(rows)
+    return rows
+
+
+def _cached_released_rows():
+    """The Read schedule's rows out of the Discover cache, or None."""
+    cached = _DISCOVER_CACHE.get(("reading_latest", ""))
+    if not cached or time.monotonic() - cached[0] >= _DISCOVER_CACHE_TTL_S:
+        return None
+    return _prepare_released_rows(cached[1])
+
+
+def _fetch_released_rows():
+    """The latest-chapter rows, fetched and cached under Discover's own
+    ("reading_latest", "") key - the schedule's Recently Released group
+    and Discover's Latest row are the same list, so they share one cache
+    entry and one fetch. Never raises."""
+    try:
+        found = (discover.discover_reading_latest(limit=DISCOVER_LIMIT)
+                 if discover is not None else [])
+    except Exception:
+        return []
+    found = [row for row in (found or []) if isinstance(row, dict)]
+    if found:
+        _DISCOVER_CACHE[("reading_latest", "")] = (time.monotonic(), found)
+        _save_discover_row("reading_latest", found)
+    return _prepare_released_rows(found)
+
+
 # Typing here is debounced far longer than the entry form's title search
 # (SEARCH_DEBOUNCE_MS, 250): that one fills a dropdown the user is
 # staring at mid-word, this one rebuilds rows of poster cards and fires
@@ -973,6 +1143,11 @@ class _DiscoverSignals(QObject):
     # "the schedule is not working"). `ok` False means the fetch
     # failed and should be retried on the next visit.
     schedule_upcoming = Signal(object, bool)
+    # One schedule row's cover, downloaded after the rows were already
+    # drawn (they no longer wait on art - see _schedule_upcoming_worker):
+    # the row's own item dict, whose identity keys _schedule_cover_labels,
+    # and the local file path. No run number, same reason as above.
+    schedule_cover = Signal(object, str)
     # A catalogue schedule row resolved to something the details page
     # can hold: the clicked row's item dict, the resolved catalogue
     # row ({} = nothing matched well enough to open).
@@ -1463,6 +1638,7 @@ class TrackerPage(GlassPage):
         self._discover_signals.schedule_upcoming.connect(
             self._on_schedule_upcoming)
         self._discover_signals.schedule_open.connect(self._on_schedule_open)
+        self._discover_signals.schedule_cover.connect(self._on_schedule_cover)
         # The Schedule tab's catalogue-wide rows, and whether a fetch
         # for them is out or has already answered (see
         # _request_schedule_upcoming - a failed fetch clears the flag
@@ -1506,6 +1682,11 @@ class TrackerPage(GlassPage):
         # the page was rebuilt sat wrong within a minute of being read.
         # (label, when) pairs, reset by every _build_schedule.
         self._schedule_countdowns = []
+        # Catalogue item id() -> its drawn cover label, so art landing
+        # after the rows were drawn swaps one pixmap in place (see
+        # _on_schedule_cover) - the same shape as _discover_cards.
+        # Refilled by every _build_schedule; nothing here outlives it.
+        self._schedule_cover_labels = {}
         self._schedule_tick = QTimer(self)
         self._schedule_tick.setInterval(30_000)
         self._schedule_tick.timeout.connect(self._refresh_schedule_countdowns)
@@ -3376,6 +3557,7 @@ class TrackerPage(GlassPage):
         immediately and then corrected - the tab is never blank while a
         list that was on screen ten seconds ago is re-fetched."""
         key = (kind, query)
+        _load_discover_cache()
         stamp_and_rows = _DISCOVER_CACHE.get(key)
         if stamp_and_rows is not None:
             stamp, rows = stamp_and_rows
@@ -3404,6 +3586,8 @@ class TrackerPage(GlassPage):
         rows = [item for item in (found or []) if isinstance(item, dict)]
         if rows:
             _DISCOVER_CACHE[key] = (time.monotonic(), list(rows))
+            if not query:
+                _save_discover_row(kind, rows)
         if stamp_and_rows is not None and not rows:
             return    # keep the stale-but-real list over an empty refresh
         self._discover_signals.results.emit(kind, rows, run)
@@ -3911,7 +4095,9 @@ class TrackerPage(GlassPage):
     # in and cache (see _refresh_schedules) - so that group is a second
     # reading of what the card tooltips already say, never a second
     # source that could disagree with them. Below a visible rule, the
-    # catalogue group: what SCHEDULE_CATALOGUE names.
+    # catalogue group(s): what SCHEDULE_CATALOGUE names. Every group
+    # carries its own heading now, the saved one included ("Saved" -
+    # the owner's ask).
     #
     # "upcoming" (Watch): AniList's airing calendar - anime is the only
     # medium with a published forward schedule. "released" (Read): the
@@ -3926,12 +4112,16 @@ class TrackerPage(GlassPage):
         """Ask the catalogue what is coming (or just landed), once per
         answer, off the UI thread.
 
-        A good answer is kept for the page's life - switching tabs
-        rebuilds the section, and re-asking on every switch would be a
-        request per glance. A *failed* fetch clears the asked flag so
-        the next visit tries again instead of remembering one bad
-        minute forever. Never blocks the build - the section draws the
-        saved rows now and gains the rest when this lands.
+        A good answer is kept module-side (with the Discover cache's own
+        TTL) as well as for the page's life - switching tabs rebuilds
+        the section, and pages themselves rebuild from scratch per
+        visit, so re-asking on every switch was a request per glance and
+        a fresh fetch per page walk. A *failed* fetch clears the asked
+        flag so the next visit tries again instead of remembering one
+        bad minute forever. Never blocks the build - a cache hit fills
+        the rows for the build that is about to read them, and a miss
+        draws the saved rows now and gains the rest when the fetch
+        lands.
 
         **Deliberately not stamped with _discover_run.** That counter
         numbers Discover searches and advances on every visit and
@@ -3944,36 +4134,43 @@ class TrackerPage(GlassPage):
         at-a-time, which the asked flag is."""
         if not self.SCHEDULE_CATALOGUE or self._schedule_upcoming_asked:
             return
+        # Module-side cache first: rows fetched by an earlier page life
+        # (or by prewarm_discover at launch) fill in synchronously, so
+        # the _build_schedule that called here draws them in the same
+        # pass - zero network, zero wait.
+        rows = (_cached_released_rows()
+                if self.SCHEDULE_CATALOGUE == "released"
+                else _cached_upcoming_calendar())
+        if rows:
+            self._schedule_upcoming_asked = True
+            self._schedule_upcoming = list(rows)
+            self._queue_schedule_covers(rows)
+            return
         self._schedule_upcoming_asked = True
         lookup_pool.submit(self._schedule_upcoming_worker)
 
     def _schedule_upcoming_worker(self):
         """Must never raise - it runs on a shared pool worker, and an
-        uncaught exception takes every queued lookup with it."""
-        rows = []
-        try:
-            if self.SCHEDULE_CATALOGUE == "released":
-                # The Read page: what just landed, newest first. The
-                # rows are Discover-shaped ({title, poster, ...}), so
-                # a click can go through _on_discover_pick unchanged;
-                # cover_url is copied out for the download below.
-                found = (discover.discover_reading_latest(limit=20)
-                         if discover is not None else [])
-                for item in found or []:
-                    item["cover_url"] = item.get("poster") or ""
-                    rows.append(item)
-            else:
-                rows = anilist.fetch_upcoming_airing(hours=168, limit=40)
-        except Exception:
-            # Includes RateLimited: the schedule simply keeps the saved
-            # rows, which is the honest answer and not an error dialog.
-            rows = []
-        for row in rows:
-            try:
-                path = images.download(row.get("cover_url") or "")
-                row["cover_path"] = str(path) if path else None
-            except Exception:
-                row["cover_path"] = None
+        uncaught exception takes every queued lookup with it (the fetch
+        helpers swallow everything, RateLimited included: the schedule
+        keeps its saved rows, the honest answer and not an error
+        dialog).
+
+        Emits as soon as the calendar answers. The covers are *not*
+        downloaded here any more: the old loop fetched every row's art
+        serially before emitting anything, so the section sat on its
+        saved rows until the last of 40 downloads - measured 73.2s with
+        a cold cover cache against 0.5s for the calendar itself. Rows
+        now draw with the blank tile immediately (the same placeholder
+        Discover cards start on) and each missing cover arrives as its
+        own pool job, swapped in place by _on_schedule_cover."""
+        if self.SCHEDULE_CATALOGUE == "released":
+            # The Read page: what just landed, newest first. The rows
+            # are Discover-shaped ({title, poster, ...}), so a click can
+            # go through _on_discover_pick unchanged.
+            rows = _fetch_released_rows()
+        else:
+            rows = _fetch_upcoming_calendar()
         # An empty answer counts as a failure: both sources fail soft
         # to [] (rules/integrations.md), so no rows is far more likely
         # a refused request than a genuinely empty calendar - and
@@ -3982,7 +4179,8 @@ class TrackerPage(GlassPage):
         try:
             self._discover_signals.schedule_upcoming.emit(rows, bool(rows))
         except RuntimeError:
-            pass    # the page was torn down under the fetch
+            return  # the page was torn down under the fetch
+        self._queue_schedule_covers(rows)
 
     def _on_schedule_upcoming(self, rows, ok):
         if not ok:
@@ -3995,6 +4193,45 @@ class TrackerPage(GlassPage):
         if self._active_tab == TAB_SCHEDULE:
             self._build_schedule()
 
+    def _queue_schedule_covers(self, rows):
+        """One pool job per missing cover - bounded by the pool's four
+        workers, never a serial loop, and art already on disk was
+        stamped by _stamp_cached_covers so it costs nothing here. Safe
+        to call again across page lives: a landed cover writes
+        cover_path onto the module-cached dict and drops out of this
+        loop for good."""
+        for row in rows or []:
+            if row.get("cover_path") or not row.get("cover_url"):
+                continue
+            lookup_pool.submit(self._schedule_cover_worker, row)
+
+    def _schedule_cover_worker(self, row):
+        # Never raises - an exception here kills the pool's worker.
+        try:
+            path = images.download(row.get("cover_url") or "")
+        except Exception:
+            path = None
+        if not path:
+            return
+        # Written onto the module-cached dict, so every later rebuild
+        # draws it without asking; the signal only repaints the row
+        # already on screen.
+        row["cover_path"] = str(path)
+        try:
+            self._discover_signals.schedule_cover.emit(row, str(path))
+        except RuntimeError:
+            pass    # page torn down; the cache keeps the path either way
+
+    def _on_schedule_cover(self, item, path):
+        label = self._schedule_cover_labels.get(id(item))
+        if label is None:
+            return  # a rebuild replaced the section and read cover_path
+        try:
+            label.setPixmap(images.thumbnail_or_avatar(
+                path, item.get("title") or "", SCHEDULE_COVER_SIZE))
+        except RuntimeError:
+            pass    # the label died with a rebuild mid-flight
+
     def _schedule_rows(self):
         """(saved rows, catalogue rows), each [(when, entry)].
 
@@ -4003,8 +4240,12 @@ class TrackerPage(GlassPage):
         `(when, not saved)` key only led within a shared clock slot),
         and _build_schedule draws a rule between the groups. Each list
         is soonest-first on its own; a "released" catalogue (the Read
-        page) has no timestamps at all, so its `when` is None and the
-        source's own order - newest chapter first - is kept as given.
+        page) normally has no timestamps at all, so its `when` is None
+        and the source's own order - newest chapter first - is kept as
+        given. A released item that *genuinely* carries a forward `at`
+        (an aware datetime - no source does today) keeps it, which is
+        what would fill the Read page's "Releasing Soon" group; nothing
+        here invents one (rules/integrations.md).
 
         A catalogue entry carries its source item under
         `_catalogue_item`, the same dict held in _schedule_upcoming for
@@ -4049,14 +4290,34 @@ class TrackerPage(GlassPage):
             if title.lower() in saved_titles:
                 continue
             if released:
-                catalogue_rows.append((None, {
+                when = item.get("at")
+                if not isinstance(when, datetime):
+                    when = None
+                else:
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    if when <= now:
+                        when = None     # already out: a released row
+                row = {
                     "title": title,
                     "type": (item.get("type")
                              if item.get("type") in self.ENTRY_TYPES
                              else self.ENTRY_TYPES[0]),
                     "cover_path": item.get("cover_path") or None,
                     "_catalogue_item": item,
-                }))
+                }
+                if when is not None:
+                    release = {}
+                    if item.get("chapter") is not None:
+                        release["chapter"] = item.get("chapter")
+                    if item.get("estimated"):
+                        # The row keeps its "Estimated" tag - a
+                        # projection stated as fact is the failure that
+                        # flag exists to prevent.
+                        release["estimated"] = True
+                    if release:
+                        row["next_release"] = release
+                catalogue_rows.append((when, row))
                 continue
             when = item.get("at")
             if not when or when <= now:
@@ -4112,6 +4373,7 @@ class TrackerPage(GlassPage):
     def _build_schedule(self):
         _clear_layout(self._schedule_layout)
         self._schedule_countdowns = []
+        self._schedule_cover_labels = {}
         self._request_schedule_upcoming()
         saved_rows, catalogue_rows = self._schedule_rows()
         if not saved_rows and not catalogue_rows:
@@ -4125,10 +4387,14 @@ class TrackerPage(GlassPage):
         body_layout = QVBoxLayout(body)
         body_layout.setSpacing(8)
         body_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        # The saved group first, whole - every saved row above every
-        # catalogue one (the owner's ask), with the day bands inside
-        # it. The rows are already ascending, so the bands come out in
-        # order and a heading is needed only where the band changes.
+        # The saved group first, whole, and named (the owner's ask: the
+        # first group used to be implicit) - every saved row above every
+        # catalogue one, with the day bands inside it. The rows are
+        # already ascending, so the bands come out in order and a
+        # heading is needed only where the band changes.
+        body_layout.addWidget(QLabel("Saved", objectName="SectionTitle"))
+        body_layout.addWidget(QLabel(
+            "Upcoming releases from your Saved list", objectName="Muted"))
         current = None
         for when, entry in saved_rows:
             band = self._schedule_group(when)
@@ -4136,14 +4402,51 @@ class TrackerPage(GlassPage):
                 current = band
                 body_layout.addWidget(self._schedule_band_label(band))
             body_layout.addWidget(self._build_schedule_row(entry, when, True))
-        if not saved_rows and catalogue_rows:
-            # The separator still needs something above it to separate,
-            # or the page opens on an unexplained rule.
+        if not saved_rows:
+            # The heading still needs something under it, or the page
+            # opens on an unexplained title.
             body_layout.addWidget(QLabel(
                 "Nothing from your Saved list is scheduled yet.",
                 objectName="Muted"))
 
-        if catalogue_rows:
+        # The catalogue groups below the saved ones. Watch has one,
+        # "Airing Soon". Read has two (the owner's ask): "Releasing
+        # Soon", then "Recently Released". Releasing Soon holds only
+        # rows that *genuinely* carry a forward date - and no reading
+        # source does today, because nobody announces scanlation dates
+        # (rules/integrations.md). So it is drawn with an honest line
+        # saying exactly that rather than filled with guesses, or with
+        # the owner's own saved predictions repeated under a second
+        # heading - discover.py already records why the same titles
+        # twice teach nobody anything. The machinery renders dated rows
+        # the moment a source honestly supplies them.
+        released = self.SCHEDULE_CATALOGUE == "released"
+        if released:
+            coming = sorted((row for row in catalogue_rows
+                             if row[0] is not None), key=lambda row: row[0])
+            landed = [row for row in catalogue_rows if row[0] is None]
+            groups = [
+                ("Releasing Soon",
+                 "Catalogue chapters with a real date to their name",
+                 coming,
+                 "Nobody announces chapter dates ahead of time - the "
+                 "expected chapters on your Saved titles above, estimated "
+                 "from each title's own release history, are the only "
+                 "honest forecast."),
+                ("Recently Released",
+                 # "newest first" is the only recency the released rows
+                 # can honestly claim - MangaDex orders them by upload
+                 # time but its row shape carries no timestamp to print.
+                 "New chapters across the catalogue, newest first",
+                 landed, None),
+            ]
+        else:
+            groups = [("Airing Soon", "Everything else airing this week",
+                       catalogue_rows, None)]
+        saved_titles = self._saved_titles()
+        for group_title, subtitle, rows, empty_note in groups:
+            if not rows and empty_note is None:
+                continue
             # The visible line between "yours" and "the catalogue"
             # (the owner's ask): a 1px rule, then the group's own name.
             rule = QFrame()
@@ -4151,20 +4454,17 @@ class TrackerPage(GlassPage):
             rule.setStyleSheet(f"background: {theme.BORDER}; border: none;")
             body_layout.addSpacing(10)
             body_layout.addWidget(rule)
-            released = self.SCHEDULE_CATALOGUE == "released"
-            heading = QLabel("Recently Released" if released
-                             else "Airing Soon", objectName="SectionTitle")
-            body_layout.addWidget(heading)
-            body_layout.addWidget(QLabel(
-                # "newest first" is the only recency the released rows
-                # can honestly claim - MangaDex orders them by upload
-                # time but its row shape carries no timestamp to print.
-                "New chapters across the catalogue, newest first"
-                if released else
-                "Everything else airing this week", objectName="Muted"))
-            saved_titles = self._saved_titles()
+            body_layout.addWidget(QLabel(group_title,
+                                         objectName="SectionTitle"))
+            if not rows:
+                # The empty note stands in for the subtitle - heading,
+                # subtitle *and* explanation stacked three deep would
+                # say the same thing twice.
+                body_layout.addWidget(QLabel(empty_note, objectName="Muted"))
+                continue
+            body_layout.addWidget(QLabel(subtitle, objectName="Muted"))
             current = None
-            for when, entry in catalogue_rows:
+            for when, entry in rows:
                 if when is not None:
                     band = self._schedule_group(when)
                     if band != current:
@@ -4212,6 +4512,12 @@ class TrackerPage(GlassPage):
         cover.setPixmap(images.thumbnail_or_avatar(
             entry.get("cover_path"), entry.get("title") or "", SCHEDULE_COVER_SIZE))
         row.addWidget(cover)
+        item = entry.get("_catalogue_item")
+        if item is not None and not entry.get("cover_path"):
+            # Art still in flight: remember the label so the download
+            # landing swaps this one pixmap (_on_schedule_cover) rather
+            # than waiting for the next rebuild.
+            self._schedule_cover_labels[id(item)] = cover
 
         column = QVBoxLayout()
         column.setSpacing(2)

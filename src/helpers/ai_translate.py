@@ -141,6 +141,16 @@ def _reason_for(provider, error) -> str:
                 or "credit balance is too low" in lowered):
             return f"{name} has no credit left"
         if error.code == 429:
+            # Google's 429 says "Please retry in 34.2s" and means nothing
+            # of the kind: measured 21 August 2026 on the owner's key,
+            # the same request 429'd again after 40s and again after 80s,
+            # naming `generate_content_free_tier_requests, limit: 20`.
+            # That is the day's free allowance, not a minute's window -
+            # which is why nothing here waits and retries. Saying "free
+            # quota" is the difference between a reason the owner can act
+            # on (enable billing) and one that reads as "try again".
+            if "free_tier" in lowered or "free tier" in lowered:
+                return f"{name} has used up its free quota for today"
             return f"{name} is rate limiting or out of quota"
         if error.code == 404 and "model" in lowered:
             # Google names the replacement in the body; carrying it
@@ -285,15 +295,25 @@ def _parse(reply, expected_indexes):
     return out
 
 
-def translate(cues, *, provider=None, progress=None, cancelled=None):
+def translate(cues, *, provider=None, fallback=True, progress=None,
+              cancelled=None):
     """Arabic versions of `cues`.
 
     Raises `TranslationFailed` with a reason rather than returning None
     on failure; returns None only when there is nothing to do or the work
-    was cancelled. Every configured provider is tried in turn, starting
-    with the one asked for - the owner has four keys pasted and three
-    accounts out of credit, and giving up on the first is how a working
-    fourth key went unused.
+    was cancelled.
+
+    **`fallback` is what the player turns off, and the reason it exists
+    is the whole point of this parameter.** With `fallback=True` every
+    configured provider is tried in turn starting with the one asked for
+    - written because the owner had four keys pasted, three accounts out
+    of credit, and giving up on the first left a working fourth key
+    unused. That is right when nobody chose a provider. It is wrong once
+    the subtitle panel offers a row per provider: a row that says
+    "translated by Anthropic" and quietly comes back from OpenAI is a
+    silently wrong answer about what produced the text on screen, which
+    is the failure mode this project keeps paying for. So a named pick
+    honours the name, and a failure says which provider said no.
 
     `progress(done, total)` is called as batches complete so the player
     can say how far along it is - a 24 minute episode is 300-400 lines
@@ -303,7 +323,8 @@ def translate(cues, *, provider=None, progress=None, cancelled=None):
     if not cues:
         return None
     order = []
-    for name in ([provider] if provider else []) + providers_available():
+    for name in ([provider] if provider else []) + (
+            providers_available() if fallback else []):
         if name and name not in order and app_settings.get_api_key(name):
             order.append(name)
     if not order:

@@ -246,6 +246,21 @@ _VK_LBUTTON = 0x01
 # frame with nothing flashing in between.
 LOADING_FLASH_GUARD_MS = 350
 
+# The startup gauge's drift: how often it recomputes, how much one silent
+# tick may add (0.005 per 250ms = 2% a second), and how far past
+# *confirmed* progress the drift may run before it parks and pulses.
+# Measured before the ticker existed: across a real 14.7s episode start
+# the logo's fraction was written exactly twice - 0.04 when the logo art
+# landed, 1.0 at the same instant as the first frame - because mpv's
+# cache-buffering-state, the gauge's only input, reports an engine URL
+# exactly once, already at 100. Every earlier phase has real numbers of
+# its own (_startup_snapshot); the drift only covers the gaps between
+# them, and the headroom is what stops it promising a finish the swarm
+# has not delivered.
+STARTUP_TICK_MS = 250
+STARTUP_CREEP = 0.005
+STARTUP_HEADROOM = 0.08
+
 # How long after a panel opens, closes or rebuilds the click-to-pause
 # poll ignores clicks - see _click_toggle. The poll samples the mouse
 # up to 40ms late, and a panel that changed shape under a click (the
@@ -1519,6 +1534,16 @@ class PlayerPage(GlassPage):
         self._loading_delay.setSingleShot(True)
         self._loading_delay.setInterval(LOADING_FLASH_GUARD_MS)
         self._loading_delay.timeout.connect(self._pending_loading_show)
+        # The startup gauge (see _update_startup_status). The fraction
+        # only ever rises within one wait - the race can swap which
+        # torrent is being read, and a gauge stepping backwards reads as
+        # breakage - and the ticker is what keeps it moving between real
+        # readings, because those were measured to arrive twice in 14.7s.
+        self._startup_fraction = 0.0
+        self._startup_text = ""
+        self._startup_ticker = QTimer(self)
+        self._startup_ticker.setInterval(STARTUP_TICK_MS)
+        self._startup_ticker.timeout.connect(self._startup_tick)
         # When a panel last opened, closed or rebuilt - what the click
         # poll holds off for (see _click_toggle / PANEL_CLICK_GUARD_S).
         self._panel_guard = 0.0
@@ -2522,6 +2547,13 @@ class PlayerPage(GlassPage):
         except Exception:
             pass
         self._run += 1
+        # The previous episode's subtitle toast goes with it. It is
+        # sticky on purpose (a translation is minutes, not moments - see
+        # _pick_subtitle), and everything that would have finished it is
+        # guarded on the run number that just moved - so a translation
+        # abandoned by pressing Next left "Translating to Arabic..." on
+        # screen until the whole page closed.
+        self._drop_sub_toast()
         # Fetched per episode rather than once per page: it is cached on
         # disk by title after the first call, so this costs nothing
         # after the first episode and still works when the page was
@@ -2632,7 +2664,7 @@ class PlayerPage(GlassPage):
             logs.exception("Subtitle search failed")
             self._work.subs_ready.emit([], run)
 
-    def _fetch_subtitle_worker(self, result, run):
+    def _fetch_subtitle_worker(self, result, run, provider=None, label=None):
         """Fetch, then write UTF-8 to a temp file and hand mpv the path.
 
         mpv is never given the url. Many of these hosts need the same
@@ -2641,12 +2673,25 @@ class PlayerPage(GlassPage):
         and re-encoding as UTF-8 here means libass reads real text
         instead of one long line of mojibake.
 
-        A non-Arabic pick goes through the AI translator when a provider
-        key is configured (Settings → API Keys). This is the whole reason
-        English results are in the list at all: for seasonal anime an
-        English track is routinely the only thing published, and
-        translating it is the one route that does not depend on somebody
-        having released Arabic for that exact episode."""
+        **A translation happens only when the picked row promised one.**
+        The rule used to be "any non-Arabic pick goes through the
+        translator", with the provider chosen here from
+        `default_provider()`. Two things were wrong with that: a row
+        filed under "Other Languages" came back in Arabic, and the
+        provider was never the user's to choose. Now the row carries the
+        provider or carries none, and this only does what it was told.
+
+        **If the Arabic never arrives, nothing is loaded.** The measured
+        bug behind this (Bleach TYBW S04E01, 21 August 2026): all four of
+        the owner's providers refused - three out of credit, Gemini out
+        of free-tier quota - the failure was emitted as a note, and then
+        this method carried straight on and loaded the *untranslated
+        English*, whereupon _on_subtitle_file overwrote the note with
+        "Subtitle Loaded". The owner's words were "it shows Subtitles
+        loaded then changes the Subtitles to the EN Opensource". A pick
+        that asked for Arabic and produced none must fail and say why;
+        the English row is one line further down the panel for anyone
+        who wants it, and whatever track was already up is left alone."""
         try:
             text = subtitles_module.fetch(result, net.deadline_in(SUBTITLE_BUDGET_S))
             if not text:
@@ -2655,16 +2700,34 @@ class PlayerPage(GlassPage):
             fmt = result.get("format") or "srt"
             # The same name the row carried (see _name_subtitles), so
             # the loaded track and the list agree on what was picked.
-            label = (result.get("display_name") or result.get("release")
-                     or "Subtitle")
-            lang = str(result.get("lang") or "").lower()
-            if (not lang.startswith("ar") and ai_translate is not None
-                    and ai_translate.available()):
-                provider = ai_translate.default_provider()
+            label = (label or result.get("display_name")
+                     or result.get("release") or "Subtitle")
+            if provider:
+                if ai_translate is None:
+                    self._work.failed.emit(
+                        "AI Translation Is Not Available In This Build", run)
+                    return
                 name = ai_translate.label(provider)
+                if not app_settings.get_api_key(provider):
+                    # The key went away between the panel being drawn and
+                    # the row being pressed. Say that rather than quietly
+                    # handing over the source language.
+                    self._work.failed.emit(
+                        f"AI Translation Failed - No {name} Key Is Configured",
+                        run)
+                    return
                 self._work.note.emit(f"Translating to Arabic With {name}...",
                                      run)
                 cues = subtitles_module.parse(text, fmt)
+                if not cues:
+                    # Zero cues is the one failure that looks like
+                    # success: translate() has nothing to do, returns
+                    # None, and the untranslated file used to sail
+                    # through. See subtitles._parse_ass for how a real
+                    # file parses to nothing.
+                    self._work.failed.emit(
+                        "That Subtitle Had No Readable Lines To Translate", run)
+                    return
                 translated = None
                 try:
                     # **Say how far along it is.** A full episode is
@@ -2680,8 +2743,10 @@ class PlayerPage(GlassPage):
                             f"Translating to Arabic With {name}... "
                             f"{done}/{total}", run)
 
+                    # fallback=False: the row named this provider, so a
+                    # different one answering would make the label a lie.
                     translated = ai_translate.translate(
-                        cues, provider=provider, progress=told,
+                        cues, provider=provider, fallback=False, progress=told,
                         cancelled=lambda: self._closing or run != self._run)
                 except ai_translate.TranslationFailed as failure:
                     # **Say which provider said no, and what it said.**
@@ -2691,11 +2756,15 @@ class PlayerPage(GlassPage):
                     # had retired - looked like a dead feature instead of
                     # four different billing problems.
                     logs.warning(f"AI translation failed: {failure.reason}")
-                    self._work.note.emit(
+                    self._work.failed.emit(
                         f"AI Translation Failed - {failure.reason}", run)
-                if translated:
-                    text, fmt = ai_translate.to_srt(translated), "srt"
-                    label = f"{label} (AI Arabic)"
+                    return
+                if not translated:
+                    # translate() returns None for a cancelled job - the
+                    # episode was left, and _on_subtitle_file would drop
+                    # the file anyway. Nothing to load, nothing to say.
+                    return
+                text, fmt = ai_translate.to_srt(translated), "srt"
             path = self._write_subtitle(text, fmt)
             self._work.sub_file_ready.emit(path, label, run)
         except Exception:
@@ -3039,31 +3108,124 @@ class PlayerPage(GlassPage):
             return True
         return False
 
-    def _update_startup_status(self):
-        """What to say between choosing a source and the first frame.
+    def _update_startup_status(self, creep=False):
+        """Move the startup gauge to wherever startup actually is.
 
-        A torrent that has just been created has no peers yet, so this
-        window is genuinely long - long enough that with nothing on
-        screen it reads as a hang. Naming the stage, and showing the
-        buffer filling, is the difference between "it's working" and
-        "it's broken"."""
+        Runs from three places: the ticker (with `creep`), mpv's
+        cache-buffering-state events, and one-off moments (logo arrival,
+        a file handed to mpv). It used to run *only* on the mpv events,
+        and for an engine URL there is exactly one of those, already at
+        100 - measured across a real 14.7s episode start, the fraction
+        was written twice: 0.04 at logo arrival, 1.0 at the first frame.
+        The owner read that (correctly) as the progress not working. The
+        phases before mpv have real numbers of their own; the snapshot
+        below reads them, and the ticker keeps the gauge visibly alive
+        between readings."""
         if not self._awaiting_first_frame or self._closing:
             return
-        percent = getattr(self, "_buffering_percent", 0)
-        # The logo is the progress. Percent is what mpv reports for its
-        # cache; before that starts moving there is still the peer
-        # search, so the bar creeps rather than sitting at zero - a
-        # completely empty logo reads as nothing happening.
-        if self.logo.has_logo():
-            self.logo.set_fraction(max(percent / 100.0, 0.04))
+        # A dead-end message outranks progress: the ticker must never
+        # paint the loading frame back over "no source would start".
+        # _show_loading's no-logo fallback is the one _show_status whose
+        # box is *itself* the loading state; it re-arms _loading_visible.
+        if self._status_visible() and not self._loading_visible:
+            return
+        target, text = self._startup_snapshot()
+        fraction = max(self._startup_fraction, target)
+        if creep:
+            # Between real readings the gauge still inches forward - a
+            # bar parked on a milestone reads as hung even while the
+            # phase behind it is genuinely working - but never more than
+            # the headroom past what has actually been measured.
+            fraction = min(fraction + STARTUP_CREEP,
+                           target + STARTUP_HEADROOM)
+        fraction = max(self._startup_fraction, min(fraction, 1.0))
+        self._startup_fraction = fraction
+
+        frame_up = (self.backdrop.isVisible()
+                    or self._loading_delay.isActive())
         # No words with the logo up - the pulse and the fill are the
-        # whole message now (the owner's ask). The text survives only as
-        # _show_loading's fallback for a title with no logo art.
+        # whole message (the owner's ask). The text survives only as
+        # the fallback for a title with no logo art.
+        if self.logo.has_logo():
+            self.logo.set_fraction(fraction)
+            # Drop the words the moment the logo can carry the message;
+            # otherwise only put the frame up when it is not already -
+            # _show_loading re-lays-out and re-raises native windows,
+            # and doing that four times a second is its own flicker.
+            if self._status_visible() or not frame_up:
+                self._show_loading()
+        elif text != self._startup_text or not frame_up:
+            self._startup_text = text
+            self._show_loading(text)
+
+    def _startup_tick(self):
+        self._update_startup_status(creep=True)
+
+    def _startup_snapshot(self):
+        """(target fraction, status text) for the phase startup is in.
+
+        Real numbers first, in the order the phases happen: sources
+        still being looked for; the torrent created but without metadata
+        yet; peers found; the head of the file arriving - bytes against
+        the engine's HEAD_BYTES, which is the window mpv's open is
+        actually waiting on (measured: the longest stretch of a cold
+        start, 9.1 of 14.7s, sits between handing mpv the URL and its
+        one buffering report). mpv's own cache percent caps the scale;
+        for an engine URL it was measured to arrive once, at 100, so it
+        is the finisher, never the driver. A phase with nothing to
+        measure returns a flat target and lets the drift say "alive"."""
+        percent = getattr(self, "_buffering_percent", 0)
         if percent > 0:
-            self._show_loading(f"Buffering... {percent}%")
-        else:
-            self._show_loading("Finding peers for this source...\n"
-                               "The first few seconds take longest.")
+            return (0.92 + 0.08 * min(percent, 100) / 100.0,
+                    f"Buffering... {int(percent)}%")
+        if not self._streams_started:
+            return 0.05, "Looking for a source..."
+        try:
+            stream = self._streams[self._stream_index] or {}
+        except Exception:
+            stream = {}
+        # The hash of what is being started right now: _play_stream sets
+        # _stream_index before it shows "Connecting...", and a race that
+        # ends on a different release writes the winner back to this
+        # same index before mpv is handed anything.
+        info_hash = str(stream.get("info_hash") or "").strip().lower()
+        if not info_hash:
+            # A direct URL: mpv is opening it and reports nothing until
+            # its cache does. Park high enough that the drift stays shy
+            # of the percent-driven band above.
+            return 0.60, "Connecting to the source..."
+        engine = None
+        try:
+            from helpers import torrent_engine
+            if torrent_engine.available():
+                engine = torrent_engine
+        except Exception:
+            engine = None
+        if engine is None:
+            return 0.20, "Connecting to the source..."
+        try:
+            progress = engine.file_progress(info_hash) or {}
+        except Exception:
+            progress = {}
+        if progress:
+            # Metadata is in (file_progress answers only past that
+            # point), so the bytes of the chosen file are the truth.
+            done = int(progress.get("done") or 0)
+            if done > 0:
+                head = float(getattr(engine, "HEAD_BYTES", 0)
+                             or 12 * 1024 * 1024)
+                return (0.42 + 0.48 * min(1.0, done / head),
+                        f"Buffering... {min(99, int(100 * done / head))}%")
+            return ((0.40 if progress.get("peers") else 0.36),
+                    "Finding peers for this source...\n"
+                    "The first few seconds take longest.")
+        try:
+            # stats() answers before metadata does; keys are stored
+            # lowercased and stats() does not lower its argument.
+            peers = int((engine.stats(info_hash) or {}).get("peers") or 0)
+        except Exception:
+            peers = 0
+        return ((0.30 if peers else 0.22), "Connecting to the source...")
 
     def _load_into_mpv(self, stream, resume_at=None):
         self._awaiting_first_frame = True
@@ -3568,28 +3730,41 @@ class PlayerPage(GlassPage):
         # translated Arabic, then everything else.
         add_language_group("Arabic", arabic)
 
-        # **AI translation, said out loud.** Picking a non-Arabic
-        # subtitle has always run it through the configured translator,
-        # but nothing in this panel ever said so - the owner pasted keys
-        # for every provider, saw no "AI" anywhere, and reasonably
-        # concluded the feature was dead. These rows are the same picks
-        # as the "Other Languages" group above, listed again under a
-        # name that says what they will become.
-        translator = ""
+        # **Every provider the owner has a key for, not just the first.**
+        # This used to build one group headed by `default_provider()`,
+        # which is whichever configured provider comes first in
+        # `ai_translate.PROVIDERS` - so four pasted keys offered exactly
+        # one translator and the owner asked where DeepSeek, Gemini and
+        # Anthropic had gone. They were never absent; they were simply
+        # never offered. A group per provider makes which model does the
+        # work a choice at the moment of picking rather than a setting
+        # nothing exposes, and the row's own label carries the provider
+        # so the loaded track, the highlight and the toast all name the
+        # same one (see _fetch_subtitle_worker, which no longer decides
+        # this for itself).
+        translators = []
         try:
-            if ai_translate is not None and ai_translate.available():
-                translator = ai_translate.label(ai_translate.default_provider())
+            if ai_translate is not None:
+                translators = list(ai_translate.providers_available())
         except Exception:
-            translator = ""
-        if translator and other:
-            panel.add_group(f"ARABIC  ·  TRANSLATED BY {translator.upper()}")
-            for index, item in enumerate(other, start=1):
-                source_name = item.get("display_name") or item.get("release") or ""
-                label = f"Arabic (AI) {index} {translator}"
-                panel.add_row(
-                    label, f"translated from {source_name}",
-                    lambda checked=False, r=item: self._pick_subtitle(r),
-                    selected=label == self._subtitle_label)
+            translators = []
+        if translators and other:
+            for provider in translators:
+                translator = ai_translate.label(provider)
+                panel.add_group(f"ARABIC  ·  TRANSLATED BY {translator.upper()}")
+                for index, item in enumerate(other, start=1):
+                    source_name = (item.get("display_name")
+                                   or item.get("release") or "")
+                    label = f"Arabic (AI) {index} {translator}"
+                    # `p` and `l` are bound here for the same reason `r`
+                    # is: the loop variables are rebound on the next
+                    # iteration and every row would otherwise pick the
+                    # last provider in the list.
+                    panel.add_row(
+                        label, f"translated from {source_name}",
+                        lambda checked=False, r=item, p=provider, l=label:
+                            self._pick_subtitle(r, provider=p, label=l),
+                        selected=label == self._subtitle_label)
         elif other and ai_translate is not None:
             # A key would turn these into Arabic; say where to add one
             # rather than leaving the English rows looking pointless.
@@ -3637,8 +3812,15 @@ class PlayerPage(GlassPage):
         # panel under the press would look like the click missed.
         self._open_subtitle_panel(rebuild=True)
 
-    def _pick_subtitle(self, result):
+    def _pick_subtitle(self, result, provider=None, label=None):
         """Load one subtitle, saying so until it has actually loaded.
+
+        `provider` names the AI translator the picked row promised, and
+        is None for every row that is already the language it says -
+        which is what makes "Other Languages" mean it. `label` is the
+        row's own text, carried through so the loaded track is named
+        the same thing the row was and the highlight lands back on it
+        (see _name_subtitles on deriving one string in one place).
 
         **Sticky, not a 2s toast.** Picking a non-Arabic row runs the
         whole file through the AI translator, which for a 400-cue
@@ -3653,7 +3835,8 @@ class PlayerPage(GlassPage):
         self._drop_sub_toast()
         self._sub_toast = show_toast(self._toast_anchor(),
                                      "Loading Subtitle...", duration_ms=None)
-        self._spawn(self._fetch_subtitle_worker, result, self._run)
+        self._spawn(self._fetch_subtitle_worker, result, self._run,
+                    provider, label)
 
     def _drop_sub_toast(self):
         """Close a subtitle toast still up from an earlier pick, so two
@@ -4361,6 +4544,14 @@ class PlayerPage(GlassPage):
         # its delay - firing after this would paint the frame over the
         # words (see _show_loading_soon).
         self._loading_delay.stop()
+        # And it outranks the gauge: a centred message is a dead end
+        # ("no source would start"), so the ticker stops and the
+        # loading flag drops - which is what _update_startup_status
+        # checks before it may paint the frame back up. _show_loading's
+        # no-logo fallback, the one caller for which this box is the
+        # loading state itself, re-arms both right after this returns.
+        self._startup_ticker.stop()
+        self._loading_visible = False
         self.status.setText(text)
         # _layout_overlays sizes the box whether or not it is showing -
         # it used to skip a hidden one, which is exactly the case that
@@ -4388,6 +4579,13 @@ class PlayerPage(GlassPage):
         loses 350ms of spinner nobody needed. The first episode of a
         page skips the delay: nothing is on screen yet, and a blank
         page saying nothing reads as hung."""
+        if not self._streams_started:
+            # A fresh episode's wait starts the gauge over. Not on the
+            # "Connecting..." a retry or a source switch raises:
+            # progress already made - sources found, a swarm answering -
+            # is still made, and a gauge that snaps back reads as
+            # breakage rather than as a phase change.
+            self._startup_fraction = 0.0
         if self._run <= 1:
             self._show_loading(text)
             return
@@ -4427,6 +4625,14 @@ class PlayerPage(GlassPage):
             self._show_backdrop()
         else:
             self._show_status(text)
+            # _show_status marks a dead end - clears the flag, stops the
+            # gauge - but this caller is the no-logo loading fallback,
+            # where the box *is* the loading state. Undo both.
+            self._loading_visible = True
+        # What keeps the gauge moving while the phases underneath are
+        # silent - see _update_startup_status. Runs only while a wait
+        # is on screen; _hide_status and a dead-end _show_status stop it.
+        self._startup_ticker.start()
 
     def _show_backdrop(self):
         """Put the loading frame up behind whatever the status box says.
@@ -4457,6 +4663,8 @@ class PlayerPage(GlassPage):
 
     def _hide_status(self):
         self._loading_delay.stop()
+        self._startup_ticker.stop()
+        self._startup_text = ""
         self._loading_visible = False
         self.status.hide()
         # The loading frame goes with it: it covers the whole window, so

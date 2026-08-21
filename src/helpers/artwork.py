@@ -140,6 +140,23 @@ def _tmdb_id(imdb_id: str, timeout):
     return None, None
 
 
+def get_json(url, timeout: int = DEFAULT_TIMEOUT):
+    """A TMDB endpoint as parsed JSON, with this module's auth on it.
+
+    Public so a second TMDB caller (ratings.py) does not have to reach
+    for the underscore - or, far worse, copy the v3/v4 credential
+    handling and the bounded `net.read_text` into itself, which is
+    exactly how five modules once missed the bounded read entirely."""
+    return _get_json(url, timeout)
+
+
+def tmdb_id(imdb_id: str, timeout: int = DEFAULT_TIMEOUT):
+    """(media type, TMDB id) for an IMDb id - see `_tmdb_id`. Public for
+    the same reason as `get_json` above; the id lookup is the one request
+    every TMDB feature starts with."""
+    return _tmdb_id(imdb_id, timeout)
+
+
 def _search_logo(title: str, timeout):
     """A logo for the franchise when the exact entry has none.
 
