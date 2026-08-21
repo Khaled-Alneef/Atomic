@@ -52,3 +52,8 @@ Thumbs.db
 # themoviedb.org/settings/api, not a hunt for a bug. And it is in the
 # history from now on, so removing the file later does not unpublish it;
 # rotating the key is what does.
+
+# Window-event logs from the diagnostic rig used to chase the flashing
+# windows (packaging has no use for them; one got committed once).
+/events.jsonl
+*.jsonl
