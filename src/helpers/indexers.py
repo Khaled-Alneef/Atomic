@@ -1,10 +1,20 @@
 """Anime torrent indexers asked directly, beside the addons.
 
-The addon route (helpers/streams.py) asks by IMDb id, which is exactly
-right and is why it stays first: an id cannot resolve to the wrong show.
-These ask by *title*, which no id-based source can do - so they reach
-the fansub releases an id-keyed index has never heard of, and they
-answer for a title Cinemeta and Torrentio between them do not carry.
+The addon route (helpers/streams.py) asks by IMDb id. These ask by
+*title*, which no id-based source can do - so they reach the fansub
+releases an id-keyed index has never heard of, and they answer for a
+title Cinemeta and Torrentio between them do not carry.
+
+**"An id cannot resolve to the wrong show" used to be written here and
+it is not true** - measured 22 August 2026 against the owner's Re:Zero
+entry (tt5607616) asked for S01E01. Torrentio and TorrentsDB map an
+IMDb id onto their own scraped release names, and that mapping returned
+seasons 2, 3 and 4 of the right show (`[FLE] ... - S04E01`,
+`[PMR] ... S03E01-12`, `[Yameii] ... - S03`) *and* four rows of
+entirely different shows (`Zero Stars S01E01`, `Re-Main.S01`,
+`Life 2020 S01`, `Loner Life In Another World - 01`). So an addon row's
+own name is now checked too, by `episode_conflict` below - which is why
+that function lives in this module rather than in streams.py.
 
 **Measured, on this machine, before anything was put in the table** -
 the same rule the addon defaults follow. Query "Solo Leveling", and the
@@ -135,6 +145,152 @@ _RANGE_RE = re.compile(r"(\d{1,3})\s*[~\-]\s*(\d{1,3})")
 _SEASON_ONLY_RE = re.compile(r"(?:^|[\s\-_\[(])s(?:eason\s*)?(\d{1,2})"
                              r"(?![\s\-_]?e?\d)", re.I)
 
+# ------------------------------------------- which season a name states
+#
+# **The season written in words was invisible, and that is the owner's
+# "many of the sources download a diff ep from a diff season" (22 August
+# 2026).** `_SEASON_ONLY_RE` above reads `S03` - but it is consulted
+# *only* when the name carries no loose episode number at all, so
+# "[Anipakku] Re:ZERO ... 3rd Season - 01" fell straight through to the
+# fansub branch, matched the `01`, and was offered as season 1 episode 1.
+# Measured over the owner's own Re:Zero entry at S01E01, that shape plus
+# the addon rows nobody checked put **sixteen rows of seasons 2, 3 and 4
+# into a list of seventy-nine** - eleven of them from TorrentsDB alone,
+# whose answer for that lookup was 39 rows. Among them the well-seeded
+# `[FLE] ... - S04E01`, which is what a viewer's eye and the default
+# pick both land on first.
+#
+# So the season is now collected from every form these names use, and
+# read as a *set*: a multi-season pack legitimately states several and
+# holds the asked-for episode inside one of them.
+#
+#   S04E01 / S03E01-12     -> _SxE_RE, below
+#   S03 / S1 / S03P01      -> _SEASON_TOKEN_RE ("S04 P01" too - a cour
+#                             split is still its own season, the same
+#                             reason anilist._SEASON_NUMBER_RE ignores
+#                             "Part")
+#   3rd Season / Season 3  -> _SEASON_TOKEN_RE
+#   S01-03                 -> _SEASON_RANGE_RE
+#   Season 1+2+Movies      -> _SEASON_LIST_RE
+#
+# Every one of these anchors on a season keyword or a bare `S`, never on
+# a loose number: "E-AC-3", "Opus 2.0" and "AV1" are all numbers with a
+# boundary in front of them, which is exactly why loose numbers may
+# *accept* a release (below) and may never reject one.
+_SEASON_RANGE_RE = re.compile(
+    r"(?<![a-z0-9])s\s*0?(\d{1,2})\s*[-~]\s*s?\s*0?(\d{1,2})(?![\s\-_]?e?\d)",
+    re.I)
+# Deliberately no `-` in the separator: "Season 3 - 08" is a season and an
+# episode, not seasons three through eight.
+_SEASON_LIST_RE = re.compile(r"season\s*0?(\d{1,2})\s*[+&,]\s*0?(\d{1,2})", re.I)
+_SEASON_TOKEN_RE = re.compile(
+    r"(?:(?<![a-z0-9])(\d{1,2})(?:st|nd|rd|th)\s*season"
+    r"|season\s*0?(\d{1,2})"
+    r"|(?<![a-z0-9])s\s?0?(\d{1,2})(?![\s\-_]?e?\d))", re.I)
+# The `-E11` / `-12` a pack writes after its first episode: `S04E01-E11`,
+# `S03E01-12`. Anchored at the end of the SxxEyy it follows, so a number
+# elsewhere in the name can never widen the span.
+_SxE_RANGE_TAIL_RE = re.compile(r"\s*[-~]\s*e?(\d{1,3})", re.I)
+# Above this a "season" is a codec artefact, not a season.
+_MAX_SEASON = 40
+
+
+def stated_seasons(release_title: str) -> set:
+    """Every season this release name names, as a set. Empty means the
+    name does not say - which is not the same as saying season one."""
+    text = _strip_noise(release_title)
+    seasons = set()
+    for match in _SxE_RE.finditer(text):
+        seasons.add(int(match.group(1)))
+    for pattern in (_SEASON_RANGE_RE, _SEASON_LIST_RE):
+        for first, last in pattern.findall(text):
+            first, last = int(first), int(last)
+            if 0 < first <= last <= _MAX_SEASON:
+                seasons.update(range(first, last + 1))
+    for groups in _SEASON_TOKEN_RE.findall(text):
+        value = next((g for g in groups if g), None)
+        if value:
+            seasons.add(int(value))
+    return {s for s in seasons if 0 < s <= _MAX_SEASON}
+
+
+def episode_conflict(release_title: str, season, episode,
+                     compare_season: bool = True, extra_seasons=None) -> bool:
+    """True only when this name **positively states** it is something
+    other than the episode asked for.
+
+    Deliberately different from `episode_match`, and the difference is
+    the whole point of having two. `episode_match` answers "is this
+    provably the right episode", which is what a *title* search needs -
+    there, anything unproven has to go, because the search is text and
+    the wrong show comes back looking as good as the right one.
+
+    An addon is asked by IMDb id, so its rows arrive already claiming to
+    be this episode of this show and most of them state nothing further.
+    Holding those to `episode_match` would throw away most of the list
+    for saying nothing; so this asks the opposite question and drops only
+    what contradicts the request. Measured 22 August 2026 on the owner's
+    Re:Zero entry (tt5607616) at S01E01: TorrentsDB answered **39 rows,
+    11 of which name season 3 or season 4**, and those eleven are what
+    goes - the rest, which say nothing about a season, stay.
+
+    Loose numbers are not evidence here, on purpose: an addon's stream
+    title is the release name, the file path *and* a stats line, and
+    "E-AC-3" and "Opus 2.0" both read as an episode number. Only a
+    stated season or a stated SxxEyy counts.
+
+    **`compare_season=False` when the two numberings are not the same
+    namespace**, which is not a hypothetical: Bleach: Thousand-Year Blood
+    War is its own IMDb title and sits at season 1 here, while every
+    index files it as *Bleach season 17*. Measured 22 August 2026 asking
+    Torrentio for tt14986406:1:12, a blanket season check dropped eleven
+    of sixty-three rows - including `[LostYears] Bleach Thousand-Year
+    Blood War - S17E12`, which is exactly the episode requested, and
+    `[Judas] Bleach (Season 17)` at 236 seeders, which is what the race
+    had been winning. The caller decides (see streams._drop_wrong_season)
+    by asking whether the season it wants appears anywhere in the answer
+    at all; when it does not, only the *episode* numbers are compared.
+
+    **`extra_seasons`** is the season(s) a caller worked out by a means
+    this function cannot - the arc-name map in helpers/anime_identity,
+    which reads "Kimetsu no Yaiba - Hashira Geiko Hen" as season 5 where
+    `stated_seasons` sees no number at all. Folded in beside the stated
+    ones, so an arc-named release is judged exactly as a numbered one:
+    that is the whole of the owner's "sources from a diff season" fix for
+    Demon Slayer, whose seasons carry arc names and never numbers."""
+    if not episode:
+        return False
+    season = int(season or 1)
+    episode = int(episode)
+    text = _strip_noise(release_title)
+
+    if compare_season:
+        seasons = stated_seasons(release_title) | (set(extra_seasons or ()))
+        if seasons and season not in seasons:
+            return True
+
+    # What episodes this name states. A pack writes a span
+    # (`S01E01-E25`); a single release writes one number.
+    spans = []
+    for match in _SxE_RE.finditer(text):
+        if compare_season and int(match.group(1)) != season:
+            continue
+        first = last = int(match.group(2))
+        tail = _SxE_RANGE_TAIL_RE.match(text, match.end())
+        if tail:
+            last = max(last, int(tail.group(1)))
+        spans.append((first, last))
+    if spans and not any(a <= episode <= b for a, b in spans):
+        # A pack whose name carries one file's SxxExx as well as its own
+        # range - "...S01 [01 ~ 25]... S01E01.mkv" - is still a pack that
+        # holds the episode. Only a name with no covering range at all
+        # is a contradiction.
+        for first, last in ((int(a), int(b)) for a, b in _RANGE_RE.findall(text)):
+            if last > first and first <= episode <= last:
+                return False
+        return True
+    return False
+
 
 def _strip_noise(title: str) -> str:
     """A release name with the parts that hold numbers-that-are-not-
@@ -167,6 +323,15 @@ def episode_match(release_title: str, season, episode):
     episode = int(episode)
     season = int(season or 1)
     text = _strip_noise(release_title)
+
+    # **The season, before anything else.** Everything below reads
+    # episode numbers, and an episode number means nothing until it is
+    # known which season it belongs to: "3rd Season - 01" and
+    # "Season 3 Episode 01-04" both used to fall through to the branches
+    # below and be returned as season 1 - see episode_conflict for the
+    # measurement, and for why the season is read as a set.
+    if episode_conflict(release_title, season, episode):
+        return None
 
     marked = _SxE_RE.search(text)
     if marked:

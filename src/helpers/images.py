@@ -74,6 +74,34 @@ def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixma
     return scaled
 
 
+_logo_cache = {}
+
+
+def logo_pixmap(path, height: int, dpr: float = 1.0) -> QPixmap:
+    """A title-logo PNG at `path`, scaled to `height` logical pixels and
+    tagged with `dpr` so it stays crisp on a non-100% display (the rule
+    the sidebar logo and the hero backdrop both follow).
+
+    Kept as-is, colour and transparency intact - unlike tinted_asset,
+    which recolours a glyph: a logo *is* the artwork, drawn over the
+    banner in its own colours. Returns a null pixmap for a missing or
+    unreadable file, which a caller reads as "no logo, keep the text"."""
+    key = (str(path), int(height), float(dpr))
+    found = _logo_cache.get(key)
+    if found is not None:
+        return found
+    source = QPixmap(str(path))
+    if source.isNull():
+        return source
+    scaled = source.scaledToHeight(max(1, int(height * dpr)),
+                                   Qt.TransformationMode.SmoothTransformation)
+    scaled.setDevicePixelRatio(dpr)
+    if len(_logo_cache) > 64:
+        _logo_cache.clear()
+    _logo_cache[key] = scaled
+    return scaled
+
+
 def cache_path_for_url(url: str) -> Path:
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
     suffix = Path(url).suffix

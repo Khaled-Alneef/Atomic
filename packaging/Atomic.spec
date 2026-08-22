@@ -7,9 +7,15 @@ import re
 # (packaging/) - resolve everything from there so the build works
 # regardless of the working directory it's invoked from.
 SRC_DIR = os.path.join(SPECPATH, "..", "src")
-ICON_FILE = os.path.join(SRC_DIR, "app_icon.ico")
-LOGO_FILE = os.path.join(SRC_DIR, "atomic_icon.png")
-FILTER_ICON_FILE = os.path.join(SRC_DIR, "filter_icon.png")
+# Everything the app ships as an image now lives under src/assets/,
+# with the cut nav icons in src/assets/icons/. src/assets/Icons.png is
+# the sheet they were cut from - kept as provenance, deliberately not
+# bundled (1.2MB nothing reads at runtime).
+ASSETS_DIR = os.path.join(SRC_DIR, "assets")
+ICONS_DIR = os.path.join(ASSETS_DIR, "icons")
+ICON_FILE = os.path.join(ASSETS_DIR, "app_icon.ico")
+LOGO_FILE = os.path.join(ASSETS_DIR, "atomic_icon.png")
+FILTER_ICON_FILE = os.path.join(ASSETS_DIR, "filter_icon.png")
 BUILD_DIR = os.path.join(SPECPATH, "build")
 # The video player's decode engine. Not in the repository (see
 # fetch_libmpv.py for why); the build stops here rather than producing an
@@ -111,7 +117,31 @@ a = Analysis(
     # and so does filter_icon.png (the tracker's filter button) - read at
     # runtime from the bundle root, so a build without it here shows a
     # button with no icon at all.
-    datas=[(ICON_FILE, '.'), (LOGO_FILE, '.'), (FILTER_ICON_FILE, '.'),
+    datas=[(ICON_FILE, 'assets'), (LOGO_FILE, 'assets'),
+           (FILTER_ICON_FILE, 'assets'),
+           # The nav icons, listed one by one rather than globbed:
+           # build.py reads this list with `ast` and byte-compares every
+           # entry against the file on disk, and a comprehension it
+           # cannot resolve makes it reject the build outright. Verbose
+           # on purpose - the spec's own note above records that a
+           # missing asset ships a button with no icon and says nothing.
+           (os.path.join(ICONS_DIR, "anime.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "apps.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "discover.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "games.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "history.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "home.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "manga.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "manhua.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "manhwa.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "movies.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "other.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "reading.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "saved.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "schedule.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "series.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "watching.png"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "websites.png"), 'assets/icons'),
            # libmpv goes in as data, not as a `binaries` entry: it lands
            # at the bundle root either way, and PyInstaller does not need
            # to walk its dependency tree - it has none outside the

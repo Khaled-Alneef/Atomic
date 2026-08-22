@@ -1,6 +1,6 @@
 """Run this to build Atomic.exe: `python build.py`.
 
-Wraps `pyinstaller Atomic.spec` (which bundles src/app_icon.ico into the
+Wraps `pyinstaller Atomic.spec` (which bundles src/assets/app_icon.ico into the
 build - the plain `pyinstaller src/main.py` form skips that and the
 taskbar/title-bar icon comes up blank at runtime). Installs PyInstaller
 first if it isn't already available. PyInstaller's own work/dist folders
@@ -10,7 +10,7 @@ copied to the project root so Atomic.exe stays the one loose file there.
 Then it proves the exe belongs to the source tree it was built from,
 because a build log that says "completed successfully" does not. 1.4 was
 tagged with an executable built before its own last two commits: it was
-missing src/filter_icon.png outright (173 bundled entries where the tree
+missing src/assets/filter_icon.png outright (173 bundled entries where the tree
 produces 174), and the release notes recorded the size and hash of a
 build that was never the one committed. Nothing failed at the time -
 PyInstaller re-copied a cached binary and reported success. Both checks
@@ -28,7 +28,11 @@ PACKAGING_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGING_DIR.parent
 SRC_DIR = PROJECT_ROOT / "src"
 SPEC_FILE = PACKAGING_DIR / "Atomic.spec"
-ICON_FILE = SRC_DIR / "app_icon.ico"
+# Everything the app ships as an image lives under src/assets/ now
+# (the nav icons cut from src/assets/Icons.png are in
+# src/assets/icons/). Atomic.spec resolves the same paths.
+ASSETS_DIR = SRC_DIR / "assets"
+ICON_FILE = ASSETS_DIR / "app_icon.ico"
 DIST_DIR = PACKAGING_DIR / "dist"
 WORK_DIR = PACKAGING_DIR / "build"
 
@@ -148,9 +152,24 @@ def _required_datas():
         if source is None or dest is None:
             raise SystemExit(f"Couldn't resolve a datas entry in {SPEC_FILE.name}: "
                              f"{ast.dump(element)}")
-        name = os.path.basename(source) if dest == "." else f"{dest}/{os.path.basename(source)}"
+        # **Joined with the OS separator, then normalised on both
+        # sides at lookup.** PyInstaller writes a nested destination
+        # into the archive using the platform separator - measured,
+        # `assets\icons\anime.png` - while this built the name with a
+        # forward slash and reported all 17 nav icons "missing from the
+        # executable" on a clean build that had bundled every one of
+        # them. Nothing used a nested dest before the assets folder, so
+        # the bug had never been reachable.
+        name = (os.path.basename(source) if dest == "."
+                else os.path.join(dest, os.path.basename(source)))
         required.append((name, Path(source).resolve()))
     return required
+
+
+def _canon(name):
+    """An archive entry name with its separators flattened, so a lookup
+    cannot fail on `/` against `\` - see the note in _required_datas."""
+    return str(name).replace("\\", "/").lower()
 
 
 def _verify_bundle(exe_path):
@@ -164,14 +183,15 @@ def _verify_bundle(exe_path):
     from PyInstaller.archive.readers import CArchiveReader
 
     archive = CArchiveReader(str(exe_path))
-    bundled = set(archive.toc)
+    bundled = {_canon(n): n for n in archive.toc}
 
     problems = []
     for name, source in _required_datas():
-        if name not in bundled:
+        actual = bundled.get(_canon(name))
+        if actual is None:
             problems.append(f"{name} is missing from the executable")
             continue
-        if archive.extract(name) != source.read_bytes():
+        if archive.extract(actual) != source.read_bytes():
             problems.append(f"{name} in the executable differs from {source}")
 
     if problems:
@@ -251,7 +271,7 @@ def main():
     # build worth doing.
     _reexec_on_build_python()
     if not ICON_FILE.exists():
-        sys.exit(f"Missing {ICON_FILE.name} in {SRC_DIR} - put the icon there before building.")
+        sys.exit(f"Missing {ICON_FILE.name} in {ASSETS_DIR} - put the icon there before building.")
     if not SPEC_FILE.exists():
         sys.exit(f"Missing {SPEC_FILE.name} in {PACKAGING_DIR}.")
 

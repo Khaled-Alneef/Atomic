@@ -58,6 +58,14 @@ try:
 except Exception:  # pragma: no cover
     indexers = None
 
+# The arc-name season resolver (helpers/anime_identity). Imported the
+# same defensive way: a build where it fails to import is one that
+# filters on numbers only, not one whose player will not open.
+try:
+    from . import anime_identity
+except Exception:  # pragma: no cover
+    anime_identity = None
+
 SITES_FILE = "stream_addons.json"
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -257,6 +265,73 @@ def seed_default_addons() -> list:
 # above, and anything else goes in by URL through add_addon().
 
 
+# **Press a source, see a picture: the whole path, measured 22 August
+# 2026 on the owner's connection and his own entries, cold cache, six
+# titles across film, anime and series.** Phases are find_streams (the
+# source list) / prepare_fastest (the race) / mpv url-to-first-frame.
+#
+#                          before            after
+#   Re:Zero      S01E01     6.56s           11.54s
+#   Frieren      S01E02    12.63s           14.14s
+#   Demon Slayer S01E05    18.38s           22.39s
+#   House Dragon S01E05    23.41s            8.93s
+#   Bleach TYBW  S01E12     6.72s            8.38s
+#   Top Gun Maverick       12.64s           14.84s
+#            mean          13.39s           13.37s
+#
+# **The mean did not move, and saying otherwise would be reading noise.**
+# Repeating a single title on unchanged code spans most of the range the
+# table does: House of the Dragon S01E05 came back at 8.93, 11.90, 23.41
+# and 36.32 seconds, and once did not draw a frame at all inside 90s;
+# Demon Slayer S01E05 over six runs ran 12.70-42.25s. Which releases the
+# race happens to hit dominates everything else, so a six-sample suite
+# cannot see a change of a few seconds, and the owner's "about twelve
+# seconds" is the middle of a very wide distribution rather than a
+# steady cost.
+#
+# What *is* repeatable is where the time goes:
+#
+#   find_streams      0.4-4.3s, and off the critical path anyway -
+#                     on_partial puts rows on screen at 0.3-0.5s
+#   prepare_fastest   3.7-5.9s when the first candidates are alive,
+#                     11-22s when they are not
+#   mpv -> picture    0.03-15.4s
+#
+# So the owner's "~12 seconds" is not one slow step; it is a race that
+# costs about five seconds when it guesses right and twenty when it does
+# not, because a lane spends its whole budget on a release that turns
+# out to have no swarm. **Getting to five seconds means knowing which
+# release is alive before trying it, and nothing in a torrent listing
+# tells you that** - the seeder count is measured wrong often enough to
+# be no help (a 2081-seeder film release that never completed a piece,
+# and a 701-seeder House of the Dragon release that answered no-peers).
+# The next thing worth measuring is an early-out: a release with zero
+# peers and zero connect candidates a couple of seconds after its
+# metadata lands is dead, and giving up on it then rather than at the
+# end of DATA_WAIT would cover more of the list in the same wall clock.
+# That has *not* been measured, so it is not in.
+#
+# What did move, and is not a swarm accident, is the stall: see
+# torrent_engine._apply_windows and _Torrent.refresh_windows for the
+# window that used to empty out and take the entire peer set with it -
+# 36.2s at zero peers on House of the Dragon S01E05, one run that never
+# drew a frame at all in 90s, and the same Demon Slayer release opening
+# in 15.4s instead of 36.6s once the swarm stopped being thrown away.
+#
+# **And the other thing that moved, measured 22 August 2026, was the
+# race feeding on the wrong episode.** For an arc-named anime the wrong
+# arcs sort to the *top*, because they are the well-seeded ones - Demon
+# Slayer S01E01 returned the Hashira Training arc (season 5) at 327
+# seeders and the Entertainment District arc (season 3) at 290 above
+# every real season-1 release, so the race spent its first lanes fetching
+# metadata for episodes nobody asked for. Dropping them (see
+# _drop_wrong_season and helpers/anime_identity) took prepare_fastest on
+# that title from 22.13s to 9.24 / 6.69 / 6.34s across three runs, each
+# winning a real S01E01 file - not because any release got faster but
+# because the race stopped trying the wrong ones first. This is the same
+# lesson as the stall: the wins here are in *what* the race attempts, not
+# in waiting on it differently.
+#
 # The two waits one release is given, and they are deliberately short.
 #
 # **Waiting longer never rescued a dead release; it only delayed a live
@@ -462,6 +537,29 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
         stream["url"] = None
         stream["reason"] = "no-metadata"
         return stream
+    # **Does this release actually hold the episode asked for?** Known
+    # the moment the metadata lands, and answered by the file names
+    # rather than by whoever listed the release - see
+    # torrent_engine._pick_file. A pack whose files are numbered
+    # absolutely used to fall through to "the largest video", which on
+    # the owner's Frieren S01E02 served **episode 4** (measured 22
+    # August 2026, both SubsPlease batches in the list).
+    #
+    # Checked here rather than after the data wait because it costs
+    # nothing and saves everything: the lane gives up now and takes the
+    # next candidate, instead of spending six seconds fetching an
+    # episode nobody asked for.
+    if season and episode:
+        try:
+            serves = torrent_engine.episode_file(added)
+        except Exception:
+            serves = ""
+        if serves is None:
+            _release_quietly(info_hash)
+            stream["url"] = None
+            stream["reason"] = "wrong-episode"
+            return stream
+        stream["file_name"] = serves
     # **The first piece and the container's seek index, waited on
     # together.** mpv's first read of a fresh torrent is the opening of
     # the file and its *second* is a seek to 100% of it (Matroska writes
@@ -878,9 +976,167 @@ def episode_fallbacks(season, episode, entry=None):
 LOOKUP_WORKERS = 6
 
 
-def _ask_addon(addon, kind, stream_id, deadline) -> list:
+# Where an addon stops printing the release and starts printing its own
+# opinion of it. Torrentio and TorrentsDB both append a stats line -
+# `👤 371 💾 705.17 MB ⚙️ nyaa` - and TorrentsDB puts an episode
+# annotation in front of it: `📅 S01E01`.
+#
+# **That annotation is the mapping being checked, so it cannot be part of
+# the evidence.** Measured 22 August 2026, asking TorrentsDB for
+# tt5607616:1:1 (Re:Zero S01E01):
+#
+#   '[FLE] Re ZERO ... - S04E01 (WEB 1080p HEVC E-AC-3) [Dual Audio] |
+#    Re: Zero Kara Hajimeru Isekai Seikatsu Season 4 Episode 1 | Re:ZERO
+#    | ReZero 📅 S01E01 👤 371 💾 705.17 MB ⚙️ nyaa'
+#
+# The release says season 4 twice in its own words and the addon says
+# S01E01 at the end. Read whole, that row states seasons {1, 4}, the
+# asked-for season is in the set, and the first version of this check
+# kept it - eleven of eleven wrong-season rows survived. Cutting at the
+# marker leaves the release's own words, which say 4, and it goes.
+#
+# Everything before the marker is kept, the file path inside the torrent
+# included: that path is the addon's claim about which *file* it will
+# serve, and it is checked for exactly the same reason.
+_ADDON_STATS_RE = re.compile("[\U0001F300-\U0001FAFF⚙⚡⬇]")
+
+
+def _release_name(title: str) -> str:
+    """An addon stream title with the addon's own annotations cut off."""
+    match = _ADDON_STATS_RE.search(title or "")
+    return (title[:match.start()] if match else (title or "")).strip()
+
+
+_ENTRY_SEASON_RE = re.compile(r"s(\d{1,3})", re.I)
+
+
+def _max_known_season(entry) -> int:
+    """The highest season number this entry is known to have, or 0.
+
+    Read off `latest_available` ("S04E13"), which the tracker keeps for
+    every entry that has a schedule. It is the bound that tells one kind
+    of wrong season from another - see _drop_wrong_season."""
+    match = _ENTRY_SEASON_RE.search((entry or {}).get("latest_available") or "")
+    return int(match.group(1)) if match else 0
+
+
+def _contiguous_seasons(all_stated) -> int:
+    """How far an unbroken run of seasons starting at 1 reaches in what
+    a source actually returned. The fallback bound for an entry with no
+    `latest_available` - Re:Zero's answer states 1, 2, 3 and 4 and its
+    seasons really do run 1-4; Bleach's states 1 and 17, and the gap is
+    the point."""
+    if 1 not in all_stated:
+        return 0
+    highest = 1
+    while highest + 1 in all_stated:
+        highest += 1
+    return highest
+
+
+def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
+    """One source's whole answer, with the rows that contradict the
+    request taken out.
+
+    **An id-keyed addon can and does answer with the wrong season, and
+    that is the owner's report of 22 August 2026** - "many of the sources
+    download a diff ep from a diff season". This file's own docstring
+    used to say an id cannot resolve to the wrong show; measured against
+    the owner's Re:Zero entry (tt5607616) at S01E01, TorrentsDB returned
+    `[FLE] ... - S04E01`, `[PMR] ... S03E01-12`, `[neoDESU] ...
+    [Season 3]`, `[Yameii] ... - S03`, `[Breeze]/[Sokudo] ... S04 P01`
+    and `... Re Zero S02P01` - and the highest-seeded of them sorts near
+    the top of the list, which is where both the eye and the default
+    pick land. Those addons map an IMDb id onto their own scraped
+    release names, and for anime that mapping is wrong often enough to
+    matter.
+
+    **But "the row says a different season" is not by itself a mistake,
+    and a first version that assumed it was broke Bleach.** Bleach:
+    Thousand-Year Blood War is season 1 of its own IMDb id and season 17
+    of Bleach, and every index uses the latter: asking Torrentio for
+    tt14986406:1:12 returned eleven S17 rows out of sixty-three, among
+    them `[LostYears] ... - S17E12`, which is exactly the episode asked
+    for, and `[Judas] Bleach (Season 17)` at 236 seeders, which is what
+    the race had been winning. Rejecting on the season alone threw all
+    eleven away.
+
+    Nor can the answer be trusted to use one numbering: measured on that
+    same lookup, **Torrentio's own rows state season 1 eleven times and
+    season 17 seven times**, both correctly, because the release groups
+    disagree with each other.
+
+    So what separates the two cases is a bound - **how many seasons this
+    entry actually has.** The tracker already knows (`latest_available`,
+    "S04E04" for Bleach and "S04E13" for Re:Zero): season 3 of a
+    four-season entry is that entry's season 3 and a row naming it when
+    season 1 was asked for is wrong; season 17 of a four-season entry is
+    somebody else's numbering and says nothing. A season past the bound
+    is therefore ignored rather than believed, and the row is judged on
+    its episode number alone - which still drops an S17E05 row when
+    episode 12 was asked for.
+
+    Done per source rather than over the merged list, so a batch handed
+    to `on_partial` is already final: rows appearing and then vanishing
+    under the pointer would be worse than either answer alone.
+
+    **`arc_map`** is helpers/anime_identity's `{season -> {tokens}}` for
+    this franchise, or `{}`. It is what lets this catch the arc-named
+    case numbers cannot - "Kimetsu no Yaiba - Hashira Geiko Hen" states
+    no season, but "Hashira Geiko" is season 5 in the map, so the row is
+    judged as an S5 row and dropped when S1 was asked for. Empty when the
+    map is not cached yet (see anime_identity.arc_map), in which case this
+    behaves exactly as it did before - the numbers only. Because the map
+    comes from TMDB, whose numbering *is* the entry's, an arc-derived
+    season is always inside the bound and always trusted.
+
+    Fails open when indexers could not be imported: a shorter list beats
+    a wrong episode, but an empty one does not, and without that module
+    there is nothing to check with."""
+    if indexers is None or not episode or not rows:
+        return rows
+    try:
+        season = int(season or 1)
+        arc_map = arc_map or {}
+        names = [_release_name(row.get("title")) for row in rows]
+        stated = [indexers.stated_seasons(name) for name in names]
+        # The arc tokens each name carries, as seasons - empty unless the
+        # franchise map is warm and the name names an arc.
+        arced = [(anime_identity.seasons_named(name, arc_map)
+                  if anime_identity is not None else set())
+                 for name in names]
+        every = set().union(*stated, *arced) if stated else set()
+        bound = max(_max_known_season(entry), _contiguous_seasons(every),
+                    season)
+        kept = []
+        for name, seasons, arc_seasons, row in zip(names, stated, arced, rows):
+            # Only seasons inside this entry's own range are evidence
+            # about *which* season; the rest are another numbering. Arc
+            # seasons are TMDB's, i.e. this entry's own, so they are
+            # always in range.
+            in_range = {s for s in (seasons | arc_seasons) if s <= bound}
+            if indexers.episode_conflict(name, season, episode,
+                                         compare_season=bool(in_range),
+                                         extra_seasons=arc_seasons):
+                continue
+            kept.append(row)
+        return kept
+    except Exception:
+        return rows
+
+
+def _ask_addon(addon, kind, stream_id, deadline, season=None,
+               episode=None, entry=None, arc_map=None) -> list:
     """One addon, one numbering. Never raises - it runs on a worker, and
-    a dead worker would take the whole lookup's pool with it."""
+    a dead worker would take the whole lookup's pool with it.
+
+    `season`/`episode` are **the numbering this call asked for**, not the
+    entry's own. That distinction is the whole reason they are passed in
+    rather than read from the entry: the fallback numbering deliberately
+    asks for the same episode under season 1 (see episode_fallbacks), and
+    checking its answers against the entry's season would throw away
+    precisely the rows it exists to find - Bleach TYBW sits at season 4
+    here and every real release of it states S01."""
     timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
     if timeout is None:
         return []
@@ -895,7 +1151,7 @@ def _ask_addon(addon, kind, stream_id, deadline) -> list:
         stream = _stream_from_addon(item, addon.get("name") or "addon")
         if stream:
             found.append(stream)
-    return found
+    return _drop_wrong_season(found, season, episode, entry, arc_map)
 
 
 # How long the fan-out may run before the fallback numbering is given
@@ -1079,6 +1335,15 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
     jobs = []
     imdb_id = (entry or {}).get("imdb_id")
     kind = "movie" if (entry or {}).get("type") == "Movie" else "series"
+    # The franchise's arc-name -> season map, **from cache only** - a warm
+    # anime returns a dict, everything else (and a cold anime) returns {}
+    # and warms in the background for next time. Read once here and passed
+    # down so every source's rows are judged against the same map, and so
+    # a cold title's partials and final list agree (both unfiltered) -
+    # anime_identity.arc_map explains why filtering only from the cache is
+    # what keeps a row from appearing then vanishing under the pointer.
+    arc_map = (anime_identity.arc_map(entry) if anime_identity is not None
+               else {})
     attempts = []
     usable = []
     if imdb_id:
@@ -1103,7 +1368,10 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
         stream_id = (imdb_id if primary is None
                      else f"{imdb_id}:{primary[0]}:{primary[1]}")
         jobs += [(lambda a=addon, i=stream_id:
-                  _ask_addon(a, kind, i, fanout_deadline))
+                  _ask_addon(a, kind, i, fanout_deadline,
+                             season=primary[0] if primary else None,
+                             episode=primary[1] if primary else None,
+                             entry=entry, arc_map=arc_map))
                  for addon in usable]
 
     # The indexers go out in the same breath as the addons rather than
@@ -1115,9 +1383,18 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
         # fansub releases no id-keyed addon carries. It is also
         # routinely the slowest (0.49-2.57s measured), which is exactly
         # why it must not be the thing the whole list waits behind.
-        jobs.append(lambda: indexers.search(entry, season=season,
-                                            episode=episode,
-                                            deadline=fanout_deadline))
+        #
+        # **Its rows go through the same season filter the addons' do.**
+        # They did not before, which is exactly how the arc-named Demon
+        # Slayer rows survived: `indexers.search` matches the *title* to
+        # the franchise but says nothing about the arc, so "Kimetsu no
+        # Yaiba - Hashira Geiko Hen - 01" (season 5) came back for an
+        # S01E01 ask. `_drop_wrong_season` with the arc map is what reads
+        # that as season 5 and drops it - see anime_identity.
+        jobs.append(lambda: _drop_wrong_season(
+            indexers.search(entry, season=season, episode=episode,
+                            deadline=fanout_deadline),
+            season, episode, entry, arc_map))
 
     # A saved page URL is worth digging into as well - it is the only
     # route for the sites the user configured themselves.
@@ -1156,10 +1433,23 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
     if not playable and len(attempts) > 1:
         fallback = attempts[1]
         stream_id = f"{imdb_id}:{fallback[0]}:{fallback[1]}"
-        results.extend(_run_all(
-            [(lambda a=addon, i=stream_id: _ask_addon(a, kind, i, deadline))
+        guessed = _run_all(
+            [(lambda a=addon, i=stream_id:
+              _ask_addon(a, kind, i, deadline, season=fallback[0],
+                         episode=fallback[1], entry=entry))
              for addon in usable], deadline,
-            on_result=None if on_partial is None else on_result))
+            on_result=None if on_partial is None else on_result)
+        # **Say that these are a guess.** They were fetched under a
+        # numbering nobody confirmed - the same episode number filed
+        # under season 1, which is what an absolutely-numbered index
+        # looks like for a continuing show. They are still the best
+        # answer available (nothing at all answered under the real
+        # numbering), but a row that might be a different season should
+        # not be indistinguishable from one that cannot be.
+        for stream in guessed:
+            stream["numbering"] = f"S{fallback[0]:02d}E{fallback[1]:02d}"
+            stream["guessed_numbering"] = True
+        results.extend(guessed)
 
     ranked = _rank(results)
     _cache_put(cache_key, ranked)

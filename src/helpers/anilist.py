@@ -147,14 +147,31 @@ query ($search: String) {
 """
 
 
+# Both media types in **one** document, because the manga side of
+# AniList is where `bannerImage` is thinnest. Measured 22 August 2026
+# over 43 real reading titles (the owner's tracker and history plus a
+# live Discover catalogue): 29 carried a manga banner, 9 carried only a
+# portrait cover, 5 matched nothing. Of the 14 with no manga banner, the
+# same franchise's *anime* entry carried a real wide banner for 2
+# (Tsukimichi, Chillin' in Another World) - and an alias in the same POST
+# costs no extra request and no extra throttle wait, which a second
+# lookup would. The anime side is asked for only when a banner is what
+# is wanted; a poster tile must never be handed one (see fetch_manga_cover).
 _MANGA_ART_QUERY = """
-query ($search: String) {
-  Page(perPage: 8) {
+query ($search: String, $withAnime: Boolean!) {
+  manga: Page(perPage: 8) {
     media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
       title { romaji english native }
       synonyms
       bannerImage
       coverImage { extraLarge large }
+    }
+  }
+  anime: Page(perPage: 6) @include(if: $withAnime) {
+    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+      title { romaji english native }
+      synonyms
+      bannerImage
     }
   }
 }
@@ -307,32 +324,71 @@ def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
     return fetch_external_urls(title, "crunchyroll", timeout)
 
 
-def _manga_art(title: str, timeout: int, banner_first: bool):
-    """Best-matching AniList manga art for `title`, or None.
+def _best_url(title: str, media_list, pick):
+    """The URL `pick` yields for the best-matching entry in `media_list`,
+    or None.
 
-    `banner_first` asks for the landscape banner and falls back to the
-    cover - a page background. False keeps the portrait cover only,
-    which is what a poster tile needs: a banner dropped into a portrait
-    box shows the middle third of a wide image.
+    Scored against the title the user actually has, never the stripped or
+    quote-folded query: normalize() drops the tag and folds the quote on
+    both sides, so the full string loses nothing and stays the thing being
+    matched. Only an entry whose title genuinely matches is considered at
+    all, because a wrong backdrop is still a page confidently dressed as a
+    different series. Shortest romaji breaks a score tie, the same
+    base-series rule as fetch_external_urls."""
+    scored = []
+    for media in media_list or []:
+        url = pick(media)
+        if not url:
+            continue
+        names = _candidate_names(media)
+        score = title_match.best_similarity(title, names)
+        if score < _MATCH_THRESHOLD:
+            continue
+        scored.append((-score, len(title_match.normalize(names[0] or "")), url))
+    return min(scored)[2] if scored else None
 
-    The search is retried with the reading site's group tag stripped.
-    Measured 21 August 2026: AniList answers "Kingdom (WAN)" - the
-    owner's own entry title - with nothing at all, and "Kingdom" with
-    the banner. See title_match.search_variants.
 
-    Same matching rule as everything else here: only an entry whose
-    title genuinely matches is considered, because a wrong backdrop is
-    still a page confidently dressed as a different series."""
+def _cover_of(media):
+    cover = media.get("coverImage") or {}
+    return cover.get("extraLarge") or cover.get("large")
+
+
+def manga_art(title: str, timeout: int = 8, banner_first: bool = True):
+    """`(url, kind)` for the best AniList art for a reading title, where
+    kind is "banner" (a real landscape image, 1900x400) or "cover" (the
+    portrait one, ~460x650), or `(None, None)`.
+
+    The caller needs to know *which*, because they are not
+    interchangeable at a 1266x300 hero: a 460x650 cover scaled with
+    KeepAspectRatioByExpanding into that box is 1266x1717, of which the
+    banner shows 300 rows - the middle **17%** of the picture, upscaled
+    2.75x. See helpers/hero_art.py for what is done with a cover instead.
+
+    Preference order, and it matters: this title's manga banner, then the
+    same franchise's *anime* banner (same POST, see _MANGA_ART_QUERY),
+    then the manga cover. A cover is never preferred over a banner and an
+    anime banner is never preferred over the work's own.
+
+    `banner_first=False` keeps the portrait cover only, which is what a
+    poster tile needs, and skips the anime alias entirely.
+
+    The search is retried across title_match.search_variants - the quote
+    fold first, then the raw string, then both with the reading site's
+    group tag dropped. Measured: AniList answers "Kingdom (WAN)" with
+    nothing and "Kingdom" with the banner, and answers "Swordmaster’S
+    Youngest Son" with nothing and "Swordmaster'S Youngest Son" with the
+    entry (that one is U+2019 against U+0027 and nothing else)."""
     title = (title or "").strip()
     if not title:
-        return None
+        return None, None
     for query in title_match.search_variants(title):
         try:
-            body = _post(_MANGA_ART_QUERY, {"search": query}, timeout)
+            body = _post(_MANGA_ART_QUERY,
+                         {"search": query, "withAnime": bool(banner_first)}, timeout)
         except RateLimited:
             # The block is on the connection, not the query: a second
             # variant buys another 403 and another throttle wait.
-            return None
+            return None, None
         except Exception:
             # Anything else is this one request failing. Measured: the
             # first variant timed out at 8.4s and the stripped retry
@@ -340,39 +396,30 @@ def _manga_art(title: str, timeout: int, banner_first: bool):
             # title AniList answers for.
             continue
 
-        media_list = (((body.get("data") or {}).get("Page") or {}).get("media")) or []
-        scored = []
-        for media in media_list:
-            cover = media.get("coverImage") or {}
-            banner = media.get("bannerImage")
-            url = ((banner or cover.get("extraLarge") or cover.get("large"))
-                   if banner_first
-                   else (cover.get("extraLarge") or cover.get("large")))
-            if not url:
-                continue
-            names = _candidate_names(media)
-            # Scored against the title the user actually has, never the
-            # stripped query: normalize() drops the tag on both sides,
-            # so the full string loses nothing and stays the thing being
-            # matched.
-            score = title_match.best_similarity(title, names)
-            if score < _MATCH_THRESHOLD:
-                continue
-            # Banner beats cover at equal match; shortest romaji breaks
-            # the remaining tie for the same base-series reason as
-            # fetch_external_urls.
-            scored.append((-score, 0 if (banner_first and banner) else 1,
-                           len(title_match.normalize(names[0] or "")), url))
-        if scored:
-            return min(scored)[3]
-    return None
+        data = body.get("data") or {}
+        manga = ((data.get("manga") or {}).get("media")) or []
+        if banner_first:
+            found = _best_url(title, manga, lambda m: m.get("bannerImage"))
+            if found:
+                return found, "banner"
+            anime = ((data.get("anime") or {}).get("media")) or []
+            found = _best_url(title, anime, lambda m: m.get("bannerImage"))
+            if found:
+                return found, "banner"
+        found = _best_url(title, manga, _cover_of)
+        if found:
+            return found, "cover"
+    return None, None
 
 
 def fetch_manga_artwork(title: str, timeout: int = 8):
     """A wide banner (or failing that, the large cover) URL for a manga
     title, or None - what the reading details page draws its ground from,
-    since reading entries have no IMDb id and so no TMDB artwork."""
-    return _manga_art(title, timeout, banner_first=True)
+    since reading entries have no IMDb id and so no TMDB artwork.
+
+    Kept for callers that only want a URL; anything drawing a *hero*
+    wants manga_art, so it can tell a banner from a cover."""
+    return manga_art(title, timeout, banner_first=True)[0]
 
 
 def fetch_manga_cover(title: str, timeout: int = 8):
@@ -380,4 +427,4 @@ def fetch_manga_cover(title: str, timeout: int = 8):
     reading site served no cover art (manga_sites._external_cover).
     Never the banner: it would be cropped to its middle in a poster
     box, which reads as a broken image rather than as a cover."""
-    return _manga_art(title, timeout, banner_first=False)
+    return manga_art(title, timeout, banner_first=False)[0]

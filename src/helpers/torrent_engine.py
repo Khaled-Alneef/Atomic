@@ -42,6 +42,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import logs
 
+# For reading an episode number out of a file name inside a pack - the
+# same parser the source list uses, so the two cannot disagree about
+# what "episode 2" means. Imported defensively for the same reason
+# streams.py does it: a missing parser means the older, weaker filename
+# rule, not an engine that will not start.
+try:
+    from . import indexers
+except Exception:                                       # pragma: no cover
+    indexers = None
+
 try:
     import libtorrent as lt
 except Exception:                                       # pragma: no cover
@@ -95,6 +105,15 @@ STREAM_WINDOW_BYTES = 48 * 1024 * 1024
 # ...and a floor in *pieces*, because a release with 256KB pieces would
 # otherwise put 192 of them in the window and be back to spreading thin.
 STREAM_WINDOW_MIN_PIECES = 12
+# How far past the reader `_apply_windows` may scan for the first piece
+# that is still missing, as a multiple of the window. The scan is what
+# stops a satisfied window from asking the swarm for nothing (see
+# _apply_windows); the bound is what stops a nearly-complete file from
+# turning every re-aim into a walk of the whole piece array. 0 restores
+# the old anchored-to-the-reader behaviour, which is how the A/B in
+# _apply_windows' comment was run.
+WINDOW_SKIP_FACTOR = 4
+
 # How far the reader may advance before the window is slid forward.
 # Sliding on every served byte would rewrite a 40,000-entry priority
 # array continuously; sliding only when a piece is *missing* (which is
@@ -290,6 +309,33 @@ def _alert_pump():
             waiter[0].set()
 
 
+# How often every streaming torrent's window is re-applied. Short enough
+# that a window cannot sit satisfied long enough for libtorrent to hang
+# up on the swarm (measured taking about a second and a half to start
+# dropping peers), long enough that rebuilding a 20,000-entry priority
+# array is nothing - _serve already does it once per 8MB served.
+WINDOW_TICK_S = 1.0
+
+
+def _window_ticker():
+    """Keep every streaming torrent's window pointed at something that
+    is actually missing. See _Torrent.refresh_windows for what this is
+    for and what it was measured costing when it did not exist."""
+    while True:
+        time.sleep(WINDOW_TICK_S)
+        if session() is None:
+            return
+        for torrent in list(_torrents.values()):
+            # A download owns its own priorities (see download_whole);
+            # a torrent with no chosen file has nothing to point at.
+            if torrent.want_whole or torrent.file_index is None:
+                continue
+            try:
+                torrent.refresh_windows()
+            except Exception:
+                pass
+
+
 def session():
     global _session, _pump_started
     with _session_lock:
@@ -299,6 +345,8 @@ def session():
                 _pump_started = True
                 threading.Thread(target=_alert_pump, daemon=True,
                                  name="atomic-torrent-alerts").start()
+                threading.Thread(target=_window_ticker, daemon=True,
+                                 name="atomic-torrent-window").start()
         return _session
 
 
@@ -696,6 +744,33 @@ class _Torrent:
             windows = list(self.readers.values())
         self._apply_windows(windows)
 
+    def refresh_windows(self):
+        """Re-apply the current windows without moving them.
+
+        **A priority array goes stale the moment its window fills up**,
+        and nothing was re-running it. `focus()` is called by a reader -
+        when it starts, when it advances STREAM_REFOCUS_BYTES, and when
+        it hits a missing piece - so a reader that is blocked, or one
+        whose 48MB window arrived in full, leaves libtorrent holding an
+        array in which every wanted piece is already on disk. It then has
+        nothing to ask anyone for and drops the swarm.
+
+        Measured 22 August 2026 on Demon Slayer S01E05, with the
+        skip-what-is-present window already in place: peers climbed to 90
+        while the head arrived, then went to **0 at 28.2s** and stayed
+        there, and mpv's read of the file's opening - which had sent only
+        4.5MB - did not complete until **42.8s**. The window fix alone
+        cannot help there, because the only thing that recomputes the
+        window is the reader that is stuck.
+
+        So the window is re-applied on a timer as well (see
+        _window_ticker). Same windows, same readers - it just re-asks the
+        question "what is still missing", which is now what the window is
+        measured from."""
+        with self.lock:
+            windows = list(self.readers.values())
+        self._apply_windows(windows)
+
     def end_read(self, reader):
         """This reader has finished; stop keeping its window wanted."""
         with self.lock:
@@ -778,22 +853,64 @@ class _Torrent:
             # means every peer is working on something the reader will
             # want within the minute.
             #
-            # The window goes idle once it is full (peers drop to 0 -
-            # measured, and expected: there is nothing left to ask for).
-            # That is safe because it holds ~48MB, which at these
-            # bitrates is minutes of video, and _serve slides it forward
-            # as it streams - see STREAM_REFOCUS_BYTES.
+            # **A full window used to go idle, and that was not safe** -
+            # peers dropped to 0 and took ten to twenty seconds to come
+            # back, which is longer than the reader can wait. The window
+            # is now measured from the first piece still missing, so it
+            # always holds something to ask for; see the scan below for
+            # the measurement.
             window_pieces = max(STREAM_WINDOW_MIN_PIECES,
                                 -(-STREAM_WINDOW_BYTES // self.piece_length()))
 
             priorities = [0] * total_pieces
             urgent_bands = []
-            for offset, span, _seq in windows:
+            for offset, _span, _seq in windows:
                 start = max(file_first, self.piece_at(offset))
-                span_last = min(file_last,
-                                self.piece_at(min(offset + span,
-                                                  max(self.file_size() - 1, 0))))
-                band_last = min(file_last, start + urgent_count - 1, span_last)
+                # **Skip what is already on disk, and this is the single
+                # biggest thing measured on 22 August 2026.**
+                #
+                # The window was anchored to the reader's byte offset,
+                # so once its ~48MB had all arrived it contained nothing
+                # missing - and with every other piece of the file at
+                # priority 0, libtorrent then had nothing to ask anyone
+                # for and **disconnected the entire swarm**. Measured on
+                # Frieren S01E02 (EMBER, 4.19MB pieces): peers climbed
+                # 20 -> 78 while the head was arriving, and 0.3s after
+                # the head read finished went to **0 peers, 0 seeds, and
+                # stayed there**. The demuxer's next read was the last
+                # piece of the file, which nothing was fetching any
+                # more, so it blocked for **20.0s** waiting for a swarm
+                # that had been thrown away - open cost 35.2s on a
+                # release whose head had arrived in seven. House of the
+                # Dragon S01E05 was worse: still 0 peers at 88s, no
+                # picture.
+                #
+                # The comment above used to record "the window goes idle
+                # once it is full (peers drop to 0 - measured, and
+                # expected)" and treat that as safe. It is not safe: the
+                # peers do not come back for ten to twenty seconds, and
+                # the reader routinely needs a piece before then.
+                #
+                # A window of *missing* pieces is what was meant all
+                # along - bounded exactly as before, just measured from
+                # the first piece the reader still needs rather than
+                # from where it happens to be sitting. The scan is
+                # bounded so a nearly-complete file cannot turn this
+                # into a walk of the whole piece array.
+                scanned, limit = 0, window_pieces * WINDOW_SKIP_FACTOR
+                while start < file_last and scanned < limit and self.have(start):
+                    start += 1
+                    scanned += 1
+                # The urgent band is `urgent_count` pieces from the first
+                # one still missing, and is deliberately no longer
+                # clamped to the reader's own `span`. That clamp never
+                # bound anything - the two spans callers pass are
+                # READAHEAD_BYTES (24MB) and HEAD_BYTES (12MB), both
+                # larger than URGENT_BYTES - and once the scan above can
+                # move `start` past the end of the span it would clamp
+                # the band down to a *single* piece, which is the one
+                # shape this whole scheme exists to avoid.
+                band_last = min(file_last, start + urgent_count - 1)
                 window_last = min(file_last, start + window_pieces - 1)
                 for piece in range(start, window_last + 1):
                     if priorities[piece] < 4:
@@ -1176,28 +1293,101 @@ def _video_files(info) -> list:
             if c[1].lower().endswith(_VIDEO_SUFFIXES)] or candidates
 
 
+def _stem(name: str) -> str:
+    """A file's own name, without directory or extension. The extension
+    has to go before the name is parsed: `... - 02.mkv` has no boundary
+    after the `02` while the `.mkv` is attached, so the fansub numbering
+    below reads as nothing at all."""
+    return os.path.splitext(os.path.basename(name or ""))[0]
+
+
+def _names_episode(stem: str, season, episode) -> bool:
+    """Whether this file name says it is the episode asked for.
+
+    **`SxxExx` was the only form recognised, and half the packs on these
+    indexers do not use it.** Measured 22 August 2026 on Frieren S01E02:
+    `[SubsPlease] Sousou no Frieren (01-28) [Batch]` names its files
+    `... - 02v2 (1080p) [00DB7386].mkv`, so `_episode_file_index`
+    answered None, `_pick_file` fell back to the largest video, and the
+    engine served **episode 04**. Both SubsPlease batches in the list did
+    it; the packs that name files `S01E02-...` were fine.
+
+    helpers/indexers.py already parses release names for exactly this and
+    is the stricter reader of the two (it knows that a season stated in
+    words outranks a loose number), so it is asked first and _EPISODE_RE
+    is the fallback for a build where that import failed."""
+    if indexers is not None:
+        try:
+            return indexers.episode_match(stem, season, episode) == "exact"
+        except Exception:
+            pass
+    match = _EPISODE_RE.search(stem)
+    return bool(match and int(match.group(1)) == int(season)
+                and int(match.group(2)) == int(episode))
+
+
 def _episode_file_index(info, season, episode):
     """The file whose *name* states this episode, or None. Deliberately
     no largest-file fallback here: callers asking "does this pack hold
     episode N" must get an honest no, not the biggest file wearing N's
-    number (see file_index_for)."""
+    number (see file_index_for).
+
+    An `SxxExx` name wins over a bare number when both are present - it
+    states the season too, so it is the stronger claim."""
     if not (season and episode):
         return None
+    loose = None
     for index, name, _size in _video_files(info):
-        match = _EPISODE_RE.search(os.path.basename(name))
+        stem = _stem(name)
+        match = _EPISODE_RE.search(stem)
         if (match and int(match.group(1)) == int(season)
                 and int(match.group(2)) == int(episode)):
             return index
-    return None
+        if loose is None and _names_episode(stem, season, episode):
+            loose = index
+    return loose
 
 
-def _pick_file(info, season=None, episode=None) -> int:
-    """Which file in the torrent to play - the episode if its name says
-    so, else the largest video."""
-    matched = _episode_file_index(info, season, episode)
-    if matched is not None:
-        return matched
-    return max(_video_files(info), key=lambda c: c[2])[0]
+def _pick_file(info, season=None, episode=None, file_index=None):
+    """Which file in the torrent to play, or **None when that cannot be
+    answered**.
+
+    Three rules, in this order:
+
+    **A file whose own name states a different episode is not served,
+    whoever pointed at it.** `file_index` is the addon's `fileIdx`, which
+    is its claim about its own mapping - measured correct on six of six
+    real packs, so it is trusted where nothing contradicts it, and
+    overridden where the file's name does.
+
+    **The name beats the size.** See _names_episode for the pack that
+    served episode 4 for a request for episode 2.
+
+    **And when neither can identify it, refuse.** Returning the largest
+    video was a guess dressed as an answer: in a 28-episode batch it is
+    whichever episode happened to encode biggest. A release that cannot
+    be shown to hold the right episode is dropped and the race takes the
+    next one, which is the standing trade in this codebase - a shorter
+    list beats a wrong episode that plays."""
+    named = _episode_file_index(info, season, episode)
+    if file_index is not None:
+        try:
+            index = int(file_index)
+            stem = _stem(info.files().file_path(index))
+        except Exception:
+            index, stem = None, ""
+        if index is not None:
+            # Only a name that positively identifies *another* episode
+            # overrides the addon; a name that says nothing does not.
+            if named is not None and named != index and _EPISODE_RE.search(stem):
+                return named
+            return index
+    if named is not None:
+        return named
+    videos = _video_files(info)
+    if season and episode and len(videos) > 1:
+        return None
+    return max(videos, key=lambda c: c[2])[0]
 
 
 def add(info_hash: str, *, trackers=(), season=None, episode=None,
@@ -1233,9 +1423,10 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
         if start_at is not None:
             existing.set_start_seconds(start_at)
         try:
-            wanted = (file_index if file_index is not None
-                      else _pick_file(existing.info, season, episode)
-                      if (season and episode) else existing.file_index)
+            wanted = (_pick_file(existing.info, season, episode,
+                                 file_index=file_index)
+                      if (season and episode) or file_index is not None
+                      else existing.file_index)
             if wanted is not None and wanted != existing.file_index:
                 existing.file_index = wanted
                 priorities = [0] * existing.info.files().num_files()
@@ -1312,8 +1503,15 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
         pass
 
     info = handle.torrent_file()
-    torrent.file_index = (file_index if file_index is not None
-                          else _pick_file(info, season, episode))
+    torrent.file_index = _pick_file(info, season, episode,
+                                    file_index=file_index)
+    if torrent.file_index is None:
+        # **Nothing in this torrent can be shown to be the episode asked
+        # for.** Give it straight back rather than streaming a guess -
+        # see _pick_file. The caller reads `episode_file(info_hash)` and
+        # says "wrong-episode" out loud, and the race takes the next
+        # candidate immediately instead of spending a data wait on it.
+        return info_hash
     # Before the first focus(), so the very first priority array already
     # carries the resume band rather than adding it a second later.
     if start_at is not None:
@@ -1411,6 +1609,24 @@ def download_whole(info_hash: str, *, all_files: bool = False) -> bool:
         return True
     except Exception:
         return False
+
+
+def episode_file(info_hash: str):
+    """The name of the file this torrent is going to serve, or None when
+    none could be identified as the episode asked for (see _pick_file).
+
+    None is how `streams.prepare` tells "the swarm is dead" apart from
+    "this release does not hold that episode" - two failures that want
+    two different messages and, more importantly, two different waits:
+    the second one is knowable the moment the metadata lands."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None or torrent.file_index is None:
+        return None
+    try:
+        return os.path.basename(torrent.info.files().file_path(
+            torrent.file_index))
+    except Exception:
+        return None
 
 
 def file_index_for(info_hash: str, season, episode):

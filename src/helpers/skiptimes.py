@@ -31,6 +31,7 @@ button, never an error and never a wrong seek.
 import json
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -142,12 +143,48 @@ def _clean(intervals, episode_length=0.0):
     return out
 
 
+# AniSkip 500s at random on entries that are perfectly fine a second
+# later - measured 22 August 2026 on One Piece (mal 21) episode 1, eight
+# identical requests: 200,200,200,500,500,500,200,200. A single try
+# therefore loses the button on about a third of the openings this
+# episode has data for, and nothing about that is visible from the chair.
+# Only a 5xx is retried: a 404 is AniSkip's honest "no entry", and asking
+# again cannot change it.
+ANISKIP_TRIES = 3
+ANISKIP_RETRY_PAUSE_S = 0.4
+
+
 def _aniskip(mal, episode, episode_length, timeout):
     types = "&".join(f"types[]={name}" for name in
                      ("op", "ed", "recap", "mixed-op", "mixed-ed"))
+    # **episodeLength is deliberately left at 0, which is AniSkip's
+    # "unknown".** Sent as the real runtime it is a *filter*, and the
+    # entry has to have been submitted against a matching length or the
+    # whole episode 404s - so passing the duration mpv had just reported
+    # was throwing away real data. Measured 22 August 2026 over six of
+    # the owner's titles, thirteen episodes:
+    #
+    #     episodeLength sent as the real runtime    6/13 answered
+    #     episodeLength left at 0                  10/13 answered
+    #
+    # One Piece episodes 2 and 5, Frieren 5 and Bleach TYBW 5 all 404 with
+    # it and return an op and an ed without it. It is also *why the offer
+    # came and went*: the length is whatever mpv knew when the lookup
+    # fired, so the same episode answered or did not depending on how far
+    # the file had loaded. Nothing is lost by dropping it - `_clean` still
+    # holds every interval against the real duration, locally, where a
+    # mismatch can be judged instead of 404'd.
     url = (f"{ANISKIP_URL}/{int(mal)}/{int(episode)}"
-           f"?{types}&episodeLength={int(episode_length or 0)}")
-    body = _get_json(url, timeout)
+           f"?{types}&episodeLength=0")
+    body = None
+    for attempt in range(ANISKIP_TRIES):
+        try:
+            body = _get_json(url, timeout)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code < 500 or attempt == ANISKIP_TRIES - 1:
+                raise
+            time.sleep(ANISKIP_RETRY_PAUSE_S)
     rows = []
     for result in (body or {}).get("results") or []:
         interval = result.get("interval") or {}

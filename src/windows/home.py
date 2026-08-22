@@ -11,9 +11,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
+    QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from helpers import (game_launch, global_search, images, launchers,
@@ -67,6 +68,12 @@ SEARCH_BAR_MIN_WIDTH = 240
 HERO_SLIDE_LIMIT = 4
 HERO_SLIDE_INTERVAL_MS = 6000
 
+# The title logo drawn over the hero. Height first, then a width cap so a
+# very wide treatment (One Piece) does not run into the pagination dashes
+# on a narrow window; scaled keeping aspect inside that box.
+HERO_LOGO_HEIGHT = 84
+HERO_LOGO_MAX_WIDTH = 480
+
 # Anime opens on the merged watch page now - there is no "anime" page
 # key left (see nav_config).
 PAGE_FOR_TYPE = {"Anime": "series", "Series": "series",
@@ -76,6 +83,11 @@ PAGE_FOR_TYPE = {"Anime": "series", "Series": "series",
 class _HeroSignals(QObject):
     # entry id -> local backdrop path, crossing back from a fetch thread.
     backdrop = pyqtSignal(str, str)
+    # entry id -> (logo path or "", hide the text title): the title
+    # treatment the banner draws in place of its typed name, and whether
+    # the name should go even without one (a real AniList reading banner
+    # already carries it). See _hero_backdrop_worker.
+    overlay = pyqtSignal(str, str, bool)
 
 
 class _GameSignals(QObject):
@@ -458,15 +470,32 @@ class HomePage(GlassPage):
         # takes so long". Resolved once, remembered on the entry, and
         # from then on the slide is painted from disk on the first frame.
         self._hero_backdrops = {}
+        # entry id -> logo path (a title-treatment PNG), and -> whether
+        # the typed title should be hidden even without a logo. Both are
+        # remembered on the entry the same way the backdrop is, so a
+        # revisit draws the finished banner on the first frame with no
+        # lookup - see _hero_backdrop_worker and _remember_hero_overlay.
+        self._hero_logos = {}
+        self._hero_hide_title = {}
         for hero in self._hero_entries:
+            hid = hero.get("id")
             stored = hero.get("hero_backdrop")
             try:
                 if stored and Path(stored).exists():
-                    self._hero_backdrops[hero.get("id")] = stored
+                    self._hero_backdrops[hid] = stored
             except OSError:
                 pass        # an unreadable path is simply not a cache hit
+            logo = hero.get("hero_logo")
+            try:
+                if logo and Path(logo).exists():
+                    self._hero_logos[hid] = logo
+            except OSError:
+                pass
+            if hero.get("hero_hide_title") is not None:
+                self._hero_hide_title[hid] = bool(hero.get("hero_hide_title"))
         self._hero_signals = _HeroSignals()
         self._hero_signals.backdrop.connect(self._on_hero_backdrop)
+        self._hero_signals.overlay.connect(self._on_hero_overlay)
 
         # theme.BG: Home's body is the page ground itself, and that is
         # what the banner paints its corner outsides back to.
@@ -486,6 +515,27 @@ class HomePage(GlassPage):
         chip_row.addStretch(1)
         column.addLayout(chip_row)
         column.addStretch(1)
+
+        # The title treatment (a transparent logo PNG) sits where the
+        # typed title does and replaces it when there is one - the owner's
+        # ask, 22 August 2026: "change the name in the banners to the logo
+        # from the APIs". Hidden until a logo lands; the text label below
+        # is what shows in the meantime and for a title that has no logo.
+        self._hero_logo = QLabel("")
+        self._hero_logo.setVisible(False)
+        self._hero_logo.setStyleSheet("background: transparent;")
+        # A soft shadow so a logo reads over the backdrop whatever its own
+        # colour - most title treatments are light and pop over a bright
+        # patch of art, but some (Demon Slayer) are near-black, and the
+        # scrim that carries the typed title cannot help a black logo the
+        # way it helps white text. Offset 0, so it is a halo lifting the
+        # shape off the ground rather than a drop under it.
+        shadow = QGraphicsDropShadowEffect(self._hero_logo)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 0)
+        shadow.setColor(QColor(0, 0, 0, 200))
+        self._hero_logo.setGraphicsEffect(shadow)
+        column.addWidget(self._hero_logo)
 
         self._hero_title = QLabel("")
         self._hero_title.setWordWrap(True)
@@ -557,7 +607,14 @@ class HomePage(GlassPage):
         # whole saving: no AniList round trip and no download for a
         # picture that is sitting on disk.
         for entry in self._hero_entries:
-            if entry.get("id") in self._hero_backdrops:
+            hid = entry.get("id")
+            # Start the worker unless the whole banner is already known -
+            # its ground, its logo, and the hide-title decision. A cached
+            # ground alone is not enough now: the logo and that decision
+            # are what the overlay draws, and a title resolved before this
+            # change has neither on its entry yet.
+            if (hid in self._hero_backdrops and hid in self._hero_logos
+                    and hid in self._hero_hide_title):
                 continue
             threading.Thread(target=self._hero_backdrop_worker,
                              args=(dict(entry),), daemon=True).start()
@@ -575,7 +632,58 @@ class HomePage(GlassPage):
         self._continue_entry(self._hero_entry(), resume=resume)
 
     def _advance_hero(self):
+        if self._hero_holds():
+            return          # the timer keeps ticking; the next one may pass
         self._show_hero_slide((self._hero_index + 1) % len(self._hero_entries))
+
+    def _hero_holds(self) -> bool:
+        """Whether this rotation must not happen. Two reasons, in the
+        order they cost:
+
+        **Something is covering the page.** The reader, the player and
+        the details page are hand-placed children of the *central
+        widget* while a page lives in main.container, so Qt sees no
+        overlap between them and goes on delivering this timer and
+        painting the banner underneath. Measured 22 August 2026 with the
+        details page open over Home: `page.visibleRegion()` is not empty,
+        `_hero_timer.isActive()` is still True, and the banner painted
+        **72 times in 20 seconds** - a burst holding the UI thread 73.6ms
+        every six seconds, ten dropped frames at 144Hz, for a banner
+        nobody can see. Worse on the first sight of each backdrop, which
+        adds a full-resolution decode (48-107ms, see
+        widgets._decoded_backdrop). That is the whole time a chapter
+        list, a chapter or an episode is on screen - the owner's
+        "clicked ... it showed me ch list and lagged heavily".
+        `_top_overlay` is main.py's own answer to "what is on top", duck-
+        typed there, so this covers the genre browse too and needs no
+        open/close wiring on this page - a rotation skipped is simply
+        retried six seconds later, and a browser-fallback open (which
+        puts no overlay up) never freezes the carousel.
+
+        **The pointer is on the banner.** A slide carries two buttons
+        whose target changes with it - "View Chapters" becomes "View
+        Episodes" - so rotating under an aiming pointer does not just
+        move a control, it changes what pressing it does. This page
+        already delays the games/apps re-sort by RESORT_DELAY_MS for the
+        weaker version of the same problem.
+
+        Asked of QApplication.widgetAt rather than the banner's
+        Enter/Leave on purpose (.claude/rules/ui.md): crossing onto
+        Continue fires the banner's *Leave*, so leave-means-gone would
+        resume the carousel precisely while the pointer sits on a
+        button."""
+        banner = getattr(self, "_hero_banner", None)
+        if banner is None:
+            return False
+        top_overlay = getattr(self.window(), "_top_overlay", None)
+        try:
+            if callable(top_overlay) and top_overlay() is not None:
+                return True
+        except RuntimeError:
+            return True     # the window is going away; nothing to rotate for
+        under = QApplication.widgetAt(QCursor.pos())
+        return under is not None and (under is banner
+                                      or banner.isAncestorOf(under))
 
     def _jump_hero(self, index):
         if self._hero_timer.isActive():
@@ -589,6 +697,7 @@ class HomePage(GlassPage):
         self._hero_chip.setText("CONTINUE READING" if reading
                                 else "CONTINUE WATCHING")
         self._hero_title.setText(entry["title"])
+        self._apply_hero_overlay()
         meta_bits = [self._progress_meta_text(entry) or entry.get("status") or "",
                      str(entry.get("type") or "")]
         self._hero_meta.setText("   ·   ".join(bit for bit in meta_bits if bit))
@@ -612,22 +721,46 @@ class HomePage(GlassPage):
 
     def _hero_backdrop_worker(self, entry):
         """One slide's ground, off the UI thread: TMDB's backdrop by
-        IMDb id for the video types, AniList's banner for reading - the
-        same two sources the details page grounds itself with. Never
+        IMDb id for the video types, hero_art's chain for reading. Never
         raises; a title with no landscape art anywhere just keeps the
-        banner's flat panel."""
+        banner's flat panel.
+
+        The reading side used to take AniList's *cover* when AniList had
+        no banner and hand that straight to HeroBanner, which expands it -
+        so a 460x624 portrait was drawn as the middle 17% of itself at
+        2.75x. hero_art composes a real ground out of a cover instead;
+        see that module for what was rendered and compared."""
         entry_id = str(entry.get("id") or "")
+        from helpers import artwork
         try:
             if entry.get("type") in MANGA_TYPES:
-                from helpers import anilist
-                url = anilist.fetch_manga_artwork(entry.get("title") or "")
-                found = images.download(url) if url else None
+                from helpers import hero_art
+                # cover_path/cover_url are whatever the entry's own
+                # reading site already served - every tracked reading
+                # entry here carries both - so a title AniList cannot
+                # match still has a picture to build a ground from, and
+                # the local copy costs no request at all.
+                found, kind = hero_art.reading_ground(
+                    entry.get("title") or "",
+                    cover_path=entry.get("cover_path"),
+                    cover_url=str(entry.get("cover_url") or ""))
                 if found:
                     self._hero_signals.backdrop.emit(entry_id, str(found))
+                # A reading title's logo: only when the same franchise is
+                # an anime/series TMDB has a title treatment for - Kingdom,
+                # Hunter x Hunter, One Piece all resolve (the owner's ask).
+                # Cheap and disk-cached, so it runs even when the ground
+                # above was already known.
+                logo = artwork.logo_path_by_title(entry.get("title") or "")
+                # Drop the typed name when a real AniList banner carries it
+                # ("take the whole banner from Anilist ... remove the name")
+                # or when a logo will stand in its place; keep it over a
+                # composed cover ground (image 2).
+                hide = bool(logo) or (kind == "banner")
+                self._hero_signals.overlay.emit(entry_id, str(logo or ""), hide)
                 return
             if not entry.get("imdb_id"):
                 return
-            from helpers import artwork
             # Both sizes, in that order - the details page's pattern,
             # and the fix for a soft slider: the small w780 copy used to
             # be taken with `or`, so the full-resolution original was
@@ -640,6 +773,11 @@ class HomePage(GlassPage):
             full = artwork.backdrop_path(entry)
             if full:
                 self._hero_signals.backdrop.emit(entry_id, str(full))
+            # The video logo (TMDB title treatment): shown in place of the
+            # typed title. Fails soft to text when the title has none.
+            logo = artwork.logo_path(entry)
+            self._hero_signals.overlay.emit(entry_id, str(logo or ""),
+                                            bool(logo))
         except Exception:
             return          # no art anywhere just keeps the flat panel
 
@@ -657,6 +795,73 @@ class HomePage(GlassPage):
             self._hero_banner.set_backdrop(path, fade=not upgrade)
         except RuntimeError:
             pass    # the page was torn down under the fetch
+
+    def _on_hero_overlay(self, entry_id, logo_path, hide_title):
+        """A slide's logo and hide-title decision, back from the fetch
+        thread. Stored per id so a rotation redraws from it, remembered on
+        the entry so a revisit needs no lookup, and applied at once if
+        this is the slide on screen."""
+        self._hero_logos[entry_id] = logo_path or None
+        self._hero_hide_title[entry_id] = bool(hide_title)
+        self._remember_hero_overlay(entry_id, logo_path or "",
+                                    bool(hide_title))
+        if str(self._hero_entry().get("id") or "") == entry_id:
+            self._apply_hero_overlay()
+
+    def _apply_hero_overlay(self):
+        """Draw the current slide's title treatment, or fall back to the
+        typed name. The logo replaces the text; a real AniList reading
+        banner (hide_title, no logo) drops the text with nothing in its
+        place, because the name is already in the banner art."""
+        try:
+            entry = self._hero_entry()
+        except (IndexError, ZeroDivisionError):
+            return
+        hid = entry.get("id")
+        logo = self._hero_logos.get(hid)
+        pixmap = None
+        if logo:
+            try:
+                dpr = self._hero_logo.devicePixelRatioF() or 1.0
+                pixmap = images.logo_pixmap(logo, HERO_LOGO_HEIGHT, dpr)
+                if pixmap.isNull():
+                    pixmap = None
+                elif pixmap.width() / dpr > HERO_LOGO_MAX_WIDTH:
+                    pixmap = pixmap.scaledToWidth(
+                        int(HERO_LOGO_MAX_WIDTH * dpr),
+                        Qt.TransformationMode.SmoothTransformation)
+                    pixmap.setDevicePixelRatio(dpr)
+            except Exception:
+                pixmap = None
+        if pixmap is not None:
+            self._hero_logo.setPixmap(pixmap)
+            self._hero_logo.setVisible(True)
+            self._hero_title.setVisible(False)
+        else:
+            self._hero_logo.clear()
+            self._hero_logo.setVisible(False)
+            self._hero_title.setVisible(not self._hero_hide_title.get(hid, False))
+
+    def _remember_hero_overlay(self, entry_id, logo_path, hide_title):
+        """Persist a slide's logo and hide-title decision onto its entry,
+        so the next visit draws the finished banner without a lookup.
+        Through update_entry, never a whole-list write - the same rule
+        _remember_hero_backdrop follows."""
+        entry = next((e for e in self._hero_entries
+                      if str(e.get("id") or "") == entry_id), None)
+        if entry is None:
+            return
+        if (entry.get("hero_logo") == (logo_path or None)
+                and entry.get("hero_hide_title") == hide_title):
+            return
+        entry["hero_logo"] = logo_path or None
+        entry["hero_hide_title"] = hide_title
+        try:
+            storage.update_entry(_progress_data_file(entry), entry.get("id"),
+                                 {"hero_logo": logo_path or None,
+                                  "hero_hide_title": hide_title})
+        except Exception:
+            pass
 
     def _remember_hero_backdrop(self, entry_id, path):
         """Write a resolved backdrop onto its entry, so the next visit

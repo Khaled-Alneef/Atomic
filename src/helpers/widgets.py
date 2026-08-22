@@ -306,8 +306,34 @@ class Card(QFrame):
         self._tooltip_provider = provider
         self.setToolTip(provider())
 
+    # Resolved once at import. `QEvent.Type.ToolTip` is an attribute walk
+    # and an enum construction every time it is written out, and the
+    # override below runs for *every* event delivered to *every* card.
+    _TOOLTIP = QEvent.Type.ToolTip
+
+    # **A class-level default, and it is not decoration.** `event()`
+    # below reads this attribute before anything else, and `QFrame`'s
+    # own constructor delivers events to the widget *before*
+    # `Card.__init__` has run its assignment - so an instance-only
+    # attribute leaves `event()` raising AttributeError from inside a
+    # C++ virtual, where Python cannot unwind it. Windows fail-fasts the
+    # process: 0xC0000409, no traceback, the app simply vanishes.
+    # Measured 22 August 2026 - every harness building a Card died at
+    # this line until the default was added. It also makes the fast path
+    # marginally faster, since the lookup resolves on the class for the
+    # cards that never set one.
+    _tooltip_provider = None
+
     def event(self, event):
-        if event.type() == QEvent.Type.ToolTip and self._tooltip_provider:
+        # **The provider is tested first, and that is the whole point.**
+        # Profiled 22 August 2026: this override took **20,128 calls and
+        # 257ms of a 1.14s scroll** of One Piece's chapter list, and
+        # 5,274 calls / 96ms while a details page opened. Most cards
+        # carry no tooltip provider at all, so a plain attribute test
+        # that fails immediately skips both the `event.type()` call and
+        # the enum lookup for all of them. Shared by every page in the
+        # app, which is why it is worth the comment.
+        if self._tooltip_provider is not None and event.type() == self._TOOLTIP:
             QToolTip.showText(event.globalPos(), self._tooltip_provider(), self)
             return True
         return super().event(event)
@@ -347,7 +373,22 @@ class Card(QFrame):
                 # never see the pointer move can never start.
                 event.accept()
                 return
-        super().mousePressEvent(event)
+        try:
+            super().mousePressEvent(event)
+        except RuntimeError:
+            # **`clicked` can delete this card.** A card's handler opens
+            # a page, and opening a page rebuilds the grid the card is
+            # in - so by the time the base handler runs, the C++ object
+            # under it is gone. From the owner's log, 22 August 2026:
+            #
+            #     widgets.py:350 mousePressEvent
+            #     RuntimeError: Card has been deleted
+            #
+            # An exception out of a Qt slot is qFatal in PyQt6, so this
+            # took the whole app down rather than raising. There is
+            # nothing left to hand the press to; returning is the whole
+            # correct behaviour.
+            return
 
     def mouseMoveEvent(self, event):
         if (self._drag_reorder is None or self._press_pos is None
@@ -1641,6 +1682,90 @@ class SmoothTween(QObject):
                     self._on_done()
                 except RuntimeError:
                     pass
+
+
+class PickCombo(QComboBox):
+    """A drop-down whose popup answers the *first* click on a row.
+
+    The owner's report, 22 August 2026: *"in some lists like the seasons
+    list in the ep list page I need to click 2 times to go to season 1"*.
+
+    Qt blocks every mouse release over a combo popup for
+    `QApplication::doubleClickInterval()` after `showPopup()`
+    (`QComboBoxPrivateContainer::blockMouseReleaseTimer`), so that the
+    release belonging to the click which *opened* the popup cannot
+    instantly pick whatever row landed under the pointer. It cancels
+    that block on the first mouse move over the popup - and that is the
+    hole. **Measured on this page, 22 August 2026: the popup takes
+    166-190ms to appear** (twelve opens, the app-wide stylesheet being
+    re-polished for the popup window). A hand that is already moving
+    spends those milliseconds over the page, not over a popup that does
+    not exist yet, so nothing cancels the block, and the row click
+    inside the remaining ~330ms is dropped in silence - the popup simply
+    stays open.
+
+    Confirmed by moving the input rather than by reading Qt: the same
+    gesture, driven with real SendInput mouse events, flipped both ways
+    with `doubleClickInterval` alone -
+
+        interval   click 139ms after the popup appeared   click 1014ms after
+        0ms        picked                                 picked
+        500ms      **eaten**                              picked
+        2000ms     **eaten**                              **eaten**
+
+    500ms is this machine's setting, and Windows' slider goes to 900.
+
+    So the release is answered here instead, before Qt's own filter sees
+    it (an event filter installed later runs first). Qt's protection is
+    kept, just tested at release time rather than trusted to intervening
+    move events: a release that has not travelled from the click which
+    opened the popup is that click's own release and is left alone."""
+
+    # Qt's own threshold for "the pointer has moved", in
+    # QComboBoxPrivateContainer::eventFilter. Same number on purpose.
+    MOVED_ENOUGH_PX = 9
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._opened_at = QPoint()
+        self._filtered_view = None
+
+    def showPopup(self):
+        # QCursor.pos(), not mapToGlobal - see .claude/rules/ui.md; this
+        # value is compared against a real event's global position.
+        self._opened_at = QCursor.pos()
+        super().showPopup()
+        view = self.view()
+        if view is not None and self._filtered_view is not view:
+            # After super().showPopup(), so the container has already
+            # installed its own filters and ours is the newer - Qt runs
+            # the most recently installed filter first, which is the
+            # whole mechanism here.
+            view.viewport().installEventFilter(self)
+            self._filtered_view = view
+
+    def eventFilter(self, obj, event):
+        view = self.view()
+        if (view is not None and obj is view.viewport()
+                and event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton
+                and view.isVisible()):
+            travelled = (event.globalPosition().toPoint()
+                         - self._opened_at).manhattanLength()
+            index = view.indexAt(event.position().toPoint())
+            if travelled > self.MOVED_ENOUGH_PX and index.isValid():
+                flags = index.flags()
+                if (flags & Qt.ItemFlag.ItemIsEnabled
+                        and flags & Qt.ItemFlag.ItemIsSelectable):
+                    # The order QComboBoxPrivate::_q_itemSelected uses:
+                    # the index first, so a slot on activated reading
+                    # currentData() sees the row that was clicked.
+                    self.hidePopup()
+                    self.setCurrentIndex(index.row())
+                    self.activated.emit(index.row())
+                    self.textActivated.emit(self.itemText(index.row()))
+                    return True
+        return super().eventFilter(obj, event)
 
 
 class CardTextLabel(QLabel):

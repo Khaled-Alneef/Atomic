@@ -27,7 +27,8 @@ from PyQt6.QtGui import (QColor, QCursor, QIcon, QLinearGradient, QPainter,
                          QPixmap, QPolygonF)
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
-    QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QDoubleSpinBox, QFrame, QGraphicsDropShadowEffect, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QScrollArea, QVBoxLayout,
     QWidget,
 )
@@ -151,10 +152,16 @@ STREMIO_CATALOG_BY_TYPE = {"Anime": "series", "Series": "series", "Movie": "movi
 # Bundled with the exe by Atomic.spec's `datas` - a file that only exists
 # next to main.py in the source tree is absent from the frozen build (the
 # same trap app_icon.ico is commented for in the spec).
-FILTER_ICON = "filter_icon.png"
+FILTER_ICON = "assets/filter_icon.png"
 FILTER_ICON_HEIGHT = 18
 
 POSTER_SIZE = (160, 216)
+
+# What a page's own width carries beyond a scrolling body's: the panel
+# padding either side plus the vertical scrollbar. Only used when no
+# body has been laid out yet (see _build_card_grid); measured at 1920
+# with the sidebar expanded - page 1636, discover_body 1604.
+_GRID_CHROME = 32
 PREVIEW_SIZE = (90, 120)
 # Pins a run of text to a left-to-right base direction. Needed wherever
 # a number sits beside Arabic content: Qt shapes digits with the
@@ -1210,6 +1217,31 @@ def _if_alive(callback):
         pass
 
 
+def _viewport_width(body) -> int:
+    """The width a scrolling body actually has to lay out in.
+
+    **The body's own width is not that number, and using it made the
+    grid feed back on itself.** A body inside a `widgetResizable` scroll
+    area is stretched by whatever it contains, so a 9-column grid makes
+    the body 1750px wide - and the next build measures 1750 and lays out
+    nine columns again, in a viewport only 1604 wide. Measured 22 August
+    2026 after folding and unfolding: body 1750, viewport 1604, **146px
+    of horizontal overflow** and a scrollbar under a grid that should
+    have re-wrapped to eight.
+
+    The viewport is never inflated by its contents, so it is the honest
+    width. Falls back to the widget's own width for a body that is not
+    in a scroll area at all."""
+    if body is None:
+        return 0
+    parent = body.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QScrollArea):
+            return parent.viewport().width()
+        parent = parent.parentWidget()
+    return body.width()
+
+
 def _clear_layout(layout):
     """Empty a layout, with what was in it gone from the screen *now*.
 
@@ -1270,6 +1302,11 @@ class _DiscoverSignals(QObject):
     poster = Signal(str, int, str, str, int)
     # The hero banner's ground - a local backdrop path, run.
     featured_backdrop = Signal(str, int)
+    # The featured banner's title treatment: a logo path ("" = none),
+    # whether to hide the typed title, run. Same idea as Home's hero
+    # overlay - the logo stands in for the name, a real AniList reading
+    # banner already carries it. See _featured_backdrop_worker.
+    featured_overlay = Signal(str, bool, int)
     # A History row's cover: the history key, the downloaded path. No
     # run number - History is not a search, so nothing can arrive
     # "under a later query"; the key is what says which row it belongs
@@ -1735,6 +1772,11 @@ class TrackerPage(GlassPage):
     # TAB_SAVED/TAB_DISCOVER/TAB_SCHEDULE would only drift from them.
     SECTIONS = TABS
     CATEGORY_SECTIONS = ()
+    # Where Ctrl+F lands on these pages (the owner's ask, 22 August
+    # 2026: "make the Ctrl+F go to discover search while in the watch or
+    # read pages"). main.py switches to this section before asking for
+    # the field, because the section is what builds it.
+    PAGE_SEARCH_SECTION = TAB_DISCOVER
 
     def __init__(self, app):
         super().__init__(parent=None)
@@ -1794,6 +1836,7 @@ class TrackerPage(GlassPage):
         self._schedule_opening = None
         self._schedule_open_toast = None
         self._discover_signals.featured_backdrop.connect(self._on_featured_backdrop)
+        self._discover_signals.featured_overlay.connect(self._on_featured_overlay)
         self._discover_signals.history_cover.connect(self._on_history_cover)
         # History row key -> (cover label, title), refilled by every
         # _build_history; nothing in it outlives that rebuild.
@@ -2431,6 +2474,17 @@ class TrackerPage(GlassPage):
             # tell this page anything.
             self._build_history()
         self._remember_view_state()
+
+    def page_search_field(self):
+        """Ctrl+F's target here: the Discover search box.
+
+        getattr, not attribute access - the Discover tab is built on
+        first use (_show_discover), so on a page whose remembered
+        section is Saved this attribute does not exist yet. main.py
+        shows PAGE_SEARCH_SECTION before calling, which is what builds
+        it; None only ever means a build that failed, and main falls
+        through rather than pretending the key did something."""
+        return getattr(self, "discover_search", None)
 
     def _search_query(self) -> str:
         # getattr because _refresh_grid can run before the box exists on
@@ -4003,7 +4057,8 @@ class TrackerPage(GlassPage):
         cards = [self._build_discover_card(kind, index, item, entry_type,
                                            card_run)
                  for index, item in enumerate(results)]
-        self._category_body_layout.addWidget(self._build_card_grid(cards))
+        self._category_body_layout.addWidget(
+            self._build_card_grid(cards, self.category_body))
 
     def _discover_subheading(self, kind="") -> str:
         if self._discover_query:
@@ -4105,7 +4160,8 @@ class TrackerPage(GlassPage):
             # into a grid instead (the owner's ask: "when the row is
             # full start a new row") - thirty matches on one sideways
             # line hides all but the first handful.
-            content = (self._build_card_grid(cards) if self._discover_query
+            content = (self._build_card_grid(cards, self.discover_body)
+                       if self._discover_query
                        else self._build_card_strip(cards))
             rest = rows[DISCOVER_STRIP_CHUNK:]
             if rest:
@@ -4208,15 +4264,38 @@ class TrackerPage(GlassPage):
         _clear_layout(layout)
         layout.addWidget(widget)
 
-    def _build_card_grid(self, cards):
+    def _build_card_grid(self, cards, host=None):
         """Search results as a wrapping grid - the genre-browse page's
         shape, not the strips'. Column count is taken from the body's
-        real width at build time; a search re-runs this whole build, so
-        there is no live re-wrap to keep correct, only this one. The
-        fallback is for a body that hasn't been laid out yet (results
-        landing before the first show), where width() is meaningless."""
+        real width at build time; a search or a fold re-runs this whole
+        build, so there is no live re-wrap to keep correct, only this
+        one.
+
+        **`host` is the body this grid will actually live in, and
+        passing it is the fix for "9 per row when the sidebar is
+        folded".** This measured `discover_body` unconditionally - and a
+        category grid does not live there. `discover_body` sits inside
+        the hidden Discover tab, which Qt never re-lays-out while it is
+        hidden, so it reports its **expanded** width forever. Measured 22
+        August 2026 across four folds: the column count came back 8
+        folded and 8 unfolded, and `relayout_for_sidebar` spent 21-40ms
+        each time recomputing the same number. The arithmetic was right
+        the whole time; it was reading a widget that could not change.
+
+        Falls back through the other body and then the page's own width
+        for the case a caller has no laid-out host yet - results landing
+        before the first show, where width() is meaningless. The page is
+        always laid out, and `_GRID_CHROME` is what separates its width
+        from a body's."""
         span = POSTER_SIZE[0] + 20 + 14           # card + grid spacing
-        width = self.discover_body.width()
+        width = 0
+        for candidate in (host, self.discover_body, self.category_body):
+            usable = _viewport_width(candidate)
+            if usable > span:
+                width = usable
+                break
+        if width <= span and self.width() > span + _GRID_CHROME:
+            width = self.width() - _GRID_CHROME
         columns = max(2, width // span) if width > span else 5
         host = QWidget(objectName="Bare")
         grid = QGridLayout(host)
@@ -4490,12 +4569,29 @@ class TrackerPage(GlassPage):
         column.addLayout(chip_row)
         column.addStretch(1)
 
+        # The title treatment (a logo PNG) drawn in place of the typed
+        # name when the APIs have one - the owner's ask, 22 August 2026.
+        # Hidden until it lands; the text below carries the title until
+        # then and for anything with no logo.
+        self._featured_logo = QLabel("")
+        self._featured_logo.setVisible(False)
+        self._featured_logo.setStyleSheet("background: transparent;")
+        # A soft halo so the logo reads over the backdrop whatever its own
+        # colour - see the same treatment on Home's hero logo.
+        logo_shadow = QGraphicsDropShadowEffect(self._featured_logo)
+        logo_shadow.setBlurRadius(28)
+        logo_shadow.setOffset(0, 0)
+        logo_shadow.setColor(QColor(0, 0, 0, 200))
+        self._featured_logo.setGraphicsEffect(logo_shadow)
+        column.addWidget(self._featured_logo)
+
         title = QLabel(title_text)
         title.setWordWrap(True)
         title.setStyleSheet(
             f"color: {theme.TEXT}; font-size: 27pt; font-weight: 800;"
             f" background: transparent;")
         column.addWidget(title)
+        self._featured_title_label = title
 
         facts = QHBoxLayout()
         facts.setSpacing(10)
@@ -4570,18 +4666,37 @@ class TrackerPage(GlassPage):
     def _featured_backdrop_worker(self, item, entry_type, run):
         """The hero's ground, off the UI thread: TMDB's backdrop by IMDb
         id for the video kinds (artwork caches it on disk, so a revisit
-        costs a stat), AniList's banner for reading - the same two
-        sources the details page grounds itself with. Never raises."""
+        costs a stat), hero_art's chain for reading. Never raises.
+
+        The reading side used to take AniList's *cover* when AniList had
+        no banner and hand it straight to HeroBanner, which expands it,
+        so a 460x624 portrait was drawn as the middle 17% of itself at
+        2.75x. hero_art composes a real ground from a cover instead; see
+        that module for what was rendered and compared. `poster` is the
+        row's own MangaDex cover, already resolved by discover._reading_row
+        and so free as a last resort - but at .256.jpg, which is a
+        thumbnail, so the 512 copy is asked for instead."""
+        from helpers import artwork
         try:
             if entry_type in MANGA_TYPES:
-                url = anilist.fetch_manga_artwork(item.get("title") or "")
-                found = images.download(url) if url else None
+                from helpers import hero_art
+                poster = str(item.get("poster") or "")
+                found, kind = hero_art.reading_ground(
+                    item.get("title") or "",
+                    cover_url=poster.replace(".256.jpg", ".512.jpg"))
                 if found:
                     self._discover_signals.featured_backdrop.emit(str(found), run)
+                # A reading title's logo, when the same franchise is an
+                # anime/series TMDB has a title treatment for (Kingdom,
+                # Hunter x Hunter, One Piece - the owner's ask); and drop
+                # the typed name when a real AniList banner already carries
+                # it, keep it over a composed cover ground (image 2).
+                logo = artwork.logo_path_by_title(item.get("title") or "")
+                self._discover_signals.featured_overlay.emit(
+                    str(logo or ""), bool(logo) or (kind == "banner"), run)
                 return
             if not item.get("imdb_id"):
                 return
-            from helpers import artwork
             probe = {"imdb_id": item.get("imdb_id"),
                      "title": item.get("title") or ""}
             # Small copy first, then the full-resolution original - the
@@ -4594,6 +4709,11 @@ class TrackerPage(GlassPage):
             full = artwork.backdrop_path(probe)
             if full:
                 self._discover_signals.featured_backdrop.emit(str(full), run)
+            # The video logo (TMDB title treatment) in place of the typed
+            # title; fails soft to text when the title has none.
+            logo = artwork.logo_path(probe)
+            self._discover_signals.featured_overlay.emit(
+                str(logo or ""), bool(logo), run)
         except Exception:
             return          # no art just keeps the banner's flat panel
 
@@ -4608,6 +4728,43 @@ class TrackerPage(GlassPage):
             # copy - it is the same picture, and dissolving a photo into
             # itself reads as a flicker.
             banner.set_backdrop(path, fade=not banner.has_backdrop())
+        except RuntimeError:
+            pass    # the tab rebuilt under the fetch
+
+    def _on_featured_overlay(self, logo_path, hide_title, run):
+        """The featured banner's title treatment. The logo replaces the
+        typed title; a real AniList reading banner (hide_title, no logo)
+        drops the text with nothing over it, because the banner already
+        carries the name. Same shape as Home's _apply_hero_overlay."""
+        if run != self._discover_run:
+            return
+        logo_label = getattr(self, "_featured_logo", None)
+        title_label = getattr(self, "_featured_title_label", None)
+        if logo_label is None or title_label is None:
+            return
+        pixmap = None
+        if logo_path:
+            try:
+                dpr = logo_label.devicePixelRatioF() or 1.0
+                pixmap = images.logo_pixmap(logo_path, 84, dpr)
+                if pixmap.isNull():
+                    pixmap = None
+                elif pixmap.width() / dpr > 480:
+                    pixmap = pixmap.scaledToWidth(
+                        int(480 * dpr),
+                        Qt.TransformationMode.SmoothTransformation)
+                    pixmap.setDevicePixelRatio(dpr)
+            except Exception:
+                pixmap = None
+        try:
+            if pixmap is not None:
+                logo_label.setPixmap(pixmap)
+                logo_label.setVisible(True)
+                title_label.setVisible(False)
+            else:
+                logo_label.clear()
+                logo_label.setVisible(False)
+                title_label.setVisible(not hide_title)
         except RuntimeError:
             pass    # the tab rebuilt under the fetch
 

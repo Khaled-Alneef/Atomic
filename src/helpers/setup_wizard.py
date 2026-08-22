@@ -40,7 +40,8 @@ LABEL_COLUMN_WIDTH = 190
 _ENTRY_FILES = ("tracker.json", "series.json", "games.json",
                 "apps.json", "websites.json")
 
-_ICON_PATH = Path(__file__).resolve().parent.parent / "atomic_icon.png"
+_ICON_PATH = (Path(__file__).resolve().parent.parent
+              / "assets" / "atomic_icon.png")
 
 
 def show_on_first_run(window):

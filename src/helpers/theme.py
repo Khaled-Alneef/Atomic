@@ -136,20 +136,51 @@ FONT_FAMILY_NAV_FALLBACKS = (FONT_FAMILY_NAV, "Segoe UI Semibold", "Segoe UI")
 FONT_STACK_NAV = ", ".join(f'"{name}"' for name in FONT_FAMILY_NAV_FALLBACKS)
 NAV_FONT_SIZE = 13
 
-# Fallback marker for a nav row whose section has no glyph in NAV_ICONS
-# below. Expanded rows lead with the section's own Fluent glyph now
-# (Harbor's icon+label rows); the bullet only ever appears for an
-# unmapped key, so a new section still gets a readable row.
+# Fallback marker for a nav row whose section has no icon in NAV_ICONS
+# below, and for one whose PNG is missing from the bundle. Expanded rows
+# lead with the section's own icon; the bullet only ever appears for an
+# unmapped key, so a new section still gets a readable row instead of a
+# blank one - which is the failure mode that matters, since
+# images.tinted_asset answers a missing file with a *null* pixmap and Qt
+# draws that as nothing at all, silently.
 NAV_BULLET = "◈"
 
-# Per-section glyphs: beside the label when the sidebar is expanded,
-# alone and centred when it is collapsed - one symbol per section at
-# both widths, so folding the rail never swaps the icon out from under
-# the user. Deliberately from the Segoe icon fonts that ship with
-# Windows rather than emoji: these are monochrome and inherit whatever
-# color the QSS gives the row, so they pick up the nav's normal/hover/
-# selected colors automatically, while emoji would render in their own
-# fixed colors and clash with the theme.
+# **Every rail row's icon is a bundled PNG now, not a font codepoint**
+# (the owner's sheet of 18, 22 August 2026). The files are alpha-only -
+# white RGB with the shape in the alpha - each trimmed to its ink and
+# padded back to a centred square with a 10% margin, so
+# images.tinted_asset can recolour one with SourceIn and hand back a
+# square whose ink is already centred in it. That squareness is what
+# lets the folded rail centre every row on one axis without a
+# per-shape offset table: main.py used to carry three tuned constants
+# for exactly two hand-drawn icons, and none of them are needed now.
+#
+# Recoloured rather than shipped gold: the row's colour is a state
+# (muted at rest, TEXT selected or hovered), and a coloured PNG would
+# ignore it the same way an emoji did - which is why these are not
+# emoji, and was already why they were not emoji when they were font
+# glyphs.
+RAIL_ICON_DIR = "assets/icons"
+
+
+def rail_icon(name: str) -> str:
+    """`name` as the path images.tinted_asset wants, relative to the
+    asset root. Written as a call rather than typed out per row so the
+    tables below read as a mapping and the directory lives in one place.
+
+    The `.png` suffix is also what main._style_rail_item keys off to
+    tell an icon row from a glyph one - a Segoe private-use codepoint
+    can never end in it, so the test cannot go wrong on a future entry.
+    """
+    return f"{RAIL_ICON_DIR}/{name}.png"
+
+
+# The Segoe icon fonts still dress the Downloads, Settings, Back and
+# fold-arrow *buttons*, and theme.NAV_BULLET's fallback row - the
+# owner's sheet has no icon for any of them, so they keep their Fluent
+# glyphs and the two font stacks below stay live. Monochrome and
+# inheriting the row's colour is why they were chosen over emoji, and
+# the PNGs above are tinted for exactly the same reason.
 FONT_FAMILY_ICONS = "Segoe Fluent Icons"
 FONT_FAMILY_ICON_FALLBACKS = (FONT_FAMILY_ICONS, "Segoe MDL2 Assets", FONT_FAMILY)
 # Same chain in the form a QSS font-family property wants. Needed
@@ -158,18 +189,21 @@ FONT_FAMILY_ICON_FALLBACKS = (FONT_FAMILY_ICONS, "Segoe MDL2 Assets", FONT_FAMIL
 # showing one of these glyphs has to be handed the family here too, or
 # it renders the codepoint as a missing-glyph box.
 FONT_STACK_ICONS = ", ".join(f'"{name}"' for name in FONT_FAMILY_ICON_FALLBACKS)
-# Anime merged into Movies & Series (the owner's ask - one watch page
-# under the camera glyph), so the monitor glyph the separate Anime entry
-# carried left with it.
+# Page key -> icon file. The two names that do not match their key are
+# the tracker pages: the key is "manga"/"series" because that is what
+# saved nav orders and the JSON files already say (see nav_config), and
+# the *rows* read "Read"/"Watch", so the artwork is reading.png and
+# watching.png. Anime merged into the Watch page long ago, so anime.png
+# belongs to the cat_anime section (main.SECTION_ICONS), not to a nav row.
 NAV_ICONS = {
-    "home": "",      # Home
-    "manga": "",     # ReadingMode
-    "series": "",    # Video
-    "games": "",     # Game (controller)
-    "apps": "",      # AllApps
-    "websites": "",  # Globe
+    "home": rail_icon("home"),
+    "manga": rail_icon("reading"),
+    "series": rail_icon("watching"),
+    "games": rail_icon("games"),
+    "apps": rail_icon("apps"),
+    "websites": rail_icon("websites"),
 }
-SETTINGS_ICON = ""   # Setting (gear)
+SETTINGS_ICON = ""   # Setting (gear) - a button, not a rail row
 
 RADIUS_SM = 8
 RADIUS = 12

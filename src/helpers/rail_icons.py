@@ -20,7 +20,7 @@ tagged with it (the same rule the sidebar logo follows - see
 .claude/rules/ui.md). The stroke weight is matched to Segoe Fluent's own
 at the sizes the rail uses, measured against the glyph rows beside them.
 
-Pixmaps are cached per (name, size, colour, lead, ink_left, ratio): the
+Pixmaps are cached per (name, size, colour, lead, ink_center, ratio): the
 rail restyles every row on every fold, and re-drawing four paths per row
 per fold is work for nothing.
 """
@@ -140,7 +140,11 @@ def ink_box(name: str) -> QRectF:
     wide) and the cat's 2.2-21.8 (19.6 wide). Left-aligning them by
     canvas alone would therefore leave the bookmark 3.5 units right of
     the cat, which is most of the misalignment the owner has reported
-    three times."""
+    three times.
+
+    Vertically both shapes *are* already centred - the bookmark's ink
+    spans y 2.4-21.6 and the cat's 3.2-20.8, both about y=12.0, the
+    grid's own middle - which is why only x is corrected below."""
     found = _bounds.get(name)
     if found is not None:
         return found
@@ -156,8 +160,29 @@ def ink_box(name: str) -> QRectF:
     return box
 
 
+def ink_center_for_left(name: str, size: int, ink_left: float) -> float:
+    """The `ink_center` that puts this shape's ink box at `ink_left`.
+
+    Two contexts want two different rules and both are right:
+
+      * the **folded** rail shows the icon alone, so it wants the ink
+        *centred* on the rail;
+      * the **expanded** rail shows icon-then-label down a column, so it
+        wants every ink box to start on the same x, or the labels line
+        up while the pictures do not.
+
+    A single shared centre cannot do both, because the two shapes are
+    different widths - the bookmark's ink is 12.6 grid units and the
+    cat's 19.6, so centring both leaves their left edges 3.5 units
+    apart. Measured on the real window: with one shared centre the cat
+    started at x=11 and the bookmark at x=14."""
+    box = ink_box(name)
+    per_unit = float(size) / _GRID
+    return float(ink_left) + box.width() * per_unit / 2.0
+
+
 def pixmap(name: str, size: int, color: str, lead: int = 0,
-           ink_left: float = 0.0) -> QPixmap:
+           ink_center: float = None) -> QPixmap:
     """`name` drawn at `size` logical pixels in `color`. Cached.
 
     `lead` widens the pixmap by that many blank columns on the right.
@@ -167,34 +192,50 @@ def pixmap(name: str, size: int, color: str, lead: int = 0,
     3px left of every glyph row's (measured on a real-window grab: ink
     at x=58 against x=61). The pad has to be in the pixmap itself.
 
-    `ink_left` is where the artwork's **ink** starts, in logical pixels
-    from the canvas's left edge - not where the 24-unit grid starts.
-    That distinction is the whole point:
+    `ink_center` is where the artwork's **ink box** should be centred, in
+    logical pixels from the canvas's left edge - not the canvas's centre
+    and not the ink's left edge. Defaults to the middle of the icon
+    square. It is a painter coordinate, so it names a pixel *edge*: ink
+    centred on 9.0 measures its centroid at pixel index 8.5, and the
+    caller's constant has to carry that half pixel (main.py does, and
+    says why).
 
-    - a view puts a decoration's left edge exactly where a text-only
-      row's text begins, so ink at `ink_left=0` lands within a pixel of
-      where a Segoe glyph's own ink lands (measured 22 August 2026:
-      glyph ink starts at x=8-9 in an expanded row, x=8-10 folded);
-    - the two shapes carry very different slack inside the grid (see
-      `ink_box`), so any scheme that positions the *canvas* leaves them
-      3.5 grid units apart from each other whatever it does to the pair.
+    **Third attempt at this, and the first two were each measured right
+    and read wrong.** Measured here 22 August 2026 on the folded section
+    rail, lit-pixel box of each row, x relative to the row box, with the
+    artwork placed by its ink's *left edge* - the state this replaces:
 
-    This replaced a `nudge` that shifted the artwork left inside an
-    unchanged canvas. Nudge was a centre-matching fix and centres were
-    never the complaint: measured, every folded row already centred on
-    x=18.0 while the bookmark's ink began at 13 against the calendar's
-    10 and the camera's 8. In a vertical stack the eye lines up edges,
-    so an 11px-wide bookmark centred with a 21px camera reads as
-    indented - which is the owner's "move it to the left a bit",
-    reported three times.
+        Saved  (drawn)  bbox  9..20  centre 14.5
+        Anime  (drawn)  bbox  9..26  centre 17.5
+        glyph rows      centres 17.0 .. 18.5, mean 18.0
 
-    Padding still cannot do this job in a folded rail, which is why the
-    offset is baked into the paint: the view reserves exactly
+    The canvas-centred attempt before it is reported rather than measured
+    - it was gone by the time this was written - but its own note records
+    every row centring on 18.0, which is what makes the pair of failures
+    make sense: it centred a *box* with unequal slack in it.
+
+    Canvas-centring is not ink-centring here, because neither shape is
+    centred inside its own 24-unit grid with the same slack: the
+    bookmark's ink is 12.6 units wide and the cat's 19.6 (see
+    `ink_box`). Edge-aligning is not centring either - a shared left
+    edge puts the narrower shape's *mass* left of the wider one's by
+    half the difference, which for bookmark against camera is 3.5px in a
+    36px rail, and that is precisely what the owner kept seeing.
+
+    So the ink box itself is centred, and the caller says on what axis.
+    Both shapes then land on one axis as each other and on the glyph
+    rows' own optical centre - which is what the eye reads down a narrow
+    column, since a glyph row's ink is likewise not centred in its cell.
+
+    Padding cannot do this job in a folded rail, which is why the offset
+    is baked into the paint: the view reserves exactly
     `option.decorationSize`, and a pixmap wider than that is scaled
     *down* to fit rather than centred - lead=2 moved the icon not one
     pixel and quietly shrank it ~9%."""
+    if ink_center is None:
+        ink_center = size / 2.0
     ratio = _ratio()
-    key = (name, int(size), str(color), int(lead), round(float(ink_left), 2),
+    key = (name, int(size), str(color), int(lead), round(float(ink_center), 2),
            ratio)
     found = _cache.get(key)
     if found is not None:
@@ -207,12 +248,21 @@ def pixmap(name: str, size: int, color: str, lead: int = 0,
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     scale = device / _GRID
     painter.scale(scale, scale)
-    # In grid units, so it reads in the same coordinates the paths do.
-    # `ink_left` is logical px, and one logical px is _GRID/size grid
-    # units at this size - the device ratio cancels, which is why this
-    # holds on a 125% display without a second term.
-    painter.translate(float(ink_left) * (_GRID / float(max(1, size)))
-                      - ink_box(name).left(), 0.0)
+    box = ink_box(name)
+    # Logical px per grid unit at this size. The device ratio cancels -
+    # the painter is already scaled by it - which is why this holds on a
+    # 125% display without a second term.
+    per_unit = float(size) / _GRID
+    half = box.width() * per_unit / 2.0
+    # Clamped into the icon square, never into the `lead` columns: ink
+    # outside the canvas is ink clipped off, and ink in the lead is ink
+    # in the gap the label needs. Nothing reaches the clamp at today's
+    # numbers - the cat is the widest shape and the tightest fit, and an
+    # expanded row asks for 8.85 against a limit of 8.575 - but it is
+    # 0.3px of headroom, so anyone re-aiming the axis needs the guard
+    # rather than a clipped whisker.
+    target = min(max(float(ink_center), half), max(half, size - half))
+    painter.translate(target / max(per_unit, 1e-6) - box.center().x(), 0.0)
     pen = QPen(QColor(color))
     pen.setWidthF(_STROKE)
     # Round joins and caps, because Fluent's are: a mitred corner on the
@@ -230,13 +280,13 @@ def pixmap(name: str, size: int, color: str, lead: int = 0,
 
 
 def icon(name: str, size: int, color: str, highlight: str,
-         lead: int = 0, ink_left: float = 0.0) -> QIcon:
+         lead: int = 0, ink_center: float = None) -> QIcon:
     """A two-mode QIcon: `color` at rest, `highlight` when the row is
     selected. The rail's own hover state is handled by the delegate (see
     main._RailDelegate) - QStyle only ever asks an icon for Normal,
     Disabled or Selected."""
-    built = QIcon(pixmap(name, size, color, lead, ink_left))
-    built.addPixmap(pixmap(name, size, highlight, lead, ink_left),
+    built = QIcon(pixmap(name, size, color, lead, ink_center))
+    built.addPixmap(pixmap(name, size, highlight, lead, ink_center),
                     QIcon.Mode.Selected)
     return built
 

@@ -263,6 +263,24 @@ def set_auto_pick_source(enabled: bool):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_blur_episode_stills() -> bool:
+    """Whether the episode rows' stills are drawn blurred (Settings >
+    Watching). The owner asked for the option because a still is a
+    picture of the episode you have not watched yet.
+
+    **Defaults off.** The stills were asked for in the same breath, and
+    a feature that arrives smeared until a checkbox is found reads as
+    broken rather than as careful - the guard is one click away for
+    whoever wants it. See windows.details._blurred_still."""
+    return bool(_load().get("blur_episode_stills", False))
+
+
+def set_blur_episode_stills(enabled: bool):
+    data = _load()
+    data["blur_episode_stills"] = bool(enabled)
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 

@@ -335,13 +335,63 @@ BOTTOM_GAP = 16
 # ~900px viewport, ~121 notches on the 31,365px Kingdom chapter
 # measured earlier. Raised from Qt's 60 in the first place so a long
 # webtoon does not need five hundred.
-WHEEL_STEP_PX = 260
+#
+# 22 August 2026: still "too fast per wheel notch" at 260 - the fourth
+# report of the same direction in a row (640->460->380->320->260, each
+# one a "still too fast"/"slower again"). The last two steps down were
+# only -60 each and each still came back as too fast, so this one moves
+# further rather than repeating another timid -60: 180, a clean one
+# fifth of the ~900px viewport (was a bit over a quarter) and ~174
+# notches on the 31,365px Kingdom chapter (was ~121). No smooth-scroll
+# animation sits on top of this to re-tune alongside it - a notch is one
+# immediate bar.setValue, not an animated tween (checked: no
+# QPropertyAnimation/QEasingCurve/QScroller anywhere in this file) - so
+# a smaller step cannot go "sluggish" against a mismatched animation
+# duration the way it could if one existed; it only ever changes how far
+# one notch moves.
+WHEEL_STEP_PX = 180
 
-# The gap drawn between pages, per medium. Zero for the vertical strips
-# - a webtoon's panels are cut mid-image and any spacing draws a seam
-# through the artwork - and a sliver for manga only, whose pages are
+# The gap drawn between pages. Zero for the vertical strips - a
+# webtoon's panels are cut mid-image and any spacing draws a seam
+# through the artwork - and a sliver for paged manga, whose pages are
 # discrete printed pages: butted hard together they read as one long
 # unbroken scan, which is what the owner asked to have visibly broken.
+#
+# **Keyed on the page's shape, not on the entry's declared type**, as of
+# 22 August 2026 - the same signal and the same threshold the width uses
+# (STRIP_ASPECT_MIN), deliberately not a second test of its own. Two
+# detections that can disagree would eventually cut a manga's seam
+# through a webtoon, which is the bug this replaces: the gap was keyed
+# on the type, and measured over the owner's own history.json almost
+# everything he reads as a long strip is typed "Manga" (Kingdom, One
+# Piece, The Eternal Supreme - only three entries carry Manhwa or Manhua
+# at all), so every webtoon he opened got manga's 6px drawn straight
+# across artwork that had been sliced mid-panel.
+#
+# Measured after, driving the real ReaderPage with pages of the shapes
+# his sources actually send: a strip page typed "Manga" opens at 6 and
+# settles at **0**; One Piece 1644x2400 (aspect 1.46) and Kingdom
+# 1325x1900 (1.43) stay at **6**; a strip typed Manhwa never leaves 0.
+# The two slots then abut exactly - a 120x28px crop of the join at 8x
+# shows one unbroken block of artwork with the diagonal running
+# through it, against a solid 6px band of page background before.
+#
+# **Every page votes, and the vote latches** (22 August 2026, second
+# pass). The verdict used to be taken from the first page that finished
+# decoding, which is not page 1: three pages are requested at once and
+# the smallest wins the race - on Swordmaster's Youngest Son ch.207,
+# page 2 (800x14925) reported before page 1 (800x18835), measured live.
+# A chapter opening on a short notice panel or a credits slice would
+# have taken 6px for the whole chapter with nothing able to correct it
+# afterwards. `_on_page_shape` now hears from every page and one strip
+# anywhere closes the gap for good; it never re-opens inside a chapter.
+#
+# Verified against the owner's own two long-strip series, live, driving
+# the real ReaderPage and reading the join off the screen: The Eternal
+# Supreme (meshmanga, 800x9000, aspect 11.25) and Swordmaster's Youngest
+# Son (olympustaff, 800x14925-20000, aspect 18.7-25.0) both report
+# within 0.25-0.42s of the chapter opening, settle at 0, and their slots
+# abut to the pixel (0 / 8550 / 17100 and 0 / 17893 / 32072).
 MANGA_PAGE_GAP_PX = 6
 
 # Down/Up arrow, same reasoning as the wheel: 120 was a tenth of a
@@ -682,9 +732,20 @@ def _decode_page_job(signals, run, index, url, headers, key):
                                 "may have sent an error page instead.")
             return
         target = _decode_size(image.size(), key)
-        if target != image.size():
-            image = image.scaled(target, Qt.AspectRatioMode.KeepAspectRatio,
-                                 Qt.TransformationMode.SmoothTransformation)
+        # **scaledToWidth, not scaled(..., KeepAspectRatio) - the column
+        # was stepping 1px sideways at every page join.** KeepAspectRatio
+        # re-derives the width from the *rounded* target height by integer
+        # division, so the answer depends on the page's own height: at the
+        # same 95% decode, Swordmaster's Youngest Son ch.207 page 1
+        # (800x18835) came out **759** wide and page 2 (800x14925) **760**
+        # - measured 22 August 2026, screen-read at the join, left edge
+        # x=322 above it and x=321 below. Every page of a chapter is cut
+        # to one width, so asking for that width and letting the height
+        # follow makes every slot in the strip agree, and AlignHCenter
+        # stops shifting the artwork under the reader.
+        if target.width() != image.width():
+            image = image.scaledToWidth(
+                target.width(), Qt.TransformationMode.SmoothTransformation)
         signals.decoded.emit(run, index, image, key)
     except Exception as error:                       # pragma: no cover
         logs.exception("reader page decode failed")
@@ -991,14 +1052,40 @@ class _ChapterListView(QWidget):
                               lambda: self._build_more(first, token))
 
     def _build_rows(self, start, stop, token):
-        """One chunk of rows, unless a newer build has superseded this."""
+        """One chunk of rows, unless a newer build has superseded this.
+
+        Returns whether the chunk actually landed, so a chained
+        `_build_more` stops instead of queueing the next one.
+
+        **The token guards against a newer build; it does not guard
+        against this panel being gone**, and that gap was fatal. The
+        chunks are chained on `singleShot`, which keeps no reference to
+        the widget, so closing the chapter list between chunks left a
+        timer that fired into a deleted layout:
+
+            reader.py:1035 <lambda> -> _build_more -> _build_rows
+            RuntimeError: wrapped C/C++ object of type QVBoxLayout
+                          has been deleted
+
+        (from the owner's own log, 22 August 2026). PyQt6 turns an
+        exception escaping a slot into `qFatal` - an immediate abort,
+        not a traceback - so the whole window went. That is the owner's
+        "it shows a small window then closes it in a moment": the list
+        was building normally and the process died mid-fill."""
         if token != self._build_token:
-            return
+            return False
         chapters = self._built_from or []
-        for index in range(start, min(stop, len(chapters))):
-            self._rows.insertWidget(index,
-                                    self._build_row(index, chapters[index]))
-        self._update_marks(*self._marks)
+        try:
+            for index in range(start, min(stop, len(chapters))):
+                self._rows.insertWidget(
+                    index, self._build_row(index, chapters[index]))
+            self._update_marks(*self._marks)
+        except RuntimeError:
+            # The panel went away between chunks. Move the token so any
+            # timer already queued behind this one gives up too.
+            self._build_token += 1
+            return False
+        return True
 
     def _build_more(self, start, token):
         """The next chunk, then hand the event loop back. Chained on a
@@ -1010,7 +1097,8 @@ class _ChapterListView(QWidget):
             return
         chapters = self._built_from or []
         stop = min(start + self.CHUNK, len(chapters))
-        self._build_rows(start, stop, token)
+        if not self._build_rows(start, stop, token):
+            return          # superseded, or the panel is gone
         if stop < len(chapters):
             QTimer.singleShot(self.CHUNK_DELAY_MS,
                               lambda: self._build_more(stop, token))
@@ -1306,6 +1394,12 @@ class _StripView(QScrollArea):
     # not a spread has been decoded. See MEDIUM_TARGET_WIDTH: it is what
     # lets the reader open every series of a medium at one size.
     pageWidthKnown = Signal(int, float)
+    # ...and the shape of *every* page that decodes, not just the first.
+    # Separate from the signal above because the two answers have
+    # different lifetimes: the width may only be acted on once (it
+    # re-decodes the whole chapter), while the gap has to keep listening
+    # - see MANGA_PAGE_GAP_PX for the page that made that necessary.
+    pageShapeKnown = Signal(float)          # height / width
 
     def __init__(self, store: _PageStore, parent=None):
         super().__init__(parent)
@@ -1496,8 +1590,16 @@ class _StripView(QScrollArea):
 
     def set_page_gap(self, gap):
         """The space drawn between page slots - see MANGA_PAGE_GAP_PX for
-        which media get one and why the strips must not."""
-        self._column.setSpacing(max(0, int(gap)))
+        which pages get one and why a strip's must not.
+
+        A no-op when nothing changes, because every page of a paged manga
+        now votes for the same 6 (see _on_page_shape) and
+        QLayout.setSpacing invalidates the column whether or not the
+        number moved - forty pages would be forty relayouts of a chapter
+        that is not re-flowing at all."""
+        gap = max(0, int(gap))
+        if gap != self._column.spacing():
+            self._column.setSpacing(gap)
 
     def eventFilter(self, obj, event):
         """Wheel over either scrollbar scrolls the strip, not the bar.
@@ -1614,6 +1716,11 @@ class _StripView(QScrollArea):
         slot.loaded = True
         if not is_spread:
             self._typical_width = max(1, round(pixmap.width() / ratio))
+            # Every page, every time - the gap is a *chapter* verdict and
+            # one page is a poor witness for it. Cheap: a float across a
+            # queued connection, a handful of times per chapter.
+            self.pageShapeKnown.emit(
+                pixmap.height() / max(1.0, float(pixmap.width())))
             if not self._reported_width:
                 # Back out the zoom this was decoded at, so what leaves
                 # here is the scan's own width and not this session's.
@@ -1703,6 +1810,9 @@ class ReaderPage(GlassPage):
         self._base_scale = MEDIUM_BASE_SCALE.get(
             str(self.entry.get("type") or "").strip().lower(),
             DEFAULT_BASE_SCALE)
+        # Whether a page of *this* chapter has been seen to be a strip.
+        # Reset per chapter in _show_chapter; see _on_page_shape.
+        self._chapter_is_strip = False
         self._closed = False
         self._last_scroll = 0
         # The chapter controls are hover-only, so this is the one thing
@@ -1759,8 +1869,14 @@ class ReaderPage(GlassPage):
         self._strip_view.zoomRequested.connect(
             lambda step: self._change_zoom(ZOOM_STEP * step))
         self._strip_view.pageWidthKnown.connect(self._on_page_width)
-        # Manga only - see MANGA_PAGE_GAP_PX. Read once here: the type
-        # cannot change while the reader is open.
+        self._strip_view.pageShapeKnown.connect(self._on_page_shape)
+        # The opening guess only: the shape overrules it in
+        # _on_page_shape the moment a page decodes (see
+        # MANGA_PAGE_GAP_PX). Nothing can know the shape before then, so
+        # the type is what there is to guess with - and it is right for
+        # every correctly typed entry, which is the whole reason to keep
+        # it rather than open every chapter at one fixed gap and re-flow
+        # half of them.
         if str(self.entry.get("type") or "").strip().lower() == "manga":
             self._strip_view.set_page_gap(MANGA_PAGE_GAP_PX)
 
@@ -2571,6 +2687,11 @@ class ReaderPage(GlassPage):
 
     def _show_chapter(self, start_page=0):
         self._last_scroll = 0
+        # The gap verdict belongs to one chapter and is re-earned by the
+        # next one - see _on_page_shape. The gap itself is left where it
+        # is until a page says otherwise, so a run of strip chapters
+        # never re-flows.
+        self._chapter_is_strip = False
         self._show_only(self._strip_view)
         self._strip_view.rebuild()
         self._strip_view.set_index(start_page)
@@ -2744,7 +2865,11 @@ class ReaderPage(GlassPage):
 
         Falls back to the plain multiplier when the number is not
         credible - see TARGET_SCALE_MIN/MAX. A thumbnail standing in for
-        a page must not be blown up to fill the column."""
+        a page must not be blown up to fill the column.
+
+        The gap is decided off the same threshold but not here - see
+        _on_page_shape, which gets to hear from every page rather than
+        only from this one."""
         medium = str(self.entry.get("type") or "").strip().lower()
         target = MEDIUM_TARGET_WIDTH.get(medium)
         # A page shaped like a strip is one, whatever the entry says.
@@ -2761,6 +2886,32 @@ class ReaderPage(GlassPage):
             return
         self._base_scale = scale
         self._apply_zoom()
+
+    def _on_page_shape(self, aspect):
+        """Whether this chapter is a strip, and so whether it gets a gap.
+
+        **A latch, and it only ever latches one way - see
+        MANGA_PAGE_GAP_PX.** The gap used to be decided by the first page
+        that happened to decode, which is not the first page of the
+        chapter: three pages are requested at once and the *smallest*
+        finishes first (measured on Swordmaster's Youngest Son ch.207 -
+        page 2, 800x14925, reported before page 1's 800x18835). A chapter
+        that opens on a short notice panel or a credits slice would
+        therefore have had manga's 6px cut across every join in it, with
+        nothing left to correct the verdict afterwards.
+
+        So: one strip-shaped page anywhere in the chapter closes the gap
+        for the whole of it, permanently. The asymmetry is deliberate.
+        Being wrong towards 0 costs two printed pages sitting flush;
+        being wrong towards 6 draws a line through artwork that was cut
+        mid-panel, which is the bug being reported."""
+        if self._chapter_is_strip or aspect <= 0:
+            return
+        if aspect >= STRIP_ASPECT_MIN:
+            self._chapter_is_strip = True
+            self._strip_view.set_page_gap(0)
+        else:
+            self._strip_view.set_page_gap(MANGA_PAGE_GAP_PX)
 
     def _apply_zoom(self):
         # The strip is told the *decode* scale - the label and the
@@ -3470,7 +3621,7 @@ def _origin_page_name(window):
 # _launch_music - because closing a window that happened to be carrying
 # the owner's other tabs would be a far worse bug than music that keeps
 # playing.
-_music = {"key": None, "hwnd": None, "tuck": False}
+_music = {"key": None, "hwnd": None, "settled": False}
 
 # Leaving a reader does not close the music instantly: opening a chapter
 # from the details list tears the old reader down and builds a new one,
@@ -3485,15 +3636,61 @@ _music_stop_timer = None
 # first window up, and some put a splash up before the real one - so the
 # sweep keeps going for the whole window rather than stopping on the
 # first hit (see _hush_browser_window).
-_MUSIC_HUSH_S = 4.0
+#
+# 22 August 2026: raised from 4.0 to comfortably outlast
+# _MUSIC_AUTOPLAY_GRACE_MS. sweep() reuses this same loop to watch for
+# the browser stealing focus back *after* being tucked away, and at 4.0
+# that watchdog was already dead before the old _MUSIC_TUCK_MS=6000
+# delay it was meant to cover had even fired - a pre-existing mismatch,
+# not something introduced here, but not worth leaving to get worse.
+# 9.0 = ~1s to first-detect (measured 0.5-0.6s) + the 5.0s grace + about
+# the original's own ~3.5s of post-action watchdog coverage (it used to
+# run from the ~0s bury to its 4.0s deadline).
+_MUSIC_HUSH_S = 9.0
 _MUSIC_HUSH_STEP_MS = 120
 
-# How long the music window stays visible-but-behind before being
-# minimized. Long enough for the page to load and playback to start -
-# an autoplay decision is made when the media element is ready, not on
-# navigation - and short enough that it is out of the way before anyone
-# alt-tabs. See _hush_browser_window.
-_MUSIC_TUCK_MS = 6000
+# How long to leave a freshly-appeared music window completely alone -
+# still foreground, still on top, actually visible - before touching it
+# at all. This replaces _MUSIC_TUCK_MS, which timed the wrong step.
+#
+# 22 August 2026: the owner's report ("music URL open... paused at
+# 0:00/2:56 with the big play button up") pointed straight back to a
+# contradiction already sitting in this file's own comments - they say
+# a fully covered Chromium window is document.hidden exactly like a
+# minimized one, and that Chromium refuses to autoplay unmuted media in
+# a hidden page, and then sweep() (below) pushed the window behind and
+# pulled Atomic's foreground back in the *same tick* it first saw the
+# window - covering it within one _MUSIC_HUSH_STEP_MS (120ms) of it
+# existing, the exact state those comments say kills autoplay. The old
+# _MUSIC_TUCK_MS=6000 delay was real but pointed at the wrong step: it
+# postponed the SW_MINIMIZE call, several seconds after the window had
+# already been fully occluded by the immediate bury+refront above it.
+#
+# Verified live before writing this fix (not just reasoned about): drove
+# the real _open_music_quietly/_hush_browser_window against a real
+# YouTube video, with a throwaway stand-in window for Atomic (never the
+# real one). With the browser window continuously covered from the
+# moment it was first seen (0.53s after launch) onward, a forced peek at
+# the underlying page still showed a black, not-yet-painted frame at
+# +3.0s: by +5.0s it was several seconds into the clip with no "blocked"
+# play-button overlay, so on *this* real, heavily-used Brave profile the
+# video started playing regardless of being covered the whole time -
+# most likely because youtube.com already has a high Media Engagement
+# Index (or Brave's own per-site autoplay permission) on this profile,
+# both of which Chromium documents as exemptions separate from page
+# visibility. Neither is something this code can read or a fresh domain
+# or a cleared profile can be assumed to have, so the grace stays in
+# regardless of that result: it costs nothing where the site is already
+# exempt, and it is the only thing that can help where it is not. Not
+# re-measured against a low-engagement domain - that would mean reading
+# the owner's actual configured URL, which a test must not do (CLAUDE.md
+# rule 5) - so say plainly that this is unconfirmed for that case.
+#
+# 5000, not the 3000 first tried: +3.0s still showed the black,
+# not-yet-painted frame in two separate runs, so anything near there
+# risked burying it at the exact moment it needed to be left alone the
+# most; +5.0s was the first point actually confirmed playing.
+_MUSIC_AUTOPLAY_GRACE_MS = 5000
 
 # The default browser's full path, resolved once and then remembered -
 # including the failure, as "".
@@ -3522,11 +3719,30 @@ def _default_browser_path() -> str:
     to minimize its window (see _hush_browser_window) and, now, to close
     it again (see stop_music)."""
     global _BROWSER_PATH
-    if _BROWSER_PATH is not None:
-        return _BROWSER_PATH
-    _BROWSER_PATH = ""
+    cached = _BROWSER_PATH
+    if cached is not None:
+        return cached
+    # **Resolved into a local and published once, at the end.** Writing
+    # the "" sentinel into the global *before* doing the registry read
+    # is why the reading music never played on the first open of a
+    # session: _open_music_quietly starts the launch thread and then
+    # calls _hush_browser_window on the UI thread, so the worker gets
+    # here first, publishes "", and spends 0.287ms in the registry -
+    # during which _default_browser_exe() reads that "" and
+    # _hush_browser_window returns without installing its sweep at all.
+    # Measured 22 August 2026: **200 runs out of 200** in that order.
+    # With no sweep the music window is never pushed behind Atomic, its
+    # handle is never recorded (so stop_music can never close it), and
+    # the only thing left touching it is the two blind _refront calls,
+    # which bury it under a maximized Atomic - and a fully covered
+    # Chromium window is document.hidden exactly as a minimized one is,
+    # which is the state this whole dance already exists to avoid (see
+    # _hush_browser_window). Second open onwards the value is cached and
+    # everything worked, which is precisely what the owner reported.
+    path = ""
     if os.name != "nt":
-        return _BROWSER_PATH
+        _BROWSER_PATH = path
+        return path
     try:
         import winreg
         with winreg.OpenKey(
@@ -3544,10 +3760,14 @@ def _default_browser_path() -> str:
             exe = command[1:].split('"', 1)[0]
         else:
             exe = command.split(" ", 1)[0]
-        _BROWSER_PATH = exe if os.path.exists(exe) else ""
+        path = exe if os.path.exists(exe) else ""
     except Exception:
-        _BROWSER_PATH = ""     # no association to read: leave it alone
-    return _BROWSER_PATH
+        path = ""              # no association to read: leave it alone
+    # Two threads racing here now both do the same read and store the
+    # same answer, which costs 0.287ms once and cannot be observed;
+    # publishing early cost the music instead.
+    _BROWSER_PATH = path
+    return path
 
 
 def _default_browser_exe() -> str:
@@ -3677,25 +3897,26 @@ def _refront(window):
 
 
 def _hush_browser_window(window, was_foreground):
-    """Put the music window down as soon as it comes up.
+    """Watch for the music window, leave it alone while it starts, then
+    put it down.
 
-    **The show hint does nothing, and that is what this exists for.**
-    ShellExecuteW is asked for SW_SHOWMINNOACTIVE, but a browser opens a
-    normal, focused window regardless - measured, and it does the same
-    when asked for SW_HIDE outright, on both a cold start and a handoff
-    to an already-running instance. So what the owner saw as "a small
-    window opens then closes fast" was never a window closing: it was
-    the browser appearing and then being *covered* half a second later
-    by the re-foreground below. The flash was the gap between the two.
+    **The show hint does nothing.** ShellExecuteW is asked for
+    SW_SHOWMINNOACTIVE, but a browser opens a normal, focused window
+    regardless - measured, and it does the same when asked for SW_HIDE
+    outright, on both a cold start and a handoff to an already-running
+    instance. So what the owner once saw as "a small window opens then
+    closes fast" was never a window closing: it was the browser
+    appearing and then being *covered* by Atomic a moment later. The
+    flash was the gap between the two - which is exactly the gap this
+    function now makes deliberately wide instead of closing fast (see
+    _MUSIC_AUTOPLAY_GRACE_MS).
 
-    The window is therefore minimized rather than asked to arrive
-    minimized. Deliberately narrow about which one: only a window that
-    belongs to this machine's own default http handler *and* was not
-    already the foreground window before the launch. A browser the owner
-    was reading when the reader opened is left where it was, and no
-    other application can be caught by this at all. With no association
-    to read, nothing is touched and the behaviour is what it always
-    was."""
+    Deliberately narrow about which window: only one that belongs to
+    this machine's own default http handler *and* was not already the
+    foreground window before the launch. A browser the owner was reading
+    when the reader opened is left where it was, and no other
+    application can be caught by this at all. With no association to
+    read, nothing is touched and the behaviour is what it always was."""
     exe = _default_browser_exe()
     if not exe or os.name != "nt":
         return
@@ -3707,45 +3928,28 @@ def _hush_browser_window(window, was_foreground):
         try:
             hwnd = user32.GetForegroundWindow()
             if hwnd and hwnd != was_foreground and _window_exe(hwnd) == exe:
-                # Remembered: this is the one window the launch brought
-                # up, and stop_music closes exactly this handle.
-                _music["hwnd"] = int(hwnd)
-                # **Pushed behind, never minimized - minimizing it is why
-                # the music would not start.** This used to call
-                # ShowWindow(SW_MINIMIZE), and a minimized window's page
-                # is `document.hidden` to the browser. Chromium's
-                # autoplay policy refuses to start unmuted media in a
-                # hidden page, so YouTube came up sitting on its big play
-                # button waiting to be clicked - the owner's screenshot,
-                # with a paused player at 0:00 / 2:56.
-                #
-                # HWND_BOTTOM with SWP_NOACTIVATE puts it under Atomic
-                # just as completely, while the window stays *shown* - so
-                # the page is visible as far as the browser is concerned
-                # and playback begins on its own. The re-fronts below
-                # still run, because a browser can raise itself again a
-                # beat after this.
-                user32.SetWindowPos(hwnd, 1, 0, 0, 0, 0,
-                                    0x0001 | 0x0002 | 0x0010)
-                # HWND_BOTTOM=1; SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE.
-                _refront(window)
-                # **Then minimized, once it has had time to start.**
-                # The owner wants it out of the taskbar's way, which is
-                # what the original SW_MINIMIZE did - but minimizing it
-                # *immediately* is what stopped the music playing at all,
-                # because a minimized window's page is document.hidden
-                # and Chromium will not autoplay unmuted media in one.
-                #
-                # Playing first and hiding second gets both: the page is
-                # visible long enough for playback to begin, and once
-                # media is already playing a browser keeps going when the
-                # window is minimized. Scheduled once, not once per
-                # sweep.
-                if not _music.get("tuck"):
-                    _music["tuck"] = True
+                if _music.get("hwnd") is None:
+                    # First sighting of the window this launch brought
+                    # up. Left alone here on purpose - not pushed behind,
+                    # not refronted-over, nothing - for
+                    # _MUSIC_AUTOPLAY_GRACE_MS: touching it at all right
+                    # now is what used to bury it within one
+                    # _MUSIC_HUSH_STEP_MS of existing (see that constant's
+                    # comment). Remembered so stop_music can still close
+                    # exactly this handle even before the grace elapses.
+                    _music["hwnd"] = int(hwnd)
                     QTimer.singleShot(
-                        _MUSIC_TUCK_MS,
+                        _MUSIC_AUTOPLAY_GRACE_MS,
                         lambda h=int(hwnd): _tuck_music_window(h, window))
+                elif _music.get("settled"):
+                    # Already had its grace period and been tucked away
+                    # once - this is the same window stealing focus back
+                    # afterwards (a browser can do that on its own a beat
+                    # later), so reclaim immediately. No reason to grant
+                    # a second grace period to a page that already had
+                    # its one chance to decide whether to autoplay.
+                    user32.ShowWindow(hwnd, 6)         # SW_MINIMIZE
+                    _refront(window)
             if time.monotonic() < deadline:
                 QTimer.singleShot(_MUSIC_HUSH_STEP_MS, sweep)
         except Exception:
@@ -3755,7 +3959,17 @@ def _hush_browser_window(window, was_foreground):
 
 
 def _tuck_music_window(hwnd, window):
-    """Minimize the music window, now that it has had time to start.
+    """Minimize the music window and give Atomic its foreground back, now
+    that _MUSIC_AUTOPLAY_GRACE_MS of being genuinely visible has passed.
+
+    By now the page has either already started playing - in which case
+    minimizing does not stop it, this file's own prior measurements say
+    a browser keeps an already-playing page going once minimized - or it
+    was never going to autoplay hidden or not, in which case tucking it
+    away does not make that worse. Either way Atomic gets refronted
+    unconditionally, even if the window died in the meantime: a reader
+    that lost the foreground for its grace period must always get it
+    back, not only when the tuck itself succeeds.
 
     Guarded on the handle still being ours: the owner may have closed
     the window, or `stop_music` may have. Never raises."""
@@ -3766,7 +3980,8 @@ def _tuck_music_window(hwnd, window):
         user32 = ctypes.windll.user32
         if user32.IsWindow(hwnd):
             user32.ShowWindow(hwnd, 6)      # SW_MINIMIZE
-            _refront(window)
+            _music["settled"] = True
+        _refront(window)
     except Exception:
         pass        # a window that died in the meantime is not a problem
 
@@ -3782,12 +3997,14 @@ def _open_music_quietly(window, entry):
     ShellExecuteW is still asked for SW_SHOWMINNOACTIVE (7), but that
     hint is now known to buy nothing: measured, a browser opens a
     normal focused window whether it is asked for 7 or for SW_HIDE, on
-    a cold start and on a handoff alike. Two things actually work, in
-    this order - _hush_browser_window minimizes the window the launch
-    brought up, and the re-foregrounds below pull Atomic back over
-    whatever held the screen in the meantime. Twice, because a cold
-    browser can take more than half a second to steal focus and a
-    re-front that fires before the theft fixes nothing.
+    a cold start and on a handoff alike. _hush_browser_window is what
+    actually watches for and tucks away the window the launch brought
+    up - deliberately not right away, see _MUSIC_AUTOPLAY_GRACE_MS - and
+    the two re-fronts below are the same safety net they always were:
+    a last resort for the rare case _hush_browser_window never manages
+    to identify the window at all (no browser association to read), so
+    they must not fire any earlier than its own grace period does, or
+    they would bury the window themselves before it has had its chance.
 
     Never raises; no music URL means nothing happens.
 
@@ -3818,6 +4035,11 @@ def _open_music_quietly(window, entry):
         return
     # Opened in a form that starts itself - see _autoplay_url.
     url = _autoplay_url(url)
+    # Resolved here, on this thread, before anything else can want it:
+    # both the launch below and _hush_browser_window ask for it, and the
+    # order they used to ask in is what silenced the first open of every
+    # session (see _default_browser_path). 0.287ms once per run.
+    _default_browser_path()
     # Read *before* the launch: a browser window that already held the
     # foreground is one the owner put there, and is the one window
     # _hush_browser_window must not touch.
@@ -3870,10 +4092,13 @@ def _open_music_quietly(window, entry):
 
     _music["key"] = key
     _music["hwnd"] = None       # filled in by the sweep below
-    _music["tuck"] = False
+    _music["settled"] = False
     _hush_browser_window(window, was_foreground)
-    QTimer.singleShot(500, lambda: _refront(window))
-    QTimer.singleShot(1500, lambda: _refront(window))
+    # Fallback only - see the docstring above. Timed to start only once
+    # _hush_browser_window's own grace period has already ended, so this
+    # cannot bury a window that function is deliberately leaving alone.
+    QTimer.singleShot(_MUSIC_AUTOPLAY_GRACE_MS + 200, lambda: _refront(window))
+    QTimer.singleShot(_MUSIC_AUTOPLAY_GRACE_MS + 1200, lambda: _refront(window))
 
 
 def _music_key(entry):
@@ -3914,7 +4139,7 @@ def stop_music(delay_ms: int = 0):
         return
     _cancel_music_stop()
     hwnd, _music["hwnd"], _music["key"] = _music["hwnd"], None, None
-    _music["tuck"] = False
+    _music["settled"] = False
     if not hwnd or os.name != "nt":
         return
     try:

@@ -23,6 +23,7 @@ or a series with no logo uploaded are all the same answer - None - and
 none of them is worth interrupting playback over.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -297,6 +298,111 @@ def logo_path(entry, timeout: int = DEFAULT_TIMEOUT):
     except Exception:
         return None                 # fail soft; the player shows text
 
+    if not data:
+        return None
+    try:
+        cached.write_bytes(data)
+    except OSError:
+        return None
+    return str(cached)
+
+
+# TMDB's genre id for Animation. A reading title borrows the *anime's*
+# title treatment, so the show carrying the logo has to be the animated
+# one - the safeguard that keeps "Kingdom" off "Animal Kingdom".
+_ANIMATION_GENRE = 16
+# How close the show's name must be to the reading title before its logo
+# is trusted. 0.9, measured 22 August 2026: the anime "Kingdom" scores
+# 1.00 and "Animal Kingdom" 0.67, "The Last Kingdom" 0.61 - so 0.9 keeps
+# the first and drops the other two, and the live-action "One Piece"
+# (not animated) is already gone on the genre test before similarity is
+# even consulted.
+_LOGO_TITLE_THRESHOLD = 0.9
+
+
+def _search_anime_logo(title, timeout):
+    """The logo of the *animated* TV show whose name matches `title`, or
+    None. Strict on purpose - this is a name search, which is how the
+    wrong show gets picked, and a banner drew **"Animal Kingdom"** for a
+    reading entry called "Kingdom" until this required both animation and
+    a near-exact name (measured 22 August 2026, screenshotted).
+
+    Among the search hits it keeps only the animated ones whose name is a
+    0.9+ match, then takes the most popular of those - which is the main
+    series rather than a one-off spin-off. Everything else returns None,
+    and None means the banner keeps its typed title, which is the honest
+    answer to "there is no anime by this name"."""
+    from . import title_match
+    try:
+        found = _get_json(
+            f"{API}/search/tv?query={urllib.parse.quote(title)}", timeout)
+    except Exception:
+        return None
+    best, best_pop = None, -1.0
+    for row in (found.get("results") or [])[:10]:
+        if _ANIMATION_GENRE not in (row.get("genre_ids") or []):
+            continue
+        name = row.get("name") or ""
+        if title_match.similarity(title, name) < _LOGO_TITLE_THRESHOLD:
+            continue
+        popularity = float(row.get("popularity") or 0)
+        if popularity > best_pop:
+            best_pop, best = popularity, row
+    if best is None:
+        return None
+    try:
+        images = _get_json(f"{API}/tv/{best['id']}/images", timeout)
+    except Exception:
+        return None
+    return _best_logo(images)
+
+
+def logo_path_by_title(title, timeout: int = DEFAULT_TIMEOUT):
+    """A local PNG logo found by **title** on TMDB, or None.
+
+    For reading entries, which have no IMDb id but may exist as an anime
+    whose title treatment is exactly the right picture - the owner's ask,
+    22 August 2026: "Kingdom also can use the same logo as the anime
+    Kingdom, also Hunter x Hunter and One Piece from TMDB". Measured that
+    day, all three resolve to the correct anime logo.
+
+    The match is deliberately strict (see _search_anime_logo): a name
+    search is how the wrong show gets picked, and the first version of
+    this drew "Animal Kingdom" for the entry "Kingdom". A wrong logo is
+    only cosmetic, but a *recognisably* wrong one is worse than none, so
+    this requires the animated show and a near-exact name and otherwise
+    returns None - the banner then keeps its typed title.
+
+    The scanlation-team tag a reading title carries ("Kingdom (WAN)") is
+    stripped by trying `title_match.search_variants`, the same cleaner
+    anilist.manga_art uses - measured turning "Kingdom (WAN)" into the
+    "Kingdom" that TMDB answers for.
+
+    Cached on disk under a hash of the title, beside the id-keyed logos,
+    with the same "asked, nothing there" marker so a title TMDB has no
+    logo for is not re-searched on every hero build."""
+    from . import title_match
+    title = (title or "").strip()
+    if not title or not token():
+        return None
+    key = hashlib.sha1(title.lower().encode("utf-8")).hexdigest()[:16]
+    cached, missing = _cached_file(key, ".title.png")
+    if cached.exists() and cached.stat().st_size > 0:
+        return str(cached)
+    if missing.exists():
+        return None
+    try:
+        path = None
+        for variant in title_match.search_variants(title):
+            path = _search_anime_logo(variant, timeout)
+            if path:
+                break
+        if not path:
+            missing.touch()
+            return None
+        data = _download(f"/{LOGO_SIZE}{path}", timeout)
+    except Exception:
+        return None                 # fail soft; the banner keeps its text
     if not data:
         return None
     try:

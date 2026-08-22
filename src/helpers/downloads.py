@@ -202,36 +202,128 @@ def default_folder() -> str:
 
 
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# What reads as a gap between words rather than as part of one: any
+# whitespace, and the brackets a title carries around a disambiguator.
+# "Kingdom (WAN)" is a real title here, and keeping its parentheses would
+# put back the very characters the 22 August 2026 rename removed.
+_SEPARATORS = re.compile(r"[\s()\[\]{}]+")
+# A run of the characters that join words. Collapsed to a single "_" when
+# the run contains one - so " - " between title and subtitle becomes one
+# separator - and left alone when it is a hyphen inside a word
+# ("Spider-Man"). One character class with one quantifier, so it is a
+# single linear pass; the obvious "[-_]*_[-_]*" is ambiguous and
+# backtracks quadratically on a long run of dashes.
+_JOINERS = re.compile(r"[-_]+")
+# Device names Windows still refuses whatever extension follows: CON.mkv
+# is not a file, it is the console. Only ever matched against the whole
+# stem, so the "[Atomic] " prefix means saved_name can never produce one
+# - but _run_chapter names a *folder* from a bare title, and "Nul" is a
+# perfectly plausible manga.
+_RESERVED = frozenset(["CON", "PRN", "AUX", "NUL"]
+                      + [f"COM{d}" for d in "123456789"]
+                      + [f"LPT{d}" for d in "123456789"])
 
 
 def safe_name(text: str, fallback: str = "download") -> str:
     """A filename Windows will accept, without losing the Arabic in it -
     Arabic characters are perfectly legal in a filename and stripping
-    them would turn a title into an empty string."""
-    cleaned = _UNSAFE.sub("_", str(text or "")).strip(" .")
-    return cleaned[:120] or fallback
+    them would turn a title into an empty string.
+
+    Spaces become underscores because the whole saved name is underscore
+    separated (see saved_name); the stripping at the end runs again
+    *after* the length cap, since a cut can land on a trailing "_" or "."
+    and Windows rejects a name ending in either."""
+    cleaned = _UNSAFE.sub("_", str(text or ""))
+    cleaned = _SEPARATORS.sub("_", cleaned)
+    cleaned = _JOINERS.sub(
+        lambda run: "_" if "_" in run.group() else run.group(), cleaned)
+    cleaned = cleaned.strip(" ._-")[:120].strip(" ._-")
+    if cleaned.split(".")[0].upper() in _RESERVED:
+        cleaned = f"_{cleaned}"
+    return cleaned or fallback
+
+
+def _tag(prefix, number, width) -> str:
+    """One numbered part of a saved name: `EP01`, `S01`, `CH884`.
+
+    The owner's prefixes, 22 August 2026 - "EP" for an episode, "S" for a
+    season, "CH" for a chapter. They live here rather than at the two
+    call sites sixty lines apart, which is how the video path and the
+    reading path drift.
+
+    `width` is a floor, never a cap: One Piece episode 1136 is EP1136,
+    not a truncation. A chapter keeps a real fraction ("CH884.5") and
+    drops a meaningless one (884.0 arrives as a float and is CH884), and
+    anything that is not a number at all is written as it came - some
+    sources label a chapter "Extra"."""
+    text = str(number if number is not None else "").strip()
+    if not text:
+        return None
+    head, _, tail = text.partition(".")
+    tail = tail.rstrip("0")
+    try:
+        text = f"{int(head):0{width}d}" + (f".{tail}" if tail else "")
+    except ValueError:
+        pass                       # not a number - keep whatever it says
+    return f"{prefix}{text}"
+
+
+def episode_tag(number) -> str:
+    """Two digits, which is what the owner's example asked for ("EP01").
+    Known cost, left in deliberately: a folder of a 1000-episode series
+    sorts EP100 before EP99. Widening this to three is a one-word change
+    if he ever wants it."""
+    return _tag("EP", number, 2)
+
+
+def season_tag(number) -> str:
+    return _tag("S", number, 2)
+
+
+def chapter_tag(number) -> str:
+    """Three digits, unlike the episodes' two, because manga numbering
+    routinely runs past 99 - Kingdom is at 884 and One Piece past 1100 in
+    the owner's own library - so two would sort CH5 after CH1000 in the
+    folder. His own example ("CH884") is unaffected either way, which is
+    why this could be chosen on the sorting alone."""
+    return _tag("CH", number, 3)
 
 
 def saved_name(title, *, number=None, season=None, fallback="download") -> str:
-    """The owner's naming scheme for everything kept:
+    """The owner's naming scheme for everything kept, revised 22 August
+    2026 - underscore separated, no parentheses:
 
-        [Atomic] (Name) (EpisodeOrChapter) (Season)
+        [Atomic] Re_Zero_Starting_Life_in_Another_World_EP01_S01
+        [Atomic] Kingdom_WAN_CH884
+
+    It was "[Atomic] (Name) (E01) (S01)", and the brackets came off on
+    his ask. Two consequences of that, both deliberate:
+
+      * a title's *own* brackets go too, so "Kingdom (WAN)" saves as
+        "Kingdom_WAN" - keeping them would leave parentheses in a name he
+        asked to have none, and the old scheme nested them anyway
+        ("[Atomic] (Kingdom (WAN)) (CH884).cbz" is a real file he has);
+      * the title's spaces become underscores, since an underscore is
+        what now separates the parts and a name half-spaced half-joined
+        reads as two schemes.
+
+    Nothing already on disk is renamed - this is the format for names
+    written from here on. A job recorded in downloads.json keeps the path
+    it was finished under, which is the path its Open Folder button uses.
 
     Parts with nothing to say are dropped rather than written empty - a
-    film has no episode and a chapter has no season, and "( )" in a
-    filename reads as a bug. The release's own name is deliberately not
-    used any more: it carried the group, the resolution and the hash,
-    so a folder of episodes sorted by whoever released them instead of
-    by episode number.
+    film has no episode and a chapter has no season. The release's own
+    name is deliberately not used: it carried the group, the resolution
+    and the hash, so a folder of episodes sorted by whoever released them
+    instead of by episode number.
 
     No extension - the caller appends the source's own, since that is
     the one part of a release name worth keeping."""
-    parts = [f"({safe_name(title, fallback)})"]
-    if number is not None and str(number).strip() != "":
-        parts.append(f"({safe_name(number)})")
-    if season is not None and str(season).strip() != "":
-        parts.append(f"({safe_name(season)})")
-    return "[Atomic] " + " ".join(parts)
+    parts = [safe_name(title, fallback)]
+    for part in (number, season):
+        if part is not None and str(part).strip() != "":
+            parts.append(safe_name(part))
+    return "[Atomic] " + "_".join(parts)
 
 
 # ----------------------------------------------------------- queueing
@@ -606,10 +698,13 @@ def _run_video(job) -> str:
     # The extension is the release's, because that is the part that says
     # what the file actually is.
     extension = os.path.splitext(source)[1] or ".mkv"
+    number = episode_tag(episode)
     target = os.path.join(folder, saved_name(
         entry.get("title") or "Video",
-        number=(f"E{int(episode):02d}" if episode else None),
-        season=(f"S{int(season):02d}" if season and episode else None),
+        number=number,
+        # A season number only means anything beside an episode: a film
+        # that happens to carry one is still just the film.
+        season=season_tag(season) if number else None,
         fallback="Video") + extension)
     _update(job_id, detail="Saving...")
     # Copy rather than move: the engine may still be serving this file
@@ -662,34 +757,78 @@ def _run_chapter(job) -> str:
     headers = dict((payload or {}).get("headers") or {})
     headers.setdefault("User-Agent", _UA)
 
+    # The per-title subfolder goes through the same safe_name as the file
+    # in it, so it is underscored to match ("Kingdom_WAN", not
+    # "Kingdom (WAN)"). A title downloaded under the old spelling keeps
+    # its old folder - nothing here renames anything - so a series read
+    # across the change ends up with chapters in two folders. Worth it
+    # for one consistent scheme; renaming his files is not this code's
+    # to do.
     folder = os.path.join(job.get("folder") or default_folder(),
                           safe_name(entry.get("title") or "Manga"))
     os.makedirs(folder, exist_ok=True)
     # The owner's scheme (see saved_name). A chapter carries no season,
     # so that part is simply absent rather than written empty.
-    number = chapter.get("number")
     target = os.path.join(folder, saved_name(
         entry.get("title") or "Manga",
-        # "CH12", not "C12" (the owner's ask) - "C" alone read as a
-        # part or volume marker beside the episodes' "E".
-        number=(f"CH{number}" if number is not None else None),
+        number=chapter_tag(chapter.get("number")),
         fallback="Manga") + ".cbz")
 
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+    # **What is already in the archive is not fetched again, and this
+    # loop honours a hold.** Neither was true, and the two halves are one
+    # defect: `_run_chapter` checked `_cancelled` and never `_paused`,
+    # and opened the archive `"w"`, which truncates it on every run.
+    # Measured 22 August 2026 against the real function with the network
+    # stubbed, a 20-page chapter paused after page 8: the job went on to
+    # fetch **20 of 20** pages - Pause did nothing at all - and the next
+    # run started again at page 1 and re-fetched all twenty. The video
+    # path has kept this contract all along (see the `_paused` branch in
+    # _run_video); this is the reading path catching up to it.
+    existing = set()
+    mode = "w"
+    if os.path.exists(target):
+        try:
+            with zipfile.ZipFile(target) as archive:
+                for name in archive.namelist():
+                    stem = os.path.splitext(name)[0]
+                    if stem.isdigit():
+                        existing.add(int(stem))
+            mode = "a"
+        except (OSError, zipfile.BadZipFile):
+            # Torn by a kill rather than closed by a pause. Start it
+            # again rather than appending to rubble - a cbz a reader
+            # cannot open is worse than one page re-downloaded.
+            existing = set()
+            mode = "w"
+
+    with zipfile.ZipFile(target, mode, zipfile.ZIP_DEFLATED) as archive:
         for index, url in enumerate(pages, 1):
             if job_id in _cancelled:
                 break
-            request = urllib.request.Request(url, headers=headers)
-            deadline = net.deadline_in(30)
-            try:
-                with net.urlopen(request, timeout=20) as response:
-                    data = net.read_bytes(response, deadline)
-            except Exception:
-                continue         # a missing page must not lose the chapter
-            extension = os.path.splitext(url.split("?")[0])[1].lower() or ".jpg"
-            # Zero-padded so readers show pages in order rather than
-            # 1, 10, 11, 2 - the classic cbz mistake.
-            archive.writestr(f"{index:03d}{extension}", data)
+            if job_id in _paused:
+                # Held, not stopped - the same contract _run_video
+                # keeps. `with` closes the archive on the way out, so
+                # the pages already written stay readable and the next
+                # run appends to them. pause() has already set the
+                # state, so returning "" here must not be read as a
+                # failure - the queue checks `_paused` before it judges
+                # the result.
+                return ""
+            if index not in existing:
+                request = urllib.request.Request(url, headers=headers)
+                deadline = net.deadline_in(30)
+                try:
+                    with net.urlopen(request, timeout=20) as response:
+                        data = net.read_bytes(response, deadline)
+                except Exception:
+                    continue     # a missing page must not lose the chapter
+                extension = os.path.splitext(url.split("?")[0])[1].lower() or ".jpg"
+                # Zero-padded so readers show pages in order rather than
+                # 1, 10, 11, 2 - the classic cbz mistake.
+                archive.writestr(f"{index:03d}{extension}", data)
+            # Advanced for a page that was already there too, so a
+            # resumed chapter shows where it actually is instead of
+            # crawling up from zero again.
             _update(job_id, progress=round(index / len(pages), 4),
                     detail=f"page {index} of {len(pages)}")
 

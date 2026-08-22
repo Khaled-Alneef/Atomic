@@ -856,6 +856,22 @@ class SettingsDialog(QDialog):
         auto_pick_hint.setWordWrap(True)
         form.addWidget(auto_pick_hint)
 
+        form.addSpacing(20)
+        form.addWidget(QLabel("Episode List", objectName="SectionTitle"))
+        self.blur_stills_check = QCheckBox("Blur episode images")
+        self.blur_stills_check.setChecked(app_settings.get_blur_episode_stills())
+        self.blur_stills_check.toggled.connect(
+            app_settings.set_blur_episode_stills)
+        form.addWidget(self.blur_stills_check)
+        blur_hint = QLabel(
+            "Episode rows show a picture of the episode. Turn this on to "
+            "soften them, so a still cannot give away what happens. Takes "
+            "effect the next time a title's page is opened.",
+            objectName="Muted",
+        )
+        blur_hint.setWordWrap(True)
+        form.addWidget(blur_hint)
+
         form.addSpacing(24)
         # The Stremio Account sign-in that lived here (email/password,
         # Sign In/Disconnect) is removed entirely at the owner's ask -

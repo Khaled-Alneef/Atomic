@@ -33,18 +33,19 @@ import re
 import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, QRect, QRectF, QSize, Qt, QTimer
+from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt,
+                          QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QBrush, QColor, QLinearGradient, QPainter,
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QLinearGradient, QPainter,
                          QPainterPath, QPixmap, QTransform)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import (app_settings, artwork, history, images, logs, lookup_pool,
-                     net, storage, theme)
-from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
+from helpers import (anime_identity, app_settings, artwork, history, images,
+                     logs, lookup_pool, net, storage, theme)
+from helpers.widgets import (Card, GlassPage, GlyphButton, PickCombo, confirm,
                              frameless_dialog, scroll_area, show_toast,
                              use_hover_cursor)
 
@@ -66,6 +67,43 @@ MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
 PANEL_WIDTH = 490
 ROW_HEIGHT = 72
 
+# **The list rows are not all one shape any more** (the owner's ask, 22
+# August 2026: "the buttons in ep/ch and sources list feel stiff and
+# old... make the resolution buttons distinguished from the sources
+# buttons"). Before this, every row in both lists was the same 72px
+# slab in the same fill, so a resolution *heading* and one of the
+# releases under it were the same object on screen and the grouping was
+# invisible - see _group_card for what separates them now.
+#
+# Height is the first thing that says what a row is, so each kind gets
+# its own and they are deliberately far apart:
+EPISODE_ROW_HEIGHT = 88     # ...carries a 16:9 still, so the tallest
+SOURCE_ROW_HEIGHT = 68      # one release: indented under its heading
+GROUP_ROW_HEIGHT = 50       # a resolution heading: shorter than any row
+BACK_ROW_HEIGHT = 46        # navigation, not content - the shortest
+
+# Cinemeta carries a still per episode and it costs nothing extra to
+# use: measured 22 August 2026 on Re:Zero, **155 of 155 videos carry
+# `thumbnail`** - 780x439 JPEGs from episodes.metahub.space, 29-65KB,
+# 0.19s each after the first connection. So the row art needs no new
+# fetcher and no second service; it is already in the meta the list is
+# drawn from. 16:9 at the row height above.
+STILL_SIZE = (112, 63)
+# The blurred copy is a *file*, written once beside the original in the
+# image cache, rather than a blur applied per row. QPixmap cannot be
+# built off the UI thread, so blurring in the slot would put PIL back on
+# the thread images.prewarm exists to keep it off - 337ms of it was
+# measured in the Discover rows earlier today. Writing a second file
+# instead means the blurred tile goes through exactly the same
+# download -> _fitted -> _PIXMAP path as the sharp one.
+STILL_BLUR_RADIUS = 6.0     # at STILL_SIZE, not at the 780px original
+# Stills already on disk, url -> local path, so a rebuild (every search
+# keystroke rebuilds the list) redraws from the pixmap cache instead of
+# queueing forty pool jobs again. Bounded: a long session browsing many
+# titles would otherwise grow it without limit.
+_STILL_READY = {}
+_STILL_READY_MAX = 800
+
 # How many list rows exist before the list is shown, and how many more
 # are added each time the view nears the end of them. See
 # DetailsPage._queue_rows for the measurement these come from - a
@@ -86,12 +124,33 @@ SCRIM = ((0.0, 14, 12, 9, 200), (0.45, 14, 12, 9, 170), (1.0, 14, 12, 9, 232))
 
 CHAPTER_LIST_TIMEOUT = 45.0
 
+# How long the panel may go on claiming to be loading before it says
+# something else. **Measured 22 August 2026**: the chapter list for the
+# owner's Swordmaster's Youngest Son normally answers in 1.5s (cached)
+# to 5.1s (a live refresh of all seven paginated pages), but one run in
+# this harness sat with *nothing* at 220s - the worker had not returned
+# at all, so neither the 45s deadline above nor the page's one silent
+# retry had produced a word. The panel said "Loading..." the entire
+# time, which is the failure CLAUDE.md rule 7 names: a surface someone
+# opened is finished, or is showing what it has, or says why not.
+#
+# This does not cancel anything - a lookup still running is still the
+# best answer available and may land a second later. It only stops the
+# panel from lying about it, and re-arms the refresh button so there is
+# a way out. Set past the worker's own 45s budget so a slow-but-working
+# lookup is never talked over.
+LIST_QUIET_MS = 52_000
+
 # U+200E LEFT-TO-RIGHT MARK, built with chr() so no invisible character
 # sits in this file waiting for a re-encoding tool to mangle it (the
 # same reason the Fluent glyphs are escapes). Prefixed onto every list
 # row title: an Arabic name otherwise flips the whole paragraph RTL and
 # the clipped end is the *start* - the chapter number.
 _LTR_MARK = chr(0x200E)
+
+# The " . " a row's meta line is joined with - a real middle dot, built
+# with chr() for the same reason as above.
+SEPARATOR = " " + chr(0x00B7) + " "
 
 # Fluent glyphs, as escapes on purpose (see reader.py - a re-encoding
 # tool turns the bare characters into mojibake, and it has happened).
@@ -107,6 +166,12 @@ ICON_SEARCH = "\ue721"
 # top bar carries, so "look again" is one shape across the app.
 ICON_REFRESH = "\ue72c"
 ICON_PLAY_GLYPH = "\ue768"
+# The fold carets on the resolution headings. Fluent glyphs rather than
+# the bare triangle characters they replace: those are drawn by whatever
+# fallback face happens to carry them, so they sat a hair off the
+# baseline at a different weight from every other icon in the app.
+ICON_CHEVRON_DOWN = "\ue70d"
+ICON_CHEVRON_RIGHT = "\ue76c"
 
 
 class _Signals(QObject):
@@ -122,6 +187,12 @@ class _Signals(QObject):
     # A reading title's MangaDex genre tags - run, [names]. Video pages
     # get genres free with the Cinemeta meta; this is the reading pair.
     reading_genres = Signal(int, object)
+    # One episode's still, decoded and ready to draw - row key, the
+    # local path (the blurred copy when that setting is on). Keyed by
+    # row rather than by episode because the list is rebuilt on every
+    # search keystroke and the widget a late image belongs to may no
+    # longer exist. See DetailsPage._on_episode_still.
+    episode_still = Signal(int, str)
     # Resolving a Discover reading title on a picked site - run, the
     # fields to store ({url, site_id}) or None, the site's name.
     site_resolved = Signal(int, object, str)
@@ -218,6 +289,73 @@ def _art_worker(signals, run, entry):
             path = None
         if path:
             signals.art.emit(run, kind, path)
+
+
+def _blurred_still(path):
+    """The blurred copy of a downloaded still, written once into the
+    image cache and returned as a path - or the sharp original if it
+    cannot be made.
+
+    Blurred at STILL_SIZE, not at the 780px original: the tile is what
+    ends up on screen, so a small blur here is the same smear a huge
+    radius on the original would give after downscaling, for a fraction
+    of the work (measured 1.5ms per tile against 34ms on the original).
+    Written .part-then-replace for the reason images.download is - an
+    interrupted write otherwise leaves a truncated file that every later
+    run hands straight back."""
+    from PIL import Image, ImageFilter, ImageOps
+    source = Path(path)
+    target = (images.CACHE_DIR
+              / f"{source.stem}-blur{STILL_SIZE[0]}x{STILL_SIZE[1]}.png")
+    if target.is_file():
+        return target
+    try:
+        with Image.open(source) as opened:
+            tile = ImageOps.fit(opened.convert("RGBA"), STILL_SIZE,
+                                Image.LANCZOS)
+        tile = tile.filter(ImageFilter.GaussianBlur(STILL_BLUR_RADIUS))
+        temporary = target.with_suffix(".png.part")
+        tile.save(temporary, "PNG")
+        temporary.replace(target)
+        return target
+    except Exception:
+        try:
+            target.with_suffix(".png.part").unlink(missing_ok=True)
+        except OSError:
+            pass
+        return source
+
+
+def _still_worker(signals, key, url, blur):
+    """One episode's still: download it, blur it if that is on, and
+    **decode it here rather than in the slot**.
+
+    The decode is the split images.prewarm exists for, and skipping it
+    is not free: 40 poster decodes done in the slot instead were
+    measured at 337ms of UI-thread time in the Discover rows on 22
+    August 2026, which starved a page transition to a single frame.
+    Warming _fitted here leaves the slot with only the ~0.1ms QPixmap
+    conversion.
+
+    Never raises - a lookup_pool worker dies silently otherwise, taking
+    every still still queued behind it with it."""
+    try:
+        path = images.download(url)
+        if not path:
+            return              # no still: the row keeps its play tile
+        if blur:
+            path = _blurred_still(path)
+        # A file that will not decode is not a still - say nothing and
+        # let the row keep the placeholder rather than draw a hole.
+        if images._fitted(str(path), STILL_SIZE, images._stamp(path)) is None:
+            return
+    except Exception:
+        return
+    if len(_STILL_READY) >= _STILL_READY_MAX:
+        for old in list(_STILL_READY)[:_STILL_READY_MAX // 4]:
+            _STILL_READY.pop(old, None)
+    _STILL_READY[(url, bool(blur))] = str(path)
+    signals.episode_still.emit(key, str(path))
 
 
 def _sources_worker(signals, run, entry, season, episode):
@@ -499,6 +637,53 @@ def _badge(text, kind) -> QLabel:
     return label
 
 
+def _pill(text, accent=False) -> QLabel:
+    """A small count/figure chip - what a resolution heading carries on
+    its right instead of a second line of prose, and what a release row
+    carries for its seeders.
+
+    This is the other half of telling the two apart (see _group_card):
+    a heading is one line with figures pushed to its right edge, a row
+    is two lines of text reading left to right. `accent` is for the one
+    number that decides the choice - the seeders on a *heading*.
+
+    No border, and translucent fills rather than flat ones: the first
+    cut gave every pill a solid fill and a 1px ring, which rendered as a
+    row of small buttons and put a gold chip on every release row as
+    well as on every heading - so the headings stopped standing out at
+    all, which was the whole point of them. Translucent also means one
+    pill works on both grounds a heading has (its dark resting fill and
+    the accent-tinted open one)."""
+    label = QLabel(text)
+    label.setStyleSheet(
+        f"color: {theme.ACCENT if accent else theme.TEXT_MUTED};"
+        f" background: {theme.rgba(theme.ACCENT, 38) if accent else theme.rgba(theme.TEXT_MUTED, 26)};"
+        f" border: none;"
+        f" border-radius: {theme.RADIUS_SM}px; padding: 3px 9px;"
+        f" font-weight: 700; font-size: 8.5pt;")
+    return label
+
+
+def _glyph_tile(glyph, size, radius, point_size=12.0, accent=True) -> QLabel:
+    """A rounded tile carrying one Fluent glyph - the caret on a
+    resolution heading, and the placeholder an episode row shows until
+    its still lands (or forever, when there is none).
+
+    The placeholder is the same shape and size as the still on purpose:
+    a row that never gets an image keeps its rhythm with the rows that
+    did, instead of leaving a hole where the art should be."""
+    label = QLabel(glyph)
+    label.setFixedSize(*size)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    label.setStyleSheet(
+        f"color: {theme.ACCENT if accent else theme.TEXT_MUTED};"
+        f" background: {theme.ACCENT_SOFT if accent else theme.SURFACE_HOVER};"
+        f" border: none; border-radius: {radius}px;"
+        f" font-family: {theme.FONT_STACK_ICONS};"
+        f" font-size: {point_size}pt;")
+    return label
+
+
 class _PanelNote(QLabel):
     """The status note centred over the list panel's viewport.
 
@@ -558,6 +743,12 @@ class _PanelNote(QLabel):
             pass        # the panel is being torn down
 
 
+# PickCombo moved to helpers/widgets.py - the player's download panel
+# has the same two-click symptom on its own drop-downs, and a window
+# module importing another window module is how import cycles start.
+# Imported above; every `PickCombo(...)` here still resolves.
+
+
 class DetailsPage(GlassPage):
     """One entry, full screen: facts on the left, the episode or chapter
     list on the right."""
@@ -607,6 +798,14 @@ class DetailsPage(GlassPage):
         # in step by _mark_history.
         self._history_marks = history.watched_keys(self.entry)
 
+        # Episode-still tiles waiting on their image, by row key. Not by
+        # episode number: a search keystroke rebuilds every row, so the
+        # widget a download was started for may already be gone.
+        self._still_tiles = {}
+        self._still_key = 0
+        # Settings > Watching, read once per list fill (see _still_tile).
+        self._blur_stills = app_settings.get_blur_episode_stills()
+
         self._signals = _Signals()
         self._signals.meta.connect(self._on_meta)
         self._signals.art.connect(self._on_art)
@@ -614,6 +813,7 @@ class DetailsPage(GlassPage):
         self._signals.sources.connect(self._on_sources)
         self._signals.saved_cover.connect(self._on_saved_cover)
         self._signals.reading_genres.connect(self._on_reading_genres)
+        self._signals.episode_still.connect(self._on_episode_still)
         self._signals.site_resolved.connect(self._on_site_resolved)
         self._signals.resolved_id.connect(self._on_resolved_id)
         self._signals.episode_ratings.connect(self._on_episode_ratings)
@@ -623,6 +823,12 @@ class DetailsPage(GlassPage):
         # Debounced: a chapter list runs to 500 rows and rebuilding it on
         # every keystroke stutters under a fast typist.
         self._search_timer.timeout.connect(self._fill_rows)
+
+        # The panel's promise that it will stop saying "Loading..." even
+        # when the lookup never comes back at all - see LIST_QUIET_MS.
+        self._quiet_timer = QTimer(self)
+        self._quiet_timer.setSingleShot(True)
+        self._quiet_timer.timeout.connect(self._on_list_quiet)
 
         self._build()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -789,7 +995,9 @@ class DetailsPage(GlassPage):
                 f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}")
             use_hover_cursor(button)
             button.clicked.connect(lambda checked=False, s=step: self._step_season(s))
-        self._season_box = QComboBox()
+        # PickCombo, not QComboBox: a plain one drops the first click on
+        # a row for half a second after the popup opens - see there.
+        self._season_box = PickCombo()
         # Wide enough for a two-digit season plus the drop arrow. Without
         # this the box is sized for "Season 2" and "Season 22" is cut off
         # mid-word (the owner's screenshot): QComboBox sizes to its
@@ -912,6 +1120,13 @@ class DetailsPage(GlassPage):
             threading.Thread(target=_art_worker,
                              args=(self._signals, self._run, dict(self.entry)),
                              daemon=True).start()
+            # Warm the arc-name season map now, in the background, so the
+            # first press of an episode is already filtered rather than
+            # the second - the source list is only cleaned from a warm
+            # cache (see helpers/anime_identity and streams.find_streams).
+            # A no-op for anything that is not anime, and deduplicated per
+            # id, so this costs nothing to call on every details open.
+            anime_identity.prewarm(dict(self.entry))
         if self._is_reading:
             # **No artwork ground on a reading page at all** - the
             # owner's ask, 21 August 2026: "remove all readings bg image
@@ -944,10 +1159,12 @@ class DetailsPage(GlassPage):
             else:
                 lookup_pool.submit(_chapters_worker, self._signals, self._run,
                                    dict(self.entry))
+                self._expect_list()
         elif self.entry.get("imdb_id") and stremio is not None:
             kind = "movie" if self.entry.get("type") == "Movie" else "series"
             lookup_pool.submit(_meta_worker, self._signals, self._run,
                                self.entry.get("imdb_id"), kind)
+            self._expect_list()
         elif stremio is not None and (self.entry.get("title") or "").strip():
             # **No id, but a title - so look the title up rather than
             # giving up.** This used to go straight to the note below,
@@ -963,6 +1180,7 @@ class DetailsPage(GlassPage):
             self._panel_note.setText("Looking this title up...")
             lookup_pool.submit(_resolve_id_worker, self._signals, self._run,
                                self.entry.get("title"), self.entry.get("type"))
+            self._expect_list()
         else:
             self._panel_note.setText(
                 "This entry has no matched title, so there is no episode "
@@ -975,9 +1193,9 @@ class DetailsPage(GlassPage):
         if run != self._run or self._closed:
             return
         if not imdb_id:
-            self._panel_note.setText(
-                "This entry has no matched title, so there is no episode "
-                "list to show. Continue below still opens it.")
+            self._list_answered()
+            self._say("This entry has no matched title, so there is no "
+                      "episode list to show. Continue below still opens it.")
             return
         # Written onto the entry, not just used once: the player, the
         # download panel and progress syncing all read imdb_id off it,
@@ -986,10 +1204,16 @@ class DetailsPage(GlassPage):
         kind = "movie" if self.entry.get("type") == "Movie" else "series"
         lookup_pool.submit(_meta_worker, self._signals, self._run,
                            imdb_id, kind)
+        # Now that the id is known, warm the arc-name season map too, so a
+        # Discover anime that only just resolved is filtered on its first
+        # play - see the same call in _start_lookups.
+        anime_identity.prewarm(dict(self.entry))
+        self._expect_list()
 
     def _on_meta(self, run, meta):
         if run != self._run or self._closed:
             return
+        self._list_answered()
         if not meta:
             # One silent retry before admitting defeat: the owner
             # reported the list "sometimes fetches nothing" on titles
@@ -1003,11 +1227,11 @@ class DetailsPage(GlassPage):
                         else "series")
                 lookup_pool.submit(_meta_worker, self._signals, self._run,
                                    self.entry.get("imdb_id"), kind)
+                self._expect_list()
                 return
             self._finish_refresh()
-            self._panel_note.setText(
-                "The episode list couldn't be loaded. Check the connection "
-                "and reopen this page.")
+            self._say("The episode list couldn't be loaded. Check the "
+                      "connection and reopen this page.")
             return
         self._finish_refresh()
         self._meta = meta
@@ -1044,6 +1268,7 @@ class DetailsPage(GlassPage):
     def _on_chapters(self, run, chapters):
         if run != self._run or self._closed:
             return
+        self._list_answered()
         if chapters is None:
             # The lookup *failed* (see _chapters_worker) - distinct from
             # a title that genuinely has no chapters. One silent retry,
@@ -1054,16 +1279,23 @@ class DetailsPage(GlassPage):
                 self._chapters_retried = True
                 lookup_pool.submit(_chapters_worker, self._signals,
                                    self._run, dict(self.entry))
+                self._expect_list()
                 return
             self._finish_refresh()
-            self._panel_note.setText(
-                "The chapter list couldn't be loaded. Check the "
-                "connection and press the refresh button to try again.")
+            self._say("The chapter list couldn't be loaded. Check the "
+                      "connection and press the refresh button to try again.")
             return
         self._finish_refresh()
         self._chapters = list(chapters)
         if not self._chapters:
-            self._panel_note.setText("No chapters were found for this title.")
+            # _say, not setText: a *partial* emission may already have
+            # filled rows and hidden the note (see _fill_chapter_rows'
+            # setVisible(shown == 0)), and then this message was written
+            # onto an invisible label while the panel went on showing
+            # chapters this page no longer has. A surface the user
+            # opened has to say what happened - CLAUDE.md rule 7.
+            self._clear_rows()
+            self._say("No chapters were found for this title.")
             return
         read = self._last_read()
         total = len({c.get("number") for c in self._chapters})
@@ -1083,6 +1315,20 @@ class DetailsPage(GlassPage):
         self._facts.setText("   ·   ".join(p for p in parts if p))
 
         def fill(row, values):
+            # **Cleared first, then filled.** This ran on every meta
+            # arrival and only ever appended, so pressing refresh
+            # appended the same names again: the owner's screenshot
+            # showed Re:Zero's three-name cast four times over, and the
+            # harness reproduced it exactly (3 chips after one meta, 12
+            # after four). The genre row never had the bug because
+            # _fill_genre_buttons clears before it inserts - this is
+            # that same clear, and the trailing stretch is what count()
+            # - 1 preserves in both.
+            while row.count() > 1:
+                item = row.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
             for value in values:
                 row.insertWidget(row.count() - 1, _chip(value))
 
@@ -1286,6 +1532,11 @@ class DetailsPage(GlassPage):
 
     def _clear_rows(self):
         self._row_queue = []
+        # Every tile in here is about to be deleted, and a still that
+        # lands afterwards must not be handed a dangling widget. The
+        # download itself is already paid for - _STILL_READY keeps it,
+        # so the rebuilt row draws it without asking the pool again.
+        self._still_tiles.clear()
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
             widget = item.widget()
@@ -1345,13 +1596,62 @@ class DetailsPage(GlassPage):
                 return
             lookup_pool.submit(_chapters_worker, self._signals, self._run,
                                dict(self.entry), True)
+            self._expect_list()
         elif self.entry.get("imdb_id") and stremio is not None:
             kind = "movie" if self.entry.get("type") == "Movie" else "series"
             lookup_pool.submit(_meta_worker, self._signals, self._run,
                                self.entry.get("imdb_id"), kind)
+            self._expect_list()
         else:
             self._finish_refresh("This entry has no matched title, so there "
                                  "is nothing to refresh.")
+
+    def _expect_list(self):
+        """A list lookup has just been fired: start the clock on it.
+
+        Every attempt gets its own budget, the silent retries included -
+        a retry that also never answers has to be reported too."""
+        self._quiet_timer.start(LIST_QUIET_MS)
+
+    def _list_answered(self):
+        """An answer landed (even a refusal). Stop the clock."""
+        self._quiet_timer.stop()
+
+    def _on_list_quiet(self):
+        """The lookup has said nothing for LIST_QUIET_MS. Say so.
+
+        Nothing is cancelled: the worker may still land, and if it does
+        the rows simply replace this. All this does is stop the panel
+        claiming to be loading, and give the refresh button back."""
+        if self._closed or self._source_pick is not None:
+            return
+        if self._site_choice_pending or self._rows.count() > 1:
+            return              # the panel already has something to show
+        try:
+            self._refresh_btn.setEnabled(True)
+        except RuntimeError:
+            return              # torn down under the lookup
+        self._say(("The chapter list" if self._is_reading
+                   else "The episode list")
+                  + " hasn't answered. It may still arrive; the refresh "
+                    "button asks again.")
+
+    def _say(self, message):
+        """Put `message` on the panel *and make sure it can be read*.
+
+        setText alone is not enough: _fill_episode_rows/_fill_chapter_rows
+        hide the note the moment they have rows, so a verdict arriving
+        after a partial list had already filled some was written onto an
+        invisible label - the panel went on showing chapters the page no
+        longer had, and said nothing about it. A surface the user opened
+        either shows what it has or says why it doesn't (CLAUDE.md rule
+        7); it never goes quiet."""
+        try:
+            self._panel_note.setText(message)
+            self._panel_note.setVisible(True)
+            self._panel_note.raise_()
+        except RuntimeError:
+            pass        # the panel is being torn down under a lookup
 
     def _finish_refresh(self, message=""):
         """Re-arm the refresh button once an answer (or a refusal) has
@@ -1361,8 +1661,7 @@ class DetailsPage(GlassPage):
         except RuntimeError:
             return
         if message:
-            self._panel_note.setVisible(True)
-            self._panel_note.setText(message)
+            self._say(message)
 
     # ---- picking a reading site (Discover titles) ---------------------
     def _reading_site_choices(self) -> list:
@@ -1384,11 +1683,11 @@ class DetailsPage(GlassPage):
             self._rows.insertWidget(shown, self._row_card(
                 site.get("name") or "Site", site.get("base_url") or "",
                 None, lambda s=site: self._pick_reading_site(s),
-                play_glyph=False))
+                variant="plain"))
             shown += 1
         self._rows.insertWidget(shown, self._row_card(
             "MangaDex", "The built-in chapter source", None,
-            self._pick_mangadex, play_glyph=False))
+            self._pick_mangadex, variant="plain"))
         self._panel_note.setVisible(True)
         self._panel_note.setText("Where should this be read from?")
 
@@ -1439,6 +1738,7 @@ class DetailsPage(GlassPage):
         self._chapters_retried = False
         lookup_pool.submit(_chapters_worker, self._signals, self._run,
                            dict(self.entry))
+        self._expect_list()
 
     def _season_ratings(self, season, rows):
         """(( {number: score}, label ) for this season's rows.
@@ -1509,6 +1809,7 @@ class DetailsPage(GlassPage):
 
     def _fill_episode_rows(self):
         self._clear_rows()
+        self._blur_stills = app_settings.get_blur_episode_stills()
         wanted = self._search.text().strip().lower()
         season = int(self._season or 0)
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -1561,12 +1862,14 @@ class DetailsPage(GlassPage):
                 meta_line = f"{meta_line}   ·   {stars}" if meta_line else stars
             builders.append(
                 lambda t=title, m=meta_line, b=badge, up=upcoming,
-                s=season, e=number: self._row_card(
+                s=season, e=number,
+                still=str(video.get("thumbnail") or ""): self._row_card(
                     t, m, b,
                     (None if up else lambda s=s, e=e: self._start_episode(s, e)),
                     on_menu=(None if up
                              else lambda ev, s=s, e=e:
-                             self._episode_menu(ev, s, e))))
+                             self._episode_menu(ev, s, e)),
+                    variant="episode", still_url=still))
             shown += 1
         self._queue_rows(builders)
         self._panel_note.setVisible(shown == 0)
@@ -1608,27 +1911,71 @@ class DetailsPage(GlassPage):
         if shown == 0 and self._chapters:
             self._panel_note.setText("Nothing matches that search.")
 
+    # ---- the row language -------------------------------------------
+    #
+    # Three builders, not one, because the owner's complaint was that
+    # there was only one: a resolution heading, a release under it and
+    # an episode were the same 72px slab in the same fill, so nothing on
+    # screen said which was which. Each kind now differs in height, in
+    # what sits at its left edge, and in whether its figures are prose
+    # or chips - see _group_card and _source_card.
+
     def _row_card(self, title, date_text, badge, on_click, on_menu=None,
-                  play_glyph=True):
+                  variant="chapter", still_url=None):
+        """One content row: an episode, a chapter, a reading site, or
+        the source picker's back row (`variant="back"`).
+
+        `still_url` is an episode's Cinemeta thumbnail. The tile is
+        built and inserted immediately, carrying the play glyph, and the
+        image replaces it when the pool answers - so the row never
+        reflows and a title with no still keeps the same shape as one
+        that has them."""
         from windows.reader import _ElidedLabel
         card = Card(matte=True, hoverable=on_click is not None)
-        card.setFixedHeight(ROW_HEIGHT)
         row = QHBoxLayout(card)
-        row.setContentsMargins(14, 10, 14, 10)
-        row.setSpacing(10)
+        row.setSpacing(12)
 
-        # play_glyph=False is the source picker's back row: it navigates
-        # rather than plays, and a play triangle on "Back to episodes"
-        # read as a resume control (the owner's screenshot).
-        if play_glyph:
-            glyph = QLabel(ICON_PLAY_GLYPH)
-            glyph.setStyleSheet(
-                f"color: {theme.TEXT_MUTED}; font-family: {theme.FONT_STACK_ICONS};"
-                f" font-size: 13pt; background: transparent; border: none;")
-            row.addWidget(glyph)
+        if variant == "back":
+            # Navigation, not content: the shortest row, no fill of its
+            # own, and no play triangle - one on "Back to episodes" read
+            # as a resume control (the owner's screenshot).
+            card.setFixedHeight(BACK_ROW_HEIGHT)
+            card.setStyleSheet(self._row_sheet(background="transparent"))
+            row.setContentsMargins(10, 4, 14, 4)
+            row.addWidget(_glyph_tile(ICON_BACK, (26, 26), theme.RADIUS_SM,
+                                      point_size=9.5, accent=False))
+            label = QLabel(str(title or ""))
+            label.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; font-weight: 700;"
+                f" font-size: 11pt; letter-spacing: 0.6px;"
+                f" background: transparent; border: none;")
+            row.addWidget(label)
+            row.addStretch(1)
+            if on_click is not None:
+                card.clicked.connect(on_click)
+            return card
+
+        if variant == "episode":
+            card.setFixedHeight(EPISODE_ROW_HEIGHT)
+            row.setContentsMargins(12, 12, 14, 12)
+            row.addWidget(self._still_tile(still_url))
+        elif variant == "plain":
+            # The reading-site chooser: a name and a URL, and nothing to
+            # resume - a play tile on "MangaDex" would be a lie.
+            card.setFixedHeight(ROW_HEIGHT)
+            row.setContentsMargins(18, 10, 14, 10)
+        else:
+            card.setFixedHeight(ROW_HEIGHT)
+            row.setContentsMargins(14, 10, 14, 10)
+            # A chapter has no per-chapter art anywhere to fetch, so the
+            # play glyph stays - but as the same rounded tile the
+            # episode stills are, rather than a bare triangle floating
+            # at the row's left edge.
+            row.addWidget(_glyph_tile(ICON_PLAY_GLYPH, (44, 44),
+                                      theme.RADIUS_SM, point_size=12.0))
 
         column = QVBoxLayout()
-        column.setSpacing(2)
+        column.setSpacing(3)
         # Elided, and forced to a left-to-right base direction with a
         # leading LRM mark: an Arabic chapter name makes Qt lay the whole
         # paragraph out right-to-left, and a long one then clipped its
@@ -1644,7 +1991,7 @@ class DetailsPage(GlassPage):
         if date_text:
             date = QLabel(date_text)
             date.setStyleSheet(
-                f"color: {theme.TEXT_MUTED}; font-size: 10pt;"
+                f"color: {theme.TEXT_MUTED}; font-size: 9.5pt;"
                 f" background: transparent; border: none;")
             column.addWidget(date)
         row.addLayout(column, stretch=1)
@@ -1656,6 +2003,181 @@ class DetailsPage(GlassPage):
             card.clicked.connect(on_click)
         if on_menu is not None:
             card.rightClicked.connect(on_menu)
+        return card
+
+    @staticmethod
+    def _row_sheet(background, border="transparent",
+                   hover_background=None, hover_border=None):
+        """A row's own fill and ring, written out in full.
+
+        Both states have to be here. A widget's own stylesheet outranks
+        the app one, so setting only a resting colour silently kills the
+        #Card[matte] hover rule that gives every row its accent ring -
+        the same trap _build_panel records for the scroll area. Written
+        with a selector rather than as bare declarations for the other
+        half of it: a declaration-only sheet cascades into every child
+        label as well.
+
+        Measured after writing it, since that trap has been sprung twice
+        here: forcing WA_UnderMouse on a heading and on the back row
+        repaints 4950-5415 pixels of each, so the ring is still there.
+        The same probe reads 0 for a row *without* its own sheet - but
+        so does an untouched Card dropped into the same layout, and
+        28366 for the identical card outside the scroll body, so that
+        zero is the probe's limit and not a missing ring."""
+        hover_background = hover_background or theme.SURFACE_HOVER
+        hover_border = hover_border or theme.ACCENT
+        return (f"QFrame#Card {{ background: {background};"
+                f" border: 1px solid {border};"
+                f" border-radius: {theme.RADIUS}px; }}"
+                f"QFrame#Card:hover {{ background: {hover_background};"
+                f" border: 1px solid {hover_border}; }}")
+
+    def _still_tile(self, url):
+        """The episode still, or the tile that stands in for it.
+
+        Registered under a row key rather than an episode number: the
+        list is rebuilt from scratch on every search keystroke and on
+        every late TMDB rating, so the widget a download started for may
+        be gone by the time it lands.
+
+        A still already on disk is drawn here, synchronously - both of
+        images' caches are warm for it, so that is a dict lookup and the
+        ~0.1ms pixmap conversion, and it saves queueing forty pool jobs
+        on every keystroke."""
+        tile = _glyph_tile(ICON_PLAY_GLYPH, STILL_SIZE, theme.RADIUS,
+                           point_size=13.0, accent=False)
+        if not url:
+            return tile
+        # Read once per fill, not once per row: app_settings has no
+        # cache - every getter re-opens and re-parses settings.json - so
+        # asking here would be a disk read and a JSON parse per row, 40
+        # of them in the batch _queue_rows builds up front.
+        blur = self._blur_stills
+        ready = _STILL_READY.get((url, blur))
+        if ready:
+            self._draw_still(tile, ready)
+            return tile
+        key = self._still_key
+        self._still_key += 1
+        self._still_tiles[key] = tile
+        lookup_pool.submit(_still_worker, self._signals, key, url, blur)
+        return tile
+
+    @staticmethod
+    def _draw_still(tile, path):
+        pixmap = images.thumbnail_or_avatar(path, "", STILL_SIZE)
+        if pixmap.isNull():
+            return
+        # The tile's own fill has to go with the glyph: _fitted clips
+        # every thumbnail to the rounded shape, so a styled square
+        # background would show at the four corners of the image.
+        tile.setText("")
+        tile.setStyleSheet("background: transparent; border: none;")
+        tile.setPixmap(pixmap)
+
+    def _on_episode_still(self, key, path):
+        tile = self._still_tiles.pop(key, None)
+        if tile is None:
+            return
+        try:
+            self._draw_still(tile, path)
+        except RuntimeError:
+            pass            # the row went out under the download
+
+    def _group_card(self, label, count, seeders, open_now, on_click):
+        """One resolution heading in the source list.
+
+        **This is the row the owner could not tell from the ones under
+        it.** Four things now separate them, and the point is that they
+        all pull the same way rather than that any one is decisive:
+        it is 18px shorter than a release row; its fill is a translucent
+        lift over the panel ground where a row is a solid slab; its
+        figures are chips pushed to the right edge where a row's are
+        prose running left; and it opens with a caret in the accent
+        where a row opens with artwork or a quality tag.
+
+        Open state is the accent's own tinted fill (ACCENT_SOFT - what
+        the sidebar's selected item uses), so an open heading reads as
+        the thing currently being looked through rather than as one more
+        item in the list."""
+        card = Card(matte=True, hoverable=True)
+        card.setFixedHeight(GROUP_ROW_HEIGHT)
+        card.setStyleSheet(self._row_sheet(
+            background=(theme.ACCENT_SOFT if open_now
+                        else theme.rgba(theme.SURFACE_HOVER, 110)),
+            border=(theme.rgba(theme.ACCENT, 120) if open_now
+                    else theme.rgba(theme.BORDER, 150))))
+        row = QHBoxLayout(card)
+        row.setContentsMargins(10, 6, 12, 6)
+        row.setSpacing(10)
+        # The caret goes gold only when the group is open. Gold on every
+        # heading at once was measured against the render as noise
+        # rather than signal - four folded headings each carrying an
+        # accent chip is four things claiming attention and none of them
+        # meaning anything.
+        row.addWidget(_glyph_tile(
+            ICON_CHEVRON_DOWN if open_now else ICON_CHEVRON_RIGHT,
+            (26, 26), theme.RADIUS_SM, point_size=9.5, accent=open_now))
+        name = QLabel(str(label))
+        name.setStyleSheet(
+            f"color: {theme.TEXT}; font-weight: 800; font-size: 12pt;"
+            f" letter-spacing: 1px; background: transparent; border: none;")
+        row.addWidget(name)
+        row.addStretch(1)
+        row.addWidget(_pill(f"{count} source{'s' if count != 1 else ''}"))
+        if seeders:
+            row.addWidget(_pill(f"{seeders} seeders", accent=True))
+        card.clicked.connect(on_click)
+        return card
+
+    def _source_card(self, source, quality, seeders, meta_text, on_click):
+        """One release under a heading.
+
+        Indented past the heading's caret, so the fold reads as
+        containment rather than as two things in a row, and led by its
+        own resolution tag - the heading says it too, but a row scrolled
+        away from its heading has to keep saying what it is, and the
+        search box matches on it (see _fill_source_rows)."""
+        from windows.reader import _ElidedLabel
+        card = Card(matte=True, hoverable=True)
+        card.setFixedHeight(SOURCE_ROW_HEIGHT)
+        row = QHBoxLayout(card)
+        row.setContentsMargins(26, 9, 12, 9)
+        row.setSpacing(10)
+
+        tag = QLabel(str(quality or "Other").upper())
+        tag.setFixedWidth(54)
+        tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Borderless, like the pills: with a ring it read as a small
+        # empty button sitting where artwork sits on the episode rows.
+        tag.setStyleSheet(
+            f"color: {theme.TEXT_MUTED};"
+            f" background: {theme.rgba(theme.TEXT_MUTED, 26)}; border: none;"
+            f" border-radius: {theme.RADIUS_SM}px; padding: 4px 0px;"
+            f" font-weight: 700; font-size: 8.5pt;")
+        row.addWidget(tag)
+
+        column = QVBoxLayout()
+        column.setSpacing(3)
+        head = QLabel(str(source or "Source"))
+        head.setStyleSheet(
+            f"color: {theme.TEXT}; font-weight: 700; font-size: 11.5pt;"
+            f" background: transparent; border: none;")
+        column.addWidget(head)
+        detail = _ElidedLabel(_LTR_MARK + str(meta_text or ""))
+        detail.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: 9.5pt;"
+            f" background: transparent; border: none;")
+        column.addWidget(detail)
+        row.addLayout(column, stretch=1)
+
+        if seeders:
+            # Deliberately *not* the accent pill the heading gets: an
+            # accent chip on every release turned the whole list gold
+            # and left the headings with nothing of their own.
+            row.addWidget(_pill(f"{seeders} seeders"))
+        card.clicked.connect(on_click)
         return card
 
     # ---- the source picker ------------------------------------------------
@@ -1767,8 +2289,8 @@ class DetailsPage(GlassPage):
         name = (f"S{int(season or 1):02d}E{int(episode):02d}"
                 if episode else "this film")
         self._rows.insertWidget(0, self._row_card(
-            "‹  Back to episodes", "", None, self._close_source_picker,
-            play_glyph=False))
+            "Back to episodes", "", None, self._close_source_picker,
+            variant="back"))
         shown = 1
 
         streams_found = pick.get("streams")
@@ -1827,14 +2349,9 @@ class DetailsPage(GlassPage):
                      else (quality or "Other").upper())
             open_now = bool(wanted) or quality in self._open_source_groups
             best = max((int(v.get("seeders") or 0) for v in visible), default=0)
-            summary = [f"{len(visible)} source{'s' if len(visible) != 1 else ''}"]
-            if best:
-                summary.append(f"up to {best} seeders")
-            self._rows.insertWidget(shown, self._row_card(
-                f"{'▾' if open_now else '▸'}  {label}",
-                " · ".join(summary), None,
-                (lambda q=quality: self._toggle_source_group(q)),
-                play_glyph=False))
+            self._rows.insertWidget(shown, self._group_card(
+                label, len(visible), best, open_now,
+                (lambda q=quality: self._toggle_source_group(q))))
             shown += 1
             if not open_now:
                 continue
@@ -1843,12 +2360,12 @@ class DetailsPage(GlassPage):
                 size = ""
                 if streams_helper:
                     size = streams_helper.format_size(stream.get("size_bytes"))
-                parts = [p for p in
-                         (_quality_label(stream.get("quality")) or "Other",
-                          f"{seeders} seeders" if seeders else "",
-                          size, (stream.get("title") or "").strip()[:70]) if p]
-                self._rows.insertWidget(shown, self._row_card(
-                    stream.get("source") or "Source", " · ".join(parts), None,
+                detail = SEPARATOR.join(
+                    p for p in (size, (stream.get("title") or "").strip()[:70])
+                    if p)
+                self._rows.insertWidget(shown, self._source_card(
+                    stream.get("source") or "Source",
+                    _quality_label(stream.get("quality")), seeders, detail,
                     lambda s=stream: self._play_stream_choice(s)))
                 shown += 1
         if shown > 1 and pick.get("looking"):
@@ -2221,8 +2738,10 @@ class DetailsPage(GlassPage):
         dialog, column = self._dialog_shell(
             "Download Film" if is_movie else "Download Episodes")
 
-        scope = QComboBox()
-        first_box, last_box = QComboBox(), QComboBox()
+        # PickCombo everywhere in this file - see there for the
+        # half-second of dropped clicks a plain QComboBox has.
+        scope = PickCombo()
+        first_box, last_box = PickCombo(), PickCombo()
         if not is_movie:
             scope.addItems(["One Episode", "A Range of Episodes",
                             "The Whole Season"])
@@ -2250,7 +2769,7 @@ class DetailsPage(GlassPage):
         # Which audio the picked release should carry. A preference over
         # release names (dual-audio/dub tags), not a track switch - see
         # downloads._order_by_audio for what it can and cannot promise.
-        audio_box = QComboBox()
+        audio_box = PickCombo()
         audio_box.addItem("Japanese (original)", "jp")
         audio_box.addItem("English dub (when a release has one)", "en")
         use_hover_cursor(audio_box)
@@ -2343,7 +2862,7 @@ class DetailsPage(GlassPage):
             candidates = list(self._chapters)
 
         dialog, column = self._dialog_shell("Download Chapters")
-        scope = QComboBox()
+        scope = PickCombo()
         scope.addItems(["One Chapter", "A Range of Chapters"])
         use_hover_cursor(scope)
         scope_row = QHBoxLayout()
@@ -2356,7 +2875,7 @@ class DetailsPage(GlassPage):
         current = next((i for i, c in enumerate(candidates)
                         if chapter_number(c) == read), 0)
         labels = [chapter_title(c) for c in candidates]
-        first_box, last_box = QComboBox(), QComboBox()
+        first_box, last_box = PickCombo(), PickCombo()
         for box in (first_box, last_box):
             box.addItems(labels)
             box.setCurrentIndex(current)

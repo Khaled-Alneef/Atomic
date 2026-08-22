@@ -15,6 +15,11 @@ import re
 # spread (curly vs straight apostrophes, en-dashes, colons).
 _BRACKETED_RE = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
 
+# The typographic apostrophes a reading site's title casing produces,
+# folded to the ASCII one before a title is sent to an external search.
+# See search_variants for what this was measured to cost on AniList.
+_QUOTES_RE = re.compile("[‘’ʼ′`´]")
+
 # Everything that is not a letter or a digit **in any script**. This was
 # `[^a-z0-9]`, which deleted an Arabic or Japanese title down to the
 # empty string - and `similarity` answers 0.0 the moment either side is
@@ -83,8 +88,29 @@ def search_query(text: str) -> str:
 
 def search_variants(text: str) -> list:
     """The strings to send an external catalog for one tracked title, in
-    order: the title exactly as the user's own site wrote it, then the
-    same with the site's group tag dropped.
+    order: the title with its quotes folded to ASCII, then (if they
+    differ) the string exactly as the user's own site wrote it, then the
+    same two with the site's group tag dropped.
+
+    **Measured 22 August 2026, one variable at a time, against AniList's
+    own search on the owner's entry "Swordmaster'S Youngest Son"** - the
+    apostrophe in it is U+2019, the character a reading site's title
+    casing produces, and AniList's search engine answers it with
+    *nothing at all*:
+
+        Swordmaster’S Youngest Son   0 hits
+        Swordmaster’s Youngest Son   0 hits
+        Swordmaster'S Youngest Son   1 hit   <- straight apostrophe
+        Swordmaster's Youngest Son   1 hit
+        Swordmasters Youngest Son    0 hits  <- so *dropping* it is wrong
+        Swordmaster Youngest Son     1 hit
+
+    Scoring never saw this, because `_fold` already folds the curly forms
+    on both sides - it is only the literal query string that dies. The
+    folded form goes *first* rather than as a retry: unlike a bracketed
+    tag, no catalogue title needs a curly quote to match, so the raw form
+    can only ever cost a wasted request. It is still kept as a fallback
+    so nothing that used to answer can stop answering.
 
     **Measured 21 August 2026 on the owner's own entry "Kingdom (WAN)"** -
     "(WAN)" is the scanlation group's tag on 3asq, not part of the name,
@@ -95,16 +121,23 @@ def search_variants(text: str) -> list:
     Historical / Action / Drama. Searching the other five configured
     sites for it found the title on none of them.
 
-    The full title still goes first, and this is a *retry* rather than a
-    replacement, because brackets are occasionally part of the real name
-    ("Kingdom (2013)") and only the untouched string can match that.
+    The full title still goes before the stripped one, and dropping the
+    tag is a *retry* rather than a replacement, because brackets are
+    occasionally part of the real name ("Kingdom (2013)") and only the
+    untouched string can match that.
 
     Scoring needs none of this - `normalize` already drops the tag on
     both sides, so "Kingdom (WAN)" scores 1.00 against "Kingdom". It is
     only the query text an external search engine takes literally."""
     full = " ".join((text or "").split())
-    stripped = search_query(full)
-    return [full] if not full or stripped == full else [full, stripped]
+    if not full:
+        return [text or ""]
+    out = []
+    for candidate in (full, search_query(full)):
+        for form in (_QUOTES_RE.sub("'", candidate), candidate):
+            if form and form not in out:
+                out.append(form)
+    return out
 
 
 def _ratio(a: str, b: str) -> float:

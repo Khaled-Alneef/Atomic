@@ -21,7 +21,7 @@ import threading
 from pathlib import Path
 
 from helpers import (app_settings, downloads, global_search, images, logs,
-                     native_cursor, rail_icons, setup_wizard, startup,
+                     native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
 from helpers.nav_config import (HOME_ITEM, nav_position, visible_nav_groups,
                                 visible_nav_items)
@@ -38,7 +38,7 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal as Signal,
 )
-from PyQt6.QtGui import QCursor, QFont, QIcon, QPixmap
+from PyQt6.QtGui import QCursor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -226,94 +226,170 @@ SECTION_BLOCKS = 3
 # key not named here is theme.NAV_BULLET, so an unmapped section still
 # gets a readable row in the collapsed rail.
 SECTION_BACK_ICON = "\uE72B"    # Back (left-pointing arrow)
-# **Two rail rows are drawn rather than typed** - see VECTOR_ICONS
-# below and helpers/rail_icons.py. Both had been standing in as *emoji*
-# because this icon font carries neither shape: E8A4, the one named
-# "Bookmarks", draws a bulleted list (checked by rendering the whole
-# E8A0-E8BF range), and there is no cat in it at all - E933 drew an
-# I-beam. The owner's ask, 22 August 2026: "replace the save emoji and
-# the cat face emoji in anime to a proper icons not emojis". An emoji is
-# the wrong thing here for a reason that is on screen rather than a
-# matter of taste: it is a *colour* glyph, so it renders in its own
-# fixed palette and ignores the row's normal/hover/selected colour - a
-# pink ribbon and a ginger cat in a column of monochrome gold-white
-# glyphs. theme.py already says exactly this about why every other rail
-# glyph comes from the Segoe icon fonts.
-VECTOR_ICONS = {"saved": "bookmark", "cat_anime": "cat"}
+# **Every rail row's icon is a bundled PNG now** (the owner's sheet of
+# 18, 22 August 2026), not a Segoe Fluent codepoint and not a path this
+# app draws. theme.rail_icon names the files and theme.NAV_ICONS is the
+# page half of the mapping; SECTION_ICONS below is the section half.
+#
+# It replaces two mechanisms, not one. Most rows typed a glyph as the
+# item's *text*; two - Saved and Anime - could not, because the font
+# carries neither shape (E8A4, the one named "Bookmarks", draws a
+# bulleted list, and there is no cat in it at all), so they were stroked
+# by helpers/rail_icons.py and handed to Qt as a decoration. Every row
+# now takes the decoration path and nothing types a glyph, which is why
+# three tuned alignment constants left with the drawn pair: a stroked
+# path's ink is not centred in its own grid and the two shapes were
+# different widths, so each needed its own offset to sit on the column's
+# axis. Every PNG in the sheet is trimmed to its ink and re-padded to a
+# centred square, so "centre the icon box" is exact for all seventeen
+# and there is nothing left to tune per shape.
+#
+# **helpers/rail_icons.py has no callers left as of this change.** It is
+# kept rather than deleted because what it holds is a measurement, not
+# code - the ink-box/optical-centre reasoning that four rounds of
+# alignment paid for - and because it is the only thing here that can
+# draw a rail icon without an asset, which is the fallback anyone adding
+# a row the sheet has no picture for would reach for first.
+#
+# The reason these are recoloured rather than shipped in the right
+# colour is the reason they are not emoji, which is the reason the
+# glyphs came from an icon font in the first place: a row's colour is a
+# *state* - muted at rest, TEXT when selected or hovered - and artwork
+# with its own palette ignores it.
+#
 # Logical pixels. 21, not the 20 the icon grid is designed on: measured
-# against the Fluent rows beside it, a 20px box puts ~15px of ink on
-# screen where those rows put ~17, and the bookmark read small.
-VECTOR_ICON_SIZE = 21
-
-# **Bigger in the folded rail, and that is an optical fix, not a
-# geometric one** - a 21px bookmark alone in a 36px rail reads small
-# beside a 21px-wide camera glyph. It does not fix alignment; see
-# VECTOR_ICON_INK_LEFT below for that, and note that a bookmark is
-# intrinsically narrow and cannot be made as wide as a camera glyph
-# without becoming a different object.
-VECTOR_ICON_SIZE_COLLAPSED = 24
-# Reserved to the *right* of a drawn icon, so the label beside it starts
-# where a glyph row's label does. Measured on a real-window grab: a
-# glyph row's label ink begins at x=61 and a drawn row's at x=58, and the
-# view reserves `iconSize` for the decoration - so three columns of
-# nothing on the right is the whole fix, with no second pixmap to keep
-# in step. Confirmed still true 22 August 2026 after the ink-left change
-# below: every label in the expanded section rail starts at x=39-40,
-# drawn rows and glyph rows alike.
-VECTOR_ICON_LEAD = 3
-
-# **Align left edges, not centres.** Third report from the owner, 22
-# August 2026: both Saved and Anime "need to be moved to the left a
-# bit", folded *and* expanded. Measured on a real window, the lit-pixel
-# box of every row in the section rail, before this change:
+# against the Fluent rows it used to sit beside, a 20px box put ~15px of
+# ink on screen where those rows put ~17. One size at both widths - a
+# folded row and an expanded one show the same picture, and the sheet's
+# icons are square, so there is no second number to keep in step.
+# **24, not 21, and it is metrically free.** A/B'd at 21/24/26 on the
+# real window: row height is 33 folded and 35 expanded at all three,
+# folded skew stays within +/-1 at all three, and the longest label
+# ("Schedule") ends at x=111 of a 184px row, so nothing elides. What it
+# buys is legibility across the whole set - the clapperboard's slate
+# teeth, the monitor's stand, the calendar's rings, the clock's hands -
+# and it is the difference between the Anime face's hair fusing into a
+# crown and its spikes separating into points.
 #
-#     folded (32px row)          expanded (184px row)
-#     Movies   x 8..28  w21      Movies   x 8..27  w20
-#     Series   x 8..28  w21      Series   x 8..27  w20
-#     Anime    x10..26  w17      Anime    x11..27  w17   <- drawn
-#     Saved    x13..23  w11      Saved    x14..24  w11   <- drawn
-#     Schedule x10..26  w17      Schedule x 9..26  w18
-#     History  x 9..28  w20      History  x 9..27  w19
+# It does not rescue Manhua. That icon's meaning is a Chinese character
+# inside a scroll, and the character is a blob at 21 and still a blob at
+# 26; what actually tells it apart from Manga and Manhwa at rail size is
+# the scroll silhouette, which reads fine. Measured, not assumed.
 #
-# Centres already agreed to within a pixel (18.0 folded), which is why
-# two rounds of centre-matching did not answer the complaint. What the
-# eye reads down a narrow column is the *left* edge, and the bookmark's
-# began 4-6px right of every glyph's. So the drawn rows are now
-# positioned by their ink's left edge instead: 0.0 means "ink starts at
-# the decoration box's left edge", and the view puts that box exactly
-# where a text-only row's text begins - i.e. on the same axis the
-# glyphs' own ink comes off. rail_icons.pixmap does the arithmetic, per
-# shape, from rail_icons.ink_box.
+# **26, not 24 - the owner's ask, 22 August 2026: "make the icons in the
+# main and watch and read sidebars larger (folded/unfolded)".** Row
+# height is not at risk from this either way: _RailDelegate.sizeHint
+# takes a decorationless row's own height regardless of icon size (see
+# its docstring), so nothing above was re-measured *because* of this
+# change - it was re-measured because the 33/35 the A/B above recorded
+# is simply stale now, for unrelated reasons. Fresh on today's window:
+# 57 folded, 59 expanded.
 #
-# Not negative, though the glyph mean sits a shade left of it: ink at
-# x<0 is ink clipped off the pixmap. This is as far left as the artwork
-# can go and still be whole.
-VECTOR_ICON_INK_LEFT = 0.0
-VECTOR_ICON_INK_LEFT_COLLAPSED = 0.0
-# The role a drawn row's icon name is parked on, so _RailDelegate can
-# tell one from an ordinary glyph row. UserRole itself already carries
-# the page/section key.
-VECTOR_ROLE = Qt.ItemDataRole.UserRole + 1
+# **28 was tried first and measured broken**: every folded row shifted
+# +1.5px right, uniformly, across all three rails - see the `max(...)`
+# in _RailDelegate.initStyleOption for the mechanism. That delegate
+# only keeps a folded icon centred while RAIL_ICON_SIZE stays at or
+# under `32 - margin*2` (the row is pinned to 32px wide,
+# _sync_rail_icon_widths; margin is 3, PM_FocusFrameHMargin + 1) - 26 is
+# that ceiling exactly, and it is also the largest value the original
+# A/B above already vetted on row height and skew, so nothing about
+# raising it to exactly this number is untested ground. Going further
+# needs the row itself widened first (SIDEBAR_COLLAPSED_WIDTH and
+# everything sized off it), not just this constant.
+#
+# Re-verified on the real window at 26: every row on all three rails
+# still centres within 0-0.5px folded, same as at 24 (see
+# RAIL_FOLDED_QSS's note above) - unlike 28, this size does not reopen
+# the centring this pass was also asked to fix.
+RAIL_ICON_SIZE = 26
 
+# Applied to a rail while it is folded - see _sync_rail_icon_widths for
+# the measurement. Only the padding is named, so every other property of
+# theme.py's #NavList::item rule (colour, radius, font, the hover and
+# selected pills) still comes from there.
+# **Applied to a rail while it is folded, and it names the horizontal
+# padding only.** That restraint is the whole trick, and it was measured
+# three ways on the real window:
+#
+#   as shipped (no widget sheet)   row 33px, icons +5px right of centre
+#   padding: 11px 0px              row 55px, centred
+#   padding-left/right: 0px        row 33px, centred
+#
+# Restating the vertical padding makes the app rule's 11px and this
+# rule's 11px both count, and every folded row grows by 22px. Naming
+# just the two sides that need changing leaves the height alone.
+#
+# A `[folded="true"]::item` rule in theme.py was tried first and is not
+# an option: Qt does not re-resolve ::item sub-control rules against a
+# dynamic property on the view. Measured - the rects came back byte
+# identical after unpolish/polish/doItemsLayout, and the icons stayed
+# +5px right.
+#
+# **Re-measured 22 August 2026 after the owner reported it still right
+# of centre**, this time sampling lit-pixel ink bounding boxes on the
+# real window rather than trusting this note - across all three rails,
+# not just the one this table was taken on: main (Home, Watch, Read,
+# Games, Apps, Websites) and both section rails (Watch's Discover,
+# Movies, Series, Anime, Saved, Schedule; Read's Manga, Manhwa, Manhua,
+# Other, Discover, Saved, History). Every one centred within 0-0.5px of
+# the 32px-wide folded pill's true middle - this fix still holds, and
+# now covers every rail rather than the one it was written against. See
+# RAIL_ICON_SIZE below for the row-height numbers this table's own 33px
+# no longer matches, and for the same re-check repeated after growing
+# the icon. The built Atomic.exe was not part of this - only the source
+# tree, run directly - so a stale build is still an open possibility if
+# this is seen again.
+RAIL_FOLDED_QSS = ("QListWidget#NavList::item {"
+                   " padding-left: 0px; padding-right: 0px; }")
+# **The rail's iconSize is square now, and the three blank columns that
+# used to hang off a drawn icon's right are gone.** They existed to push
+# a drawn row's label out to where a *glyph* row's label started - a glyph
+# row spent its lead on two literal spaces in the text - and with no
+# glyph rows left there is nothing to match: every row is placed by the
+# same decoration-to-text gap, which is what makes them line up. Measured
+# to be a no-op either way at today's sizes: a view reserves
+# QIcon.actualSize(iconSize), which for a 21x21 pixmap is 21x21 whether
+# the box asked for is 21 or 24 wide.
+
+# **Four rounds of ink-centring constants used to live here and are
+# gone with the artwork they aimed.** Kept as a note because the fact
+# they recorded is what makes the replacement safe rather than lucky:
+# what the eye centres on down a narrow column is a shape's *ink mass*,
+# not its canvas, and the two hand-drawn shapes had ink 12.6 and 19.6
+# grid units wide inside the same 24-unit box - so neither centring the
+# canvas nor sharing a left edge put them on one axis, and each needed
+# its own measured offset (folded and expanded differed too). The sheet's
+# PNGs are each trimmed to their ink and re-padded to a centred square
+# before they ship, so ink centre and canvas centre are the same point
+# for every one of them and the offsets have nothing left to correct.
+# The role a row's icon file is parked on. Read by _RailDelegate (which
+# rebuilds the pixmap in the row's own colour on hover) and by
+# _sync_rail_icon_widths. UserRole itself already carries the page or
+# section key, so this is UserRole + 1.
+RAIL_ICON_ROLE = Qt.ItemDataRole.UserRole + 1
+
+# Section key -> icon file, the other half of theme.NAV_ICONS. The keys
+# are tracker.WATCH_CATEGORIES / READ_CATEGORIES plus the four standing
+# sections; an unmapped one still falls through to theme.NAV_BULLET, and
+# so does a *mapped* one whose PNG is missing from the bundle - see
+# _rail_icon, which refuses to hand back a null pixmap.
+#
+# The three reading flavours keep three distinct pictures for the reason
+# they always did: "Manhwa" and "Manhua" differ by one letter and could
+# never be told apart by their text at rail width, where the label is
+# gone entirely and the icon is the whole row.
 SECTION_ICONS = {
-    "saved": VECTOR_ICONS["saved"],
-    "discover": "\uE721",  # Search
-    "schedule": "\uE787",  # Calendar
-    "history": "\uE81C",   # History (the clock-with-arrow)
-    # The category sections (tracker.WATCH_CATEGORIES / READ_CATEGORIES).
-    # Chosen to read at a glance in the *collapsed* rail, where the label
-    # is gone and the glyph is all there is - a TV set for series, a
-    # camera for anime, a filmstrip for movies. The three reading
-    # flavours get three distinct book shapes for the same reason:
-    # "Manhwa" and "Manhua" differ by one letter and could never be told
-    # apart by their text at rail width.
-    "cat_series": "\uE7F4",      # TVMonitor - the screen
-    "cat_anime": VECTOR_ICONS["cat_anime"],
-    "cat_movies": "\uE714",      # Video - the camera
-    "cat_manga": "",     # Library
-    "cat_manhwa": "",    # ReadingList
-    "cat_manhua": "",    # Page
-    "cat_other": "",     # Dictionary
+    "discover": theme.rail_icon("discover"),
+    "saved": theme.rail_icon("saved"),
+    "schedule": theme.rail_icon("schedule"),
+    "history": theme.rail_icon("history"),
+    "cat_movies": theme.rail_icon("movies"),
+    "cat_series": theme.rail_icon("series"),
+    "cat_anime": theme.rail_icon("anime"),
+    "cat_manga": theme.rail_icon("manga"),
+    "cat_manhwa": theme.rail_icon("manhwa"),
+    "cat_manhua": theme.rail_icon("manhua"),
+    "cat_other": theme.rail_icon("other"),
 }
 
 # The fold toggle's two faces - single Fluent chevrons, drawn large
@@ -414,22 +490,56 @@ class NavListWidget(QListWidget):
         pass
 
 
-class _RailDelegate(QStyledItemDelegate):
-    """The two things a rail row needs that the stock delegate does not
-    do, and nothing else - every ordinary glyph row is drawn exactly as
-    it was.
+def _rail_dpr(widget):
+    """The ratio a rail's pixmaps have to be cut at. Taken off the widget
+    rather than the primary screen, since the window can be dragged to a
+    monitor with a different scale factor."""
+    try:
+        return float(widget.devicePixelRatioF()) if widget is not None else 1.0
+    except (AttributeError, RuntimeError):
+        return 1.0
 
-    1. **A drawn icon follows the row's colour.** QStyle only ever asks a
+
+def _rail_icon(path, dpr):
+    """A rail row's decoration: TEXT_MUTED at rest, TEXT when the row is
+    selected. Hover is _RailDelegate's to draw - QStyle only ever asks an
+    icon for Normal, Disabled or Selected.
+
+    **Returns None rather than an empty icon when the file is missing.**
+    images.tinted_asset answers a missing asset with a null QPixmap, by
+    design (an empty icon, not a crash) - but an empty icon in a folded
+    rail is a *blank row*, with no label to say which one it is and
+    nothing on screen to say anything is wrong. The caller falls back to
+    theme.NAV_BULLET instead, so a bundle that shipped without one of the
+    PNGs loses the picture and keeps the row.
+    """
+    normal = images.tinted_asset(path, theme.TEXT_MUTED, RAIL_ICON_SIZE, dpr)
+    if normal.isNull():
+        return None
+    built = QIcon(normal)
+    built.addPixmap(
+        images.tinted_asset(path, theme.TEXT, RAIL_ICON_SIZE, dpr),
+        QIcon.Mode.Selected)
+    return built
+
+
+class _RailDelegate(QStyledItemDelegate):
+    """The three things a rail row needs that the stock delegate does not
+    do, and nothing else.
+
+    1. **A row's icon follows the row's colour.** QStyle only ever asks a
        QIcon for Normal, Disabled or Selected (QCommonStyle decides the
        mode from `State_Selected` alone), so a *hovered* row's icon would
-       stay muted while its label turned bright - the one visual where
-       the drawn rows would have read differently from the glyph rows
-       beside them. Hover is therefore mapped onto the icon's Selected
-       pixmap here.
+       stay muted while its label turned bright. Hover is therefore
+       mapped onto the icon's Selected pixmap here.
     2. **A collapsed row centres its icon.** With the label gone the row
        is the icon, and QStyleOptionViewItem's decorationAlignment is
        AlignLeft in list mode - so the icon sat hard against the left
        edge of a 68px rail while every glyph row centred its text.
+    3. **A row is as tall as a typed one, decoration or not** - see
+       sizeHint. This used to apply to two rows out of nine and now
+       applies to all of them, which is what keeps the row height where
+       it was when the glyphs were text.
     """
 
     def initStyleOption(self, option, index):
@@ -440,19 +550,101 @@ class _RailDelegate(QStyledItemDelegate):
             # right and centres the *pair*, which puts the icon left of
             # the rail's middle by half a label's width.
             option.displayAlignment = Qt.AlignmentFlag.AlignCenter
+            # **And the empty label still costs 12px**, which neither
+            # alignment above can reach: measured 22 August 2026 on a
+            # folded row, HasDisplay set makes the style size the content
+            # at 39px (21 icon + 12 empty text + margins) where the row
+            # is pinned to 32. Clearing the flag drops that to 33.
+            #
+            # A row that types a glyph (the theme.NAV_BULLET fallback)
+            # has real text and never reaches this branch, so it keeps
+            # centring exactly as every folded row did before.
+            option.features &= ~QStyleOptionViewItem.ViewItemFeature.HasDisplay
+            # **AlignCenter centres the pixmap inside the decoration
+            # *cell*, not the cell inside the row** - which is why
+            # clearing HasDisplay above moved the row's width and not one
+            # pixel of its icon. QCommonStylePrivate::viewItemLayout puts
+            # that cell at `rect.x + margin` and gives it exactly
+            # `decorationSize.width()`, so a 21px icon in a 32px row sat
+            # 2.5px left of centre however it was aligned (measured: ink
+            # margins 7 left, 12 right, against 8/9 for the glyph rows it
+            # replaced). The old drawn pair paid this with a hand-tuned
+            # per-shape offset baked into the artwork; widening the cell
+            # to the row instead means AlignCenter lands the icon on the
+            # true centre and there is no constant to keep true.
+            #
+            # `margin` is read from the style rather than assumed - it is
+            # PM_FocusFrameHMargin + 1, which is the expression
+            # viewItemLayout itself uses, and it measures 3 here.
+            #
+            # This leans on the folded rail having no horizontal padding
+            # (RAIL_FOLDED_QSS): `rect` here is the whole item, and
+            # QStyleSheetStyle hands the base style the content box, so
+            # the two are the same row only while that padding is 0.
+            widget = option.widget
+            style = widget.style() if widget is not None else QApplication.style()
+            margin = style.pixelMetric(
+                QStyle.PixelMetric.PM_FocusFrameHMargin, None, widget) + 1
+            # **The `max(...)` here has a ceiling, and RAIL_ICON_SIZE must
+            # stay under it.** Found 22 August 2026 while trying to raise
+            # RAIL_ICON_SIZE to 28: every folded row shifted **+1.5px
+            # right, uniformly** (measured on the real window, all three
+            # rails, no exceptions) - the first time this file's own
+            # centring fix has reproducibly failed rather than just
+            # sitting on a stale note.
+            #
+            # The cause is this line, not the value 28 itself. Qt's own
+            # viewItemLayout - not this code - always starts the
+            # decoration cell at `rect.x() + margin` (see above) and
+            # gives it exactly `decorationSize.width()`; the cell is only
+            # centred when that width is *exactly*
+            # `option.rect.width() - margin*2` (26 here, row 32, margin
+            # 3), because that is the one width whose right edge lands
+            # `margin` from the row's right side too. `max(RAIL_ICON_SIZE,
+            # ...)` was written to stop Qt shrinking a too-big icon to
+            # fit its cell - and it still does that job - but the moment
+            # RAIL_ICON_SIZE > 26 it *replaces* the symmetric width with
+            # a plain `RAIL_ICON_SIZE`-wide cell still anchored at the
+            # same left-only `x + margin`, so the cell (and the icon
+            # filling it, since the two are now the same width) inherits
+            # a left margin of 3 and a right margin of `32-3-28=1` - a
+            # 2px lopsided pair, half of which is the +1px-plus-rounding
+            # this measured.
+            #
+            # No fix landed here: raising the row's own 32px would move
+            # this ceiling but touches SIDEBAR_COLLAPSED_WIDTH and
+            # everything sized off it, well past an icon-size change.
+            # RAIL_ICON_SIZE instead stays at or under `32 - margin*2`
+            # (26) - see its own comment for why 26 rather than a smaller
+            # safe value.
+            option.decorationSize = QSize(
+                max(RAIL_ICON_SIZE, option.rect.width() - margin * 2),
+                RAIL_ICON_SIZE)
 
     def sizeHint(self, option, index):
-        """A drawn row is exactly as tall as a typed one.
+        """An icon row is exactly as tall as a typed one.
 
         Measured: carrying a decoration at all cost a row **2px**
         (59 -> 61 expanded, 57 -> 61 collapsed) whatever size the icon
         was - 18px through 22px all produced 61 - so it is the style's
-        decoration margins, not the artwork. Two rows out of nine being
-        2px taller reads as uneven spacing down the column, so the
-        height is taken from what the same row would want with no
-        decoration in it at all."""
+        decoration margins, not the artwork. That was worth undoing when
+        two rows out of nine had a decoration and read as uneven spacing
+        down the column; now that *every* row has one it is worth
+        undoing for a second reason - it is the only thing holding the
+        rail's row height where the typed glyphs left it (33px folded,
+        35 expanded, measured before and after this change).
+
+        **Standing in a placeholder character for the folded row's empty
+        label was tried here and measured wrong**, which is worth a line
+        because the reasoning for it sounded right: the height wanted is
+        the one a typed row takes, and a folded row types nothing. But
+        the style already answers 33 for a decorationless row with an
+        empty label, and answers 40 for the same row carrying one
+        character of the folded rail's 14pt icon face - so the
+        placeholder did not reproduce the old height, it invented a
+        taller one. Measured on the real window: rows went 33 -> 40."""
         hint = super().sizeHint(option, index)
-        if not index.data(VECTOR_ROLE):
+        if not index.data(RAIL_ICON_ROLE):
             return hint
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
@@ -471,25 +663,26 @@ class _RailDelegate(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
         if hovered and not (opt.state & QStyle.StateFlag.State_Selected):
-            name = index.data(VECTOR_ROLE)
-            if name:
-                # The lead read back off the box the row is already
-                # using, rather than the sidebar's state - the delegate
-                # has no business knowing whether the rail is folded.
-                lead = max(0, opt.decorationSize.width()
-                           - opt.decorationSize.height())
-                # Same reading for the ink offset: an empty label *is*
-                # the folded state as far as this delegate is concerned
-                # (initStyleOption already keys off it). Without it,
-                # hovering a folded drawn row snapped its artwork back
-                # to wherever the default put it - the row shifted
-                # sideways under the pointer.
-                ink_left = (VECTOR_ICON_INK_LEFT if opt.text
-                            else VECTOR_ICON_INK_LEFT_COLLAPSED)
-                size = (VECTOR_ICON_SIZE if opt.text
-                        else VECTOR_ICON_SIZE_COLLAPSED)
-                opt.icon = QIcon(rail_icons.pixmap(
-                    str(name), size, theme.TEXT, lead, ink_left))
+            path = index.data(RAIL_ICON_ROLE)
+            if path:
+                # Rebuilt in TEXT rather than swapped to the icon's
+                # Selected pixmap through a mode, because the style is
+                # what picks the mode and it will only ever pick
+                # Selected for a selected row. Cheap on repeat -
+                # images.tinted_asset caches per (file, colour, size,
+                # ratio), and a hover asks for one combination.
+                #
+                # The size and the ratio are read off the row, not off
+                # the sidebar's state: the delegate has no business
+                # knowing whether the rail is folded, and a previous
+                # pass shipped a snap-back here by deriving the artwork
+                # from something the paint could not see - the row
+                # shifted sideways under the pointer.
+                hot = images.tinted_asset(str(path), theme.TEXT,
+                                          RAIL_ICON_SIZE,
+                                          _rail_dpr(opt.widget))
+                if not hot.isNull():
+                    opt.icon = QIcon(hot)
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt,
@@ -532,6 +725,55 @@ def _fit_to_available_screen(rect):
     y = min(max(rect.y(), available.y() + TITLE_BAR_ALLOWANCE),
             available.bottom() - height + 1)
     return QRect(x, y, width, height)
+
+
+class _FoldFreeze(QWidget):
+    """The page, as one flat picture, for the length of a sidebar fold.
+
+    **This is the owner's "the sidebar stutters in read or watch", and
+    it is the same cause as the page transition** (widgets.PageSlide):
+    folding animates the sidebar holder's width, which moves *and*
+    resizes the container the page sits in, and Qt's blit path
+    (`QWidgetPrivate::moveRect`) is only taken for a pure move - a
+    move-and-resize invalidates the whole region instead. So every
+    QLabel, Card, CardTextLabel and cover on the page re-rendered on
+    every step of the fold. Measured 22 August 2026, real window,
+    1920x1040, on the owner's data, at his panel's 6.94ms budget:
+
+        Home                       63-67 paints/position   ~94-99 fps
+        Watch / Discover           85-102               ~74-85 fps
+        Watch / Movies (category) 100-127               ~44-70 fps
+        Read / Discover            71-86                ~69-85 fps
+
+    which is exactly the "fine on Home, bad on the tracker pages" split
+    the owner reported: the same per-widget cost, over four times as
+    many widgets. Hiding the page for the length of a fold - the
+    isolation test - took Movies from 58/93 fps to 110/127, naming the
+    page's repaint as the dominant term; the sidebar's own repaint,
+    tested the same way, was worth about 1ms of median.
+
+    So the page is rendered once, here, and a fold step is one
+    `drawPixmap` with the real widgets hidden behind it. The picture is
+    taken at the *widest* geometry the page holds for the whole fold
+    (see _toggle_sidebar), so the container simply clips it as it
+    resizes, exactly as it clipped the live page."""
+
+    def __init__(self, parent, pixmap):
+        super().__init__(parent)
+        # Same pair as PageSlide: this covers every pixel it is given,
+        # so Qt can skip the erase and stop painting the container under
+        # it.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._pixmap = pixmap
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        # Whole-pixmap draw at the origin: it carries its own
+        # devicePixelRatio from grab(), so Qt places it 1:1 on any
+        # display without resampling (see .claude/rules/ui.md).
+        painter.drawPixmap(0, 0, self._pixmap)
+        painter.end()
 
 
 class MainWindow(QMainWindow):
@@ -772,8 +1014,7 @@ class MainWindow(QMainWindow):
         # not the ::item QSS font-family - the stylesheet rule alone is
         # silently ignored for list items, so it has to be set here too.
         rail.setFont(theme.nav_font())
-        rail.setIconSize(QSize(VECTOR_ICON_SIZE + VECTOR_ICON_LEAD,
-                               VECTOR_ICON_SIZE))
+        rail.setIconSize(QSize(RAIL_ICON_SIZE, RAIL_ICON_SIZE))
         # setItemDelegate, not setItemDelegateForRow: the drawn rows move
         # around as blocks are refilled, and a per-row delegate would be
         # attached to whichever row happened to hold one at build time.
@@ -819,8 +1060,8 @@ class MainWindow(QMainWindow):
                 pass
 
     def _sync_rail_icon_widths(self):
-        """Make a drawn row occupy exactly the width a glyph row does,
-        so the folded rail centres them all on the same axis.
+        """Pin every folded row to the width the rail actually has, so
+        they all centre on the same axis.
 
         **Measured 22 August 2026 on the folded section rail**, sampling
         the lit pixels of each row's icon:
@@ -830,8 +1071,7 @@ class MainWindow(QMainWindow):
             History   (glyph)  centroid x = 17.9
 
         which is the owner's "the saved icon is moved more to the right
-        when folded", and the same 1px sits under Anime in the rail
-        above. The cause is not the artwork: a row carrying a
+        when folded". The cause is not the artwork: a row carrying a
         *decoration* reserves the icon **and** the view's
         decoration-to-text gap even when the collapsed label is empty,
         so the Saved item's rect came out **39px wide inside a 36px
@@ -839,18 +1079,20 @@ class MainWindow(QMainWindow):
         rail. Widening or padding the pixmap cannot fix that - the extra
         width is the item's, not the icon's.
 
-        So the hint is pinned to what the glyph rows in the same rail
-        actually measure. Width only; the height stays the delegate's,
-        which is what _sync_rail_gaps reads. Expanded rails are left
-        alone - there the label needs the natural width, and the two
-        were already measured 1px apart (see _style_rail_item).
+        **Pinned to the viewport now rather than to the glyph rows in the
+        same rail**, because there are no glyph rows left to measure
+        against - every row carries a decoration since the icon sheet
+        landed, so the old `min(width of the rows without one)` had
+        nothing to take a minimum of and quietly did nothing at all,
+        leaving every row 3px over the viewport and centred off the rail.
+        The number it used to find is the one computed here: a row with
+        no decoration lays out at the full viewport width less the list's
+        spacing on each side - measured 32 in a 36px viewport at
+        spacing 2, both before and after this change.
 
-        **The centroids quoted above are history, not the current
-        alignment.** Making them agree is what this function does and it
-        is still needed - without the pin the item is wider than the
-        viewport and centres off the rail entirely - but agreeing
-        centres did not answer the owner's complaint, and the artwork is
-        now placed by its *left* edge instead. See VECTOR_ICON_INK_LEFT.
+        Width only; the height stays the delegate's, which is what
+        _sync_rail_gaps reads. Expanded rails are left alone - there the
+        label needs the natural width.
         """
         # getattr throughout: this runs from _populate_nav_list, which
         # the main bar builds before the section bar or the Home row
@@ -862,6 +1104,46 @@ class MainWindow(QMainWindow):
             if rail is None:
                 continue
             try:
+                # **The folded rail takes its left padding off, and that
+                # is what finally centres it.**
+                #
+                # Measured 22 August 2026 on the real window, ink margins
+                # inside the 36px viewport: Movies +5, Series +5, Anime
+                # +5, Saved +4, Schedule +5, History +6 - *every* row
+                # sitting right of centre, not just the two drawn ones.
+                # Four rounds of this were spent aligning the bookmark
+                # and the cat to the glyph column, and the glyph column
+                # was itself the thing that was off.
+                #
+                # The cause is one number: Qt lays the content out at
+                # `item.x + padding-left` and lets it run to the item's
+                # right edge, so the box the glyph centres in is inset
+                # on one side only. Probed with deliberately absurd
+                # values - padding-left 30 put the text at x=32, exactly
+                # item.x + 30 - which makes the arithmetic exact:
+                # content centre = x + padL + (w - padL)/2, and with the
+                # item at x=2 w=32 in a 36px viewport that lands on 18
+                # (the true centre) only when padL is 0.
+                #
+                # Set on the widget rather than through a
+                # [collapsed="true"] rule in theme.py: that was tried
+                # first and never matched - Qt does not re-resolve
+                # `::item` sub-control rules against a dynamic property
+                # on the view, and the measured rects came back byte
+                # identical after an unpolish/polish. A widget
+                # stylesheet merges with the app's, so the hover and
+                # selected rules still apply.
+                # Set as a *property* read by theme.py's
+                # `[folded="true"]::item` rule, not as a widget
+                # stylesheet. A widget stylesheet naming padding was
+                # measured taking the row height from 33px to 55px -
+                # exactly twice the 11px vertical padding, i.e. applied
+                # once by the app rule and again by the widget one.
+                # doItemsLayout() is required as well: the rule changes
+                # the item's metrics, and the view caches them.
+                sheet = RAIL_FOLDED_QSS if self._sidebar_collapsed else ""
+                if rail.styleSheet() != sheet:
+                    rail.setStyleSheet(sheet)
                 items = [rail.item(i) for i in range(rail.count())]
                 # Back to the delegate's own hint first, or the widths
                 # read below would be last fold's pinned ones.
@@ -879,13 +1161,11 @@ class MainWindow(QMainWindow):
                 if rail.viewport().width() > SIDEBAR_COLLAPSED_WIDTH:
                     continue
                 rail.doItemsLayout()
-                glyph = [rail.visualItemRect(item).width() for item in items
-                         if not item.data(VECTOR_ROLE)]
-                if not glyph:
-                    continue        # nothing to line up against
-                target = min(glyph)
+                target = rail.viewport().width() - rail.spacing() * 2
+                if target <= 0:
+                    continue
                 for item in items:
-                    if item.data(VECTOR_ROLE):
+                    if item.data(RAIL_ICON_ROLE):
                         height = rail.visualItemRect(item).height()
                         item.setSizeHint(QSize(target, height))
             except RuntimeError:
@@ -928,6 +1208,12 @@ class MainWindow(QMainWindow):
         self._sidebar_collapsed = False
         self._sidebar_anim = None
         self._fold_in_flight = False
+        # The flat picture standing in for the page while a fold runs,
+        # the page it was taken of, and whatever on that page held the
+        # keyboard - see _FoldFreeze/_settle_fold.
+        self._fold_freeze = None
+        self._fold_frozen_page = None
+        self._fold_focus = None
         # Set before anything styles the Settings button, which reads it
         # for its tooltip. Filled in by the startup update check.
         self._pending_update_version = ""
@@ -963,7 +1249,7 @@ class MainWindow(QMainWindow):
         # 260*scale screen area on any non-100%-scaled display (125% here)
         # and it comes out visibly blurry.
         dpr = QApplication.primaryScreen().devicePixelRatio()
-        logo_pixmap = QPixmap(str(APP_DIR / "atomic_icon.png")).scaledToHeight(
+        logo_pixmap = QPixmap(str(APP_DIR / "assets" / "atomic_icon.png")).scaledToHeight(
             int(LOGO_HEIGHT * dpr), Qt.TransformationMode.SmoothTransformation)
         logo_pixmap.setDevicePixelRatio(dpr)
         logo_label.setPixmap(logo_pixmap)
@@ -1348,52 +1634,63 @@ class MainWindow(QMainWindow):
         self._style_rail_item(item, name,
                               theme.NAV_ICONS.get(page_name, theme.NAV_BULLET))
 
-    def _style_rail_item(self, item, name, glyph):
+    def _style_rail_item(self, item, name, icon_token):
         """Harbor's row language, shared by the nav list and the section
-        list (they are the same widget on purpose): the row's Fluent
-        glyph leads the label when expanded (replacing the
-        one-shape-for-every-row ◈ bullet), and the collapsed rail shows
-        the same glyph alone, centred, with the label moved to a tooltip
-        - one symbol per row at both widths. The expanded font is a
-        two-family chain (theme.nav_row_font): the glyph resolves from
-        the icon face and the label falls through to the nav face,
-        because an item carries exactly one font.
+        list (they are the same widget on purpose): the row's icon leads
+        its label when the sidebar is expanded, and the collapsed rail
+        shows that same icon alone and centred with the label moved to a
+        tooltip - one picture per row at both widths, so folding never
+        swaps the symbol out from under the user.
 
-        Two rows have no glyph to type - Saved and Anime, whose symbols
-        this icon font does not carry (see VECTOR_ICONS). Those are
-        handed to Qt as the item's *decoration* instead, drawn by
-        helpers/rail_icons and coloured by _RailDelegate, and the row is
-        otherwise laid out identically: icon then label expanded, icon
-        alone and centred collapsed."""
-        vector = VECTOR_ICONS.get(glyph) or (
-            glyph if glyph in VECTOR_ICONS.values() else "")
-        if vector:
-            # No lead in the folded rail: there the row is the icon and
-            # it is centred, so blank columns on one side would push it
-            # off centre by half of them.
-            collapsed_row = self._sidebar_collapsed
-            lead = 0 if collapsed_row else VECTOR_ICON_LEAD
-            ink_left = (VECTOR_ICON_INK_LEFT_COLLAPSED if collapsed_row
-                        else VECTOR_ICON_INK_LEFT)
-            icon_size = (VECTOR_ICON_SIZE_COLLAPSED if collapsed_row
-                         else VECTOR_ICON_SIZE)
-            item.setData(VECTOR_ROLE, vector)
-            item.setIcon(rail_icons.icon(vector, icon_size,
-                                         theme.TEXT_MUTED, theme.TEXT, lead,
-                                         ink_left))
+        `icon_token` is a bundled PNG's path for every row this app
+        ships (theme.NAV_ICONS and SECTION_ICONS, both built by
+        theme.rail_icon). It used to be a Segoe codepoint typed into the
+        item's *text*, with two hand-drawn exceptions handed over as a
+        decoration; now every row takes the decoration path and the text
+        branch below is only a fallback - which is the point of it.
+
+        **A row must never come out blank, and a missing PNG is how that
+        happens quietly**: images.tinted_asset answers a missing asset
+        with a null pixmap by design, Qt draws a null pixmap as nothing,
+        and a folded row has no label to give it away. So _rail_icon
+        reports the miss instead of returning an empty icon, and the row
+        falls through to theme.NAV_BULLET - the same branch an unmapped
+        section key has always used.
+
+        The expanded font stays the two-family chain
+        (theme.nav_row_font) even though nothing types a glyph in the
+        normal case: it resolves the icon face first and falls through
+        to the nav face, and an item carries exactly one font, so a
+        fallback row typing a bullet still gets a face that has one."""
+        path = str(icon_token) if str(icon_token).endswith(".png") else ""
+        icon = _rail_icon(path, _rail_dpr(self)) if path else None
+        if icon is not None:
+            item.setData(RAIL_ICON_ROLE, path)
+            item.setIcon(icon)
+            glyph = ""
+        else:
+            # Cleared rather than left alone: this runs again on every
+            # fold and every section refill, so a row that lost its icon
+            # would otherwise keep the one it was built with and draw the
+            # fallback text on top of it.
+            item.setData(RAIL_ICON_ROLE, None)
+            item.setIcon(QIcon())
+            glyph = theme.NAV_BULLET if path else str(icon_token)
         if self._sidebar_collapsed:
-            item.setText("" if vector else glyph)
+            item.setText(glyph)
+            # Kept even with nothing to type: the row's height comes off
+            # its font (see _RailDelegate.sizeHint), and this is the face
+            # the folded rail has always measured 33px against.
             item.setFont(theme.icon_font())
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setToolTip(name)
         else:
-            # Two spaces, not three: with the wider glyph leading, three
-            # pushed "Movies & Series" past the 220px column and elided
-            # it (measured on a real-window grab). A drawn row spends no
-            # spaces at all - Qt's own decoration-to-text gap already
-            # sits it where the glyph rows' labels start (measured: 1px
-            # apart, see the rail alignment probe).
-            item.setText(name if vector else f"{glyph}  {name}")
+            # Two spaces, not three, on a fallback row: with a wide glyph
+            # leading, three pushed "Movies & Series" past the 220px
+            # column and elided it (measured on a real-window grab). An
+            # icon row spends no spaces at all - Qt's own
+            # decoration-to-text gap places the label.
+            item.setText(name if not glyph else f"{glyph}  {name}")
             item.setFont(theme.nav_row_font())
             item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             item.setToolTip("")
@@ -1537,7 +1834,74 @@ class MainWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
 
+    def _reflow_for_fold(self, page):
+        """Re-wrap a page's grid for the width the sidebar has settled at.
+
+        Split out only so it can be deferred a turn - see the caller."""
+        if page is not self._current_page:
+            return              # navigated away while the timer was queued
+        relayout = getattr(page, "relayout_for_sidebar", None)
+        if not callable(relayout):
+            return
+        try:
+            relayout()
+        except RuntimeError:
+            pass                # the page was replaced mid-fold
+
+    def _settle_fold(self):
+        """Put the live page back, whatever ended the fold.
+
+        One place undoes the freeze, so an interrupted fold (a second
+        click mid-flight, a navigation) and a completed one land
+        identically - the same shape as _settle_swap. Without it a
+        SmoothTween.stop() would strand the page hidden behind a picture
+        of itself, because stop() deliberately does not run on_done."""
+        freeze, self._fold_freeze = self._fold_freeze, None
+        page, self._fold_frozen_page = self._fold_frozen_page, None
+        focused, self._fold_focus = self._fold_focus, None
+        if page is not None:
+            try:
+                page.show()
+            except RuntimeError:
+                pass        # the page was replaced mid-fold
+        if focused is not None:
+            # Hiding a widget takes the keyboard off it and Qt does not
+            # give it back on show(): without this, folding the sidebar
+            # while typing in a search box left the caret nowhere and the
+            # next keystroke went to the window.
+            try:
+                if focused.isVisible():
+                    focused.setFocus(Qt.FocusReason.OtherFocusReason)
+            except RuntimeError:
+                pass
+        # **And re-flow the grid now the width is real.** The
+        # `relayout_for_sidebar()` before the animation is right for the
+        # link_grid pages, which decide their column count from
+        # `_sidebar_collapsed` - a boolean, already flipped. It is wrong
+        # for the tracker's category grid, which counts columns from its
+        # body's *measured* width, and at that moment the body is still
+        # the width it is about to stop being. Measured 22 August 2026:
+        # category_body reported 1604 before the fold and 1756 after, so
+        # the pre-fold re-flow recomputed 8 columns every time and the
+        # owner's "9 per row when folded" never happened. Running it here
+        # as well costs one rebuild from the already-warm catalogue
+        # cache, after the animation, so it cannot touch the fold's
+        # frame rate.
+        # On a zero timer, not inline: `landed()` has only just pinned
+        # the holder's width, and the page's own layout pass has not run
+        # yet - measured, unfolding re-flowed against a body still
+        # reporting its folded 1750px and kept 9 columns where 8 was
+        # right. One turn of the event loop is all it needs.
+        if page is not None:
+            QTimer.singleShot(0, lambda p=page: self._reflow_for_fold(p))
+        if freeze is not None:
+            freeze.hide()
+            freeze.deleteLater()
+
     def _toggle_sidebar(self):
+        # A second click while the last fold is still running: end its
+        # freeze here rather than leaving two stacked.
+        self._settle_fold()
         self._sidebar_collapsed = not self._sidebar_collapsed
         collapsed = self._sidebar_collapsed
 
@@ -1565,15 +1929,6 @@ class MainWindow(QMainWindow):
         # gaps are re-measured rather than left at the other width's.
         self._sync_rail_gaps()
         self._sync_rail_icon_widths()
-
-        # The card grids fit one more card per row against the folded
-        # rail (link_grid.grid_columns), so whatever is showing re-flows
-        # now rather than looking wrong until the next time it is opened.
-        # Before the animation, not after it: the column count is decided
-        # by the fold, not by the width it is currently passing through.
-        relayout = getattr(self._current_page, "relayout_for_sidebar", None)
-        if callable(relayout):
-            relayout()
 
         target = SIDEBAR_COLLAPSED_WIDTH if collapsed else SIDEBAR_WIDTH
         # setFixedWidth pins min and max together, so the animation drives
@@ -1603,6 +1958,11 @@ class MainWindow(QMainWindow):
                                  if self._sidebar_collapsed else SIDEBAR_WIDTH)
             self._fold_in_flight = False
             self._fit_current_page()
+            # The live page comes back only now, at its real width, with
+            # the picture dropped in the same turn of the event loop -
+            # showing it first and removing the picture after would cost
+            # the page two repaints instead of one.
+            self._settle_fold()
             # **After the fold, not before it.** _sync_rail_icon_widths
             # pins a drawn row to what its glyph neighbours measure, and
             # measuring is only meaningful once the rail is at its final
@@ -1625,6 +1985,41 @@ class MainWindow(QMainWindow):
             widest.setWidth(max(widest.width(),
                                 self.width() - SIDEBAR_COLLAPSED_WIDTH))
             self._current_page.setGeometry(widest)
+            # **Painted once and blitted for the rest of the fold** - the
+            # page's own repaint was 80-91% of the paint events in a
+            # fold, and all of the difference between Home and the
+            # tracker pages. See _FoldFreeze for the numbers.
+            #
+            # Taken *before* relayout_for_sidebar below, and that
+            # ordering is not cosmetic: a category grid rebuilds its
+            # cards in chunks off a timer, so a picture taken after the
+            # re-flow starts is a picture of an **empty page** - which is
+            # what the first version of this shipped into the pixel diff
+            # (38% of the frame, caught only by comparing the fold
+            # against the same fold with the picture switched off).
+            shot = self._current_page.grab()
+            freeze = _FoldFreeze(self.container, shot)
+            freeze.setGeometry(widest)
+            freeze.show()
+            freeze.raise_()
+            self._fold_freeze = freeze
+            self._fold_frozen_page = self._current_page
+            focused = QApplication.focusWidget()
+            self._fold_focus = (focused if focused is not None
+                                and self._current_page.isAncestorOf(focused)
+                                else None)
+            self._current_page.hide()
+
+        # The card grids fit one more card per row against the folded
+        # rail (link_grid.grid_columns), so whatever is showing re-flows
+        # now rather than looking wrong until the next time it is opened.
+        # Before the animation, not after it: the column count is decided
+        # by the fold, not by the width it is currently passing through -
+        # the page is already pinned at that width above, so this reads
+        # the fold's own answer either way.
+        relayout = getattr(self._current_page, "relayout_for_sidebar", None)
+        if callable(relayout):
+            relayout()
         self._sidebar_anim.start(holder.width(), target)
 
     def _populate_nav_list(self):
@@ -2193,10 +2588,19 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key.Key_F:
                 # The page's own search box, not the global panel - F is
                 # "find in this list" everywhere else too.
-                box = getattr(self._current_page, "search_box", None)
-                if box is not None:
-                    box.setFocus()
-                    box.selectAll()
+                #
+                # On Watch and Read that box is now the **Discover**
+                # search, and reaching it switches to Discover first
+                # (the owner's ask, 22 August 2026: "make the Ctrl+F go
+                # to discover search while in the watch or read pages").
+                # Every other page keeps exactly what it had: the saved
+                # rows' filter, which is what _focus_page_search
+                # declining falls through to.
+                if not self._focus_page_search():
+                    box = getattr(self._current_page, "search_box", None)
+                    if box is not None:
+                        box.setFocus()
+                        box.selectAll()
                 return
             if event.key() == Qt.Key.Key_Y:
                 # Redo: do again whatever Ctrl+Z just undid. Only ever
@@ -2245,16 +2649,9 @@ class MainWindow(QMainWindow):
             return
         if event.key() == Qt.Key.Key_Escape:
             # A search box is the thing most worth escaping from, so it
-            # wins over leaving full screen. Focused *or* holding text,
-            # not text alone: keyed on text, an empty box swallowed
-            # nothing and Escape left the caret sitting in it - reported,
-            # and the half of this the first fix missed. The text half
-            # stays because a query still narrowing the grid is worth
-            # escaping from after the focus has moved to a card. A box
-            # that is neither is not what Escape is about, so it keeps
-            # its usual meaning the rest of the time.
-            box = getattr(self._current_page, "search_box", None)
-            if box is not None and (box.hasFocus() or box.text()):
+            # wins over leaving full screen.
+            box = self._live_search_box()
+            if box is not None:
                 box.clear()
                 box.clearFocus()
                 self._current_page.setFocus()
@@ -2284,6 +2681,78 @@ class MainWindow(QMainWindow):
         self._history.append(page_name)
         self._history_index += 1
         self._show_page(page_name, direction=self._direction_between(current, page_name), animate=animate)
+
+    def _page_search_boxes(self):
+        """Every search field the page on screen owns, most specific
+        first.
+
+        Duck-typed, like every other page hook here (SECTIONS,
+        relayout_for_sidebar): `search_box` is the filter a page draws
+        over its own saved rows, and `page_search_field()` is whatever
+        that page calls its main search - on the tracker pages, the
+        Discover box, which is built lazily and so has to be *asked*
+        for rather than read off the class."""
+        page = self._current_page
+        boxes = [getattr(page, "search_box", None)]
+        field = getattr(page, "page_search_field", None)
+        if callable(field):
+            try:
+                boxes.append(field())
+            except RuntimeError:
+                pass        # the page went away under a queued key
+        return [box for box in boxes if box is not None]
+
+    def _live_search_box(self):
+        """The box Escape is actually about.
+
+        Focused *or* holding text, not text alone: keyed on text, an
+        empty box swallowed nothing and Escape left the caret sitting in
+        it - reported, and the half of this the first fix missed. The
+        text half stays because a query still narrowing the grid is
+        worth escaping from after the focus has moved to a card. A box
+        that is neither is not what Escape is about, so it keeps its
+        usual meaning the rest of the time.
+
+        Focus wins over text, and a hidden box counts for neither: a
+        tracker page carries two of these now and only one section is
+        ever on screen, so a stale query in the Saved filter must not
+        eat the Escape pressed in Discover."""
+        for box in self._page_search_boxes():
+            if box.hasFocus():
+                return box
+        for box in self._page_search_boxes():
+            if box.isVisible() and box.text():
+                return box
+        return None
+
+    def _focus_page_search(self) -> bool:
+        """Ctrl+F: put the cursor in this page's own search field, and
+        show the section that field lives in first.
+
+        False when the page has no such field, which is what leaves
+        Ctrl+F alone everywhere else. The section switch goes through
+        _on_section_clicked rather than the page's setter directly, so
+        the rail's highlight follows - a section reached by keyboard has
+        to look the same as one reached by clicking it."""
+        page = self._current_page
+        if not callable(getattr(page, "page_search_field", None)):
+            return False
+        section = getattr(page, "PAGE_SEARCH_SECTION", None)
+        current = getattr(page, "current_section", None)
+        if section is not None and (not callable(current)
+                                    or current() != section):
+            self._on_section_clicked(section)
+        # After the switch, never before: the section that owns the
+        # field is what builds it (tracker._show_discover).
+        box = page.page_search_field()
+        if box is None:
+            return False
+        box.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        # Selected rather than cleared, so a second Ctrl+F over an
+        # existing query types straight over it without throwing away a
+        # query the user may have wanted to edit.
+        box.selectAll()
+        return True
 
     def open_global_search(self, initial=""):
         """Ctrl+K, from any page: go to Home and put the cursor in its
@@ -2340,6 +2809,11 @@ class MainWindow(QMainWindow):
 
     def _show_page(self, page_name, direction="down", animate=True):
         page_name = _page_name(page_name)
+        # A navigation arriving mid-fold (Ctrl+3 while the sidebar is
+        # still folding) would otherwise leave the outgoing page's
+        # picture sitting over the incoming one - the fold's own tween
+        # carries on, it is only the freeze that has to end here.
+        self._settle_fold()
         self._sync_nav_highlight(page_name)
 
         old_page = self._current_page
@@ -2494,7 +2968,7 @@ def main():
     # anywhere. See helpers/logs.py.
     logs.install_excepthook()
     app = QApplication(sys.argv)
-    icon_path = APP_DIR / "app_icon.ico"
+    icon_path = APP_DIR / "assets" / "app_icon.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     theme.apply_theme(app)
