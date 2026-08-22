@@ -70,11 +70,33 @@ resolve nothing here, and unlike Netflix there is no second public
 source. Revisit only on new evidence - a materially different library,
 or visibly improved coverage. "Prime would be nice" is not evidence.
 
-**Performance: measured, nothing to fix** (roadmap #15). Frozen exe cold
-start 1.29-1.57s, mostly PyInstaller unpack and Qt init; tracker redraw
-0.3-0.4ms per card, linear to 500 entries; covers are not a cost
-(pixmaps are cached). Don't open a performance item without a new
-measurement contradicting this.
+**Performance: superseded 21 August 2026 - there was plenty to fix, and
+the old measurement was looking in the wrong place.** What it said
+remains true and remains irrelevant: frozen exe cold start 1.29-1.57s,
+tracker redraw 0.3-0.4ms per card, covers cached. None of that is what
+the owner meant by slow. Measured on his machine, on his data:
+
+| What | Was | Now |
+|---|---|---|
+| Six HTTP GETs to one host | 40.3s | 0.75s |
+| Worst reading site, one search | 25.4s | 0.9s |
+| Stream sources for an episode | 10.0s (53 rows) | 1.9s (88 rows) |
+| Home, one scroll frame | 29.4ms, 100% over budget | 4.6ms, 0% over |
+| Read, one scroll frame | 13.9ms, 129 paints | 4.3ms, 37 paints |
+| Same search, three runs | 22 / 10 / 16 rows | 12 / 12 / 12 |
+
+Two causes, both now fixed at a single point each: `urlopen` opened a
+fresh TCP+TLS connection for every request (and ~1 handshake in 10 to
+these hosts stalls 10-20s, so a six-site fan-out reliably ate one),
+and a scroll body was transparent, which denies Qt its blit path and
+repaints every visible widget every frame. See `helpers/net.py`'s pool
+and `widgets.scroll_area`'s `ground`.
+
+The standing rule that came out of it is CLAUDE.md rule 7 (one second
+for any transition, 16.7ms for a scroll frame). A performance item is
+now opened the same way as before - on a measurement - but "the app
+feels slow" from the owner outranks an old number, and the old number
+here was measuring cold start while the user was waiting on sockets.
 
 **Code signing: priced, awaiting the owner's decision** (roadmap #16).
 Azure Artifact Signing is ~$9.99/mo with no hardware token and is open

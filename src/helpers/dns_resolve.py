@@ -30,6 +30,8 @@ import threading
 import time
 import urllib.request
 
+from . import net
+
 # Two providers, tried in order. Both speak the same JSON API.
 PROVIDERS = (
     "https://cloudflare-dns.com/dns-query",
@@ -81,7 +83,7 @@ def resolve(host: str, timeout: float = TIMEOUT):
             url = f"{provider}?name={urllib.parse.quote(host)}&type=A"
             request = urllib.request.Request(
                 url, headers={"Accept": "application/dns-json", "User-Agent": _UA})
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with net.urlopen(request, timeout=timeout) as response:
                 body = json.load(response)
         except Exception:
             continue

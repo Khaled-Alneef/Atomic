@@ -54,6 +54,8 @@ saturated this user's whole home network once (see helpers/lookup_pool).
 import datetime
 import os
 import re
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -151,7 +153,128 @@ ZOOM_MIN, ZOOM_MAX = 0.25, 4.0
 # This is the baseline, not the zoom: the +/- controls and the label
 # still read 100% here, so "100%" means "the size this medium opens at"
 # rather than a number that has to be re-learned per series.
-MEDIUM_BASE_SCALE = {"manga": 0.75, "manhwa": 1.67, "manhua": 1.67}
+#
+# **The two strips were then cut 40%** - the owner's ask, 22 August 2026:
+# "make the manhua/manhwa ch pages size 40% smaller from now". 1.67 x
+# 0.60 = 1.00, which for the 760px strips these sites cut is the scan's
+# own pixels, one per device pixel. Manga is untouched: he named the two
+# vertical media by name, and they are the two this table already holds
+# apart from manga, so scoping the cut to them costs nothing.
+#
+# This number and MEDIUM_TARGET_WIDTH below have to agree, or every
+# strip chapter opens at the baseline and then visibly snaps to the
+# target the moment the first page decodes (see _on_page_width's 0.01
+# guard, which is what stops that happening today). They agree when
+# base == target / the medium's usual source width: 762 / 760 = 1.003.
+MEDIUM_BASE_SCALE = {"manga": 0.75, "manhwa": 1.00, "manhua": 1.00}
+
+# **What 100% is actually worth, in pixels on screen, per medium.**
+#
+# The multipliers above are a multiplier on *the source image's own
+# width*, which means the same medium opens at a different size on every
+# series - the owner's ask, 21 August 2026: "make the size of the ch
+# reader view fixed for all manga/manhwa/manhua, but make it auto detect
+# the correct size whenever I read".
+#
+# Measured 21 August 2026, real pages off the owner's own entries:
+#
+#     One Piece      (3asq)        1644 x 2400   single page
+#     Kingdom (WAN)  (3asq)        1325 x ....   single page
+#     Kingdom (WAN)  (3asq)        2760 x 1917   DOUBLE-PAGE SPREAD
+#     Rise of the Fallen Kingdom's  760 x 13607  vertical strip (manhua)
+#
+# So under the old multipliers the owner's two manga opened at 1644x0.75
+# = 1233px and 1325x0.75 = 994px - a 24% difference between two series
+# of the same medium, which is exactly what had to be re-zoomed by hand
+# every time. The strip opened at 760x1.67 = 1269px.
+#
+# The targets below are those same numbers made deliberate: the middle
+# of the manga range, and the strip width the owner already reads at.
+# 100% now means "this many logical pixels wide", so every series of a
+# medium opens identically and the +/- zoom is a multiplier on a
+# constant rather than on whatever the scanner happened to choose.
+#
+# The published widths agree: LINE Webtoon and Naver cut at 800px and
+# most manhwa/manhua scans arrive between 720 and 900 (this one is 760),
+# so a strip is always being scaled up a little to a readable column -
+# which is what the owner was doing by hand.
+#
+# **Double-page spreads are untouched by this and must stay that way.**
+# A spread is ~2x a single page (2760 against 1325 above), so scaling it
+# by the same factor makes it ~2x the target and wider than the window -
+# and _show's fit-to-viewport then shrinks it to fit, which is the
+# behaviour the owner calls perfect. This changes the number that fit
+# starts from, never the fit itself.
+#
+# **The two strips are 40% off those numbers as of 22 August 2026** -
+# 1270 x 0.60 = 762, the owner's ask ("make the manhua/manhwa ch pages
+# size 40% smaller from now"). Manga's 1100 is deliberately left alone:
+# he named manhua and manhwa, they are the two long-strip media, and
+# they are the two this table already separates from manga. Cutting the
+# shared number would have shrunk his manga scans as well, which he did
+# not ask for.
+#
+# Because a target is absolute, the cut is exactly 40% whatever the scan
+# is cut at - the source only decides how much resampling it takes to
+# get there. Measured over the 74 long-strip pages sitting in his own
+# image cache, 22 August 2026, which is where these sites actually land:
+#
+#     source  700px  ->  was 1270 (1.81x up), now 762 (1.09x up)
+#     source  720px  ->  was 1270 (1.76x up), now 762 (1.06x up)
+#     source  760px  ->  was 1270 (1.67x up), now 762 (1.00x - untouched)
+#     source  800px  ->  was 1270 (1.59x up), now 762 (0.95x down)
+#     source  900px  ->  was 1270 (1.41x up), now 762 (0.85x down)
+#
+# So this is also the change that stops a strip being blown up at all.
+# Every one of those pages used to be upscaled before it was drawn -
+# 760 real pixels stretched to 1269 - and an upscale cannot add detail,
+# only soften what is there. Crops of the two, 4x, side by side: the old
+# render doubles every 1px rule into a grey pair, the new one draws it
+# as the single clean line it is in the file.
+MEDIUM_TARGET_WIDTH = {"manga": 1100, "manhwa": 762, "manhua": 762}
+
+# **How tall a page has to be, relative to its width, to be read as a
+# long strip whatever the entry calls itself.**
+#
+# The owner asked for manhua and manhwa to be cut 40%, and the widths
+# above do exactly that - but measured over his own library on 22 August
+# 2026, almost everything he actually reads as a strip is *typed*
+# "Manga": Kingdom (WAN), One Piece and The Eternal Supreme are all
+# typed Manga, and only three titles in history.json carry Manhwa or
+# Manhua at all. So keying the width on the declared type alone would
+# have left the change invisible on nearly every title it was asked for,
+# and told him to go and retype his library instead.
+#
+# A page's proportions are not ambiguous about this. Measured across the
+# 74 long-strip pages in his cache: 760 x 13607 is 17.9, and the tallest
+# is 257 x 26171 at 102. A paged manga scan is 1.4-1.5, and a two-page
+# spread is below 1.0 (and is excluded here anyway - only non-spread
+# pages report). Three is nowhere near either population, so it
+# separates them without a judgement call.
+#
+# The cost of this, stated plainly: a strip *typed* as manga opens at
+# manga's baseline and snaps once to the strip width when the first page
+# decodes, because nothing can know the shape before then. A correctly
+# typed entry never snaps (its baseline already agrees - see
+# MEDIUM_BASE_SCALE), and one snap on the first page beats reading a
+# whole series at the wrong size.
+STRIP_ASPECT_MIN = 3.0
+STRIP_TARGET_WIDTH = 762
+# A source this far off the target is not a page cut for reading - a
+# thumbnail, a banner, a spread - and forcing it to the target would
+# blow it up past any use. Outside this the medium's plain multiplier
+# stands.
+#
+# Left where it was measured when the strips were cut to 762, which
+# moves the window of source widths it accepts rather than resizing it:
+# strips now normalise a source between 293px and 2177px (was 488-3629),
+# manga is unchanged at 423-3143. The published strip range is 720-900
+# and the owner's own manhua is 760, so his sources sit mid-window with
+# 2.4x of headroom above them - and the case that falls *outside* got
+# better, not worse: a rejected source now stands at the 1.00 baseline
+# (its own pixels) where it used to stand at 1.67 and render half again
+# wider than the target it had just been refused.
+TARGET_SCALE_MIN, TARGET_SCALE_MAX = 0.35, 2.6
 DEFAULT_BASE_SCALE = 1.0
 
 # How far outside the viewport the strip keeps pixels. This margin is
@@ -293,7 +416,7 @@ def _fetch_page_file(url: str, headers: dict):
         # pool's queue behind others, and a deadline started back then
         # would already be spent before the first byte is asked for.
         deadline = net.deadline_in(PAGE_TIMEOUT)
-        with urllib.request.urlopen(request, timeout=PAGE_TIMEOUT) as response:
+        with net.urlopen(request, timeout=PAGE_TIMEOUT) as response:
             data = net.read_bytes(response, deadline, MAX_PAGE_BYTES)
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
@@ -383,6 +506,14 @@ class _PageSignals(QObject):
 
 class _ChapterSignals(QObject):
     listed = Signal(int, object, str)     # run, chapters or None, error
+    # The first page of a paginated list, handed over before the rest is
+    # fetched - see chapter_source._site_chapters, which has published
+    # this all along and had nobody listening. A full list is up to six
+    # more page fetches at a time (21.7s measured on olympustaff for 249
+    # chapters), and the reader showed nothing at all for the whole of
+    # it; the first page is the newest forty, which is what someone
+    # opening a series is nearly always reaching for.
+    partial = Signal(int, object)         # run, chapters so far
     opened = Signal(int, object, str)     # run, pages dict or None, error
 
 
@@ -790,10 +921,25 @@ class _ChapterListView(QWidget):
         self._notice.setText(text or "")
         self._notice.setVisible(bool(text))
 
-    # How many rows to build before giving the event loop a turn. Big
-    # enough to fill any viewport at once, small enough that a turn
-    # never costs a visible frame.
-    CHUNK = 80
+    # How many rows to build before giving the event loop a turn.
+    #
+    # **24, down from 80, and the number is a screenful.** A row is 44px
+    # and this window is ~900px tall, so 80 built four screenfuls of
+    # cards nobody had scrolled to before the list could be shown at
+    # all. Measured on the owner's own 380-chapter entry, 22 August 2026:
+    # set_chapters cost 80ms and the first-show polish of those rows
+    # another 72ms inside _show_only - 152ms of a 200ms budget for the
+    # whole open, spent on rows 25 through 80.
+    CHUNK = 24
+    # And how long between chunks. **Not zero, and that is measured.** A
+    # zero timer posts an event the loop drains in the round it is
+    # already draining, so the whole chain ran before Qt sent a single
+    # paint - all 380 of the owner's Kingdom rows were built before the
+    # list appeared, and the list took 273-281ms to reach the screen
+    # against a 200ms budget. 8ms puts a frame between chunks and fills
+    # a 380-chapter list in about an eighth of a second, with the first
+    # screenful on screen immediately.
+    CHUNK_DELAY_MS = 8
 
     def set_chapters(self, chapters, current=-1, read_up_to=0.0):
         """Rebuild only when the chapter list itself changed; otherwise
@@ -833,12 +979,16 @@ class _ChapterListView(QWidget):
         # nobody had scrolled to yet. The first chunk covers any
         # viewport, and reaches past the chapter being read so scrolling
         # to it works immediately.
+        # Not widened to reach `current` any more: that made opening a
+        # series at chapter 300 build three hundred rows before showing
+        # anything, and nothing here scrolls to the current row - the
+        # marks are re-applied by every chunk as it lands (_build_rows),
+        # so the row being read gets its pill when its chunk arrives.
         first = self.CHUNK
-        if current is not None and current >= 0:
-            first = max(first, int(current) + 5)
         self._build_rows(0, min(first, len(chapters)), token)
         if first < len(chapters):
-            QTimer.singleShot(0, lambda: self._build_more(first, token))
+            QTimer.singleShot(self.CHUNK_DELAY_MS,
+                              lambda: self._build_more(first, token))
 
     def _build_rows(self, start, stop, token):
         """One chunk of rows, unless a newer build has superseded this."""
@@ -852,16 +1002,18 @@ class _ChapterListView(QWidget):
 
     def _build_more(self, start, token):
         """The next chunk, then hand the event loop back. Chained on a
-        zero timer rather than a loop: the point is that the reader stays
+        timer rather than a loop: the point is that the reader stays
         responsive - and scrolling, clicking or leaving mid-fill all get
-        their turn between chunks."""
+        their turn between chunks. See CHUNK_DELAY_MS for why that timer
+        is not a zero one."""
         if token != self._build_token:
             return
         chapters = self._built_from or []
         stop = min(start + self.CHUNK, len(chapters))
         self._build_rows(start, stop, token)
         if stop < len(chapters):
-            QTimer.singleShot(0, lambda: self._build_more(stop, token))
+            QTimer.singleShot(self.CHUNK_DELAY_MS,
+                              lambda: self._build_more(stop, token))
 
     def _update_marks(self, current=-1, read_up_to=0.0):
         """Move the "Reading" pill and the read ticks without touching
@@ -1149,6 +1301,11 @@ class _StripView(QScrollArea):
     positionChanged = Signal()
     ranOff = Signal(int)
     zoomRequested = Signal(int)     # +1 / -1 zoom steps (Ctrl+wheel)
+    # The source width of this chapter's ordinary pages, in logical px at
+    # 100% - emitted once per chapter, as soon as the first page that is
+    # not a spread has been decoded. See MEDIUM_TARGET_WIDTH: it is what
+    # lets the reader open every series of a medium at one size.
+    pageWidthKnown = Signal(int, float)
 
     def __init__(self, store: _PageStore, parent=None):
         super().__init__(parent)
@@ -1186,6 +1343,10 @@ class _StripView(QScrollArea):
         # Pages inside one chapter are cut to the same width, so the
         # first one that lands makes every later placeholder right.
         self._typical_width = DEFAULT_PAGE_WIDTH
+        # Whether this chapter has already said how wide its pages are.
+        # Once per chapter, not once per page - and deliberately not
+        # reset by set_zoom, or re-scaling would ask again and again.
+        self._reported_width = False
 
         self._body = QWidget(objectName="Bare")
         self._column = QVBoxLayout(self._body)
@@ -1252,6 +1413,7 @@ class _StripView(QScrollArea):
             if widget is not None:
                 widget.deleteLater()
         self._slots = []
+        self._reported_width = False
         self._typical_width = max(1, round(DEFAULT_PAGE_WIDTH * self._zoom / 100.0))
         for index in range(self._store.count()):
             slot = _StripSlot(index, self._body)
@@ -1452,6 +1614,18 @@ class _StripView(QScrollArea):
         slot.loaded = True
         if not is_spread:
             self._typical_width = max(1, round(pixmap.width() / ratio))
+            if not self._reported_width:
+                # Back out the zoom this was decoded at, so what leaves
+                # here is the scan's own width and not this session's.
+                self._reported_width = True
+                # The page's *shape* goes with its width - see
+                # STRIP_ASPECT_MIN. Taken off the decoded pixmap, so it
+                # is the scan's own proportions and not this session's
+                # zoom (which cancels in the ratio anyway).
+                self.pageWidthKnown.emit(
+                    max(1, round(self._typical_width * 100.0
+                                 / max(1, self._zoom))),
+                    pixmap.height() / max(1.0, float(pixmap.width())))
         self._resize_slot(slot)
 
     def _on_page_ready(self, index):
@@ -1550,6 +1724,7 @@ class ReaderPage(GlassPage):
 
         self._signals = _ChapterSignals()
         self._signals.listed.connect(self._on_chapters_listed)
+        self._signals.partial.connect(self._on_chapters_partial)
         self._signals.opened.connect(self._on_chapter_opened)
 
         self._store = _PageStore(self)
@@ -1583,6 +1758,7 @@ class ReaderPage(GlassPage):
         self._strip_view.ranOff.connect(self._on_ran_off)
         self._strip_view.zoomRequested.connect(
             lambda step: self._change_zoom(ZOOM_STEP * step))
+        self._strip_view.pageWidthKnown.connect(self._on_page_width)
         # Manga only - see MANGA_PAGE_GAP_PX. Read once here: the type
         # cannot change while the reader is open.
         if str(self.entry.get("type") or "").strip().lower() == "manga":
@@ -2082,8 +2258,40 @@ class ReaderPage(GlassPage):
                 "opens in your browser.")
             return
         self._run += 1
-        lookup_pool.submit(_list_chapters_job, self._signals, self._run,
-                           self.entry, refresh)
+        if not refresh:
+            # **A cache hit never crosses a thread.** It is a dictionary
+            # lookup, and going through a worker for it cost 50-84ms of
+            # signal latency - the UI thread was busy showing this very
+            # reader, so the answer waited for it - and split what should
+            # be one frame into two. Off a zero timer rather than called
+            # straight from here, because this runs from __init__ and
+            # _on_chapters_listed can open a chapter.
+            cached = None
+            try:
+                cached = chapter_source.cached_chapters(self.entry)
+            except Exception:
+                cached = None
+            if cached:
+                run = self._run
+
+                def deliver():
+                    # The reader can be closed inside the one turn this
+                    # waits, and touching a deleted QWidget raises
+                    # RuntimeError inside a slot - which takes the
+                    # process down (helpers/logs.py).
+                    try:
+                        self._on_chapters_listed(run, list(cached), "")
+                    except RuntimeError:
+                        pass
+
+                QTimer.singleShot(0, deliver)
+                return
+        # **submit_watched, not submit.** This is the one lookup the user
+        # is sitting in front of - they pressed a title and are looking
+        # at an empty reader - and the shared queue is drained by three
+        # tracker pages' worth of page-load backfill (see lookup_pool).
+        lookup_pool.submit_watched(_list_chapters_job, self._signals,
+                                   self._run, self.entry, refresh)
 
     def refresh_chapter(self):
         """Re-fetch what is on screen from the site.
@@ -2109,21 +2317,30 @@ class ReaderPage(GlassPage):
         self._refresh_toast = show_toast(self, "Refreshing...", duration_ms=None)
         self._load_chapters(refresh=True)
 
-    def _on_chapters_listed(self, run, chapters, error):
-        if run != self._run or self._closed:
+    def _on_chapters_partial(self, run, chapters):
+        """The source's first page, on screen while the rest is fetched.
+
+        Deliberately does *less* than _on_chapters_listed: it fills the
+        list and nothing else. No resume, no jump to a numbered chapter,
+        no "Refreshed" verdict - all three are answers about the whole
+        list, and giving them from a fortieth of it would open the wrong
+        chapter or claim a refresh that is still running.
+
+        Never touches a reader that has moved on: a chapter opened from
+        this partial list must not be yanked back to the list when the
+        next page lands."""
+        if run != self._run or self._closed or not chapters:
             return
-        if chapters is None:
-            self._finish_refresh("Refresh Failed")
-            self._set_message(
-                f"The chapter list couldn't be loaded. {error}".strip())
+        if self._in_chapter() or self.chapters:
             return
-        self.chapters = list(chapters)
-        if not self.chapters:
-            self._finish_refresh("No Chapters Found")
-            self._set_message(
-                "No chapters were found for this title on any configured "
-                "source - not in Arabic and not in any other language.")
-            return
+        self._fill_chapter_list(list(chapters))
+        self._show_only(self._list_view)
+        self._sync_controls()
+
+    def _fill_chapter_list(self, chapters):
+        """The chapter list widgets, from `chapters`. Shared by the
+        partial answer and the full one so both land identically."""
+        self.chapters = chapters
         self._chapter_box.clear()
         for chapter in self.chapters:
             label = chapter_title(chapter)
@@ -2137,7 +2354,27 @@ class ReaderPage(GlassPage):
             "below are what the source has in other languages.")
         self._list_view.set_chapters(self.chapters, self._reading_index(),
                                      self._last_read_number())
-        self._show_only(self._list_view)
+
+    def _on_chapters_listed(self, run, chapters, error):
+        if run != self._run or self._closed:
+            return
+        if chapters is None:
+            self._finish_refresh("Refresh Failed")
+            self._set_message(
+                f"The chapter list couldn't be loaded. {error}".strip())
+            return
+        if not chapters:
+            self._finish_refresh("No Chapters Found")
+            self._set_message(
+                "No chapters were found for this title on any configured "
+                "source - not in Arabic and not in any other language.")
+            return
+        self._fill_chapter_list(list(chapters))
+        # Not while a chapter is open: the partial list above may have
+        # been read from already, and the rest of the list arriving is
+        # no reason to take the reader out of it.
+        if not self._in_chapter():
+            self._show_only(self._list_view)
         self._sync_controls()
         self._finish_refresh("Refreshed")
         if self._pending_resume is not None:
@@ -2492,6 +2729,37 @@ class ReaderPage(GlassPage):
         if abs(zoom - self._zoom) < 1e-6:
             return
         self._zoom = zoom
+        self._apply_zoom()
+
+    def _on_page_width(self, source_width, aspect=0.0):
+        """Set 100% to the medium's target width, now that this chapter
+        has said how wide its pages actually are.
+
+        This is the "auto detect the correct size whenever I read" half
+        of the owner's ask: the multiplier is *derived* per series rather
+        than fixed per medium, so a 1644px One Piece scan and a 1325px
+        Kingdom scan both open at MEDIUM_TARGET_WIDTH instead of 24%
+        apart. Once per chapter, and unchanged across the rest of a
+        session unless the next series is cut differently.
+
+        Falls back to the plain multiplier when the number is not
+        credible - see TARGET_SCALE_MIN/MAX. A thumbnail standing in for
+        a page must not be blown up to fill the column."""
+        medium = str(self.entry.get("type") or "").strip().lower()
+        target = MEDIUM_TARGET_WIDTH.get(medium)
+        # A page shaped like a strip is one, whatever the entry says.
+        # See STRIP_ASPECT_MIN for why the declared type cannot be
+        # trusted here.
+        if aspect >= STRIP_ASPECT_MIN:
+            target = STRIP_TARGET_WIDTH
+        if not target or source_width <= 0:
+            return
+        scale = target / float(source_width)
+        if not (TARGET_SCALE_MIN <= scale <= TARGET_SCALE_MAX):
+            return
+        if abs(scale - self._base_scale) < 0.01:
+            return
+        self._base_scale = scale
         self._apply_zoom()
 
     def _apply_zoom(self):
@@ -3059,25 +3327,35 @@ class ReaderPage(GlassPage):
         self._sync_fullscreen_glyph()
 
     def leave(self):
-        """Close the reader and land on Home.
+        """Close the reader and uncover whatever it was opened over.
 
-        **Home, not the page this was opened from** - the owner's ask,
-        for the reader and the player alike. It used to return to
-        `origin_page`, which was usually the Reading shelf; the attribute
-        is still recorded because it costs nothing and says where the
-        reader came from, but nothing routes on it any more.
+        **Back where you were, not Home** - the owner's ask, 21 August
+        2026: "back btn from any reading ch list takes me home, make it
+        take me to the last visited exactly like the ep list in
+        watching". This used to land on Home deliberately, which was an
+        earlier ask; the ep list is the model now, and the ep list does
+        nothing at all on the way out.
 
-        The sidebar needs nothing put back: it was never modified, only
-        covered, so it reappears the moment this widget is hidden.
+        That is the whole implementation: the details page never
+        navigated either, it just hid itself and let the page underneath
+        show through. The reader covers the *central widget* rather than
+        replacing a page, so the page it was opened over is still there,
+        still built, and still where it was scrolled to - revealing it
+        is both the right destination and free.
 
-        Navigating happens *after* hide() and off a zero-timer, because
-        it rebuilds a whole page: doing it inline made the press hold the
-        reader on screen for the length of that build (see LEAVE_NAV_MS),
-        which is what "the back button is still slow" was. The reader is
-        gone in the frame after the click either way."""
+        The sidebar needs nothing put back either: it was never
+        modified, only covered, so it reappears the moment this widget
+        is hidden. Dropping the navigation also drops the whole-page
+        rebuild that used to follow every Back press (LEAVE_NAV_MS)."""
         if self._closed:
             return
         self._closed = True
+        # Leaving the reader is leaving the manga - this lands on Home,
+        # not back on the chapter list - so the music goes with it. The
+        # grace period is what keeps it playing while the *details*
+        # chapter list swaps one reader for the next: that reader opens
+        # for the same title inside the window and cancels this.
+        stop_music(_MUSIC_STOP_GRACE_MS)
         self._save_timer.stop()
         self._write_position()
         self._drop_refresh_toast()
@@ -3088,7 +3366,6 @@ class ReaderPage(GlassPage):
         self.closed.emit()
         self.hide()
         window = self.window()
-        navigate = getattr(window, "navigate_to", None)
 
         def land():
             # Deliberately holds no reference to the reader - it is
@@ -3096,15 +3373,13 @@ class ReaderPage(GlassPage):
             # runs. A dead window raises RuntimeError, which is the
             # normal case on app shutdown, not an error worth a log.
             try:
-                if callable(navigate):
-                    navigate(HOME_PAGE, animate=False)
                 page = getattr(window, "_current_page", None)
                 if page is not None:
                     page.setFocus()
             except RuntimeError:
                 pass
             except Exception:
-                logs.exception("reader could not return to Home")
+                logs.exception("reader could not hand focus back")
 
         QTimer.singleShot(0, land)
         self.deleteLater()
@@ -3113,11 +3388,21 @@ class ReaderPage(GlassPage):
 # ---- background jobs -----------------------------------------------------
 def _list_chapters_job(signals, run, entry, refresh=False):
     """The chapter list for one entry. Runs on a lookup_pool worker and
-    must never raise - a dead worker takes every queued lookup with it."""
+    must never raise - a dead worker takes every queued lookup with it.
+
+    Reports the source's *first page* as soon as it parses (see
+    _ChapterSignals.partial), which is the difference between a reader
+    that shows the newest forty chapters in a second and one that shows
+    nothing for the six-plus seconds a full paginated list takes."""
+    def partial(chapters):
+        try:
+            signals.partial.emit(run, list(chapters or []))
+        except RuntimeError:
+            pass        # the reader closed under the fetch
     try:
         chapters = chapter_source.list_chapters(
             entry, deadline=net.deadline_in(CHAPTER_LIST_TIMEOUT),
-            refresh=bool(refresh))
+            refresh=bool(refresh), on_partial=partial)
         signals.listed.emit(run, list(chapters or []), "")
     except Exception as error:
         logs.exception("reader chapter listing failed")
@@ -3165,10 +3450,35 @@ def _origin_page_name(window):
     return None
 
 
-# When the music URL was last opened, and how long before another reader
-# open is allowed to open it again (see _open_music_quietly's throttle).
-_MUSIC_OPENED_AT = float("-inf")
-_MUSIC_REOPEN_S = 10 * 60
+# The music belongs to the *title being read*, not to the clock.
+#
+# It used to be throttled: opened once, then refused for ten minutes, so
+# a reader opened again half an hour later got music and one opened five
+# minutes later got silence. The owner's ask is simpler and has nothing
+# to do with elapsed time - "if it opens once, then if I leave the ch it
+# closes, then when I enter a new ch it reopens; while moving from ch to
+# ch without leaving, do not close it; close when leaving the whole
+# manga page".
+#
+# So: one music window per entry. Opening a reader for the entry that is
+# already playing does nothing at all; leaving the reader closes the
+# window; opening one again starts it again.
+#
+# `hwnd` is the window the launch actually created, found by the same
+# sweep that minimizes it (_hush_browser_window). It is only ever a
+# window this app opened *itself*, in its own new browser window - see
+# _launch_music - because closing a window that happened to be carrying
+# the owner's other tabs would be a far worse bug than music that keeps
+# playing.
+_music = {"key": None, "hwnd": None, "tuck": False}
+
+# Leaving a reader does not close the music instantly: opening a chapter
+# from the details list tears the old reader down and builds a new one,
+# and a stop that fired in between would kill the music every time a
+# chapter was turned. A reader opening for the same entry inside this
+# window cancels the stop.
+_MUSIC_STOP_GRACE_MS = 600
+_music_stop_timer = None
 
 # How long after the launch to keep watching for the music window, and
 # how often to look. A cold browser can take over a second to put its
@@ -3178,26 +3488,45 @@ _MUSIC_REOPEN_S = 10 * 60
 _MUSIC_HUSH_S = 4.0
 _MUSIC_HUSH_STEP_MS = 120
 
-# The default browser's file name, resolved once and then remembered -
+# How long the music window stays visible-but-behind before being
+# minimized. Long enough for the page to load and playback to start -
+# an autoplay decision is made when the media element is ready, not on
+# navigation - and short enough that it is out of the way before anyone
+# alt-tabs. See _hush_browser_window.
+_MUSIC_TUCK_MS = 6000
+
+# The default browser's full path, resolved once and then remembered -
 # including the failure, as "".
-_BROWSER_EXE = None
+_BROWSER_PATH = None
+
+# The switch that makes each of these open a window of its own rather
+# than a tab in whatever is already up. That window is the one this app
+# is then allowed to close again, which is the whole reason for knowing
+# the browser by name at all.
+_NEW_WINDOW_SWITCH = {
+    "chrome.exe": "--new-window", "msedge.exe": "--new-window",
+    "brave.exe": "--new-window", "opera.exe": "--new-window",
+    "vivaldi.exe": "--new-window", "chromium.exe": "--new-window",
+    "firefox.exe": "-new-window", "librewolf.exe": "-new-window",
+    "waterfox.exe": "-new-window", "zen.exe": "-new-window",
+}
 
 
-def _default_browser_exe() -> str:
-    """Lowercased file name of whatever opens an http:// link on this
-    machine ("brave.exe", "chrome.exe", ...), or "" if it can't be read.
+def _default_browser_path() -> str:
+    """Full path of whatever opens an http:// link on this machine, or
+    "" if it can't be read.
 
     Read from the user's own file association rather than matched
     against a list of known browsers: the music URL is opened through
-    ShellExecute, so the window that appears belongs to exactly this
-    program - and being sure of that is what makes it safe to minimize
-    it (see _hush_browser_window)."""
-    global _BROWSER_EXE
-    if _BROWSER_EXE is not None:
-        return _BROWSER_EXE
-    _BROWSER_EXE = ""
+    exactly this program, and being sure of that is what makes it safe
+    to minimize its window (see _hush_browser_window) and, now, to close
+    it again (see stop_music)."""
+    global _BROWSER_PATH
+    if _BROWSER_PATH is not None:
+        return _BROWSER_PATH
+    _BROWSER_PATH = ""
     if os.name != "nt":
-        return _BROWSER_EXE
+        return _BROWSER_PATH
     try:
         import winreg
         with winreg.OpenKey(
@@ -3215,10 +3544,16 @@ def _default_browser_exe() -> str:
             exe = command[1:].split('"', 1)[0]
         else:
             exe = command.split(" ", 1)[0]
-        _BROWSER_EXE = os.path.basename(exe).lower()
+        _BROWSER_PATH = exe if os.path.exists(exe) else ""
     except Exception:
-        _BROWSER_EXE = ""      # no association to read: leave it alone
-    return _BROWSER_EXE
+        _BROWSER_PATH = ""     # no association to read: leave it alone
+    return _BROWSER_PATH
+
+
+def _default_browser_exe() -> str:
+    """Lowercased file name of the above ("brave.exe", "chrome.exe"), or
+    "" - which is what the window sweep matches against."""
+    return os.path.basename(_default_browser_path()).lower()
 
 
 def _autoplay_url(url: str) -> str:
@@ -3228,13 +3563,24 @@ def _autoplay_url(url: str) -> str:
     play the video directly, do not make the user go to the browser and
     press play by himself."
 
-    **YouTube watch pages cannot be made to autoplay** - `autoplay=1` on
-    /watch is ignored, and that is deliberate on YouTube's side. The
-    embed player is the form that honours it, so a watch link, a youtu.be
-    link or a playlist link is rewritten to /embed/ with autoplay set,
-    carrying the playlist along when there is one. Anything else gets a
-    plain `autoplay=1`, which the sites that support it read and the
-    rest ignore as an unknown parameter.
+    **The /embed/ rewrite this used to do was the bug in the owner's
+    screenshot.** It turned a watch link into
+    `youtube.com/embed/<id>?autoplay=1`, which is not a page - it is the
+    player IFrame, and opened as a top-level document it has no
+    embedding origin to check, so YouTube refuses it with
+
+        Error 153 - Video player configuration error
+
+    and a "Watch video on YouTube" link, which is exactly what the music
+    URL showed. No parameter fixes that; the embed form simply cannot be
+    the thing a browser navigates to.
+
+    So a YouTube link is normalised to its **watch** page instead, which
+    is what a browser is meant to open and what starts playing on its
+    own - a watch page begins playback on load, which is why `autoplay=1`
+    is documented as ignored there: there is nothing for it to do.
+    Everything else gets a plain `autoplay=1`, which the sites that
+    support it read and the rest ignore as an unknown parameter.
 
     Not a guarantee, and it cannot be one from here: browsers block
     *unmuted* autoplay until a site has earned it, so a YouTube the
@@ -3261,16 +3607,24 @@ def _autoplay_url(url: str) -> str:
         elif host == "youtu.be":
             video = parts.path.lstrip("/")
         playlist = query.get("list", "")
-        if video or playlist:
-            # videoseries is the embed player's name for "a playlist
-            # with no particular video picked out".
-            wanted = {"autoplay": "1", "rel": "0"}
+        if video:
+            # The watch page, carrying its playlist when it had one. A
+            # watch page starts playing by itself; the embed form that
+            # used to be built here is what produced Error 153.
+            wanted = {"v": video}
             if playlist:
                 wanted["list"] = playlist
             return urllib.parse.urlunsplit((
-                "https", "www.youtube.com",
-                f"/embed/{video or 'videoseries'}",
+                "https", "www.youtube.com", "/watch",
                 urllib.parse.urlencode(wanted), ""))
+        if playlist:
+            # A playlist with no video named: /playlist is the page for
+            # it, and `playnext=1` is YouTube's own "start the first
+            # one" - the closest a link can get without knowing an id.
+            return urllib.parse.urlunsplit((
+                "https", "www.youtube.com", "/playlist",
+                urllib.parse.urlencode({"list": playlist, "playnext": "1"}),
+                ""))
         query["autoplay"] = "1"
         return urllib.parse.urlunsplit((
             parts.scheme or "https", parts.netloc, parts.path,
@@ -3353,8 +3707,45 @@ def _hush_browser_window(window, was_foreground):
         try:
             hwnd = user32.GetForegroundWindow()
             if hwnd and hwnd != was_foreground and _window_exe(hwnd) == exe:
-                user32.ShowWindow(hwnd, 6)      # SW_MINIMIZE
+                # Remembered: this is the one window the launch brought
+                # up, and stop_music closes exactly this handle.
+                _music["hwnd"] = int(hwnd)
+                # **Pushed behind, never minimized - minimizing it is why
+                # the music would not start.** This used to call
+                # ShowWindow(SW_MINIMIZE), and a minimized window's page
+                # is `document.hidden` to the browser. Chromium's
+                # autoplay policy refuses to start unmuted media in a
+                # hidden page, so YouTube came up sitting on its big play
+                # button waiting to be clicked - the owner's screenshot,
+                # with a paused player at 0:00 / 2:56.
+                #
+                # HWND_BOTTOM with SWP_NOACTIVATE puts it under Atomic
+                # just as completely, while the window stays *shown* - so
+                # the page is visible as far as the browser is concerned
+                # and playback begins on its own. The re-fronts below
+                # still run, because a browser can raise itself again a
+                # beat after this.
+                user32.SetWindowPos(hwnd, 1, 0, 0, 0, 0,
+                                    0x0001 | 0x0002 | 0x0010)
+                # HWND_BOTTOM=1; SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE.
                 _refront(window)
+                # **Then minimized, once it has had time to start.**
+                # The owner wants it out of the taskbar's way, which is
+                # what the original SW_MINIMIZE did - but minimizing it
+                # *immediately* is what stopped the music playing at all,
+                # because a minimized window's page is document.hidden
+                # and Chromium will not autoplay unmuted media in one.
+                #
+                # Playing first and hiding second gets both: the page is
+                # visible long enough for playback to begin, and once
+                # media is already playing a browser keeps going when the
+                # window is minimized. Scheduled once, not once per
+                # sweep.
+                if not _music.get("tuck"):
+                    _music["tuck"] = True
+                    QTimer.singleShot(
+                        _MUSIC_TUCK_MS,
+                        lambda h=int(hwnd): _tuck_music_window(h, window))
             if time.monotonic() < deadline:
                 QTimer.singleShot(_MUSIC_HUSH_STEP_MS, sweep)
         except Exception:
@@ -3363,7 +3754,24 @@ def _hush_browser_window(window, was_foreground):
     QTimer.singleShot(_MUSIC_HUSH_STEP_MS, sweep)
 
 
-def _open_music_quietly(window):
+def _tuck_music_window(hwnd, window):
+    """Minimize the music window, now that it has had time to start.
+
+    Guarded on the handle still being ours: the owner may have closed
+    the window, or `stop_music` may have. Never raises."""
+    if os.name != "nt" or _music.get("hwnd") != hwnd:
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if user32.IsWindow(hwnd):
+            user32.ShowWindow(hwnd, 6)      # SW_MINIMIZE
+            _refront(window)
+    except Exception:
+        pass        # a window that died in the meantime is not a problem
+
+
+def _open_music_quietly(window, entry):
     """Open the configured reading-music URL (Settings) behind the app.
 
     The setting promises music *alongside* reading, but a plain
@@ -3383,46 +3791,142 @@ def _open_music_quietly(window):
 
     Never raises; no music URL means nothing happens.
 
-    Throttled: the details page opens a reader per chapter row clicked,
-    and the browser route this mirrors was only ever hit once per
-    sitting - un-throttled, working through a series would stack a new
-    music tab (and two focus fights) on every single chapter."""
-    global _MUSIC_OPENED_AT
+    **One window per title, not one per chapter, and no clock in it.**
+    Opening a reader for the title already playing does nothing at all,
+    so turning pages and stepping through chapters never restarts the
+    music or picks another focus fight. Leaving the reader closes it
+    (see stop_music), and opening one again starts it again - which is
+    the behaviour the ten-minute throttle that used to live here got
+    wrong in both directions.
+
+    Opened in a browser window of *this app's* making wherever the
+    browser is one we know the switch for (_NEW_WINDOW_SWITCH), because
+    a window we opened is the only kind we may close later. Anything
+    else falls back to ShellExecute and simply never gets closed - the
+    owner's other tabs are not ours to take down."""
+    key = _music_key(entry)
+    _cancel_music_stop()
+    if _music["key"] == key and _music["hwnd"]:
+        return                  # already playing for this title
+    if _music["key"] is not None and _music["key"] != key:
+        stop_music()            # a different title: swap, don't stack
     try:
         url = app_settings.get_manga_music_url()
     except Exception:
         url = ""
     if not url:
         return
-    if time.monotonic() - _MUSIC_OPENED_AT < _MUSIC_REOPEN_S:
-        return
-    _MUSIC_OPENED_AT = time.monotonic()
     # Opened in a form that starts itself - see _autoplay_url.
     url = _autoplay_url(url)
     # Read *before* the launch: a browser window that already held the
     # foreground is one the owner put there, and is the one window
     # _hush_browser_window must not touch.
     was_foreground = 0
-    try:
-        if os.name == "nt":
-            import ctypes
-            was_foreground = ctypes.windll.user32.GetForegroundWindow()
-            # ShellExecute hands the child this process's environment,
-            # which still carries PyInstaller's bootloader variables -
-            # fatal for any child that is itself a PyInstaller build.
-            # See helpers/child_process.
-            with child_process.clean_environ():
-                ctypes.windll.shell32.ShellExecuteW(
-                    None, "open", url, None, None, 7)  # SW_SHOWMINNOACTIVE
-        else:
-            webbrowser.open(url)
-    except Exception:
-        logs.exception("could not open the reading-music URL")
-        return
+    if os.name == "nt":
+        import ctypes
+        was_foreground = ctypes.windll.user32.GetForegroundWindow()
 
+    def launch():
+        """Start the browser. **On a worker, not the UI thread.**
+
+        Spawning a browser costs a process creation - measured as part
+        of the owner's "the watch/read buttons take ~1.5 sec": this ran
+        inline, before the reader page was even built, so the reading
+        surface waited on a program that has nothing to do with it. It
+        answers to nobody here; the only thing that has to come back to
+        the UI thread is the window sweep, which is a QTimer and stays
+        below.
+
+        Never raises - it is a thread, and an uncaught exception in one
+        is silent."""
+        try:
+            if os.name == "nt":
+                path = _default_browser_path()
+                switch = _NEW_WINDOW_SWITCH.get(os.path.basename(path).lower())
+                # A child process, not ShellExecute, wherever the browser
+                # takes a new-window switch: ShellExecute hands the link
+                # to whatever instance is already running, which puts the
+                # music in a *tab* of a window full of the owner's own
+                # pages - nothing this app could then close. Both routes
+                # get a clean environment: the child inherits
+                # PyInstaller's bootloader variables otherwise, which is
+                # fatal to any child that is itself a PyInstaller build
+                # (see helpers/child_process).
+                with child_process.clean_environ():
+                    if switch:
+                        subprocess.Popen(
+                            [path, switch, url],
+                            creationflags=getattr(subprocess,
+                                                  "CREATE_NO_WINDOW", 0))
+                    else:
+                        ctypes.windll.shell32.ShellExecuteW(
+                            None, "open", url, None, None, 7)
+            else:
+                webbrowser.open(url)
+        except Exception:
+            logs.exception("could not open the reading-music URL")
+
+    threading.Thread(target=launch, name="music-launch", daemon=True).start()
+
+    _music["key"] = key
+    _music["hwnd"] = None       # filled in by the sweep below
+    _music["tuck"] = False
     _hush_browser_window(window, was_foreground)
     QTimer.singleShot(500, lambda: _refront(window))
     QTimer.singleShot(1500, lambda: _refront(window))
+
+
+def _music_key(entry):
+    """What "the same title" means for the music. The entry's id where it
+    has one, its title otherwise - a card being edited mid-session must
+    not read as a different manga and restart the music."""
+    entry = entry or {}
+    return str(entry.get("id") or (entry.get("title") or "").strip().lower())
+
+
+def _cancel_music_stop():
+    global _music_stop_timer
+    if _music_stop_timer is not None:
+        try:
+            _music_stop_timer.stop()
+        except RuntimeError:
+            pass                # the timer's owner is already gone
+        _music_stop_timer = None
+
+
+def stop_music(delay_ms: int = 0):
+    """Close the music window this app opened, if it opened one.
+
+    `delay_ms` gives a reader that is only being *replaced* - the details
+    chapter list tears one down and builds the next - a moment to say so
+    by opening again for the same title, which cancels this.
+
+    Never raises, and never closes a window this app did not open: only
+    the handle the sweep recorded for its own launch is touched, and a
+    handle that has already gone is simply forgotten."""
+    global _music_stop_timer
+    if delay_ms > 0:
+        _cancel_music_stop()
+        _music_stop_timer = QTimer()
+        _music_stop_timer.setSingleShot(True)
+        _music_stop_timer.timeout.connect(lambda: stop_music(0))
+        _music_stop_timer.start(delay_ms)
+        return
+    _cancel_music_stop()
+    hwnd, _music["hwnd"], _music["key"] = _music["hwnd"], None, None
+    _music["tuck"] = False
+    if not hwnd or os.name != "nt":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if user32.IsWindow(hwnd):
+            # PostMessage, not a process kill: this asks the window to
+            # close the way its own X button does, so the browser saves
+            # its session and the owner's other windows are untouched.
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)     # WM_CLOSE
+    except Exception:
+        logs.exception("could not close the reading-music window")
 
 
 def open_reader(window, entry, data_file="tracker.json", resume=True,
@@ -3462,7 +3966,7 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
     # The music site opens with the reader, exactly as the browser route
     # opens it beside the reading tab (tracker._open_manga_entry) - but
     # quietly, behind the app, since the reading surface is *this* page.
-    _open_music_quietly(window)
+    _open_music_quietly(window, entry)
     page = ReaderPage(entry, data_file, host,
                       origin_page=_origin_page_name(window), resume=resume,
                       chapter_number=chapter_number)

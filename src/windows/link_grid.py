@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
 
 from helpers import app_art, child_process, images, lookup_pool, storage, theme
 from helpers.widgets import (
+    # CardTextLabel is re-exported: it used to be defined here.
+    CardTextLabel,  # noqa: F401
     Card, CardDragReorder, GlassPage, GridSelection, confirm,
     defer_grid_rebuild, frameless_dialog, inform, scroll_area, search_field,
     show_toast, show_undo_toast,
@@ -88,50 +90,11 @@ def grid_columns(page) -> int:
     return GRID_COLS if getattr(window, "_sidebar_collapsed", False) else GRID_COLS_SIDEBAR_OPEN
 
 
-class CardTextLabel(QLabel):
-    """A word-wrapped line of text on a card, sized honestly for the
-    width it will actually be given.
-
-    A plain wrapped QLabel is not, and that clipped the second line of
-    every long card name on Apps, Websites and Games. Two Qt behaviours
-    combine to do it:
-
-    * `QLabel.sizeHint()` for a wrapped label is a heuristic - it picks a
-      wrap width it thinks looks balanced rather than the one it will be
-      laid out at, and reports the height *that* width needs. Measured on
-      "A Really Long Missing Application Name": a sizeHint wide enough
-      for two lines, in a card that only ever offers 104px, where the
-      same text needs three.
-    * A QBoxLayout with an alignment set (these cards centre their
-      contents) lays itself out inside `alignmentRect`, which clamps the
-      layout's *width* to what the card has - but keeps the height the
-      too-wide sizeHint asked for. So the label is narrowed without ever
-      being asked how tall it now needs to be.
-
-    Fixing the width and answering sizeHint from `heightForWidth` at that
-    same width removes both halves: the layout cannot narrow it further,
-    and the height it reports is the height the text really occupies.
-    Deliberately lazy rather than measured in `__init__` - the fonts here
-    come from QSS (#CardTitle's weight, the badge's 8pt), which is not
-    applied to a widget until it is polished, some time after it is
-    built."""
-
-    def __init__(self, text, width=CARD_TEXT_WIDTH, parent=None):
-        super().__init__(text, parent)
-        self._text_width = width
-        self.setWordWrap(True)
-        self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.setFixedWidth(width)
-
-    def sizeHint(self):
-        return QSize(self._text_width, self.heightForWidth(self._text_width))
-
-    def minimumSizeHint(self):
-        # Same answer as sizeHint: QLabel's own minimumSizeHint for
-        # wrapped text is another heuristic, and a minimum shorter than
-        # the real height is all a grid row needs to squeeze the last
-        # line back off the card.
-        return self.sizeHint()
+# CardTextLabel moved to helpers/widgets.py - the Discover cards in
+# tracker.py need the same honest wrapped-text height, and a window
+# module importing another window module is how import cycles start.
+# Re-exported above so every existing `link_grid.CardTextLabel` still
+# resolves.
 
 
 def open_link_entry(parent, entry, label="Links"):
@@ -376,7 +339,7 @@ class LinkGridPage(GridSelection, GlassPage):
         self.grid_layout = QGridLayout(self.grid_body)
         self.grid_layout.setSpacing(10)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        panel_layout.addWidget(scroll_area(self.grid_body), stretch=1)
+        panel_layout.addWidget(scroll_area(self.grid_body, ground=theme.PANEL_FILL), stretch=1)
 
         self._drag_reorder = CardDragReorder(
             self.grid_body, self._begin_custom_order, self._drop_reorder)

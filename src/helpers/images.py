@@ -35,10 +35,19 @@ def _asset_dir() -> Path:
     return Path(base) if base else Path(__file__).resolve().parent.parent
 
 
+# Recoloured assets already cut, keyed (name, colour, height, ratio).
+# Every caller asks for one of a handful of fixed combinations, and each
+# miss reads a PNG off disk, scales it smoothly and composites a fill -
+# measured 12ms a call, twice per tracker page build, on the path
+# between pressing Watch and seeing it.
+_tinted = {}
+
+
 def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixmap:
     """A bundled image recoloured to `color`, scaled for `dpr` and tagged
     with it so it isn't blurry on a non-100% display (same reason as the
-    sidebar logo in main.py).
+    sidebar logo in main.py). Cached per (name, colour, height, ratio) -
+    see _tinted.
 
     Recoloured rather than shipped in the right colour: every other glyph
     on these buttons is text drawn from theme's palette, so a white PNG
@@ -47,6 +56,10 @@ def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixma
 
     Scaled before it is filled - filling first would leave a flat block of
     colour for the scaler to blur."""
+    key = (name, str(color), int(height), float(dpr))
+    found = _tinted.get(key)
+    if found is not None:
+        return found
     source = QPixmap(str(_asset_dir() / name))
     if source.isNull():
         return source  # missing asset: an empty icon, not a crash
@@ -57,6 +70,7 @@ def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixma
     painter.fillRect(scaled.rect(), QColor(color))
     painter.end()
     scaled.setDevicePixelRatio(dpr)
+    _tinted[key] = scaled
     return scaled
 
 
@@ -85,11 +99,30 @@ def download(url: str, timeout: int = 8):
             net.ascii_url(url), headers={"User-Agent": "Mozilla/5.0 PC-App/1.0"}
         )
         deadline = net.deadline_in(timeout)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             data = net.read_bytes(resp, deadline)
-        path.write_bytes(data)
+        # **Written beside the target and moved into place.** A direct
+        # write_bytes is not atomic, so anything that interrupts it - and
+        # a full disk is the one that actually happened here - leaves a
+        # *truncated* file at the cache path. `download` then returns
+        # that path forever (it only checks `exists()`), `load_thumbnail`
+        # cannot decode it, and the card draws the blank tile on every
+        # visit from then on. Measured 22 August 2026: the owner's C:
+        # drive was at 0.0 GB free of 237.6 GB, and a planted 204-byte
+        # JPEG reproduced the failure exactly - which is the owner's
+        # "sometimes the images appear but when go back and come again
+        # they disappear".
+        temporary = path.with_suffix(path.suffix + ".part")
+        temporary.write_bytes(data)
+        temporary.replace(path)
         return path
     except Exception:
+        # Never leave a half-written file where a later run will mistake
+        # it for a finished download.
+        try:
+            path.with_suffix(path.suffix + ".part").unlink(missing_ok=True)
+        except OSError:
+            pass
         return None
 
 
@@ -303,6 +336,28 @@ def _fitted(path, size, stamp):
 
     if img is None:
         img = load_thumbnail(path, size)
+        if img is None:
+            # **An undecodable file inside our own cache is deleted, not
+            # remembered.** It is a download this app wrote, so the only
+            # ways it can fail to decode are a truncated or interrupted
+            # write - and leaving it there means `download` keeps
+            # handing the same dead path back and the card is blank for
+            # good. Removing it costs one re-download and is the only
+            # thing that makes the failure self-heal. Never touches a
+            # file outside CACHE_DIR: a user-chosen cover that will not
+            # open is theirs, and deleting it would be data loss.
+            try:
+                candidate = Path(path).resolve()
+                if candidate.is_relative_to(CACHE_DIR.resolve()):
+                    candidate.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
+            # Deliberately not cached. A None here means "this failed
+            # *this time*" - a half-written download, a disk that was
+            # full a moment ago - and storing it would keep the blank
+            # tile for the life of the process even after the retry
+            # above would have succeeded.
+            return None
         if img is not None:
             img = _round_corners(img)
             try:
@@ -363,9 +418,17 @@ def thumbnail_or_avatar(path, label_text, size=(64, 64)) -> QPixmap:
         return cached
 
     img = _fitted(path, size, stamp) if path else None
+    failed = path and img is None
     if img is None:
         img = blank_tile(size)
     pixmap = to_pixmap(img)
+    if failed:
+        # A path that was given and would not decode is a *transient*
+        # failure by the time it gets here - _fitted has just deleted
+        # the damaged cache file, so the next call re-downloads it.
+        # Caching the blank tile against this key would hold the empty
+        # card for the life of the process and hide the repair.
+        return pixmap
     _evict(_PIXMAP)
     _PIXMAP[key] = pixmap
     return pixmap

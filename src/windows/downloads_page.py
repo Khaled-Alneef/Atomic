@@ -188,7 +188,7 @@ class DownloadsPage(GlassPage):
         self.list_layout.setContentsMargins(0, 0, 0, 0)
         self.list_layout.setSpacing(10)
         self.list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(scroll_area(self.list_body), stretch=1)
+        layout.addWidget(scroll_area(self.list_body, ground=theme.PANEL_FILL), stretch=1)
 
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)

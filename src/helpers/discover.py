@@ -30,11 +30,14 @@ MangaDex's `title` field is usually romaji with the English name filed
 under altTitles.
 """
 
+import concurrent.futures
+import threading
+import time
 import json
 import urllib.parse
 import urllib.request
 
-from . import mangadex, net
+from . import mangadex, net, storage
 
 CINEMETA_URL = "https://v3-cinemeta.strem.io"
 MANGADEX_COVERS = "https://uploads.mangadex.org/covers"
@@ -85,7 +88,7 @@ def _get_json(url: str, deadline, timeout: float):
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
     try:
-        with urllib.request.urlopen(req, timeout=step) as resp:
+        with net.urlopen(req, timeout=step) as resp:
             return json.loads(net.read_text(resp, net.deadline_in(step)))
     except Exception:
         return None
@@ -322,20 +325,461 @@ def discover_reading(query: str = "", limit: int = 30, deadline=None) -> list:
 
 
 def discover_reading_latest(limit: int = 30, deadline=None) -> list:
-    """Manga whose newest chapter landed most recently - the "Latest"
-    row beside "Popular Now" on the Read page (the owner's ask).
+    """What landed recently - the "Latest" row on Read, and the schedule's
+    **Recently Released** group, which are the same list.
 
-    **A different source on purpose.** Popular Now is filled by browsing
-    the user's own reading sites, and a site's front page is already
-    roughly "what updated lately" - so a Latest row built the same way
-    would have printed the same titles under a second heading and taught
-    nobody anything. MangaDex can order by the actual chapter timestamp,
-    which is the question being asked.
+    **From the owner's own sites, not MangaDex** (the owner's ask, 21
+    August 2026: "take them from the source websites provided so that
+    when clicked from the recently released it directly shows the ch
+    list"). That is the whole point of the change, and it is not a
+    cosmetic one: a MangaDex row carries a MangaDex id and no site url,
+    so opening it landed on a details page with nothing to list and the
+    question "where do you read this" all over again. A row browsed from
+    a configured site carries `url`, `site_id` and `site_name`, and
+    `tracker.discover_entry` passes those straight through - so the
+    click opens that site's chapter list, first time, every time.
 
-    Same browse content-ratings and the same shared throttle as every
-    other call here (mangadex._get). Fails soft to [] like its
-    neighbours - a Latest row that cannot answer is a missing row, never
-    an error."""
+    What is given up, honestly: a scanlation site's listing is *its own
+    newest-first order*, not a timestamped global one, so this is "new
+    on your sites" rather than "new on the internet". MangaDex could
+    order by real upload time and these cannot. That was the original
+    reason for asking MangaDex, recorded here so it is not rediscovered
+    as a bug - it was traded away deliberately, because a row that opens
+    where you read is worth more than a row that is sorted perfectly and
+    opens nowhere. It also means this row and Popular Now now draw on
+    the same source; the sites' own order is what separates them.
+
+    Fails soft to [] like its neighbours - a Latest row that cannot
+    answer is a missing row, never an error."""
+    if limit <= 0:
+        return []
+    rows = discover_reading_sites(query="", limit=limit * 2, deadline=deadline)
+    return _serving_sites_only(rows, deadline)[:limit]
+
+
+# Which sites have been seen to actually hand over a chapter list, and
+# when that was last established. Session-lived, with a TTL, keyed by
+# site id.
+# **Both caches below are written to disk.** They were session-only, and
+# that was the difference between a cost paid once and a cost paid every
+# launch: measured 22 August 2026, a cold category section took 36.4s
+# (six site probes plus a MangaDex lookup for each of forty titles) and
+# 1.9s once warm. Neither answer moves - a site either serves chapter
+# lists or does not, and a series does not change which medium it is -
+# so re-deriving them on every start was pure waste, and waste on the
+# path the owner was waiting on.
+_META_FILE = "reading_meta.json"
+_meta_loaded = False
+_meta_dirty = False
+
+
+def _load_reading_meta():
+    global _meta_loaded
+    if _meta_loaded:
+        return
+    _meta_loaded = True
+    try:
+        saved = storage.load(_META_FILE, {}) or {}
+    except Exception:
+        saved = {}
+    if not isinstance(saved, dict):
+        return
+    for title, medium in (saved.get("medium") or {}).items():
+        _MEDIUM_CACHE.setdefault(str(title), str(medium))
+    # A series does not change what it is filed under either, so these
+    # keep forever like the medium verdicts beside them. An empty list
+    # is a real answer - "MangaDex carries no genre tags for this" - and
+    # is remembered, or every browse would re-ask about the same titles.
+    for title, genres in (saved.get("genres") or {}).items():
+        if isinstance(genres, list):
+            _GENRE_CACHE.setdefault(str(title),
+                                    [str(name) for name in genres])
+    # Site verdicts keep their own age: a site that was refusing may have
+    # been fixed, so these expire where the medium answers never do.
+    now = time.time()
+    for site_id, row in (saved.get("sites") or {}).items():
+        try:
+            stamp, ok = float(row[0]), bool(row[1])
+        except Exception:
+            continue
+        if now - stamp < _SERVES_TTL_S:
+            # Stored as wall-clock, read back as monotonic-relative, so
+            # an entry written last week does not look like one written
+            # a moment ago.
+            _SERVES_CACHE[str(site_id)] = (
+                time.monotonic() - (now - stamp), ok)
+
+
+def _save_reading_meta():
+    """Never raises - losing a cache is a slow next launch, not a bug."""
+    try:
+        now_wall, now_mono = time.time(), time.monotonic()
+        storage.save(_META_FILE, {
+            "medium": dict(_MEDIUM_CACHE),
+            "genres": dict(_GENRE_CACHE),
+            "sites": {site: [now_wall - (now_mono - stamp), ok]
+                      for site, (stamp, ok) in _SERVES_CACHE.items()},
+        })
+    except Exception:
+        pass
+
+
+_SERVES_CACHE = {}
+_SERVES_TTL_S = 6 * 60 * 60
+# One probe gets this long. A site that refuses answers immediately (a
+# 403 is one round trip); a site that works answered in 0.4-0.9s when
+# this was measured. Anything past this is not worth a row.
+_SERVES_PROBE_S = 8.0
+
+
+def _serving_sites_only(rows, deadline=None):
+    """`rows`, minus every row from a site that cannot actually serve a
+    chapter list.
+
+    **The owner's report, with a screenshot: a Recently Released row for
+    "Celebrity Lady" that opens to no chapters at all.** It is not a
+    fetch bug. Measured 21 August 2026: Mangalek browses and searches
+    perfectly, and answers **403 to every series page** it publishes -
+    six header shapes tried, both transports, so it is the site refusing
+    non-browsers rather than anything this app does. A schedule row that
+    cannot open is worse than a shorter schedule, which is the owner's
+    own instruction here: "only show the ones in the websites provided
+    so that it definitely will show the ch list".
+
+    So each site is asked once - with one of its own rows, so the probe
+    is a real chapter list rather than a guess - and the answer is kept
+    for six hours. A site that has not been asked yet is *included*: the
+    probe runs in the caller's thread and the first build should not
+    hang behind six of them, so the cost is paid once and the list is
+    right from then on.
+
+    Never raises; a probe that blows up leaves the site included."""
+    from . import chapter_source
+    _load_reading_meta()
+    by_site, order = {}, []
+    for row in rows or []:
+        site = row.get("site_id") or row.get("site_name") or ""
+        if site not in by_site:
+            by_site[site] = []
+            order.append(site)
+        by_site[site].append(row)
+
+    now = time.monotonic()
+    unknown = [s for s in order
+               if not (_SERVES_CACHE.get(s)
+                       and now - _SERVES_CACHE[s][0] < _SERVES_TTL_S)]
+
+    def probe(site_id):
+        sample = by_site.get(site_id) or []
+        if not sample:
+            return site_id, False
+        entry = {"title": sample[0].get("title") or "",
+                 "type": "Manga", "url": sample[0].get("url") or "",
+                 "site_id": site_id}
+        try:
+            found = chapter_source._site_chapters(
+                entry, net.deadline_in(_SERVES_PROBE_S), None)
+        except Exception:
+            found = []
+        return site_id, bool(found)
+
+    if unknown:
+        # Together, not one after another - six sites serially is six
+        # times the wait for an answer that is the same either way.
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(unknown)) as pool:
+            for site_id, ok in pool.map(probe, unknown):
+                _SERVES_CACHE[site_id] = (time.monotonic(), ok)
+        _save_reading_meta()
+
+    kept = []
+    for site in order:
+        row = _SERVES_CACHE.get(site)
+        if row is not None and not row[1]:
+            continue        # asked, and it cannot serve one
+        kept.extend(by_site[site])
+    # Interleaved again, so dropping a site does not leave the list as
+    # one site's catalogue in a block.
+    out, index = [], 0
+    while len(out) < len(kept):
+        added = False
+        for site in order:
+            rows_for = [r for r in kept if (r.get("site_id")
+                                            or r.get("site_name") or "") == site]
+            if index < len(rows_for):
+                out.append(rows_for[index])
+                added = True
+        if not added:
+            break
+        index += 1
+    return out
+
+
+# **Which original language is which medium.** This is the split the
+# Read page's new sections ask for, and it is not a guess: MangaDex files
+# every series under `originalLanguage`, AniList under `countryOfOrigin`
+# and MangaUpdates under a plain `type` string, and all three agree on
+# the same three buckets. Japanese is manga, Korean is manhwa, Chinese is
+# manhua - that *is* the definition of the words, not a heuristic over
+# them.
+#
+# "Other" is everything else MangaDex carries (English originals, French,
+# Indonesian, Vietnamese...), which is a real category rather than a
+# dumping ground - it is where an OEL webcomic honestly belongs.
+MEDIUM_LANGUAGES = {
+    "Manga": ("ja",),
+    "Manhwa": ("ko",),
+    "Manhua": ("zh", "zh-hk"),
+}
+_ALL_MEDIUM_LANGUAGES = tuple(
+    code for codes in MEDIUM_LANGUAGES.values() for code in codes)
+# What "Other" actually asks for. **Named rather than inverted**, and
+# that is a measured correction: filtering the three known languages out
+# of the most-followed list returned **zero rows** - the head of that
+# list is entirely Japanese, Korean and Chinese, so there was nothing
+# left after the filter. MangaDex has no "not these" operator, so the
+# rest has to be listed. These are the origin languages it actually
+# carries series under.
+_OTHER_LANGUAGES = ("en", "fr", "es", "es-la", "pt-br", "id", "vi", "th",
+                    "ru", "de", "it", "pl", "tr")
+
+
+# One title -> "Manga" / "Manhwa" / "Manhua" / "Other", cached for the
+# session. A series does not change what it is, so this is asked once
+# per title ever and then answered from memory.
+_MEDIUM_CACHE = {}
+# And one title -> the genre names MangaDex files it under, filled by
+# the same search that answers the medium (see _classify). Kept beside
+# it rather than in its own table because it is the same question asked
+# of the same answer: one round trip per title, ever.
+_GENRE_CACHE = {}
+_MEDIUM_LOCK = threading.Lock()
+# Titles are classified this many at a time. The catalogues answer in
+# 0.3-1.5s each, so a screenful serially would be most of a minute.
+MEDIUM_WORKERS = 8
+
+
+def classify_medium(title: str, timeout: float = 8.0) -> str:
+    """What medium `title` is, asked of the catalogues that actually
+    record it.
+
+    **MangaDex first**, because its `originalLanguage` is the field the
+    answer is defined by - Japanese is manga, Korean is manhwa, Chinese
+    is manhua - and one search returns it. **MangaUpdates second**, whose
+    `type` field says the word outright and which knows scanlation
+    titles MangaDex does not. AniList is not asked here: its
+    countryOfOrigin agrees with both, and a third round trip for a title
+    the first two already answered is a round trip for nothing.
+
+    "Other" is the honest answer for a title neither knows - it is what
+    the Read page's Other section is for - and it is cached like any
+    other, so a title nobody carries is asked about once.
+
+    Never raises."""
+    return _classify(title, timeout)[0]
+
+
+def classify_genres(title: str, timeout: float = 8.0) -> list:
+    """The genre names MangaDex files `title` under, or [].
+
+    Answered by the *same* search that answers the medium - it is one
+    round trip and the tags are already in the reply - so the reading
+    genre browse costs nothing on top of the category sections that ran
+    before it (see reading_genre_sites). Never raises."""
+    return _classify(title, timeout)[1]
+
+
+def _classify(title: str, timeout: float = 8.0):
+    """(medium, genres) for one title, cached forever.
+
+    One MangaDex search answers both: `originalLanguage` is the medium
+    and `tags` of the `genre` group are the genres. Asking twice was two
+    round trips for one reply.
+
+    **The genres are only kept for a title that genuinely matches**, at
+    the same 0.85 bar `reading_genres` uses and for the same reason -
+    inheriting another series' tags is the worst failure here, and the
+    medium can survive a looser match (a near-miss is nearly always the
+    same franchise, so the same language) where a genre list cannot."""
+    title = (title or "").strip()
+    if not title:
+        return "Other", []
+    key = title.lower()
+    _load_reading_meta()
+    with _MEDIUM_LOCK:
+        if key in _MEDIUM_CACHE and key in _GENRE_CACHE:
+            return _MEDIUM_CACHE[key], list(_GENRE_CACHE[key])
+    medium, genres = "", None
+    try:
+        from . import title_match
+        for manga in mangadex._search(title, int(timeout)) or []:
+            attributes = manga.get("attributes") or {}
+            language = str((attributes.get("originalLanguage") or "")).lower()
+            if genres is None and title_match.similarity(
+                    title, _reading_title(attributes)) >= 0.85:
+                genres = []
+                for tag in attributes.get("tags") or []:
+                    tag_attributes = tag.get("attributes") or {}
+                    if tag_attributes.get("group") != "genre":
+                        continue
+                    name = (tag_attributes.get("name") or {}).get("en")
+                    if name:
+                        genres.append(str(name).strip())
+            if not medium:
+                for name, codes in MEDIUM_LANGUAGES.items():
+                    if language in codes:
+                        medium = name
+                        break
+            if medium and genres is not None:
+                break
+    except Exception:
+        pass
+    if not medium:
+        try:
+            from . import mangaupdates
+            medium = mangaupdates.fetch_medium(title, timeout) or ""
+        except Exception:
+            medium = ""
+    medium = medium or "Other"
+    genres = genres or []
+    with _MEDIUM_LOCK:
+        _MEDIUM_CACHE[key] = medium
+        _GENRE_CACHE[key] = list(genres)
+    return medium, list(genres)
+
+
+def discover_reading_sites_by_medium(medium: str, limit: int = 30,
+                                     deadline=None) -> list:
+    """`medium`'s titles, **browsed from the owner's own sites**.
+
+    The owner's ask, 21 August 2026: "the manga/manhwa/manhua list are
+    taken from the wrong site, take them from the provided websites like
+    SWAT, TeamX". They were coming from MangaDex's own catalogue, which
+    made the sections a browse of a site the owner does not read from -
+    every card opened the "where should this be read from" flow instead
+    of a chapter list.
+
+    So the rows come from `discover_reading_sites` exactly as Discover's
+    do - carrying `url`, `site_id` and `site_name`, so a card opens that
+    site's chapters - and the *medium* is looked up per title, because
+    no scanlation site records it. Classification is cached forever and
+    fanned out MEDIUM_WORKERS at a time; a second visit costs nothing.
+
+    A site's listing is not sorted by medium, so a wider draw is taken
+    than will be kept - most of what a mixed listing returns is not the
+    medium being asked for."""
+    return reading_sites_by_medium_all(limit, deadline).get(medium, [])
+
+
+def reading_sites_by_medium_all(limit: int = 30, deadline=None) -> dict:
+    """**Every** medium's rows in one pass - the four Read category
+    sections, browsed and classified once between them.
+
+    Asked per medium, this was the same work four times over: the same
+    six-site browse, the same probe of each site, and the same
+    classification sweep, thrown away three times because each call kept
+    only one medium's rows. Measured on the owner's machine, 22 August
+    2026 - one section cost 1.7-5.1s warm and 36.4s cold, and there are
+    four of them.
+
+    So the browse happens once and the verdicts are split four ways. The
+    draw is wider than any one section will show because a mixed listing
+    is mostly not the medium being asked for.
+
+    Never raises; a medium nothing was found for comes back as []."""
+    if limit <= 0:
+        return {}
+    names = list(MEDIUM_LANGUAGES) + ["Other"]
+    empty = {name: [] for name in names}
+    rows = discover_reading_sites(query="", limit=max(limit * 6, 60),
+                                  deadline=deadline)
+    # Same rule as Recently Released: a card that cannot open a chapter
+    # list has no business being offered. Mangalek browses and searches
+    # perfectly and 403s every series page it publishes, so without this
+    # it fills these sections with rows that open to nothing.
+    rows = _serving_sites_only(rows, deadline)
+    if not rows:
+        return empty
+    titles = [row.get("title") or "" for row in rows]
+    verdicts = {}
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(MEDIUM_WORKERS, max(1, len(titles)))) as pool:
+        for title, found in zip(titles, pool.map(classify_medium, titles)):
+            verdicts[title] = found
+    _save_reading_meta()
+    out = dict(empty)
+    for row in rows:
+        medium = verdicts.get(row.get("title") or "")
+        if medium not in out or len(out[medium]) >= limit:
+            continue
+        row = dict(row)
+        row["type"] = medium if medium in MEDIUM_LANGUAGES else "Manga"
+        out[medium].append(row)
+    return out
+
+
+def reading_genre_sites(genre: str, limit: int = 30, deadline=None) -> list:
+    """One genre's titles, **browsed from the owner's own sites**.
+
+    The owner's ask, 22 August 2026: *"make the same generes page in
+    read shows only from the settings websites (TeamX, SWAT, etc...)"*.
+    It used to be MangaDex's own tag browse (`discover_reading_genre`,
+    still here and still what a *video* page has no equivalent of), so
+    every card on the page opened the "where should this be read from"
+    flow instead of a chapter list - the same thing that was wrong with
+    the Manga/Manhwa/Manhua sections before them.
+
+    Same shape as reading_sites_by_medium_all, and deliberately the same
+    browse: the rows come from manga_sites, the sites that cannot serve
+    a chapter list are dropped, and the genre is looked up per title
+    because no scanlation site records one. The lookup is the *same*
+    MangaDex search the medium sections already paid for (see
+    _classify), so on a machine that has opened Read once this costs no
+    requests at all.
+
+    No MangaDex fallback when a genre matches nothing here. That would
+    put back exactly the rows the owner asked to be rid of; an honest
+    empty page says the configured sites have nothing under that genre.
+    """
+    wanted = (genre or "").strip().lower()
+    if not wanted or limit <= 0:
+        return []
+    rows = discover_reading_sites(query="", limit=max(limit * 6, 60),
+                                  deadline=deadline)
+    rows = _serving_sites_only(rows, deadline)
+    if not rows:
+        return []
+    titles = [row.get("title") or "" for row in rows]
+    tagged = {}
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(MEDIUM_WORKERS, max(1, len(titles)))) as pool:
+        for title, found in zip(titles, pool.map(classify_genres, titles)):
+            tagged[title] = {str(name).strip().lower() for name in found or []}
+    _save_reading_meta()
+    kept = []
+    for row in rows:
+        if wanted not in tagged.get(row.get("title") or "", ()):
+            continue
+        row = dict(row)
+        row["type"] = classify_medium(row.get("title") or "")
+        if row["type"] not in MEDIUM_LANGUAGES:
+            row["type"] = "Manga"
+        kept.append(row)
+        if len(kept) >= limit:
+            break
+    return kept
+
+
+def discover_reading_medium(medium: str, limit: int = 30, deadline=None) -> list:
+    """The most-followed titles of one medium - what the Read page's
+    Manga / Manhwa / Manhua / Other sections show.
+
+    Asked of MangaDex by `originalLanguage`, which is the field that
+    actually decides the answer (see MEDIUM_LANGUAGES). "Other" asks for
+    everything and filters the three known languages out afterwards,
+    because MangaDex has no "not these" operator.
+
+    Fails soft to [] like everything here."""
     if limit <= 0:
         return []
     if deadline is None:
@@ -343,14 +787,26 @@ def discover_reading_latest(limit: int = 30, deadline=None) -> list:
     step = net.step_timeout(deadline, READING_TIMEOUT)
     if step is None:
         return []
+    languages = MEDIUM_LANGUAGES.get(medium) or _OTHER_LANGUAGES
     count = min(int(limit), _MANGADEX_MAX_LIMIT)
+    query = "".join(f"&originalLanguage[]={code}" for code in languages)
     url = (f"{mangadex.BASE_URL}/manga?limit={count}&includes[]=cover_art"
-           f"&order[latestUploadedChapter]=desc{_BROWSE_RATINGS}")
+           f"&order[followedCount]=desc{_BROWSE_RATINGS}{query}")
     try:
         body = mangadex._get(url, step)
     except Exception:
         return []
-    rows = [row for row in (_reading_row(m) for m in (body or {}).get("data") or []) if row]
+    named = MEDIUM_LANGUAGES.get(medium) is not None
+    rows = []
+    for manga in (body or {}).get("data") or []:
+        row = _reading_row(manga)
+        if row:
+            # A section's rows say what they are, so saving one from
+            # Manhwa files it as Manhwa rather than as the form's
+            # default. "Other" has no type of its own in this app, so it
+            # keeps Manga - the reader treats it the same way.
+            row["type"] = medium if named else "Manga"
+            rows.append(row)
     return rows[:limit]
 
 

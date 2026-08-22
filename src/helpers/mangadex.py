@@ -94,7 +94,7 @@ def _get(url: str, timeout: int, retries: int = 1):
             # Per attempt, not per call: a retry gets its own full budget,
             # the same way it gets its own socket timeout.
             deadline = net.deadline_in(timeout)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with net.urlopen(req, timeout=timeout) as resp:
                 return json.loads(net.read_text(resp, deadline))
         except Exception:
             if attempt == retries:

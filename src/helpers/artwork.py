@@ -120,7 +120,7 @@ def _get_json(url, timeout):
         url = f"{url}{joiner}api_key={urllib.parse.quote(credential)}"
     request = urllib.request.Request(url, headers=headers)
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return json.loads(net.read_text(response, deadline))
 
 
@@ -251,7 +251,7 @@ def _download(path, timeout):
     request = urllib.request.Request(f"{CDN}{path}",
                                      headers={"User-Agent": _UA})
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return net.read_bytes(response, deadline)
 
 

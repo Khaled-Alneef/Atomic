@@ -44,6 +44,76 @@ root, which updates itself from this repository's GitHub tags.
    binary**, automatically, without asking - it may destroy in-progress
    test state, but Windows won't let the build replace a running binary
    either way.
+7. **One second.** The owner's standing rule, 21 August 2026: *"make all
+   transitions in the app take at most 1 sec"*. Anything the user
+   started and is now watching - a page opening, a search answering,
+   sources listing, the reader or player opening - is finished, or is
+   *showing what it has so far*, inside a second. A scroll frame has
+   16.7ms, not a second: 60Hz is the budget there.
+
+   This is a rule about what is on screen, not about when the network
+   replies. Where an answer cannot arrive in a second, show the part
+   that has (`on_partial`, as `streams.find_streams` and
+   `subtitles.search` already do) and fill the rest in - never an empty
+   surface waiting on the slowest source.
+
+   **Measure it before claiming it**, and against the frozen build, not
+   only the source tree. Three things that were slow and what they
+   actually were, so the same ground is not re-dug:
+   - every HTTP request opened a new connection (six GETs: **40.3s**,
+     against **0.75s** over one kept-alive connection) - fixed in
+     `helpers/net.py`, which everything must now go through;
+   - a scroll body was transparent, so Qt repainted every widget every
+     frame instead of blitting (Home: **29.4ms** per frame, *every*
+     frame over budget → **4.6ms**, none) - `widgets.scroll_area`'s
+     `ground`;
+   - a search's results depended on which sites won a race inside the
+     budget, so the same query returned 22, then 10, then 16 rows.
+
+   None of it was Python, Qt, or the owner's connection, and no rewrite
+   in another language would have touched any of it.
+8. **Find the cause before writing the fix - by measurement, not by
+   reading.** The owner's ask, 21 August 2026, after the pass above
+   landed every item on his list: *"make the method you used (accurate
+   calculations, finding new solutions) a rule for you and the other
+   agents"*. It outranks the instinct to start editing, and it is not
+   the same as "test afterwards" - the measuring comes **first**, and
+   often changes what gets built.
+
+   The loop, in order:
+
+   1. **Reproduce and put a number on it** before forming a theory. A
+      harness that drives the real thing (`test` skill), not a reading
+      of the code. "The scroll stutters" became "29.4ms per frame, 100%
+      of frames over a 16.7ms budget, 278 paints per frame" - and the
+      last of those three numbers is what named the cause.
+   2. **Split the number until one part dominates.** DNS / TCP / TLS /
+      first byte, not "the request is slow". Per site, not "search is
+      slow". Frame time *and* paint count, not "it feels heavy".
+   3. **Test the theory in isolation before building on it.** One
+      attribute at a time, re-measured each time: it took four variants
+      to learn that a single `WA_OpaquePaintEvent` bought the whole 4x
+      and the palette changes bought nothing.
+   4. **Run a control.** Two runs of *unchanged* code, to find out what
+      moves on its own. That is the only reason a 37% screenshot diff
+      was correctly read as live network content rather than a bug -
+      the control diffed 37% too.
+   5. **Prove the fix on the same measurement**, then prove it changed
+      nothing else (pixel diff, correctness check, the frozen exe).
+   6. **Write the number into the code** at the place it explains, with
+      the date. Every table in `net.py` and `manga_sites.py` is there so
+      the next person inherits the measurement instead of the guess.
+
+   Two failure modes this exists to catch, both of which happened here:
+   a fix that measured as doing **nothing** (Qt's polish silently
+   cleared the attribute - caught only because the number was taken
+   again afterwards), and a fix that was **fast and wrong** (a ground
+   colour that was 12 levels off across 65% of the frame, caught only
+   by diffing screenshots). A change nobody measured is a guess, however
+   good the reasoning behind it reads.
+
+   Corollary: **say what was not measured.** "I did not exercise the
+   browser launch live" is a finding. Silence about it is a claim.
 
 ## How work gets done here
 

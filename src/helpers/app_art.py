@@ -166,7 +166,7 @@ def fetch_art_url(name: str, timeout: float = DEFAULT_TIMEOUT):
             SEARCH_URL.format(term=urllib.parse.quote(term)),
             headers={"User-Agent": _UA, "Accept": "application/json"})
         deadline = net.deadline_in(timeout)
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with net.urlopen(request, timeout=timeout) as response:
             body = json.loads(net.read_text(response, deadline))
 
         best_url, best_score = None, 0.0

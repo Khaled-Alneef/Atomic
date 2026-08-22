@@ -99,13 +99,33 @@ RESOLUTION_LABELS = {
 # filter out just the matching type(s) and keep the rest. Mirrors
 # windows.tracker.MANGA_TYPES, duplicated here rather than imported to
 # avoid a helpers -> windows dependency for one 3-value tuple.
+# **Rebuilt 21 August 2026 to match where the app actually keeps things.**
+# It had drifted, and silently: "Anime" cleared `tracker.json` for
+# entries typed Anime, but anime moved into `series.json` when the two
+# watch pages merged (main._merge_anime_into_series) - so ticking Anime
+# cleared *nothing at all* (measured: 0 entries), while ticking "Series"
+# wiped every anime with it (measured: all 6). A destructive control
+# that does nothing, beside one that does more than it says, is the
+# worst pair of the two.
+#
+# So the three watch kinds are named separately and keyed off the type
+# they are really stored under, reading is the whole of tracker.json
+# (which holds nothing else since the merge), and the three files the
+# app has grown since - history, downloads and the catalogue cache - are
+# offered instead of being unclearable.
 CLEAR_CATEGORIES = [
-    ("Anime", "tracker.json", lambda e: e.get("type") == "Anime"),
-    ("Reading", "tracker.json", lambda e: e.get("type") in ("Manga", "Manhwa", "Manhua")),
-    ("Series", "series.json", None),
+    ("Anime", "series.json", lambda e: e.get("type") == "Anime"),
+    ("Series", "series.json", lambda e: e.get("type") == "Series"),
+    ("Movies", "series.json", lambda e: e.get("type") == "Movie"),
+    ("Reading", "tracker.json", None),
     ("Games", "games.json", None),
     ("Apps", "apps.json", None),
     ("Websites", "websites.json", None),
+    # Not entries, but the three other things this app accumulates and
+    # that someone clearing data plainly means to include.
+    ("Watch & Read History", "history.json", None),
+    ("Download Queue", "downloads.json", None),
+    ("Cached Discover Results", "discover_cache.json", None),
 ]
 
 
@@ -361,16 +381,55 @@ class SettingsDialog(QDialog):
         self.stack = QStackedWidget()
         # Same order as CATEGORIES - the stack is indexed by the
         # sidebar's row, so the two lists are one list in two places.
-        self.stack.addWidget(scroll_area(self._build_general_page()))
-        self.stack.addWidget(scroll_area(self._build_preferences_page()))
-        self.stack.addWidget(scroll_area(self._build_anime_page()))
-        self.stack.addWidget(scroll_area(self._build_reading_page()))
-        self.stack.addWidget(scroll_area(self._build_games_page()))
-        self.stack.addWidget(scroll_area(self._build_api_keys_page()))
-        self.stack.addWidget(scroll_area(self._build_data_page()))
-        self.stack.addWidget(scroll_area(self._build_keybinds_page()))
-        self.stack.addWidget(scroll_area(self._build_uninstall_page()))
+        #
+        # **Built on first visit, not all nine up front** (22 August 2026,
+        # the owner: "the settings btn takes ~1 sec to show the settings
+        # window, make it < 200 ms"). Measured against the real main
+        # window over the owner's own data, click to the dialog's first
+        # paint: 355-376ms, and nothing in it was one slow call. Every
+        # cost was simply *proportional to how many widgets existed*, so
+        # the same 300ms was being paid nine times over for eight pages
+        # nobody was looking at:
+        #
+        #     scroll_area x9                     60ms
+        #     stack.addWidget x9                 54ms
+        #     content_wrap.setLayout             47ms   (reparents the lot)
+        #     frameless_dialog                   50ms   (setWindowFlag)
+        #     the nine _build_* methods          40ms
+        #
+        # The last line is the only one that looks like page building;
+        # the rest is Qt walking the tree those pages made - an empty
+        # frameless QDialog of this size builds in **0.2ms**, which is
+        # what says the cost is the tree and not the dialog.
+        #
+        # After: **44-57ms** click to first paint, three consecutive
+        # opens, same harness. A category's first visit then costs
+        # 9-59ms (worst: API Keys, 41 widgets), measured in both
+        # directions through the list so a per-tab cost could be told
+        # from a first-switch one; a second visit costs nothing.
+        self._page_builders = [
+            self._build_general_page,
+            self._build_preferences_page,
+            self._build_anime_page,
+            self._build_reading_page,
+            self._build_games_page,
+            self._build_api_keys_page,
+            self._build_data_page,
+            self._build_keybinds_page,
+            self._build_uninstall_page,
+        ]
+        self._built_pages = set()
+        for _ in self._page_builders:
+            # #Bare, so an unbuilt slot paints nothing: the app
+            # stylesheet's plain QWidget rule is an opaque BG fill, and
+            # these stand where a transparent QScrollArea used to.
+            holder = QWidget(objectName="Bare")
+            slot = QVBoxLayout(holder)
+            slot.setContentsMargins(0, 0, 0, 0)
+            self.stack.addWidget(holder)
         content_col.addWidget(self.stack, stretch=1)
+        # Builds row 0 on the way through _on_category_changed, so the
+        # page that is about to be on screen is the one page that exists.
         self.category_list.setCurrentRow(0)
 
         btn_row = QHBoxLayout()
@@ -387,7 +446,9 @@ class SettingsDialog(QDialog):
         content_wrap.setLayout(content_col)
         body.addWidget(content_wrap, stretch=1)
 
-        self._refresh_sites()
+        # The sites list used to be filled here. It is filled by
+        # _build_reading_page instead now - that page may not exist yet,
+        # and a list nobody has built has nothing to fill.
 
         # No title heading: the content column already opens with its
         # own "Settings" PanelTitle.
@@ -457,7 +518,22 @@ class SettingsDialog(QDialog):
 
     def _on_category_changed(self, row):
         if row >= 0:
+            self._ensure_page(row)
             self.stack.setCurrentIndex(row)
+
+    def _ensure_page(self, row):
+        """Build one category's page, the first time it is asked for.
+
+        Before setCurrentIndex, deliberately: the page is added while its
+        holder is still the hidden one, so Qt lays it out once rather
+        than laying out and then showing. A row is recorded as built
+        before the builder runs, so a builder that raises leaves an empty
+        page rather than being retried on every click."""
+        if row in self._built_pages:
+            return
+        self._built_pages.add(row)
+        self.stack.widget(row).layout().addWidget(
+            scroll_area(self._page_builders[row]()))
 
     # ------------------------------------------------------------------
     def _build_general_page(self):
@@ -817,6 +893,9 @@ class SettingsDialog(QDialog):
         self.sites_list.setMinimumHeight(160)
         self.sites_list.itemDoubleClicked.connect(self._edit_site)
         form.addWidget(self.sites_list, stretch=1)
+        # Filled here rather than from __init__: this page builds on
+        # first visit, so this is the moment the list exists.
+        self._refresh_sites()
 
         sites_btn_row = QHBoxLayout()
         add_site_btn = QPushButton("Add...")
@@ -1261,8 +1340,9 @@ class SettingsDialog(QDialog):
                        f"Clear all {names} entries? This cannot be undone."):
             return
 
-        # Anime and Reading share tracker.json - load/save it once for
-        # both instead of the second clear stomping the first's result.
+        # The three watch kinds share series.json - load/save it once for
+        # all of them instead of the second clear stomping the first's
+        # result.
         by_file = {}
         for name, data_file, predicate in checked:
             by_file.setdefault(data_file, []).append(predicate)
@@ -1286,7 +1366,8 @@ class SettingsDialog(QDialog):
         if not confirm(
                 self, "Uninstall Atomic",
                 "This permanently deletes every saved Atomic file on this PC "
-                "(all Anime/Reading/Series/Games/Apps/Websites entries, site "
+                "(all Anime/Series/Movies/Reading/Games/Apps/Websites entries, "
+                "your watch and read history, the download queue, site "
                 "lists, and settings) and removes the app itself. This cannot "
                 "be undone.\n\nThe app will close immediately. Continue?",
                 danger=True, default_no=True):
@@ -1406,6 +1487,15 @@ class SettingsDialog(QDialog):
             self._refresh_sites()
 
     def _refresh_sites(self):
+        # The Reading page builds on first visit, and a probe started
+        # before that (Add Website, or one still running from an earlier
+        # visit) reports back through _on_site_probed regardless. An
+        # AttributeError raised in a Qt slot takes the whole process down
+        # (planning.md, defect #5) - so ask whether the list exists
+        # rather than assuming it does. Nothing is lost: the page fills
+        # itself from disk when it is finally built.
+        if getattr(self, "sites_list", None) is None:
+            return
         self.sites_list.clear()
         for site in manga_sites.list_sites():
             item = QListWidgetItem(self._site_label(site))

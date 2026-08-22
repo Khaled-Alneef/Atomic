@@ -229,7 +229,7 @@ def _post(url, payload, headers, timeout):
         url, data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", **headers})
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return json.loads(net.read_text(response, deadline, max_bytes=4_000_000))
 
 

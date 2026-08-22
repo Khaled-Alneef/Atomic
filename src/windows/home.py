@@ -162,7 +162,7 @@ class HomePage(GlassPage):
         # width unconditionally keeps that centered regardless of
         # whether this page's content is currently tall enough to
         # actually need scrolling (see scroll_area's always_show_vbar).
-        panel_layout.addWidget(scroll_area(body, always_show_vbar=True))
+        panel_layout.addWidget(scroll_area(body, always_show_vbar=True, ground=theme.BG))
 
         # Greeting on the left, the app-wide search on the same line.
         # Only this page carries the field: it searches everything, and
@@ -468,7 +468,9 @@ class HomePage(GlassPage):
         self._hero_signals = _HeroSignals()
         self._hero_signals.backdrop.connect(self._on_hero_backdrop)
 
-        banner = HeroBanner()
+        # theme.BG: Home's body is the page ground itself, and that is
+        # what the banner paints its corner outsides back to.
+        banner = HeroBanner(theme.BG)
         self._hero_banner = banner
         column = QVBoxLayout(banner)
         column.setContentsMargins(36, 22, 36, 16)

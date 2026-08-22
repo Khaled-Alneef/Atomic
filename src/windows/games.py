@@ -129,7 +129,7 @@ class GamesPage(GridSelection, GlassPage):
         self.grid_layout = QGridLayout(self.grid_body)
         self.grid_layout.setSpacing(14)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(scroll_area(self.grid_body), stretch=1)
+        layout.addWidget(scroll_area(self.grid_body, ground=theme.PANEL_FILL), stretch=1)
 
         self._drag_reorder = CardDragReorder(
             self.grid_body, self._begin_custom_order, self._drop_reorder)

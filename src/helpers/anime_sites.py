@@ -239,7 +239,7 @@ def _get(url: str, timeout: int) -> str:
     # and copying it once already (into manga_sites) is how those five
     # were missed.
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with net.urlopen(req, timeout=timeout) as resp:
         return net.read_text(resp, deadline)
 
 
@@ -256,7 +256,7 @@ def _post(url: str, fields: dict, timeout: int) -> str:
     # and copying it once already (into manga_sites) is how those five
     # were missed.
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with net.urlopen(req, timeout=timeout) as resp:
         return net.read_text(resp, deadline)
 
 
@@ -849,7 +849,7 @@ def _netflix_available(url: str, timeout: int):
             "Accept": "text/html,*/*",
             "User-Agent": "Mozilla/5.0 PC-App/1.0",
         })
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with net.urlopen(request, timeout=timeout) as response:
             return response.status == 200
     except urllib.error.HTTPError as exc:
         return False if exc.code == 404 else None

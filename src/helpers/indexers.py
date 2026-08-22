@@ -88,7 +88,7 @@ def _get(url, timeout):
     request = urllib.request.Request(
         url, headers={"User-Agent": _UA, "Accept": "application/json, */*"})
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return net.read_text(response, deadline, net.MAX_RESPONSE_BYTES)
 
 

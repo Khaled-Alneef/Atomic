@@ -87,7 +87,7 @@ def search(query_text: str, content_type: str = "series", timeout: int = 6):
     })
     try:
         deadline = net.deadline_in(timeout)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             body = json.loads(net.read_text(resp, deadline))
     except Exception:
         return []
@@ -142,7 +142,7 @@ def fetch_meta(imdb_id: str, content_type: str = "series", timeout: int = 8):
     })
     try:
         deadline = net.deadline_in(timeout)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             body = json.loads(net.read_text(resp, deadline))
     except Exception:
         return None
@@ -187,7 +187,7 @@ def _api_post(path: str, payload: dict, timeout: int):
     })
     deadline = net.deadline_in(timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             return json.loads(net.read_text(resp, deadline))
     except urllib.error.HTTPError as exc:
         if exc.code in _AUTH_HTTP_CODES:

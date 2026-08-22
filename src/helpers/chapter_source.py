@@ -29,6 +29,7 @@ import concurrent.futures
 import html
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -43,6 +44,14 @@ SERIES_PAGE_TIMEOUT = 25
 # Below this a chapter list is treated as a partial one and the ajax
 # endpoint is asked as well.
 MIN_TRUSTED_CHAPTERS = 3
+# And the bar for showing a first page to the reader before the rest of
+# a paginated list arrives (see on_partial in _site_chapters). Higher
+# than the trust bar above on purpose: that one decides whether to ask
+# the ajax endpoint as well, this one decides what a person sees. A real
+# first page is forty chapters (olympustaff, measured); Madara's inline
+# links are one or two, and one chapter on screen reads as a series with
+# one chapter, not as a list still loading.
+MIN_PARTIAL_CHAPTERS = 10
 
 # How many extra `?page=N` pages of a chapter list to follow, and how
 # many at once. Both bounded on purpose: a series page that paginates
@@ -91,7 +100,7 @@ def _get(url, timeout, referer=None, post=None, accept=None):
         headers["X-Requested-With"] = "XMLHttpRequest"
     request = urllib.request.Request(url, data=post, headers=headers)
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return net.read_text(response, deadline)
 
 
@@ -399,7 +408,13 @@ def _site_chapters(entry, deadline, on_partial=None) -> list:
         # first page is already the newest forty, which is what someone
         # opening a series is nearly always reaching for, so it goes to
         # the caller now and the rest arrives underneath it.
-        if on_partial is not None:
+        # **Few is as wrong as none here too.** Madara serves a couple of
+        # chapter links in the page body and the rest only from its ajax
+        # endpoint, so this "first page" is *one chapter* on 3asq -
+        # measured on the owner's own Kingdom (WAN), which has 380. Shown
+        # early, that reads as a series with one chapter rather than as a
+        # list still loading, which is worse than showing nothing.
+        if on_partial is not None and len(chapters) >= MIN_PARTIAL_CHAPTERS:
             try:
                 on_partial(list(chapters))
             except Exception:
@@ -533,6 +548,24 @@ def _mangadex_id(title: str, timeout: float):
 CACHE_FILE = "reader_cache.json"
 CACHE_TTL_S = 6 * 3600
 
+# The parsed cache file, held in memory for the life of the process.
+#
+# It is the only thing that writes this file, so a copy in hand cannot
+# go stale under it - and reading it back is not cheap: measured on the
+# owner's machine, 22 August 2026, the file is **1.88 MB** of JSON (40
+# chapter lists, one of them 380 chapters) and parsing it cost 34-47ms
+# *per call*, on the path between opening a title and its chapter list
+# appearing. The budget for that whole move is 200ms (the owner's ask).
+_store_cache = None
+
+
+def _load_store() -> dict:
+    global _store_cache
+    if _store_cache is None:
+        store = storage.load(CACHE_FILE, {})
+        _store_cache = store if isinstance(store, dict) else {}
+    return _store_cache
+
 
 def _cache_key(entry) -> str:
     return str((entry or {}).get("id") or (entry or {}).get("url") or "")
@@ -544,8 +577,8 @@ def _cached(key):
     A revisit must not re-fetch: opening the reader on a series whose
     list was just read should be instant, and these sites are slow."""
     import time
-    store = storage.load(CACHE_FILE, {})
-    row = store.get(key) if isinstance(store, dict) else None
+    store = _load_store()
+    row = store.get(key)
     if not row or time.time() - (row.get("at") or 0) > CACHE_TTL_S:
         return None
     return row.get("chapters")
@@ -553,15 +586,31 @@ def _cached(key):
 
 def _store(key, chapters):
     import time
-    store = storage.load(CACHE_FILE, {})
-    if not isinstance(store, dict):
-        store = {}
+    store = _load_store()
     store[key] = {"at": time.time(), "chapters": chapters}
     # Bounded: this is a convenience cache, not a library.
     if len(store) > 40:
         for stale in sorted(store, key=lambda k: store[k].get("at", 0))[:len(store) - 40]:
             store.pop(stale, None)
     storage.save(CACHE_FILE, store)
+
+
+def cached_chapters(entry):
+    """This entry's chapter list if a fresh one is already in hand, or
+    None. Touches no network and no site.
+
+    Split out of list_chapters so the *caller* can tell the two cases
+    apart: a cache hit is a dictionary lookup and belongs on the UI
+    thread, where it lands before the reader's first frame and the list
+    appears in that frame rather than in a second one. Measured on the
+    owner's own 380-chapter entry, 22 August 2026: going through a
+    worker for a hit cost 50-84ms of signal latency on a 200ms budget,
+    because the thread that had to deliver the answer was busy showing
+    the reader."""
+    key = _cache_key(entry)
+    if not key:
+        return None
+    return _cached(key)
 
 
 def list_chapters(entry, *, deadline=None, refresh=False,
@@ -624,11 +673,13 @@ def _other_site_chapters(entry, deadline) -> list:
     if not title.strip():
         return []
     own_site = (entry or {}).get("site_id")
-    for site in manga_sites.list_sites():
-        if site.get("id") == own_site:
-            continue
-        if net.step_timeout(deadline, DEFAULT_TIMEOUT) is None:
-            break
+    others = [s for s in manga_sites.list_sites() if s.get("id") != own_site]
+    if not others:
+        return []
+
+    def ask(site):
+        """One site's best match for this title, or None. Never raises -
+        it runs on a pool worker."""
         # One budget per site, covering both title variants together.
         # Without it a site answering neither spends four engines twice
         # over out of the reader's single deadline, and the MangaDex rung
@@ -669,7 +720,47 @@ def _other_site_chapters(entry, deadline) -> list:
             if best_key is None or key < best_key:
                 best, best_key = row, key
         if best is None or -best_key[0] < 0.85 or not best.get("url"):
-            continue
+            return None
+        return (best_key, site, best)
+
+    # **Every other site is asked at once.** This walked them one at a
+    # time, and the walk is the whole cost: measured 21 August 2026 on
+    # "Celebrity Lady" - a title Mangalek carries and refuses to serve
+    # (see the 403 note above) - the sweep took **13.0s** on its own and
+    # the whole of list_chapters 9.6s before answering "nothing". A
+    # reader that sits blank for ten seconds and then says it found
+    # nothing is the owner's "either takes a long time to show the ch
+    # list, or never shows them".
+    #
+    # Searching is what parallelises; *reading* the winner does not, and
+    # must not - the candidates are tried strongest-match-first and the
+    # first that yields chapters wins, so trying them together would
+    # spend requests on sites whose answer will be thrown away.
+    candidates = []
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(others))
+    try:
+        jobs = [pool.submit(ask, site) for site in others]
+        try:
+            for job in concurrent.futures.as_completed(
+                    jobs, timeout=max(0.0, deadline - time.monotonic())):
+                try:
+                    row = job.result()
+                except Exception:
+                    row = None
+                if row is not None:
+                    candidates.append(row)
+        except concurrent.futures.TimeoutError:
+            pass        # the budget is the answer; use whatever arrived
+    finally:
+        # Stragglers are abandoned, never waited for - the same rule as
+        # manga_sites.search_all. They are bounded by the deadline their
+        # own requests were given.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    candidates.sort(key=lambda row: row[0])
+    for _key, site, best in candidates:
+        if net.step_timeout(deadline, DEFAULT_TIMEOUT) is None:
+            break
         probe = dict(entry)
         probe["url"] = best["url"]
         probe["site_id"] = site.get("id")

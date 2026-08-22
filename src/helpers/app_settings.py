@@ -28,17 +28,30 @@ def set_nav_order(order: list):
     storage.save(SETTINGS_FILE, data)
 
 
+# The section rail's saved drag order moved key on 22 August 2026, when
+# that rail became three fixed blocks with a row of air between them
+# (the owner's ask - see tracker._section_groups). The old "section_order"
+# was one flat list and could no longer be honoured: an order saved
+# before the blocks existed names Saved, History, Schedule in the order
+# they used to sit in, which would quietly override the order the owner
+# has just asked for. Read under a new key so a stale flat list is
+# ignored exactly once rather than migrated into the wrong answer; the
+# old value is left where it is, unread, because deleting a setting to
+# fix a layout is not a trade worth making.
+SECTION_ORDER_KEY = "section_order_blocks"
+
+
 def get_section_order() -> list:
     """Saved order of the tracker pages' sub-sections (the section
-    sidebar's drag-to-reorder list), or [] before the user has dragged
-    one. Keys are tracker.TABS keys; every tracker page shares the one
-    order, since they share the sections themselves."""
-    return _load().get("section_order", [])
+    rail's drag-to-reorder blocks), flattened, or [] before the user has
+    dragged one. Keys are tracker.TABS and category keys; every tracker
+    page shares the one order, since they share the sections."""
+    return _load().get(SECTION_ORDER_KEY, [])
 
 
 def set_section_order(order: list):
     data = _load()
-    data["section_order"] = list(order)
+    data[SECTION_ORDER_KEY] = list(order)
     storage.save(SETTINGS_FILE, data)
 
 

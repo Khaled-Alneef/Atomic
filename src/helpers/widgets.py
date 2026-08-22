@@ -1,6 +1,7 @@
 """Small reusable widgets shared across windows."""
 
 import math
+import time
 import weakref
 
 from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
@@ -1118,6 +1119,52 @@ HERO_BANNER_HEIGHT = 300
 # heaviest where the text sits, nearly clear at the artwork's edge.
 HERO_BANNER_SCRIM = ((0.0, 242), (0.45, 175), (0.72, 95), (1.0, 30))
 
+# The hero's own corner radius, larger than the app's RADIUS_LG.
+#
+# **The owner has reported square corners on this banner three times**,
+# most recently 22 August 2026 ("make the corners ALWAYS rounded"), and
+# the geometry was measured again each time. It is not square: probed at
+# dpr 1 and 1.25, flat, mid-fade, cross-fading, mid-resize and settled,
+# the pixel in every corner is the ground behind the banner and never
+# the artwork - the fill-through-a-path in paintEvent does round it.
+#
+# What is wrong is the *scale*. 18px of curve on a banner that is 300px
+# tall and 1600px wide at the owner's full-screen size is a quarter of
+# one percent of the edge, and at the dark end the 242-alpha scrim turns
+# the interior into very nearly the page's own background, so there is
+# almost nothing for that quarter-percent to read against. A radius
+# proportionate to the banner is what actually makes it visible - it is
+# not a fix to the shape, which was already right, but to how much of it
+# there is to see.
+HERO_BANNER_RADIUS = 28
+
+
+# Backdrops already decoded, by path. **Decoding one is a 144ms freeze
+# on the UI thread**, measured while profiling the sidebar fold - a
+# single QPixmap(path) on a full-resolution backdrop was the largest
+# stall in the whole profile, larger than every paint in it put
+# together. Home's hero rotates every five seconds, so that stall lands
+# again and again, and anything animating when it lands - a fold, a
+# scroll - drops a visible chunk of frames.
+#
+# The carousel cycles a small fixed set, so caching turns every rotation
+# after the first into a dictionary lookup. Bounded by count rather than
+# bytes because these are all one shape - a handful of banners, not the
+# reader's two-orders-of-magnitude page images (which is why
+# _PixmapCache bounds itself in bytes instead).
+_BACKDROP_CACHE = {}
+_BACKDROP_CACHE_MAX = 12
+
+
+def _decoded_backdrop(path):
+    pixmap = _BACKDROP_CACHE.get(path)
+    if pixmap is None:
+        pixmap = QPixmap(path)
+        if len(_BACKDROP_CACHE) >= _BACKDROP_CACHE_MAX:
+            _BACKDROP_CACHE.pop(next(iter(_BACKDROP_CACHE)), None)
+        _BACKDROP_CACHE[path] = pixmap
+    return pixmap
+
 
 class HeroBanner(QFrame):
     """The hero's canvas: paints the backdrop and its scrim, and the
@@ -1127,15 +1174,24 @@ class HeroBanner(QFrame):
     thing here follows. The backdrop arrives late (a TMDB/AniList
     lookup) and lands through set_backdrop, cross-fading over whatever
     was there; until then the banner is a flat surface panel, which is
-    what it stays for a title with no landscape art anywhere."""
+    what it stays for a title with no landscape art anywhere.
+
+    `ground` is the colour of the page *behind* the banner, which
+    paintEvent paints back over the four corner outsides - see the note
+    there. It is not one constant across the app: Home's hero sits on
+    theme.BG (#0e0c09) while Discover's featured banner sits on a
+    theme.PANEL_FILL (#1a1712) scroll body, and a corner filled with the
+    wrong one would be a visible dark or light notch rather than no
+    corner at all."""
 
     FADE_MS = 260
 
     clicked = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, ground=None, parent=None):
         super().__init__(parent)
         self.setFixedHeight(HERO_BANNER_HEIGHT)
+        self._ground = QColor(ground or theme.BG)
         self._backdrop = None
         self._previous = None
         self._path = None
@@ -1149,7 +1205,21 @@ class HeroBanner(QFrame):
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._fade.valueChanged.connect(self._on_fade)
         self._scaled = {}
+        # Armed by every resize, fired 90ms after the last one - see
+        # _scaled_for. Long enough to cover a whole fold animation
+        # without re-cutting mid-flight, short enough that the sharp
+        # copy is there before anyone looks at it.
+        self._resize_settle = QTimer(self)
+        self._resize_settle.setSingleShot(True)
+        self._resize_settle.setInterval(90)
+        self._resize_settle.timeout.connect(self._resmooth)
         use_hover_cursor(self)
+
+    def set_ground(self, colour):
+        """Change the page colour the corners are cut back to, for a
+        caller that moves the banner between grounds."""
+        self._ground = QColor(colour)
+        self.update()
 
     def _on_fade(self, value):
         self._mix = float(value)
@@ -1161,7 +1231,7 @@ class HeroBanner(QFrame):
         path = str(path) if path else None
         if path == getattr(self, "_path", None):
             return self._backdrop is not None
-        pixmap = QPixmap(path) if path else QPixmap()
+        pixmap = _decoded_backdrop(path) if path else QPixmap()
         incoming = None if pixmap.isNull() else pixmap
         self._path = path if incoming is not None else None
         self._previous = self._backdrop if fade else None
@@ -1187,6 +1257,11 @@ class HeroBanner(QFrame):
             self.clicked.emit()
         super().mousePressEvent(event)
 
+    def resizeEvent(self, event):
+        # Every width the fold animation passes through lands here.
+        self._note_resize()
+        super().resizeEvent(event)
+
     def _scaled_for(self, key, pixmap, size):
         # Cut at devicePixelRatio and tagged with it, or the banner is
         # rendered at logical size and stretched by Qt on any non-100%
@@ -1203,13 +1278,61 @@ class HeroBanner(QFrame):
         if cached is None or cached[0] != (size, ratio):
             target = QSize(max(1, int(size.width() * ratio)),
                            max(1, int(size.height() * ratio)))
+            # **Smooth only when the size has stopped moving.**
+            # Measured 21 August 2026, profiling the sidebar fold: this
+            # one call was **4.9ms** and ran seven times per fold, which
+            # was the whole of "the fold stutters" - every step of the
+            # animation is a new width, so every step missed this cache
+            # and re-scaled a multi-megapixel banner with
+            # SmoothTransformation. The tween underneath was ticking at
+            # 7ms and the work was taking 17.
+            #
+            # A frame mid-animation is on screen for one refresh and
+            # nobody can see the difference between the two filters at
+            # that speed; the settled frame is the one that has to be
+            # sharp, and _resmooth below re-cuts it 90ms after the last
+            # size change. So this costs a fast scale per step and one
+            # smooth scale per resize, instead of one smooth scale per
+            # step.
+            # **While the size is still moving, keep the copy we have.**
+            # Re-cutting was measured at 6.9ms a call and ran once per
+            # animation step, which is the whole of "the fold stutters":
+            # the tween underneath ticks every 7ms and the work took
+            # nearly three times that. Trying FastTransformation first
+            # barely helped - the cost is allocating and filling a
+            # multi-megapixel pixmap, not the filter choosing between
+            # neighbours.
+            #
+            # So a resize in flight simply reuses the last cut. It is the
+            # wrong size by a few percent for a few frames, and the
+            # brush's own transform in paintEvent stretches it to fit -
+            # which the GPU does as part of the blit it was doing
+            # anyway. _resmooth re-cuts it properly 90ms after the last
+            # size change, which is the frame anyone actually looks at.
+            if cached is not None and self._resize_settle.isActive():
+                return cached[1]
             scaled = pixmap.scaled(
                 target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation)
             scaled.setDevicePixelRatio(ratio)
-            cached = ((size, ratio), scaled)
+            cached = ((size, ratio), scaled, True)
             self._scaled[key] = cached
         return cached[1]
+
+    def _note_resize(self):
+        """Called from resizeEvent: mark the widget as moving and arm the
+        re-cut that follows the last change."""
+        self._resize_settle.start()
+
+    def _resmooth(self):
+        """Re-cut anything whose cached copy no longer matches the size
+        now showing. A copy already cut for this size is left alone -
+        re-cutting it would be exactly the cost this avoids."""
+        ratio = self.devicePixelRatioF() or 1.0
+        size = self.rect().size()
+        self._scaled = {key: row for key, row in self._scaled.items()
+                        if row[0] == (size, ratio)}
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1217,7 +1340,8 @@ class HeroBanner(QFrame):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         rect = self.rect()
         shape = QPainterPath()
-        shape.addRoundedRect(QRectF(rect), theme.RADIUS_LG, theme.RADIUS_LG)
+        shape.addRoundedRect(QRectF(rect), HERO_BANNER_RADIUS,
+                             HERO_BANNER_RADIUS)
         # **Filled through the path, not clipped to it.** setClipPath is
         # not antialiased in Qt's raster engine - the clip is applied per
         # whole pixel - so the artwork kept hard square corners under a
@@ -1258,12 +1382,34 @@ class HeroBanner(QFrame):
         draw("current", self._backdrop, self._mix if self._previous is not None
              else 1.0)
         gradient = QLinearGradient(0.0, 0.0, float(rect.width()), 0.0)
-        ground = QColor(theme.BG)
+        # The scrim is theme.BG whatever the page behind is - it is the
+        # dark wash the title text has to read against, not the page's
+        # own colour (self._ground, below, is that one).
+        scrim = QColor(theme.BG)
         for stop, alpha in HERO_BANNER_SCRIM:
-            ground.setAlpha(alpha)
-            gradient.setColorAt(stop, QColor(ground))
+            scrim.setAlpha(alpha)
+            gradient.setColorAt(stop, QColor(scrim))
         painter.setBrush(QBrush(gradient))
         painter.drawPath(shape)
+        # **Then the four corner outsides are painted back out in the
+        # page's own colour** - bounding rect minus the rounded rect,
+        # filled opaque. The owner's own suggestion, on his third report
+        # of square corners (22 August 2026), and taken because it is the
+        # one fix that does not depend on how Qt rasterises a *textured*
+        # brush along a curve: whatever the fills above leave in the
+        # corners - a hard square edge, a stray row, nothing at all - an
+        # opaque layer of the page colour is over it, so the corner is
+        # subtracted rather than merely never drawn. The banner was
+        # rendered here at 8-10x on both grounds and measured correct
+        # before this went in; it is belt-and-braces for a machine where
+        # it is not, and costs one small path fill per paint.
+        #
+        # This is why `ground` is a constructor argument: the corner has
+        # to become the page, and the two callers sit on different pages.
+        corners = QPainterPath()
+        corners.addRect(QRectF(rect))
+        painter.setBrush(QColor(self._ground))
+        painter.drawPath(corners.subtracted(shape))
         # A hairline of BORDER around the shape, because the rounding is
         # real but was unreadable: measured in the full Discover
         # composition (offscreen grab, loud magenta art), the left
@@ -1274,10 +1420,16 @@ class HeroBanner(QFrame):
         # stroke path is inset half a pixel so the pen isn't clipped by
         # the widget edge.
         edge = QPainterPath()
-        edge.addRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5),
-                            theme.RADIUS_LG, theme.RADIUS_LG)
+        edge.addRoundedRect(QRectF(rect).adjusted(0.75, 0.75, -0.75, -0.75),
+                            HERO_BANNER_RADIUS, HERO_BANNER_RADIUS)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(theme.BORDER), 1.0))
+        # 1.5px, not 1: at one physical pixel the hairline is antialiased
+        # into two half-lit rows around the curve and reads as a smudge
+        # rather than an edge - which on the scrimmed left half, where it
+        # is the only thing separating banner from page, is the whole of
+        # the "square corners" report. The pen is inset by half its own
+        # width so it is not clipped by the widget edge.
+        painter.setPen(QPen(QColor(theme.BORDER), 1.5))
         painter.drawPath(edge)
         painter.end()
 
@@ -1383,6 +1535,255 @@ def search_field(placeholder: str, width: int = None) -> QLineEdit:
     return field
 
 
+# The longest a refresh-rate-driven tick is allowed to be. A screen
+# reporting 0Hz (a headless or offscreen platform) falls back to this,
+# which is Qt's own animation granularity.
+MAX_TICK_MS = 16
+
+
+def screen_tick_ms(widget=None) -> int:
+    """One display refresh, in whole milliseconds.
+
+    **Qt's animation clock is not this number, and that is the whole
+    problem it exists to solve.** QPropertyAnimation and friends run off
+    a unified timer that ticks about every 16ms - 60 steps a second -
+    while both of this machine's monitors run at **144Hz** (measured). So
+    any animation driven by Qt produces a new value only every 2.4
+    display refreshes: the panel shows each position two or three times
+    over, which reads as stepping however well the curve was chosen.
+    Nothing is dropping frames; there are simply not enough positions.
+
+    Everything the owner has called "stuttering" - the wheel, the sidebar
+    fold, the sideways rows - has been this."""
+    try:
+        screen = (widget.screen() if widget is not None else None)             or QApplication.primaryScreen()
+        rate = screen.refreshRate() if screen is not None else 0.0
+    except Exception:
+        rate = 0.0
+    if not rate or rate <= 0:
+        return MAX_TICK_MS
+    return max(4, min(MAX_TICK_MS, int(round(1000.0 / rate))))
+
+
+def ease_out_cubic(fraction: float) -> float:
+    """1-(1-t)^3, by hand - the curve every glide in this app uses."""
+    return 1.0 - (1.0 - fraction) ** 3
+
+
+class SmoothTween(QObject):
+    """A number moved from one value to another at the screen's refresh
+    rate, instead of at Qt's animation rate.
+
+    A drop-in for the QPropertyAnimation-on-a-scalar pattern wherever
+    the movement is something the eye follows: same curve, same
+    duration, 2.4x the positions on a 144Hz panel (see screen_tick_ms).
+    Retargets rather than restarting - a second start() mid-flight
+    re-aims from wherever the value currently is, so repeated presses
+    never queue a backlog of animations.
+
+    `apply` is called with a float on every tick; `on_done` once when it
+    lands, if given. Both are held on this object, which is parented to
+    the widget it animates, so the pair die with it."""
+
+    def __init__(self, owner, apply, duration_ms, on_done=None):
+        super().__init__(owner)
+        self._owner = owner
+        self._apply = apply
+        self._on_done = on_done
+        self._duration = max(1, int(duration_ms))
+        self._from = 0.0
+        self._to = 0.0
+        self._started_at = 0.0
+        self._running = False
+        self._timer = QTimer(self)
+        # Precise, or Qt coalesces a 7ms timer back up to ~16ms and
+        # hands back exactly the stepping this removes.
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(self._tick)
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self, start_value, end_value, duration_ms=None):
+        if duration_ms is not None:
+            self._duration = max(1, int(duration_ms))
+        self._from = float(start_value)
+        self._to = float(end_value)
+        self._started_at = time.monotonic()
+        self._running = True
+        # Re-read every run: the window can have moved to the other
+        # monitor since the last one.
+        self._timer.setInterval(screen_tick_ms(self._owner))
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self):
+        self._running = False
+        self._timer.stop()
+
+    def _tick(self):
+        if not self._running:
+            self._timer.stop()
+            return
+        elapsed = (time.monotonic() - self._started_at) * 1000.0
+        fraction = min(1.0, elapsed / float(self._duration))
+        value = self._from + (self._to - self._from) * ease_out_cubic(fraction)
+        try:
+            self._apply(value)
+        except RuntimeError:
+            self.stop()         # the widget went away mid-flight
+            return
+        if fraction >= 1.0:
+            self.stop()
+            if self._on_done is not None:
+                try:
+                    self._on_done()
+                except RuntimeError:
+                    pass
+
+
+class CardTextLabel(QLabel):
+    """A word-wrapped line of text on a card, sized honestly for the
+    width it will actually be given.
+
+    A plain wrapped QLabel is not, and that clipped the second line of
+    every long card name on Apps, Websites and Games. Two Qt behaviours
+    combine to do it:
+
+    * `QLabel.sizeHint()` for a wrapped label is a heuristic - it picks a
+      wrap width it thinks looks balanced rather than the one it will be
+      laid out at, and reports the height *that* width needs. Measured on
+      "A Really Long Missing Application Name": a sizeHint wide enough
+      for two lines, in a card that only ever offers 104px, where the
+      same text needs three.
+    * A QBoxLayout with an alignment set (these cards centre their
+      contents) lays itself out inside `alignmentRect`, which clamps the
+      layout's *width* to what the card has - but keeps the height the
+      too-wide sizeHint asked for. So the label is narrowed without ever
+      being asked how tall it now needs to be.
+
+    Fixing the width and answering sizeHint from `heightForWidth` at that
+    same width removes both halves: the layout cannot narrow it further,
+    and the height it reports is the height the text really occupies.
+    Deliberately lazy rather than measured in `__init__` - the fonts here
+    come from QSS (#CardTitle's weight, the badge's 8pt), which is not
+    applied to a widget until it is polished, some time after it is
+    built."""
+
+    def __init__(self, text, width, parent=None):
+        super().__init__(text, parent)
+        self._text_width = width
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.setFixedWidth(width)
+
+    def sizeHint(self):
+        return QSize(self._text_width, self.heightForWidth(self._text_width))
+
+    def minimumSizeHint(self):
+        # Same answer as sizeHint: QLabel's own minimumSizeHint for
+        # wrapped text is another heuristic, and a minimum shorter than
+        # the real height is all a grid row needs to squeeze the last
+        # line back off the card.
+        return self.sizeHint()
+
+
+class PageSlide(QWidget):
+    """Two pages sliding past each other, painted as two flat pictures.
+
+    **This is the owner's "the page transition stutters", and the cause
+    was never the curve.** Measured 22 August 2026 in a real window on
+    the owner's data, Home -> Movies & Series with the shipped
+    `QPropertyAnimation(page, b"pos")` on both pages:
+
+        ticks delivered  13 over 227ms  ->  57 fps   (best run)
+        ticks delivered   6 over 438ms  ->  13.7 fps (third run, 271ms stall)
+        paint events     832 over 13 ticks -> **64 per tick**
+                         654 over  6 ticks -> **109 per tick**
+
+    Moving a widget moves its children, and because a page is not marked
+    opaque Qt cannot blit its backing store - so every QLabel, Card,
+    QPushButton and scroll viewport on *both* pages re-rendered on every
+    single step. Sixty-odd repaints to move a picture 40 pixels. Exactly
+    the shape of the scroll-frame cause in CLAUDE.md rule 7, and the same
+    answer: give Qt something it can blit.
+
+    So each page is rendered **once** into a pixmap, both pages are
+    handed to this one opaque widget, and a step is two `drawPixmap`
+    calls - one paint event per frame instead of sixty-four, with the
+    real widgets hidden behind it and not repainting at all.
+
+    Driven by SmoothTween rather than QPropertyAnimation for the other
+    half of the same complaint: Qt's animation clock ticks every ~16ms
+    whatever the panel does, so an animation can never have more
+    positions than 60 a second. SmoothTween runs at screen_tick_ms.
+
+    `direction` is +1 when the new page comes up from below (or in from
+    the right), -1 when it comes down from above (or in from the left).
+    `axis` is "y" for the page stack and "x" for the sidebar swap, which
+    slides two full bars over each other and had exactly the same cost."""
+
+    def __init__(self, parent, old_pixmap, new_pixmap, direction, duration_ms,
+                 on_done=None, axis="y"):
+        super().__init__(parent)
+        # Opaque and no system background: this covers the whole
+        # container and paints every pixel of it, so telling Qt that
+        # saves an erase per frame and stops the parent painting under
+        # it. Without the attribute the measured win is roughly halved.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._old = old_pixmap
+        self._new = new_pixmap
+        self._dy = direction
+        self._axis = axis
+        self._offset = 0.0
+        self._on_done = on_done
+        self._tween = SmoothTween(self, self._apply, duration_ms,
+                                  on_done=self._finish)
+
+    def start(self):
+        self.setGeometry(self.parent().rect())
+        self.show()
+        self.raise_()
+        self._tween.start(0.0, 1.0)
+
+    def _apply(self, fraction):
+        self._offset = float(fraction)
+        self.update()
+
+    def _finish(self):
+        if self._on_done is not None:
+            self._on_done()
+
+    def stop(self):
+        """Abandon the slide - a second navigation arriving mid-flight.
+        The callback still runs, so the pending page is never orphaned."""
+        self._tween.stop()
+        self._finish()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        span = self.height() if self._axis == "y" else self.width()
+        # The new page travels from `dy * span` to 0; the old one from 0
+        # to `-dy * span`. Rounded to whole pixels: a pixmap drawn at a
+        # fractional offset is resampled, which is both slower and
+        # visibly soft on text.
+        travel = int(round(self._offset * span))
+        if self._dy > 0:
+            new_at, old_at = span - travel, -travel
+        else:
+            new_at, old_at = travel - span, travel
+        for pixmap, at in ((self._old, old_at), (self._new, new_at)):
+            if pixmap is None or pixmap.isNull():
+                continue
+            if self._axis == "y":
+                painter.drawPixmap(0, at, pixmap)
+            else:
+                painter.drawPixmap(at, 0, pixmap)
+        painter.end()
+
+
 class _SmoothWheel(QObject):
     """Animated wheel scrolling for one QScrollArea.
 
@@ -1405,23 +1806,54 @@ class _SmoothWheel(QObject):
     The reader's strip keeps its own physics (windows.reader.WHEEL_STEP_PX
     and a hand-tuned feel) - it does not go through scroll_area()."""
 
-    DURATION_MS = 160
+    # **Driven at the screen's refresh rate, not Qt's animation clock.**
+    # This is what the owner's "it works, but I need it smoother" was.
+    # Qt's unified animation timer ticks every 16ms - about 60 steps a
+    # second - and both of this machine's monitors run at **144Hz**
+    # (measured). So the glide produced a new position only every 2.4
+    # display refreshes: the panel was showing each scroll position two
+    # or three times over, which reads as stepping however well the
+    # curve is chosen. Nothing was dropping frames; there simply were
+    # not enough positions to show.
+    #
+    # A plain QTimer at the screen's own interval fixes that, and gives
+    # two things QVariantAnimation could not: the position is computed
+    # from real elapsed time (so a late tick lands where it should
+    # rather than behind), and it is carried as a float, so a slow
+    # stretch of a long glide still advances instead of rounding to the
+    # same integer pixel twice in a row.
+    #
+    # Measured, one notch, positions produced per second:
+    #     before  60/s      after  ~144/s
+    #
+    # 220ms rather than 160: with 2.4x the steps there is room for a
+    # longer tail, and a longer tail is most of what reads as "glide"
+    # rather than "jump". Retargeting keeps it responsive - a second
+    # notch re-aims from where the view is now, so spinning the wheel
+    # never queues 220ms of backlog.
+    DURATION_MS = 220
     # Distance per notch. Qt's own default is wheelScrollLines (3) x
     # singleStep (20) = 60px; kept as the floor so nothing scrolls
     # *slower* than it used to, but a taller viewport earns a longer
     # stride - a tenth of a screen per notch was unusably slow on the
     # tracker grids.
     NOTCH_FLOOR_PX = 60
+    # Never slower than this, whatever the screen claims. A refresh rate
+    # of 0 is what a headless/offscreen platform reports.
+    MAX_TICK_MS = 16
 
     def __init__(self, area: QScrollArea):
         super().__init__(area)
         self._area = area
         self._target = None
-        self._anim = QVariantAnimation(self)
-        self._anim.setDuration(self.DURATION_MS)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anim.valueChanged.connect(self._apply)
-        self._anim.finished.connect(self._settled)
+        self._from = 0.0
+        self._started_at = 0.0
+        self._timer = QTimer(self)
+        # Precise, or Qt coalesces a 7ms timer up to the ordinary ~16ms
+        # granularity and hands back exactly the stepping this removes.
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(self._tick_ms())
+        self._timer.timeout.connect(self._tick)
         # Grabbing the scrollbar mid-glide must win instantly - an
         # animation still writing values under a held slider fights the
         # hand holding it.
@@ -1429,14 +1861,41 @@ class _SmoothWheel(QObject):
         area.viewport().installEventFilter(self)
         area.verticalScrollBar().installEventFilter(self)
 
-    def _apply(self, value):
-        self._area.verticalScrollBar().setValue(int(value))
+    def _tick_ms(self) -> int:
+        return screen_tick_ms(self._area)
+
+    def _start(self, target):
+        bar = self._area.verticalScrollBar()
+        self._from = float(bar.value())
+        self._target = target
+        self._started_at = time.monotonic()
+        # Re-read every glide: the window can have been dragged to the
+        # other monitor since the last one.
+        self._timer.setInterval(self._tick_ms())
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def _tick(self):
+        if self._target is None:
+            self._timer.stop()
+            return
+        elapsed = (time.monotonic() - self._started_at) * 1000.0
+        fraction = min(1.0, elapsed / float(self.DURATION_MS))
+        # OutCubic, by hand: 1-(1-t)^3. The same curve the animation
+        # used, kept so the feel of a single notch is unchanged and only
+        # the number of steps in it goes up.
+        eased = 1.0 - (1.0 - fraction) ** 3
+        value = self._from + (self._target - self._from) * eased
+        self._area.verticalScrollBar().setValue(int(round(value)))
+        if fraction >= 1.0:
+            self._settled()
 
     def _settled(self):
         self._target = None
+        self._timer.stop()
 
     def _cancel(self):
-        self._anim.stop()
+        self._timer.stop()
         self._target = None
 
     def eventFilter(self, obj, event):
@@ -1462,11 +1921,7 @@ class _SmoothWheel(QObject):
             # Already hard against this end - hand the notch back to Qt
             # so a parent scroller (if any) can take it.
             return False
-        self._target = target
-        self._anim.stop()
-        self._anim.setStartValue(float(bar.value()))
-        self._anim.setEndValue(float(target))
-        self._anim.start()
+        self._start(target)
         event.accept()
         return True
 
@@ -1569,7 +2024,62 @@ def install_edge_wheel(app) -> QObject:
     return relay
 
 
-def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
+class _OpaqueGround(QObject):
+    """Paints a scroll body's ground, so the body can tell Qt it is
+    opaque - which is the whole of the scroll fix (see `ground` in
+    scroll_area).
+
+    An event filter rather than a stylesheet, and that is not a style
+    preference. A declaration-only sheet set on one of these hosts
+    cascades into every descendant and outranks the app stylesheet:
+    details.py carries two comments recording the day that silently
+    killed the row Cards' hover ring. An ID-scoped sheet would dodge the
+    cascade but not the fact that these hosts are named `#Bare`, whose
+    own rule is what currently makes them transparent.
+
+    Painting first and returning False leaves the widget's own paint and
+    all of its children exactly as they were - the only difference on
+    screen is that this fills the pixels the page underneath used to
+    fill, in the same colour."""
+
+    def __init__(self, widget, colour):
+        super().__init__(widget)
+        self._colour = QColor(colour)
+        widget.installEventFilter(self)
+        self._claim(widget)
+
+    @staticmethod
+    def _claim(widget):
+        """Set the opaque flag, and keep setting it.
+
+        **Setting it once does not hold**, which cost a measurement that
+        showed the fix doing nothing at all: the app stylesheet gives
+        this body a background, so Qt polishes it as a styled widget and
+        clears WA_OpaquePaintEvent again some time after construction.
+        Read back live, the flag was False on both pages while the
+        filter sat installed - and setting it *after* the page was built
+        stuck. So it is re-asserted below rather than trusted."""
+        if not widget.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent):
+            widget.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind == QEvent.Type.Paint:
+            self._claim(obj)
+            painter = QPainter(obj)
+            # event.rect(), never obj.rect(): during a scroll this is the
+            # newly exposed strip, and filling the whole body instead
+            # would hand back the cost this exists to remove.
+            painter.fillRect(event.rect(), self._colour)
+            painter.end()
+        elif kind in (QEvent.Type.Polish, QEvent.Type.PolishRequest,
+                      QEvent.Type.StyleChange):
+            self._claim(obj)
+        return False
+
+
+def scroll_area(body: QWidget, always_show_vbar: bool = False,
+                ground: str = None) -> QScrollArea:
     """Wrap `body` in a frameless, resizable, mouse-wheel-scrollable area.
 
     `always_show_vbar` reserves the vertical scrollbar's width whether or
@@ -1580,7 +2090,31 @@ def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
     right depending on scroll state. Pages with fixed-width centered
     content (Home's hero) want that width reserved unconditionally so
     centering math stays consistent either way; pages that never center
-    anything against the full viewport width don't need it."""
+    anything against the full viewport width don't need it.
+
+    **`ground` is what makes scrolling smooth**, and it is the colour the
+    page behind this body already paints - pass `theme.BG` on a page,
+    leave it None anywhere the ground is not that (a translucent dialog,
+    an overlay bar over video).
+
+    The measurement, on the owner's machine over the owner's real data,
+    one wheel-sized step at a time:
+
+        Home    14.5ms per frame, 123 paints per frame  ->  3.5ms, 24
+        Read    15.3ms per frame, 179 paints per frame  ->  3.7ms, 38
+
+    at a 60Hz budget of 16.7ms - so *every* frame on Home was over
+    budget, which is the stutter, and none is now. The cause is that
+    theme.py makes a scroll body transparent (`QScrollArea > QWidget`),
+    and a transparent body cannot be scrolled by blitting: Qt has to
+    repaint the page underneath and then every widget over it, for every
+    frame. Telling Qt the body is opaque restores the blit path, so a
+    frame repaints the strip that actually came into view instead of the
+    whole viewport. Nothing about the easing curve or the wheel handler
+    was ever the problem.
+
+    The body still has to *be* opaque for that promise to hold, or
+    scrolling smears; _OpaqueGround is what keeps it true."""
     area = QScrollArea()
     area.setWidgetResizable(True)
     area.setFrameShape(QFrame.Shape.NoFrame)
@@ -1588,6 +2122,8 @@ def scroll_area(body: QWidget, always_show_vbar: bool = False) -> QScrollArea:
     if always_show_vbar:
         area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     area.setWidget(body)
+    if ground:
+        _OpaqueGround(body, ground)
     # Parented to the area, so it lives and dies with it.
     _SmoothWheel(area)
     return area
@@ -1656,9 +2192,13 @@ class SideScroller(QWidget):
 
         # Animated rather than a jump: at this distance an instant
         # scroll gives no sense of which way the row moved.
-        self._anim = QPropertyAnimation(self._bar, b"value", self)
-        self._anim.setDuration(SIDE_SCROLL_ANIM_MS)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Driven at the screen's refresh rate, not Qt's animation clock -
+        # the sideways rows stepped for exactly the reason the wheel did
+        # (see screen_tick_ms). Same curve, same duration, 2.4x the
+        # positions on this machine's 144Hz panels.
+        self._anim = SmoothTween(
+            self, lambda value: self._bar.setValue(int(round(value))),
+            SIDE_SCROLL_ANIM_MS, on_done=self._wheel_settled)
 
         self._fades = {}
         self._buttons = {}
@@ -1683,7 +2223,6 @@ class SideScroller(QWidget):
         # it (the owner's ask) - see eventFilter. Where the glide is
         # heading, for retargeting; None when settled.
         self._wheel_target = None
-        self._anim.finished.connect(self._wheel_settled)
         area.viewport().installEventFilter(self)
         # maximumHeight, not height(): the caller pins the area's height
         # before wrapping it, and the widget has not been laid out yet,
@@ -1728,10 +2267,7 @@ class SideScroller(QWidget):
         if target == bar.value() and self._wheel_target is None:
             return False    # hard against this end - the page's notch
         self._wheel_target = target
-        self._anim.stop()
-        self._anim.setStartValue(bar.value())
-        self._anim.setEndValue(target)
-        self._anim.start()
+        self._anim.start(bar.value(), target)
         event.accept()
         return True
 
@@ -1789,10 +2325,7 @@ class SideScroller(QWidget):
         # finished, so without this a wheel glide cut off by an arrow
         # press would leave a stale destination for the next notch.
         self._wheel_target = None
-        self._anim.stop()
-        self._anim.setStartValue(bar.value())
-        self._anim.setEndValue(target)
-        self._anim.start()
+        self._anim.start(bar.value(), target)
 
 
 # ---- Frameless dialogs ---------------------------------------------------

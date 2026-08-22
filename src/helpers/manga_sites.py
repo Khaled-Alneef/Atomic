@@ -475,7 +475,7 @@ def _post_text(url: str, fields: dict, timeout: int, accept: str = "*/*") -> str
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with net.urlopen(req, timeout=timeout) as resp:
         return net.read_text(resp, deadline)
 
 
@@ -494,7 +494,7 @@ def _get(url: str, timeout: int, extra_headers: dict = None) -> str:
         **(extra_headers or {}),
     })
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with net.urlopen(req, timeout=timeout) as resp:
         return net.read_text(resp, deadline)
 
 
@@ -1034,8 +1034,80 @@ SEARCH_BUDGET = 6.0
 # measured, "I Want to Stop Killing" is on Mangalek and nowhere else -
 # must not be dropped for being alone, so a thin answer waits out the
 # full budget instead.
-EARLY_RESULTS = 12
+#
+# 12 originally, raised to 24 once the connection pool made waiting for
+# a fourth and fifth site nearly free. Measured over three queries, two
+# runs each, on the owner's six sites:
+#
+#            12          24          48
+#   kingdom  12 / 0.54s  26 / 1.00s  26 / 0.97s
+#   solo     17 / 0.27s  35 / 1.09s  35 / 0.94s
+#   tower    15 / 0.25s  31 / 1.05s  31 / 0.89s  <- and one run 19 / 6.01s
+#
+# 24 roughly doubles what the owner sees for about half a second, and
+# stays inside the one-second rule. 48 buys nothing at all - it is above
+# what the sites actually hold - and is actively worse: a cap that can
+# never be reached means every search waits out the whole budget, which
+# is the 6.01s run above returning *fewer* rows than the 0.89s one.
+EARLY_RESULTS = 24
 EARLY_SITES = 3
+
+
+# What a finished search found, keyed by the query that found it.
+#
+# **This is what stops a longer query showing less than its own prefix**
+# - the owner's report, in his words: "why is there less results while
+# searching (kingdom) than searching (kingdo) while the results
+# increased has the name kingdom on them". Measured per site, both
+# queries return *identical* rows (3asq 4 and 4, TeamX 2 and 2, Mangalek
+# 14 and 14): what differed was which sites answered inside the budget.
+# Three runs of the very same query returned 22, then 10, then 16 rows.
+# It was a race, never the query.
+#
+# The transport fix (net.py's pool) is most of the cure - the worst site
+# went from 25.4s to 0.9s - but a race that is merely unlikely still
+# runs sometimes, and the failure is silent. So a query also inherits
+# what its own prefixes already found: every one of those rows was
+# returned by a real site for a real query, and the ones whose titles
+# still contain what is now typed are still answers. Typing forward can
+# then only ever *narrow*, which is what someone typing expects.
+_SEARCH_CACHE = {}
+_SEARCH_CACHE_TTL_S = 180.0
+_SEARCH_CACHE_MAX = 40
+
+
+def _cached_prefix_rows(query: str) -> list:
+    """Rows already found for a prefix of `query`, still matching it.
+
+    Longest prefix first, so "kingdom" prefers what "kingdo" found over
+    what "k" found - both are valid, the longer one is closer to what
+    the sites were actually asked."""
+    now = time.monotonic()
+    for cached_query in sorted(_SEARCH_CACHE, key=len, reverse=True):
+        if not query.startswith(cached_query) or cached_query == query:
+            continue
+        at, rows = _SEARCH_CACHE[cached_query]
+        if now - at >= _SEARCH_CACHE_TTL_S:
+            continue
+        return [row for row in rows
+                if query in (row.get("title") or "").lower()]
+    return []
+
+
+def _remember_search(query: str, rows: list):
+    if not rows:
+        return          # an empty answer is usually a race, not a fact
+    _SEARCH_CACHE[query] = (time.monotonic(), [dict(r) for r in rows])
+    while len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
+        oldest = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
+        _SEARCH_CACHE.pop(oldest, None)
+
+
+def _row_identity(row):
+    """What makes two rows the same result. The url where there is one -
+    the same title on two sites is two genuine places to read it."""
+    return (row.get("url") or "").strip().lower() or (
+        (row.get("site_id"), (row.get("title") or "").strip().lower()))
 
 
 def search_all(query: str, timeout: int = SEARCH_TIMEOUT,
@@ -1051,12 +1123,17 @@ def search_all(query: str, timeout: int = SEARCH_TIMEOUT,
 
     Stragglers are abandoned, never waited for - the same rule as
     streams._run_all. They cannot linger: they are bounded by the same
-    deadline their requests were given."""
+    deadline their requests were given.
+
+    Whatever this run misses, it inherits from what the query's own
+    prefixes already found (see _SEARCH_CACHE)."""
     sites = list_sites()
-    if not (query or "").strip() or not sites:
+    query = (query or "").strip()
+    if not query or not sites:
         return []
     if deadline is None:
         deadline = net.deadline_in(budget)
+    key = query.lower()
 
     results, answered = [], 0
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(sites))
@@ -1084,6 +1161,17 @@ def search_all(query: str, timeout: int = SEARCH_TIMEOUT,
         # wait=False on purpose: see the straggler note above. Waiting
         # here would put the whole point of the early return back.
         pool.shutdown(wait=False, cancel_futures=True)
+
+    # This run first, then anything a prefix found that this run did not
+    # reach: a site that answered now is fresher than the same site's
+    # older answer, and dedup keeps the first of each.
+    seen = {_row_identity(row) for row in results}
+    for row in _cached_prefix_rows(key):
+        identity = _row_identity(row)
+        if identity not in seen:
+            seen.add(identity)
+            results.append(row)
+    _remember_search(key, results)
     return results
 
 

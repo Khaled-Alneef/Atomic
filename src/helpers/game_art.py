@@ -304,7 +304,7 @@ def _get_json(url: str, timeout: float):
     request = urllib.request.Request(
         url, headers={"User-Agent": _UA, "Accept": "application/json"})
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return json.loads(net.read_text(response, deadline))
 
 
@@ -359,7 +359,7 @@ def _probe(url: str, deadline):
         request = urllib.request.Request(
             url, headers={"User-Agent": _UA}, method="HEAD")
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with net.urlopen(request, timeout=timeout) as response:
                 return response.status == 200
         except urllib.error.HTTPError as error:
             if error.code == 404:

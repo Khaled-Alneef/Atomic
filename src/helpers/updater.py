@@ -54,7 +54,7 @@ from . import child_process, net
 # `development`, counting up from the last release; two parts on a build
 # that is being released, bumped in the same commit that tags it - or the
 # new build goes on offering itself an update.
-APP_VERSION = "1.10.17"
+APP_VERSION = "1.10.18"
 
 # What counts as a release: exactly two numeric parts, with or without the
 # leading v. Development builds are tagged (if at all) with three, and are
@@ -84,7 +84,7 @@ def _get_json(url, timeout):
     # dribbles a body forever would hang the Settings dialog rather than
     # a background worker.
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return json.loads(net.read_text(response, deadline))
 
 
@@ -172,7 +172,7 @@ def download_update(update: dict, progress=None, timeout: int = 60) -> Path:
     received = 0
     try:
         request = urllib.request.Request(update["url"], headers=_HEADERS)
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with net.urlopen(request, timeout=timeout) as response:
             while True:
                 chunk = response.read(256 * 1024)
                 if not chunk:

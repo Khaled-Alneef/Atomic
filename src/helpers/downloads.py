@@ -582,7 +582,7 @@ def _run_video(job) -> str:
 
     while True:
         if job_id in _cancelled:
-            torrent_engine.release(info_hash)
+            torrent_engine.release(info_hash, force=True)
             return ""
         if job_id in _paused:
             # Held, not stopped: the torrent stays added, so the pieces
@@ -682,7 +682,7 @@ def _run_chapter(job) -> str:
             request = urllib.request.Request(url, headers=headers)
             deadline = net.deadline_in(30)
             try:
-                with urllib.request.urlopen(request, timeout=20) as response:
+                with net.urlopen(request, timeout=20) as response:
                     data = net.read_bytes(response, deadline)
             except Exception:
                 continue         # a missing page must not lose the chapter

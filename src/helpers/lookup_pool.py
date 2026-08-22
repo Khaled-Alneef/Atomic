@@ -64,6 +64,35 @@ def submit_watched(fn, *args, **kwargs):
     _watched_queue.put((fn, args, kwargs))
 
 
+# The third queue: whole-catalogue fan-outs. These are *slow by nature* -
+# they browse six sites, probe each one, or classify a screenful of
+# titles against three catalogues - and putting them on the shared queue
+# above was measured, on 22 August 2026, starving everything else:
+#
+#     Read page load (discover_reading_latest)      7.83s holding a worker
+#     one category section (Manhwa)                36.40s holding a worker
+#
+# against MAX_WORKERS of four. Two of those and half the pool is gone for
+# half a minute, so the covers, the chapter list and the schedule
+# lookups that share it simply queue - which is exactly what the owner
+# reported as "the ch list takes ages", "the images take ages" and "the
+# pages take ages", all at once and all after the same build.
+#
+# Two workers, so a browse still overlaps a browse, and nothing a user is
+# looking at is ever behind one.
+BROWSE_WORKERS = 2
+
+_browse_queue = queue.Queue()
+_browse_workers = []
+
+
+def submit_browse(fn, *args, **kwargs):
+    """Queue a whole-catalogue fan-out - a browse, a probe, a
+    classification sweep. Never on the shared queue: see BROWSE_WORKERS."""
+    _ensure_workers(_browse_workers, _browse_queue, BROWSE_WORKERS, "lookup-browse")
+    _browse_queue.put((fn, args, kwargs))
+
+
 def _ensure_workers(workers, work_queue, count, name):
     with _workers_lock:
         if workers:

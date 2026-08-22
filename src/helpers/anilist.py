@@ -194,7 +194,7 @@ def _post(query: str, variables: dict, timeout: int):
     # request, and the gap above can be most of a second on its own.
     deadline = net.deadline_in(timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             return json.loads(net.read_text(resp, deadline))
     except urllib.error.HTTPError as exc:
         if exc.code in _RATE_LIMIT_CODES:

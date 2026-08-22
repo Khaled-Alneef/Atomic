@@ -45,7 +45,7 @@ def _get(url: str, timeout: int):
         _last_request_at = time.monotonic()
     # After the throttle sleep, not before it - see anilist._post.
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with net.urlopen(req, timeout=timeout) as resp:
         return json.loads(net.read_text(resp, deadline))
 
 

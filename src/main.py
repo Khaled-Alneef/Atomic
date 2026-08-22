@@ -21,9 +21,10 @@ import threading
 from pathlib import Path
 
 from helpers import (app_settings, downloads, global_search, images, logs,
-                     native_cursor, setup_wizard, startup, storage, theme,
-                     updater, whats_new)
-from helpers.nav_config import HOME_ITEM, nav_position, visible_nav_items
+                     native_cursor, rail_icons, setup_wizard, startup,
+                     storage, theme, updater, whats_new)
+from helpers.nav_config import (HOME_ITEM, nav_position, visible_nav_groups,
+                                visible_nav_items)
 from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
@@ -51,11 +52,14 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import (confirm, install_edge_wheel,
+from helpers.widgets import (PageSlide, SmoothTween, confirm, install_edge_wheel,
                              release_stale_hover_cursors, show_toast,
                              take_live_redo, take_live_undo, use_hover_cursor)
 from windows import home as home_page_module
@@ -181,6 +185,38 @@ SIDEBAR_WIDTH = 220
 # labels are dropped (see _set_sidebar_collapsed).
 SIDEBAR_COLLAPSED_WIDTH = 68
 SIDEBAR_ANIM_MS = 180
+# The spacing every sidebar's QVBoxLayout is built with, and the slack
+# NavListWidget.sizeHint keeps under its last row - both read by
+# RAIL_GAP_SLACK below, so a change to either stays in step with the
+# blank row it has to be subtracted from.
+SIDEBAR_LAYOUT_SPACING = 4
+NAV_LIST_BOTTOM_MARGIN = 12
+
+# The blank row between two blocks of rail rows, used only until a real
+# row has been laid out and can be measured (see _sync_rail_gaps). 44 is
+# what a row measures at the expanded width on this machine: 11px of QSS
+# padding top and bottom, a 13pt Bahnschrift line, and the 1px resting
+# border that reserves the selected pill's space.
+RAIL_GAP_FALLBACK = 44
+
+# What is already between two rail blocks before the gap widget is added,
+# and therefore what has to come off it so the air between them measures
+# exactly one row. Measured on a real-window grab: block-to-block was
+# 146px against a 63px row pitch, i.e. 20px too much for the "one button"
+# the owner asked for.
+#
+#   12  NavListWidget.sizeHint's safety margin under its last row
+#    8  the sidebar layout's 4px spacing, once above the gap and once below
+#
+# Named rather than written as 20, because both halves are values that
+# live elsewhere and could move.
+RAIL_GAP_SLACK = NAV_LIST_BOTTOM_MARGIN + SIDEBAR_LAYOUT_SPACING * 2
+
+# How many blocks the section rail draws. Fixed rather than read off the
+# showing page, because the bar is built once and refilled per page -
+# and every page that has sections has the same three (see
+# tracker._section_groups).
+SECTION_BLOCKS = 3
 
 # Glyphs for the contextual section sidebar that replaces the main one
 # over any page exposing SECTIONS (the tracker pages). Segoe Fluent/MDL2
@@ -190,11 +226,94 @@ SIDEBAR_ANIM_MS = 180
 # key not named here is theme.NAV_BULLET, so an unmapped section still
 # gets a readable row in the collapsed rail.
 SECTION_BACK_ICON = "\uE72B"    # Back (left-pointing arrow)
+# **Two rail rows are drawn rather than typed** - see VECTOR_ICONS
+# below and helpers/rail_icons.py. Both had been standing in as *emoji*
+# because this icon font carries neither shape: E8A4, the one named
+# "Bookmarks", draws a bulleted list (checked by rendering the whole
+# E8A0-E8BF range), and there is no cat in it at all - E933 drew an
+# I-beam. The owner's ask, 22 August 2026: "replace the save emoji and
+# the cat face emoji in anime to a proper icons not emojis". An emoji is
+# the wrong thing here for a reason that is on screen rather than a
+# matter of taste: it is a *colour* glyph, so it renders in its own
+# fixed palette and ignores the row's normal/hover/selected colour - a
+# pink ribbon and a ginger cat in a column of monochrome gold-white
+# glyphs. theme.py already says exactly this about why every other rail
+# glyph comes from the Segoe icon fonts.
+VECTOR_ICONS = {"saved": "bookmark", "cat_anime": "cat"}
+# Logical pixels. 21, not the 20 the icon grid is designed on: measured
+# against the Fluent rows beside it, a 20px box puts ~15px of ink on
+# screen where those rows put ~17, and the bookmark read small.
+VECTOR_ICON_SIZE = 21
+
+# **Bigger in the folded rail, and that is an optical fix, not a
+# geometric one** - a 21px bookmark alone in a 36px rail reads small
+# beside a 21px-wide camera glyph. It does not fix alignment; see
+# VECTOR_ICON_INK_LEFT below for that, and note that a bookmark is
+# intrinsically narrow and cannot be made as wide as a camera glyph
+# without becoming a different object.
+VECTOR_ICON_SIZE_COLLAPSED = 24
+# Reserved to the *right* of a drawn icon, so the label beside it starts
+# where a glyph row's label does. Measured on a real-window grab: a
+# glyph row's label ink begins at x=61 and a drawn row's at x=58, and the
+# view reserves `iconSize` for the decoration - so three columns of
+# nothing on the right is the whole fix, with no second pixmap to keep
+# in step. Confirmed still true 22 August 2026 after the ink-left change
+# below: every label in the expanded section rail starts at x=39-40,
+# drawn rows and glyph rows alike.
+VECTOR_ICON_LEAD = 3
+
+# **Align left edges, not centres.** Third report from the owner, 22
+# August 2026: both Saved and Anime "need to be moved to the left a
+# bit", folded *and* expanded. Measured on a real window, the lit-pixel
+# box of every row in the section rail, before this change:
+#
+#     folded (32px row)          expanded (184px row)
+#     Movies   x 8..28  w21      Movies   x 8..27  w20
+#     Series   x 8..28  w21      Series   x 8..27  w20
+#     Anime    x10..26  w17      Anime    x11..27  w17   <- drawn
+#     Saved    x13..23  w11      Saved    x14..24  w11   <- drawn
+#     Schedule x10..26  w17      Schedule x 9..26  w18
+#     History  x 9..28  w20      History  x 9..27  w19
+#
+# Centres already agreed to within a pixel (18.0 folded), which is why
+# two rounds of centre-matching did not answer the complaint. What the
+# eye reads down a narrow column is the *left* edge, and the bookmark's
+# began 4-6px right of every glyph's. So the drawn rows are now
+# positioned by their ink's left edge instead: 0.0 means "ink starts at
+# the decoration box's left edge", and the view puts that box exactly
+# where a text-only row's text begins - i.e. on the same axis the
+# glyphs' own ink comes off. rail_icons.pixmap does the arithmetic, per
+# shape, from rail_icons.ink_box.
+#
+# Not negative, though the glyph mean sits a shade left of it: ink at
+# x<0 is ink clipped off the pixmap. This is as far left as the artwork
+# can go and still be whole.
+VECTOR_ICON_INK_LEFT = 0.0
+VECTOR_ICON_INK_LEFT_COLLAPSED = 0.0
+# The role a drawn row's icon name is parked on, so _RailDelegate can
+# tell one from an ordinary glyph row. UserRole itself already carries
+# the page/section key.
+VECTOR_ROLE = Qt.ItemDataRole.UserRole + 1
+
 SECTION_ICONS = {
-    "saved": "\uE8F1",     # Library
+    "saved": VECTOR_ICONS["saved"],
     "discover": "\uE721",  # Search
     "schedule": "\uE787",  # Calendar
     "history": "\uE81C",   # History (the clock-with-arrow)
+    # The category sections (tracker.WATCH_CATEGORIES / READ_CATEGORIES).
+    # Chosen to read at a glance in the *collapsed* rail, where the label
+    # is gone and the glyph is all there is - a TV set for series, a
+    # camera for anime, a filmstrip for movies. The three reading
+    # flavours get three distinct book shapes for the same reason:
+    # "Manhwa" and "Manhua" differ by one letter and could never be told
+    # apart by their text at rail width.
+    "cat_series": "\uE7F4",      # TVMonitor - the screen
+    "cat_anime": VECTOR_ICONS["cat_anime"],
+    "cat_movies": "\uE714",      # Video - the camera
+    "cat_manga": "",     # Library
+    "cat_manhwa": "",    # ReadingList
+    "cat_manhua": "",    # Page
+    "cat_other": "",     # Dictionary
 }
 
 # The fold toggle's two faces - single Fluent chevrons, drawn large
@@ -261,11 +380,20 @@ class NavListWidget(QListWidget):
         if self.count() == 0:
             return QSize(width, 0)
         row_height = self.sizeHintForRow(0)
-        total = row_height * self.count() + self.spacing() * (self.count() + 1)
+        # count * (row + 2*spacing), because QListView's spacing surrounds
+        # *each* item - so the pitch is row + 2*spacing and the content is
+        # that times the number of rows. The old form
+        # (row*count + spacing*(count+1)) undershot by spacing*(count-1),
+        # which is why two blocks of different lengths measured a
+        # different amount of air below their last row (126px against
+        # 122px between blocks, for one blank 63px row in both cases).
+        total = (row_height + self.spacing() * 2) * self.count()
         # Safety margin: the selected-item QSS border renders right at
         # the edge of the last row's box, and without enough slack the
-        # list widget clips its own bottom border/corners off.
-        return QSize(width, total + 12)
+        # list widget clips its own bottom border/corners off. Named,
+        # because the blank row between two blocks has to subtract it -
+        # see RAIL_GAP_SLACK.
+        return QSize(width, total + NAV_LIST_BOTTOM_MARGIN)
 
     def minimumSizeHint(self):
         return self.sizeHint()
@@ -284,6 +412,88 @@ class NavListWidget(QListWidget):
         # scroll snaps the view down and hides the row(s) above it. This
         # list should never move at all, for any reason.
         pass
+
+
+class _RailDelegate(QStyledItemDelegate):
+    """The two things a rail row needs that the stock delegate does not
+    do, and nothing else - every ordinary glyph row is drawn exactly as
+    it was.
+
+    1. **A drawn icon follows the row's colour.** QStyle only ever asks a
+       QIcon for Normal, Disabled or Selected (QCommonStyle decides the
+       mode from `State_Selected` alone), so a *hovered* row's icon would
+       stay muted while its label turned bright - the one visual where
+       the drawn rows would have read differently from the glyph rows
+       beside them. Hover is therefore mapped onto the icon's Selected
+       pixmap here.
+    2. **A collapsed row centres its icon.** With the label gone the row
+       is the icon, and QStyleOptionViewItem's decorationAlignment is
+       AlignLeft in list mode - so the icon sat hard against the left
+       edge of a 68px rail while every glyph row centred its text.
+    """
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if not option.text:
+            option.decorationAlignment = Qt.AlignmentFlag.AlignCenter
+            # Or QCommonStyle lays the (empty) text out to the icon's
+            # right and centres the *pair*, which puts the icon left of
+            # the rail's middle by half a label's width.
+            option.displayAlignment = Qt.AlignmentFlag.AlignCenter
+
+    def sizeHint(self, option, index):
+        """A drawn row is exactly as tall as a typed one.
+
+        Measured: carrying a decoration at all cost a row **2px**
+        (59 -> 61 expanded, 57 -> 61 collapsed) whatever size the icon
+        was - 18px through 22px all produced 61 - so it is the style's
+        decoration margins, not the artwork. Two rows out of nine being
+        2px taller reads as uneven spacing down the column, so the
+        height is taken from what the same row would want with no
+        decoration in it at all."""
+        hint = super().sizeHint(option, index)
+        if not index.data(VECTOR_ROLE):
+            return hint
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.icon = QIcon()
+        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasDecoration
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        plain = style.sizeFromContents(
+            QStyle.ContentsType.CT_ItemViewItem, opt, QSize(), widget)
+        if plain.height() > 0:
+            hint.setHeight(plain.height())
+        return hint
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
+        if hovered and not (opt.state & QStyle.StateFlag.State_Selected):
+            name = index.data(VECTOR_ROLE)
+            if name:
+                # The lead read back off the box the row is already
+                # using, rather than the sidebar's state - the delegate
+                # has no business knowing whether the rail is folded.
+                lead = max(0, opt.decorationSize.width()
+                           - opt.decorationSize.height())
+                # Same reading for the ink offset: an empty label *is*
+                # the folded state as far as this delegate is concerned
+                # (initStyleOption already keys off it). Without it,
+                # hovering a folded drawn row snapped its artwork back
+                # to wherever the default put it - the row shifted
+                # sideways under the pointer.
+                ink_left = (VECTOR_ICON_INK_LEFT if opt.text
+                            else VECTOR_ICON_INK_LEFT_COLLAPSED)
+                size = (VECTOR_ICON_SIZE if opt.text
+                        else VECTOR_ICON_SIZE_COLLAPSED)
+                opt.icon = QIcon(rail_icons.pixmap(
+                    str(name), size, theme.TEXT, lead, ink_left))
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt,
+                          painter, widget)
 
 
 def _fit_to_available_screen(rect):
@@ -363,7 +573,9 @@ class MainWindow(QMainWindow):
         self._history = ["home"]
         self._history_index = 0
         self._current_page = None
-        self._anim_group = None
+        # The page-slide compositor while one is running (see
+        # widgets.PageSlide), so a second navigation can end it.
+        self._page_slide = None
         self._was_maximized = False
         self._last_pointer_pos = QCursor.pos()
         self._cursor_watchdog = QTimer(self)
@@ -378,9 +590,23 @@ class MainWindow(QMainWindow):
 
         self._show_page("home", animate=False)
 
-        # Application-wide, so it sees the container's own resize events
-        # too (see eventFilter), not just this window's.
-        QApplication.instance().installEventFilter(self)
+        # **On the two widgets it actually watches, not on the whole
+        # application.** It was app-wide, which means Qt handed it every
+        # event delivered to every object in the process - measured
+        # while profiling the sidebar fold, **13,172 calls across six
+        # folds**, roughly 2,200 per fold, each one constructing a
+        # QEvent.Type enum in Python up to four times over. That was the
+        # largest single Python cost left in a fold, and it was buying
+        # two resize hooks.
+        #
+        # The settings buttons install this on themselves already (see
+        # _build_utility_footer), and mouse buttons 4/5 are handled by
+        # _MouseNavFilter - which is app-wide because it has to be, and
+        # which routes through navigate_back rather than go_back, so it
+        # leaves an overlay properly instead of walking page history
+        # underneath it. Nothing is lost by narrowing this one.
+        self.container.installEventFilter(self)
+        self.sidebar_holder.installEventFilter(self)
         QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
     # ------------------------------------------------------------------
@@ -404,7 +630,8 @@ class MainWindow(QMainWindow):
         # one is. _layout_sidebars is the single place geometry is
         # derived from these.
         self._section_bar_showing = False
-        self._swap_group = None
+        # The sidebar-swap compositor while one runs (widgets.PageSlide).
+        self._bar_slide = None
         # Every Downloads/Settings pair on screen - one per sidebar (see
         # _build_utility_footer). The style and indicator refreshes walk
         # this rather than naming widgets, so a bar gaining or losing a
@@ -522,6 +749,148 @@ class MainWindow(QMainWindow):
         self._style_settings_btn()
         return pair
 
+    def _make_rail_list(self, *, draggable):
+        """One block of rail rows - the widget both sidebars are built
+        out of. Every property here used to be spelled out three times
+        over (Home, the nav list, the section list) and drifted; the two
+        drawn-icon rows made a fourth thing to keep in step, which is
+        what finally collapsed them into one place."""
+        rail = NavListWidget(objectName="NavList")
+        if draggable:
+            rail.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        rail.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        rail.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rail.setFrameShape(QFrame.Shape.NoFrame)
+        rail.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        rail.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 2, matching the item inset - without it a row renders edge to
+        # edge and its selected pill is clipped by the widget border.
+        rail.setSpacing(2)
+        rail.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Fixed)
+        # QListWidget's item delegate paints with the widget's own font(),
+        # not the ::item QSS font-family - the stylesheet rule alone is
+        # silently ignored for list items, so it has to be set here too.
+        rail.setFont(theme.nav_font())
+        rail.setIconSize(QSize(VECTOR_ICON_SIZE + VECTOR_ICON_LEAD,
+                               VECTOR_ICON_SIZE))
+        # setItemDelegate, not setItemDelegateForRow: the drawn rows move
+        # around as blocks are refilled, and a per-row delegate would be
+        # attached to whichever row happened to hold one at build time.
+        # Owned by the list, so it lives exactly as long as it does.
+        rail.setItemDelegate(_RailDelegate(rail))
+        return rail
+
+    def _make_rail_gap(self):
+        """A blank row's worth of column, between two blocks.
+
+        Registered in `_rail_gaps` so _sync_rail_gaps can re-measure it:
+        the rows it is supposed to match shrink when the sidebar folds
+        (the icon font's metrics are shorter than the nav face's), and a
+        gap frozen at the expanded height would leave the folded rail
+        with two holes in it."""
+        gap = QWidget(objectName="Bare")
+        gap.setFixedHeight(RAIL_GAP_FALLBACK)
+        gap.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._rail_gaps.append(gap)
+        return gap
+
+    def _make_nav_gap(self):
+        """A block gap in the *main* bar, also indexed in `_nav_gaps` so
+        _populate_nav_list can hide it with the block below it."""
+        gap = self._make_rail_gap()
+        self._nav_gaps.append(gap)
+        return gap
+
+    def _sync_rail_gaps(self):
+        """Every block gap set to exactly one row's height.
+
+        Measured off a real row rather than assumed - the QSS gives
+        ::item 11px of vertical padding on top of whatever the font
+        needs, so the number is a product of the stylesheet and the
+        font, not something worth hard-coding twice."""
+        row = self.home_list.sizeHintForRow(0)
+        pitch = (row if row > 0 else RAIL_GAP_FALLBACK) + self.home_list.spacing() * 2
+        height = max(1, pitch - RAIL_GAP_SLACK)
+        for gap in getattr(self, "_rail_gaps", ()):
+            try:
+                gap.setFixedHeight(height)
+            except RuntimeError:
+                pass
+
+    def _sync_rail_icon_widths(self):
+        """Make a drawn row occupy exactly the width a glyph row does,
+        so the folded rail centres them all on the same axis.
+
+        **Measured 22 August 2026 on the folded section rail**, sampling
+        the lit pixels of each row's icon:
+
+            Saved     (drawn)  centroid x = 19.0
+            Schedule  (glyph)  centroid x = 17.9
+            History   (glyph)  centroid x = 17.9
+
+        which is the owner's "the saved icon is moved more to the right
+        when folded", and the same 1px sits under Anime in the rail
+        above. The cause is not the artwork: a row carrying a
+        *decoration* reserves the icon **and** the view's
+        decoration-to-text gap even when the collapsed label is empty,
+        so the Saved item's rect came out **39px wide inside a 36px
+        viewport** and AlignCenter centred it on 19.5 rather than on the
+        rail. Widening or padding the pixmap cannot fix that - the extra
+        width is the item's, not the icon's.
+
+        So the hint is pinned to what the glyph rows in the same rail
+        actually measure. Width only; the height stays the delegate's,
+        which is what _sync_rail_gaps reads. Expanded rails are left
+        alone - there the label needs the natural width, and the two
+        were already measured 1px apart (see _style_rail_item).
+
+        **The centroids quoted above are history, not the current
+        alignment.** Making them agree is what this function does and it
+        is still needed - without the pin the item is wider than the
+        viewport and centres off the rail entirely - but agreeing
+        centres did not answer the owner's complaint, and the artwork is
+        now placed by its *left* edge instead. See VECTOR_ICON_INK_LEFT.
+        """
+        # getattr throughout: this runs from _populate_nav_list, which
+        # the main bar builds before the section bar or the Home row
+        # exist at all.
+        rails = list(getattr(self, "nav_lists", ()))
+        rails += list(getattr(self, "section_lists", ()))
+        rails.append(getattr(self, "home_list", None))
+        for rail in rails:
+            if rail is None:
+                continue
+            try:
+                items = [rail.item(i) for i in range(rail.count())]
+                # Back to the delegate's own hint first, or the widths
+                # read below would be last fold's pinned ones.
+                for item in items:
+                    item.setSizeHint(QSize())
+                if not items or not self._sidebar_collapsed:
+                    continue
+                # **Only measure a rail that is actually at rail width.**
+                # This runs from _populate_nav_list and from the fold
+                # *before* the width animation, where the rows are still
+                # 184px wide and pinning to them puts the icon 5.7px off
+                # centre - worse than the 1.1px being fixed. The
+                # post-animation call in _toggle_sidebar's landed() is
+                # the one that does the work.
+                if rail.viewport().width() > SIDEBAR_COLLAPSED_WIDTH:
+                    continue
+                rail.doItemsLayout()
+                glyph = [rail.visualItemRect(item).width() for item in items
+                         if not item.data(VECTOR_ROLE)]
+                if not glyph:
+                    continue        # nothing to line up against
+                target = min(glyph)
+                for item in items:
+                    if item.data(VECTOR_ROLE):
+                        height = rail.visualItemRect(item).height()
+                        item.setSizeHint(QSize(target, height))
+            except RuntimeError:
+                pass                # the rail is being torn down
+
     def _build_fold_button(self):
         """One fold toggle - the main bar and the section bar each carry
         their own copy (the section bar had none at all, so folding from
@@ -557,6 +926,8 @@ class MainWindow(QMainWindow):
         sidebar = QWidget(objectName="Sidebar", parent=parent)
         self.sidebar = sidebar
         self._sidebar_collapsed = False
+        self._sidebar_anim = None
+        self._fold_in_flight = False
         # Set before anything styles the Settings button, which reads it
         # for its tooltip. Filled in by the startup update check.
         self._pending_update_version = ""
@@ -566,7 +937,7 @@ class MainWindow(QMainWindow):
         self._download_tooltip = ""
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 20, 16, 16)
-        layout.setSpacing(4)
+        layout.setSpacing(SIDEBAR_LAYOUT_SPACING)
 
         # Collapse/expand toggle, pinned top-right of the sidebar so it
         # stays put (and stays reachable) at either width. Its glyph and
@@ -610,24 +981,13 @@ class MainWindow(QMainWindow):
         # so it stays put above the user's drag-to-reorder order instead
         # of becoming a reorderable/draggable row.
         home_name, home_page = HOME_ITEM
-        self.home_list = NavListWidget(objectName="NavList")
-        self.home_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.home_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.home_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.home_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.home_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.home_list.setSpacing(2)  # matches nav_list's item inset, else Home renders edge-to-edge
-        self.home_list.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        # QListWidget's item delegate paints with the widget's own font(),
-        # not the ::item QSS font-family - the stylesheet rule alone gets
-        # silently ignored for list items, so it has to be set here too.
-        self.home_list.setFont(theme.nav_font())
+        self.home_list = self._make_rail_list(draggable=False)
         home_item = QListWidgetItem()
         self.home_list.addItem(home_item)
         self._style_nav_item(home_item, home_name, home_page)
         self.home_list.itemClicked.connect(lambda: self.navigate_to("home"))
         # NavListWidget.sizeHint() pads in a generous +12 "safety margin"
-        # below the last row (see its docstring) - fine for nav_list's
+        # below the last row (see its docstring) - fine for a nav list's
         # multi-row case, but on a single-item list that margin is just
         # dead space, widening the visible gap before the next item well
         # past the ~spacing()px gap between every other pair of items.
@@ -636,25 +996,37 @@ class MainWindow(QMainWindow):
         self._sync_home_list_height()
         layout.addWidget(self.home_list)
 
-        self.nav_list = NavListWidget(objectName="NavList")
-        self.nav_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.nav_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.nav_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.nav_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.nav_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.nav_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.nav_list.setSpacing(2)
-        self.nav_list.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
-        )
-        self.nav_list.setFont(theme.nav_font())
+        # **One row of air, then the blocks** (the owner's ask, 22 August
+        # 2026 - see nav_config.NAV_GROUPS for what the blocks are and
+        # why). A gap widget rather than layout.addSpacing(): the gap is
+        # "one button", and a button is a different height folded than
+        # unfolded, so it has to be re-measured (see _sync_rail_gaps)
+        # rather than frozen at build time.
+        self._rail_gaps = []
+        # This bar's own gaps, indexed to match nav_lists: [0] is the one
+        # under Home, and [i] is the one above block i. Kept apart from
+        # _rail_gaps (which is every gap in the window, for the height
+        # sync) so hiding a block's gap cannot reach into the section
+        # bar's - which is exactly what happened when the two were one
+        # list and _refresh_nav_list ran.
+        self._nav_gaps = []
+        layout.addWidget(self._make_nav_gap())
+
+        # One list per block, not one list with separators in it: a
+        # QListWidget in InternalMove mode will happily drop a row past
+        # anything sitting in the list, so a spacer row would be
+        # draggable, land anywhere, and take the grouping with it. Split
+        # this way, a drag reorders its own block and cannot leave it.
+        self.nav_lists = []
+        for index, group in enumerate(visible_nav_groups()):
+            if index:
+                layout.addWidget(self._make_nav_gap())
+            nav_list = self._make_rail_list(draggable=True)
+            nav_list.itemClicked.connect(self._on_nav_item_clicked)
+            nav_list.model().rowsMoved.connect(self._on_nav_reordered)
+            self.nav_lists.append(nav_list)
+            layout.addWidget(nav_list)
         self._populate_nav_list()
-        self.nav_list.itemClicked.connect(self._on_nav_item_clicked)
-        self.nav_list.model().rowsMoved.connect(self._on_nav_reordered)
-        self.nav_list.updateGeometry()
-        layout.addWidget(self.nav_list)
 
         # Add and Settings both sit at the very bottom, Add directly
         # above Settings, with the stretch above them pushing the pair
@@ -697,7 +1069,7 @@ class MainWindow(QMainWindow):
         # exactly the x its rows do and the swap reads as one column
         # changing contents, not two different panels.
         layout.setContentsMargins(16, 20, 16, 16)
-        layout.setSpacing(4)
+        layout.setSpacing(SIDEBAR_LAYOUT_SPACING)
 
         # The same fold control the main bar carries, in the same corner
         # - this bar had none, so folding the rail from a tracker page
@@ -723,22 +1095,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(separator)
         layout.addSpacing(6)
 
-        self.section_list = NavListWidget(objectName="NavList")
-        self.section_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.section_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.section_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.section_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.section_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.section_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.section_list.setSpacing(2)
-        self.section_list.setSizePolicy(QSizePolicy.Policy.Preferred,
-                                        QSizePolicy.Policy.Fixed)
-        # The widget font as well as the QSS rule, or the 13pt nav face
-        # is silently ignored for list items - same trap as nav_list.
-        self.section_list.setFont(theme.nav_font())
-        self.section_list.itemClicked.connect(self._on_section_item_clicked)
-        self.section_list.model().rowsMoved.connect(self._on_sections_reordered)
-        layout.addWidget(self.section_list)
+        # **Three blocks with a row of air between them** (the owner's
+        # ask, 22 August 2026, spelled out row by row): Discover, then
+        # the categories, then Saved / Schedule / History. A page names
+        # its blocks in SECTION_GROUPS; SECTIONS stays the flat tuple
+        # everything that only wants the keys reads.
+        #
+        # One list per block for the same reason the main bar has one
+        # per block: a QListWidget in InternalMove mode will drop a row
+        # past anything in the list, so a spacer row would be draggable
+        # and the grouping would last until the first drag.
+        self.section_lists = []
+        for index in range(SECTION_BLOCKS):
+            if index:
+                layout.addWidget(self._make_rail_gap())
+            rail = self._make_rail_list(draggable=True)
+            rail.itemClicked.connect(self._on_section_item_clicked)
+            rail.model().rowsMoved.connect(self._on_sections_reordered)
+            self.section_lists.append(rail)
+            layout.addWidget(rail)
         layout.addStretch()
 
         # This bar's own Downloads and Settings (the owner's ask): the
@@ -769,12 +1144,15 @@ class MainWindow(QMainWindow):
         button.style().unpolish(button)
         button.style().polish(button)
 
-        for row in range(self.section_list.count()):
-            item = self.section_list.item(row)
-            key = item.data(Qt.ItemDataRole.UserRole)
-            self._style_rail_item(item, self._section_labels.get(key, key),
-                                  SECTION_ICONS.get(key, theme.NAV_BULLET))
-        self.section_list.updateGeometry()
+        for rail in self.section_lists:
+            for row in range(rail.count()):
+                item = rail.item(row)
+                key = item.data(Qt.ItemDataRole.UserRole)
+                self._style_rail_item(item, self._section_labels.get(key, key),
+                                      SECTION_ICONS.get(key, theme.NAV_BULLET))
+            rail.updateGeometry()
+        self._sync_rail_gaps()
+        self._sync_rail_icon_widths()
 
     def _sync_section_list(self, page):
         """Make the section rows match `page`: refill when its SECTIONS
@@ -788,37 +1166,56 @@ class MainWindow(QMainWindow):
         keys = tuple(key for key, _label in sections)
         if keys != self._section_keys:
             by_key = dict(sections)
-            order = [k for k in app_settings.get_section_order() if k in by_key]
-            order += [k for k in keys if k not in order]
-            self.section_list.blockSignals(True)
-            self.section_list.clear()
-            for key in order:
-                item = QListWidgetItem()
-                item.setData(Qt.ItemDataRole.UserRole, key)
-                self.section_list.addItem(item)
-            self.section_list.blockSignals(False)
+            groups = getattr(page, "SECTION_GROUPS", None) or (sections,)
+            saved = app_settings.get_section_order()
+            for index, rail in enumerate(self.section_lists):
+                block = tuple(groups[index]) if index < len(groups) else ()
+                block_keys = [key for key, _label in block]
+                # The saved order is one flat list and a block only ever
+                # reorders within itself, so a block's order is that list
+                # filtered to it, with anything the user has never
+                # dragged (a category added in a later version) keeping
+                # the page's own order behind it.
+                order = [k for k in saved if k in block_keys]
+                order += [k for k in block_keys if k not in order]
+                rail.blockSignals(True)
+                rail.clear()
+                for key in order:
+                    item = QListWidgetItem()
+                    item.setData(Qt.ItemDataRole.UserRole, key)
+                    rail.addItem(item)
+                rail.blockSignals(False)
+                rail.setVisible(bool(order))
             self._section_labels = by_key
             self._section_keys = keys
             self._style_section_bar()
         getter = getattr(page, "current_section", None)
         current = getter() if callable(getter) else None
-        match = None
-        for row in range(self.section_list.count()):
-            item = self.section_list.item(row)
-            if item.data(Qt.ItemDataRole.UserRole) == current:
-                match = item
-                break
-        if match is not None:
-            self.section_list.setCurrentItem(match)
-        else:
-            self.section_list.clearSelection()
+        for rail in self.section_lists:
+            match = None
+            for row in range(rail.count()):
+                item = rail.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == current:
+                    match = item
+                    break
+            # Cleared on every block that does not hold it, or two rows
+            # read as active at once - one list's selection knows
+            # nothing about another's.
+            if match is not None:
+                rail.setCurrentItem(match)
+            else:
+                rail.clearSelection()
 
     def _on_section_item_clicked(self, item):
         self._on_section_clicked(item.data(Qt.ItemDataRole.UserRole))
 
     def _on_sections_reordered(self, *_args):
-        order = [self.section_list.item(i).data(Qt.ItemDataRole.UserRole)
-                 for i in range(self.section_list.count())]
+        # Every block, in block order - the saved order is one flat list
+        # and a drag never crosses a block, so concatenating is the
+        # whole of the merge (see _sync_section_list).
+        order = [rail.item(i).data(Qt.ItemDataRole.UserRole)
+                 for rail in self.section_lists
+                 for i in range(rail.count())]
         app_settings.set_section_order(order)
 
     def _on_section_clicked(self, key):
@@ -853,9 +1250,13 @@ class MainWindow(QMainWindow):
         geometry for the current _section_bar_showing. Also the finish
         handler of every swap - one place computes end-state geometry,
         so an interrupted swap and a completed one land identically."""
-        if self._swap_group is not None:
-            self._swap_group.stop()
-            self._swap_group = None
+        slide, self._bar_slide = self._bar_slide, None
+        if slide is not None:
+            # The tween directly, not slide.stop(): stop() runs the
+            # done-callback, which is this method.
+            slide._tween.stop()
+            slide.hide()
+            slide.deleteLater()
         width = self.sidebar_holder.width()
         shown = self.section_sidebar if self._section_bar_showing else self.sidebar
         hidden = self.sidebar if self._section_bar_showing else self.section_sidebar
@@ -890,22 +1291,29 @@ class MainWindow(QMainWindow):
         if not animate or width <= 0 or not self.isVisible():
             self._settle_swap()
             return
+        # **Painted once each and blitted, for the same reason the page
+        # stack is** - see widgets.PageSlide. Animating two full
+        # sidebars' `pos` repainted every nav row, glyph and button on
+        # both bars on every step, and it runs *concurrently* with the
+        # page slide: with the pages already composited, the bars were
+        # still contributing 70 QPushButton and 43 QLabel paints to a
+        # 220ms transition (measured 22 August 2026).
         incoming.move(-width, 0)
         incoming.show()
         incoming.raise_()
-        group = QParallelAnimationGroup(self)
-        for bar, x_from, x_to in ((outgoing, 0, -width), (incoming, -width, 0)):
-            anim = QPropertyAnimation(bar, b"pos", self)
-            anim.setDuration(SIDEBAR_ANIM_MS)
-            anim.setStartValue(QPoint(x_from, 0))
-            anim.setEndValue(QPoint(x_to, 0))
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            group.addAnimation(anim)
-        # stop() does not emit finished, so a swap interrupted by
-        # _settle_swap cannot run this a second time.
-        group.finished.connect(self._settle_swap)
-        self._swap_group = group
-        group.start()
+        outgoing_shot = outgoing.grab()
+        incoming_shot = incoming.grab()
+        incoming.hide()
+        outgoing.hide()
+        # _settle_swap above already ended any swap in flight, and it is
+        # also this one's finish handler - one place computes end-state
+        # geometry, so an interrupted swap and a completed one land
+        # identically.
+        slide = PageSlide(holder, outgoing_shot, incoming_shot, -1,
+                          SIDEBAR_ANIM_MS, axis="x",
+                          on_done=self._settle_swap)
+        self._bar_slide = slide
+        slide.start()
 
     def _layout_sidebars(self):
         """Track the holder: both bars are positioned by hand (they
@@ -918,7 +1326,7 @@ class MainWindow(QMainWindow):
         width, height = holder.width(), holder.height()
         for bar in (self.sidebar, self.section_sidebar):
             bar.resize(width, height)
-        if self._swap_group is not None:
+        if self._bar_slide is not None:
             return
         shown = self.section_sidebar if self._section_bar_showing else self.sidebar
         hidden = self.sidebar if self._section_bar_showing else self.section_sidebar
@@ -949,17 +1357,43 @@ class MainWindow(QMainWindow):
         - one symbol per row at both widths. The expanded font is a
         two-family chain (theme.nav_row_font): the glyph resolves from
         the icon face and the label falls through to the nav face,
-        because an item carries exactly one font."""
+        because an item carries exactly one font.
+
+        Two rows have no glyph to type - Saved and Anime, whose symbols
+        this icon font does not carry (see VECTOR_ICONS). Those are
+        handed to Qt as the item's *decoration* instead, drawn by
+        helpers/rail_icons and coloured by _RailDelegate, and the row is
+        otherwise laid out identically: icon then label expanded, icon
+        alone and centred collapsed."""
+        vector = VECTOR_ICONS.get(glyph) or (
+            glyph if glyph in VECTOR_ICONS.values() else "")
+        if vector:
+            # No lead in the folded rail: there the row is the icon and
+            # it is centred, so blank columns on one side would push it
+            # off centre by half of them.
+            collapsed_row = self._sidebar_collapsed
+            lead = 0 if collapsed_row else VECTOR_ICON_LEAD
+            ink_left = (VECTOR_ICON_INK_LEFT_COLLAPSED if collapsed_row
+                        else VECTOR_ICON_INK_LEFT)
+            icon_size = (VECTOR_ICON_SIZE_COLLAPSED if collapsed_row
+                         else VECTOR_ICON_SIZE)
+            item.setData(VECTOR_ROLE, vector)
+            item.setIcon(rail_icons.icon(vector, icon_size,
+                                         theme.TEXT_MUTED, theme.TEXT, lead,
+                                         ink_left))
         if self._sidebar_collapsed:
-            item.setText(glyph)
+            item.setText("" if vector else glyph)
             item.setFont(theme.icon_font())
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setToolTip(name)
         else:
             # Two spaces, not three: with the wider glyph leading, three
             # pushed "Movies & Series" past the 220px column and elided
-            # it (measured on a real-window grab).
-            item.setText(f"{glyph}  {name}")
+            # it (measured on a real-window grab). A drawn row spends no
+            # spaces at all - Qt's own decoration-to-text gap already
+            # sits it where the glyph rows' labels start (measured: 1px
+            # apart, see the rail alignment probe).
+            item.setText(name if vector else f"{glyph}  {name}")
             item.setFont(theme.nav_row_font())
             item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             item.setToolTip("")
@@ -1121,11 +1555,16 @@ class MainWindow(QMainWindow):
         home_name, home_page = HOME_ITEM
         self._style_nav_item(self.home_list.item(0), home_name, home_page)
         self._sync_home_list_height()
-        for row, (name, page_name) in enumerate(visible_nav_items()):
-            item = self.nav_list.item(row)
-            if item is not None:
-                self._style_nav_item(item, name, page_name)
-        self.nav_list.updateGeometry()
+        for rail, rows in zip(self.nav_lists, visible_nav_groups()):
+            for row, (name, page_name) in enumerate(rows):
+                item = rail.item(row)
+                if item is not None:
+                    self._style_nav_item(item, name, page_name)
+            rail.updateGeometry()
+        # A folded row is shorter than an expanded one, so the blocks'
+        # gaps are re-measured rather than left at the other width's.
+        self._sync_rail_gaps()
+        self._sync_rail_icon_widths()
 
         # The card grids fit one more card per row against the folded
         # rail (link_grid.grid_columns), so whatever is showing re-flows
@@ -1144,41 +1583,104 @@ class MainWindow(QMainWindow):
         # (_build_sidebars) and follow every width change through
         # _layout_sidebars, so this stays one animation however many
         # bars are in the column.
-        anim = QPropertyAnimation(self.sidebar_holder, b"maximumWidth", self)
-        anim.setDuration(SIDEBAR_ANIM_MS)
-        anim.setStartValue(self.sidebar_holder.width())
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.valueChanged.connect(
-            lambda value: self.sidebar_holder.setMinimumWidth(int(value)))
-        anim.finished.connect(lambda: self.sidebar_holder.setFixedWidth(target))
-        self._sidebar_anim = anim  # keep a reference so it isn't gc'd mid-animation
-        anim.start()
+        # Driven at the screen's refresh rate rather than Qt's animation
+        # clock (widgets.SmoothTween): the fold stepped for exactly the
+        # reason the wheel and the sideways rows did - 60 positions a
+        # second on a 144Hz panel, so every one was shown two or three
+        # times. Same duration, same curve, 2.4x the steps.
+        holder = self.sidebar_holder
+
+        def apply(value):
+            width = int(round(value))
+            holder.setMaximumWidth(width)
+            # Both, or the other one clamps the result: setFixedWidth
+            # pins min and max together, so driving one alone does
+            # nothing until the other is moved too.
+            holder.setMinimumWidth(width)
+
+        def landed():
+            holder.setFixedWidth(SIDEBAR_COLLAPSED_WIDTH
+                                 if self._sidebar_collapsed else SIDEBAR_WIDTH)
+            self._fold_in_flight = False
+            self._fit_current_page()
+            # **After the fold, not before it.** _sync_rail_icon_widths
+            # pins a drawn row to what its glyph neighbours measure, and
+            # measuring is only meaningful once the rail is at its final
+            # width: called before the animation it read the *expanded*
+            # 184px row and pinned the Saved icon to it, which put the
+            # bookmark 5.7px off centre in a 36px rail instead of 1.1px
+            # - worse than the bug it fixes (measured).
+            self._sync_rail_icon_widths()
+
+        if self._sidebar_anim is not None:
+            self._sidebar_anim.stop()
+        else:
+            self._sidebar_anim = SmoothTween(holder, apply, SIDEBAR_ANIM_MS,
+                                             on_done=landed)
+        # Pin the page at the widest the container reaches during this
+        # fold, before the first step - see _fit_current_page.
+        self._fold_in_flight = True
+        if self._current_page is not None:
+            widest = self.container.rect()
+            widest.setWidth(max(widest.width(),
+                                self.width() - SIDEBAR_COLLAPSED_WIDTH))
+            self._current_page.setGeometry(widest)
+        self._sidebar_anim.start(holder.width(), target)
 
     def _populate_nav_list(self):
-        self.nav_list.clear()
-        for name, page_name in visible_nav_items():
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, page_name)
-            self.nav_list.addItem(item)
-            self._style_nav_item(item, name, page_name)
-        self.nav_list.updateGeometry()
+        """Fill every block from nav_config, and hide a block that has
+        nothing left in it - along with the gap above it, or hiding all
+        of Apps/Websites in Settings would leave the rail ending in two
+        rows of air."""
+        groups = visible_nav_groups()
+        for index, rail in enumerate(self.nav_lists):
+            rows = groups[index] if index < len(groups) else []
+            rail.clear()
+            for name, page_name in rows:
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, page_name)
+                rail.addItem(item)
+                self._style_nav_item(item, name, page_name)
+            rail.setVisible(bool(rows))
+            rail.updateGeometry()
+        # Gap 0 sits under Home and always shows; gap i belongs to
+        # block i and goes with it.
+        for index, gap in enumerate(getattr(self, "_nav_gaps", ())):
+            if index == 0:
+                continue
+            rail = (self.nav_lists[index]
+                    if index < len(self.nav_lists) else None)
+            # count(), not isVisible(): this bar is hidden whenever the
+            # section bar has the column, and isVisible() answers for
+            # the *parent* there - so every gap was being explicitly
+            # hidden while a tracker page was showing and stayed hidden
+            # after it (measured with the hide/restore probe).
+            gap.setVisible(rail is not None and rail.count() > 0)
+        self._sync_rail_gaps()
+        self._sync_rail_icon_widths()
 
     def _refresh_nav_list(self):
         """Called by Settings when a section is hidden/unhidden, so the
         sidebar updates immediately instead of needing a restart."""
-        self.nav_list.blockSignals(True)
+        for rail in self.nav_lists:
+            rail.blockSignals(True)
         self._populate_nav_list()
-        self.nav_list.blockSignals(False)
+        for rail in self.nav_lists:
+            rail.blockSignals(False)
         self._sync_nav_highlight(self._history[self._history_index])
 
     def _on_nav_item_clicked(self, item):
         self.navigate_to(item.data(Qt.ItemDataRole.UserRole))
 
     def _on_nav_reordered(self, *_args):
+        # Every block, in block order: the saved order is one flat list
+        # (Home reads it too, see nav_config.ordered_nav_items) and a
+        # block only ever reorders within itself, so concatenating them
+        # is the whole of the merge.
         order = [
-            self.nav_list.item(i).data(Qt.ItemDataRole.UserRole)
-            for i in range(self.nav_list.count())
+            rail.item(i).data(Qt.ItemDataRole.UserRole)
+            for rail in self.nav_lists
+            for i in range(rail.count())
         ]
         app_settings.set_nav_order(order)
         # Home lays its preview sections out in this same order, so a
@@ -1386,32 +1888,44 @@ class MainWindow(QMainWindow):
         # after that. The AttributeError landed inside a Qt callback,
         # where it took the whole process down with no traceback at all -
         # exactly the failure helpers/logs.install_excepthook exists for.
-        if (obj is getattr(self, "container", None)
-                and event.type() == QEvent.Type.Resize):
-            self._fit_current_page()
+        # One event.type() for the whole method: each call builds a
+        # QEvent.Type enum member through Python's enum machinery, and
+        # this used to ask four times per event.
+        kind = event.type()
+        if kind == QEvent.Type.Resize:
+            if obj is getattr(self, "container", None):
+                self._fit_current_page()
         # The sidebars are hand-positioned children of their holder for
         # the same reason the pages are of the container - they slide
         # over each other - so they too follow their parent's resizes
         # here (window resize, and the fold animation's width sweep).
-        if (obj is getattr(self, "sidebar_holder", None)
-                and event.type() == QEvent.Type.Resize):
-            self._layout_sidebars()
-        if event.type() == QEvent.Type.Resize and any(
-                obj is pair["settings"]
-                for pair in getattr(self, "_utility_bars", ())):
-            self._position_update_dot()
-        if event.type() == QEvent.Type.MouseButtonPress:
-            if event.button() == Qt.MouseButton.BackButton:
-                self.go_back()
-                return True
-            if event.button() == Qt.MouseButton.ForwardButton:
-                self.go_forward()
-                return True
+            if obj is getattr(self, "sidebar_holder", None):
+                self._layout_sidebars()
+            elif any(obj is pair["settings"]
+                     for pair in getattr(self, "_utility_bars", ())):
+                self._position_update_dot()
         return super().eventFilter(obj, event)
 
     def _fit_current_page(self):
-        if self._current_page is not None:
-            self._current_page.setGeometry(self.container.rect())
+        if self._current_page is None:
+            return
+        if self._fold_in_flight:
+            # **Not while the sidebar is folding.** Every step of that
+            # animation resizes the container, and re-fitting the page
+            # here re-lays out everything on it - on a tracker page that
+            # is a grid of a hundred-odd cards, and it was the last big
+            # cost left in a fold (measured: the tracker pages held
+            # 63-75 positions a second against Home's 111).
+            #
+            # The page is pinned to the *widest* the container will be
+            # during the fold instead (see _toggle_sidebar), so it is
+            # never narrower than the container and no strip of bare
+            # window can show through - the failure the container hook
+            # above exists to prevent. Being wider is invisible: the
+            # container clips it. The real fit happens once, when the
+            # fold lands.
+            return
+        self._current_page.setGeometry(self.container.rect())
 
     def _drain_override_cursor(self):
         """Drop any application-wide override cursor.
@@ -1809,16 +2323,20 @@ class MainWindow(QMainWindow):
             self.home_list.setCurrentRow(0)
         else:
             self.home_list.clearSelection()
-        match = None
-        for i in range(self.nav_list.count()):
-            item = self.nav_list.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == page_name:
-                match = item
-                break
-        if match is not None:
-            self.nav_list.setCurrentItem(match)
-        else:
-            self.nav_list.clearSelection()
+        for rail in self.nav_lists:
+            match = None
+            for i in range(rail.count()):
+                item = rail.item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == page_name:
+                    match = item
+                    break
+            # Cleared on every block that does not hold the page, or the
+            # rail would show two highlighted rows at once - one list's
+            # selection knows nothing about the other's.
+            if match is not None:
+                rail.setCurrentItem(match)
+            else:
+                rail.clearSelection()
 
     def _show_page(self, page_name, direction="down", animate=True):
         page_name = _page_name(page_name)
@@ -1844,36 +2362,44 @@ class MainWindow(QMainWindow):
                 old_page.deleteLater()
             return
 
-        if self._anim_group is not None:
-            self._anim_group.stop()
+        # A navigation arriving while one is still running: end the old
+        # slide immediately (its callback puts its page in place) rather
+        # than leaving two compositors stacked.
+        if self._page_slide is not None:
+            self._page_slide.stop()
+            self._page_slide = None
 
+        # **Both pages are painted once, into pixmaps, and the slide is
+        # two blits per frame.** Animating the widgets' `pos` re-rendered
+        # every child on both pages every step - 64 to 109 paint events
+        # per tick, measured, which is the whole of the owner's
+        # "stuttering". See widgets.PageSlide for the numbers.
+        #
         # "down" = the target sits below the source in the sidebar, so
         # the new page enters from below and slides up into place (like
         # scrolling down a page); "up" is the mirror image.
-        height = rect.height()
-        dy = height if direction == "down" else -height
-        new_page.setGeometry(rect.translated(0, dy))
-        new_page.show()
-        new_page.raise_()
+        new_page.setGeometry(rect)
+        old_shot = old_page.grab()
+        new_shot = new_page.grab()
+        # Hidden, not moved: nothing behind the compositor should be
+        # painting at all while it runs.
+        new_page.hide()
+        old_page.hide()
 
-        group = QParallelAnimationGroup(self)
-        anim_new = QPropertyAnimation(new_page, b"pos", self)
-        anim_new.setDuration(ANIM_DURATION_MS)
-        anim_new.setStartValue(QPoint(0, dy))
-        anim_new.setEndValue(QPoint(0, 0))
-        anim_new.setEasingCurve(QEasingCurve.Type.OutCubic)
-        group.addAnimation(anim_new)
+        def landed(page=new_page, previous=old_page):
+            self._page_slide = None
+            if slide is not None:
+                slide.hide()
+                slide.deleteLater()
+            page.setGeometry(self.container.rect())
+            page.show()
+            previous.deleteLater()
 
-        anim_old = QPropertyAnimation(old_page, b"pos", self)
-        anim_old.setDuration(ANIM_DURATION_MS)
-        anim_old.setStartValue(QPoint(0, 0))
-        anim_old.setEndValue(QPoint(0, -dy))
-        anim_old.setEasingCurve(QEasingCurve.Type.OutCubic)
-        group.addAnimation(anim_old)
-
-        group.finished.connect(old_page.deleteLater)
-        self._anim_group = group
-        group.start()
+        slide = PageSlide(self.container, old_shot, new_shot,
+                          1 if direction == "down" else -1,
+                          ANIM_DURATION_MS, on_done=landed)
+        self._page_slide = slide
+        slide.start()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1943,6 +2469,24 @@ def _prewarm_image_specs():
     return specs
 
 
+# How long after the window is up before the overlay modules are
+# imported. Long enough that the first paint and the page's own lookups
+# have had the thread, short enough to be finished before anyone has
+# aimed at a card.
+PRELOAD_OVERLAYS_MS = 400
+
+
+def _preload_overlays():
+    """Import the player, reader and details modules ahead of the first
+    click that needs one. Never raises: a failed preload just means the
+    old lazy import happens at click time, exactly as before."""
+    for name in ("windows.details", "windows.reader", "windows.player"):
+        try:
+            __import__(name)
+        except Exception:
+            logs.exception(f"could not preload {name}")
+
+
 def main():
     # Before QApplication, because an exception raised anywhere after this
     # point - in a slot, in a paint event, during startup - otherwise
@@ -1975,6 +2519,31 @@ def main():
         downloads.resume_pending()
     except Exception:
         logs.exception("Could not resume the download queue")
+    # The torrent session's DHT, bootstrapped now rather than on the
+    # first press of an episode. Measured 2.44s to a usable routing
+    # table from cold, paid once per run - which is exactly the pause
+    # the owner sees on the first source and never again after it.
+    # Off the UI thread and soft: see torrent_engine.warm.
+    try:
+        from helpers import torrent_engine
+        torrent_engine.prewarm()
+    except Exception:
+        logs.exception("Could not warm the torrent session")
+    # The three overlay modules, imported now rather than inside the
+    # click that opens one. **They are imported lazily on purpose** (see
+    # tracker.open_in_app) and that is still right - it keeps them off
+    # the startup path - but the first press then pays the import on the
+    # UI thread with the pointer already down: measured 119ms for
+    # windows.details alone in the source tree, and a frozen build reads
+    # its modules out of a zip. Opening a details page is otherwise
+    # 48-108ms, so the import was most of the "~1 second to enter watch
+    # or read".
+    #
+    # On the main thread, not a worker: these build QPixmap/QIcon objects
+    # at import time and Qt's image classes are not safe to touch from
+    # another thread. Off a timer so it lands after the first frame is
+    # on screen rather than delaying it.
+    QTimer.singleShot(PRELOAD_OVERLAYS_MS, _preload_overlays)
     # Full screen only for a launch Windows itself started at sign-in
     # (the registered command carries startup.STARTUP_FLAG, nothing else
     # does) - opening the app by hand is unaffected by that setting.

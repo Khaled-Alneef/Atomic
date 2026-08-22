@@ -77,7 +77,7 @@ def _headers(referer=None) -> dict:
 def _get_bytes(url, timeout, referer=None, max_bytes=net.MAX_RESPONSE_BYTES):
     request = urllib.request.Request(url, headers=_headers(referer))
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return net.read_bytes(response, deadline, max_bytes)
 
 

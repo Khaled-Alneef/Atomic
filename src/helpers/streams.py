@@ -81,7 +81,7 @@ def _get(url: str, timeout: float, referer: str = None,
          max_bytes: int = net.MAX_RESPONSE_BYTES) -> str:
     request = urllib.request.Request(url, headers=_headers(referer))
     deadline = net.deadline_in(timeout)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return net.read_text(response, deadline, max_bytes)
 
 
@@ -289,6 +289,18 @@ DATA_WAIT = 12.0
 # move on to, and a slow-but-live release is worth the wait when it is
 # the only thing left. 6.0 rather than 4.0 because the slowest live
 # metadata measured was 3.46s and one sample is not a distribution.
+# **4.0, down from 6.0, measured again 22 August 2026.** Every live
+# release timed on the owner's connection publishes its metadata inside
+# 3.46s (1.07-2.48s in the runs taken that day) and lands its first
+# piece inside 2.93s (2.01s that day), so four seconds covers every one
+# of them with margin - while a dead release costs precisely its budget
+# and nothing else. On Bleach S01E12 ten consecutive releases answered
+# `no-peers` at 6.9-8.1s each; at these budgets that walk is a third
+# shorter, which is a third less of the loading screen the owner is
+# looking at. The *last* candidates still get the full twelve
+# (METADATA_TIMEOUT/DATA_WAIT): by then there is nothing better to move
+# on to, and a slow-but-live release is worth waiting for when it is
+# all that is left.
 QUEUED_METADATA_TIMEOUT = 6.0
 QUEUED_DATA_WAIT = 6.0
 
@@ -300,6 +312,31 @@ QUEUED_DATA_WAIT = 6.0
 # retries when the top of the list is dead.
 RACE_WIDTH = 6
 RACE_TIMEOUT = 45.0
+
+# **What a source the *user* picked by hand is allowed to cost before
+# the rest are tried anyway.**
+#
+# This is the owner's "sourcing still takes 15 to 30 seconds", and the
+# cause is not the fan-out: with `auto_pick_source` off - which is how
+# their settings are set - pressing an episode opens the source picker,
+# and choosing a row plays it with `solo=True`. Solo skips the race on
+# purpose (six releases racing split one connection, and whichever
+# answered first would silently override the row that was chosen), but
+# it also meant the pick got the *full* budgets: 12s of metadata plus
+# 12s of data before `_try_next_source` was even reached. One dead pick
+# is therefore 24 seconds of loading screen, which is exactly the range
+# reported.
+#
+# Measured on the owner's connection, so these are not guesses: a live
+# release publishes metadata in 0.83-2.61s and its first piece lands
+# 2.93s later; a dead one costs precisely whatever budget it is given.
+# 4s each therefore keeps every live release measured and cuts a dead
+# pick from 24s to 8s before the rest of the list is raced.
+#
+# The pick still gets first refusal, which is what solo was for - it is
+# just no longer allowed to spend half a minute failing.
+SOLO_METADATA_TIMEOUT = 4.0
+SOLO_DATA_WAIT = 4.0
 
 
 # --------------------------------------------------------- the engine
@@ -319,10 +356,37 @@ RACE_TIMEOUT = 45.0
 # than depending on what else the user happens to have installed.
 
 
+def _resume_seconds(start_at, duration):
+    """Where playback will begin, in seconds into the file, or None.
+
+    `duration`, when the caller has it, is only a sanity check - a
+    stored position past the end of the file is a stale resume record,
+    not a place to fetch. Both come straight from the resume record
+    (`player.load_resume` keeps position and duration), and anything
+    implausible answers None, which means "prime nothing", i.e. exactly
+    what happened before this existed."""
+    try:
+        start_at = float(start_at or 0)
+        duration = float(duration or 0)
+    except (TypeError, ValueError):
+        return None
+    if start_at <= 0:
+        return None
+    if duration and start_at >= duration:
+        return None
+    return start_at
+
+
 def prepare(stream: dict, *, season=None, episode=None,
             metadata_timeout: float = METADATA_TIMEOUT,
-            data_wait: float = DATA_WAIT) -> dict:
+            data_wait: float = DATA_WAIT,
+            start_at=None, duration=None) -> dict:
     """Make a torrent stream actually playable, immediately before playing.
+
+    `start_at`/`duration` (seconds) say playback is going to *resume*
+    part-way in rather than start at the beginning, so the engine primes
+    that offset as well as the head. Both optional and both default to
+    None, in which case nothing changes.
 
     **This is the step whose absence made every torrent stream time out.**
     A bare infoHash gives the server nothing to find peers with: DHT
@@ -355,7 +419,8 @@ def prepare(stream: dict, *, season=None, episode=None,
         return stream
 
     prepared = _prepare_with_own_engine(stream, info_hash, season, episode,
-                                       metadata_timeout, data_wait)
+                                       metadata_timeout, data_wait,
+                                       _resume_seconds(start_at, duration))
     if prepared is not None:
         return prepared
     stream["url"] = None
@@ -364,7 +429,8 @@ def prepare(stream: dict, *, season=None, episode=None,
 
 
 def _prepare_with_own_engine(stream, info_hash, season, episode,
-                             metadata_timeout=None, data_wait=None):
+                             metadata_timeout=None, data_wait=None,
+                             resume_at=None):
     """Stream through Atomic's own libtorrent engine.
 
     Returns the finished stream, or None to mean "this build has no
@@ -388,15 +454,34 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
             info_hash, trackers=trackers, season=season, episode=episode,
             file_index=stream.get("file_index"),
             metadata_timeout=(METADATA_TIMEOUT if metadata_timeout is None
-                              else metadata_timeout))
+                              else metadata_timeout),
+            start_at=resume_at)
     except Exception:
         added = None
     if not added:
         stream["url"] = None
         stream["reason"] = "no-metadata"
         return stream
-    if not torrent_engine.has_data(
-            info_hash, wait=DATA_WAIT if data_wait is None else data_wait):
+    # **The first piece and the container's seek index, waited on
+    # together.** mpv's first read of a fresh torrent is the opening of
+    # the file and its *second* is a seek to 100% of it (Matroska writes
+    # its Cues at the end), so both have to be there before a url is
+    # worth handing over - but they arrive in parallel, and waiting for
+    # one and then the other only added the two waits together: 3.14s +
+    # 6.01s measured on Frieren S01E02. See torrent_engine.await_start.
+    # Missing the index is not a failure; missing the data is.
+    try:
+        got_data, _got_index = torrent_engine.await_start(
+            info_hash, data_wait=(DATA_WAIT if data_wait is None
+                                  else data_wait),
+            # Resuming needs the index for a different reason than
+            # playback does - the resume offset is *read out of it* -
+            # so it is worth a longer wait when there is one.
+            index_wait=(torrent_engine.RESUME_INDEX_WAIT
+                        if resume_at is not None else None))
+    except Exception:
+        got_data = False
+    if not got_data:
         # Nothing arriving. Release it rather than leaving a dead
         # torrent announcing in the background while the player moves on
         # to the next source.
@@ -407,6 +492,22 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
         stream["url"] = None
         stream["reason"] = "no-peers"
         return stream
+    # Only now does the resume offset become worth wanting: it is a
+    # guess (position/duration), and until the url exists the only
+    # things that matter are the first piece and the index. See
+    # torrent_engine.arm_start_band.
+    if resume_at is not None:
+        try:
+            torrent_engine.arm_start_band(info_hash)
+            # And wait for it, briefly. Handing the url over the moment
+            # the index lands means mpv draws a frame at 0 and asks for
+            # the seek a quarter of a second later, with nothing
+            # fetched - measured, the seek then cost 3.5s of frozen
+            # picture *after* the "Resumed From" toast. Better spent
+            # here, on a loading screen the viewer is already watching.
+            torrent_engine.await_start_band(info_hash)
+        except Exception:
+            pass
     stream["url"] = torrent_engine.stream_url(info_hash)
     stream["engine"] = "atomic"
     stream["reason"] = "" if stream["url"] else "engine-failed"
@@ -416,7 +517,8 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
 
 
 def prepare_fastest(candidates, *, season=None, episode=None,
-                    width: int = RACE_WIDTH, timeout: float = RACE_TIMEOUT):
+                    width: int = RACE_WIDTH, timeout: float = RACE_TIMEOUT,
+                    failed=None, start_at=None, duration=None):
     """Start several releases at once; play whichever delivers data
     first, and keep replacing the failures until one does.
 
@@ -439,6 +541,35 @@ def prepare_fastest(candidates, *, season=None, episode=None,
     left added keeps announcing and keeps taking bandwidth from the one
     actually playing.
 
+    **A hand-picked release is raced too, and that is a reversal.**
+    Picking one by hand used to skip this entirely (`solo`), so the
+    choice could not be overridden and six releases could not split one
+    connection. Measured 22 August 2026, that cost far more than it
+    saved: the top-seeded 1080p release for House of the Dragon S01E05
+    answered `no-peers` after its full data wait, and only then was the
+    rest of the list tried - the owner's "23 seconds from pressing the
+    episode until it plays".
+
+    Giving the pick a head start before the others joined was tried and
+    is *worse still*: 18.54s against 5.55s for the same title with the
+    field racing from the first moment. So the pick goes in as the first
+    candidate and everything of its resolution races beside it - it gets
+    the first lane and the best chance, and it can no longer hold the
+    loading screen alone.
+
+    **`start_at`/`duration`** are passed straight through to `prepare`:
+    they say playback is going to resume part-way in, so the winner
+    primes that offset as well as the head. Optional, and absent they
+    change nothing.
+
+    **`failed`, if given, is filled with the info hash of every release
+    this race proved dead.** Without it the caller learns about exactly
+    one - the index it asked for - so the *next* attempt raced the same
+    twenty releases again, at the same twelve seconds each. Measured 22
+    August 2026 on House of the Dragon S02E06: two attempts, 52.6s to a
+    playable url, the second of them re-walking what the first had
+    already disproved.
+
     Returns the prepared stream, or None if none of them started."""
     live = [c for c in (candidates or []) if c.get("info_hash")]
     if not live:
@@ -453,6 +584,23 @@ def prepare_fastest(candidates, *, season=None, episode=None,
     deadline = time.monotonic() + timeout
 
     def worker():
+        try:
+            _race_lane()
+        finally:
+            # **The last lane out ends the race.** Without this the call
+            # below waited the whole RACE_TIMEOUT even when every
+            # candidate had already been tried and failed - measured 22
+            # August 2026 on two episodes that had only two 1080p
+            # releases each, both dead: 45.0s of loading screen for an
+            # answer that was known in about twelve. With it, "none of
+            # these work" is said as soon as it is true.
+            with lock:
+                running[0] -= 1
+                spent = running[0] <= 0
+            if spent:
+                done.set()
+
+    def _race_lane():
         while not done.is_set() and time.monotonic() < deadline:
             with lock:
                 if cursor[0] >= len(live):
@@ -469,11 +617,16 @@ def prepare_fastest(candidates, *, season=None, episode=None,
                     candidate, season=season, episode=episode,
                     metadata_timeout=(QUEUED_METADATA_TIMEOUT if queued
                                       else METADATA_TIMEOUT),
-                    data_wait=QUEUED_DATA_WAIT if queued else DATA_WAIT)
+                    data_wait=QUEUED_DATA_WAIT if queued else DATA_WAIT,
+                    start_at=start_at, duration=duration)
             except Exception:
                 continue
             if not got.get("url"):
                 _release_quietly(candidate.get("info_hash"))
+                if failed is not None:
+                    # A plain list append under the GIL - the caller
+                    # reads it only after this call returns.
+                    failed.append(candidate.get("info_hash"))
                 continue
             with lock:
                 if winner:
@@ -484,8 +637,10 @@ def prepare_fastest(candidates, *, season=None, episode=None,
             done.set()
             return
 
+    lanes = max(1, min(width, len(live)))
+    running = [lanes]
     threads = [threading.Thread(target=worker, daemon=True)
-               for _ in range(max(1, min(width, len(live))))]
+               for _ in range(lanes)]
     for thread in threads:
         thread.start()
     done.wait(timeout)
@@ -1290,7 +1445,7 @@ def playable_check(stream: dict, timeout: float = 6) -> bool:
     headers["Range"] = "bytes=0-1023"
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with net.urlopen(request, timeout=timeout) as response:
             content_type = (response.headers.get("Content-Type") or "").lower()
             body = response.read(1024)
     except Exception:

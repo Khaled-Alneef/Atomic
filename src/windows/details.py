@@ -31,10 +31,12 @@ same thing for video and the owner rightly called that broken.
 import datetime
 import re
 import uuid
+from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QRect, QRectF, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QColor, QLinearGradient, QPainter, QPixmap
+from PyQt6.QtGui import (QBrush, QColor, QLinearGradient, QPainter,
+                         QPainterPath, QPixmap, QTransform)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QVBoxLayout, QWidget,
@@ -63,6 +65,20 @@ MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
 # list, and 12pt names in a 440px panel elided half of everything.
 PANEL_WIDTH = 490
 ROW_HEIGHT = 72
+
+# How many list rows exist before the list is shown, and how many more
+# are added each time the view nears the end of them. See
+# DetailsPage._queue_rows for the measurement these come from - a
+# 508-chapter list built in one go froze the UI for 1.26s.
+#
+# 40 against a viewport that holds ~13 rows: enough that the first
+# screen and the one after it are already there, few enough that
+# building them is ~50ms.
+ROW_FIRST_BATCH = 40
+ROW_BATCH = 40
+# Start building the next batch this far from the end, so rows are ready
+# before the scroll reaches them rather than after.
+ROW_EXTEND_MARGIN_PX = ROW_HEIGHT * 6
 
 # The scrim over the backdrop, top to bottom - heavier than the player's
 # loading frame because real text sits on this one.
@@ -239,13 +255,67 @@ def _reading_art_worker(signals, run, entry):
     and its banner is landscape art cut for exactly this use. Fails soft
     like every art lookup: no match or no network just keeps the dark
     ground."""
-    try:
-        from helpers import anilist
-        url = anilist.fetch_manga_artwork(entry.get("title") or "")
-        path = images.download(url) if url else None
-    except Exception:
-        logs.exception("details manga artwork failed")
-        path = None
+    title = (entry.get("title") or "").strip()
+    path = None
+    # **Three catalogues, in the order of how good their answer is** -
+    # the owner's ask: "use MangaDex and AniList and MangaUpdates to load
+    # the ch list bg image for all". They are not interchangeable, and
+    # measured 21 August 2026 over the owner's own titles:
+    #
+    #   AniList banner   1900x400 landscape, cut for exactly this -
+    #                    One Piece, Kingdom (WAN), Hunter x Hunter, Rise
+    #                    of the Fallen Kingdom's all have one
+    #   AniList cover    460x652 portrait, when there is no banner
+    #                    (Celebrity Lady)
+    #   MangaDex         portrait, and knows titles AniList does not
+    #   MangaUpdates     portrait, a scanlation database first - it had
+    #                    One Piece and Solo Leveling; it is the rung that
+    #                    catches what the other two miss
+    #
+    # 3 of 9 of the owner's titles had **no AniList match at all**, which
+    # is why the chain exists rather than one source with a fallback to
+    # nothing. A portrait answer is still a good answer here: paintEvent
+    # turns one into a blurred ground instead of stretching it, which is
+    # what "wrong size" was.
+    for source in ("anilist", "mangadex", "mangaupdates"):
+        if path or not title:
+            break
+        try:
+            if source == "anilist":
+                from helpers import anilist
+                url = anilist.fetch_manga_artwork(title)
+            elif source == "mangadex":
+                from helpers import mangadex
+                url = mangadex.fetch_cover_url(title)
+            else:
+                from helpers import mangaupdates
+                url = mangaupdates.fetch_cover_url(title)
+            path = images.download(url) if url else None
+        except Exception:
+            logs.exception(f"details manga artwork via {source} failed")
+            path = None
+    if not path:
+        # **AniList does not know every title, and the ones it misses are
+        # exactly the ones the owner reads.** Measured 21 August 2026
+        # over their own list plus a Recently Released sample: 3 of 9 had
+        # no AniList match at all ("2072267132 Gods Of All People...",
+        # "I Can Snatch 999 Types Of Abilities", "I Will Try To Raise The
+        # Villainess") - scanlation titles that no catalogue files under
+        # the name the site prints. Those pages sat on the flat dark
+        # ground with no art whatever.
+        #
+        # The entry's own cover always exists, because the site it came
+        # from named it. It is portrait, so it lands on the blurred
+        # ground in paintEvent rather than being stretched - which is the
+        # whole reason that branch is there.
+        try:
+            local = entry.get("cover_path")
+            if local and Path(local).exists():
+                path = local
+            elif entry.get("cover_url"):
+                path = images.download(entry["cover_url"])
+        except Exception:
+            path = None
     if path:
         signals.art.emit(run, "backdrop", str(path))
 
@@ -523,6 +593,9 @@ class DetailsPage(GlassPage):
         # {"season", "episode", "streams" (None until the first batch
         # lands), "looking" (more sources still out)}.
         self._source_pick = None
+        # Which resolution groups are open in the source list. Empty on
+        # purpose: every group starts folded (see _fill_source_rows).
+        self._open_source_groups = set()
         # A Discover reading title with no site yet: the list panel
         # offers the configured reading sites first (the owner's ask),
         # and this stays True until one is picked and answers.
@@ -805,8 +878,14 @@ class DetailsPage(GlassPage):
         self._rows.setContentsMargins(0, 0, 6, 0)
         self._rows.setSpacing(6)
         self._rows.addStretch(1)
-        area = scroll_area(self._rows_host)
-        column.addWidget(area, stretch=1)
+        self._rows_area = scroll_area(self._rows_host, ground=theme.BG)
+        # Rows that have not been built yet - see _queue_rows. Kept on
+        # the page rather than passed around, because a refill, a search
+        # keystroke and a teardown all have to be able to drop them.
+        self._row_queue = []
+        self._rows_area.verticalScrollBar().valueChanged.connect(
+            self._maybe_extend_rows)
+        column.addWidget(self._rows_area, stretch=1)
 
         # Centred over the list rather than tucked under it. "Finding
         # sources for S01E07..." used to sit in the bottom-left corner,
@@ -819,7 +898,7 @@ class DetailsPage(GlassPage):
         # first list it was meant to describe. _PanelNote lays itself
         # out - see its docstring for the two bugs the by-hand placement
         # used to have.
-        self._panel_note = _PanelNote("Loading...", area.viewport())
+        self._panel_note = _PanelNote("Loading...", self._rows_area.viewport())
         return panel
 
     # ---- lookups ----------------------------------------------------------
@@ -834,11 +913,24 @@ class DetailsPage(GlassPage):
                              args=(self._signals, self._run, dict(self.entry)),
                              daemon=True).start()
         if self._is_reading:
-            # No IMDb id to hang TMDB art off - AniList's banner is the
-            # reading ground (see _reading_art_worker).
-            threading.Thread(target=_reading_art_worker,
-                             args=(self._signals, self._run, dict(self.entry)),
-                             daemon=True).start()
+            # **No artwork ground on a reading page at all** - the
+            # owner's ask, 21 August 2026: "remove all readings bg image
+            # in the ch list, make the bg use something according to the
+            # app theme".
+            #
+            # It was never going to be consistent, and that was the
+            # complaint: measured over their own titles, some resolve to
+            # a 1900x400 AniList banner, some only to a 460x652 portrait
+            # cover, and some to nothing at all - so the same page had a
+            # sharp cinematic ground for One Piece, a blurred one for
+            # Celebrity Lady and a flat one for a scanlation title. The
+            # page's own theme ground (GlassPage paints theme.BG) is the
+            # one answer that is the same for every title.
+            #
+            # _reading_art_worker and the three-catalogue chain behind it
+            # are kept: the *cards* still want a cover, and the video
+            # pages still want a backdrop. Only this page stopped asking.
+            pass
             lookup_pool.submit(_reading_genres_worker, self._signals,
                                self._run, self.entry.get("title") or "")
             if chapter_source is None:
@@ -1124,7 +1216,76 @@ class DetailsPage(GlassPage):
         except (TypeError, ValueError):
             return 0.0
 
+    def _queue_rows(self, builders):
+        """Take the whole list as *builders* and put only the first
+        screenful of them on screen.
+
+        **Measured on the owner's own library, 21 August 2026**, the
+        chapter list built one row per chapter the moment it arrived:
+
+            One Piece      508 chapters   1258ms to fill, 725ms to clear
+            Kingdom (WAN)  380 chapters   1037ms to fill, 436ms to clear
+
+        which is exactly the owner's "clicking One Piece freezes for
+        ~1.5 sec" and "the back button from the reading ch takes a few
+        secs" - the clear is what back pays. Both numbers are the UI
+        thread, so nothing else can happen while they run.
+
+        A row costs 1.18ms to *build* but 2.5ms to build-and-insert,
+        because every insertWidget into a live layout is another layout
+        pass over everything already in it. So this does both things
+        that helps: it inserts with updates switched off, and it only
+        inserts what can be seen. 40 rows against a 13-row viewport is
+        ~50ms, and the rest arrive as the list is scrolled - which also
+        means a list nobody scrolled costs nothing to tear down again.
+
+        Search is unaffected: filtering rebuilds this queue from the
+        already-computed list, which is strings, not widgets."""
+        self._row_queue = list(builders)
+        self._materialise_rows(ROW_FIRST_BATCH)
+        # A short list, or a tall window, can leave the first batch not
+        # even filling the viewport - then no scroll ever comes to ask
+        # for the next one. Ask once the layout has settled instead.
+        QTimer.singleShot(0, self._maybe_extend_rows)
+
+    def _materialise_rows(self, count):
+        """Build and insert the next `count` queued rows."""
+        if not self._row_queue:
+            return
+        self._rows_host.setUpdatesEnabled(False)
+        try:
+            # count() - 1: the trailing stretch is always the last item,
+            # and rows go in above it.
+            shown = self._rows.count() - 1
+            for _ in range(min(int(count), len(self._row_queue))):
+                widget = self._row_queue.pop(0)()
+                if widget is None:
+                    continue
+                self._rows.insertWidget(shown, widget)
+                shown += 1
+        finally:
+            self._rows_host.setUpdatesEnabled(True)
+
+    def _maybe_extend_rows(self, _value=None):
+        """Build the next batch when the view nears the end of what has
+        been built. Guarded against a torn-down page: this is wired to a
+        scrollbar that outlives nothing, but a queued singleShot can
+        still land after leave()."""
+        if self._closed or not self._row_queue:
+            return
+        try:
+            bar = self._rows_area.verticalScrollBar()
+        except RuntimeError:
+            return
+        if bar.maximum() - bar.value() <= ROW_EXTEND_MARGIN_PX:
+            self._materialise_rows(ROW_BATCH)
+            # Straight back round: one batch may still not reach the
+            # bottom of a tall window, and stopping here would leave the
+            # list stuck with no further scroll event coming.
+            QTimer.singleShot(0, self._maybe_extend_rows)
+
     def _clear_rows(self):
+        self._row_queue = []
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
             widget = item.widget()
@@ -1362,6 +1523,7 @@ class DetailsPage(GlassPage):
             return
         rating_map, rating_label = self._season_ratings(season, rows)
         shown = 0
+        builders = []
         for video in rows:
             number = int(video.get("number") or video.get("episode") or 0)
             name = str(video.get("name") or video.get("title") or "").strip()
@@ -1397,15 +1559,16 @@ class DetailsPage(GlassPage):
             stars = _episode_rating(rating_map.get(number), rating_label)
             if stars:
                 meta_line = f"{meta_line}   ·   {stars}" if meta_line else stars
-            self._rows.insertWidget(shown, self._row_card(
-                title, meta_line,
-                badge,
-                (None if upcoming
-                 else lambda s=season, e=number: self._start_episode(s, e)),
-                on_menu=(None if upcoming
-                         else lambda ev, s=season, e=number:
-                         self._episode_menu(ev, s, e))))
+            builders.append(
+                lambda t=title, m=meta_line, b=badge, up=upcoming,
+                s=season, e=number: self._row_card(
+                    t, m, b,
+                    (None if up else lambda s=s, e=e: self._start_episode(s, e)),
+                    on_menu=(None if up
+                             else lambda ev, s=s, e=e:
+                             self._episode_menu(ev, s, e))))
             shown += 1
+        self._queue_rows(builders)
         self._panel_note.setVisible(shown == 0)
         if shown == 0:
             self._panel_note.setText("Nothing matches that search."
@@ -1418,6 +1581,7 @@ class DetailsPage(GlassPage):
         wanted = self._search.text().strip().lower()
         read_up_to = self._last_read()
         shown = 0
+        builders = []
         for chapter in self._chapters:
             number = chapter_number(chapter)
             name = chapter_name(chapter)
@@ -1431,12 +1595,15 @@ class DetailsPage(GlassPage):
             read = number is not None and (
                 (read_up_to and number <= read_up_to)
                 or history.chapter_key(number) in self._history_marks)
-            self._rows.insertWidget(shown, self._row_card(
-                title, chapter_published(chapter),
-                ("watched", "DONE") if read else None,
-                lambda n=number: self._read(n),
-                on_menu=lambda ev, n=number: self._chapter_menu(ev, n)))
+            builders.append(
+                lambda t=title, d=chapter_published(chapter),
+                b=(("watched", "DONE") if read else None),
+                n=number: self._row_card(
+                    t, d, b,
+                    lambda n=n: self._read(n),
+                    on_menu=lambda ev, n=n: self._chapter_menu(ev, n)))
             shown += 1
+        self._queue_rows(builders)
         self._panel_note.setVisible(shown == 0)
         if shown == 0 and self._chapters:
             self._panel_note.setText("Nothing matches that search.")
@@ -1521,6 +1688,9 @@ class DetailsPage(GlassPage):
 
     def _close_source_picker(self):
         self._source_pick = None
+        # Back to all-folded for the next episode: an open group is
+        # about the list being read now, not a preference.
+        self._open_source_groups = set()
         self._search.clear()
         self._sync_season_controls()
         self._fill_rows()
@@ -1558,6 +1728,15 @@ class DetailsPage(GlassPage):
         pick["streams"] = playable
         pick["looking"] = bool(looking)
         self._fill_rows()
+        # **No speculative warm-up here, and that is deliberate.** A
+        # previous version fetched the top row's metadata while the
+        # picker was being read, on the theory that the wait was free.
+        # It is not: libtorrent's session runs `active_downloads = 8`,
+        # and a warmed torrent is *held* - measured 22 August 2026,
+        # warming five releases left five of those eight slots occupied,
+        # and the race that followed took 15.3s against the 4.9s the same
+        # race costs on a clean session. Browsing a few episodes would
+        # quietly starve the one being played.
 
     def _fill_source_rows(self):
         """The sources for the picked episode: a back row, then one
@@ -1633,14 +1812,32 @@ class DetailsPage(GlassPage):
             # Most seeders first *within this heading* - the owner's ask.
             if streams_helper is not None:
                 visible.sort(key=streams_helper.list_sort_key)
-            heading = QLabel("4K (2160p)" if quality == "2160p"
-                             else (quality or "Other").upper())
-            heading.setStyleSheet(
-                f"color: {theme.TEXT_MUTED}; font-size: 11pt; font-weight: 700;"
-                f" letter-spacing: 1px; background: transparent; border: none;"
-                f" padding: 6px 2px 0px 2px;")
-            self._rows.insertWidget(shown, heading)
+            # **Every resolution is a foldable group, and they all
+            # start folded** - the owner's ask, 22 August 2026. A real
+            # lookup answers with sixty-odd releases; laid out flat that
+            # is a wall to scroll past before the *next* resolution's
+            # heading is even reachable. Folded, the panel opens as a
+            # short list of resolutions with their counts, which is the
+            # choice actually being made first.
+            #
+            # A search overrides the fold: typing "2160" or a group name
+            # is a request to see what matched, and leaving those rows
+            # hidden behind a closed heading would read as no results.
+            label = ("4K (2160p)" if quality == "2160p"
+                     else (quality or "Other").upper())
+            open_now = bool(wanted) or quality in self._open_source_groups
+            best = max((int(v.get("seeders") or 0) for v in visible), default=0)
+            summary = [f"{len(visible)} source{'s' if len(visible) != 1 else ''}"]
+            if best:
+                summary.append(f"up to {best} seeders")
+            self._rows.insertWidget(shown, self._row_card(
+                f"{'▾' if open_now else '▸'}  {label}",
+                " · ".join(summary), None,
+                (lambda q=quality: self._toggle_source_group(q)),
+                play_glyph=False))
             shown += 1
+            if not open_now:
+                continue
             for stream in visible:
                 seeders = int(stream.get("seeders") or 0)
                 size = ""
@@ -1671,6 +1868,20 @@ class DetailsPage(GlassPage):
         if shown <= 1:
             self._panel_note.setText("Nothing matches that search.")
 
+    def _toggle_source_group(self, quality):
+        """Open or close one resolution's releases and redraw the list.
+
+        Folded state lives on the page rather than on the widgets, which
+        are rebuilt from scratch every time a late source lands (see
+        _on_sources) - a fold kept on a row would be lost on the next
+        batch, which is the one moment someone is definitely reading
+        it."""
+        if quality in self._open_source_groups:
+            self._open_source_groups.discard(quality)
+        else:
+            self._open_source_groups.add(quality)
+        self._fill_rows()
+
     def _play_stream_choice(self, stream):
         """Play exactly the chosen source. The rest of the list rides
         along behind it so a dead pick can still fall through, but the
@@ -1679,8 +1890,24 @@ class DetailsPage(GlassPage):
         season, episode = pick.get("season"), pick.get("episode")
         ordered = [stream] + [s for s in (pick.get("streams") or [])
                               if s is not stream]
-        self._source_pick = None
-        self._fill_rows()
+        # Leave the picker by the one routine that knows how, rather than
+        # clearing _source_pick by hand: picking a source is an exit from
+        # it exactly as much as the Back row is.
+        #
+        # It used to set the field and refill the rows and nothing else,
+        # so everything else the picker had switched on stayed on behind
+        # the player. Traced through the real flow 22 August 2026 - open
+        # details, click an episode, click a source, close the player:
+        # _season_box/_prev_btn/_next_btn all came back isVisible=False,
+        # because only _sync_season_controls un-hides them and nothing on
+        # this path called it. That is the owner's "the season list and
+        # the prev/next btns do not show", and only leaving the page and
+        # re-entering it cleared the state. Two more leaked the same way:
+        # the open resolution group (so the *next* episode's picker
+        # opened unfolded, against _fill_source_rows' all-folded rule)
+        # and the search text (a "2160" typed to narrow sources was left
+        # filtering the episode list underneath).
+        self._close_source_picker()
         try:
             from windows import player
             page = player.open_player(self.window(), self.entry,
@@ -2346,13 +2573,39 @@ class DetailsPage(GlassPage):
             target = QSize(max(1, int(rect.width() * ratio)),
                            max(1, int(rect.height() * ratio)))
             source = self._backdrop.size()
-            covers = (source.height() * target.width()
-                      >= source.width() * target.height())
-            self._backdrop_scaled = self._backdrop.scaled(
-                target,
-                (Qt.AspectRatioMode.KeepAspectRatioByExpanding if covers
-                 else Qt.AspectRatioMode.KeepAspectRatio),
-                Qt.TransformationMode.SmoothTransformation)
+            if source.height() > source.width():
+                # **A portrait image is never stretched across the page.**
+                # Measured over the owner's reading titles, 21 August
+                # 2026: most resolve to a real AniList banner (One Piece,
+                # Kingdom, Hunter x Hunter, Rise of the Fallen Kingdom's
+                # all 1900x400), but a title AniList knows only as a
+                # *cover* comes back portrait - Celebrity Lady at
+                # 460x652 - and the cover-fill below then blew it up 2.5x
+                # and cropped it to a letterbox strip of somebody's chin.
+                # That is the owner's "some reading ch list bg uses an
+                # image as the wrong size".
+                #
+                # So a portrait cover becomes a deliberately blurred
+                # ground instead, which is what every media app does with
+                # one and what the scrim over it already assumes. Blurred
+                # by scaling down hard and back up - Qt has no blur
+                # without QGraphicsEffect, and an effect on the page's
+                # ground would repaint on every hover.
+                small = self._backdrop.scaled(
+                    max(1, target.width() // 24), max(1, target.height() // 24),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+                self._backdrop_scaled = small.scaled(
+                    target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+            else:
+                covers = (source.height() * target.width()
+                          >= source.width() * target.height())
+                self._backdrop_scaled = self._backdrop.scaled(
+                    target,
+                    (Qt.AspectRatioMode.KeepAspectRatioByExpanding if covers
+                     else Qt.AspectRatioMode.KeepAspectRatio),
+                    Qt.TransformationMode.SmoothTransformation)
             self._backdrop_scaled.setDevicePixelRatio(ratio)
             self._backdrop_size = (rect.size(), ratio)
         scaled = self._backdrop_scaled
@@ -2364,7 +2617,47 @@ class DetailsPage(GlassPage):
         # belongs behind the title, and centring a 337px band in a 900px
         # page floats it in the middle of nothing.
         top = 0 if height < rect.height() else int((rect.height() - height) / 2)
-        painter.drawPixmap(int((rect.width() - width) / 2), top, scaled)
+        left = int((rect.width() - width) / 2)
+        # **Rounded, not square into the window's corners** - the owner's
+        # ask ("make sure the edges of the top result / featured / main
+        # page are all rounded"). Measured before changing it: the
+        # details page's own top-left and top-right pixels carried
+        # artwork (58,58,40 and 58,26,17) while its bottom two were the
+        # page ground - so this was the one large surface in the app
+        # still meeting a corner squarely. The hero banners were already
+        # right (their corner pixels read as BG, checked the same way).
+        #
+        # Painted as a *brush through a path*, not setClipPath: Qt's
+        # raster clip is applied per whole pixel and is not antialiased,
+        # which is exactly how HeroBanner's artwork kept hard corners
+        # under a rounded panel (widgets.py carries the same note, from
+        # the same screenshot).
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        brush = QBrush(scaled)
+        transform = QTransform()
+        transform.translate(left, top)
+        # The brush tiles in *device* pixels; the pixmap carries a ratio,
+        # so it has to be scaled back down or the art is drawn at ratio
+        # times its size on any display that is not at 100%.
+        if ratio and ratio != 1.0:
+            transform.scale(1.0 / ratio, 1.0 / ratio)
+        brush.setTransform(transform)
+        # **Intersected with the artwork's own rectangle, or the brush
+        # tiles.** A QBrush repeats to fill whatever path it is given,
+        # and a 1900x400 banner scaled to a 1500px-wide page is 316px
+        # tall against 900 - so the first attempt drew One Piece three
+        # times down the page and twice across (caught by looking at the
+        # render, not by the corner pixels, which were correct). Filling
+        # only where the art actually is leaves the rest to the page's
+        # own ground, exactly as the plain drawPixmap did.
+        shape = QPainterPath()
+        shape.addRoundedRect(QRectF(rect), theme.RADIUS_LG, theme.RADIUS_LG)
+        art = QPainterPath()
+        art.addRect(QRectF(left, top, width, height))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(brush)
+        painter.drawPath(shape.intersected(art))
         gradient = QLinearGradient(0.0, 0.0, 0.0, float(rect.height()))
         for stop, red, green, blue, alpha in SCRIM:
             gradient.setColorAt(stop, QColor(red, green, blue, alpha))
@@ -2500,7 +2793,7 @@ class GenreBrowsePage(GlassPage):
         self._body.setContentsMargins(0, 0, 8, 0)
         self._body.setSpacing(16)
         self._body.addStretch(1)
-        self._area = scroll_area(self._body_host)
+        self._area = scroll_area(self._body_host, ground=theme.BG)
         # Never sideways: the grid re-flows to whatever width there is
         # (see _columns_for), so a horizontal bar could only ever mean
         # the re-flow failed.
@@ -2578,7 +2871,14 @@ class GenreBrowsePage(GlassPage):
             rows = _GENRE_CACHE.get(key)
             if rows is None:
                 try:
-                    rows = (discover.discover_reading_genre(
+                    # **Reading genres come from the owner's own sites**
+                    # (the owner's ask, 22 August 2026) - not MangaDex's
+                    # tag browse, whose cards can only ever open the
+                    # "where should this be read from" flow because they
+                    # carry no site url. See
+                    # discover.reading_genre_sites, which is the same
+                    # browse the Manga/Manhwa/Manhua sections use.
+                    rows = (discover.reading_genre_sites(
                                 self._genre, limit=_BROWSE_LIMIT)
                             if kind == "reading" else
                             discover.discover_video(kind, genre=self._genre,
@@ -2702,7 +3002,15 @@ class GenreBrowsePage(GlassPage):
         grid = QGridLayout(grid_host)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(_BROWSE_GRID_SPACING)
-        grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        # Centred, not left-aligned (the owner's ask, with a screenshot
+        # of the Comedy page): the column count is computed from the
+        # viewport, so the last column almost never lands flush against
+        # the right edge - and left-aligning put the whole leftover
+        # gutter on one side, which reads as the page having slipped
+        # sideways. Centring splits it, so the rows sit in the middle of
+        # the screen whatever the window width works out to.
+        grid.setAlignment(Qt.AlignmentFlag.AlignHCenter
+                          | Qt.AlignmentFlag.AlignTop)
         columns = self._columns or self._columns_for(self._viewport_width())
         self._columns = columns
         cards = [self._build_card(item) for item in rows]
@@ -2782,6 +3090,16 @@ class GenreBrowsePage(GlassPage):
             return
         if self._got_rows:
             self._note.setVisible(False)
+        elif self._is_reading:
+            # Named for what it actually browsed. A reading genre is
+            # searched across the *configured* sites and nowhere else
+            # (the owner's ask - see discover.reading_genre_sites), so
+            # "check the connection" would be the wrong thing to blame
+            # when the honest answer is that none of those sites' current
+            # listings are filed under this genre.
+            self._note.setText(
+                f"None of your reading sites have anything under "
+                f"{self._genre} right now.")
         else:
             self._note.setText(f"Nothing was found under {self._genre}. "
                                "Check the connection and try again.")
