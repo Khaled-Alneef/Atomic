@@ -470,3 +470,145 @@ after the hand stops, and that deferred distance *is* drift. Removing
 acceleration is what worked. See the note on `FRICTION` in
 `widgets._Momentum` for the numbers and for the trade that was accepted:
 smear down, evenness partly given back, a third more wheel per page.
+
+---
+
+# Research: frames, smoothness, smear and friction
+
+Read this before touching scroll physics again. It is the published
+state of the art on the four things this app keeps re-fighting, checked
+against the numbers measured here on 24 August 2026. Sources at the end.
+
+## 1. One law governs the smear, and this app's numbers obey it
+
+**Blur Busters Law: 1ms of persistence = 1 pixel of motion blur per
+1000 px/s of motion.** A sample-and-hold display *holds* each frame for
+the whole refresh while the eye keeps tracking smoothly, so the held
+image is smeared across the retina. Nothing about the panel being "fast"
+avoids it; it is the hold itself.
+
+    refresh    frame held      blur at 1000 px/s
+    60 Hz      16.7 ms         16.7 px
+    144 Hz      6.94 ms         6.94 px      <- this machine
+    240 Hz      4.2 ms          4.2 px
+
+Measured here, and it lands on the law exactly:
+
+    4953 px/s x 6.944ms = 34.4 px   (before acceleration was removed)
+    1872 px/s x 6.944ms = 13.0 px   (after)
+
+It is also why the panel sitting at 60Hz earlier that day was so much
+worse: identical content, **2.4x the blur**, for free.
+
+## 2. There are TWO blur sources and only one of them is ours
+
+  * **Persistence (MPRT)** - the hold, 6.94ms here. Velocity scales it.
+    This is the one the app can influence.
+  * **Pixel response (GtG)** - how fast the crystal physically changes.
+    It adds *on top* of persistence.
+
+**On VA panels the dark transitions are the pathological case.** Rated
+GtG is a best case; dark-level transitions are measured 50-80% slower,
+around 20ms. The symptom has a name in the literature - "black
+smearing" - and is described as *a lingering shadow or dark trail
+dragging behind objects*. The owner's word for what he sees is
+"traces".
+
+**Atomic is a near-black UI** (BG #0e0c09, SURFACE #1a1712). Stremio's
+is a lighter navy. On the same panel at the same velocity the dark app
+smears worse, for reasons no code here can reach.
+
+The monitor reports only a generic `LED MONITOR`, vendor code `FSI`
+(unregistered), 2025, 1080p/144Hz - a class that is very commonly VA.
+**The panel type could not be confirmed from software.**
+
+**The test that decides it, and it takes ten seconds:** scroll a bright
+region and a dark region at the same speed. Bright smearing noticeably
+less means GtG/black smearing - the monitor's overdrive setting, not the
+app - and it means velocity work is addressing the smaller term.
+testufo.com/eyetracking does the same discrimination with a controlled
+pattern.
+
+**If the panel term dominates, the budget looks like this**, and the
+app's share is the smallest of the three:
+
+    dark-transition GtG    possibly ~20ms    monitor overdrive setting
+    persistence at 144Hz   6.94ms            fixed by refresh rate
+    velocity               scales both       the app
+
+## 3. `update()` inside `paintEvent` is a documented anti-pattern
+
+The bug this session found the hard way is a known one. Published
+guidance: *"If you put update() inside paintEvent(), you're telling Qt
+to schedule another repaint every time it finishes painting ... it will
+consume as much CPU as it can ... The fix is to never call update()
+inside paintEvent."*
+
+Measured here with the app's paints and the compositor's presents on one
+QPC clock: **137.4 paints/s against 109.5 presents**, paint interval
+5.80ms against a 6.944ms refresh. Qt's raster path does **not** block on
+vsync - only the GL path double-buffers to it - so the widget free-ran.
+
+## 4. The 14px/28px steps were textbook judder
+
+Judder is *the fingerprint of a frame-rate conversion that does not
+divide evenly*. The classic is 24fps on 60Hz: 2.5 refreshes per frame is
+impossible, so it alternates 3:2 and some frames are held a beat too
+long. A 137:109 ratio is the same mechanism with worse numbers -
+constant velocity arriving at the eye unevenly. **The fix is pacing, not
+painting more.**
+
+## 5. The motion model is already what the industry moved *to*
+
+Two deliberate Chromium/Edge changes, both of which this app already
+matches - so the model is not the thing to rewrite:
+
+  * **impulse-style scroll** - *"each tick of the mouse wheel tries to
+    mimic a physical world where content starts moving quickly (an
+    impulse) and then slows due to friction"*. That is `FrameMotion` and
+    `widgets._Momentum`.
+  * **percent-based scrolling** - away from a fixed 100px per tick,
+    toward a percentage of the scroller's height. That is
+    `NOTCH_FRACTION = 0.0924`.
+
+Android's `OverScroller` uses the same exponential-decay family.
+
+## 6. Friction and smear are in fundamental tension - do not re-derive
+
+During a sustained scroll,
+
+    velocity  ~=  distance_per_notch  x  notches_per_second
+
+**FRICTION cancels out.** It changes how a notch is spent, not the
+average rate. Three consequences, all of which cost time to learn:
+
+  * capping `MAX_SPEED` cannot reduce the average - it defers distance
+    into `_pending`, which drains after the hand stops, and **that
+    deferred distance is drift**. A request for less smear *and* no
+    drift cannot be answered with the cap.
+  * higher friction gives the same average with a **peakier** profile,
+    which is why removing drift cost evenness (grid spread 1.1x -> 2.1x).
+    Structural, not a tuning miss.
+  * the only lever that lowers peak *and* average is **distance per
+    notch**, and it costs travel one-for-one.
+
+## 7. What could not be established
+
+  * the panel type, and therefore whether GtG or persistence dominates;
+  * any software technique that removes hold-blur without cutting
+    velocity or raising the refresh rate. There is none. Backlight
+    strobing / black frame insertion is the only real answer and it is a
+    monitor feature.
+
+## Sources
+
+  * Blur Busters Law - blurbusters.com/blur-busters-law-amazing-journey-to-future-1000hz-displays-with-blurfree-sample-and-hold/
+  * GtG versus MPRT FAQ - blurbusters.com/gtg-versus-mprt-frequently-asked-questions-about-display-pixel-response/
+  * TestUFO eye-tracking demo - testufo.com/eyetracking
+  * VA panel response time and black smearing - us.ktcplay.com/blogs/technology-hub/va-panel-response-time-explained
+  * What is VA smearing - displayninja.com/what-is-va-smearing/
+  * Chromium compositor thread architecture - chromium.org/developers/design-documents/compositor-thread-architecture/
+  * Scrolling personality improvements in Microsoft Edge - blogs.windows.com/msedgedev/2020/04/02/scrolling-personality-improvements/
+  * Percent-based scrolling (Intent to Ship) - groups.google.com/a/chromium.org/g/blink-dev/c/5Mt8RZyf-pc
+  * Qt paintEvent / update guidance - pythonguis.com/faq/creating-a-new-widget-very-heavy-paintevent/
+  * Refresh rates and frame pacing - digitechbytes.com/tech-basics-evergreen-fundamentals/refresh-rate-frame-pacing-basics/
