@@ -101,3 +101,38 @@ def set_enabled(enabled: bool) -> None:
                 winreg.DeleteValue(key, _VALUE_NAME)
             except FileNotFoundError:
                 pass
+
+
+def allow_precise_timers() -> bool:
+    """Opt this process out of Windows 11's timer-resolution throttling.
+
+    **Measured 24 August 2026 on the owner's new PC (Windows 11 26200,
+    240Hz panel): a 4ms Qt PreciseTimer fired every 13.9ms** - foreground
+    window, timeBeginPeriod(1) active, in-tick work 0.26ms - so every
+    QTimer-driven glide in the app (the wheel, the tweens, the fold) was
+    quantised to ~72 positions a second on a panel refreshing 240 times
+    a second. That is the owner's "in 2k it is not smooth", and no code
+    that keeps riding OS timers can fix it while the OS coalesces them.
+
+    PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION with a zero state
+    mask tells the scheduler to always honour this process's requested
+    resolution (the documented opt-out). Fails soft on any Windows that
+    lacks it: the vblank ticker in widgets._Momentum does not depend on
+    this succeeding - this is for everything else that still ticks."""
+    import ctypes
+
+    class _PowerThrottling(ctypes.Structure):
+        _fields_ = [("Version", ctypes.c_uint),
+                    ("ControlMask", ctypes.c_uint),
+                    ("StateMask", ctypes.c_uint)]
+
+    try:
+        state = _PowerThrottling(1, 0x4, 0)     # IGNORE_TIMER_RESOLUTION off
+        ok = ctypes.windll.kernel32.SetProcessInformation(
+            ctypes.windll.kernel32.GetCurrentProcess(),
+            4,                                   # ProcessPowerThrottling
+            ctypes.byref(state), ctypes.sizeof(state))
+        ctypes.windll.winmm.timeBeginPeriod(1)
+        return bool(ok)
+    except Exception:
+        return False

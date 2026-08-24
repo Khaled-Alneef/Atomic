@@ -62,6 +62,42 @@ _ANISKIP_TYPES = {
 MIN_SPAN_S = 3.0
 MAX_SPAN_S = 150.0
 
+# **Where in the file each kind is allowed to sit, as a fraction of the
+# runtime.** Measured live 24 August 2026 over three of the owner's own
+# titles, and this is not a tidy-up: AniSkip files *endings at the head
+# of episode 1* on all three.
+#
+#     Iruma-kun ep1   ed    4.08 ->   94.08     0.3% of the file
+#     Iruma-kun ep1   ed   42.65 ->  132.65     2.9%
+#     Attack on Titan ep1  ed   24.41 ->  114.41     1.7%
+#     Jujutsu Kaisen ep1   ed  223.97 ->  313.96    15.8%
+#
+# against every *real* ending in the same sample at 89.7 - 94.6%. The
+# player offers "Next Episode" over an ending interval, so the first of
+# those is the owner's screenshot: **"Next Episode ->" showing at 0:22
+# of Welcome to Demon-School, Iruma-kun S01E01**, twenty-two seconds
+# into a twenty-four minute episode. The gap between 15.8% and 89.7% is
+# wide enough that 0.5 needs no defending; it is set there rather than
+# at 0.85 so a double-length premiere whose credits genuinely start
+# early still keeps its offer.
+#
+# A recap is the mirror image - "previously on" is at the head or it is
+# not a recap. Measured: Jujutsu Kaisen S01E03 recap 0.50-41.62,
+# Iruma-kun S01E02 recap 24.08-51.04, both inside the first 2%.
+#
+# Openings deliberately have **no** position rule. The same measurement
+# has Jujutsu Kaisen ep2's real opening at 24.3% and Demon Slayer's
+# double-length premiere at 44%, so any threshold tight enough to be
+# useful would throw away real data.
+ENDING_MIN_POSITION = 0.5
+RECAP_MAX_POSITION = 0.35
+
+# How long each kind actually runs, from the 18 openings / 20 endings
+# measured 22 August 2026 (both median 90.0s) and the recaps measured
+# since (17.4 - 90.0s). Used only to choose between two crowd entries
+# that overlap - see _resolve_overlaps.
+CANONICAL_SPAN_S = {OPENING: 90.0, ENDING: 90.0, RECAP: 45.0}
+
 _mal_cache = {}
 _skip_cache = {}
 _lock = threading.Lock()
@@ -76,21 +112,44 @@ def _get_json(url, timeout):
         return json.loads(net.read_text(response, deadline))
 
 
-def mal_id(title: str, timeout: float = DEFAULT_TIMEOUT):
-    """The MyAnimeList id for `title`, via AniList, or None.
+def mal_id(title: str, timeout: float = DEFAULT_TIMEOUT, season=None):
+    """The MyAnimeList id for `title` - for `season` of it, when the
+    franchise files each season as its own anime - via AniList, or None.
 
-    Cached for the session: a title's MAL id does not change, and this
-    is asked once per episode otherwise."""
+    **`season` matters, and ignoring it was the owner's "in Bleach ep3s4
+    the skip intro button is totally inaccurate" (24 August 2026).**
+    AniSkip is keyed by MAL id, and MAL files Bleach: Thousand-Year
+    Blood War as four ids (41467 / 53998 / 56784 / 60636, one per
+    cour). This used to take AniList's single best match - part 1 - so
+    asking for S04E03 fetched **part 1 episode 3's** intervals: an
+    opening at 137.5s, correct for an episode nobody was watching, drawn
+    over the one playing. Measured live; and part 4's own id answers
+    404 (no crowd entry yet), so the right behaviour for that episode
+    today is **no button**, which this now produces.
+
+    The season is resolved by listing every AniList match for the title
+    and taking the Nth by start date - the same order seasons air in.
+    A title with exactly one match keeps it whatever the season (One
+    Piece is one entry with one long numbering), and a season past the
+    list answers None rather than the wrong part's data.
+
+    Cached for the session per (title, season): ids do not change."""
     title = (title or "").strip()
     if not title:
         return None
-    key = title.lower()
+    try:
+        season = int(season) if season else 0
+    except (TypeError, ValueError):
+        season = 0
+    key = (title.lower(), season)
     with _lock:
         if key in _mal_cache:
             return _mal_cache[key]
     query = {
-        "query": ("query($s:String){Media(search:$s,type:ANIME)"
-                  "{idMal title{romaji english}}}"),
+        "query": ("query($s:String){Page(perPage:10){media(search:$s,"
+                  "type:ANIME,format_in:[TV,TV_SHORT,ONA])"
+                  "{idMal episodes startDate{year month day}"
+                  " title{romaji english}}}}"),
         "variables": {"s": title},
     }
     found = None
@@ -102,14 +161,32 @@ def mal_id(title: str, timeout: float = DEFAULT_TIMEOUT):
         deadline = net.deadline_in(timeout)
         with net.urlopen(request, timeout=timeout) as response:
             body = json.loads(net.read_text(response, deadline))
-        media = ((body or {}).get("data") or {}).get("Media") or {}
-        names = [n for n in (media.get("title") or {}).values() if n]
+        rows = (((body or {}).get("data") or {}).get("Page") or {}).get("media") or []
         # Checked, not trusted: AniList's search is fuzzy and will
         # happily answer with a spin-off. Skipping to the wrong place in
         # an episode is a worse failure than not offering to skip.
-        if media.get("idMal") and any(
-                title_match.similarity(title, name) >= 0.7 for name in names):
-            found = int(media["idMal"])
+        matches = []
+        for media in rows:
+            names = [n for n in (media.get("title") or {}).values() if n]
+            if media.get("idMal") and any(
+                    title_match.similarity(title, name) >= 0.7
+                    for name in names):
+                matches.append(media)
+        if len(matches) == 1 or season <= 1:
+            # One entry is the whole franchise; and season 1 of a
+            # per-part franchise is the earliest entry either way.
+            if matches:
+                def aired(media):
+                    date = media.get("startDate") or {}
+                    return (date.get("year") or 9999,
+                            date.get("month") or 99, date.get("day") or 99)
+                found = int(sorted(matches, key=aired)[0]["idMal"])
+        elif season >= 2 and len(matches) >= season:
+            def aired(media):
+                date = media.get("startDate") or {}
+                return (date.get("year") or 9999,
+                        date.get("month") or 99, date.get("day") or 99)
+            found = int(sorted(matches, key=aired)[season - 1]["idMal"])
     except Exception:
         found = None
     with _lock:
@@ -118,8 +195,10 @@ def mal_id(title: str, timeout: float = DEFAULT_TIMEOUT):
 
 
 def _clean(intervals, episode_length=0.0):
-    """Drop what cannot be a real opening/ending, and sort by start."""
+    """Drop what cannot be a real opening/ending/recap, resolve crowd
+    entries that contradict each other, and sort by start."""
     out = []
+    length = float(episode_length or 0.0)
     for row in intervals or []:
         try:
             start = float(row.get("start"))
@@ -134,13 +213,67 @@ def _clean(intervals, episode_length=0.0):
         # An interval that runs past the file is data about a different
         # cut of the episode - seen in crowd-sourced entries, where an
         # "op" can be filed at 21 minutes into a 24 minute episode.
-        if episode_length and start >= float(episode_length):
+        if length and start >= length:
             continue
-        out.append({"type": row.get("type") or OPENING,
-                    "start": start, "end": end,
+        kind = row.get("type") or OPENING
+        # **Where it sits, not only how long it is** - see the note on
+        # ENDING_MIN_POSITION for the four measured intervals this
+        # rejects and the one screenshot it explains.
+        if length:
+            where = start / length
+            if kind == ENDING and where < ENDING_MIN_POSITION:
+                continue
+            if kind == RECAP and where > RECAP_MAX_POSITION:
+                continue
+        out.append({"type": kind, "start": start, "end": end,
                     "source": row.get("source") or ""})
     out.sort(key=lambda row: row["start"])
-    return out
+    return _resolve_overlaps(out)
+
+
+def _resolve_overlaps(rows):
+    """One interval per kind per stretch of the episode.
+
+    AniSkip returns several submissions for the same episode and they
+    overlap. Measured live 24 August 2026:
+
+        Iruma-kun ep1   op   31.41 -> 145.06   (113.6s)
+                        op  114.96 -> 204.01    (89.0s)
+        Attack on Titan ep1  op   47.37 -> 137.37    (90.0s)
+                             op   75.00 -> 135.00    (60.0s)
+
+    Both pairs overlap, so the player showed the button, seeked to the
+    first interval's end, and landed *inside the second one* - where the
+    same button appeared again. That is the owner's "the skip intro and
+    the skip recap btn are really inaccurate", and it is the crowd data
+    disagreeing rather than the offer being computed wrongly.
+
+    The winner is the one whose length is closest to what that kind
+    actually runs (CANONICAL_SPAN_S). Note that neither "keep the
+    earlier" nor "keep the later" works: Iruma's real title sequence is
+    the *later* entry (89.0s, a standard OP) and Attack on Titan's is
+    the *earlier* one (90.0s), and picking by length gets both right.
+    Kept intervals of *different* kinds are left alone - a recap
+    running into an opening is normal, and `_current_skip` takes the
+    first match, which is the recap."""
+    kept = []
+    for row in rows:
+        want = CANONICAL_SPAN_S.get(row["type"], 90.0)
+        clash = None
+        for other in kept:
+            if (other["type"] == row["type"]
+                    and row["start"] < other["end"]
+                    and other["start"] < row["end"]):
+                clash = other
+                break
+        if clash is None:
+            kept.append(row)
+            continue
+        if abs((row["end"] - row["start"]) - want) < abs(
+                (clash["end"] - clash["start"]) - want):
+            kept[kept.index(clash)] = row
+    kept.sort(key=lambda row: row["start"])
+    return kept
 
 
 # AniSkip 500s at random on entries that are perfectly fine a second
@@ -238,7 +371,7 @@ def fetch(title: str, season=None, episode=None, episode_length: float = 0.0,
             return [dict(x) for x in row[1]]
 
     rows = []
-    mal = mal_id(title, timeout)
+    mal = mal_id(title, timeout, season=season)
     if mal:
         try:
             rows = _aniskip(mal, episode, episode_length, timeout)
@@ -250,6 +383,24 @@ def fetch(title: str, season=None, episode=None, episode_length: float = 0.0,
         except Exception:
             rows = []
     cleaned = _clean(rows, episode_length)
+    if first_episode(season, episode):
+        cleaned = [row for row in cleaned if row["type"] != RECAP]
     with _lock:
         _skip_cache[key] = (time.monotonic(), [dict(x) for x in cleaned])
     return cleaned
+
+
+def first_episode(season, episode) -> bool:
+    """Whether this is the very first episode of the whole series - the
+    one case where a recap is not merely unlikely but impossible, since
+    there is nothing before it to recap.
+
+    Shared with the player, which applies the same rule to a *chapter
+    marker* named "Recap": the owner watched Attack on Titan S01E01 and
+    was offered "Skip Recap" over the cold open. Season 2 episode 1
+    deliberately does not qualify - a season premiere recapping the
+    previous season is a real thing."""
+    try:
+        return int(episode or 0) == 1 and int(season or 1) <= 1
+    except (TypeError, ValueError):
+        return False

@@ -1,7 +1,10 @@
 """Small reusable widgets shared across windows."""
 
 import collections
+import ctypes
 import math
+import os
+import threading
 import time
 import weakref
 
@@ -9,8 +12,8 @@ from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
                           QPointF, QPropertyAnimation, QRect, QRectF, QSize,
                           Qt, QTimer, QVariantAnimation)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QBrush, QColor, QCursor, QDrag, QIcon,
-                         QLinearGradient, QPainter, QPainterPath, QPen,
+from PyQt6.QtGui import (QBitmap, QBrush, QColor, QCursor, QDrag, QIcon,
+                         QImage, QLinearGradient, QPainter, QPainterPath, QPen,
                          QPixmap, QRegion, QTransform)
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
@@ -19,6 +22,45 @@ from PyQt6.QtWidgets import (
 )
 
 from . import logs, theme
+
+
+def _alpha_region(image, cut: int):
+    """A QRegion of every pixel in `image` whose alpha is at least `cut`.
+
+    Done through Qt's own Grayscale8 -> Mono conversion rather than a
+    per-pixel Python loop: a 420x130 logo is 54,600 pixels, and
+    `QImage.pixelColor` per pixel is tens of milliseconds on the UI
+    thread at exactly the moment the player is already stalling.
+
+    The route is: take the alpha plane as 8-bit grey, threshold it with
+    `bytes.translate` (one C-speed pass over the buffer), and let Qt turn
+    a two-valued grey image into a bitmap. Returns None rather than
+    raising - the caller's fallback is a rounded badge, which is worse
+    but not broken."""
+    try:
+        alpha = image.convertToFormat(QImage.Format.Format_Alpha8)
+        width, height, stride = alpha.width(), alpha.height(), alpha.bytesPerLine()
+        raw = alpha.constBits()
+        raw.setsize(stride * height)
+        # 0 below the cut, 255 at or above it. One table, one pass.
+        table = bytes(0 if value < cut else 255 for value in range(256))
+        grey = QImage(bytes(raw).translate(table), width, height, stride,
+                      QImage.Format.Format_Grayscale8).copy()
+        mono = grey.convertToFormat(QImage.Format.Format_Mono,
+                                    Qt.ImageConversionFlag.MonoOnly
+                                    | Qt.ImageConversionFlag.ThresholdDither)
+        region = QRegion(QBitmap.fromImage(mono))
+        # QRegion(QBitmap) keeps the color1 pixels, and which of black
+        # and white that is depends on the mono image's colour table -
+        # so the polarity is checked rather than assumed. An inverted
+        # mask is the whole rectangle minus the logo, which is bigger
+        # than the logo's own bounding box can be.
+        if region.boundingRect().width() * region.boundingRect().height() > \
+                width * height * 0.9 and not region.isEmpty():
+            region = QRegion(0, 0, width, height).subtracted(region)
+        return region
+    except Exception:
+        return None
 
 
 class LogoProgress(QWidget):
@@ -54,6 +96,12 @@ class LogoProgress(QWidget):
     # never visibly snaps.
     PULSE_MS = 1600
     PULSE_FLOOR = 0.55
+
+    # Where the logo's silhouette ends, for `logo_region`. Half alpha:
+    # above it a pixel is part of the mark, below it a pixel is the
+    # shadow or glow around it. See logo_region for what asking Qt to
+    # decide this produced instead.
+    ALPHA_CUT = 128
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -109,7 +157,28 @@ class LogoProgress(QWidget):
         player.StartupBackdrop's stall mode. Built from the pixmap's
         alpha, so it is a 1-bit shape: the edge is hard where the artwork
         is soft, which is the price of a native child window that can
-        only be blended whole."""
+        only be blended whole.
+
+        **Not `QPixmap.mask()`, and that is the whole fix - the owner, 24
+        August 2026: "in the loading logo while the ep is playing why
+        does it have a bg (gray)???? make it just the logo".** The clip
+        was already here and already being applied; it was simply not
+        clipping anything. `QPixmap.mask()` goes through
+        `QImage::createAlphaMask`, which **dithers** by default, so a
+        title treatment's soft shadow and antialiased edges come back as
+        scattered opaque pixels spread over the whole rectangle.
+        Measured over the owner's twelve cached TMDB logos: the region
+        covered **26.5% to 88.5%** of its own bounding box, where the
+        real ink of a logo is a fraction of that - so the badge's fill
+        had almost nowhere it was actually clipped away from, and what
+        he saw was the grey box the clip exists to remove.
+
+        Thresholded at ALPHA_CUT instead, with no dither at all. Measured
+        on the same logos, coverage drops to roughly the artwork's own
+        ink. Then dilated by one pixel, so the antialiased rim is kept
+        rather than shaved - a hard edge one pixel outside the glyph
+        reads as the glyph; a hard edge one pixel inside it reads as
+        damage."""
         if self._pixmap is None:
             return None
         target = self._target_rect(self._pixmap)
@@ -120,9 +189,20 @@ class LogoProgress(QWidget):
                 target.width(), target.height(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
-            region = QRegion(scaled.mask())
-            region.translate(target.x(), target.y())
-            return region
+            region = _alpha_region(scaled.toImage(), self.ALPHA_CUT)
+            if region is None or region.isEmpty():
+                return None
+            # One pixel of growth in each direction. Union of four
+            # translations rather than a real morphological dilate: this
+            # runs once per stall on the UI thread, and the difference
+            # between the two is invisible at one pixel.
+            grown = QRegion(region)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                moved = QRegion(region)
+                moved.translate(dx, dy)
+                grown = grown.united(moved)
+            grown.translate(target.x(), target.y())
+            return grown
         except Exception:
             return None
 
@@ -1455,7 +1535,14 @@ class HeroBanner(QFrame):
             transform = QTransform()
             transform.translate((rect.width() - width) / 2.0,
                                 (rect.height() - height) / 2.0)
-            transform.scale(1.0 / ratio, 1.0 / ratio)
+            # **No 1/ratio scale** - Qt's raster brush already applies
+            # the texture pixmap's devicePixelRatio, so scaling again
+            # drew the banner art at 1/ratio of its size and tiled the
+            # gap. Measured 24 August 2026; the same line and the same
+            # wrong comment were in details.DetailsPage.paintEvent,
+            # which carries the marker-texture measurement that settled
+            # it. Invisible at DPR 1.0, which is every display this was
+            # written on.
             brush.setTransform(transform)
             painter.setOpacity(opacity)
             painter.setBrush(brush)
@@ -1518,7 +1605,7 @@ class HeroBanner(QFrame):
         painter.end()
 
 
-def hero_split(banner, cover_size=HERO_COVER_SIZE):
+def hero_split(banner, cover_size=None):
     """Lay a hero out as **cover on the left, details on the right**, and
     hand back `(cover_label, details_column)` for the caller to fill.
 
@@ -1545,6 +1632,10 @@ def hero_split(banner, cover_size=HERO_COVER_SIZE):
     The artwork behind is unchanged: it is still the landscape backdrop
     under HERO_BANNER_SCRIM, which is what gives the banner its colour.
     The cover sits on top of it, on the darkest end of the ramp."""
+    # Resolved at call time, not bound as a default: a default is
+    # evaluated when this module is imported, which is before
+    # layout.adopt() has had a screen to size the cover against.
+    cover_size = cover_size or HERO_COVER_SIZE
     row = QHBoxLayout(banner)
     row.setContentsMargins(26, 18, 32, 18)
     row.setSpacing(24)
@@ -2090,6 +2181,294 @@ class PageSlide(QWidget):
         painter.end()
 
 
+# ---------------------------------------------------------------------
+# The vblank ticker: motion clocked by the panel itself, not by QTimer.
+#
+# **Why this exists - measured 24 August 2026 on the owner's new PC
+# (Windows 11 26200, 2560x1440 @ 240Hz):** a 4ms PreciseTimer QTimer
+# fired every **13.9ms median** - with the window foreground, with
+# timeBeginPeriod(1) active, and with the tick itself costing 0.26ms -
+# so _Momentum produced ~70 positions a second against a panel showing
+# 240, and 71-74% of refreshes moved nothing at all (per-refresh steps
+# sampled at IDXGIOutput::WaitForVBlank). That is the owner's "in 2k it
+# is not smooth the reader". The OS quantised the timer; nothing inside
+# the process was slow.
+#
+# So the clock is now the display: one daemon thread blocks on
+# WaitForVBlank and emits a queued signal every real refresh, and
+# _Momentum steps on that signal instead of a timer. The position is
+# still computed from the *snapped timestamp* (_tick), so a burst of
+# queued ticks after a busy stretch collapses into no-ops rather than a
+# lurch - which is what went wrong the first time a vblank clock was
+# tried (24 August 2026, 62-64% judder): that version *drove* the
+# position per tick; this one only decides when to look at the clock.
+#
+# The primary output's vblank, deliberately: enumerating per-window
+# outputs buys nothing here because the timestamp snap already quantises
+# to the widget's own refresh interval - on the 165Hz second monitor the
+# 240Hz ticks between its refreshes land on the same snapped time and
+# move nothing. Falls soft back to the QTimer path when DXGI is not
+# there (RDP, a test rig), and ATOMIC_NO_VBLANK=1 forces that fallback
+# so the two paths stay measurable against each other.
+
+_IID_IDXGIFactory1 = (ctypes.c_ubyte * 16)(
+    0x78, 0xae, 0x0a, 0x77, 0x6f, 0xf2, 0xba, 0x4d,
+    0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87)
+
+
+class _VBlankTicker(QObject):
+    """The shared per-refresh tick, awake only while something scrolls.
+
+    **The gate is the point.** The first version looped on
+    `WaitForVBlank` for the life of the process, so a 240Hz panel meant
+    a thread waking 240 times a second and emitting a queued signal into
+    the UI thread forever - while reading a page, while watching a
+    video, while the app sat idle. That is a constant tax on everything,
+    which is the shape of the owner's report the same day: "the
+    scrolling now in the whole app seems lower in fps". The wait itself
+    is a driver spin, not a cheap sleep.
+
+    So the thread parks on an Event and is woken only between the first
+    `acquire()` and the last `release()` - i.e. only while at least one
+    _Momentum is actually mid-glide."""
+
+    tick = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+        # Which clock the thread settled on ("dwm"/"dxgi"), or None while
+        # it is still timing them. Read by _vblank_ticker_for_use to know
+        # the decision has been made, and worth having by name: "which
+        # clock is this machine on" is the first question any future
+        # scroll measurement here will ask.
+        self.clock = None
+        self._wanted = 0
+        self._lock = threading.Lock()
+        self._awake = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="vblank-ticker")
+        self._thread.start()
+
+    def acquire(self):
+        """One more surface wants ticks."""
+        with self._lock:
+            self._wanted += 1
+            if self._wanted == 1:
+                self._awake.set()
+
+    def release(self):
+        """One fewer. At zero the thread parks until the next kick."""
+        with self._lock:
+            self._wanted = max(0, self._wanted - 1)
+            if self._wanted == 0:
+                self._awake.clear()
+
+    def _com(self, obj, index, restype, *argtypes):
+        vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.c_void_p)).contents.value
+        fn = ctypes.cast(vtable, ctypes.POINTER(ctypes.c_void_p))[index]
+        return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(fn)
+
+    # What a clock has to do to be believed. A display refresh is
+    # somewhere between 24Hz and 1000Hz in any world this app runs in,
+    # so a "wait" that returns faster than a millisecond is not waiting
+    # for anything and one that takes longer than a tenth of a second is
+    # not a refresh either.
+    CLOCK_MIN_MS = 1.0
+    CLOCK_MAX_MS = 100.0
+    CLOCK_SAMPLES = 8
+
+    def _plausible(self, wait) -> bool:
+        """Time `wait` a few times and say whether it behaves like a
+        display.
+
+        **This check is the whole reason the ticker was rewritten, and
+        it is a measurement, not a precaution.** Measured 24 August 2026
+        on the owner's 2560x1440 240Hz panel:
+
+            IDXGIOutput::WaitForVBlank   2000 calls in 1.2ms
+                                         = 1,677,149/s, every one S_OK
+            DwmFlush                      240 calls in 999.4ms
+                                         = 240.1/s
+
+        DXGI's wait returns *immediately and successfully* on this
+        machine - the desktop is composited, the enumerated output is
+        not owned, and nothing about the return code says so. The old
+        code took S_OK as proof of a clock, so `failed` stayed False,
+        the millisecond-timer fallback was never used, and every
+        scrolling surface was driven by a thread spinning a whole core
+        and posting queued signals into the UI thread as fast as it
+        could.
+
+        What the panel then showed. Measured on the real pages, the real
+        window, a seeded 240-title library, the scroll position sampled
+        once per compositor present and the wheel driven at a fixed 20
+        notches a second - "before" is this same build with
+        ATOMIC_VBLANK_TRUST=1, which is what shipped:
+
+            surface            before                after
+            Watch categories   104.9 fps, 56.3% dead   221.8, 7.6%
+            Saved grid         148.6 fps, 38.1% dead   207.9, 13.4%
+            Home               194.0 fps, 19.2% dead   230.8,  3.8%
+
+        and the evenness with it - on the category grid the step spread
+        went x2.22 -> x1.20 and the local step-to-step change 20/140% ->
+        17/57%. That is the owner's "the text labels and image cards
+        seem to be refreshing on a stiff way"; his "sometimes the whole
+        app seems lower in fps" is the same fault on a machine where the
+        call happens to work, since whether it does is a property of the
+        display path and not of this app.
+
+        **The millisecond timer measured better still, and is not what
+        this returns to.** Same surface, ATOMIC_NO_VBLANK=1: 236.0 fps,
+        1.7% dead, spread x1.25. It is faster because it schedules the
+        paint *before* the boundary rather than reacting after one - but
+        its worst case is a cliff, not a slope: the handover records
+        65.2 steps/s and 72.9% dead on one run in three, because
+        `_schedule_frame` asks for 0-4ms and Windows quantises a timer
+        request to ~13.9ms unless some process on the machine has raised
+        the global resolution. A clock that cannot be quantised is worth
+        eleven frames a second."""
+        try:
+            wait()                              # first one may be partial
+            start = time.perf_counter()
+            for _ in range(self.CLOCK_SAMPLES):
+                wait()
+            each_ms = (time.perf_counter() - start) * 1000.0 / self.CLOCK_SAMPLES
+        except Exception:
+            return False
+        return self.CLOCK_MIN_MS <= each_ms <= self.CLOCK_MAX_MS
+
+    def _dwm_clock(self):
+        """DwmFlush, which blocks until the compositor's next present.
+
+        Preferred over DXGI now: it is what the user actually sees (the
+        compositor is the last stop before the panel), it needs no COM
+        plumbing, and it measured exact - 240.1/s against a panel
+        reporting 240Hz."""
+        try:
+            flush = ctypes.windll.dwmapi.DwmFlush
+        except Exception:
+            return None
+        return flush
+
+    def _dxgi_clock(self):
+        """IDXGIOutput::WaitForVBlank on the first output of the first
+        adapter. Kept as the fallback for a machine with no DWM."""
+        try:
+            dxgi = ctypes.windll.dxgi
+            factory = ctypes.c_void_p()
+            if dxgi.CreateDXGIFactory1(ctypes.byref(_IID_IDXGIFactory1),
+                                       ctypes.byref(factory)) != 0:
+                return None
+            adapter = ctypes.c_void_p()
+            if self._com(factory, 7, ctypes.c_long, ctypes.c_uint,
+                         ctypes.POINTER(ctypes.c_void_p))(
+                    factory, 0, ctypes.byref(adapter)) != 0:
+                return None
+            output = ctypes.c_void_p()
+            if self._com(adapter, 7, ctypes.c_long, ctypes.c_uint,
+                         ctypes.POINTER(ctypes.c_void_p))(
+                    adapter, 0, ctypes.byref(output)) != 0:
+                return None
+            call = self._com(output, 10, ctypes.c_long)
+        except Exception:
+            return None
+        # `output` is captured by the closure so the COM pointer cannot
+        # be collected while the thread is still waiting on it.
+        return lambda: call(output)
+
+    def _run(self):
+        # Each candidate is *timed* before it is trusted - see
+        # _plausible for the machine where the second one lies.
+        wait = None
+        builders = [("dwm", self._dwm_clock), ("dxgi", self._dxgi_clock)]
+        # Two measurement switches, in the spirit of ATOMIC_NO_VBLANK
+        # above: ATOMIC_VBLANK_CLOCK names which candidate to try first,
+        # and ATOMIC_VBLANK_TRUST=1 skips the plausibility check - which
+        # is the only way to reproduce the shipped fault on a machine
+        # where DXGI lies, and therefore the only way to A/B a fix for
+        # it. Neither is read anywhere but here.
+        wanted = os.environ.get("ATOMIC_VBLANK_CLOCK", "").strip().lower()
+        if wanted:
+            builders.sort(key=lambda row: row[0] != wanted)
+        trust = os.environ.get("ATOMIC_VBLANK_TRUST") == "1"
+        for name, build in builders:
+            candidate = build()
+            if candidate is not None and (trust or self._plausible(candidate)):
+                wait, self.clock = candidate, name
+                break
+        if wait is None:
+            self.failed = True
+            return
+        while True:
+            # Parked when nothing is scrolling - see the class docstring.
+            self._awake.wait()
+            try:
+                if wait() != 0:
+                    # A clock that starts failing - DWM restarting, a
+                    # mode change, an output lost - must not become a
+                    # spin. This guard is why the old loop slept on a
+                    # non-zero return, and it is worth keeping now that
+                    # the *zero* return is the one that was lying.
+                    time.sleep(0.01)
+            except Exception:
+                self.failed = True
+                return
+            if not self._awake.is_set():
+                continue        # the last surface stopped mid-wait
+            try:
+                self.tick.emit()
+            except RuntimeError:
+                return          # the app is shutting down under us
+
+
+_vblank_ticker = None
+
+
+def _vblank_ticker_for_use():
+    """The shared ticker, or None when there is no vblank to wait on (no
+    DXGI, or ATOMIC_NO_VBLANK=1 for A/B measurement)."""
+    global _vblank_ticker
+    if os.environ.get("ATOMIC_NO_VBLANK") == "1":
+        return None
+    if _vblank_ticker is None:
+        _vblank_ticker = _VBlankTicker()
+        # Give the thread long enough to *time* its candidate clocks, not
+        # merely to construct them - _VBlankTicker._plausible waits eight
+        # refreshes, which is 33ms at 240Hz and 133ms at 60. The old 20ms
+        # grace predates that check and would return the ticker before it
+        # had decided anything, which is the one case where a surface
+        # commits to a clock that is about to mark itself failed.
+        deadline = time.monotonic() + 0.30
+        while (not _vblank_ticker.failed
+               and _vblank_ticker.clock is None
+               and time.monotonic() < deadline):
+            time.sleep(0.005)
+    return None if _vblank_ticker.failed else _vblank_ticker
+
+
+def warm_display_clock():
+    """Decide which display clock this machine has, before anything
+    scrolls. Returns its name ("dwm"/"dxgi") or None.
+
+    Public because main() calls it at startup: `_vblank_ticker_for_use`
+    now *times* its candidates before trusting one, and that probe waits
+    eight refreshes - 33ms at 240Hz, 133ms at 60. Paid once at launch
+    rather than by whoever scrolls first."""
+    ticker = _vblank_ticker_for_use()
+    clock = getattr(ticker, "clock", None) if ticker is not None else None
+    # Written to the log, because "which clock did this machine get" is
+    # the first question any report of stiff scrolling has to answer and
+    # it is not visible from inside the app otherwise. One line per
+    # launch.
+    try:
+        logs.info(f"display clock: {clock or 'none (millisecond timer)'}")
+    except Exception:
+        pass
+    return clock
+
+
 class _Momentum(QObject):
     """Wheel scrolling as velocity and friction, not as a curve restarted
     on every notch.
@@ -2178,6 +2557,18 @@ class _Momentum(QObject):
     _OLD_MAX_SPEED_NOTE = "7000 then 4500"
     # Below this the remaining distance (speed/FRICTION) is ~2px: snap
     # it and stop, rather than ticking sub-pixel amounts into round().
+    # Below this the remaining distance (speed/FRICTION) is ~2px: snap
+    # it and stop, rather than ticking sub-pixel amounts into round().
+    #
+    # **A "one pixel per refresh" floor was tried here on 24 August 2026
+    # and taken out again.** The reasoning read well - a frame that
+    # cannot move a whole pixel shows nothing - and it is wrong twice
+    # over: the position is a float that *accumulates*, so two 0.6px
+    # frames are a real 1.2px move rather than two wasted ones, and at
+    # 240Hz the floor works out at 240px/s, which is a perfectly normal
+    # gentle scroll speed to refuse to render. Measured at friction 16 it
+    # made things far worse (65.6% dead refreshes) by stopping and
+    # restarting the motion continuously. Left at 30.
     STOP_SPEED = 30.0
     # An impulse is not applied in one tick: it is handed over at this
     # rate (1/s), so ~63% of a notch's speed has arrived after 14ms and
@@ -2205,14 +2596,23 @@ class _Momentum(QObject):
     MAX_DT = 2.0 / 144.0
 
     def __init__(self, bar, tick_ms, parent=None, friction=None,
-                 accel_max=None, frame_s=None):
-        """`friction` and `accel_max` override the class defaults for one
-        surface. The reader passes a high friction so its strip **stops
-        when the wheel stops** - the owner's ask, 24 August 2026: "while
-        in reader mode remove the scrolling movement after the mouse
-        scroll stops ... ONLY IN READER MODE". Reading is aiming at a
-        panel, not travelling, and a coast overshoots what you were
-        looking at."""
+                 accel_max=None, frame_s=None, ramp=None, max_speed=None):
+        """`friction`, `accel_max`, `ramp` and `max_speed` override the
+        class defaults for one surface. The reader passes all four so its
+        strip **stops when the wheel stops** - the owner's ask, 24 August
+        2026: "while in reader mode remove the scrolling movement after
+        the mouse scroll stops ... ONLY IN READER MODE", and then, when
+        that was not enough, "remove the mouse drift ENTIRELY from the
+        reader view!!!". Reading is aiming at a panel, not travelling,
+        and a coast overshoots what you were looking at.
+
+        `max_speed=math.inf` turns the ceiling off, and for a
+        drift-free surface that is not optional: the cap does not
+        discard the excess, it parks it in `_pending` and feeds it in as
+        the speed decays - so the distance a flick could not deliver
+        while the hand was moving is delivered *after* it stopped. That
+        deferred distance is the drift. See windows.reader for the
+        numbers the reader's four values were chosen against."""
         super().__init__(parent)
         self._bar = bar
         self._tick_ms = tick_ms
@@ -2221,10 +2621,18 @@ class _Momentum(QObject):
             self.FRICTION = float(friction)
         if accel_max is not None:
             self.ACCEL_MAX = float(accel_max)
+        if ramp is not None:
+            self.RAMP = float(ramp)
+        if max_speed is not None:
+            self.MAX_SPEED = float(max_speed)
         self._pos = None
         self._vel = 0.0
         self._pending = 0.0          # impulse not yet handed to the velocity
         self._last = 0.0
+        # Whether this instance is currently connected to the shared
+        # vblank ticker (see _start_ticking) - the QTimer below is only
+        # the fallback clock for machines with no vblank to wait on.
+        self._vblank_on = False
         # Where the refresh grid is anchored - see _tick. Re-anchored
         # whenever motion restarts.
         self._phase = None
@@ -2254,7 +2662,7 @@ class _Momentum(QObject):
         # the bad options.
 
     def active(self) -> bool:
-        return self._timer.isActive()
+        return self._vblank_on or self._timer.isActive()
 
     def kick(self, distance_px, direction):
         """One notch: `direction` is +1 to scroll forward (value up), -1
@@ -2265,7 +2673,7 @@ class _Momentum(QObject):
         accel = 1.0 + (self.ACCEL_MAX - 1.0) * min(
             1.0, len(self._kicks) / float(self.ACCEL_NOTCHES))
         self._kicks.append(now)
-        if not self._timer.isActive() or self._pos is None:
+        if not self.active() or self._pos is None:
             self._pos = float(self._bar.value())
             self._vel, self._pending = 0.0, 0.0
             self._last = now
@@ -2273,13 +2681,44 @@ class _Momentum(QObject):
             # A reversal answers now, not after a decay.
             self._vel, self._pending = 0.0, 0.0
         self._pending += direction * float(distance_px) * self.FRICTION * accel
+        self._start_ticking()
+
+    def _start_ticking(self):
+        """Clock the motion: the panel's own vblank where there is one,
+        the fallback QTimer where there is not. See _VBlankTicker for
+        the 13.9ms-per-4ms-timer measurement that makes the choice, and
+        for why the ticker only runs while somebody holds it."""
+        ticker = _vblank_ticker_for_use()
+        if ticker is not None:
+            if not self._vblank_on:
+                ticker.tick.connect(self._tick)
+                ticker.acquire()
+                self._vblank_on = True
+            return
         self._timer.setInterval(self._tick_ms())
         if not self._timer.isActive():
             self._timer.start()
 
+    def _stop_ticking(self):
+        if self._vblank_on:
+            # **Disconnect first, flag second.** The other order leaks:
+            # if the disconnect raises, the flag is already False and
+            # the next kick connects a *second* time, so _tick runs
+            # twice per refresh and the position advances double - and
+            # it compounds for the life of the page.
+            ticker = _vblank_ticker_for_use()
+            try:
+                if ticker is not None:
+                    ticker.tick.disconnect(self._tick)
+                    ticker.release()
+            except Exception:
+                logs.exception("could not release the vblank ticker")
+            self._vblank_on = False
+        self._timer.stop()
+
     def _tick(self):
         if self._pos is None:
-            self._timer.stop()
+            self._stop_ticking()
             return
         now = time.monotonic()
         # **Snap to the refresh grid.** This timer runs at
@@ -2332,14 +2771,14 @@ class _Momentum(QObject):
             # never a string of ticks that round to nothing.
             self._pos = max(low, min(high, self._pos + self._vel / self.FRICTION))
             self._bar.setValue(int(round(self._pos)))
-            self._timer.stop()
+            self._stop_ticking()
             self._vel, self._pos = 0.0, None
             self._phase = None
             return
         self._bar.setValue(int(round(self._pos)))
 
     def cancel(self):
-        self._timer.stop()
+        self._stop_ticking()
         self._vel, self._pos, self._pending = 0.0, None, 0.0
         self._phase = None
         self._kicks.clear()
@@ -2422,7 +2861,12 @@ class _SmoothWheel(QObject):
     # 127 -> 76 per notch. The motion model's FRICTION/RAMP were retuned
     # in the same pass (see _Momentum) because a shorter notch on the
     # old decay measured *stiffer*, not just slower.
-    NOTCH_FRACTION = 0.0924
+    # **0.0647 - 30% slower again, the owner, 24 August 2026: "make the
+    # scrolling in the whole app 30% slower (do NOT change the reading
+    # viewer)". 0.0924 x 0.70; the reader's own notch
+    # (windows.reader.WHEEL_STEP_PX) took its 30% separately and is
+    # deliberately untouched here.**
+    NOTCH_FRACTION = 0.0647
     NOTCH_FLOOR_PX = 25
     # Never slower than this, whatever the screen claims. A refresh rate
     # of 0 is what a headless/offscreen platform reports.
@@ -2466,8 +2910,14 @@ class _SmoothWheel(QObject):
         bar = self._area.verticalScrollBar()
         if bar.maximum() <= bar.minimum():
             return False
-        notch = max(self.NOTCH_FLOOR_PX,
-                    int(self._area.viewport().height() * self.NOTCH_FRACTION))
+        # `notch_scale` is a per-area multiplier - see scroll_area's
+        # argument. Only Home passes one today (the owner asked for that
+        # page alone to be slower still); everything else is 1.0 and
+        # lands on exactly NOTCH_FRACTION.
+        scale = float(getattr(self._area, "notch_scale", 1.0) or 1.0)
+        notch = max(int(self.NOTCH_FLOOR_PX * scale),
+                    int(self._area.viewport().height()
+                        * self.NOTCH_FRACTION * scale))
         direction = -1 if steps > 0 else 1      # wheel up = value down
         at_end = ((direction < 0 and bar.value() <= bar.minimum())
                   or (direction > 0 and bar.value() >= bar.maximum()))
@@ -2643,7 +3093,7 @@ class _OpaqueGround(QObject):
 
 
 def scroll_area(body: QWidget, always_show_vbar: bool = False,
-                ground: str = None) -> QScrollArea:
+                ground: str = None, notch_scale: float = 1.0) -> QScrollArea:
     """Wrap `body` in a frameless, resizable, mouse-wheel-scrollable area.
 
     `always_show_vbar` reserves the vertical scrollbar's width whether or
@@ -2688,6 +3138,12 @@ def scroll_area(body: QWidget, always_show_vbar: bool = False,
     area.setWidget(body)
     if ground:
         _OpaqueGround(body, ground)
+    # How far one wheel notch travels here, as a multiple of the app's
+    # own step - see _SmoothWheel._notch_px. 1.0 everywhere except Home,
+    # which the owner asked to slow on its own (24 August 2026: "make
+    # the scrolling in the main page 30% slower", after the whole app
+    # had already been cut).
+    area.notch_scale = float(notch_scale or 1.0)
     # Parented to the area, so it lives and dies with it.
     _SmoothWheel(area)
     return area
@@ -2776,7 +3232,15 @@ class SideScroller(QWidget):
         # at full speed while the pages around them slowed.
         # **0.126 and 38px, down a further 40% from 0.21 and 63px** -
         # the owner's 24 August 2026 ask, whole app.
-        notch = max(38, int(self._area.viewport().width() * 0.126))
+        # **0.088 and 27px - 30% down again, same day, same words**
+        # ("make the scrolling in the whole app 30% slower").
+        # **0.0616 and 19px - and this cut is the horizontal rows' own**,
+        # the owner, 24 August 2026: "make the horizontal scrollbars
+        # slower by 30% (in the whole app)". Every sideways strip goes
+        # through here - Home's poster and games rows, the tracker's
+        # Saved and Discover strips - so one number covers "the whole
+        # app" for this axis.
+        notch = max(19, int(self._area.viewport().width() * 0.0616))
         direction = 1 if steps < 0 else -1      # wheel down = row forward
         at_end = ((direction < 0 and bar.value() <= bar.minimum())
                   or (direction > 0 and bar.value() >= bar.maximum()))

@@ -27,6 +27,25 @@ import urllib.parse
 # read into memory until the app dies.
 MAX_RESPONSE_BYTES = 5_000_000
 
+# **A page image is not an API response and must not be read at that
+# ceiling.** A webtoon strip is one 800px-wide image tens of thousands
+# of pixels tall, and it goes past 5MB routinely. windows.reader has
+# carried its own 16MB cap for this since the reader was written; the
+# *downloader* did not, and read pages at MAX_RESPONSE_BYTES with an
+# `except Exception: continue` around it, so an oversized page was
+# dropped from the .cbz without a word.
+#
+# Measured 24 August 2026 on the owner's own report - The Eternal
+# Supreme chapter 550, lavascans.com. Seven pages; the first is
+# **5,007,791 bytes** (800x17103), 7,791 bytes over the cap, and the
+# other six are 1.6-2.5MB. So the saved chapter was six pages long and
+# started on page two. That is his "ch 550 was not fetched correctly,
+# look at the size!!!".
+#
+# One number in one place now, because two copies is how the downloader
+# came to be missing the fix the reader already had.
+MAX_IMAGE_BYTES = 16_000_000
+
 # Small on purpose: read1() returns whatever has arrived rather than
 # waiting to fill the buffer, which is what lets the deadline below be
 # checked while a slow sender is still dribbling.

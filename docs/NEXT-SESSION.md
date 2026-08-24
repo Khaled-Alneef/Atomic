@@ -612,3 +612,189 @@ average rate. Three consequences, all of which cost time to learn:
   * Percent-based scrolling (Intent to Ship) - groups.google.com/a/chromium.org/g/blink-dev/c/5Mt8RZyf-pc
   * Qt paintEvent / update guidance - pythonguis.com/faq/creating-a-new-widget-very-heavy-paintevent/
   * Refresh rates and frame pacing - digitechbytes.com/tech-basics-evergreen-fundamentals/refresh-rate-frame-pacing-basics/
+
+---
+
+# 24 August 2026, overnight - the display clock was not a clock
+
+Five asks, worked in named phases. The one that matters to everything
+else is the first.
+
+## The finding: `WaitForVBlank` returns S_OK in 0.6 microseconds here
+
+`widgets._VBlankTicker` drives **every** scrolling surface in the app -
+`_Momentum` (so every `scroll_area`, Home, the Discover rows, the
+reader strip) and `PosterGrid` alike. It waited on
+`IDXGIOutput::WaitForVBlank` and treated a zero return as proof of a
+refresh. Measured on the owner's machine (2560x1440, **240Hz**):
+
+    IDXGIOutput::WaitForVBlank   2000 calls in 1.2ms = 1,677,149/s, all S_OK
+    DwmFlush                      240 calls in 999.4ms = 240.1/s
+
+So on this hardware the "vblank ticker" was a spin loop posting queued
+signals into the UI thread as fast as a core could produce them, and
+because it never returned an error, `failed` stayed False and the
+millisecond-timer fallback was never reached. **This was not a
+regression in the motion model - the motion model is fine. It was the
+clock underneath it.**
+
+Fixed by *timing* each candidate before trusting it
+(`_VBlankTicker._plausible`), with DwmFlush preferred and DXGI kept as
+the fallback. The ticker now measures 239 ticks in a second.
+
+Measured on the real pages, real window, seeded 240-title library,
+position sampled once per compositor present, wheel driven at a fixed
+20 notches/s. "Before" is the same build with `ATOMIC_VBLANK_TRUST=1`:
+
+| surface | before | after |
+|---|---|---|
+| Watch categories (PosterGrid) | 104.9 fps, 56.3% dead, x2.22 | **221.8, 7.6%, x1.20** |
+| Saved grid (240 widget cards) | 148.6 fps, 38.1% dead, x2.00 | **207.9, 13.4%, x1.50** |
+| Home | 194.0 fps, 19.2% dead, x2.00 | **230.8, 3.8%, x1.33** |
+
+Three runs each way on the category grid, all consistent
+(159.7/33.4%, 104.9/56.3%, 161.2/32.8% against 225.0/6.3%, 224.2/6.6%,
+221.8/7.6%, 220.1/8.3%).
+
+**Two measurement switches now exist and are worth knowing about:**
+`ATOMIC_VBLANK_CLOCK=dwm|dxgi` picks which candidate is tried first and
+`ATOMIC_VBLANK_TRUST=1` skips the plausibility check - the only way to
+reproduce the old fault, and therefore the only way to A/B a fix for
+it. `ATOMIC_NO_VBLANK=1` still forces the timer path.
+
+**The millisecond timer measured *better* still and is deliberately not
+what ships:** 236.0 fps, 1.7% dead, x1.25 on the same surface. It wins
+because it schedules the paint before the boundary rather than reacting
+after one. Its worst case is a cliff rather than a slope (this file
+records 65.2 steps/s and 72.9% dead on one run in three, from Windows
+quantising a 0-4ms request to ~13.9ms), and a clock that cannot be
+quantised is worth eleven frames a second. Also measured, and contrary
+to what the constant's own docstring says: `startup.allow_precise_timers()`
+**returns False on this machine**, yet a 4ms Qt PreciseTimer fires at
+4.003ms median / 4.122 p95 anyway. Do not read that failure as the
+cause of anything without re-measuring.
+
+## Two traps in the instrument, both paid for here
+
+* **The handover's own harness does not work on this machine.** It
+  describes a DXGI vblank thread; that is the exact call that lies here.
+  The rebuilt harness (`vsync.py` in the session scratchpad) uses
+  DwmFlush and validates at 240.0Hz to four figures.
+* **Wrapping `paintEvent` on every class in `sys.modules` crashes the
+  process** (exit 127, no traceback) as soon as a widget-built page
+  scrolls. Restricting the wrap to classes whose `__module__` starts
+  with `windows`/`helpers` fixes it. Worth knowing before writing the
+  same counter again.
+
+## Still open on scrolling, and measured rather than guessed
+
+The widget-card grids remain the worst surface (13.4% dead against
+PosterGrid's 7.6%). Instrumented, the Saved grid pays **19
+`ContinueCover` paints per refresh, 4,149/s** - each one repainting its
+whole 216px cover rather than the exposed strip. The page behind it
+does *not* repaint per frame (`GlassPage`, 26 paints in 2.5s), so the
+opaque-ground fix is holding; the cost is in the cards themselves.
+`PosterGrid` already exists as the virtualized answer and the Saved tab
+does not use it. Not attempted tonight - it is a real rewrite of the
+hover tooltip, the continue button and the selection badges, and the
+dominant fault was elsewhere.
+
+Also worth recording: the owner's library **on this machine** is 8
+titles and 0 series, so every saved-grid measurement without a seeded
+library measures the clamp, not the motion - the same trap this file
+already records for Home.
+
+---
+
+# The other four asks
+
+## Cover art on a fresh install (the friend's report)
+
+*"the images of all read/watch did not load except in the schedule
+page, he did add his TMDB key"*.
+
+Reproduced by naming the hosts rather than guessing: every Watch
+Discover row's art comes from **one** host, `images.metahub.space` (35
+of 36 rows across anime/series/movie), while the Watch schedule's comes
+from `s4.anilist.co`. A machine that cannot reach that one host loses
+every cover on the page and keeps the schedule's - exactly the shape of
+the report. Driven on the real page with a cold `DATA_DIR` and that
+host blackholed:
+
+    host reachable                    90 cards, 90 covers
+    host unreachable, before          90 cards,  0 covers
+    host unreachable, after           90 cards, 90 covers
+
+`cover_fetch.resolve` is the single answer now - the row's own URL, a
+retry, then a catalogue that does not share a host with it (TMDB by
+IMDb id for video, MangaDex/AniList by strict title for reading). Every
+surface that draws a cover goes through it: Discover, Saved, Home,
+Schedule, History.
+
+**Not confirmed:** that this *is* what the friend hit. It could not be -
+his machine was not available and the app logs nothing about a failed
+cover. What is confirmed is that the failure mode existed, was
+reachable, and is now covered. If it recurs, the next thing to add is a
+log line naming the host that refused.
+
+## Sourcing speed, on Attack on Titan
+
+Split before touching anything (S01E05, the owner's own addon list):
+
+    first partial       0.65-0.71s     53 rows
+    find_streams total  1.97-4.16s     79 rows
+    prepare_fastest     3.1-9.5s       to a playable url
+
+Per stage: Torrentio 0.63s/59 rows, Torrentio Anime 0.71-2.32s/50,
+indexers 0.38-0.42s/16, WatchHub 0.42-2.44s/**0 rows**, TorrentsDB
+0.29s/0, and `arc_map_soon` **1.21s** on a cold franchise (nothing on a
+warm one - the details page prewarms it).
+
+**Two plans were killed by measurement and should not be re-proposed
+without new evidence.** Both were A/B'd on one fixed candidate list,
+interleaved with controls:
+
+* *A seeder floor inside the Arabic tier.* The ranking does put an
+  83-seeder release above an 836-seeder one, and that looks
+  indefensible - but racing the big swarms first measured **worse**:
+  8.1s and 8.1s to nothing, against controls of 5.2s, 9.5s, 3.1s, 3.1s
+  that all found a url.
+* *A wider race* (`RACE_WIDTH` 8 -> 14): 4.5s and 11.3s, inside the
+  control's own spread.
+
+The variance between two runs of the *same* config (3.1s vs 9.5s) is
+larger than any difference between configs. Do not tune race constants
+on fewer than a dozen runs.
+
+**What landed instead is deterministic**: the details page warms
+`find_streams` for the episode Continue would play, 700ms after it
+opens, on a background thread (`details._prefetch_sources`). Measured
+on the real page, same title, same 79 rows: **press-to-sources 4850ms
+-> 0ms.** It deliberately does not warm the torrent race - that would
+mean joining swarms for something nobody has pressed.
+
+## Statistics while the video plays
+
+The panel held the swarm and nothing else, so an episode on a direct
+URL opened it to one sentence about there being no peers. It now has
+two groups, and the second reads mpv's own properties: resolution, fps,
+video/audio format, hwdec, bitrate, dropped-and-late frames, buffer
+seconds. Verified on the real player over a real torrent of Attack on
+Titan S01E05:
+
+    Source    Peers 7   Speed 2.55 MB/s   Completed 24.00 %
+    Playback  1920x1080   24.0   hevc   aac   d3d11va   3.7 s buffer
+              Dropped 0 (0 late)
+
+`video-format` rather than `video-codec` - the latter renders as
+"H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10" in a column a few dozen
+pixels wide, measured on that same run.
+
+## Sidebar icons
+
+`RAIL_ICON_SIZE` 20 -> **26**. 20 x 1.28 = 25.6, and 26 is exactly the
+delegate ceiling this file already derives (folded row 32px, margin 3,
+32 - 2*3 = 26) - the largest size that keeps a folded icon centred.
+Verified in the frozen exe (26 present in `main`'s consts, 20 absent)
+and by ink measurement on a screenshot of the running app: the tall
+glyphs measure 24-26px.

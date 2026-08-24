@@ -8,6 +8,7 @@ a Qt widget.
 
 import os
 import io
+import math
 import time
 import hashlib
 import sys
@@ -24,6 +25,126 @@ from . import icon_extract, net, storage, theme
 
 CACHE_DIR = storage.DATA_DIR / "image_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# **Chapter pages live in their own folder, and the reason is a
+# launch-time pass that was destroying them.** `shrink_existing` runs at
+# every startup and re-encodes anything in CACHE_DIR over
+# SHRINK_MIN_BYTES down to the *cover* bounds - PORTRAIT_MAX_H is 1200,
+# sized for poster art. The reader cached its pages in the same
+# directory, and a webtoon page is one 800 x 17000 image: the next
+# launch quietly re-encoded it to **56 x 1200**, which is the owner's
+# "ch 550 in the Eternal Supreme still has the ch loading size issue"
+# (measured on the real ReaderPage: every slot 56-71 x 1200 against
+# sources of 800 x 13000-17000). Kingdom's mixed page widths were the
+# same pass - a 1325x1900 scan shrunk to 838x1200 beside a 2760x1917
+# spread the landscape bound left alone.
+#
+# `shrink_existing` and `trim_cache` scan with a non-recursive
+# os.scandir, so a subdirectory is outside the shrinker by construction;
+# PAGES_DIR is added to trim_cache's roots explicitly, because pages
+# must still age out - deleting one only costs a re-download, where
+# re-encoding one costs the artwork.
+PAGES_DIR = CACHE_DIR / "pages"
+
+
+def page_path_for_url(url: str):
+    """Where a chapter page image for `url` is cached - like
+    cache_path_for_url, but under PAGES_DIR so the cover-sized shrink
+    passes never touch it."""
+    PAGES_DIR.mkdir(parents=True, exist_ok=True)
+    return PAGES_DIR / cache_path_for_url(url).name
+
+# **Every tile is cut at device pixels, not logical ones.** Measured 24
+# August 2026 on the owner's new panel (LG 27GS950, 2560x1440 at 125%,
+# so DPR 1.25): `thumbnail_or_avatar` cut a 160x216 pixmap, left it
+# tagged DPR 1, and every surface drew it into a 160x216 *logical* box -
+# which Qt then blew up to 200x270 device pixels with a plain stretch.
+# That is the owner's "why do the cover images seems pixels???", and it
+# was invisible on the old 1920x1080 at 100% because there the two sizes
+# are the same number.
+#
+# **The ratio follows the screen the window is actually on - not the
+# sharpest screen attached.** The first version took the max across all
+# screens, on the reasoning that over-cutting only costs a downscale,
+# "which is sharp". It is not: the surfaces draw these pixmaps through
+# painters with no SmoothPixmapTransform hint, so a 1.25-tagged tile on
+# the 1.0 monitor was scaled 0.8x nearest-neighbour on every draw. That
+# is the owner's very next report, same day: "the text and the images
+# seems pixeled, when using 1080P monitor, but they look good when
+# using 2K monitor" - good exactly where the tag matched the screen,
+# crunchy exactly where it did not.
+#
+# So main.py sets this to the main window's own ratio at startup and
+# again whenever the window changes screens (`set_device_ratio`), and
+# pages - which rebuild from scratch on every visit - cut their tiles
+# for the monitor they are being read on. The tile caches key on the
+# ratio, so both monitors' variants coexist on disk; a page dragged
+# across mid-life is soft until its next rebuild, which is the cost of
+# not keeping two copies of every pixmap live.
+#
+# Cached, because it is read on worker threads (cover_fetch) where
+# walking QGuiApplication's screen list does not belong.
+_ratio = None
+# Rounded up to this step so an odd scale factor does not give the tile
+# cache its own private size. 0.25 rather than 0.5 because 1.25 is the
+# single most common Windows setting and is this machine's: at 0.5 it
+# rounded up to 1.5 and every tile was cut 44% larger than the screen
+# could show, which is memory spent on a downscale nobody sees. Every
+# Windows preset - 100/125/150/175/200% - lands on this step exactly.
+_RATIO_STEP = 0.25
+_RATIO_MAX = 2.0
+
+
+def set_device_ratio(value) -> float:
+    """Adopt the main window's devicePixelRatio - see the note above for
+    why this follows the window rather than the sharpest screen. Called
+    by main.py at startup and on every screen change; never raises."""
+    global _ratio
+    try:
+        stepped = math.ceil(max(1.0, float(value)) / _RATIO_STEP) * _RATIO_STEP
+        _ratio = min(_RATIO_MAX, stepped)
+    except (TypeError, ValueError):
+        _ratio = 1.0
+    return _ratio
+
+
+def device_ratio() -> float:
+    """The devicePixelRatio every cut tile is sized for - see above.
+
+    Before main.py has adopted the window's ratio this answers from the
+    primary screen without caching, so a page built very early is still
+    close and the adopted value wins the moment it exists. Never raises:
+    with no QGuiApplication at all it answers 1.0."""
+    if _ratio is not None:
+        return _ratio
+    try:
+        from PyQt6.QtGui import QGuiApplication
+        app = QGuiApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        if screen is None:
+            return 1.0
+        stepped = math.ceil(max(1.0, screen.devicePixelRatio())
+                            / _RATIO_STEP) * _RATIO_STEP
+        return min(_RATIO_MAX, stepped)
+    except Exception:
+        return 1.0
+
+
+def tile_size(size):
+    """`size` in the device pixels a tile for it must actually hold."""
+    ratio = device_ratio()
+    return (max(1, int(round(size[0] * ratio))),
+            max(1, int(round(size[1] * ratio))))
+
+
+def warm(path, size):
+    """Decode and cache the tile for `path` at logical `size`, off the
+    UI thread. The one place background prefetchers should call, so a
+    prewarmed tile is cut at the same device size the UI will ask for -
+    a mismatch means the decode is simply paid again on the UI thread."""
+    ratio = device_ratio()
+    return _fitted(str(path), tile_size(size), _stamp(str(path)),
+                   radius=_corner_radius(size) * ratio)
 
 
 def _asset_dir() -> Path:
@@ -66,13 +187,20 @@ def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixma
     source = QPixmap(str(_asset_dir() / name))
     if source.isNull():
         return source  # missing asset: an empty icon, not a crash
-    scaled = source.scaledToHeight(max(1, int(height * dpr)),
+    device_h = max(1, round(height * dpr))
+    scaled = source.scaledToHeight(device_h,
                                    Qt.TransformationMode.SmoothTransformation)
     painter = QPainter(scaled)
     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
     painter.fillRect(scaled.rect(), QColor(color))
     painter.end()
-    scaled.setDevicePixelRatio(dpr)
+    # Tagged with the ratio the cut actually landed on, not the ratio
+    # asked for: at dpr 1.25 a 39px icon is 48.75 device pixels, which
+    # rounds to 48 - tagging that 1.25 makes its logical height 38.4,
+    # and Qt then rescales it a fraction on every draw, which is the
+    # soft edge the owner reported as sidebar quality. height/logical
+    # integral by construction means the draw is a 1:1 blit.
+    scaled.setDevicePixelRatio(device_h / float(height))
     _tinted[key] = scaled
     return scaled
 
@@ -257,7 +385,13 @@ def trim_cache(limit: int = CACHE_LIMIT_BYTES, budget_s: float = 8.0) -> int:
     started = time.monotonic()
     freed = 0
     try:
-        roots = [CACHE_DIR, _TILE_DIR, storage.DATA_DIR / "logo_cache"]
+        # **logo_cache is deliberately NOT trimmed.** It holds one logo
+        # and one backdrop per watched title - bounded by the library,
+        # a few MB each - and trimming it is how Bleach TYBW's loading
+        # screen lost its logo (24 August 2026): the evicted files'
+        # refetch failed once and wrote permanent miss markers. The big
+        # caches are the ones that grow without bound.
+        roots = [CACHE_DIR, PAGES_DIR, _TILE_DIR]
         rows = []
         for root in roots:
             if not root.is_dir():
@@ -389,11 +523,18 @@ def _corner_radius(size) -> int:
     """The clip radius for a thumbnail at `size`: theme.RADIUS on
     poster-sized art, proportionally tighter on small icons - a 28px
     quick-list icon under the full 12px radius is most of the way to a
-    circle, which is not "rounded corners" any more."""
+    circle, which is not "rounded corners" any more.
+
+    **Takes the logical size.** A tile is cut at `size x device_ratio()`
+    now, so passing the device size here would answer theme.RADIUS in
+    device pixels - a visibly tighter corner on a 125% display than on a
+    100% one. Callers scale the result instead (see `warm` and
+    `thumbnail_or_avatar`), which keeps the corner the same *on screen*
+    at every ratio."""
     return max(2, min(theme.RADIUS, min(size) // 4))
 
 
-def _round_corners(img):
+def _round_corners(img, radius=None):
     """Clip `img` to the app's rounded-corner tile shape, in place on a
     copy's alpha channel.
 
@@ -405,19 +546,21 @@ def _round_corners(img):
     a visible staircase against the near-black ground. Multiplied into
     the existing alpha rather than replacing it, so art that already
     carries transparency keeps it."""
+    if radius is None:
+        radius = _corner_radius(img.size)
     scale = 4
     mask = Image.new("L", (img.width * scale, img.height * scale), 0)
     draw = ImageDraw.Draw(mask)
     draw.rounded_rectangle(
         (0, 0, img.width * scale - 1, img.height * scale - 1),
-        radius=_corner_radius(img.size) * scale, fill=255)
+        radius=int(round(radius)) * scale, fill=255)
     mask = mask.resize(img.size, Image.LANCZOS)
     rounded = img.copy()
     rounded.putalpha(ImageChops.multiply(img.getchannel("A"), mask))
     return rounded
 
 
-def blank_tile(size=(64, 64)):
+def blank_tile(size=(64, 64), radius=None):
     """An empty flat tile in the thumbnails' own rounded shape - the
     fallback whenever no real image/icon/cover is available. It replaced
     the coloured first-letter avatar at the owner's ask ("completely
@@ -427,7 +570,7 @@ def blank_tile(size=(64, 64)):
     color = theme.SURFACE_HOVER.lstrip("#")
     rgb = tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
     img = Image.new("RGBA", size, rgb + (255,))
-    return _round_corners(img)
+    return _round_corners(img, radius)
 
 
 def to_pixmap(img: Image.Image) -> QPixmap:
@@ -500,8 +643,11 @@ _TILE_DIR = CACHE_DIR / "tiles"
 _TILE_MAX = 1500
 
 
-def _tile_path(path, size, stamp):
-    key = f"{path}|{stamp}|{size[0]}x{size[1]}"
+def _tile_path(path, size, stamp, radius):
+    # The radius is part of the key: the same pixel size can be asked
+    # for with a different corner (see _corner_radius' note on device
+    # ratios), and a tile is stored with its corners already clipped.
+    key = f"{path}|{stamp}|{size[0]}x{size[1]}|r{int(round(radius))}"
     digest = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()
     return _TILE_DIR / f"{digest}.png"
 
@@ -521,7 +667,7 @@ def _prune_tiles():
             pass
 
 
-def _fitted(path, size, stamp):
+def _fitted(path, size, stamp, radius=None):
     """The decoded, resized PIL image for `path`, cached - with the
     corners already clipped (see _round_corners), so the rounding is
     paid once per decode and the cache holds the finished tile.
@@ -530,11 +676,13 @@ def _fitted(path, size, stamp):
     (see _TILE_DIR), then an actual decode. Safe to call from a
     background thread - it touches no Qt types, and a torn or
     half-written tile file is treated as a miss rather than an error."""
-    key = (str(path), stamp, size)
+    if radius is None:
+        radius = _corner_radius(size)
+    key = (str(path), stamp, size, int(round(radius)))
     if key in _FITTED:
         return _FITTED[key]
 
-    tile = _tile_path(path, size, stamp)
+    tile = _tile_path(path, size, stamp, radius)
     img = None
     try:
         if tile.is_file():
@@ -572,7 +720,7 @@ def _fitted(path, size, stamp):
             # above would have succeeded.
             return None
         if img is not None:
-            img = _round_corners(img)
+            img = _round_corners(img, radius)
             try:
                 _TILE_DIR.mkdir(parents=True, exist_ok=True)
                 # Written beside the target and moved into place, so a
@@ -605,7 +753,7 @@ def prewarm(specs):
             if not path:
                 continue
             try:
-                _fitted(path, tuple(size), _stamp(path))
+                warm(path, tuple(size))
             except Exception:
                 continue
         # Once per launch, off the UI thread, after the tiles that
@@ -622,19 +770,29 @@ def thumbnail_or_avatar(path, label_text, size=(64, 64)) -> QPixmap:
     signature stay so no caller changes.
 
     Cached - QPixmap is implicitly shared, so handing the same one to
-    several widgets copies a handle, not the pixels."""
+    several widgets copies a handle, not the pixels.
+
+    **`size` is logical.** The tile is cut at `size x device_ratio()`
+    and the returned pixmap carries that ratio, so every caller that
+    draws it into a `size`-shaped box - a QLabel at setFixedSize, a
+    drawPixmap in poster_grid - gets it at full device resolution
+    instead of a 1.25x stretch. See the note beside `device_ratio`."""
     size = tuple(size)
+    ratio = device_ratio()
+    cut = tile_size(size)
+    radius = _corner_radius(size) * ratio
     stamp = _stamp(path) if path else None
-    key = (str(path) if path else None, stamp, size)
+    key = (str(path) if path else None, stamp, size, ratio)
     cached = _PIXMAP.get(key)
     if cached is not None:
         return cached
 
-    img = _fitted(path, size, stamp) if path else None
+    img = _fitted(path, cut, stamp, radius=radius) if path else None
     failed = path and img is None
     if img is None:
-        img = blank_tile(size)
+        img = blank_tile(cut, radius)
     pixmap = to_pixmap(img)
+    pixmap.setDevicePixelRatio(ratio)
     if failed:
         # A path that was given and would not decode is a *transient*
         # failure by the time it gets here - _fitted has just deleted

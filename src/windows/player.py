@@ -252,7 +252,17 @@ SUB_POS_OFFSET_MIN, SUB_POS_OFFSET_MAX, SUB_POS_OFFSET_STEP = -60, 10, 2
 # openings.
 _CHAPTER_OPENING = ("opening", "op", "intro", "titles", "title", "theme")
 _CHAPTER_ENDING = ("ending", "ed", "outro", "credits", "closing")
-_CHAPTER_RECAP = ("recap", "previously", "prologue")
+# **"prologue" is gone, 24 August 2026 - the third time this exact
+# mistake has been paid for.** "teaser" and then "avant" were removed
+# for the same reason and it is the same reason again: a prologue is the
+# cold open, which is the *story*, not a summary of an earlier episode.
+# BD and fansub releases chapter it Prologue / OP / Part A / Part B / ED,
+# so with the word here the first chapter of an episode classified as a
+# recap and the button said "Skip Recap" over the opening scene. That is
+# the owner's "I tested it in AOT 1st ep 1st season and it was showing
+# skip recap while it was not a recap". The general rule this keeps
+# proving: only words that mean *previously-seen footage* belong here.
+_CHAPTER_RECAP = ("recap", "previously")
 # A chapter marker is only believed as an opening if it starts within
 # this much of the episode - a "Part 2" chapter at 15 minutes is not an
 # opening however it is named. Measured 22 August 2026 over 18 real
@@ -278,6 +288,17 @@ CHAPTER_OPENING_WINDOW_S = 600.0
 # skiptimes.MAX_SPAN_S, comfortably above the longest measured.
 CHAPTER_SPAN_MIN_S = 30.0
 CHAPTER_SPAN_MAX_S = 150.0
+# **A recap is bounded too now.** It used to be exempt from the span
+# check entirely, on the reasoning that recaps genuinely vary
+# (measured 17.4-90.0s) and that landing on the opening is harmless.
+# What that exemption actually allowed is the failure above: a first
+# chapter running to the first act break - LOST S06E01's is 0.00 ->
+# 434.06s, measured - classified as a recap and offering to throw the
+# viewer seven minutes in. The floor is lower than an opening's because
+# a real "previously on" can be under half a minute; the ceiling is
+# skiptimes.MAX_SPAN_S like everything else.
+CHAPTER_RECAP_SPAN_MIN_S = 8.0
+CHAPTER_RECAP_SPAN_MAX_S = 150.0
 # Below this, a chapter's claim to be the opening loses to AniSkip's -
 # see _on_skips. Deliberately near zero rather than at the measured
 # minimum start of 27.4s: this only decides which of two sources to
@@ -288,6 +309,11 @@ CHAPTER_OPENING_MIN_START_S = 5.0
 # The button sits above the controls bar, right-aligned - out of the
 # subtitles' way and where a remote's "skip" lives on every streaming
 # app. Hidden the instant playback leaves the interval.
+# How tall the Subtitles panel's two scrolling columns are - enough for
+# ~7 rows; the settings column beside them is three steppers and sets
+# the panel's natural height.
+SUBS_PANEL_COLUMN_H = 380
+
 SKIP_BUTTON_SIZE = (168, 44)
 SKIP_BUTTON_MARGIN = 28
 # How long before the end of the file "Next Episode" appears even with no
@@ -372,7 +398,37 @@ BAR_ALPHA = 180
 # background was colour-keyed to nothing); that ended when the key
 # failed on the owner's display and rendered as black boxes around the
 # title and buttons - see _build_top_bar.
-CONTROLS_VEIL_ALPHA = 130
+# **255 - the bars are opaque now.** They carried a 130/255 DWM veil so
+# the picture read through them as glass, and the veil dims *everything*
+# in the window uniformly: a native child window has one alpha for all
+# its pixels (per-pixel alpha is not available to a child; the colour-key
+# route was tried and abandoned - see _hard_edge_font), so the buttons,
+# the glyphs and the time labels were all at half strength. That is the
+# owner's "make the player UI buttons not transparent, only make the
+# frame behind them as is (Like stremio)". The glass look is kept by
+# painting the *frame* pre-blended instead (_bar_style): the fill is
+# darkened by the same 130/255 the veil used to apply, so over the
+# letterbox black the bars sit on the frame reads as it always did,
+# while everything drawn on it is at full strength - which is exactly
+# what Stremio's bar is.
+# **230 - "a bit transparent", the owner's own words on seeing 255.**
+# The full history in one line each: 130 made every button and label
+# half-strength (uniform DWM alpha dims the whole native window, and
+# per-pixel alpha is not available to a child window); 255 made the
+# buttons right and the frame a slab he then asked to see through
+# again. 230 is the split: buttons at ~90% read as solid, the frame
+# genuinely shows the picture behind it. The fill colours went back to
+# the theme's own the moment the heavy veil left - the pre-darkening
+# existed only to fake 130 on an opaque window.
+# 200, down from 230 - the owner on the 230 build: "the ui looks
+# perfect ... make JUST the frame a bit more transparent". Buttons at
+# ~78% still read solid on the near-black fill; below ~180 they start
+# going grey again, which is where this journey began.
+CONTROLS_VEIL_ALPHA = 200
+# What the panels' scroll viewport paints as its ground - matched to
+# the bar gradient's body so rows scroll over a solid, blit-friendly
+# fill instead of transparency (see OverlayPanel).
+_VEIL_FACTOR = 200 / 255
 
 _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
@@ -494,6 +550,12 @@ ICON_EMBEDDED = "\ue9d9"    # Audio wave - the owner asked for a
 # The globe, for the settings button - the owner's ask. E774 is the
 # same glyph the reader's open-in-browser button carries.
 ICON_SETTINGS_GLOBE = "\ue774"
+
+# WiFi bars - the owner asked for this button by its icon (24 August
+# 2026, with a screenshot of the numbers it should open). An escape
+# rather than the bare character, for the reason every glyph in this
+# file is one: a re-encoding tool turns them into mojibake.
+ICON_STATS = "\ue701"
 
 # Two buttons came off the control bar at the owner's request and their
 # glyphs went with them: the globe (E774), which opened a little menu of
@@ -1001,6 +1063,9 @@ def _icon_button(glyph, tooltip, size=44, font_pt=16):
     button.setObjectName("Flat")
     button.setToolTip(tooltip)
     button.setFixedSize(size, size)
+    # Every clickable shows the hand - the owner's ask, 24 August 2026,
+    # and this factory is where most of the player's buttons come from.
+    use_hover_cursor(button)
     button.setStyleSheet(
         # padding:0 - the app-wide QPushButton rule is `padding: 8px 16px`,
         # which on a fixed 44px button leaves 12px of content width for a
@@ -1106,14 +1171,22 @@ def _radius_css(radius=BAR_RADIUS, square=()):
                    for key in ("tl", "tr", "bl", "br"))
 
 
-def _bar_style():
-    """The fill behind a translucent bar (top, controls, side panel).
+def _dimmed(color: str, factor: float) -> str:
+    """`color` scaled toward black by `factor` - what that colour looked
+    like on screen under the old uniform veil, baked into the paint."""
+    raw = str(color).lstrip("#")
+    r, g, b = (int(raw[i:i + 2], 16) for i in (0, 2, 4))
+    return "#{:02x}{:02x}{:02x}".format(
+        int(r * factor), int(g * factor), int(b * factor))
 
-    A top-lit gradient rather than a flat fill, and anchored near-black
-    rather than at SURFACE: under the ~70% alpha the bars now carry, a
-    mid-tone fill washed white text out over a bright frame, while a dark
-    scrim holds the contrast (see BAR_ALPHA). The faint lift at the top
-    edge is the "glass" - a sheen catching light along the bar's lip."""
+
+def _bar_style():
+    """The fill behind a bar (top, controls, side panel).
+
+    A top-lit gradient rather than a flat fill, anchored near-black so
+    white text holds its contrast under the bars' light veil
+    (CONTROLS_VEIL_ALPHA). The faint lift at the top edge is the
+    "glass" - a sheen catching light along the bar's lip."""
     return (f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
             f" stop:0 {theme.SURFACE}, stop:0.5 {theme.BG}, stop:1 {theme.BG})")
 
@@ -1255,18 +1328,30 @@ class StartupBackdrop(QWidget):
         painter.fillRect(rect, QColor(theme.BG))
         if (self._pixmap is not None and not self._stall
                 and rect.width() > 0 and rect.height() > 0):
-            if self._scaled is None or self._scaled_size != rect.size():
+            # **Cut at devicePixelRatio and tagged.** It used to scale to
+            # rect.size(), which is *logical*, and Qt then stretched the
+            # result up to the device surface - the owner's "the bg image
+            # while loading the ep ... is pixeled a bit", seen on his
+            # 2560x1440 panel at 125% (DPR 1.25), where a 2048-wide cut
+            # was being blown up to 2560. The source is a 3840x2160 TMDB
+            # original, so the sharp cut costs nothing but the scale.
+            ratio = self.devicePixelRatioF() or 1.0
+            if self._scaled is None or self._scaled_size != (rect.size(), ratio):
                 # Cover, not fit: a 16:9 still in a 21:9 window would
                 # otherwise leave two black columns beside it, which
                 # reads as a broken image rather than as a backdrop.
                 self._scaled = self._pixmap.scaled(
-                    rect.size(),
+                    max(1, int(rect.width() * ratio)),
+                    max(1, int(rect.height() * ratio)),
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation)
-                self._scaled_size = rect.size()
+                self._scaled.setDevicePixelRatio(ratio)
+                self._scaled_size = (rect.size(), ratio)
             scaled = self._scaled
-            painter.drawPixmap(int((rect.width() - scaled.width()) / 2),
-                               int((rect.height() - scaled.height()) / 2),
+            # Centred on the pixmap's *logical* size - width()/height()
+            # are device pixels once it carries a ratio.
+            painter.drawPixmap(int((rect.width() - scaled.width() / ratio) / 2),
+                               int((rect.height() - scaled.height() / ratio) / 2),
                                scaled)
             gradient = QLinearGradient(0.0, 0.0, 0.0, float(rect.height()))
             for stop, red, green, blue, alpha in self.SCRIM:
@@ -1563,7 +1648,18 @@ class OverlayPanel(QFrame):
         self.body_layout.setSpacing(6)
         self.area = scroll_area(self.body)
         self.area.setStyleSheet("background: transparent; border: none;")
-        self.area.viewport().setStyleSheet("background: transparent;")
+        # **A solid viewport, not a transparent one.** With the viewport
+        # transparent, a scroll cannot blit: every tick repaints the
+        # whole ancestor stack under every row - inside a native child
+        # window that is already competing with mpv for present slots,
+        # which is the owner's "the windows in the video player like
+        # subtitles still has the low fps while scrolling". A solid
+        # ground lets QScrollArea move the backing store and repaint
+        # only the uncovered band. The colour is the bar gradient's own
+        # body, darkened to where the gradient sits mid-panel, so rows
+        # scroll over what looks like the same glass.
+        self.area.viewport().setStyleSheet(
+            f"background: {_dimmed(theme.BG, _VEIL_FACTOR)};")
         outer.addWidget(self.area, stretch=1)
 
         # Vertical: the footer holds full-width stepper rows now, and two
@@ -1653,15 +1749,23 @@ class OverlayPanel(QFrame):
             # not left scrolled somewhere arbitrary.
             QTimer.singleShot(250, lambda: (_restore(), _finish()))
 
-    def add_group(self, name):
+    def add_group(self, name, into=None):
         label = QLabel(name)
         label.setStyleSheet(
             f"color: {theme.TEXT_MUTED}; font-size: 10pt; font-weight: 700;"
             f" background: transparent; border: none; padding-top: 4px;")
-        self.body_layout.addWidget(label)
+        # `is None`, never truthiness: PyQt layouts implement __len__ as
+        # count(), so an **empty column is falsy** - `(into or default)`
+        # sent the first widget of every fresh column to the default
+        # layout instead. That one expression is the whole of the
+        # owner's "the subtitles window is missed up" screenshot: the
+        # three group headers stacked in the body and all three steppers
+        # in the footer, while the rows (added through the `is not None`
+        # branch below) sat in their columns.
+        (self.body_layout if into is None else into).addWidget(label)
 
     def add_row(self, title, subtitle, on_click, selected=False, chevron=False,
-                index=None):
+                index=None, into=None, dot=False):
         card = Card(matte=True)
 
         # Rows are borderless at rest now (the Harbor pass); the border
@@ -1723,6 +1827,17 @@ class OverlayPanel(QFrame):
                 f" background: transparent; border: none;")
             column.addWidget(sub)
         outer.addLayout(column, stretch=1)
+        if dot:
+            # The small disc Stremio puts on the active language and the
+            # active variant - state, where the ring is the browse
+            # position. ACCENT rather than Stremio's green: the dot has
+            # to be this app's own accent, not another product's.
+            mark = QLabel()
+            mark.setFixedSize(10, 10)
+            mark.setStyleSheet(
+                f"background: {theme.ACCENT}; border: none;"
+                f" border-radius: 5px;")
+            outer.addWidget(mark, alignment=Qt.AlignmentFlag.AlignVCenter)
         if chevron:
             arrow = QLabel(GLYPH_CHEVRON)
             arrow.setStyleSheet(
@@ -1730,7 +1845,9 @@ class OverlayPanel(QFrame):
                 f" background: transparent; border: none;")
             outer.addWidget(arrow, alignment=Qt.AlignmentFlag.AlignVCenter)
         card.clicked.connect(on_click)
-        if index is None:
+        if into is not None:
+            into.addWidget(card)
+        elif index is None:
             self.body_layout.addWidget(card)
         else:
             # For callers keeping a live panel in step with changing data
@@ -1740,16 +1857,40 @@ class OverlayPanel(QFrame):
             self.body_layout.insertWidget(index, card)
         return card
 
-    def add_message(self, text):
+    def add_message(self, text, into=None):
         label = QLabel(text)
         label.setWordWrap(True)
         label.setStyleSheet(
             f"color: {theme.TEXT_MUTED}; font-size: 11pt;"
             f" background: transparent; border: none;")
-        self.body_layout.addWidget(label)
+        (self.body_layout if into is None else into).addWidget(label)
         return label
 
-    def add_stepper(self, name, value_text, on_left, on_right, step_text=""):
+    def add_stat(self, name, value_text, into=None):
+        """One "Peers 17" pair - the label small and muted above nothing,
+        the value beside it in the reading weight. The shape the owner
+        sketched for the connection panel: three of these on one row,
+        no boxes and no chrome around them."""
+        block = QWidget()
+        block.setStyleSheet("background: transparent; border: none;")
+        row = QHBoxLayout(block)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        title = QLabel(name)
+        title.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 10.5pt;"
+            f" background: transparent; border: none;")
+        row.addWidget(title)
+        value = QLabel(value_text)
+        value.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 700;"
+            f" background: transparent; border: none;")
+        row.addWidget(value)
+        (self.body_layout if into is None else into).addWidget(block)
+        return value.setText
+
+    def add_stepper(self, name, value_text, on_left, on_right, step_text="",
+                    into=None):
         """A stepper as the owner sketched it: the name small above, then
         a full-width row of − button, the value centred between them,
         + button.
@@ -1804,7 +1945,9 @@ class OverlayPanel(QFrame):
         row.addWidget(plus)
         column.addLayout(row)
 
-        self.footer_layout.addWidget(block)
+        # `is None`, not truthiness - an empty QVBoxLayout is falsy (see
+        # add_group).
+        (self.footer_layout if into is None else into).addWidget(block)
         return value.setText
 
     @staticmethod
@@ -1816,6 +1959,7 @@ class OverlayPanel(QFrame):
         36px disc; the smaller font is for the same reason."""
         button = QPushButton(glyph)
         button.setToolTip(tooltip)
+        use_hover_cursor(button)
         button.setFixedSize(64 if wide else 36, 36)
         # Hold to repeat. Delay moves in tenths of a second, so a release
         # out of sync by five seconds was fifty separate clicks - which
@@ -1977,6 +2121,9 @@ class PlayerPage(GlassPage):
         self._muted = False
         self._speed = 1.0
         self._marked_watched = False
+        # One embedded-Arabic auto-select per episode - see
+        # _auto_select_arabic_track.
+        self._arabic_track_done = False
         self._panel = None
         # What the download panel is currently set to. Held on the page,
         # not in the panel: the panel is rebuilt from scratch on every
@@ -2164,8 +2311,12 @@ class PlayerPage(GlassPage):
         _make_native(self.skip_btn)
         self.skip_btn.setFixedSize(*SKIP_BUTTON_SIZE)
         self.skip_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Solid - the owner, 24 August 2026: "make them solid, not
+        # transparent at all". BG rather than SURFACE: over a bright
+        # frame the near-black panel colour read as see-through even
+        # when the window itself was opaque.
         self.skip_btn.setStyleSheet(
-            f"QPushButton {{ background: {theme.SURFACE}; color: {theme.TEXT};"
+            f"QPushButton {{ background: {theme.BG}; color: {theme.TEXT};"
             f" border: 1px solid {theme.BORDER};"
             f" border-radius: {BAR_RADIUS}px; padding: 0px;"
             f" font-size: 11pt; font-weight: 700; }}"
@@ -2541,6 +2692,14 @@ class PlayerPage(GlassPage):
         # (title, episode, pills).
         # The globe rather than theme.SETTINGS_ICON's gear, at the
         # owner's ask.
+        # Connection statistics - peers, speed, how much of the release
+        # has arrived. The owner's ask, 24 August 2026, with a
+        # screenshot: a WiFi button opening exactly those three numbers.
+        self.stats_btn = _icon_button(ICON_STATS, "Connection statistics",
+                                      size=40, font_pt=14)
+        self.stats_btn.clicked.connect(self._open_stats_panel)
+        row.addWidget(self.stats_btn)
+
         self.settings_btn = _icon_button(ICON_SETTINGS_GLOBE, "Settings",
                                          size=40, font_pt=14)
         self.settings_btn.clicked.connect(self._open_settings_panel)
@@ -3318,6 +3477,7 @@ class PlayerPage(GlassPage):
         # was.
         self._spawn(self._fetch_logo_worker, self._run)
         self._marked_watched = False
+        self._arabic_track_done = False
         self._prefetched = False
         # The warm-up done for *this* episode has served its purpose (or
         # not); either way the next one owns the question now. Nothing is
@@ -3468,11 +3628,30 @@ class PlayerPage(GlassPage):
                 self.entry.get("title") or "", year=self.entry.get("year"),
                 season=self.season, episode=self.episode, imdb_id=imdb_id,
                 kind=kind, deadline=net.deadline_in(SUBTITLE_BUDGET_S),
-                on_partial=partial)
+                on_partial=partial, release=self._playing_release())
             self._work.subs_ready.emit(list(found or []), run)
         except Exception:
             logs.exception("Subtitle search failed")
             self._work.subs_ready.emit([], run)
+
+    def _playing_release(self) -> str:
+        """The name of the release currently loaded, or "".
+
+        Handed to `subtitles.search` so a subtitle cut against this same
+        encode outranks one cut against a different distributor - see
+        subtitles._timeline_rank for the owner's report this answers.
+        Read at search time rather than remembered: the search can start
+        after a source switch, and the release that matters is the one
+        actually playing."""
+        try:
+            stream = self._streams[self._stream_index]
+        except (IndexError, TypeError, AttributeError):
+            return ""
+        title = stream.get("title") or stream.get("name") or ""
+        # The first line only: an addon's title carries seeders, size and
+        # the language list under the release name, and none of those say
+        # anything about which cut this is.
+        return str(title).splitlines()[0].strip() if str(title).strip() else ""
 
     def _fetch_subtitle_worker(self, result, run, provider=None, label=None):
         """Fetch, then write UTF-8 to a temp file and hand mpv the path.
@@ -3963,6 +4142,44 @@ class PlayerPage(GlassPage):
     _AUDIO_AVOID_WORDS = ("commentary", "description", "descriptive",
                           "narration")
 
+    def _auto_select_arabic_track(self):
+        """Select an embedded Arabic subtitle track the moment the file
+        lists one - the owner, 24 August 2026: "when loading the source
+        that has ar in embedded translations, make it auto select and
+        load it when I play directly" (and the pick now *prefers*
+        releases that carry one - streams.arabic_rank).
+
+        This deliberately narrows the standing "no embedded track is
+        auto-selected, ever" rule (video_backend's `sid: no`) to
+        everything that is not Arabic: that rule existed because English
+        and Chinese tracks kept burning themselves over the picture,
+        and an Arabic track is the one the whole subtitle apparatus
+        exists to find. A remembered choice still outranks it: whatever
+        the owner picked last time (_auto_apply_subtitle) or picks now
+        (_pick_subtitle / _subtitles_off sets _sub_auto_done) is never
+        overridden - this fills the silence before either speaks, and
+        only once per episode."""
+        if self._closing or self._arabic_track_done:
+            return
+        try:
+            stored = load_subtitle_choice(self.entry)
+        except Exception:
+            stored = None
+        if stored:
+            return          # the remembered pick owns this episode
+        track = next(
+            (t for t in self._tracks
+             if t.get("type") == "sub"
+             and subtitles_module is not None
+             and subtitles_module.is_arabic_code(t.get("lang"))), None)
+        if track is None or track.get("selected"):
+            if track is not None:
+                self._arabic_track_done = True
+            return
+        self._arabic_track_done = True
+        self._sub_auto_done = True      # embedded Arabic is the answer
+        self._pick_track("sid", track)
+
     def _apply_audio_default(self):
         """Move to the preferred audio language, once per loaded file.
 
@@ -4112,7 +4329,7 @@ class PlayerPage(GlassPage):
         # is going to watch. So it happens here, for the one chosen
         # stream - off the UI thread, because it can also have to start
         # the server.
-        if not stream.get("url") and stream.get("info_hash") and streams_module:
+        if self._needs_preparing(stream) and streams_module:
             self._show_loading_soon("Connecting to the source...")
             # Worked out here, on the UI thread, and *before* the
             # release is created - see _prime_seat.
@@ -4121,6 +4338,42 @@ class PlayerPage(GlassPage):
             return
 
         self._load_into_mpv(stream, resume_at)
+
+    def _needs_preparing(self, stream) -> bool:
+        """Whether this release has to be handed to the engine before it
+        can be played.
+
+        **A url on the stream is not proof it still works, and that is
+        the owner's "changing the source inside the vid playing does not
+        work gets stuck, but if I go back to the ep list and choose the
+        source it loads".** The two paths differ in exactly one way: the
+        episode list builds a fresh list out of `find_streams`, whose
+        rows carry no url, while the player *writes the prepared stream
+        back* into `self._streams[index]` (see _on_stream_prepared). So
+        the second time a release is picked from the panel it already
+        has one - and `_switch_stream` has meanwhile called
+        `_release_playing_torrent`, which takes that very torrent out of
+        the session. `torrent_engine.stream_url` then serves nothing at
+        that address (it answers None for a hash it no longer holds),
+        mpv opens a route with no torrent behind it, and the page waits
+        for a first frame that cannot arrive.
+
+        So a *local engine* url is only trusted while the engine still
+        has the torrent. A direct link - a debrid download, an http
+        source - does not depend on the session at all and is left
+        alone; re-preparing one would spend a debrid round trip to be
+        handed back the same address."""
+        url = stream.get("url") or ""
+        info_hash = stream.get("info_hash")
+        if not url:
+            return bool(info_hash)
+        if not info_hash or "127.0.0.1" not in url:
+            return False
+        try:
+            from helpers import torrent_engine
+            return torrent_engine.stream_url(info_hash) is None
+        except Exception:
+            return False
 
     def _prime_seat(self, resume_at):
         """`(seconds, total)` the engine should fetch first, or
@@ -4893,19 +5146,39 @@ class PlayerPage(GlassPage):
 
         chips = QHBoxLayout()
         chips.setSpacing(4)
-        for preset in SPEED_PRESETS:
-            chip = QPushButton(f"{preset:g}x")
-            chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            current = abs(preset - self._speed) < 1e-6
+        chip_rows = []
+
+        def paint_chip(chip, current):
             chip.setStyleSheet(
                 f"QPushButton {{ background: {theme.SURFACE_HOVER if current else 'transparent'};"
                 f" color: {theme.ACCENT if current else theme.TEXT};"
                 f" border: none; padding: 5px 7px; font-size: 10pt; font-weight: 600;"
                 f" border-radius: {theme.RADIUS_SM}px; }}"
                 f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}")
+
+        def pick_speed(preset):
+            # Repainted at the press, not at the next reopen - the
+            # owner's "the playback speed buttons do not get highlighted
+            # when I choose them until I close the window and reopen".
+            # mpv's confirmation still lands through the property
+            # observer; this is the same optimistic move-the-highlight
+            # rule every panel row follows (_pick_track).
+            self._set_speed(preset)
+            for other, other_preset in chip_rows:
+                paint_chip(other, abs(other_preset - preset) < 1e-6)
+
+        for preset in SPEED_PRESETS:
+            chip = QPushButton(f"{preset:g}x")
+            chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            paint_chip(chip, abs(preset - self._speed) < 1e-6)
             use_hover_cursor(chip)
-            chip.clicked.connect(lambda checked=False, p=preset: self._set_speed(p))
+            chip.clicked.connect(lambda checked=False, p=preset: pick_speed(p))
+            chip_rows.append((chip, preset))
             chips.addWidget(chip)
+        # The slider moves the speed too - keep the chips honest under it.
+        slider.valueChanged.connect(
+            lambda v: [paint_chip(c, abs(pr - round(v / 100.0 / 0.05) * 0.05) < 1e-6)
+                       for c, pr in chip_rows])
         panel.body_layout.addLayout(chips)
 
         panel.speed_value = value
@@ -5156,6 +5429,7 @@ class PlayerPage(GlassPage):
             # actually going to be playing rather than the one mpv
             # opened on and is about to be moved off.
             self._apply_audio_default()
+            self._auto_select_arabic_track()
             self._update_audio_pill()
             # An open tracks panel follows mpv's own answer: the pick
             # already moved the highlight optimistically (_pick_track),
@@ -5540,134 +5814,274 @@ class PlayerPage(GlassPage):
         self._panel = panel
         return panel
 
+    # Column-1 language names, written the way Stremio writes them - the
+    # owner's ask, 24 August 2026, twice, both times with a screenshot of
+    # Stremio's panel: three columns, native-script names, a dot on what
+    # is active. Codes not named here fall back to the bare code,
+    # uppercased.
+    _SUB_LANG_NAMES = {
+        "ar": "العربية",
+        "en": "English", "de": "Deutsch", "id": "Bahasa Indonesia",
+        "ja": "日本語", "fr": "Français",
+        "es": "Español", "pt": "Português", "it": "Italiano",
+        "ru": "Русский",
+        "tr": "Türkçe", "zh": "中文",
+        "ko": "한국어",
+    }
+
+    # The pseudo-language holding the AI translations - a row of its own
+    # in column 1, exactly where the owner's Stremio mock puts "Make
+    # Arabic". Keeping it out of العربية matters: those are real Arabic
+    # files, these are machine output, and the split is what lets a
+    # person reach for either knowingly.
+    _MAKE_ARABIC = "make-ar"
+
+    @staticmethod
+    def _sub_lang_key(value) -> str:
+        """A language field collapsed to a two-letter key: 'ara', 'ar-sa'
+        and 'arabic' are all one column-1 row."""
+        code = str(value or "").strip().lower()
+        if not code:
+            return ""
+        if subtitles_module is not None and subtitles_module.is_arabic_code(code):
+            return "ar"
+        return code[:2]
+
+    def _active_sub_key(self, embedded) -> str:
+        """Which column-1 row owns the subtitle actually showing: a
+        language key, _MAKE_ARABIC for a loaded AI translation, or ""
+        for Off. This is what the dot marks - state, where the
+        selection ring marks only where the user is browsing."""
+        track = next((t for t in embedded if t.get("selected")), None)
+        if track is not None:
+            return self._sub_lang_key(track.get("lang"))
+        label = self._subtitle_label or "Off"
+        if label == "Off":
+            return ""
+        if label.startswith("Arabic (AI)"):
+            return self._MAKE_ARABIC
+        match = next((s for s in self._subtitles
+                      if (s.get("display_name") or s.get("release")) == label),
+                     None)
+        return self._sub_lang_key(match.get("lang")) if match else "ar"
+
     def _open_subtitle_panel(self, rebuild=False):
+        """The Subtitles panel, laid out the way Stremio lays its out -
+        the owner's ask, 24 August 2026, sent with a screenshot:
+        **Languages | Variants | Settings**, title-case headers, a dot
+        on the active language and the active variant, and the AI
+        translations filed under their own "Make Arabic" language row
+        rather than mixed into العربية.
+
+        Which language column 2 shows is `self._subs_panel_lang`, held
+        on the page rather than the panel because every pick rebuilds
+        the panel (see _new_panel) and the browse position has to
+        survive that."""
         # Opening the panel is a request for results, however early it
         # comes - the automatic search waits for the first frame, a
         # person asking must not (see _ensure_subtitle_search).
         self._ensure_subtitle_search()
-        panel = self._new_panel("Arabic Subtitles", "subs", rebuild)
+        panel = self._new_panel("Subtitles", "subs", rebuild)
         if panel is None:
             return          # the same button closed it
-        panel.add_row("Off", "No external subtitle", self._subtitles_off,
-                      selected=self._subtitle_label == "Off")
+        panel.panel_width = 880
 
-        arabic = [s for s in self._subtitles
-                  if str(s.get("lang", "")).lower().startswith("ar")]
-        other = [s for s in self._subtitles if s not in arabic]
-        if not self._subtitles:
-            panel.add_message(
-                "Searching..." if subtitles_module is not None
-                else "Subtitle search is not available in this build.")
-        def add_language_group(group, items):
-            if not items:
-                return
-            by_source = {}
-            for item in items:
-                by_source.setdefault(item.get("source") or "Unknown", []).append(item)
-            for source, entries in by_source.items():
-                panel.add_group(f"{group.upper()}  ·  {source.upper()}")
-                for item in entries:
-                    # "Arabic 2 SubDL" (see _name_subtitles), with the
-                    # release name moved down to the detail line - it is
-                    # still worth seeing, it just is not a name.
-                    label = (item.get("display_name")
-                             or item.get("release") or "Subtitle")
-                    parts = [str(p) for p in
-                             (item.get("format"), item.get("release")) if p]
-                    # Say so when a line was produced by machine
-                    # translation rather than written by a person. It is
-                    # often serviceable and sometimes nonsense, and
-                    # which one you picked should not be a guess -
-                    # especially for anime, where these are frequently
-                    # the only Arabic on offer.
-                    if item.get("translated"):
-                        parts.insert(0, "auto-translated")
-                    panel.add_row(label, " · ".join(parts),
-                                  lambda checked=False, r=item: self._pick_subtitle(r),
-                                  selected=label == self._subtitle_label)
+        columns = QWidget()
+        columns.setStyleSheet("background: transparent; border: none;")
+        row = QHBoxLayout(columns)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(18)
+        lang_col, variant_col, settings_col = QVBoxLayout(), QVBoxLayout(), QVBoxLayout()
+        for column in (lang_col, variant_col, settings_col):
+            # A sliver of right margin on the scrolling two, so a row's
+            # selection ring is not shaved off by its own scrollbar.
+            column.setContentsMargins(0, 0, 6, 0)
+            column.setSpacing(6)
 
-        # **Every Arabic row first, whatever produced it** - the owner's
-        # ask ("move the ARABIC by any source above all other
-        # languages"). Arabic already sat above Other Languages; what did
-        # not was the AI-translated Arabic below, which is Arabic too and
-        # was the last thing on a long list. So: real Arabic, then
-        # translated Arabic, then everything else.
-        add_language_group("Arabic", arabic)
+        def scrolling(column):
+            # Languages and Variants scroll independently - the owner's
+            # ask - so a long variants list never drags the settings
+            # column off screen. Settings stays plain: three steppers
+            # always fit.
+            holder = QWidget()
+            holder.setStyleSheet("background: transparent; border: none;")
+            holder.setLayout(column)
+            area = scroll_area(holder)
+            area.setStyleSheet("background: transparent; border: none;")
+            area.viewport().setStyleSheet("background: transparent;")
+            area.setFixedHeight(SUBS_PANEL_COLUMN_H)
+            return area
 
-        # **Every provider the owner has a key for, not just the first.**
-        # This used to build one group headed by `default_provider()`,
-        # which is whichever configured provider comes first in
-        # `ai_translate.PROVIDERS` - so four pasted keys offered exactly
-        # one translator and the owner asked where DeepSeek, Gemini and
-        # Anthropic had gone. They were never absent; they were simply
-        # never offered. A group per provider makes which model does the
-        # work a choice at the moment of picking rather than a setting
-        # nothing exposes, and the row's own label carries the provider
-        # so the loaded track, the highlight and the toast all name the
-        # same one (see _fetch_subtitle_worker, which no longer decides
-        # this for itself).
+        row.addWidget(scrolling(lang_col), stretch=3)
+        row.addWidget(scrolling(variant_col), stretch=4)
+        row.addLayout(settings_col, stretch=3)
+        panel.body_layout.addWidget(columns)
+
+        embedded = [t for t in self._tracks if t.get("type") == "sub"]
+        external = list(self._subtitles)
+        arabic = [s for s in external
+                  if subtitles_module is not None
+                  and subtitles_module.is_arabic_code(s.get("lang"))]
+        other = [s for s in external if s not in arabic]
         translators = []
         try:
             if ai_translate is not None:
                 translators = list(ai_translate.providers_available())
         except Exception:
             translators = []
-        if translators and other:
-            for provider in translators:
-                translator = ai_translate.label(provider)
-                panel.add_group(f"ARABIC  ·  TRANSLATED BY {translator.upper()}")
-                for index, item in enumerate(other, start=1):
-                    source_name = (item.get("display_name")
-                                   or item.get("release") or "")
-                    label = f"Arabic (AI) {index} {translator}"
-                    # `p` and `l` are bound here for the same reason `r`
-                    # is: the loop variables are rebound on the next
-                    # iteration and every row would otherwise pick the
-                    # last provider in the list.
-                    panel.add_row(
-                        label, f"translated from {source_name}",
-                        lambda checked=False, r=item, p=provider, l=label:
-                            self._pick_subtitle(r, provider=p, label=l),
-                        selected=label == self._subtitle_label)
-        elif other and ai_translate is not None:
-            # A key would turn these into Arabic; say where to add one
-            # rather than leaving the English rows looking pointless.
-            panel.add_group("ARABIC  ·  AI TRANSLATION")
-            panel.add_message(
-                "Add an OpenAI, DeepSeek, Gemini or Anthropic key in "
-                "Settings > API Keys to translate the subtitles above "
-                "into Arabic.")
-        # Last, under both Arabic groups.
-        add_language_group("Other Languages", other)
-        panel.finish()
 
-        # Delay first, size second: resyncing a mismatched Arabic release
-        # is by far the most common thing anyone needs from this panel.
+        active = self._active_sub_key(embedded)
+        browsing = getattr(self, "_subs_panel_lang", "") or (active or "ar")
+
+        def browse(lang):
+            self._subs_panel_lang = lang
+            self._open_subtitle_panel(rebuild=True)
+
+        # ---- column 1: languages ------------------------------------
+        panel.add_group("Subtitles Languages", into=lang_col)
+        # The dot says "subtitles are off"; the ring stays the browse
+        # position, which OFF is not one of - both ringed at once was
+        # the owner's "the off button keeps highlighted even if I
+        # choose another".
+        panel.add_row("OFF", "", self._subtitles_off,
+                      selected=False, dot=active == "", into=lang_col)
+        languages = ["ar"]
+        for track in embedded:
+            key = self._sub_lang_key(track.get("lang"))
+            if key and key not in languages:
+                languages.append(key)
+        for item in other:
+            key = self._sub_lang_key(item.get("lang"))
+            if key and key not in languages:
+                languages.append(key)
+        if other and (translators or ai_translate is not None):
+            languages.append(self._MAKE_ARABIC)
+        for key in languages:
+            name = ("Make Arabic" if key == self._MAKE_ARABIC
+                    else self._SUB_LANG_NAMES.get(key, key.upper()))
+            panel.add_row(name, "",
+                          lambda checked=False, k=key: browse(k),
+                          selected=key == browsing, dot=key == active,
+                          into=lang_col)
+        lang_col.addStretch(1)
+
+        # ---- column 2: variants of the browsed language -------------
+        panel.add_group("Subtitles Variants", into=variant_col)
+        shown = 0
+        if browsing != self._MAKE_ARABIC:
+            for track in embedded:
+                if self._sub_lang_key(track.get("lang")) != browsing:
+                    continue
+                panel.add_row(self._track_label(track), "embedded",
+                              lambda checked=False, t=track:
+                                  self._pick_track("sid", t),
+                              selected=bool(track.get("selected")),
+                              dot=bool(track.get("selected")),
+                              into=variant_col)
+                shown += 1
+
+        def add_external(items):
+            nonlocal shown
+            for item in items:
+                label = (item.get("display_name")
+                         or item.get("release") or "Subtitle")
+                parts = [str(p) for p in
+                         (item.get("source"), item.get("format"),
+                          item.get("release")) if p]
+                # Say so when a line was produced by machine translation
+                # rather than written by a person - which one you picked
+                # should not be a guess.
+                if item.get("translated"):
+                    parts.insert(0, "auto-translated")
+                on = label == self._subtitle_label
+                panel.add_row(label, " · ".join(parts),
+                              lambda checked=False, r=item:
+                                  self._pick_subtitle(r),
+                              selected=on, dot=on, into=variant_col)
+                shown += 1
+
+        if browsing == "ar":
+            add_external(arabic)
+        elif browsing == self._MAKE_ARABIC:
+            # **Every provider the owner has a key for, not just the
+            # first** - four pasted keys once offered exactly one
+            # translator; a group per provider makes which model does
+            # the work a choice at the moment of picking.
+            if translators and other:
+                for provider in translators:
+                    translator = ai_translate.label(provider)
+                    for index, item in enumerate(other, start=1):
+                        source_name = (item.get("display_name")
+                                       or item.get("release") or "")
+                        label = f"Arabic (AI) {index} {translator}"
+                        on = label == self._subtitle_label
+                        # r/p/l bound per row - the loop variables are
+                        # rebound on the next iteration.
+                        panel.add_row(
+                            label, f"translated from {source_name}",
+                            lambda checked=False, r=item, p=provider, l=label:
+                                self._pick_subtitle(r, provider=p, label=l),
+                            selected=on, dot=on, into=variant_col)
+                        shown += 1
+            elif other:
+                panel.add_message(
+                    "Add an OpenAI, DeepSeek, Gemini or Anthropic key in "
+                    "Settings > API Keys to translate the other languages' "
+                    "subtitles into Arabic.", into=variant_col)
+                shown += 1
+        else:
+            add_external([item for item in other
+                          if self._sub_lang_key(item.get("lang")) == browsing])
+
+        if not shown:
+            if not external and not embedded:
+                panel.add_message(
+                    "Searching..." if subtitles_module is not None
+                    else "Subtitle search is not available in this build.",
+                    into=variant_col)
+            else:
+                panel.add_message("Nothing found for this language yet.",
+                                  into=variant_col)
+        variant_col.addStretch(1)
+
+        # ---- column 3: settings -------------------------------------
+        panel.add_group("Subtitles Settings", into=settings_col)
         set_delay = panel.add_stepper(
             "Delay", self._delay_text(),
             lambda: self._nudge_delay(-SUB_DELAY_STEP),
             lambda: self._nudge_delay(SUB_DELAY_STEP),
-            step_text=f"{SUB_DELAY_STEP:g}")
+            step_text=f"{SUB_DELAY_STEP:g}s", into=settings_col)
         set_size = panel.add_stepper(
-            "Font size", str(self._sub_size),
+            "Size", self._sub_size_text(),
             lambda: self._nudge_size(-SUB_SIZE_STEP),
             lambda: self._nudge_size(SUB_SIZE_STEP),
-            step_text=str(SUB_SIZE_STEP))
-        # Third, under the two levers it belongs with (the owner's ask).
-        # Left raises the line, right lowers it - so the arrows point the
+            step_text=f"{round(SUB_SIZE_STEP * 100 / SUB_SIZE_DEFAULT)}%",
+            into=settings_col)
+        # Left raises the line, right lowers it - the arrows point the
         # way the text moves rather than the way mpv's number goes.
         set_pos = panel.add_stepper(
-            "Height", self._sub_pos_text(),
+            "Vertical Position", self._sub_pos_text(),
             lambda: self._nudge_sub_pos(SUB_POS_OFFSET_STEP),
             lambda: self._nudge_sub_pos(-SUB_POS_OFFSET_STEP),
-            step_text=str(SUB_POS_OFFSET_STEP))
-        # Held on the panel, not captured in the nudge calls: the panel is
-        # rebuilt whenever a subtitle is picked, and a setter belonging to
-        # a deleted QLabel would take the process with it.
+            step_text=str(SUB_POS_OFFSET_STEP), into=settings_col)
+        settings_col.addStretch(1)
+        # Held on the panel, not captured in the nudge calls: the panel
+        # is rebuilt whenever a subtitle is picked, and a setter
+        # belonging to a deleted QLabel would take the process with it.
         panel.set_delay_text = set_delay
         panel.set_size_text = set_size
         panel.set_pos_text = set_pos
+        panel.finish()
         self._show_panel(panel)
+
+    def _sub_size_text(self):
+        """The size as a percentage of the default, not the raw
+        sub-font-size - the owner, 24 August 2026: "make the font size a
+        percentage (%100) instead of numbers like 50". 55 is mpv's own
+        default, so 100% is "what mpv would do untouched" - the same
+        anchor `sub-scale` already divides by for .ass tracks
+        (_apply_sub_style)."""
+        return f"{round(self._sub_size * 100 / SUB_SIZE_DEFAULT)}%"
 
     def _delay_text(self):
         return f"{self._sub_delay:+.1f}s"
@@ -5776,7 +6190,7 @@ class PlayerPage(GlassPage):
     def _nudge_size(self, delta):
         self._sub_size = max(SUB_SIZE_MIN, min(SUB_SIZE_MAX, self._sub_size + delta))
         self._apply_sub_style()
-        self._update_stepper("set_size_text", str(self._sub_size))
+        self._update_stepper("set_size_text", self._sub_size_text())
 
     def _apply_sub_delay(self):
         """Push the delay onto every subtitle mpv is showing.
@@ -6052,6 +6466,200 @@ class PlayerPage(GlassPage):
         # panel structurally cannot absorb (see _sync_track_rows).
         if not (self._sync_track_rows() and self._highlight_tracks()):
             self._open_tracks_panel(rebuild=True)
+
+    # How often the connection panel re-reads the swarm. The numbers
+    # move constantly and nobody reads them faster than this; a second
+    # also keeps the libtorrent status call off the frame budget.
+    STATS_POLL_MS = 1000
+
+    @staticmethod
+    def _rate_text(bytes_per_second) -> str:
+        """A download rate the way the owner's screenshot writes it -
+        "6.55 MB/s". Decimal MB, matching every other size this app
+        prints (release sizes come from the indexers in decimal too)."""
+        rate = float(bytes_per_second or 0.0)
+        if rate >= 1_000_000:
+            return f"{rate / 1_000_000:.2f} MB/s"
+        if rate >= 1_000:
+            return f"{rate / 1_000:.0f} KB/s"
+        return f"{int(rate)} B/s"
+
+    def _playing_info_hash(self):
+        """The info hash of the release actually on screen, or "" when
+        this episode is not a torrent at all (a direct URL, a debrid
+        link). The panel says so rather than showing three zeroes."""
+        stream = None
+        if 0 <= self._stream_index < len(self._streams):
+            stream = self._streams[self._stream_index]
+        return str((stream or {}).get("info_hash") or "").lower()
+
+    def _mpv_number(self, name, default=None):
+        """One mpv property as a float, or `default`.
+
+        python-mpv raises for a property the current file has no answer
+        for - `video-bitrate` before the first frame, `estimated-vf-fps`
+        on an audio-only stream - and every one of those is a normal
+        state for a panel that opens whenever the user presses the
+        button, so each read is guarded rather than the whole refresh."""
+        try:
+            value = getattr(self.handle, name.replace("-", "_"))
+        except Exception:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _mpv_text(self, name, default=""):
+        """One mpv property as a string, or `default` - same guard as
+        `_mpv_number`, and the same reason."""
+        try:
+            value = getattr(self.handle, name.replace("-", "_"))
+        except Exception:
+            return default
+        text = "" if value is None else str(value).strip()
+        return text or default
+
+    def _playback_stats(self) -> dict:
+        """What mpv can say about the picture on screen right now.
+
+        Every field is optional: a stream that has not produced a frame
+        yet, an audio-only file and a still-loading seek all answer
+        nothing for most of these, and "-" is the honest reading rather
+        than a zero that looks like a measurement."""
+        width = self._mpv_number("width")
+        height = self._mpv_number("height")
+        fps = (self._mpv_number("estimated-vf-fps")
+               or self._mpv_number("container-fps"))
+        return {
+            "resolution": (f"{int(width)}x{int(height)}"
+                           if width and height else "-"),
+            "fps": f"{fps:.1f}" if fps else "-",
+            # video-format ("h264"), not video-codec - the latter is
+            # mpv's prose description and reads "H.264 / AVC / MPEG-4
+            # AVC / MPEG-4 part 10" in a panel column a few dozen pixels
+            # wide (measured on the real player, Attack on Titan S01E05).
+            "video": self._mpv_text("video-format",
+                                    self._mpv_text("video-codec", "-")),
+            "audio": self._mpv_text("audio-codec-name", "-"),
+            # hwdec-current is "no" when mpv fell back to software, and
+            # that is worth reading rather than hiding: a 4K release
+            # decoding on the CPU is the one case where the picture
+            # stutters for a reason the swarm numbers cannot explain.
+            "hwdec": self._mpv_text("hwdec-current", "-"),
+            "bitrate": self._mpv_number("video-bitrate"),
+            "dropped": self._mpv_number("frame-drop-count"),
+            "delayed": self._mpv_number("vo-delayed-frame-count"),
+            "buffer": self._mpv_number("demuxer-cache-duration"),
+        }
+
+    def _open_stats_panel(self, rebuild=False):
+        """What is arriving, and what is being drawn from it.
+
+        **Two groups now, and the second is the owner's ask, 24 August
+        2026: "make the statistics also show information while vid is
+        playing".** The panel used to hold the swarm and nothing else -
+        peers, speed, completed - so an episode playing from a direct
+        URL or a debrid link opened it to a single sentence saying there
+        were no peers to report, and a torrent playing badly showed a
+        healthy swarm with no way to see that the picture was the
+        problem. Everything mpv knows about the frame on screen lives in
+        mpv own properties; this reads them beside the swarm numbers.
+
+        Read from `torrent_engine.stats` (libtorrent status for the
+        handle this episode streams from) and from the mpv handle, and
+        repolled on a timer while the panel is up. The timer is owned by
+        the panel and dies with it, so nothing polls a swarm - or a
+        player - nobody is looking at."""
+        panel = self._new_panel("Statistics", "stats", rebuild)
+        if panel is None:
+            return          # the same button closed it
+        info_hash = self._playing_info_hash()
+
+        setters = {}
+        panel.add_group("Source")
+        if info_hash:
+            row = QHBoxLayout()
+            row.setSpacing(26)
+            columns = QWidget()
+            columns.setStyleSheet("background: transparent; border: none;")
+            columns.setLayout(row)
+            setters["peers"] = panel.add_stat("Peers", "-", into=row)
+            setters["speed"] = panel.add_stat("Speed", "-", into=row)
+            setters["done"] = panel.add_stat("Completed", "-", into=row)
+            row.addStretch(1)
+            panel.body_layout.addWidget(columns)
+        else:
+            panel.add_message(
+                "This episode is not streaming from a torrent, so there "
+                "are no peers to report.")
+
+        panel.add_group("Playback")
+        # Two stats to a line rather than six across one: the panel is a
+        # fixed-width column, and the same crowding add_stepper records
+        # for the subtitle panel applies to any row that tries to hold
+        # more than a couple of value pairs.
+        for pairs in ((("resolution", "Resolution"), ("fps", "FPS")),
+                      (("video", "Video"), ("audio", "Audio")),
+                      (("hwdec", "Decode"), ("bitrate", "Bitrate")),
+                      (("dropped", "Dropped"), ("buffer", "Buffer"))):
+            line = QHBoxLayout()
+            line.setSpacing(26)
+            holder = QWidget()
+            holder.setStyleSheet("background: transparent; border: none;")
+            holder.setLayout(line)
+            for key, label in pairs:
+                setters[key] = panel.add_stat(label, "-", into=line)
+            line.addStretch(1)
+            panel.body_layout.addWidget(holder)
+
+        def refresh():
+            if info_hash:
+                try:
+                    from helpers import torrent_engine
+                    found = torrent_engine.stats(info_hash) or {}
+                except Exception:
+                    found = {}
+                if not found:
+                    # The handle was released (the episode moved on, or
+                    # the engine reaped it) - say nothing rather than
+                    # freezing the last numbers as though they were
+                    # current.
+                    setters["peers"]("-")
+                    setters["speed"]("-")
+                    setters["done"]("-")
+                else:
+                    setters["peers"](str(int(found.get("peers") or 0)))
+                    setters["speed"](self._rate_text(found.get("download_rate")))
+                    setters["done"](
+                        f"{float(found.get('progress') or 0.0) * 100:.2f} %")
+            live = self._playback_stats()
+            setters["resolution"](live["resolution"])
+            setters["fps"](live["fps"])
+            setters["video"](live["video"])
+            setters["audio"](live["audio"])
+            setters["hwdec"](live["hwdec"])
+            bitrate = live["bitrate"]
+            setters["bitrate"](f"{bitrate / 1_000_000:.2f} Mbps"
+                               if bitrate else "-")
+            dropped, delayed = live["dropped"], live["delayed"]
+            # Dropped and delayed together: a frame mpv threw away and a
+            # frame it showed late are different faults with the same
+            # symptom, and reading only the first says "nothing is
+            # wrong" for the second.
+            setters["dropped"](
+                "-" if dropped is None
+                else f"{int(dropped)} ({int(delayed or 0)} late)")
+            buffer_s = live["buffer"]
+            setters["buffer"]("-" if buffer_s is None else f"{buffer_s:.1f} s")
+
+        refresh()
+        timer = QTimer(panel)
+        timer.timeout.connect(refresh)
+        timer.start(self.STATS_POLL_MS)
+        panel.stats_timer = timer
+        panel.finish()
+        self._show_panel(panel)
 
     def _open_settings_panel(self):
         """The gear: the controls that do not earn a button of their own
@@ -6808,21 +7416,27 @@ class PlayerPage(GlassPage):
             # the controls' source label.
             return
         self._buffer_frame_up = True
-        # The badge, not the full frame - the owner's ask, 23 August
-        # 2026: "when it loads while playing ... make it just shows the
-        # logo not the bg image". Mode before geometry: _layout_overlays
-        # reads it to size the badge.
-        self.backdrop.set_stall(True)
+        # **The full startup frame, exactly - the owner, 24 August 2026:
+        # "remove it entirely, then readd it as the 1st loading logo
+        # exactly!!".** This is the third design for a mid-play stall
+        # and it supersedes the other two, both his own earlier asks:
+        # the 23 August "keep the video with ONLY logo loading" badge,
+        # and today's silhouette-clipped variant of it. The badge could
+        # never be made identical to the startup logo, because it is a
+        # native child window blended whole by DWM - the startup logo
+        # sits on an opaque backdrop and needs no blending at all. So a
+        # stall now raises the very same surface startup uses: the
+        # backdrop still, the scrim, the logo filling with the buffer.
+        # set_stall stays False; StartupBackdrop's badge mode and the
+        # silhouette clip in _layout_overlays are dead branches kept for
+        # the history recorded on them.
+        self.backdrop.set_stall(False)
         # Geometry before show, for the reason _show_status gives: these
         # are native child windows, and one shown before it is placed
         # paints in the window's top-left corner for a frame.
         self._layout_overlays()
         self._show_backdrop(force=True)
-        # The panels' glass, so the frozen frame reads through the badge
-        # rather than being punched out by a solid slab. Uniform DWM
-        # alpha like every other overlay here - LWA_COLORKEY rendered as
-        # black boxes on the owner's display (see the status stylesheet).
-        _set_window_alpha(self.backdrop, BAR_ALPHA)
+        _set_window_alpha(self.backdrop, 255)
         self.logo.set_fraction(
             min(1.0, max(0.0, getattr(self, "_buffering_percent", 0) / 100.0)))
 
@@ -7237,6 +7851,20 @@ class PlayerPage(GlassPage):
         except Exception:
             return []
         rows = []
+        # Written down whatever happens next: "the skip intro is not
+        # showing" for a live-action title (House of the Dragon, the
+        # owner, 24 August 2026) is unanswerable without knowing what
+        # the release actually carried. AniSkip cannot know live action
+        # (it is keyed by MAL id), TheIntroDB is dead from here, so the
+        # file's own markers are the *only* source - and most WEB rips
+        # ship either none or bare "Chapter N" names, which correctly
+        # classify as nothing. One line per episode makes the next
+        # report diagnosable from the log instead of from a guess.
+        try:
+            logs.info("chapter markers: " + (", ".join(
+                repr(str(c.get("title") or "")) for c in chapters) or "none"))
+        except Exception:
+            pass
         for index, chapter in enumerate(chapters):
             title = str(chapter.get("title") or "").strip().lower()
             if not title:
@@ -7247,6 +7875,11 @@ class PlayerPage(GlassPage):
             elif words & set(_CHAPTER_ENDING):
                 kind = skiptimes.ENDING
             elif words & set(_CHAPTER_RECAP):
+                # Nothing precedes the first episode of a series, so a
+                # chapter calling itself a recap there is naming the cold
+                # open. See skiptimes.first_episode.
+                if skiptimes.first_episode(self.season, self.episode):
+                    continue
                 kind = skiptimes.RECAP
             else:
                 continue
@@ -7258,6 +7891,14 @@ class PlayerPage(GlassPage):
             # A marker named like an opening but sitting fifteen minutes
             # in is a scene break, not an opening.
             if kind == skiptimes.OPENING and start > CHAPTER_OPENING_WINDOW_S:
+                continue
+            # And one named like an ending but sitting at the head of the
+            # file is not the credits - the same position rule the crowd
+            # data goes through (skiptimes.ENDING_MIN_POSITION), applied
+            # here because the player offers "Next Episode" over an
+            # ending and being wrong about that ends the episode.
+            if (kind == skiptimes.ENDING and self._duration
+                    and start < self._duration * skiptimes.ENDING_MIN_POSITION):
                 continue
             if end <= start:
                 continue
@@ -7276,8 +7917,10 @@ class PlayerPage(GlassPage):
             # (measured 17.4-90.0s) and skipping one lands on the
             # opening rather than inside the story.
             span = end - start
-            if kind != skiptimes.RECAP and not (
-                    CHAPTER_SPAN_MIN_S <= span <= CHAPTER_SPAN_MAX_S):
+            floor, ceiling = ((CHAPTER_RECAP_SPAN_MIN_S, CHAPTER_RECAP_SPAN_MAX_S)
+                              if kind == skiptimes.RECAP
+                              else (CHAPTER_SPAN_MIN_S, CHAPTER_SPAN_MAX_S))
+            if not floor <= span <= ceiling:
                 continue
             rows.append({"type": kind, "start": start, "end": end,
                          "source": "chapters"})
@@ -7324,6 +7967,21 @@ class PlayerPage(GlassPage):
 
         self._spawn(worker)
 
+    @staticmethod
+    def _overlaps(left, right) -> bool:
+        """Whether two skip intervals cover any of the same seconds.
+
+        Used to decide whether a chapter marker and a crowd entry are
+        describing the same title sequence - see _on_skips. Any overlap
+        at all counts: the two sources cut at different frames, and
+        "within a second of each other" is a tuning knob nothing here
+        has a measurement for."""
+        try:
+            return (float(left.get("start") or 0.0) < float(right.get("end") or 0.0)
+                    and float(right.get("start") or 0.0) < float(left.get("end") or 0.0))
+        except (TypeError, ValueError):
+            return False
+
     def _on_skips(self, found, run):
         if self._closing or run != self._run:
             return
@@ -7343,19 +8001,56 @@ class PlayerPage(GlassPage):
         # button appeared over the cold open and AniSkip's correct
         # interval was thrown away unseen. Nothing changes for live
         # action, where AniSkip is silent and the chapter stands.
+        #
+        # **And more generally: where both sources name the opening,
+        # they have to be talking about the same stretch of the file.**
+        # The owner, 24 August 2026, with a screenshot: "the skip intro
+        # is not accurate at all ... it is showing while there is not
+        # intro" - The Angel Next Door Spoils Me Rotten S01E07, the
+        # button up at **3:10** of a 23:41 episode. Measured live that
+        # day, AniSkip (mal 50739) answers exactly one opening for that
+        # episode, **0.00 -> 90.00**, and one ending at 1325. So
+        # whatever was offering to skip at 190s was a chapter marker
+        # naming a stretch the crowd data says is not the opening at
+        # all.
+        #
+        # Two independent sources disagreeing about *where* the opening
+        # is is different from one source being silent. A chapter is
+        # authoritative about this cut of the file; it is not
+        # authoritative about which scene is the title sequence, and a
+        # release that marks acts will happily call one of them
+        # something opening-shaped. So when AniSkip has an opening for
+        # this episode, a chapter opening is kept only if the two
+        # overlap - and dropped, not merged, when they do not.
+        #
+        # Live action is untouched: AniSkip is keyed by MyAnimeList id
+        # and answers nothing at all there, so `crowd` is empty and
+        # every chapter marker stands exactly as before.
         crowd_kinds = {row.get("type") for row in found}
+        crowd_openings = [row for row in found
+                          if row.get("type") == skiptimes.OPENING]
         kept = []
         for row in self._skips:
             if (row.get("source") == "chapters"
                     and row.get("type") == skiptimes.OPENING
-                    and float(row.get("start") or 0.0) < CHAPTER_OPENING_MIN_START_S
                     and skiptimes.OPENING in crowd_kinds):
-                continue
+                if float(row.get("start") or 0.0) < CHAPTER_OPENING_MIN_START_S:
+                    continue
+                if not any(self._overlaps(row, other) for other in crowd_openings):
+                    continue
             kept.append(row)
-        self._skips = kept
         have = {row.get("type") for row in kept
                 if row.get("source") == "chapters"}
-        self._skips.extend(row for row in found if row.get("type") not in have)
+        kept.extend(row for row in found if row.get("type") not in have)
+        # **Sorted, and one interval per kind per stretch.** Before this,
+        # the merged list was in whatever order the two sources arrived,
+        # and `_current_skip` returns the *first* row that contains the
+        # position - so which offer appeared depended on arrival order
+        # rather than on where playback was. The overlap resolver is the
+        # same one AniSkip's own contradictory submissions go through;
+        # see skiptimes._resolve_overlaps for the measured pairs.
+        self._skips = skiptimes._resolve_overlaps(
+            sorted(kept, key=lambda row: float(row.get("start") or 0.0)))
         self._refresh_skip_button()
 
     def _current_skip(self):
@@ -7417,6 +8112,12 @@ class PlayerPage(GlassPage):
             return
         self._skip_offer = offer
         try:
+            # Re-asserted at every offer change, not only in
+            # _wake_controls: the button shows itself with the bars
+            # hidden, and a native window that was never given its
+            # alpha keeps whatever DWM last had for it.
+            if offer is not None:
+                _set_window_alpha(self.skip_btn, 255)
             if offer is None:
                 self.skip_btn.hide()
                 return
@@ -7439,7 +8140,7 @@ class PlayerPage(GlassPage):
             self.skip_btn.show()
             if was_hidden:
                 _raise_native(self.skip_btn)
-                self._veil(self.skip_btn, BAR_ALPHA)
+                self._veil(self.skip_btn, 255)
                 # Size is fixed (SKIP_BUTTON_SIZE) so the cut only has to
                 # follow the window, not every move.
                 _round_overlay(self.skip_btn)
@@ -7585,7 +8286,8 @@ class PlayerPage(GlassPage):
                                int(rect.height() / 2) + 90,
                                size.width(), size.height())
         if self._panel is not None:
-            width = min(PANEL_WIDTH, max(280, rect.width() - 60))
+            width = min(getattr(self._panel, "panel_width", PANEL_WIDTH),
+                        max(280, rect.width() - 60))
             # As tall as its content and no taller: the speed panel is a
             # value, a slider and a row of chips, and at the old fixed
             # height it was four-fifths empty (the owner's complaint).

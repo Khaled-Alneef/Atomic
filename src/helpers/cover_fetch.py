@@ -55,6 +55,80 @@ def _connect_once():
         _connected = True
 
 
+# How long the second source is allowed, once the first has already
+# failed. Shorter than the primary's retry on purpose: this runs on the
+# shared 4-worker pool, and a page of blank covers must not hold that
+# pool for a minute apiece.
+FALLBACK_TIMEOUT = 8
+
+
+def resolve(url, *, imdb_id="", title="", kind="", timeout=8):
+    """A local path for one cover, asking every source there is.
+
+    **Why there is more than one, and it is a report rather than a
+    theory** (24 August 2026): a friend's fresh install showed no art at
+    all on Watch or Read while the Watch schedule filled normally. Every
+    Watch row's poster comes from a single host - `images.metahub.space`
+    (measured: 35 of 36 Discover rows across anime/series/movie) - and
+    the schedule's comes from s4.anilist.co, so one unreachable host is
+    exactly the shape of "no images except the schedule page". The card
+    had no second source to ask, and a blank tile is indistinguishable
+    from a title with no art.
+
+    Reproduced and fixed on the same measurement - a cold DATA_DIR, the
+    real Watch page, `images.metahub.space` blackholed:
+
+        host reachable                    90 cards, 90 covers
+        host unreachable, before this     90 cards,  0 covers
+        host unreachable, after this      90 cards, 90 covers
+
+    The order is cheapest-and-surest first: the row's own URL, that URL
+    again with a longer budget (measured: the reading hosts
+    intermittently take more than 8s to hand over a 17-477KB image and
+    the very next attempt works), then a catalogue that does not share a
+    host with either. Video rows go to TMDB, which is the one key the
+    app already asks for in Settings; reading rows go to MangaDex/
+    AniList through `manga_sites.cover_for_title`, which is the same
+    strictly-matched lookup a coverless search result already uses.
+
+    Never raises, and never returns a *wrong* cover: both fallbacks
+    match on an id or on a guarded title, because this project has
+    shipped a card wearing another series' art before."""
+    url = str(url or "")
+    if url:
+        path = images.download(url, timeout=timeout)
+        if path:
+            return path
+        path = images.download(url, timeout=20)
+        if path:
+            return path
+    title = (title or "").strip()
+    imdb_id = (imdb_id or "").strip()
+    if kind != "reading" and (imdb_id or title):
+        try:
+            from . import artwork
+            second = artwork.poster_url(imdb_id, title,
+                                        timeout=FALLBACK_TIMEOUT)
+        except Exception:
+            second = None
+        if second:
+            path = images.download(second, timeout=FALLBACK_TIMEOUT)
+            if path:
+                return path
+    if kind != "video" and title:
+        try:
+            from . import manga_sites
+            second = manga_sites.cover_for_title(title,
+                                                 timeout=FALLBACK_TIMEOUT)
+        except Exception:
+            second = None
+        if second:
+            path = images.download(second, timeout=FALLBACK_TIMEOUT)
+            if path:
+                return path
+    return None
+
+
 def ensure(key, path, fetch, title, size, setter, persist=None):
     """Draw the cover at `path` through `setter` now if the file exists.
     Otherwise start `fetch` (a callable returning a local path or None,
@@ -91,7 +165,11 @@ def _worker(key, fetch, size):
         try:
             # Cut the tile here, on the worker, so the UI-thread slot
             # only converts a cached tile to a QPixmap (see images._fitted).
-            images._fitted(str(path), size, images._stamp(str(path)))
+            # Through `warm`, so the tile is cut at the *device* size the
+            # UI will ask for - cutting it at the logical size meant the
+            # decode was simply paid again on the UI thread on any
+            # display above 100%.
+            images.warm(str(path), size)
         except Exception:
             pass
     with _lock:

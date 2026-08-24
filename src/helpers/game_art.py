@@ -159,6 +159,61 @@ MATCH_THRESHOLD = 0.90
 # before it is asked again. Only ever written when Steam answered.
 NEGATIVE_TTL = 7 * 24 * 3600
 
+# ---- the games Steam has never heard of ----------------------------
+#
+# **The owner, 24 August 2026: "why does VALORANT game did not get a
+# cover image??!! it is a famous game!"** It is, and the reason is in
+# this module's first line: the source is Steam, and VALORANT is not on
+# Steam. Measured that day - `search_appid` answers None for VALORANT
+# and for League of Legends, and 730 for Counter-Strike 2. His library
+# has ten games; nine are Steam or Battle.net titles Steam also lists,
+# and the Riot one is the only blank tile.
+#
+# Wikipedia is the fallback because it is the only source measured that
+# is **keyless, public and covers non-Steam titles**. SteamGridDB, IGDB
+# and RAWG all cover them and all need an account key, which by the
+# project's own rule would leave this dark until one is pasted - and a
+# blank tile is exactly what is being fixed. Measured over five titles:
+#
+#     Valorant             logo   544x371   landscape
+#     League of Legends    logo   600x229   landscape
+#     Overwatch 2          cover  258x387   portrait
+#     Palworld             cover  258x387   portrait
+#     Rocket League        cover 1024x1024  square
+#
+# So it answers for every one of them, but **only Steam reliably
+# publishes portrait box art**; Wikipedia hands back whatever the
+# article's lead image is, which for a live-service game is usually a
+# wide logo. `_as_poster` letterboxes those onto a poster-shaped panel
+# rather than letting ImageOps.fit crop a wide logo down to its middle
+# third, which is unreadable.
+#
+# Asked *only* after Steam has answered and has nothing, so no game that
+# already resolves changes at all.
+WIKI_API = "https://en.wikipedia.org/w/api.php"
+WIKI_SUMMARY = "https://en.wikipedia.org/api/rest_v1/page/summary/"
+# How many search rows to consider. The article wanted is first or
+# second in all five measured; three is one row of slack.
+WIKI_ROWS = 3
+# Lower than Steam's 0.90 on purpose, and safe for a different reason:
+# Steam's danger is a *sibling product* (a game's own DLC, sequel or
+# soundtrack, all scoring 0.83), so it needs a high bar. Wikipedia's
+# search is asked with "video game" appended and its titles carry a
+# disambiguator - "Overwatch (2023 video game)" - which is stripped
+# before scoring, so the comparison is title against title.
+WIKI_MATCH_THRESHOLD = 0.80
+_WIKI_DISAMBIG_RE = re.compile(r"\s*\([^)]*\)\s*$")
+# Art too small to be worth a tile. The measured lead images run
+# 258x387 upward; anything under this is an icon or a stub thumbnail.
+WIKI_MIN_PIXELS = 120
+# What a composed poster is: Steam's own library shape, so a composed
+# tile and a real one are the same object to every caller below.
+POSTER_W, POSTER_H = 600, 900
+# How wide the art sits inside a composed poster. 0.86 rather than full
+# bleed so a logo with no background of its own does not touch the
+# tile's rounded edge, which images._round_corners then clips through.
+POSTER_INSET = 0.86
+
 _UA = "Atomic/1.0"
 
 # Trademark marks sit inside store titles ("NieR:Automata(tm)") and
@@ -421,8 +476,16 @@ def _cache_files(name: str):
 
     Keyed on the normalized name rather than the raw one so a rename
     that changes only punctuation reuses what was already resolved."""
+    # "v2|" is the Wikipedia fallback, 24 August 2026 - and it is why
+    # VALORANT stayed blank on the owner's machine *after* the fallback
+    # shipped: the pre-fallback build had already written an
+    # authoritative `.none` for it (Steam answered, Steam has nothing),
+    # and `_read_cached` short-circuits on that miss before the new
+    # source is ever asked. A resolver gaining a source has to retire
+    # the misses recorded when it had fewer; versioning the key is what
+    # does that without touching the hits.
     digest = hashlib.sha1(
-        _squash(name).encode("utf-8", "replace")).hexdigest()
+        ("v2|" + _squash(name)).encode("utf-8", "replace")).hexdigest()
     return _cache_dir() / f"{digest}.url", _cache_dir() / f"{digest}.none"
 
 
@@ -495,6 +558,111 @@ def _resolve_appid(name: str, install_path, deadline):
         return None, False       # network/parse failure - do not cache
 
 
+def _wikipedia_art(name: str, deadline=None):
+    """The lead image of the English Wikipedia article about the game
+    called `name`, or None. See the note beside WIKI_API for why this
+    source and not one of the three better ones.
+
+    Two requests, both keyless, both bounded by the shared deadline.
+    Never raises: this is the step after Steam has already said no, so
+    failing here is the same outcome as not asking."""
+    query = (name or "").strip()
+    if not query:
+        return None
+    try:
+        search = _get_json(WIKI_API + "?" + urllib.parse.urlencode({
+            "action": "query", "list": "search", "format": "json",
+            "srsearch": f"{query} video game", "srlimit": WIKI_ROWS}),
+            net.step_timeout(deadline, DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT)
+    except Exception:
+        return None
+    rows = (((search or {}).get("query") or {}).get("search") or [])
+    for row in rows:
+        title = str(row.get("title") or "")
+        # The disambiguator is Wikipedia's, not the game's - scoring
+        # "Overwatch" against "Overwatch (2023 video game)" would fail
+        # on the parenthetical alone.
+        bare = _WIKI_DISAMBIG_RE.sub("", title)
+        if title_match.similarity(query, bare) < WIKI_MATCH_THRESHOLD:
+            continue
+        try:
+            summary = _get_json(
+                WIKI_SUMMARY + urllib.parse.quote(title.replace(" ", "_")),
+                net.step_timeout(deadline, DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT)
+        except Exception:
+            continue
+        if str((summary or {}).get("type") or "") != "standard":
+            continue        # a disambiguation page has no art of its own
+        image = (summary or {}).get("originalimage") or {}
+        url = str(image.get("source") or "")
+        if not url:
+            continue
+        if (int(image.get("width") or 0) < WIKI_MIN_PIXELS
+                or int(image.get("height") or 0) < WIKI_MIN_PIXELS):
+            continue
+        # The API appends its own utm_* analytics parameters. Dropped so
+        # the URL that gets cached is the file's own address, and two
+        # games resolving to the same file share one download.
+        return url.split("?", 1)[0]
+    return None
+
+
+def _as_poster(path):
+    """`path` itself when it is already poster-shaped, else a composed
+    POSTER_W x POSTER_H tile with the art centred on a flat panel.
+
+    A wide logo is what Wikipedia returns for a live-service game (see
+    the note beside WIKI_API), and every tile in the app is drawn
+    through `images.thumbnail_or_avatar`, which *crops to fill*. Cropping
+    a 544x371 Valorant logo into a 2:3 tile keeps its middle third and
+    throws the name away. Letterboxing keeps the whole thing.
+
+    Composed once and cached beside the download, on the worker that
+    fetched it. Never raises - a composition that fails returns the
+    original path, which is still better than nothing."""
+    try:
+        from PIL import Image
+        source = Path(path)
+        with Image.open(source) as opened:
+            art = opened.convert("RGBA")
+            width, height = art.size
+            # Steam's own library art is 2:3. Anything at least this
+            # tall is left alone - cropping a 258x387 cover to 2:3 takes
+            # 3% off it, which is not worth a recomposition.
+            if height >= width * 1.35:
+                return str(source)
+            target = source.with_name(source.stem + "-poster.png")
+            if target.exists():
+                return str(target)
+            scale = min(POSTER_W * POSTER_INSET / width,
+                        POSTER_H * POSTER_INSET / height)
+            art = art.resize((max(1, round(width * scale)),
+                              max(1, round(height * scale))),
+                             Image.Resampling.LANCZOS)
+            panel = Image.new("RGBA", (POSTER_W, POSTER_H),
+                              _panel_rgb() + (255,))
+            panel.alpha_composite(art, ((POSTER_W - art.width) // 2,
+                                        (POSTER_H - art.height) // 2))
+            temporary = target.with_suffix(".png.part")
+            panel.save(temporary, "PNG")
+            os.replace(temporary, target)
+            return str(target)
+    except Exception:
+        return str(path)
+
+
+def _panel_rgb():
+    """theme.SURFACE as an (r, g, b) triple. Imported here rather than
+    at module scope: this module is pure network/PIL and is imported by
+    worker code that has no business pulling in the stylesheet."""
+    try:
+        from . import theme
+        raw = theme.SURFACE.lstrip("#")
+        return tuple(int(raw[i:i + 2], 16) for i in (0, 2, 4))
+    except Exception:
+        return (26, 23, 18)
+
+
 def fetch_cover_url(name: str, deadline=None, install_path=None):
     """The best portrait cover-art URL for a game called `name`, or None.
 
@@ -520,6 +688,14 @@ def fetch_cover_url(name: str, deadline=None, install_path=None):
             deadline = net.deadline_in(DEFAULT_BUDGET)
         appid, answered = _resolve_appid(name, install_path, deadline)
         if not appid:
+            # Steam has no such game - so ask the source that covers the
+            # ones it has never heard of. See the note beside WIKI_API:
+            # this is the whole of what makes VALORANT resolve, and it
+            # runs only here, after Steam has already said no.
+            found = _wikipedia_art(name, deadline)
+            if found:
+                _write_cached(name, found)
+                return found
             if answered:
                 _write_cached(name, None)
             return None
@@ -549,6 +725,10 @@ def fetch_cover(name: str, deadline=None, install_path=None):
         if not url:
             return None
         path = images.download(url, timeout=int(DEFAULT_TIMEOUT))
-        return str(path) if path else None
+        # Steam's library art is already 2:3 and passes straight through;
+        # a wide Wikipedia logo is letterboxed onto a poster panel here,
+        # on the worker, rather than being cropped to its middle third by
+        # the tile cutter. See `_as_poster`.
+        return _as_poster(path) if path else None
     except Exception:
         return None

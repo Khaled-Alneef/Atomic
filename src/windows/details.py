@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
 from helpers import (anime_identity, app_settings, artwork, hero_art, history,
                      images,
                      logs, lookup_pool, net, storage, theme)
+from helpers.poster_grid import PosterGrid
 from helpers.widgets import (Card, GlassPage, GlyphButton, PickCombo, confirm,
                              frameless_dialog, scroll_area, show_toast,
                              use_hover_cursor)
@@ -418,7 +419,7 @@ def _still_worker(signals, key, url, blur):
             path = _blurred_still(path)
         # A file that will not decode is not a still - say nothing and
         # let the row keep the placeholder rather than draw a hole.
-        if images._fitted(str(path), STILL_SIZE, images._stamp(path)) is None:
+        if images.warm(str(path), STILL_SIZE) is None:
             return
     except Exception:
         return
@@ -739,6 +740,7 @@ def _chip_button(text) -> QPushButton:
     _chip look at rest, so the facts row stays one design; hover borrows
     the accent border every other clickable thing here answers with."""
     button = QPushButton(text)
+    use_hover_cursor(button)
     button.setStyleSheet(
         f"QPushButton {{ color: {theme.TEXT}; background: {theme.SURFACE_HOVER};"
         f" border: 1px solid {theme.BORDER};"
@@ -890,6 +892,9 @@ class DetailsPage(GlassPage):
         self.entry = dict(entry or {})
         self._run = 0
         self._closed = False
+        # Whether this open has already warmed its episode's sources -
+        # see _prefetch_sources. One fan-out per open, never per relayout.
+        self._prefetch_started = False
         self._backdrop = None
         self._backdrop_scaled = None      # see paintEvent's size cache
         self._backdrop_size = None
@@ -1266,6 +1271,9 @@ class DetailsPage(GlassPage):
             # A no-op for anything that is not anime, and deduplicated per
             # id, so this costs nothing to call on every details open.
             anime_identity.prewarm(dict(self.entry))
+            # And the sources for whatever Continue would play, warmed
+            # into streams' own cache while the page is being read.
+            self._prefetch_sources()
         if self._is_reading:
             # **No artwork ground on a reading page at all** - the
             # owner's ask, 21 August 2026: "remove all readings bg image
@@ -3365,6 +3373,74 @@ class DetailsPage(GlassPage):
         if self.entry.get("id") == entry_id:
             self.entry.update(fields)
 
+    # How long the page is given before it warms the sources it expects
+    # to be asked for. Not zero: the open is already spending its first
+    # moments on Cinemeta, the artwork and the episode list, and a
+    # six-way stream fan-out started in the same breath competes with
+    # the three things actually on screen.
+    SOURCE_PREFETCH_DELAY_MS = 700
+
+    def _prefetch_sources(self):
+        """Warm `find_streams` for the episode Continue would play.
+
+        **Measured 24 August 2026, Attack on Titan S01E05, the owner's
+        own addon list.** Pressing an episode costs the fan-out before
+        anything can be raced: 0.65-0.71s to the first batch of rows and
+        1.97-4.16s to the finished list (the spread is one slow addon -
+        WatchHub answered 0 rows in 2.44s on one run). All of that is
+        HTTP the page could have paid while it was being looked at, and
+        `streams._RESULT_CACHE` keys on exactly (entry, season, episode)
+        for 15 minutes, so a warmed answer makes the press free.
+
+        A/B on the real page, same title, same list of 79 rows:
+
+            cold press-to-sources    4850ms
+            warmed by this page         0ms
+
+        Deliberately *not* the torrent race: warming that would mean
+        joining swarms for something nobody has pressed. This is the
+        cheap half - the addons and the indexers, one fan-out, once per
+        open.
+
+        Everything about it is soft. It picks the part-watched episode
+        if there is one (`player.resume_point` - the same target the
+        Continue button uses) and otherwise the next one after stored
+        progress, which is what `PlayerPage._starting_episode` would
+        land on; a wrong guess costs one fan-out and caches nothing,
+        since an empty answer is never stored."""
+        if self._is_reading or self._prefetch_started:
+            return
+        self._prefetch_started = True
+
+        def worker(entry, run):
+            try:
+                from helpers import streams as streams_module
+                from windows import player as player_module
+                season = episode = None
+                point = player_module.resume_point(entry)
+                if point:
+                    season, episode = point
+                else:
+                    stored_season, stored_episode = self._progress()
+                    if stored_episode:
+                        season, episode = stored_season, stored_episode + 1
+                    elif entry.get("type") != "Movie":
+                        season, episode = 1, 1
+                if run != self._run or self._closed:
+                    return
+                streams_module.find_streams(entry, season=season,
+                                            episode=episode)
+            except Exception:
+                logs.exception("details source prefetch failed")
+
+        QTimer.singleShot(
+            self.SOURCE_PREFETCH_DELAY_MS,
+            lambda run=self._run: (
+                None if (self._closed or run != self._run)
+                else threading.Thread(target=worker,
+                                      args=(dict(self.entry), run),
+                                      daemon=True).start()))
+
     def _continue(self):
         """Resume where watching/reading stopped - the page's primary
         action, and with the cards' round button gone, the only one.
@@ -3519,11 +3595,24 @@ class DetailsPage(GlassPage):
         brush = QBrush(scaled)
         transform = QTransform()
         transform.translate(left, top)
-        # The brush tiles in *device* pixels; the pixmap carries a ratio,
-        # so it has to be scaled back down or the art is drawn at ratio
-        # times its size on any display that is not at 100%.
-        if ratio and ratio != 1.0:
-            transform.scale(1.0 / ratio, 1.0 / ratio)
+        # **No 1/ratio scale here, and that line was the owner's "on my
+        # 2K monitor the image did not fit".** It used to read "the
+        # brush tiles in device pixels, so the pixmap has to be scaled
+        # back down". Measured 24 August 2026 with a four-quadrant
+        # marker texture (200 device px, DPR 2) painted as a path brush
+        # into a DPR-2 target: the tile repeated every 200 *device*
+        # pixels - i.e. every 100 logical, the texture's own logical
+        # size. Qt's raster brush already applies the pixmap's
+        # devicePixelRatio; the extra scale applied it twice.
+        #
+        # What that looked like on his LG 27GS950 (2560x1440 at 125%,
+        # DPR 1.25): the backdrop was cut to 2560x1440 device = 2048x1152
+        # logical, exactly the page - then drawn at 1638x922, and the
+        # brush *tiled* the rest. Reproduced offscreen at that geometry
+        # before the fix: a hard seam at device row 1152 (= 1152/1.25 =
+        # 921.6 logical) with the top of the picture starting again
+        # underneath it. At DPR 1.0 the branch never ran, which is why
+        # it survived every earlier screenshot.
         brush.setTransform(transform)
         # **Intersected with the artwork's own rectangle, or the brush
         # tiles.** A QBrush repeats to fill whatever path it is given,
@@ -3680,14 +3769,18 @@ class GenreBrowsePage(GlassPage):
         super().__init__(parent=host)
         self._genre = str(genre)
         self._is_reading = bool(is_reading)
-        self._covers = {}         # poster key -> (label, title)
-        self._next_key = 0
         self._closed = False
-        self._sections = {}       # row label -> the grid to fill
-        # Every grid built, with its cards, so a resize can re-flow them
-        # into a new column count instead of scrolling sideways.
-        self._grids = []
-        self._columns = 0
+        # One painted grid (helpers/poster_grid) instead of sections of
+        # Card widgets in a scroll area - the same conversion the
+        # category pages and the reader strip got, for the same measured
+        # reason: moving child widgets through Qt's scroll machinery
+        # costs ~14ms a frame on the owner's machine (70/s against the
+        # panel's 240), and this page was the one grid still doing it -
+        # his "fix the low fps in the same genre pages while
+        # scrolling!!". The Series/Movies section headings become a
+        # neutral badge on each card's head; the rows land appended in
+        # arrival order.
+        self._items = []          # grid index -> catalogue row
         self.open_title = None    # set by the caller
 
         column = QVBoxLayout(self)
@@ -3714,18 +3807,11 @@ class GenreBrowsePage(GlassPage):
         # visual where Discover's identical cards did (the owner's
         # report). theme.py's QScrollArea/#Bare rules keep the ground
         # transparent without reaching the children.
-        self._body_host = QWidget(objectName="Bare")
-        self._body = QVBoxLayout(self._body_host)
-        self._body.setContentsMargins(0, 0, 8, 0)
-        self._body.setSpacing(16)
-        self._body.addStretch(1)
-        self._area = scroll_area(self._body_host, ground=theme.BG)
-        # Never sideways: the grid re-flows to whatever width there is
-        # (see _columns_for), so a horizontal bar could only ever mean
-        # the re-flow failed.
-        self._area.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        column.addWidget(self._area, stretch=1)
+        self._grid = PosterGrid(_BROWSE_POSTER_SIZE, ground=theme.BG,
+                                parent=self)
+        self._grid.clicked.connect(self._on_grid_pick)
+        self._grid.needs_cover.connect(self._on_grid_needs_cover)
+        column.addWidget(self._grid, stretch=1)
 
         self._note = QLabel(f"Looking for {self._genre} titles...")
         self._note.setWordWrap(True)
@@ -3861,179 +3947,65 @@ class GenreBrowsePage(GlassPage):
         except RuntimeError:
             pass
 
-    def _columns_for(self, width) -> int:
-        """How many poster columns fit in `width`.
-
-        Clamped at the top so a very wide window does not stretch one
-        thin line across it, and at the bottom so a narrow one wraps
-        rather than clipping a card in half."""
-        card = _BROWSE_POSTER_SIZE[0] + 20
-        step = card + _BROWSE_GRID_SPACING
-        fits = int((max(0, width) + _BROWSE_GRID_SPACING) // step)
-        return max(_BROWSE_MIN_COLUMNS, min(_BROWSE_COLUMNS, fits))
-
-    def _viewport_width(self) -> int:
-        area = getattr(self, "_area", None)
-        if area is not None:
-            try:
-                return area.viewport().width()
-            except RuntimeError:
-                pass
-        return self.width()
-
-    def _reflow(self, columns):
-        """Re-place every card into `columns` columns.
-
-        Cheap enough for a resize: the widgets already exist and only
-        their grid coordinates change, so nothing is rebuilt, re-styled
-        or re-decoded - which is what makes it safe from resizeEvent.
-
-        **Taken out of the layout first.** `addWidget` on a widget a
-        QGridLayout already holds does not move it, it adds a second
-        entry for it - so re-adding alone left every card occupying its
-        old cell as well as its new one, and the grid kept the width of
-        the widest arrangement it had ever had. Measured: re-flowing
-        1633px down to 900px produced a 699px horizontal scroll range,
-        which is the sideways scrolling this whole change exists to
-        remove. The stale columns are zeroed for the same reason - a
-        QGridLayout never forgets a column index it has been given, and
-        an emptied one keeps its minimum width."""
-        previous = self._columns
-        self._columns = columns
-        for grid, cards in self._grids:
-            try:
-                for card in cards:
-                    grid.removeWidget(card)
-                for index, card in enumerate(cards):
-                    grid.addWidget(card, index // columns, index % columns)
-                for extra in range(columns, max(previous, columns) + 1):
-                    grid.setColumnMinimumWidth(extra, 0)
-                    grid.setColumnStretch(extra, 0)
-                grid.invalidate()
-                parent = grid.parentWidget()
-                if parent is not None:
-                    parent.adjustSize()
-            except RuntimeError:
-                continue      # that section went away under a rebuild
-
-    def _sync_columns(self):
-        """Re-flow if the width now says a different column count.
-
-        **Called from more than resizeEvent, and that is the point.**
-        Rows can land before the scroll area has ever been laid out, when
-        `viewport().width()` is still a placeholder - measured, a page
-        opened at 1633px built its grid three columns wide because that
-        is what the not-yet-sized viewport claimed, and nothing corrected
-        it unless the window was afterwards resized by hand. So the count
-        is re-taken on show, after every batch of rows, and on resize."""
-        columns = self._columns_for(self._viewport_width())
-        if columns != self._columns:
-            self._reflow(columns)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        # After this turn of the event loop: the geometry the layout
-        # gives the viewport is not final until the show has been
-        # processed.
-        QTimer.singleShot(0, self._sync_columns)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._sync_columns()
-
     def _on_rows(self, label, rows):
         if self._closed or not rows:
             return
         self._got_rows = True
-        insert_at = self._body.count() - 1
-        if label:
-            heading = QLabel(label, objectName="SectionTitle")
-            self._body.insertWidget(insert_at, heading)
-            insert_at += 1
-        grid_host = QWidget(objectName="Bare")
-        grid = QGridLayout(grid_host)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(_BROWSE_GRID_SPACING)
-        # Centred, not left-aligned (the owner's ask, with a screenshot
-        # of the Comedy page): the column count is computed from the
-        # viewport, so the last column almost never lands flush against
-        # the right edge - and left-aligning put the whole leftover
-        # gutter on one side, which reads as the page having slipped
-        # sideways. Centring splits it, so the rows sit in the middle of
-        # the screen whatever the window width works out to.
-        grid.setAlignment(Qt.AlignmentFlag.AlignHCenter
-                          | Qt.AlignmentFlag.AlignTop)
-        columns = self._columns or self._columns_for(self._viewport_width())
-        self._columns = columns
-        cards = [self._build_card(item) for item in rows]
-        for index, card in enumerate(cards):
-            grid.addWidget(card, index // columns, index % columns)
-        self._grids.append((grid, cards))
-        self._body.insertWidget(insert_at, grid_host)
-        # The width this was built against may have been a placeholder;
-        # re-take it once this turn of the event loop has laid out.
-        QTimer.singleShot(0, self._sync_columns)
+        first = len(self._items)
+        records = []
+        for item in rows:
+            row = dict(item)
+            row["_badge"] = str(label or "")
+            self._items.append(row)
+            title = (row.get("title") or "").strip()
+            bits = [_year_text(row.get("year"))]
+            rating = str(row.get("imdbRating") or "").strip()
+            records.append({
+                "title": title,
+                "year": "  ·  ".join(b for b in bits if b),
+                "rating": f"★ {rating}" if rating else "",
+                "badge": str(label or ""),
+                "saved": False,
+                "pixmap": None,
+            })
+        self._grid.append_items(records)
 
-    def _build_card(self, item):
-        """One poster tile - the Discover grid's own card, so the two
-        pages read as the same surface."""
-        title = (item.get("title") or "").strip()
-        card = Card(hoverable=True)
-        card.setFixedWidth(_BROWSE_POSTER_SIZE[0] + 20)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(6, 8, 6, 8)
-        layout.setSpacing(6)
+    def _on_grid_pick(self, index):
+        if 0 <= index < len(self._items):
+            self._pick(dict(self._items[index]))
 
-        cover = QLabel()
-        cover.setFixedSize(*_BROWSE_POSTER_SIZE)
-        cover.setPixmap(images.thumbnail_or_avatar(None, title,
-                                                   _BROWSE_POSTER_SIZE))
-        layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        name = QLabel(title, objectName="CardTitle")
-        name.setWordWrap(True)
-        name.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(name)
-
-        bits = [_year_text(item.get("year"))]
-        rating = str(item.get("imdbRating") or "").strip()
-        if rating:
-            bits.append(f"★ {rating}")
-        meta_text = "  ·  ".join(b for b in bits if b)
-        if meta_text:
-            meta = QLabel(meta_text, objectName="CardMeta")
-            meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            layout.addWidget(meta)
-
-        poster_url = item.get("poster") or ""
-        if poster_url:
-            key = self._next_key
-            self._next_key += 1
-            self._covers[key] = (cover, title)
-            lookup_pool.submit(self._poster_worker, self._signals, key,
-                               poster_url)
-
-        card.clicked.connect(lambda it=dict(item): self._pick(it))
-        return card
+    def _on_grid_needs_cover(self, index):
+        if not (0 <= index < len(self._items)):
+            return
+        url = self._items[index].get("poster") or ""
+        if not url:
+            return
+        lookup_pool.submit(self._poster_worker, self._signals, index, url)
 
     @staticmethod
     def _poster_worker(signals, key, url):
         # Never raises - the pool's worker thread dies silently otherwise.
         try:
             path = images.download(url)
+            if path:
+                # Decoded on the worker; the slot only converts a cached
+                # tile (the split every cover path here uses).
+                images.warm(path, tuple(_BROWSE_POSTER_SIZE))
         except Exception:
             path = None
         if path:
-            signals.poster.emit(key, str(path))
+            try:
+                signals.poster.emit(key, str(path))
+            except RuntimeError:
+                pass
 
     def _on_poster(self, key, path):
-        pair = self._covers.get(key)
-        if pair is None:
+        if self._closed or not (0 <= key < len(self._items)):
             return
-        cover, title = pair
+        title = (self._items[key].get("title") or "").strip()
         try:
-            cover.setPixmap(images.thumbnail_or_avatar(path, title,
-                                                       _BROWSE_POSTER_SIZE))
+            self._grid.set_cover(key, images.thumbnail_or_avatar(
+                path, title, _BROWSE_POSTER_SIZE))
         except RuntimeError:
             pass          # the page closed under the download
 

@@ -26,6 +26,7 @@ none of them is worth interrupting playback over.
 import hashlib
 import json
 import os
+import time
 import re
 import urllib.parse
 import urllib.request
@@ -125,19 +126,62 @@ def _get_json(url, timeout):
         return json.loads(net.read_text(response, deadline))
 
 
-def _tmdb_id(imdb_id: str, timeout):
+def _tmdb_id(imdb_id: str, timeout, title: str = ""):
     """TMDB's own id and media type for an IMDb id.
 
     `find` rather than `search`: the tracker already stores an IMDb id
     for everything it resolved, and matching on an id cannot pick the
     wrong show the way a title search can - which this project has been
-    bitten by before."""
-    url = f"{API}/find/{urllib.parse.quote(imdb_id)}?external_source=imdb_id"
-    body = _get_json(url, timeout)
-    for kind, field in (("tv", "tv_results"), ("movie", "movie_results")):
-        rows = (body or {}).get(field) or []
-        if rows:
-            return kind, rows[0].get("id")
+    bitten by before.
+
+    **`title` is the fallback for an id TMDB has unlinked, and it is a
+    real case, measured 24 August 2026:** `find/tt14986406` (Bleach:
+    Thousand-Year Blood War) answers zero rows in every list - TMDB
+    files TYBW as seasons of Bleach and no longer maps that IMDb id -
+    so the loading screen that had shown its logo all week lost it the
+    moment the cache was evicted (the owner's "why do the bleach tybw
+    logo do not show while loading!!"). A guarded title search rescues
+    exactly this: the answer must match the asked title at 0.85, **or
+    be a strict prefix of it** - "Bleach" for "Bleach: Thousand-Year
+    Blood War" is the franchise parent, and franchise art on a loading
+    screen is right where no art is not. Anything looser inherits
+    another show's artwork, which this project has been bitten by
+    before too."""
+    # An empty id skips straight to the title search. `find/` with no id
+    # is a 404, which used to raise out of here before the fallback
+    # below could run - and a title with no IMDb id at all (every
+    # reading row, and any catalogue row Cinemeta filed without one) is
+    # exactly the case `poster_url` needs answered.
+    if imdb_id:
+        url = f"{API}/find/{urllib.parse.quote(imdb_id)}?external_source=imdb_id"
+        body = _get_json(url, timeout)
+        for kind, field in (("tv", "tv_results"), ("movie", "movie_results")):
+            rows = (body or {}).get(field) or []
+            if rows:
+                return kind, rows[0].get("id")
+    title = (title or "").strip()
+    if not title:
+        return None, None
+    from . import title_match
+    asked = title.lower()
+    for kind in ("tv", "movie"):
+        try:
+            found = _get_json(
+                f"{API}/search/{kind}?query={urllib.parse.quote(title)}",
+                timeout)
+        except Exception:
+            continue
+        for row in (found or {}).get("results") or []:
+            name = str(row.get("name") or row.get("title") or "").strip()
+            if not name or row.get("id") is None:
+                continue
+            lowered = name.lower()
+            prefix = (asked.startswith(lowered)
+                      and len(lowered) >= 4
+                      and (len(asked) == len(lowered)
+                           or not asked[len(lowered)].isalnum()))
+            if prefix or title_match.similarity(title, name) >= 0.85:
+                return kind, row.get("id")
     return None, None
 
 
@@ -156,6 +200,57 @@ def tmdb_id(imdb_id: str, timeout: int = DEFAULT_TIMEOUT):
     the same reason as `get_json` above; the id lookup is the one request
     every TMDB feature starts with."""
     return _tmdb_id(imdb_id, timeout)
+
+
+# The poster size the tracker's tiles are cut from. w500 rather than
+# `original`: POSTER_SIZE is 160x216 logical, so even at DPR 2 a 500px
+# wide poster is more than the tile needs, and `original` runs to 2000px
+# for a picture nothing here draws that large.
+POSTER_SIZE_PATH = "w500"
+
+
+def poster_url(imdb_id: str = "", title: str = "",
+               timeout: int = DEFAULT_TIMEOUT):
+    """A TMDB poster URL for a title, or None.
+
+    **The second art source for video rows, and the reason it exists is
+    a report rather than a theory** (24 August 2026): a friend's fresh
+    install showed no art anywhere on Watch or Read while the Watch
+    schedule - whose covers come from s4.anilist.co - filled normally.
+    Every Watch row's art comes from one host, `images.metahub.space`
+    (measured: 35 of 36 Discover rows across anime/series/movie), so a
+    machine that cannot reach that one host loses every cover on the
+    page while a different host's art on the next tab is fine. There was
+    no second source to fall back to. Now there is, and it is the one
+    TMDB key a user is already asked for in Settings.
+
+    Matched on the IMDb id where there is one, which cannot pick the
+    wrong show; a title is passed through `_tmdb_id`'s guarded search
+    (0.85, or a strict prefix for a franchise parent) rather than a bare
+    best match, for the reason this project keeps re-learning - a
+    confidently wrong cover is worse than a blank tile.
+
+    Returns a CDN URL, not a file: the caller already owns a download
+    cache keyed by URL, and routing this through it means the fallback
+    is cached, shrunk and trimmed exactly like the primary."""
+    if not token():
+        return None
+    imdb_id = (imdb_id or "").strip()
+    title = (title or "").strip()
+    if not imdb_id and not title:
+        return None
+    try:
+        kind, ident = _tmdb_id(imdb_id, timeout, title)
+    except Exception:
+        return None
+    if not ident:
+        return None
+    try:
+        body = _get_json(f"{API}/{kind}/{ident}", timeout) or {}
+    except Exception:
+        return None
+    path = body.get("poster_path")
+    return f"{CDN}/{POSTER_SIZE_PATH}{path}" if path else None
 
 
 def _search_logo(title: str, timeout):
@@ -240,12 +335,41 @@ def _best_backdrop(images: dict):
     return sorted(backdrops, key=rank)[0].get("file_path")
 
 
+# How long an "asked and there is none" marker stands before the art is
+# asked about again. It used to stand forever, and forever is wrong in
+# both directions: art gets *added* to TMDB over time, and - the case
+# that actually happened, 24 August 2026 - a marker written during one
+# bad moment blocked a logo that demonstrably existed. Bleach TYBW's
+# logo and backdrop were on disk in the morning, the cache trim evicted
+# them (logo_cache sat in trim_cache's roots and the reader's new
+# full-resolution pages pushed the total over the cap), the refetch hit
+# a bad answer, and two 0-byte `.none` files then made the loading
+# screen permanently logoless - the owner's "why do the bleach tybw
+# logo do not show while loading!!". Six hours keeps request spam
+# bounded and heals the same evening.
+NEGATIVE_TTL_S = 6 * 3600
+
+
 def _cached_file(imdb_id, suffix):
     """(image path, "asked and there is none" marker) for one kind of
     artwork. Cached on disk by IMDb id: artwork does not change, and the
     player asks for it every time an episode starts."""
     return (_cache_dir() / f"{imdb_id}{suffix}",
             _cache_dir() / f"{imdb_id}{suffix}.none")
+
+
+def _still_missing(marker) -> bool:
+    """Whether this miss marker still speaks - see NEGATIVE_TTL_S. An
+    expired one is removed so the next check is a clean ask."""
+    try:
+        if not marker.exists():
+            return False
+        if time.time() - marker.stat().st_mtime < NEGATIVE_TTL_S:
+            return True
+        marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return False
 
 
 def _download(path, timeout):
@@ -267,11 +391,12 @@ def logo_path(entry, timeout: int = DEFAULT_TIMEOUT):
         return str(cached)
     # A title TMDB has no logo for must not be looked up on every single
     # episode; an empty marker file records "asked, nothing there".
-    if missing.exists():
+    if _still_missing(missing):
         return None
 
     try:
-        kind, tmdb_id = _tmdb_id(imdb_id, timeout)
+        kind, tmdb_id = _tmdb_id(imdb_id, timeout,
+                                 (entry or {}).get("title") or "")
         if not tmdb_id:
             missing.touch()
             return None
@@ -389,7 +514,7 @@ def logo_path_by_title(title, timeout: int = DEFAULT_TIMEOUT):
     cached, missing = _cached_file(key, ".title.png")
     if cached.exists() and cached.stat().st_size > 0:
         return str(cached)
-    if missing.exists():
+    if _still_missing(missing):
         return None
     try:
         path = None
@@ -427,10 +552,11 @@ def backdrop_fast_path(entry, timeout: int = DEFAULT_TIMEOUT):
     cached, missing = _cached_file(imdb_id, ".bgq.jpg")
     if cached.exists() and cached.stat().st_size > 0:
         return str(cached)
-    if missing.exists():
+    if _still_missing(missing):
         return None
     try:
-        kind, tmdb_id = _tmdb_id(imdb_id, timeout)
+        kind, tmdb_id = _tmdb_id(imdb_id, timeout,
+                                 (entry or {}).get("title") or "")
         if not tmdb_id:
             missing.touch()
             return None
@@ -475,11 +601,12 @@ def backdrop_path(entry, timeout: int = DEFAULT_TIMEOUT):
     cached, missing = _cached_file(imdb_id, ".bg2.jpg")
     if cached.exists() and cached.stat().st_size > 0:
         return str(cached)
-    if missing.exists():
+    if _still_missing(missing):
         return None
 
     try:
-        kind, tmdb_id = _tmdb_id(imdb_id, timeout)
+        kind, tmdb_id = _tmdb_id(imdb_id, timeout,
+                                 (entry or {}).get("title") or "")
         if not tmdb_id:
             missing.touch()
             return None

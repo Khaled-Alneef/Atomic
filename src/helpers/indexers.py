@@ -408,6 +408,27 @@ def _quality_of(text: str) -> str:
     return found.group(1).lower() if found else ""
 
 
+# info_hash -> the URL of the release's actual .torrent file, for the
+# sources that publish one. Anime Tosho serves every release's .torrent
+# off its own CDN, and handing those bytes to libtorrent skips the whole
+# DHT/tracker metadata wait - the longest single step of a cold play
+# (0.83-3.46s measured; the mirror services were probed as an
+# alternative and rejected: itorrents.org answered the same files in
+# 9.4-14.3s with one timeout in three, 24 August 2026). Keyed by hash
+# rather than kept only on the row, so a Torrentio row for a release
+# tosho also indexed benefits too. Bounded; entries are only ever URLs.
+TORRENT_FILE_URLS = {}
+_TORRENT_FILE_URLS_MAX = 400
+
+
+def _remember_torrent_url(info_hash, url):
+    if not url or not info_hash:
+        return
+    if len(TORRENT_FILE_URLS) >= _TORRENT_FILE_URLS_MAX:
+        TORRENT_FILE_URLS.clear()
+    TORRENT_FILE_URLS[str(info_hash).lower()] = str(url)
+
+
 def _stream(title, info_hash, trackers, seeders, source, size_bytes=0):
     return {"title": title, "url": None, "kind": "torrent", "source": source,
             "quality": _quality_of(title), "reason": "", "headers": {},
@@ -446,6 +467,7 @@ def animetosho(entry_title, season, episode, deadline) -> list:
             continue
         if episode_match(title, season, episode) is None:
             continue
+        _remember_torrent_url(info_hash, row.get("torrent_url"))
         results.append(_stream(title, info_hash,
                                _trackers_from(row.get("magnet_uri") or ""),
                                row.get("seeders"), "Anime Tosho",

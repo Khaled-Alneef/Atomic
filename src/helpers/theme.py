@@ -881,6 +881,25 @@ QMenu::separator {{
     background: {BORDER};
     margin: 6px 4px;
 }}
+/* Checkable menu items draw a real box - the owner's ask, 24 August
+   2026 ("a box that will be checked if choose otherwise empty"). Once
+   QMenu itself is styled, Qt stops drawing the native check glyph, so
+   without these rules a ticked filter looked identical to an unticked
+   one. Same recipe as QCheckBox below: empty bordered box at rest,
+   accent fill with the drawn tick when checked. */
+QMenu::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {TEXT_DIM};
+    border-radius: 4px;
+    background: {BG};
+    margin-left: 4px;
+}}
+QMenu::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    image: url({CHECKMARK_PATH});
+}}
 
 /* ---- Dialogs --------------------------------------------------------------- */
 /* The square QDialog fill never paints on the app's own dialogs any

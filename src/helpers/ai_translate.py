@@ -394,10 +394,16 @@ def _translate_with(provider, cues, progress, cancelled):
 def to_srt(cues) -> str:
     """Cues back out as an .srt the player can hand to mpv."""
     def stamp(seconds):
-        seconds = max(0.0, float(seconds))
-        hours, rest = divmod(int(seconds), 3600)
-        minutes, secs = divmod(rest, 60)
-        millis = int(round((seconds - int(seconds)) * 1000))
+        # **Rounded to whole milliseconds first, then split.** Rounding
+        # the fraction on its own overflows: 12.9996s gave int(12) and
+        # round(0.9996 * 1000) = 1000, which formats as "00:00:12,1000"
+        # - a four-digit field no .srt parser reads, and every cue after
+        # a line mpv cannot parse shifts. Working in integer
+        # milliseconds throughout makes the carry impossible.
+        total_ms = int(round(max(0.0, float(seconds)) * 1000))
+        hours, rest = divmod(total_ms, 3_600_000)
+        minutes, rest = divmod(rest, 60_000)
+        secs, millis = divmod(rest, 1000)
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
     blocks = []

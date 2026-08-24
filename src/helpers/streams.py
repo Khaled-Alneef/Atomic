@@ -66,6 +66,14 @@ try:
 except Exception:  # pragma: no cover
     anime_identity = None
 
+# Cinemeta's episode list, for `absolute_episode`. Same defensive shape:
+# without it a series is judged on its stated season and episode only,
+# which is what this file did before absolute numbering was understood.
+try:
+    from . import stremio
+except Exception:  # pragma: no cover
+    stremio = None
+
 # The debrid client (helpers/debrid). Same defensive import again: a
 # build without it plays from the swarm exactly as before, and so does a
 # build *with* it until a key is pasted in Settings - debrid.available()
@@ -777,6 +785,40 @@ def _prepare_with_debrid(stream, info_hash, season, episode, deadline=None,
     return stream
 
 
+# How long fetching a release's published .torrent file may take before
+# the magnet path proceeds without it. Short on purpose: the fetch runs
+# *before* the engine add, so every millisecond here is on the critical
+# path to first frame, and the magnet route it replaces costs 0.83-3.46s
+# (measured) - a fetch slower than that buys nothing.
+TORRENT_FILE_TIMEOUT_S = 2.5
+TORRENT_FILE_MAX_BYTES = 8_000_000
+
+
+def _torrent_file_bytes(info_hash):
+    """The bytes of this release's .torrent file, or None.
+
+    Only for releases whose source published a direct URL (Anime Tosho -
+    see indexers.TORRENT_FILE_URLS, and the note there on why the
+    hash-mirror services were measured and rejected). Handing these to
+    torrent_engine.add skips the DHT/tracker metadata wait, which is the
+    longest single step of a cold play. Never raises; None simply means
+    the magnet path runs exactly as it always has."""
+    try:
+        if indexers is None:
+            return None
+        url = indexers.TORRENT_FILE_URLS.get(str(info_hash or "").lower())
+        if not url:
+            return None
+        request = urllib.request.Request(url, headers={"User-Agent": _UA})
+        deadline = net.deadline_in(TORRENT_FILE_TIMEOUT_S)
+        with net.urlopen(request, timeout=TORRENT_FILE_TIMEOUT_S) as response:
+            data = net.read_bytes(response, deadline, TORRENT_FILE_MAX_BYTES)
+        # bencode starts with 'd'; anything else is an error page.
+        return data if data[:1] == b"d" else None
+    except Exception:
+        return None
+
+
 def _prepare_with_own_engine(stream, info_hash, season, episode,
                              metadata_timeout=None, data_wait=None,
                              resume_at=None, data_wait_max=None, title=None):
@@ -808,7 +850,8 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
             file_index=stream.get("file_index"),
             metadata_timeout=(METADATA_TIMEOUT if metadata_timeout is None
                               else metadata_timeout),
-            start_at=resume_at)
+            start_at=resume_at,
+            torrent_bytes=_torrent_file_bytes(info_hash))
     except Exception:
         added = None
     if not added:
@@ -1257,6 +1300,47 @@ def _quality_rank(quality: str) -> int:
 _SEEDER_CEILING = 200
 
 
+# **Does this release carry Arabic subtitles in the file?**
+#
+# The owner's ask, 24 August 2026: "ALWAYS auto select when the vid play
+# the source that has AR (arabic) embedded translation and more seeds".
+#
+# What there is to read, measured on Torrentio's own rows for Bleach
+# TYBW S04E02: every title's third line is a language list, written
+# either as regional-indicator flags or as the words "Multi Subs" -
+#
+#     Multi Subs / <flags>          [ToonsHub] ... 1080p HULU WEB-DL
+#     <flags>                       ... SON OF DARKNESS 1080p DSNP
+#     Multi Subs                    [DKB] Bleach - Sennen Kessen-hen
+#
+# so "states Arabic" is the Saudi flag or the word, and there is no
+# third form. Three tiers rather than two, because "Multi Subs" is not
+# a claim about Arabic and is not silence either: this project already
+# measured (`.claude/rules/integrations.md`) that the multi-sub groups -
+# ToonsHub above all, then Erai-raws - publish every language track of a
+# release, Arabic included. So a multi-sub release is the right second
+# choice and a plain English one is the third.
+#
+# U+1F1F8 U+1F1E6 written as escapes, for the same reason every other
+# non-ASCII literal in this project is: a re-encoding tool has mangled
+# bare characters in these files before.
+_ARABIC_FLAG = "\U0001F1F8\U0001F1E6"
+_ARABIC_WORD_RE = re.compile(r"\b(arabic|ara|ar)\b", re.I)
+_MULTISUB_RE = re.compile(r"multi[\s._-]*subs?", re.I)
+
+
+def arabic_rank(stream) -> int:
+    """0 when the release states Arabic, 1 when it states multi-sub,
+    2 otherwise. Smaller is better, so it drops straight into a sort
+    key."""
+    text = f"{stream.get('title') or ''}\n{stream.get('name') or ''}"
+    if _ARABIC_FLAG in text or _ARABIC_WORD_RE.search(text):
+        return 0
+    if _MULTISUB_RE.search(text):
+        return 1
+    return 2
+
+
 def _default_pick_key(stream, preferred):
     """The sort key deciding what plays by default. Smaller sorts first.
 
@@ -1292,11 +1376,20 @@ def _default_pick_key(stream, preferred):
         quality = "2160p"
     raw_seeders = int(stream.get("seeders") or 0)
     seeders = min(raw_seeders, _SEEDER_CEILING)
+    # **Arabic before seeders, inside the chosen resolution** - the
+    # owner's ask, 24 August 2026: "ALWAYS auto select when the vid play
+    # the source that has AR (arabic) embedded translation and more
+    # seeds". Inside it rather than above it, because "the resolution
+    # you asked for wins outright" is his earlier ask and the two are
+    # not in conflict: among the 1080p rows, prefer the one that carries
+    # Arabic, and among those the biggest swarm. See `arabic_rank` for
+    # what counts as carrying it.
+    arabic = arabic_rank(stream)
     if preferred != "best" and quality == preferred:
         size = int(stream.get("size_bytes") or 0)
         size_key = size if size >= _MIN_REAL_SIZE else float("inf")
-        return (drm, resolvable, 0, -raw_seeders, size_key)
-    return (drm, resolvable, 1, -_quality_rank(quality), -seeders)
+        return (drm, resolvable, 0, arabic, -raw_seeders, size_key)
+    return (drm, resolvable, 1, -_quality_rank(quality), arabic, -seeders)
 
 
 def _stremio_id(entry, season=None, episode=None) -> str:
@@ -1400,6 +1493,55 @@ def _drm_stream(entry):
         return None
     return {"title": provider.title(), "url": entry.get("url") or "", "kind": "drm",
             "source": provider, "quality": "", "reason": provider, "headers": {}}
+
+
+# The absolute episode index for one (season, episode), cached per
+# entry for the session. Cinemeta's episode list is the same data
+# Stremio itself numbers from, and it is already cached on disk by
+# stremio.fetch_meta_cached, so a warm title costs a dict lookup.
+_ABSOLUTE_CACHE = {}
+
+
+def absolute_episode(entry, season, episode):
+    """Which episode of the whole series `season`x`episode` is, or None.
+
+    **This is arithmetic over Cinemeta's own episode list, not a guess**,
+    and the distinction matters because `episode_fallbacks` above
+    deliberately refuses to guess an episode number - substituting a
+    different episode is the worst failure this file can produce, and it
+    has produced it. Counting the episodes Cinemeta lists before a season
+    is not substitution: it is the same episode written the other way.
+
+    Measured 24 August 2026 on the owner's own report. Cinemeta gives
+    Bleach: Thousand-Year Blood War (tt14986406) 13 + 13 + 14 + 10
+    episodes, so **S04E02 is absolute episode 42** - and every release
+    of it is named `S01E42` or `S04E42`, because the groups number the
+    whole run continuously. See _drop_wrong_season for what that cost.
+
+    None when there is no metadata, no episode list, or the season is
+    not in it - in which case the caller must behave exactly as it did
+    before this existed."""
+    try:
+        imdb_id = (entry or {}).get("imdb_id")
+        season, episode = int(season or 0), int(episode or 0)
+        if not imdb_id or season < 1 or episode < 1 or stremio is None:
+            return None
+        key = str(imdb_id)
+        counts = _ABSOLUTE_CACHE.get(key)
+        if counts is None:
+            meta = stremio.fetch_meta_cached(imdb_id, "series")
+            counts = {}
+            for video in ((meta or {}).get("videos") or []):
+                number = video.get("season")
+                if number:
+                    counts[int(number)] = counts.get(int(number), 0) + 1
+            _ABSOLUTE_CACHE[key] = counts
+        if season not in counts or episode > counts[season]:
+            return None
+        return sum(count for number, count in counts.items()
+                   if number < season) + episode
+    except Exception:
+        return None
 
 
 def episode_fallbacks(season, episode, entry=None):
@@ -1585,6 +1727,30 @@ def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
     try:
         season = int(season or 1)
         arc_map = arc_map or {}
+        # **The same episode written the other way is not a conflict -
+        # the owner, 24 August 2026: "in img 3 these are the sources list
+        # in stremio, why am I not getting the same list".** Measured
+        # against that screenshot: Torrentio answers `tt14986406:4:2`
+        # (Bleach TYBW, "Son of Darkness") with 29 rows and this dropped
+        # **13 of them**, including every row at the head of his Stremio
+        # list - the 2160p Feibanyama, the 2415-seeder ToonsHub, the
+        # 596-seeder DSNP. All thirteen are named `S01E42` or `S04E42`,
+        # because the groups number TYBW's four cours as one continuous
+        # run, and 42 is exactly what S04E02 is (13+13+14 episodes
+        # precede it - see absolute_episode).
+        #
+        # So the row states the right episode under absolute numbering
+        # and this read it as the wrong episode of the wrong season. The
+        # addon was *asked* for 4:2 and had already done that mapping;
+        # re-judging its answer by the release name is what threw the
+        # best releases away.
+        #
+        # Only ever an extra way to *accept*. Nothing that was kept
+        # before is dropped now, and the Re:Zero case this filter was
+        # built for is untouched: those rows stated season 3 and 4 with
+        # episode **01** when episode 1 of season 1 was asked for, and 1
+        # is not the absolute index of anything but itself.
+        absolute = absolute_episode(entry, season, episode)
         names = [_release_name(row.get("title")) for row in rows]
         stated = [indexers.stated_seasons(name) for name in names]
         # The arc tokens each name carries, as seasons - empty unless the
@@ -1605,7 +1771,15 @@ def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
             if indexers.episode_conflict(name, season, episode,
                                          compare_season=bool(in_range),
                                          extra_seasons=arc_seasons):
-                continue
+                # Before rejecting it, ask whether the name states this
+                # same episode under the series' absolute numbering. The
+                # season is *not* compared on this route: a row calling
+                # absolute episode 42 "S01E42" and one calling it
+                # "S04E42" are the same file, and which of the two a
+                # group writes says nothing about the episode.
+                if not (absolute and not indexers.episode_conflict(
+                        name, season, absolute, compare_season=False)):
+                    continue
             kept.append(row)
         return kept
     except Exception:
@@ -1865,7 +2039,20 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
     # after them: they answer by title, so they need no id at all and
     # can be the only thing that answers for an entry Cinemeta never
     # matched. Only for something with an episode or a name to ask for.
-    if indexers is not None and (entry or {}).get("title"):
+    # **Anime entries only - measured 24 August 2026, the owner's "when
+    # I played the boys series 1st ep 1st season the auto source choose
+    # opened an anime!!".** These indexers ask fansub feeds *by title*,
+    # and `is_same_title` requires the significant words to appear - for
+    # "The Boys" the one significant word is "boys", so Anime Tosho
+    # answered 16 real anime releases ("Daily Lives of High School
+    # Boys", "Bakumatsu Bad Boys!", ...) and whichever won the race
+    # played. The feeds carry nothing but anime, so asking them for a
+    # live-action title can only ever produce this failure. The cost,
+    # stated: an anime *film* typed "Movie" loses the by-title fansub
+    # extras too (Torrentio's anime providers still cover it by id) -
+    # correctness over capability.
+    if (indexers is not None and (entry or {}).get("title")
+            and (entry or {}).get("type") == "Anime"):
         # This is the one source that answers by *title*, so it reaches
         # fansub releases no id-keyed addon carries. It is also
         # routinely the slowest (0.49-2.57s measured), which is exactly

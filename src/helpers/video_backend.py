@@ -138,6 +138,17 @@ def default_options() -> dict:
         "video_sync": "display-resample",
         "interpolation": True,
         "tscale": "oversample",
+        # **No scaler overrides - reverted 24 August 2026, same day they
+        # went in.** spline36/deband landed as the answer to "stremio
+        # has better quality" and the owner's very next report was "my
+        # PC lagging the monitors started freezing": his primary panel
+        # is 240Hz, display-resample presents at the full 240, and two
+        # spline passes plus deband per frame at 1440p on his GPU is a
+        # load that starves the desktop compositor itself - both
+        # monitors, not just the app. mpv's defaults are what shipped
+        # before and never caused this. Re-attempt only with the GPU
+        # load measured (mpv's own stats or GPU-Z) at 240Hz first, and
+        # gate anything expensive on the refresh rate actually present.
         "keep_open": "yes",
         "idle": "yes",
         "ytdl": False,

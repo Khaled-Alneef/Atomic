@@ -1563,6 +1563,33 @@ def movie_file_index(info, title):
     return None if chosen is None else chosen[0]
 
 
+def _plausible_episode(names, season, episode, title) -> bool:
+    """Whether any of `names` can be believed to be this episode of this
+    show - see the note in _pick_file for what this exists to stop.
+
+    Deliberately generous about *how* it is satisfied, because both
+    halves are common and legitimate: a fansub release states the
+    episode and often not the English title ("Shingeki no Kyojin - 01"),
+    while a single-episode file may name the show and no number at all
+    ("Attack on Titan.mkv"). Either is proof enough; neither is the
+    failure case."""
+    try:
+        from . import indexers
+    except Exception:
+        return True         # no way to judge: behave as before
+    for name in names:
+        if not name:
+            continue
+        try:
+            if indexers.episode_match(name, season, episode) is not None:
+                return True
+            if title and indexers.is_same_title(str(title), name):
+                return True
+        except Exception:
+            return True
+    return False
+
+
 def _pick_file(info, season=None, episode=None, file_index=None, title=None):
     """Which file in the torrent to play, or **None when that cannot be
     answered**.
@@ -1602,6 +1629,39 @@ def _pick_file(info, season=None, episode=None, file_index=None, title=None):
     videos = _video_files(info)
     if season and episode and len(videos) > 1:
         return None
+    if season and episode and len(videos) == 1:
+        # **A single-video release still has to be shown to be the right
+        # show - the owner, 24 August 2026: "when I play aot ep 1 season
+        # 1 the auto sourcing played another whole anime!!".**
+        #
+        # Measured that day on his own entry: `find_streams` for Attack
+        # on Titan S01E01 (tt2560140) came back with 67 rows, four of
+        # which are unrelated Chinese BD raws that **Torrentio** returns
+        # for that IMDb id - "[DBD-Raws][Kimi no Iro]", two Mahou Shoujo
+        # Lyrical Nanoha films, a BanG Dream film. The indexers were
+        # clean; the addon's own data is wrong, and nothing in this app
+        # can make it right.
+        #
+        # Every other route was already guarded: a multi-video pack that
+        # cannot be shown to hold the episode returns None just above,
+        # and a film pack goes through movie_file_index. A release with
+        # exactly *one* video fell through to "play it" on the addon's
+        # word alone - and a single-file BDRip of a different series is
+        # precisely that case. So it now has to earn it: the name must
+        # either state the episode being asked for, or name the show.
+        # Failing both, return None and let prepare_fastest take the
+        # next candidate - being wrong costs one more attempt, which is
+        # this codebase's standing trade.
+        names = []
+        try:
+            names.append(str(info.name() or ""))
+        except Exception:
+            pass
+        names.append(_stem(videos[0][1]))
+        if not _plausible_episode(names, season, episode, title):
+            logs.info(f"rejected single-file release for S{season}E{episode}: "
+                      f"{names[0][:90]!r} names neither the episode nor the show")
+            return None
     # **A film in a pack is identified by name too, not by size.** The
     # rule above has always covered episodes; movies fell through to
     # "largest video", which in a 263-film pack is simply the biggest
@@ -1614,7 +1674,7 @@ def _pick_file(info, season=None, episode=None, file_index=None, title=None):
 
 def add(info_hash: str, *, trackers=(), season=None, episode=None,
         title=None, file_index=None, metadata_timeout: float = 45.0,
-        start_at=None):
+        start_at=None, torrent_bytes=None):
     """Start streaming a torrent; returns its id, or None.
 
     `trackers` matters more than it looks. Some indexers return a bare
@@ -1694,6 +1754,19 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
         # metadata wait - see _METADATA_DIR. The magnet's trackers stay
         # in params.trackers and are merged either way.
         cached_info = _cached_torrent_info(info_hash)
+        if cached_info is None and torrent_bytes:
+            # The release's own .torrent file, fetched over HTTP by the
+            # caller (streams._torrent_file_bytes) - the same skip of
+            # the metadata wait the disk cache buys, available on the
+            # *first* play. Checked against the hash that was asked
+            # for, never trusted: a mirror serving the wrong file must
+            # fall through to the magnet, not hijack the add.
+            try:
+                candidate = lt.torrent_info(lt.bdecode(torrent_bytes))
+                if str(candidate.info_hash()).lower() == info_hash:
+                    cached_info = candidate
+            except Exception:
+                cached_info = None
         if cached_info is not None:
             params.ti = cached_info
         params.flags |= lt.torrent_flags.sequential_download

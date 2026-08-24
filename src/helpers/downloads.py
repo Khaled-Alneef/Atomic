@@ -31,7 +31,7 @@ import time
 import urllib.request
 import zipfile
 
-from . import net, storage
+from . import logs, net, storage
 
 JOBS_FILE = "downloads.json"
 
@@ -638,7 +638,26 @@ def _run_video(job) -> str:
     # file_index_for insists on a name match, so a single-episode torrent
     # can never be mistaken for a pack (the copied-episode-1-five-times
     # defect this whole path replaces).
-    pack_key = (entry.get("id") or entry.get("title"), season)
+    # **Keyed by what was actually asked for, not just the season - the
+    # owner, 24 August 2026: "when I downloaded aot s1 ep 3 it was
+    # embedded English sound although I selected JP".**
+    #
+    # The reuse below is the right optimisation for a season queued as N
+    # jobs, and it was silently the wrong one for a *changed* request:
+    # keyed on (entry, season) alone, the first download of a season
+    # pinned the release for every later episode of it, so the audio and
+    # quality choices on the second download were never consulted at
+    # all - the branch that reads them is the one this skips. Measured
+    # that day on his own entry: of 74 candidates for Attack on Titan
+    # S01E03, 39 name themselves dual-audio and 35 do not, and
+    # `_order_by_audio("jp")` correctly floats the Japanese-audio
+    # fansubs (Erai-raws, MTBB) to the top - it simply never ran.
+    #
+    # With the choices in the key, a season queued in one go still
+    # shares one pack (every job carries the same values), and asking
+    # for something different starts a fresh, correctly-ordered pick.
+    pack_key = (entry.get("id") or entry.get("title"), season,
+                job.get("audio"), job.get("quality"))
     info_hash = _season_packs.get(pack_key)
     if not (info_hash and torrent_engine.file_index_for(
             info_hash, season, episode) is not None):
@@ -801,6 +820,10 @@ def _run_chapter(job) -> str:
             existing = set()
             mode = "w"
 
+    # Pages this run could not fetch. Reported at the end rather than
+    # swallowed: a chapter that saved 6 of 7 pages is not a success, and
+    # saying nothing about it is how a truncated .cbz reached the owner.
+    dropped = []
     with zipfile.ZipFile(target, mode, zipfile.ZIP_DEFLATED) as archive:
         for index, url in enumerate(pages, 1):
             if job_id in _cancelled:
@@ -819,9 +842,20 @@ def _run_chapter(job) -> str:
                 deadline = net.deadline_in(30)
                 try:
                     with net.urlopen(request, timeout=20) as response:
-                        data = net.read_bytes(response, deadline)
+                        # net.MAX_IMAGE_BYTES, not the API ceiling - see
+                        # the note there for the chapter this was
+                        # measured on and the page it was dropping.
+                        data = net.read_bytes(response, deadline,
+                                              net.MAX_IMAGE_BYTES)
                 except Exception:
-                    continue     # a missing page must not lose the chapter
+                    # A missing page must not lose the chapter - but it
+                    # must not be silent either. This `continue` is why
+                    # the size cap above went unnoticed: the .cbz simply
+                    # came out short and nothing anywhere said so.
+                    dropped.append(index)
+                    logs.exception(f"chapter page {index} could not be "
+                                   f"downloaded: {url}")
+                    continue
                 extension = os.path.splitext(url.split("?")[0])[1].lower() or ".jpg"
                 # Zero-padded so readers show pages in order rather than
                 # 1, 10, 11, 2 - the classic cbz mistake.
@@ -838,4 +872,10 @@ def _run_chapter(job) -> str:
         except OSError:
             pass
         return ""
+    if dropped:
+        # Kept, because a chapter missing one page is still worth having
+        # - but named, so "it saved" and "it saved everything" are not
+        # the same word on screen.
+        _update(job_id, detail=f"saved without {len(dropped)} of "
+                               f"{len(pages)} pages")
     return target

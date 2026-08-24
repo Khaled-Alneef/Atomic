@@ -623,7 +623,7 @@ def sources() -> tuple:
 
 
 def search(title, *, year=None, season=None, episode=None, imdb_id=None,
-           kind="series", deadline=None, on_partial=None) -> list:
+           kind="series", deadline=None, on_partial=None, release=None) -> list:
     """Arabic subtitles for this episode or film, best match first.
 
     The sources run together, not in a row: AnimeTosho now walks release
@@ -635,8 +635,13 @@ def search(title, *, year=None, season=None, episode=None, imdb_id=None,
     Never raises, never returns None."""
     if deadline is None:
         deadline = net.deadline_in(24)
+    # `release` is the *name of the file being played*, and it is only
+    # ever used for ranking (see _timeline_rank): a subtitle cut against
+    # the same encode is the one that lines up. No source is asked for
+    # it, so a caller that does not know it loses nothing.
     query = {"title": title or "", "year": year, "season": season,
-             "episode": episode, "imdb_id": imdb_id, "kind": kind}
+             "episode": episode, "imdb_id": imdb_id, "kind": kind,
+             "release": release or ""}
 
     def run(pair):
         _, source = pair
@@ -693,19 +698,70 @@ SOURCE_PRIORITY = {"OpenSubtitles": 0, "SubDL": 1,
                    "SubtitleCat": 2, "AnimeTosho": 3}
 
 
+# The words in a release name that decide whether two files share a
+# timeline. A subtitle is cut against *one* encode: a Disney+ WEB-DL and
+# a Blu-ray of the same episode differ by the length of a distributor
+# logo, and two fansubs of the same source differ by where they trim the
+# opening. So these are the tags worth comparing, and nothing else in a
+# release name is.
+_SOURCE_TAG_RE = re.compile(
+    r"\b(dsnp|amzn|nf|hulu|cr|crunchyroll|hidive|bili|iqiyi|adn|"
+    r"web-?dl|web-?rip|webrip|bd-?rip|bdrip|blu-?ray|bluray|bd|hdtv|dvd)\b",
+    re.I)
+# The scanlation/encode group, which is the strongest single signal: the
+# same group cutting the same episode times its own subtitles to it.
+_GROUP_TAG_RE = re.compile(r"^\s*[\[\(]([^\]\)]{1,32})[\]\)]")
+
+
+def _timeline_rank(name: str, playing: str) -> int:
+    """How likely a subtitle named `name` is to be in sync with the
+    release named `playing`. 0 best, 3 worst.
+
+    **The owner, 24 August 2026: "fix the subtitles always do not fit
+    the timing".** Nothing in this module has ever compared a subtitle
+    against the file it is going to be laid over - `_rank` sorted on
+    language, source, episode match and the source's own rating, all of
+    which are about whether it is the right *episode* and none of which
+    are about whether it is the right *cut*. Two Arabic subtitles for
+    the same episode, one timed to a Crunchyroll WEB-DL and one to a
+    Blu-ray, sorted purely by which site published them.
+
+    No score at all when the caller does not say what is playing, which
+    keeps every existing caller behaving exactly as before."""
+    if not playing or not name:
+        return 1                # nothing to compare: neither better nor worse
+    name, playing = name.lower(), playing.lower()
+    group = _GROUP_TAG_RE.search(name)
+    playing_group = _GROUP_TAG_RE.search(playing)
+    if group and playing_group and group.group(1).strip() == playing_group.group(1).strip():
+        return 0                # same group, same cut
+    tags = {t.lower() for t in _SOURCE_TAG_RE.findall(name)}
+    playing_tags = {t.lower() for t in _SOURCE_TAG_RE.findall(playing)}
+    if tags and playing_tags and tags & playing_tags:
+        return 1                # same distributor/source
+    if tags and playing_tags:
+        return 3                # both named a source and they disagree
+    return 2                    # one side says nothing
+
+
 def _rank(results, query) -> list:
-    """Arabic before anything else, then exact episode match, then a real
-    translation over a machine one, then whatever the source rated it.
+    """Arabic before anything else, then the release it is timed to,
+    then exact episode match, then a real translation over a machine
+    one, then whatever the source rated it.
 
     Language leads because English results exist here only as feedstock
-    for the AI translator - useful, but never ahead of actual Arabic."""
+    for the AI translator - useful, but never ahead of actual Arabic.
+    The timeline comes next because a subtitle for the wrong cut is
+    unusable however well the source rates it - see `_timeline_rank`."""
     wanted = ""
     if query.get("episode"):
         wanted = f"s{int(query.get('season') or 1):02d}e{int(query['episode']):02d}"
+    playing = str(query.get("release") or "")
 
     def key(item):
         name = (item.get("release") or item.get("name") or "").lower()
         return (0 if is_arabic_code(item.get("lang")) else 1,
+                _timeline_rank(name, playing),
                 SOURCE_PRIORITY.get(item.get("source"), 90),
                 0 if wanted and wanted in name else 1,
                 1 if item.get("translated") else 0,

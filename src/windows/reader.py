@@ -52,6 +52,7 @@ saturated this user's whole home network once (see helpers/lookup_pool).
 """
 
 import datetime
+import math
 import os
 import re
 import subprocess
@@ -63,7 +64,7 @@ import urllib.request
 import webbrowser
 from collections import OrderedDict
 
-from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QImage,
                          QPainter, QPixmap)
@@ -131,7 +132,13 @@ CHAPTER_PAGES_TIMEOUT = 20.0
 # Bigger than net.MAX_RESPONSE_BYTES on purpose: that ceiling is sized for
 # API responses and covers, and a single webtoon strip image routinely
 # runs past it.
-MAX_PAGE_BYTES = 16_000_000
+#
+# It lives in net.py now rather than here, because the *downloader* was
+# reading the same page images at the API ceiling and silently dropping
+# whatever went over it - see the note beside net.MAX_IMAGE_BYTES for
+# the chapter that was measured short. Two copies of a number is how
+# that happened; this alias keeps the local name and the single source.
+MAX_PAGE_BYTES = net.MAX_IMAGE_BYTES
 
 # Decoded pixmaps held at once. A long strip page is ~20MB, so this is
 # roughly a dozen of the worst case and a few hundred of an ordinary
@@ -371,11 +378,70 @@ BOTTOM_GAP = 16
 # only surface in the app that still snapped. It now goes through
 # widgets._Momentum like every other scroll area, so the number is a
 # resting travel per notch, not a jump.
-WHEEL_STEP_PX = 108
+# **76, down 30% from 108 - the owner, 24 August 2026: "make the
+# scrolling slower by 30% in the reader mode only!"** The rest of the
+# app keeps its own notch; this constant is already the reader-only one.
+WHEEL_STEP_PX = 76
 
 # How fast a reader notch gives its speed back - see the _Momentum built
 # in _StripView.__init__ for why this surface does not coast.
-READER_WHEEL_FRICTION = 34.0
+#
+# **90/34, up from 34, and the ramp and the speed cap with it - the
+# owner, 24 August 2026: "remove the mouse drift ENTIRELY from the
+# reader view!!!". SUPERSEDED the same day - see the 50/60 note below;
+# this paragraph is the reasoning that chose 90, kept because the
+# uncapped MAX_SPEED half of it still stands.** Friction 34 was already the app's no-coast value
+# and it was not enough here, because "settles" is not "stops": with
+# RAMP 40 against FRICTION 34, a notch's covered fraction is
+#
+#     1 - (R.exp(-F.t) - F.exp(-R.t)) / (R - F)
+#
+# which is 88% at 100ms and 97% at 150ms - so an eighth of every notch
+# was still arriving a tenth of a second after the wheel stopped, and on
+# a 108px notch that is ~13px of visible travel with the hand off the
+# wheel. At 100/90 the same expression is 98% at 60ms: eight or nine
+# frames on a 144Hz panel, which still reads as movement rather than a
+# jump (the owner's other standing complaint about this surface is that
+# it snapped), and is over before the hand can notice.
+#
+# The speed cap is the other half and it is the half that actually
+# *drifts*: MAX_SPEED parks whatever will not fit in `_pending` and
+# feeds it back in as the velocity decays, so a fast flick's undelivered
+# distance arrives after the flick. Uncapped here - the travel is the
+# same either way (notches x WHEEL_STEP_PX), it is only delivered while
+# the hand is still moving.
+# **50/60, down from 90/100 - the owner, 24 August 2026: "fix the
+# reader view also!!!", on the same complaint as the rest of the app
+# ("the scrolling now in the whole app seems lower in fps").**
+#
+# 90 was set to answer "remove the mouse drift ENTIRELY", and it did -
+# too well. Friction does not change how *far* a notch travels, only
+# how long it takes, and at 90 the whole notch is delivered in 62ms.
+# A steady hand sends a notch every 100-150ms, so the strip moved for
+# 62ms and then sat still for the rest - which is not a frame-rate
+# problem at all, it is the page being stationary between hops, and it
+# reads as exactly the stutter reported. Computed per notch at 240Hz
+# over the 76px notch this surface uses:
+#
+#     ramp/friction   98% delivered at   frames that move >=1px
+#     100/90            62 ms             15      <- was
+#      80/70            79 ms             18
+#      60/50           108 ms             23      <- now
+#      50/40           133 ms             27
+#
+# At 23 moving frames against a ~29-frame gap the hops now nearly touch,
+# so a steady scroll is continuous rather than a string of jumps. What
+# it costs is stated plainly: after the *last* notch the strip finishes
+# its travel in 108ms instead of 62ms. It does not travel further - the
+# distance is the same 76px - so this is not the drift that was removed
+# (that was `_pending` deferring distance past the hand, and MAX_SPEED
+# is still uncapped here so nothing is deferred at all).
+#
+# Deliberately not the app-wide 34: the rest of the app tolerates a
+# ~150ms settle, and a reader is aiming at a panel rather than
+# travelling, so it keeps the shorter one.
+READER_WHEEL_FRICTION = 50.0
+READER_WHEEL_RAMP = 60.0
 
 # The gap drawn between pages. Zero for the vertical strips - a
 # webtoon's panels are cut mid-image and any spacing draws a seam
@@ -470,9 +536,10 @@ def _fetch_page_file(url: str, headers: dict):
     """`url` on disk, as (Path, None) - or (None, message) saying what
     went wrong in words meant for the user.
 
-    Cached in images.CACHE_DIR under images.cache_path_for_url, which is
-    the app's one image cache; this is deliberately not a second cache
-    next to it. It is not images.download() only because that helper
+    Cached under images.page_path_for_url - the pages subfolder of the
+    app's one image cache, kept apart so the cover-sized shrink passes
+    never touch a page (see images.PAGES_DIR for what happened when
+    they shared a folder). It is not images.download() only because that helper
     cannot carry headers, and headers are the whole difference between a
     page and a 403 here.
 
@@ -480,7 +547,12 @@ def _fetch_page_file(url: str, headers: dict):
     half way through must not be left behind as a cached file, because
     nothing would ever re-fetch it and the page would be permanently
     broken."""
-    path = images.cache_path_for_url(url)
+    # PAGES_DIR, not the shared cover cache - the launch-time shrink
+    # pass re-encoded every page stored there down to poster size (56 x
+    # 1200 out of an 800 x 17000 strip, measured). See images.PAGES_DIR
+    # for the full note. Pages ruined under the old path are simply not
+    # found here any more and re-download fresh.
+    path = images.page_path_for_url(url)
     try:
         if path.exists() and path.stat().st_size > 0:
             return path, None
@@ -522,6 +594,9 @@ def _drop_cached_page(url: str):
     truncated or placeholder image is cached, and every later read would
     be served that same file forever."""
     try:
+        images.page_path_for_url(url).unlink(missing_ok=True)
+        # And the pre-pages-dir location, so Refresh also clears a copy
+        # ruined by the old shrink pass.
         images.cache_path_for_url(url).unlink(missing_ok=True)
     except OSError:
         pass
@@ -1524,6 +1599,22 @@ class _StripSlot(QLabel):
         self.loaded = False
 
 
+# Where the strip's body widget is parked, left of the viewport - see
+# _StripView.paintEvent for the measurement that exiled it there.
+#
+# **Horizontal, and within +/-32767, both load-bearing.** Windows child
+# widgets clamp their coordinates to a signed 16-bit range, so the
+# first park (y = -(1<<24)) silently never landed: the position stayed
+# clamped, the "is it parked yet" test never became true, and the Move
+# handler re-parked forever - a native stack overflow that killed the
+# process before faulthandler could print a frame. And vertical parking
+# cannot work anyway: a chapter's body is hundreds of thousands of
+# pixels tall, so any in-range y offset still leaves most of it inside
+# the viewport. The body is ~2500px wide at most; 30000 to the left is
+# out of sight for every window that fits on a desktop.
+_BODY_PARK_X = -30000
+
+
 class _StripView(QScrollArea):
     """Continuous vertical scroll - manhwa and manhua, which are drawn as
     one strip and have no pages to turn. Also the default for everything
@@ -1572,6 +1663,8 @@ class _StripView(QScrollArea):
             f" {{ background: none; }}")
         self._store = store
         self._slots = []
+        # One queued _sync_visible per event-loop turn - see _on_scrolled.
+        self._sync_queued = False
         self._zoom = zoom_key(1.0)
         # See eventFilter: re-entrancy guard for the scrollbar wheel
         # forwarding, not state anything else reads.
@@ -1593,6 +1686,23 @@ class _StripView(QScrollArea):
         self._column.setSpacing(0)
         self._column.addStretch()
         self.setWidget(self._body)
+        self._park_body()
+        # The viewport never shows anything but this class's own
+        # painting (see paintEvent) - saying it is opaque lets Qt skip
+        # every ancestor on every frame.
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent,
+                                     True)
+        # QScrollArea moves the body back whenever the body resizes (a
+        # slot settling into its decoded height does that constantly
+        # while a chapter loads) - watch for it and re-park.
+        self._body.installEventFilter(self)
+        # The canvas repaints from the bars' values; every write - the
+        # wheel model, a jump, a drag of the bar itself - lands as one
+        # update on the next frame.
+        self.verticalScrollBar().valueChanged.connect(
+            lambda _v: self.viewport().update())
+        self.horizontalScrollBar().valueChanged.connect(
+            lambda _v: self.viewport().update())
 
         store.ready.connect(self._on_page_ready)
         store.failed.connect(self._on_page_failed)
@@ -1632,6 +1742,7 @@ class _StripView(QScrollArea):
         self._wheel_motion = _Momentum(
             self.verticalScrollBar(), lambda: screen_tick_ms(self), self,
             friction=READER_WHEEL_FRICTION, accel_max=1.0,
+            ramp=READER_WHEEL_RAMP, max_speed=math.inf,
             frame_s=lambda: screen_frame_s(self))
         self.verticalScrollBar().sliderPressed.connect(self._wheel_motion.cancel)
 
@@ -1781,6 +1892,17 @@ class _StripView(QScrollArea):
         reported as the wheel not working over there. Returning True
         consumes it so the bar's own handler cannot also run and add its
         60 on top."""
+        # getattr, not a bare attribute: this filter is installed on the
+        # scrollbars a few lines before _body exists, and an exception
+        # inside a Qt virtual is a process abort, not a traceback.
+        body = getattr(self, "_body", None)
+        if body is not None and obj is body:
+            if (event.type() in (QEvent.Type.Move, QEvent.Type.Resize)
+                    and body.x() != _BODY_PARK_X):
+                self._park_body()
+                self.viewport().update()
+            return False
+
         if (event.type() == QEvent.Type.Wheel
                 and not self._forwarding_wheel
                 and obj in (self.verticalScrollBar(), self.horizontalScrollBar())):
@@ -1917,9 +2039,112 @@ class _StripView(QScrollArea):
         if 0 <= index < len(self._slots):
             self._slots[index].setText(message)
 
+    def paintEvent(self, event):
+        """The strip paints its pages itself - the slots are data.
+
+        **Why - measured 24 August 2026 on the owner's new PC (Windows
+        11 26200, 2560x1440 @ 240Hz, DPR 1.25), per-refresh scroll steps
+        sampled at the panel's own vblank (IDXGIOutput::WaitForVBlank):**
+
+            slots moved by QScrollArea (any path)   58-72 steps/s, 70-76%
+                                                    of refreshes moving
+                                                    nothing at all
+            the same motion with the body hidden    234/s, 2.3% dead
+            poster_grid (paints its own cells)      236/s, 1.8% dead
+
+        The wheel model was never the problem - its tick costs 0.26ms
+        and _sync_visible 0.03ms - and neither blit-vs-repaint nor
+        timer resolution nor foreground state moved the number: moving
+        child widgets through Qt's scroll machinery costs ~14ms a frame
+        on this machine, whatever else is true. Content one widget
+        paints at an offset does not pay it. So the slots still hold
+        the pixmaps, the geometry and the load state - every consumer
+        of slot.y()/height() is untouched - but they live on a body
+        parked far outside the viewport where they are never painted or
+        moved (see scrollContentsBy), and this paints their pixmaps at
+        the scroll offset, exactly as helpers/poster_grid draws its
+        cells. QAbstractScrollArea routes the viewport's paint events
+        here; the painter must open on the viewport, not on self."""
+        viewport = self.viewport()
+        painter = QPainter(viewport)
+        painter.fillRect(viewport.rect(), QColor(theme.BG))
+        top = self.verticalScrollBar().value()
+        left = self.horizontalScrollBar().value()
+        bottom = top + viewport.height()
+        for slot in self._slots:
+            slot_top = slot.y()
+            slot_bottom = slot_top + slot.height()
+            if slot_bottom <= top or slot_top >= bottom:
+                continue
+            x = slot.x() - left
+            y = slot_top - top
+            pixmap = slot.pixmap()
+            if slot.loaded and pixmap is not None and not pixmap.isNull():
+                painter.drawPixmap(x, y, pixmap)
+                continue
+            # A slot still waiting (or failed): the placeholder slab and
+            # whatever message it carries, the same surface the QLabel
+            # used to show.
+            painter.fillRect(x, y, slot.width(), slot.height(),
+                             QColor(theme.SURFACE))
+            text = slot.text()
+            if text:
+                painter.setPen(QColor(theme.TEXT_MUTED))
+                painter.drawText(
+                    QRect(x + 16, y, max(1, slot.width() - 32), slot.height()),
+                    int(Qt.AlignmentFlag.AlignCenter)
+                    | int(Qt.TextFlag.TextWordWrap), text)
+        painter.end()
+
+    def _park_body(self):
+        """Exile the body left of the viewport, where its slots are never
+        painted or moved. Slot geometry stays valid - it is relative to
+        the body - and paintEvent is what puts the artwork on screen."""
+        widget = self.widget()
+        if widget is not None and widget.x() != _BODY_PARK_X:
+            widget.move(_BODY_PARK_X, 0)
+
+    def scrollContentsBy(self, dx, dy):
+        """**Deliberately does not call QScrollArea's implementation.**
+        The base class repositions the body widget here, and moving a
+        child through that machinery measures **~14ms a frame** on the
+        owner's machine whatever the path under it (blit, full repaint,
+        timer resolution, foreground state - all measured, none moved
+        it; see _StripCanvas). The body stays parked; the canvas
+        repaints at the new offset through the valueChanged hook."""
+        self._park_body()
+        self.viewport().update()
+
     def _on_scrolled(self, _value):
-        self._sync_visible()
+        # **Coalesced to one pass per event-loop turn, off the hot
+        # path.** The momentum timer writes the scrollbar up to once per
+        # refresh (144/s here), and this slot ran the full slot walk -
+        # geometry for every slot, a store request per near one, a
+        # set_keep - synchronously inside every single write, *before*
+        # the viewport blit the setValue exists to cause. None of that
+        # work changes within a frame, so at 144Hz it was pure overhead
+        # between the wheel and the picture: the owner's "reader mode
+        # still has the low fps issue". A queued singleShot runs once
+        # after the burst of writes in the current turn, and the blit
+        # itself stays synchronous - the strip still *moves* on every
+        # write, it just budgets its bookkeeping per frame.
+        if not self._sync_queued:
+            self._sync_queued = True
+            QTimer.singleShot(0, self._deferred_sync)
         self.positionChanged.emit()
+
+    def _deferred_sync(self):
+        # The flag drops only *after* the pass: _sync_visible can move
+        # the scrollbar itself (slot-height compensation in
+        # _resize_slot), and with the flag already cleared that write
+        # re-queued another pass from inside this one - a 0-interval
+        # timer loop pegging the UI thread. Writes that land during the
+        # pass are absorbed by it; a genuinely later scroll queues the
+        # next one normally.
+        try:
+            self._sync_visible()
+        finally:
+            self._sync_queued = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1928,6 +2153,7 @@ class _StripView(QScrollArea):
         # a no-op for the rest.
         for slot in self._slots:
             self._resize_slot(slot)
+        self._park_body()
         self._sync_visible()
 
 
@@ -3067,6 +3293,22 @@ class ReaderPage(GlassPage):
         # trusted here.
         if aspect >= STRIP_ASPECT_MIN:
             target = STRIP_TARGET_WIDTH
+        elif target and source_width > target:
+            # **A paged scan opens at its own resolution, up to the
+            # window - the owner, 24 August 2026: "why does the ch
+            # appear in less resolution than the original in the
+            # websites like one piece!!".** The fixed 1100 target was
+            # his earlier ask (one size across every manga series), and
+            # it quietly *downscaled* every scan cut wider than 1100 -
+            # One Piece's 1644px pages drew at two-thirds of the pixels
+            # the site serves. Native-up-to-the-window is what the
+            # site he compares against does; the target remains the
+            # floor for scans narrower than it (nothing is blown up),
+            # and the strips keep their own width - their sources are
+            # 700-900px and 762 already is native for them.
+            viewport = max(target, self._strip_view.viewport().width() - 24
+                           if self._strip_view is not None else target)
+            target = min(source_width, viewport)
         if not target or source_width <= 0:
             return
         scale = target / float(source_width)
@@ -3186,6 +3428,7 @@ class ReaderPage(GlassPage):
         frameless_dialog(dialog, title="Download Chapters")
 
         scope = QComboBox()
+        use_hover_cursor(scope)
         scope.addItems(["This Chapter", "A Range of Chapters"])
         use_hover_cursor(scope)
         scope_row = QHBoxLayout()
@@ -3195,6 +3438,8 @@ class ReaderPage(GlassPage):
 
         labels = [chapter_title(self.chapters[index]) for index in candidates]
         first_box, last_box = QComboBox(), QComboBox()
+        use_hover_cursor(first_box)
+        use_hover_cursor(last_box)
         for box in (first_box, last_box):
             box.addItems(labels)
             box.setCurrentIndex(current)
@@ -3812,7 +4057,7 @@ def _origin_page_name(window):
 # the owner's other tabs would be a far worse bug than music that keeps
 # playing.
 _music = {"key": None, "hwnd": None, "pid": None, "settled": False,
-          "gesture_sent": False, "pressed_at": None}
+          "gesture_sent": False, "pressed_at": None, "reviving": False}
 
 # Every browser pid this session ever spawned for music, so a stuck
 # close can prove a process is ours before ending it - see
@@ -4052,6 +4297,109 @@ def _send_key(vk):
     ctypes.windll.user32.SendInput(2, batch, ctypes.sizeof(INPUT))
 
 
+# How long after the media key to keep listening before concluding it
+# did nothing. The key is delivered to the session immediately; YouTube
+# takes 0.3-1.5s to actually roll (the same runway the visible press
+# needed), so 3s is comfortable without stalling the fallback.
+_MUSIC_MEDIA_KEY_WAIT_S = 3.0
+VK_MEDIA_PLAY_PAUSE = 0xB3
+
+
+def _start_music_minimized(hwnd, window):
+    """Start playback in the already-minimized music window - the
+    owner's open -> minimize -> play, 24 August 2026 - escalating only
+    as far as silence forces:
+
+      1. **Autoplay.** A handoff launch into his running profile
+         autoplays on its own ~2s in (measured 23 August 2026, visible;
+         whether it also does so minimized is what the sensor decides
+         here rather than anyone guessing).
+      2. **The media key**, which reaches a media session foreground or
+         not - guarded on the whole machine being silent, because
+         VK_MEDIA_PLAY_PAUSE goes to whichever session Windows deems
+         current and would pause the owner's other music instead.
+      3. **The visible press** - the pre-24-August behaviour whole:
+         restore, foreground, `k`, re-tuck once audible. Last resort
+         only, because it is the flash the new order exists to remove;
+         kept, because a music feature that can silently produce no
+         music is worse than one that flashes.
+
+    Every stage logs what it did, so "the music did not play" reports
+    are diagnosable from atomic.log."""
+    if _music.get("hwnd") != hwnd or _music.get("gesture_sent"):
+        return
+    try:
+        if _browser_is_audible():
+            _music["gesture_sent"] = True
+            logs.info("music: autoplayed while minimized")
+            return
+        if not _anything_is_audible():
+            _send_key(VK_MEDIA_PLAY_PAUSE)
+            logs.info("music: media key sent (machine was silent)")
+        else:
+            logs.info("music: machine already audible; media key withheld")
+        deadline = time.monotonic() + _MUSIC_MEDIA_KEY_WAIT_S
+
+        def listen():
+            if _music.get("hwnd") != hwnd or _music.get("gesture_sent"):
+                return
+            if _browser_is_audible():
+                _music["gesture_sent"] = True
+                logs.info("music: playing after the media key")
+                return
+            if time.monotonic() < deadline:
+                QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, listen)
+                return
+            _music_visible_press(hwnd, window)
+
+        QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, listen)
+    except Exception:
+        logs.exception("could not start the minimized music")
+
+
+def _music_visible_press(hwnd, window):
+    """The last resort: put the window up, press `k` the moment it is
+    foreground, and tuck it again once sound arrives (or the runway
+    runs out). This is the whole pre-24-August flow, demoted."""
+    if _music.get("hwnd") != hwnd or _music.get("gesture_sent"):
+        return
+    logs.info("music: still silent; falling back to the visible press")
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if not user32.IsWindow(hwnd):
+            return
+        _music["reviving"] = True       # the sweep must not slam it shut
+        user32.ShowWindow(hwnd, 9)      # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        gesture_deadline = time.monotonic() + _MUSIC_AUTOPLAY_GRACE_MS / 1000.0
+        QTimer.singleShot(
+            400, lambda: _grant_play_gesture(hwnd, gesture_deadline))
+        started = time.monotonic()
+
+        def retuck():
+            if _music.get("hwnd") != hwnd:
+                _music["reviving"] = False
+                return
+            pressed = _music.get("pressed_at")
+            runway_done = (pressed is not None and time.monotonic() - pressed
+                           >= _MUSIC_POST_PRESS_VISIBLE_S)
+            out_of_time = (time.monotonic() - started
+                           >= _MUSIC_AUTOPLAY_GRACE_MS / 1000.0
+                           + _MUSIC_POST_PRESS_VISIBLE_S)
+            if _browser_is_audible() or runway_done or out_of_time:
+                _music["reviving"] = False
+                _music["settled"] = False
+                _tuck_music_window(hwnd, window)
+                return
+            QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, retuck)
+
+        QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, retuck)
+    except Exception:
+        _music["reviving"] = False
+        logs.exception("the visible music press failed")
+
+
 def _grant_play_gesture(hwnd, deadline):
     """Press `k` in the music window, once, so the page starts playing.
 
@@ -4151,7 +4499,25 @@ def _window_exe(hwnd) -> str:
 
 def _browser_is_audible() -> bool:
     """True when the default output device is currently carrying audio
-    from the default browser's processes.
+    from the default browser's processes - see _audible."""
+    exe = _default_browser_exe()
+    return _audible(exe) if exe else False
+
+
+def _anything_is_audible() -> bool:
+    """True when *any* process is putting sound out. The guard in front
+    of the media key (see _start_music_minimized): VK_MEDIA_PLAY_PAUSE
+    goes to whichever media session Windows considers current, and
+    pressing it while the owner's Spotify - or anything else - is
+    playing would pause that instead of starting this. Silence
+    everywhere is the one state where the key can only do its job."""
+    return _audible(None)
+
+
+def _audible(exe) -> bool:
+    """True when the default output device is currently carrying audio
+    from `exe`'s processes - or from any process at all when `exe` is
+    None.
 
     This is the sensor that keeps _grant_play_gesture's `k` from doing
     the opposite of its job. Measured 23 August 2026, owner's real
@@ -4169,9 +4535,6 @@ def _browser_is_audible() -> bool:
     failure anywhere returns False - the press then happens exactly as
     it would have without this sensor. Never raises."""
     if os.name != "nt":
-        return False
-    exe = _default_browser_exe()
-    if not exe:
         return False
     import ctypes
     from ctypes import wintypes
@@ -4264,7 +4627,7 @@ def _browser_is_audible() -> bool:
                     pid = ctypes.c_uint32(0)
                     com(control2, 14, [ctypes.POINTER(ctypes.c_uint32)],
                         ctypes.byref(pid))
-                    if _process_exe(pid.value) != exe:
+                    if exe is not None and _process_exe(pid.value) != exe:
                         continue
                     if com(session, 0, [ctypes.POINTER(GUID),
                                         ctypes.POINTER(ctypes.c_void_p)],
@@ -4387,58 +4750,21 @@ def _hush_browser_window(window, was_foreground):
     deadline = time.monotonic() + _MUSIC_HUSH_S
 
     def first_sighting(hwnd):
-        # First sighting of the window this launch brought up. Left
-        # alone here on purpose - not pushed behind, not refronted-over,
-        # nothing - for _MUSIC_AUTOPLAY_GRACE_MS: touching it at all
-        # right now is what used to bury it within one
-        # _MUSIC_HUSH_STEP_MS of existing (see that constant's comment).
-        # Remembered so stop_music can still close exactly this handle
-        # even before the grace elapses.
+        # **Minimize first, then play - the order is the owner's, 24
+        # August 2026:** "open URL - minimize - play the music". The old
+        # order (leave it visible, press `k`, tuck once audible) existed
+        # because a page hidden at load can park at 0:00 and the `k`
+        # gesture needs the window foreground - both still true, both
+        # still handled: playback is now started *minimized* in stages
+        # (autoplay, then the media key), and the visible press survives
+        # only as the last resort when nothing else made a sound - see
+        # _start_music_minimized. Remembered so stop_music can still
+        # close exactly this handle.
         _music["hwnd"] = int(hwnd)
-        # **Tucked as soon as it is actually heard, not when a timer says
-        # it probably started.** The owner, 23 August 2026: "the URL music
-        # opened correctly but it took long time to minimize!" - and he is
-        # right, the grace was being waited out in full every time even
-        # though playback was measured beginning at +0.8-1.5s.
-        #
-        # What makes the early tuck safe is the same sensor that gates the
-        # keypress (_browser_is_audible): once sound is coming out of the
-        # browser the page is unambiguously playing, and a *playing* media
-        # element keeps playing when its window is minimized - measured
-        # across five cycles, audible through the tuck and still audible
-        # 18-24s later. The visibility rule only governs whether playback
-        # may *start*.
-        #
-        # So the grace is now a ceiling rather than a fixed wait: poll for
-        # sound and tuck the moment it is there, and if it never comes,
-        # tuck at _MUSIC_AUTOPLAY_GRACE_MS exactly as before.
-        started = time.monotonic()
-
-        def tuck_when_playing(h=int(hwnd)):
-            if _music.get("hwnd") != h or _music.get("settled"):
-                return          # closed, replaced, or already tucked
-            elapsed_ms = (time.monotonic() - started) * 1000.0
-            audible = False
-            try:
-                audible = _browser_is_audible()
-            except Exception:
-                audible = False     # sensor unavailable: fall back to the timer
-            if audible or elapsed_ms >= _MUSIC_AUTOPLAY_GRACE_MS:
-                _tuck_music_window(h, window)
-                return
-            QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, tuck_when_playing)
-
-        # Not from zero: a window that has not painted yet cannot be
-        # playing, and the gesture below may still be owed.
-        QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, tuck_when_playing)
-        # The keystroke that actually starts playback - after a
-        # page-load beat, and only while the window is foreground
-        # inside this same grace period. See _grant_play_gesture.
-        gesture_deadline = (time.monotonic()
-                            + _MUSIC_AUTOPLAY_GRACE_MS / 1000.0)
+        _tuck_music_window(int(hwnd), window)
         QTimer.singleShot(
             _MUSIC_GESTURE_DELAY_MS,
-            lambda h=int(hwnd): _grant_play_gesture(h, gesture_deadline))
+            lambda h=int(hwnd): _start_music_minimized(h, window))
 
     def sweep():
         try:
@@ -4446,13 +4772,14 @@ def _hush_browser_window(window, was_foreground):
             if hwnd and hwnd != was_foreground and _window_exe(hwnd) == exe:
                 if _music.get("hwnd") is None:
                     first_sighting(hwnd)
-                elif _music.get("settled"):
+                elif _music.get("settled") and not _music.get("reviving"):
                     # Already had its grace period and been tucked away
                     # once - this is the same window stealing focus back
                     # afterwards (a browser can do that on its own a beat
-                    # later), so reclaim immediately. No reason to grant
-                    # a second grace period to a page that already had
-                    # its one chance to decide whether to autoplay.
+                    # later), so reclaim immediately. `reviving` is the
+                    # one exception: the last-resort visible press has
+                    # restored it on purpose (_start_music_minimized)
+                    # and this sweep must not slam it shut mid-press.
                     user32.ShowWindow(hwnd, 6)         # SW_MINIMIZE
                     _refront(window)
             elif _music.get("hwnd") is None and _music.get("pid"):
@@ -4471,8 +4798,9 @@ def _hush_browser_window(window, was_foreground):
 
 
 def _tuck_music_window(hwnd, window):
-    """Minimize the music window and give Atomic its foreground back, now
-    that _MUSIC_AUTOPLAY_GRACE_MS of being genuinely visible has passed.
+    """Minimize the music window and give Atomic its foreground back -
+    immediately at first sighting under the 24 August open->minimize->
+    play order, and again after the last-resort visible press.
 
     By now the page has either already started playing - in which case
     minimizing does not stop it, this file's own prior measurements say
@@ -4702,6 +5030,34 @@ def _cancel_music_stop():
         except RuntimeError:
             pass                # the timer's owner is already gone
         _music_stop_timer = None
+
+
+def close_music_now():
+    """Close the music window with no grace and no timers - for the one
+    caller that has no event loop left to wait in: the whole app is
+    closing (main.MainWindow.closeEvent). The owner, 24 August 2026:
+    "when I close the whole app while I am reading in the reader mode,
+    close the music URL as in the back btn!" - the back button's
+    stop_music() ran fine, but quitting the app skipped it and left the
+    music playing in the browser. Synchronous on purpose: the 900ms
+    forced-close follow-up (see stop_music) rides a QTimer that will
+    never fire during shutdown, so this asks once politely and then
+    forces it in the same breath."""
+    hwnd = _music.get("hwnd")
+    _cancel_music_stop()
+    _music["hwnd"] = None
+    _music["key"] = None
+    _music["pid"] = None
+    if not hwnd or os.name != "nt":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if user32.IsWindow(hwnd):
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)     # WM_CLOSE
+        _force_close_music(hwnd)
+    except Exception:
+        logs.exception("could not close the music window at app exit")
 
 
 def stop_music(delay_ms: int = 0):

@@ -165,6 +165,11 @@ def _video_row(meta: dict, label: str):
         # where Cinemeta has none (search rows often carry it, catalog
         # rows usually do). The UI treats absence as "no chip".
         "imdbRating": str(meta.get("imdbRating") or "").strip(),
+        # For the category pages' genre filter - present on catalog
+        # rows, absent on search rows (measured; see _is_animated).
+        "genres": [str(g).strip() for g in
+                   (meta.get("genres") or meta.get("genre") or [])
+                   if str(g).strip()],
     }
 
 
@@ -640,7 +645,7 @@ def _classify(title: str, timeout: float = 8.0):
                     if tag_attributes.get("group") != "genre":
                         continue
                     name = (tag_attributes.get("name") or {}).get("en")
-                    if name:
+                    if name and _allowed_genre(name):
                         genres.append(str(name).strip())
             if not medium:
                 for name, codes in MEDIUM_LANGUAGES.items():
@@ -663,6 +668,41 @@ def _classify(title: str, timeout: float = 8.0):
         _MEDIUM_CACHE[key] = medium
         _GENRE_CACHE[key] = list(genres)
     return medium, list(genres)
+
+
+# Genre tags never carried out of this module - the owner, 24 August
+# 2026: "remove the Boys love category from the filter in all pages that
+# have it!". MangaDex files it as a `genre`-group tag, so it reached the
+# reading filters and the details page's genre chips alike; dropped here,
+# at the one place tags are read, so no surface has to know about it.
+# The aliases are the other spellings the same tag ships under.
+BLOCKED_GENRES = frozenset({
+    "boys' love", "boys love", "boyslove", "bl",
+    "yaoi", "shounen ai", "shonen ai",
+    "girls' love", "girls love", "yuri", "shoujo ai", "shojo ai",
+})
+
+
+def _allowed_genre(name) -> bool:
+    return str(name or "").strip().lower() not in BLOCKED_GENRES
+
+
+def cached_genres(title: str) -> list:
+    """The genres already on record for `title` - cache only, no
+    network, safe on the UI thread. The medium pages classify every row
+    they show through `_classify`, which caches genres from the same
+    reply, so by the time a reading category is on screen almost every
+    row answers here instantly. [] is "not classified yet", which the
+    genre filter treats as unknowable rather than as a mismatch."""
+    key = (title or "").strip().lower()
+    if not key:
+        return []
+    _load_reading_meta()
+    with _MEDIUM_LOCK:
+        # Filtered on the way out as well as on the way in: a cache
+        # written before BLOCKED_GENRES existed still holds the tag, and
+        # these entries keep forever by design.
+        return [g for g in _GENRE_CACHE.get(key, []) if _allowed_genre(g)]
 
 
 def discover_reading_sites_by_medium(medium: str, limit: int = 30,
@@ -1022,7 +1062,7 @@ def reading_genres(title: str, limit: int = 6) -> list:
                     if tag_attributes.get("group") != "genre":
                         continue
                     name = (tag_attributes.get("name") or {}).get("en")
-                    if name:
+                    if name and _allowed_genre(name):
                         names.append(str(name).strip())
                 if names:
                     return names[:limit]

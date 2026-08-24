@@ -26,7 +26,7 @@ from helpers.widgets import (
     CardTextLabel,  # noqa: F401
     Card, CardDragReorder, GlassPage, GridSelection, confirm,
     defer_grid_rebuild, frameless_dialog, inform, scroll_area, search_field,
-    show_toast, show_undo_toast,
+    show_toast, show_undo_toast, use_hover_cursor,
 )
 # One poster number for the whole app: the Games/Apps tiles are sized
 # off the tracker's own POSTER_SIZE (no cycle - tracker imports no
@@ -311,6 +311,7 @@ class LinkGridPage(GridSelection, GlassPage):
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
         self.sort_box = QComboBox()
+        use_hover_cursor(self.sort_box)
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
@@ -868,7 +869,16 @@ class EntryForm(QDialog):
         name = self.name_edit.text().strip()
         targets = [t for t in (row.get() for row in self.rows) if t]
         if not name or not targets:
-            inform(self, "Links", "Name and at least one URL/app are required.")
+            # Named for the thing this dialog actually collects - the
+            # owner's ask, 24 August 2026: "make it says app in the app
+            # adding instead of (URL/app), and in the web adding make it
+            # says URL". "URL/app" was one message written to cover both
+            # forms, and on either of them half of it is about something
+            # the dialog has no field for. `target_kind` is already what
+            # decides the field's placeholder and the Browse button
+            # (see TargetRow), so it decides the wording too.
+            noun = "app" if self.target_kind == "app" else "URL"
+            inform(self, "Links", f"Name and at least one {noun} are required.")
             return
 
         if self.is_new:

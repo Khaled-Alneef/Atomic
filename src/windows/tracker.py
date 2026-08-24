@@ -41,6 +41,7 @@ from helpers import (
 )
 from helpers.widgets import (
     Card, CardDragReorder, CardTextLabel, GlassPage, HERO_COVER_SIZE,
+    _OpaqueGround,
     HeroBanner, SideScroller, confirm,
     defer_grid_rebuild, finish_toast, frameless_dialog, hero_logo_label,
     hero_split, inform, scroll_area, search_field, set_hero_logo, show_toast,
@@ -310,6 +311,28 @@ def prewarm():
         logs.exception("could not warm the filter glyph")
 
 
+def _tidy_cached_rows(rows):
+    """Rows off disk, with their titles cleaned the way the source now
+    cleans them.
+
+    The leading-id strip (manga_sites._LEADING_ID_RE, "2072267132 The
+    Eternal Supreme") reached only two of the six title producers until
+    24 August 2026, so a cache written before that carries the bad names
+    for up to _DISCOVER_DISK_TTL_S - a day of seeing the thing that was
+    just reported as fixed. One call on the way in costs nothing and
+    means the first launch after the fix is already right."""
+    from helpers import manga_sites
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = row.get("title")
+        if isinstance(title, str):
+            row["title"] = manga_sites._clean_text(title) or title
+        out.append(row)
+    return out
+
+
 def _load_discover_cache():
     """Fold last session's browse rows into the in-memory cache, once.
 
@@ -343,7 +366,7 @@ def _load_discover_cache():
             if key in _DISCOVER_CACHE:
                 continue
             _DISCOVER_CACHE[key] = (mono - age,
-                                    [r for r in rows if isinstance(r, dict)])
+                                    _tidy_cached_rows(rows))
     except Exception:
         return
 
@@ -1552,6 +1575,10 @@ class _DiscoverSignals(QObject):
     # `results`, which redraws the whole section - this one appends.
     # See _maybe_load_more_category.
     more_results = Signal(str, list, int, int)
+    # Genres fetched for rows that arrived without any: {key: [names]},
+    # and the _category_run that asked. See
+    # TrackerPage._fill_missing_genres.
+    genres_filled = Signal(object, int)
 
 
 class _StayOpenMenu(QMenu):
@@ -1566,7 +1593,8 @@ class _StayOpenMenu(QMenu):
 
     def mouseReleaseEvent(self, event):
         action = self.activeAction()
-        if action is not None and action.isEnabled() and action.isCheckable():
+        if action is not None and action.isEnabled() and (
+                action.isCheckable() or action.property("stay_open")):
             action.trigger()
             return
         super().mouseReleaseEvent(event)
@@ -2222,6 +2250,7 @@ class TrackerPage(GlassPage):
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
         self.sort_box = QComboBox()
+        use_hover_cursor(self.sort_box)
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
@@ -2346,7 +2375,36 @@ class TrackerPage(GlassPage):
         # widget with all of that to build again.
         self._category_note_label = QLabel("", objectName="Muted")
         self._category_note_label.setWordWrap(True)
-        self._category_layout.addWidget(self._category_note_label)
+        # The note on the left, the genre filter on the right - the
+        # owner's ask, 24 August 2026: "add a filter button on the top
+        # right make the user chose the genres as check box ... make the
+        # filter button like the one in the saved page". Same icon, same
+        # stay-open menu class as Saved's.
+        category_header = QHBoxLayout()
+        category_header.setContentsMargins(0, 0, 0, 0)
+        category_header.setSpacing(8)
+        category_header.addWidget(self._category_note_label, stretch=1)
+        self._category_filter_btn = QPushButton(objectName="Icon")
+        self._category_filter_btn.setFixedSize(40, 40)
+        self._category_filter_btn.setToolTip("Filter by genre")
+        _dpr = QApplication.primaryScreen().devicePixelRatio()
+        _filter_icon = QIcon()
+        _filter_icon.addPixmap(images.tinted_asset(
+            FILTER_ICON, theme.TEXT_MUTED, FILTER_ICON_HEIGHT, _dpr),
+            QIcon.Mode.Normal)
+        _filter_icon.addPixmap(images.tinted_asset(
+            FILTER_ICON, theme.TEXT, FILTER_ICON_HEIGHT, _dpr),
+            QIcon.Mode.Active)
+        self._category_filter_btn.setIcon(_filter_icon)
+        self._category_filter_btn.setIconSize(
+            QSize(FILTER_ICON_HEIGHT, FILTER_ICON_HEIGHT))
+        use_hover_cursor(self._category_filter_btn)
+        self._category_filter_menu = _StayOpenMenu(self)
+        self._category_filter_menu.aboutToShow.connect(
+            self._build_category_filter_menu)
+        self._category_filter_btn.setMenu(self._category_filter_menu)
+        category_header.addWidget(self._category_filter_btn)
+        self._category_layout.addLayout(category_header)
         self._category_widget = PosterGrid(POSTER_SIZE, ground=theme.PANEL_FILL,
                                            parent=self.category_tab)
         self._category_widget.clicked.connect(self._on_category_grid_pick)
@@ -2362,8 +2420,20 @@ class TrackerPage(GlassPage):
         # moved to Manhua.
         self._category_key = ""
         self._category_run = 0
+        # kind -> set of checked genre names. Session state: the picks
+        # survive switching sections and come back with the section.
+        self._category_genre_picks = {}
+        self._category_section_current = None
         self._category_signals = _DiscoverSignals()
         self._category_signals.results.connect(self._on_category_results)
+        self._category_signals.genres_filled.connect(self._on_genres_filled)
+        # key -> [genre names], for rows the catalogue handed over
+        # without any. Filled on demand while a genre filter is on (see
+        # _fill_missing_genres) and kept for the session, so switching
+        # sections and coming back costs nothing.
+        self._genre_fill = {}
+        # Keys already asked about, so a re-render cannot re-queue them.
+        self._genre_asked = set()
         # Load-on-scroll state for the category pages (the owner's ask,
         # 22 August 2026: "make it always load more when the user
         # scrolls down"). The rows currently drawn, the grid they sit
@@ -3455,6 +3525,18 @@ class TrackerPage(GlassPage):
         strip_layout.addStretch()
 
         area = QScrollArea(objectName="Bare")
+        # **Opaque ground on the strip - the one thing scroll_area()
+        # does that a hand-built QScrollArea does not.** theme.py makes
+        # every scroll body transparent (`QScrollArea > QWidget`), and a
+        # transparent body cannot be scrolled by blitting: Qt repaints
+        # the page underneath and then every widget over it, every
+        # frame. That is measured in scroll_area's own docstring as
+        # 14.5ms/frame -> 3.5ms, and these rows - built by hand rather
+        # than through that helper - never got it. With four rows of
+        # thirty cards on Discover, they are most of what the page has
+        # to repaint (the owner, 24 August 2026: "solve the scroll low
+        # fps in the discovery pages in watch/read").
+        _OpaqueGround(strip, theme.PANEL_FILL)
         area.setWidget(strip)
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
@@ -3589,7 +3671,11 @@ class TrackerPage(GlassPage):
             _url = str(entry.get("cover_url") or "")
             cover_fetch.ensure(
                 entry.get("id"), entry.get("cover_path"),
-                (lambda u=_url: images.download(u)) if _url else None,
+                (lambda u=_url, en=entry: cover_fetch.resolve(
+                    u, imdb_id=en.get("imdb_id") or "",
+                    title=en.get("title") or "",
+                    kind=("reading" if en.get("type") in MANGA_TYPES
+                          else "video"))),
                 entry["title"], POSTER_SIZE,
                 cover.set_cover if isinstance(cover, ContinueCover) else cover.setPixmap,
                 persist=lambda path, en=entry: (
@@ -4298,6 +4384,8 @@ class TrackerPage(GlassPage):
         sideways."""
         key, label, kind, entry_type = section
         self._category_key = key
+        self._category_section_current = section
+        self._sync_category_filter_button(kind)
         self._category_run += 1
         run = self._category_run
         # A new visit is a new paging cycle: whatever batch was in
@@ -4500,8 +4588,13 @@ class TrackerPage(GlassPage):
         self._category_no_more.discard(kind)
         self._category_dry_strikes.pop(kind, None)
         self._category_skip[kind] = len(results)
+        # The genre filter cuts what is *rendered*, never what is
+        # remembered: _category_rows, the dedupe set and the paging
+        # cursor above all stay on the full list, so unchecking a genre
+        # is a redraw, not a refetch.
+        visible = self._genre_visible(kind, results)
         saved_titles = self._saved_titles()
-        records = [self._grid_record(item, saved_titles) for item in results]
+        records = [self._grid_record(item, saved_titles) for item in visible]
         for record in records:
             pixmap = carried.get(record["title"].lower())
             if pixmap is not None:
@@ -4515,13 +4608,281 @@ class TrackerPage(GlassPage):
         grid._kind = kind
         grid._entry_type = entry_type
         grid._card_run = card_run
-        for index, item in enumerate(results):
+        for index, item in enumerate(visible):
             self._discover_cards[(kind, index)] = {
                 "cover": _GridCover(grid, index),
                 "title": records[index]["title"],
                 "size": POSTER_SIZE, "item": item, "badge": None,
                 "badge_at_foot": False, "grid": grid, "index": index}
         return True
+
+    # What the sources actually file things under, so the filter can
+    # offer a genre before a row carrying it has scrolled into the
+    # loaded pages - the owner's "add romance to the anime page!!":
+    # Romance is real on every one of these catalogues, it just was not
+    # in the first ~90 rows, and a menu built only from loaded rows
+    # could never show it. Video is Cinemeta's manifest list; reading is
+    # MangaDex's genre tag group.
+    VIDEO_GENRE_SEED = (
+        "Action", "Adventure", "Animation", "Comedy", "Crime",
+        "Documentary", "Drama", "Family", "Fantasy", "History", "Horror",
+        "Music", "Mystery", "Politics", "Romance", "Sci-Fi", "Sport",
+        "Thriller", "War", "Western")
+    READING_GENRE_SEED = (
+        "Action", "Adventure", "Comedy", "Crime", "Drama", "Fantasy",
+        "Historical", "Horror", "Isekai", "Mecha", "Medical", "Music",
+        "Mystery", "Philosophical", "Psychological", "Romance", "Sci-Fi",
+        "Slice of Life", "Sports", "Superhero", "Thriller", "Tragedy",
+        "Wuxia")
+
+    # **Genres these catalogues publish as one combined name, split into
+    # the two the owner asked to choose between separately** (24 August
+    # 2026: "separate the fantasy from the sci fi in anime also the war
+    # from politics"). These are TMDB's *television* genre names, which
+    # Cinemeta passes through - measured in his own discover cache:
+    # "Sci-Fi & Fantasy" on 16 rows, "Action & Adventure" on 15, "War &
+    # Politics" on 2. Splitting on " & " is the general rule; the tuple
+    # is here so the seeds above can offer both halves before any row
+    # carrying the pair has loaded.
+    _GENRE_SPLIT = " & "
+
+    # Never offered, whatever a catalogue files under it - the owner, 24
+    # August 2026: "remove the Boys love category from the filter in all
+    # pages that have it!". It arrives from MangaDex's genre tag group
+    # (one title in his cache); the aliases are the other spellings the
+    # same tag ships under, so the name cannot come back by a side door.
+    GENRE_BLOCKLIST = frozenset({
+        "boys' love", "boys love", "boyslove", "bl",
+        "yaoi", "shounen ai", "shonen ai",
+        "girls' love", "girls love", "yuri", "shoujo ai", "shojo ai",
+    })
+
+    @classmethod
+    def _split_genre(cls, name) -> list:
+        """One catalogue genre as the names this app offers for it -
+        "Sci-Fi & Fantasy" as two, everything else as itself. Blocked
+        names come back empty."""
+        out = []
+        for part in str(name or "").split(cls._GENRE_SPLIT):
+            part = part.strip()
+            if part and part.lower() not in cls.GENRE_BLOCKLIST:
+                out.append(part)
+        return out
+
+    def _row_genre_names(self, kind, item) -> set:
+        """The genres this row is known to carry, lowercased and split.
+
+        Three sources, in the order they cost anything: the row itself
+        (Cinemeta catalog rows carry them - see discover._video_row),
+        this session's fill-in cache (see _fill_missing_genres, which is
+        the *same* Cinemeta meta the episode list shows), and for
+        reading the classification cache the medium pages already paid
+        for. Empty means "not known", and under a live filter that now
+        means hidden - see _genre_visible."""
+        names = item.get("genres") or []
+        if not names:
+            key = self._genre_key(item)
+            if key:
+                names = self._genre_fill.get(key) or []
+        if not names and kind.startswith("medium:"):
+            try:
+                names = discover.cached_genres(item.get("title") or "")
+            except Exception:
+                names = []
+        out = set()
+        for name in names:
+            for part in self._split_genre(name):
+                out.add(part.lower())
+        return out
+
+    @staticmethod
+    def _genre_key(item):
+        """What a row is remembered by in the fill-in cache: its IMDb id
+        where there is one, else its title."""
+        return (str(item.get("imdb_id") or "").strip()
+                or (item.get("title") or "").strip().lower())
+
+    def _genre_visible(self, kind, rows) -> list:
+        """`rows` with the checked-genre filter applied.
+
+        **A row whose genres are unknown is hidden while a filter is
+        on**, and that reversal is the owner's report, 24 August 2026:
+        "the filters added on the pages are not accurate for example, it
+        shows re-zero in History category". The first version kept
+        unknown rows visible, on the reasoning that hiding them claims
+        knowledge nobody has - but a filter that shows things which do
+        not match is not a filter, and measured over his own cache only
+        21-32% of video rows carry genres on the row, so "unknown" was
+        the common case and the page looked barely filtered at all.
+
+        What makes hiding safe is that unknown no longer has to stay
+        unknown: _fill_missing_genres asks Cinemeta for exactly the rows
+        that lack them - the same meta the episode list draws its genre
+        chips from - and re-renders as answers land."""
+        picks = self._category_genre_picks.get(kind) or set()
+        if not picks:
+            return list(rows)
+        return [item for item in rows
+                if self._row_genre_names(kind, item) & picks]
+
+    # How many rows one fill-in pass asks about. The point is that the
+    # *visible* page stops lying quickly, not that a 700-row cache is
+    # exhaustively classified: each ask is one Cinemeta meta request
+    # (cached on disk by stremio.fetch_meta_cached), and the pass
+    # re-arms itself as long as a filter is on and rows still lack
+    # genres.
+    GENRE_FILL_BATCH = 24
+
+    def _fill_missing_genres(self, kind):
+        """Fetch genres for loaded rows that arrived without any.
+
+        **The same source the episode list shows** - the owner's ask,
+        24 August 2026: "make the filter works based on each movie/
+        series/anime categories in the ep list shown". That page reads
+        `stremio.fetch_meta_cached`, so this does too, and the two can
+        never disagree about what a title is filed under.
+
+        Only while a filter is actually on: with nothing checked every
+        row is visible anyway and this would be a few hundred requests
+        for a list nobody is narrowing. Reading rows are skipped - their
+        genres come from the MangaDex classification the medium pages
+        already pay for (discover.cached_genres), not from Cinemeta."""
+        if kind.startswith("medium:"):
+            return
+        if not self._category_genre_picks.get(kind):
+            return
+        wanted = []
+        for item in self._category_rows:
+            if item.get("genres"):
+                continue
+            key = self._genre_key(item)
+            imdb_id = str(item.get("imdb_id") or "").strip()
+            if not key or not imdb_id or key in self._genre_asked:
+                continue
+            self._genre_asked.add(key)
+            wanted.append((key, imdb_id,
+                           "movie" if kind == "movie" else "series"))
+            if len(wanted) >= self.GENRE_FILL_BATCH:
+                break
+        if not wanted:
+            return
+        lookup_pool.submit_browse(self._genre_fill_worker, wanted,
+                                  self._category_run)
+
+    def _genre_fill_worker(self, wanted, run):
+        """Never raises - a dead pool worker takes every queued lookup
+        in the app with it."""
+        found = {}
+        for key, imdb_id, content_type in wanted:
+            try:
+                meta = stremio.fetch_meta_cached(imdb_id, content_type) or {}
+                names = [str(g).strip() for g in
+                         (meta.get("genres") or meta.get("genre") or [])
+                         if str(g).strip()]
+            except Exception:
+                names = []
+            # [] is remembered too: "Cinemeta has no genres for this" is
+            # a real answer, and without it the row is asked about again
+            # on every re-render.
+            found[key] = names
+        try:
+            self._category_signals.genres_filled.emit(found, run)
+        except RuntimeError:
+            pass        # the page was torn down under the fetch
+
+    def _on_genres_filled(self, found, run):
+        if run != self._category_run or not found:
+            return
+        self._genre_fill.update(found)
+        section = self._category_section_current
+        if section is None:
+            return
+        kind = section[2]
+        if not self._category_genre_picks.get(kind):
+            return          # the filter was cleared while this was out
+        self._refill_grid(kind, list(self._category_rows), section[3])
+        # More may still be missing - keep going while the filter is on.
+        self._fill_missing_genres(kind)
+
+    def _build_category_filter_menu(self):
+        menu = self._category_filter_menu
+        menu.clear()
+        section = self._category_section_current
+        if section is None:
+            return
+        kind = section[2]
+        picks = self._category_genre_picks.setdefault(kind, set())
+        names = {}
+        seed = (self.READING_GENRE_SEED if kind.startswith("medium:")
+                else self.VIDEO_GENRE_SEED)
+        for shown in seed:
+            names.setdefault(shown.lower(), shown)
+        for item in self._category_rows:
+            for name in self._row_genre_names(kind, item):
+                names.setdefault(name, name.title())
+        checkable = []
+        for lower in sorted(names, key=lambda n: names[n].lower()):
+            action = menu.addAction(names[lower])
+            action.setCheckable(True)
+            action.setChecked(lower in picks)
+            action.toggled.connect(
+                lambda checked, k=kind, g=lower:
+                    self._on_category_genre_toggled(k, g, checked))
+            checkable.append(action)
+        menu.addSeparator()
+        clear = menu.addAction("Clear Filters")
+        # Stays open like the ticks do, and unchecks them in place - it
+        # used to close the menu, which read as the button doing
+        # nothing until the next open (the owner's "fix the clear
+        # filters button").
+        clear.setProperty("stay_open", True)
+        clear.triggered.connect(
+            lambda checked=False, k=kind, actions=tuple(checkable):
+                self._on_category_genre_cleared(k, actions))
+
+    def _on_category_genre_toggled(self, kind, genre, checked):
+        picks = self._category_genre_picks.setdefault(kind, set())
+        (picks.add if checked else picks.discard)(genre)
+        self._rerender_category_filter(kind)
+
+    def _on_category_genre_cleared(self, kind, actions=()):
+        self._category_genre_picks[kind] = set()
+        for action in actions:
+            # Signals blocked: each setChecked would otherwise fire the
+            # toggle handler and re-render the grid once per genre.
+            action.blockSignals(True)
+            action.setChecked(False)
+            action.blockSignals(False)
+        self._rerender_category_filter(kind)
+
+    def _sync_category_filter_button(self, kind):
+        """Accent icon while a filter is on - the same signal Saved's
+        button gives - so a filtered page cannot be mistaken for the
+        source having little to show."""
+        button = getattr(self, "_category_filter_btn", None)
+        if button is None:
+            return
+        active = bool(self._category_genre_picks.get(kind))
+        dpr = QApplication.primaryScreen().devicePixelRatio()
+        icon = QIcon()
+        icon.addPixmap(images.tinted_asset(
+            FILTER_ICON, theme.ACCENT if active else theme.TEXT_MUTED,
+            FILTER_ICON_HEIGHT, dpr), QIcon.Mode.Normal)
+        icon.addPixmap(images.tinted_asset(
+            FILTER_ICON, theme.ACCENT if active else theme.TEXT,
+            FILTER_ICON_HEIGHT, dpr), QIcon.Mode.Active)
+        button.setIcon(icon)
+
+    def _rerender_category_filter(self, kind):
+        self._sync_category_filter_button(kind)
+        section = self._category_section_current
+        if section is None or section[2] != kind:
+            return
+        _key, _label, _kind, entry_type = section
+        self._refill_grid(kind, list(self._category_rows), entry_type)
+        # Rows that arrived with no genres are hidden by a live filter
+        # (see _genre_visible) - so go and learn what they are.
+        self._fill_missing_genres(kind)
 
     def _grid_record(self, item, saved_titles):
         """The painted grid's view of one catalogue row."""
@@ -4540,6 +4901,11 @@ class TrackerPage(GlassPage):
         grid = self._category_grid
         if grid is None:
             return
+        # Only the rows the genre filter shows, indexed by the grid's
+        # own count rather than the caller's row arithmetic - with a
+        # filter on, the two stopped agreeing.
+        items = self._genre_visible(getattr(grid, "_kind", ""), items)
+        first_index = grid.count()
         saved_titles = self._saved_titles()
         records = [self._grid_record(item, saved_titles) for item in items]
         grid.append_items(records)
@@ -4600,11 +4966,12 @@ class TrackerPage(GlassPage):
 
     def _warm_tile_worker(self, kind, index, path, run):
         """Cut the cover's tile on a worker, then hand the path to the
-        same slot a download uses. `images._fitted` is documented as
-        thread-safe (PIL only); the slot's thumbnail_or_avatar then finds
-        the tile in the process cache and only converts to a QPixmap."""
+        same slot a download uses. `images.warm` is documented as
+        thread-safe (PIL only) and cuts at the device size the UI asks
+        for; the slot's thumbnail_or_avatar then finds the tile in the
+        process cache and only converts to a QPixmap."""
         try:
-            images._fitted(path, tuple(POSTER_SIZE), images._stamp(path))
+            images.warm(path, tuple(POSTER_SIZE))
         except Exception:
             pass
         try:
@@ -5157,10 +5524,10 @@ class TrackerPage(GlassPage):
         # and a page can have two rows, so a thread each is exactly the
         # shape that once put 651 connections in flight (see lookup_pool).
         lookup_pool.submit(self._fetch_discover_poster, kind, index, url, run,
-                           page_url, title)
+                           page_url, title, (item or {}).get("imdb_id") or "")
 
     def _fetch_discover_poster(self, kind, index, url, run, page_url="",
-                               title=""):
+                               title="", imdb_id=""):
         """Resolve one card's art, in three widening steps.
 
         **The title is passed now, and that is the fix.** Step two asks
@@ -5182,15 +5549,17 @@ class TrackerPage(GlassPage):
                 url = resolved = details.get("cover_url") or ""
             if not url and title:
                 url = resolved = manga_sites.cover_for_title(title) or ""
-            if url:
-                # One retry, with a longer budget. Measured: the reading
-                # covers come from a host that intermittently takes more
-                # than the default 8s to hand over a 17-477KB image, and
-                # the URL is right - the next visit fetches it fine. A
-                # blank tile that fixes itself tomorrow is exactly the
-                # failure the owner has reported twice, and the second
-                # attempt costs nothing when the first works.
-                path = images.download(url) or images.download(url, timeout=20)
+            # The retry and the second catalogue both live in
+            # cover_fetch.resolve now - the retry because the reading
+            # hosts intermittently take more than 8s to hand over a
+            # 17-477KB image and the very next attempt works, and the
+            # second catalogue because a host this machine cannot reach
+            # at all otherwise costs every card on the page (see that
+            # function for the report it comes from). `kind` keeps a
+            # reading row off TMDB and a video row off MangaDex.
+            path = cover_fetch.resolve(
+                url, imdb_id=imdb_id, title=title,
+                kind="reading" if str(kind).startswith("reading") else "video")
         except Exception:
             path = None
         if path:
@@ -5205,7 +5574,7 @@ class TrackerPage(GlassPage):
             # which is the same split images.prewarm was built for.
             # Fails soft: a miss just decodes in the slot as before.
             try:
-                images._fitted(path, tuple(POSTER_SIZE), images._stamp(path))
+                images.warm(path, tuple(POSTER_SIZE))
             except Exception:
                 pass
         self._discover_signals.poster.emit(kind, index,
@@ -5816,7 +6185,14 @@ class TrackerPage(GlassPage):
     def _schedule_cover_worker(self, row):
         # Never raises - an exception here kills the pool's worker.
         try:
-            path = images.download(row.get("cover_url") or "")
+            # Through resolve, like every other cover: a schedule row
+            # carries a title (and an IMDb id where the catalogue had
+            # one), so a host it cannot reach is no longer the end of
+            # the ask. See cover_fetch.resolve.
+            path = cover_fetch.resolve(
+                row.get("cover_url") or "",
+                imdb_id=row.get("imdb_id") or "",
+                title=row.get("title") or "")
         except Exception:
             path = None
         if not path:
@@ -5830,7 +6206,7 @@ class TrackerPage(GlassPage):
         # thread, and a PIL decode plus a tile write there is 10ms a
         # cover with forty of them arriving at once.
         try:
-            images._fitted(path, tuple(SCHEDULE_COVER_SIZE), images._stamp(path))
+            images.warm(path, tuple(SCHEDULE_COVER_SIZE))
         except Exception:
             pass
         try:
@@ -6329,10 +6705,11 @@ class TrackerPage(GlassPage):
         episodes."""
         return history.recent(self.ENTRY_TYPES)
 
-    def _history_cover_worker(self, key, url):
+    def _history_cover_worker(self, key, url, title="", kind="", imdb_id=""):
         # Never raises - an exception here kills the pool's worker.
         try:
-            path = images.download(url)
+            path = cover_fetch.resolve(url, title=title, kind=kind,
+                                       imdb_id=imdb_id)
         except Exception:
             path = None
         if path and key:
@@ -6421,7 +6798,9 @@ class TrackerPage(GlassPage):
             # whatever Discover had since re-downloaded.
             self._history_covers[row.get("key")] = (cover, row.get("title") or "")
             lookup_pool.submit(self._history_cover_worker, row.get("key"),
-                               row.get("cover_url"))
+                               row.get("cover_url"), row.get("title") or "",
+                               "reading" if row.get("type") in MANGA_TYPES
+                               else "video", row.get("imdb_id") or "")
         layout.addWidget(cover)
 
         column = QVBoxLayout()
@@ -6724,6 +7103,7 @@ class EntryForm(QDialog):
         self.title_label = QLabel()
         fields.addWidget(self.title_label)
         self.title_combo = QComboBox()
+        use_hover_cursor(self.title_combo)
         self.title_combo.setEditable(True)
         self.title_combo.setCurrentText(entry["title"] if entry else "")
         self.title_combo.lineEdit().textEdited.connect(self._on_title_edited)
@@ -6740,6 +7120,7 @@ class EntryForm(QDialog):
         # more than one type (Anime/Manga share tracker.json); Series has
         # nothing to switch to, so it's set silently instead.
         self.type_box = QComboBox()
+        use_hover_cursor(self.type_box)
         self.type_box.addItems(type_options)
         self.type_box.setCurrentText(entry["type"] if entry else default_type)
         self.type_box.currentTextChanged.connect(self._on_type_changed)
@@ -6764,6 +7145,7 @@ class EntryForm(QDialog):
         form.addSpacing(8)
         form.addWidget(QLabel("Status"))
         self.status_box = QComboBox()
+        use_hover_cursor(self.status_box)
         self._populate_status_options(entry["status"] if entry else None)
         form.addWidget(self.status_box)
 
@@ -6858,6 +7240,7 @@ class EntryForm(QDialog):
         self.site_label = QLabel()
         site_layout.addWidget(self.site_label)
         self.site_box = QComboBox()
+        use_hover_cursor(self.site_box)
         self._populate_site_options(entry.get("site_id") if entry else None)
         site_layout.addWidget(self.site_box)
         form.addWidget(self.site_row)

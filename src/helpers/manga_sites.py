@@ -658,6 +658,39 @@ def _remember_engine(site: dict, engine):
         pass        # a site being probed before it is saved has no row yet
 
 
+def _tidy_rows(rows):
+    """Run every row's title through `_clean_text` before it leaves this
+    module.
+
+    **The owner, 24 August 2026: "why does some of the manhwa and manhua
+    names has some nums on it fetch the names correctly??"** They do, and
+    it is this. `_LEADING_ID_RE` has stripped LavaScans' ten-digit card
+    prefix since it was found, but it lives in `_clean_text`, and
+    `_clean_text` was only ever reached by the two *HTML-scraping*
+    producers. The four that read a site's own API - `_search_madara`,
+    `_search_ajaxy`, `_search_v2_api`, `_browse_v2_api` - took the title
+    the API gave them, prefix and all. Found in his own
+    discover_cache.json:
+
+        2072267132 The Eternal Supreme
+        2072267132 Necromancer Academys Genius Summoner
+        2072267132 Start By Signing In And Obtaining The Ancient Divine Body
+        2072267132 Super God Pet Beast Shop
+
+    Applied here, at the two public exits, rather than inside each
+    engine: an engine added later gets it without anyone remembering to.
+    A row whose title cleans away to nothing is dropped - it had no name
+    to show."""
+    out = []
+    for row in rows or []:
+        title = _clean_text(row.get("title") or "")
+        if not title:
+            continue
+        row["title"] = title
+        out.append(row)
+    return out
+
+
 def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list:
     """Try each known engine against one site, stopping at the first that
     returns anything. Returns [] if the site matches no known shape, has
@@ -679,6 +712,7 @@ def search_site(site: dict, query: str, timeout: int = 6, deadline=None) -> list
             results = engine(base_url, query, step)
         except Exception:
             results = []
+        results = _tidy_rows(results)
         if results:
             _remember_engine(site, engine)
             return results
@@ -975,7 +1009,7 @@ def browse_site(site: dict, limit: int = 30, timeout: int = 8,
     if step is None:
         return []
     try:
-        rows = _browse_v2_api(base_url, limit, step)
+        rows = _tidy_rows(_browse_v2_api(base_url, limit, step))
         if rows:
             return rows
     except Exception:
@@ -985,7 +1019,7 @@ def browse_site(site: dict, limit: int = 30, timeout: int = 8,
         if step is None:
             break
         try:
-            rows = _browse_html(base_url, path, limit, step)
+            rows = _tidy_rows(_browse_html(base_url, path, limit, step))
         except Exception:
             rows = []
         # Three or more is a listing; one or two is a stray link on a

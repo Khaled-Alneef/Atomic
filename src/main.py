@@ -20,7 +20,7 @@ import sys
 import threading
 from pathlib import Path
 
-from helpers import (app_settings, downloads, global_search, images, logs,
+from helpers import (app_settings, downloads, global_search, images, layout, logs,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
 from helpers.nav_config import (HOME_ITEM, nav_position, visible_nav_groups,
@@ -62,7 +62,8 @@ from helpers.settings_dialog import SettingsDialog
 from helpers.widgets import (PageSlide, SmoothTween, confirm, hold_hover_cursor,
                              install_edge_wheel, release_hover_cursor,
                              release_stale_hover_cursors, show_toast,
-                             take_live_redo, take_live_undo, use_hover_cursor)
+                             take_live_redo, take_live_undo, use_hover_cursor,
+                             warm_display_clock)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -84,16 +85,17 @@ CURSOR_WATCHDOG_MS = 120
 # The image sizes each page renders at, for the startup prewarm (see
 # _prewarm_image_specs) - read off the pages themselves so a size
 # changed there can't quietly leave the prewarm decoding the wrong one.
-tracker_poster_size = tracker_module.POSTER_SIZE
-home_poster_size = home_page_module.POSTER_SIZE
+#
+# **Read inside the function, not here.** These are module-level
+# statements, so they used to run at import - which is before main()
+# constructs the QApplication and therefore before layout.adopt() can
+# size a card against the screen it will be drawn on. Bound here, the
+# prewarm would go on decoding 160x216 tiles for a grid drawing 216x292
+# ones, and every one of them would be decoded a second time on the UI
+# thread, which is precisely the cost prewarm exists to avoid.
 home_icon_size = home_page_module.ICON_SIZE
 home_row_icon_size = home_page_module.ROW_ICON_SIZE
 link_thumb_size = link_grid_module.THUMB_SIZE
-# The poster grids' art sizes: Steam covers at the tracker's poster
-# size, app-store icons square at the poster card's width.
-game_cover_size = tracker_module.POSTER_SIZE
-app_art_size = (link_grid_module.POSTER_ART_SIZE[0],
-                link_grid_module.POSTER_ART_SIZE[0])
 
 # The one page every way out of a section lands on - the section Back
 # button here, and the reader's and player's doors (reader.HOME_PAGE).
@@ -184,6 +186,14 @@ DOWNLOAD_IDLE_POLL_MS = 2500
 SIDEBAR_WIDTH = 220
 # Wide enough for the nav bullets and the +/gear buttons once the text
 # labels are dropped (see _set_sidebar_collapsed).
+# **84, up from 68, alongside RAIL_ICON_SIZE 26 -> 40** (the owner, 24
+# August 2026: "make the sidebar icons in the main page/ reading /
+# watching 50% larger"). The two move together by the ceiling recorded
+# at RAIL_ICON_SIZE: a folded row lays out at viewport - 2*spacing and
+# the delegate only centres an icon at or under row - 2*margin, so a
+# 40px icon needs a 46px row, a 50px viewport, and the collapsed rail
+# holds viewport + 32px of holder chrome (measured 36 in 68). See
+# RAIL_ICON_SIZE for the centring measurement 84 was chosen against.
 SIDEBAR_COLLAPSED_WIDTH = 68
 SIDEBAR_ANIM_MS = 180
 # The spacing every sidebar's QVBoxLayout is built with, and the slack
@@ -302,6 +312,36 @@ SECTION_BACK_ICON = "\uE72B"    # Back (left-pointing arrow)
 # still centres within 0-0.5px folded, same as at 24 (see
 # RAIL_FOLDED_QSS's note above) - unlike 28, this size does not reopen
 # the centring this pass was also asked to fix.
+#
+# **40, 24 August 2026 - the owner: "make the sidebar icons in the main
+# page/ reading / watching 50% larger", then "the icons on the sidebar
+# while folded seem to be shifted to the right a bit".** Both measured
+# by lit-pixel centroid on the offscreen-rendered rail: at 39 (26*1.5,
+# the first cut) every folded row's ink sat **+1.0px** right of the
+# viewport centre - odd icon in an even cell, the half-pixels all
+# rounding the same way. At 40 with the rail at 84 the same measure
+# reads **+0.5px**, which is the floor integer pixels allow (an
+# odd-width ink span cannot measure closer). The ceiling moved with it:
+# folded row 48px, 48 - 2*3 = 42 >= 40.
+# **20, half of 40 - the owner, 24 August 2026: "make the sidebars
+# (main/read/watch) icons 50% smaller", two builds after asking for them
+# 50% larger. The rail came down with it (SIDEBAR_COLLAPSED_WIDTH back
+# to 68): a 20px icon centred in an 84px column reads as a wide empty
+# strip with a speck in it. 68/20 is inside the delegate's ceiling with
+# room to spare - the folded row is 32px and 32 - 2*3 = 26 >= 20 - so
+# this is the well-trodden geometry, not new ground.
+#
+# **26, 24 August 2026 - the owner: "increase the icons in the sidebars
+# (main/read/watch) by 28%".** 20 x 1.28 = 25.6, and the integer either
+# side of it is not a free choice: 26 is *exactly* the delegate ceiling
+# derived above (folded row 32px, margin 3, so 32 - 2*3 = 26), the
+# largest size that keeps a folded icon centred rather than shifted
+# right. 25.6 rounds up onto that ceiling and 27 would step over it, so
+# the ask lands on the one number this file has already vetted twice -
+# see the 22 August note above, where 26 was measured centred within
+# 0-0.5px on all three rails and 28 was measured broken at +1.5px.
+# SIDEBAR_COLLAPSED_WIDTH stays 68: that pairing is what shipped before
+# the 40/84 experiment, not new geometry.
 RAIL_ICON_SIZE = 26
 
 # Applied to a rail while it is folded - see _sync_rail_icon_widths for
@@ -2586,6 +2626,16 @@ class MainWindow(QMainWindow):
             images.trim_cache(budget_s=2.0)
         except Exception:
             pass
+        # The reading-music window closes with the app - the back button
+        # already did this, closing the app around an open reader did
+        # not, and the music played on in the browser (the owner's
+        # report). Synchronous: see reader.close_music_now for why the
+        # normal grace-timer route cannot run during shutdown.
+        try:
+            from windows import reader
+            reader.close_music_now()
+        except Exception:
+            logs.exception("could not close the reading music at exit")
         super().closeEvent(event)
 
     def start_fullscreen(self):
@@ -2935,6 +2985,34 @@ class MainWindow(QMainWindow):
         self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
 
 
+def _strip_scraped_ids_from_titles():
+    """Take LavaScans' card id back off any title already saved with it.
+
+    A title is a *name*, and "2072267132 The Eternal Supreme" is not
+    one - it is the site's slug id, which four of manga_sites' six title
+    producers were passing straight through until 24 August 2026 (see
+    manga_sites._tidy_rows). The source is fixed, but a title copied
+    onto an entry when it was added stays wrong forever: the owner's own
+    Home hero reads "2072267132 The Eternal Supreme", which is where
+    this was reported from.
+
+    Deliberately narrow - six or more leading digits, which no real
+    title in a library carries. "86" and "20th Century Boys" are
+    untouched, which is the whole reason the threshold is six and not
+    one. Idempotent, and never writes when there is nothing to change."""
+    from helpers import manga_sites
+    for filename in ("tracker.json", "series.json"):
+        try:
+            for entry in storage.load(filename, []):
+                title = entry.get("title") or ""
+                cleaned = manga_sites._LEADING_ID_RE.sub("", title).strip()
+                if cleaned and cleaned != title:
+                    storage.update_entry(filename, entry.get("id"),
+                                         {"title": cleaned})
+        except Exception:
+            logs.exception(f"could not tidy titles in {filename}")
+
+
 def _merge_anime_into_series():
     """One-time data move behind the page merge: Anime rows lived in
     tracker.json beside the reading types, and the merged Movies &
@@ -2974,20 +3052,21 @@ def _prewarm_image_specs():
         for entry in storage.load(data_file, []):
             path = entry.get(key)
             if path:
-                specs.append((path, tracker_poster_size))
-                specs.append((path, home_poster_size))
+                specs.append((path, tracker_module.POSTER_SIZE))
+                specs.append((path, home_page_module.POSTER_SIZE))
     for game in storage.load("games.json", []):
         if game.get("icon"):
             specs.append((game["icon"], home_icon_size))
         if game.get("cover"):
-            specs.append((game["cover"], game_cover_size))
+            specs.append((game["cover"], tracker_module.POSTER_SIZE))
     for entry in storage.load("apps.json", []):
         # The Apps grid draws art (or the icon standing in for it)
         # square at poster width; Home's quick list still draws the
         # small icon.
         art = entry.get("art") or entry.get("image")
         if art:
-            specs.append((art, app_art_size))
+            specs.append((art, (link_grid_module.POSTER_ART_SIZE[0],
+                                link_grid_module.POSTER_ART_SIZE[0])))
         if entry.get("image"):
             specs.append((entry["image"], home_row_icon_size))
     for entry in storage.load("websites.json", []):
@@ -3048,11 +3127,30 @@ def main():
     # takes the whole process down through qFatal with no traceback
     # anywhere. See helpers/logs.py.
     logs.install_excepthook()
+    # Before the QApplication, so every timer Qt ever creates lives in a
+    # process that Windows has agreed not to quantise - see
+    # startup.allow_precise_timers for the 13.9ms-per-4ms-timer
+    # measurement. The reader no longer depends on this (it rides the
+    # vblank), but every tween and page slide still ticks.
+    startup.allow_precise_timers()
     app = QApplication(sys.argv)
     icon_path = APP_DIR / "assets" / "app_icon.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     theme.apply_theme(app)
+    # And how big a card is on this screen, before the first page is
+    # built out of that number (helpers/layout - the owner's "the cards
+    # sorting per row must be diff from 2K to 4K to 1080P monitors,
+    # make it auto detect and adapt").
+    layout.adopt()
+    # Decide which display clock this machine actually has, now, off the
+    # first scroll's critical path. The ticker times its candidates
+    # before it trusts one (see widgets._VBlankTicker._plausible - on
+    # this owner's machine DXGI's WaitForVBlank returns S_OK in 0.6
+    # microseconds and is not a clock at all), and that probe waits eight
+    # refreshes: 33ms at 240Hz, 133ms at 60. Paid here, once, rather than
+    # by whoever scrolls first.
+    warm_display_clock()
     # The wheel over a page's dead margins - the strip right of the
     # scrollbar above all (the owner's ask). One filter for every page,
     # kept alive by the app it is parented to.
@@ -3061,8 +3159,33 @@ def main():
     # Before the window exists: the pages it builds each load their own
     # file, and the move has to be finished before either looks.
     _merge_anime_into_series()
+    _strip_scraped_ids_from_titles()
+    # One-time repair, 24 August 2026: the cache trim used to evict
+    # logo_cache, and each eviction's failed refetch left a permanent
+    # 0-byte `.none` marker holding the loading screen logoless (Bleach
+    # TYBW, the owner's report). The markers now expire (artwork.
+    # NEGATIVE_TTL_S) and the trim no longer touches this folder, but
+    # the ones already written today would stand for hours yet - drop
+    # every empty marker once so tonight's first episode asks fresh.
+    try:
+        for stale in (storage.DATA_DIR / "logo_cache").glob("*.none"):
+            stale.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     window = MainWindow()
+    # Every cover tile is cut for the screen this window is on
+    # (images.set_device_ratio - the note there records the 1080p
+    # pixelation that taking the sharpest screen instead caused).
+    # Adopted now and again on every screen change; cover_fetch reads it
+    # from workers, where walking the screen list does not belong.
+    images.set_device_ratio(window.devicePixelRatioF())
+    window.winId()          # ensure the QWindow exists to connect to
+    handle = window.windowHandle()
+    if handle is not None:
+        handle.screenChanged.connect(
+            lambda screen: images.set_device_ratio(
+                screen.devicePixelRatio() if screen else 1.0))
     # Mouse 4/5 as back/forward across every surface, overlays included
     # (see _MouseNavFilter). Parented to the window, so it lives exactly
     # as long as the thing it navigates.

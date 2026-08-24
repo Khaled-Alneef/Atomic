@@ -20,10 +20,12 @@ from PyQt6.QtWidgets import (
 # hero_art at module level costs nothing new: its imports (PIL via
 # helpers.images) are already pulled by this module's own `images`
 # import - measured, not assumed, 22 August 2026.
-from helpers import (app_art, cover_fetch, game_launch, global_search, hero_art,
-                     images, launchers, lookup_pool, nav_config, storage, theme)
+from helpers import (app_art, cover_fetch, game_art, game_launch, global_search,
+                     hero_art, images, launchers, lookup_pool, nav_config, storage,
+                     theme)
 from helpers.widgets import (
-    Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, hero_logo_label,
+    Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, _OpaqueGround,
+    hero_logo_label,
     hero_split, inform, scroll_area, search_field, set_hero_logo,
     use_hover_cursor,
 )
@@ -94,12 +96,6 @@ class _HeroSignals(QObject):
     overlay = pyqtSignal(str, str, bool)
 
 
-class _GameSignals(QObject):
-    # game id -> local Steam cover path, back from the lookup pool so
-    # the storage write and the redraw stay on the UI thread.
-    cover = pyqtSignal(str, str)
-
-
 def _greeting():
     hour = datetime.now().hour
     if hour < 12:
@@ -134,8 +130,6 @@ class HomePage(GlassPage):
         self.games = launchers.backfill_launch_commands(self.games)
         self.websites = storage.load(WEBSITES_FILE, [])
         self.apps = storage.load(APPS_FILE, [])
-        self._game_signals = _GameSignals()
-        self._game_signals.cover.connect(self._on_game_cover)
 
         # Sections the user has hidden *and* asked to keep off Home (see
         # nav_config.home_hidden_sections). Applied to what gets drawn
@@ -178,7 +172,14 @@ class HomePage(GlassPage):
         # width unconditionally keeps that centered regardless of
         # whether this page's content is currently tall enough to
         # actually need scrolling (see scroll_area's always_show_vbar).
-        panel_layout.addWidget(scroll_area(body, always_show_vbar=True, ground=theme.BG))
+        # **0.7 - Home scrolls 30% slower than the rest of the app**,
+        # the owner's ask, 24 August 2026 ("make the scrolling in the
+        # main page 30% slower"), on top of the whole-app cut made the
+        # same day. Home is a short page of big blocks where every other
+        # page is a long list, so the same notch reads as a lurch here
+        # and as travel there.
+        panel_layout.addWidget(scroll_area(body, always_show_vbar=True,
+                                           ground=theme.BG, notch_scale=0.7))
 
         # Greeting on the left, the app-wide search on the same line.
         # Only this page carries the field: it searches everything, and
@@ -292,7 +293,11 @@ class HomePage(GlassPage):
         recent_games = [] if "games" in hidden else self._recent_games()
         if recent_games:
             pos = nav_config.nav_position("games")
-            self._backfill_game_covers(recent_games)
+            # No separate backfill pass here any more - every card asks
+            # for its own cover through cover_fetch as it is built (see
+            # _ensure_game_cover). The old pass ran once, at page
+            # construction, over the six games this row happens to show;
+            # a card built by a later _refresh_games_row got nothing.
             self._games_grid = self._build_games_grid(recent_games)
             self._games_section = self._build_section("Games", self._games_grid)
             sections.append((pos, self._games_section))
@@ -894,12 +899,72 @@ class HomePage(GlassPage):
                 self._hero_cover.setPixmap(pixmap)
         cover_fetch.ensure(
             entry.get("id"), entry.get("cover_path"),
-            (lambda u=_url: images.download(u)) if _url else None,
+            (lambda u=_url, en=entry: cover_fetch.resolve(
+                u, imdb_id=en.get("imdb_id") or "",
+                title=en.get("title") or "",
+                kind=("reading" if en.get("type") in MANGA_TYPES
+                      else "video"))) if _url else None,
             entry.get("title") or "", HERO_COVER_SIZE, _set_hero,
             persist=lambda path, en=entry: (
                 en.__setitem__("cover_path", str(path)),
                 storage.update_entry(_progress_data_file(en), en.get("id"),
                                      {"cover_path": str(path)})))
+
+    def _on_inapp_closed(self, _entry_id):
+        """The player or reader opened from this page has closed -
+        rebuild Home fresh from disk, so the hero's "S01E07" / "Ch 551"
+        and every card's progress caption show what was just watched or
+        read. The owner, 24 August 2026: "make the Ep and Season / ch
+        num in the main page change immediately when watched or read!".
+
+        tracker._wire_overlay_refresh has delivered this hook to every
+        tracker page since it was written and named Home as the one
+        caller that "simply is not notified" - the player marks the
+        episode watched at 85% (WATCHED_FRACTION) and the number was on
+        disk all along; this page was showing the copy it loaded at
+        build.
+
+        A whole-page rebuild rather than surgical label updates, on
+        purpose: the hero, its peeks, the Reading and Watching rows and
+        History all carry the number somewhere, and pages here rebuild
+        from scratch on every visit anyway - this is the same rebuild,
+        one navigation earlier. Deferred a tick so the overlay's own
+        close (which this page hosted) finishes tearing down first."""
+        window = self.app
+        refresh = getattr(window, "refresh_current_page", None)
+        if not callable(refresh):
+            return
+        current = getattr(window, "_current_page", None)
+        if current is not self:
+            return          # the user already navigated; that rebuild won
+        QTimer.singleShot(0, lambda: refresh() if current is
+                          getattr(window, "_current_page", None) else None)
+
+    def _ensure_game_cover(self, game, label):
+        """Draw this game's poster now if it is on disk, and go and get
+        it on the shared pool if it is not - see the note at the call
+        site for why Home has to do this itself.
+
+        `helpers/game_art` is the same resolver the Games page's
+        backfill uses, so a cover fetched from either surface is one
+        download and both find it afterwards."""
+        game_id = game.get("id")
+        if not game_id:
+            return
+        name = game.get("name") or ""
+        install_path = game.get("path")
+
+        def _set(pixmap, lbl=label):
+            lbl.setPixmap(pixmap)
+
+        cover_fetch.ensure(
+            f"game:{game_id}", game.get("cover"),
+            lambda n=name, p=install_path: game_art.fetch_cover(
+                n, install_path=p),
+            name, POSTER_SIZE, _set,
+            persist=lambda path, g=game, gid=game_id: (
+                g.__setitem__("cover", str(path)),
+                storage.update_entry(GAMES_FILE, gid, {"cover": str(path)})))
 
     def _remember_hero_overlay(self, entry_id, logo_path, hide_title):
         """Persist a slide's logo and hide-title decision onto its entry,
@@ -1005,7 +1070,11 @@ class HomePage(GlassPage):
             _url = str(entry.get("cover_url") or "")
             cover_fetch.ensure(
                 entry.get("id"), entry.get("cover_path"),
-                (lambda u=_url: images.download(u)) if _url else None,
+                (lambda u=_url, en=entry: cover_fetch.resolve(
+                    u, imdb_id=en.get("imdb_id") or "",
+                    title=en.get("title") or "",
+                    kind=("reading" if en.get("type") in MANGA_TYPES
+                          else "video"))) if _url else None,
                 entry["title"], POSTER_SIZE,
                 cover.set_cover if isinstance(cover, ContinueCover) else cover.setPixmap,
                 persist=lambda path, en=entry: (
@@ -1044,8 +1113,15 @@ class HomePage(GlassPage):
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        area.viewport().setAutoFillBackground(False)
-        strip.setAutoFillBackground(False)
+        # **Opaque, not transparent - and this reverses the two lines
+        # that used to sit here.** theme.py's `#Bare` rule makes a scroll
+        # body transparent, and a transparent body cannot be scrolled by
+        # blitting: Qt repaints the page underneath and every widget over
+        # it, every frame. scroll_area()'s docstring measures that at
+        # 14.5ms/frame against 3.5ms, and these hand-built rows never had
+        # the fix because they never went through that helper. Same
+        # change, same reason, as the tracker's section strips.
+        _OpaqueGround(strip, theme.BG)
         strip.adjustSize()
         area.setFixedHeight(strip.sizeHint().height()
                             + area.horizontalScrollBar().sizeHint().height())
@@ -1081,6 +1157,20 @@ class HomePage(GlassPage):
             cover.setFixedSize(*POSTER_SIZE)
             cover.setPixmap(images.thumbnail_or_avatar(
                 game.get("cover"), game["name"], POSTER_SIZE))
+            # **And fetch it if there is none - the owner, 24 August
+            # 2026: "the games images only load from the games page,
+            # make them start loading from the main page also!".** This
+            # row drew `game["cover"]` and nothing else, so a game whose
+            # art had never been resolved stayed a blank slab here until
+            # the Games page was opened and ran `_backfill_covers`. Same
+            # shape as the defect cover_fetch was written for, and the
+            # same fix: draw what is on disk, fetch what is not, write
+            # the path back onto the entry.
+            #
+            # `storage.update_entry`, never a whole-list write - the
+            # Games page holds its own copy of this file and a snapshot
+            # written from here would undo whatever it has done since.
+            self._ensure_game_cover(game, cover)
             card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
             name = QLabel(game["name"], objectName="CardTitle")
@@ -1102,8 +1192,15 @@ class HomePage(GlassPage):
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        area.viewport().setAutoFillBackground(False)
-        strip.setAutoFillBackground(False)
+        # **Opaque, not transparent - and this reverses the two lines
+        # that used to sit here.** theme.py's `#Bare` rule makes a scroll
+        # body transparent, and a transparent body cannot be scrolled by
+        # blitting: Qt repaints the page underneath and every widget over
+        # it, every frame. scroll_area()'s docstring measures that at
+        # 14.5ms/frame against 3.5ms, and these hand-built rows never had
+        # the fix because they never went through that helper. Same
+        # change, same reason, as the tracker's section strips.
+        _OpaqueGround(strip, theme.BG)
         strip.adjustSize()
         area.setFixedHeight(strip.sizeHint().height()
                             + area.horizontalScrollBar().sizeHint().height())
@@ -1165,47 +1262,6 @@ class HomePage(GlassPage):
             return
         self._games_grid = self._swap_in(
             self._games_grid, self._build_games_grid(self._recent_games()))
-
-    def _backfill_game_covers(self, games):
-        """Resolve Steam covers for the games this row draws.
-
-        The Games page does this for the whole library; Home does it for
-        the handful it shows, because Home is very often the only page
-        visited and a row of letter avatars is exactly what the poster
-        tiles were meant to replace. game_art caches hits and
-        authoritative misses on disk, so this costs a stat per game
-        after the first run."""
-        wanted = [g for g in games
-                  if not (g.get("cover") and Path(g["cover"]).exists())]
-        if not wanted:
-            return
-        for game in wanted:
-            lookup_pool.submit(self._game_cover_worker, game.get("id"),
-                               game.get("name") or "", game.get("path"))
-
-    def _game_cover_worker(self, game_id, name, install_path):
-        # Never raises - an exception here kills the pool's worker.
-        try:
-            from helpers import game_art
-            path = game_art.fetch_cover(name, install_path=install_path)
-        except Exception:
-            path = None
-        if path and game_id:
-            self._game_signals.cover.emit(game_id, str(path))
-
-    def _on_game_cover(self, game_id, path):
-        game = next((g for g in self.games if g.get("id") == game_id), None)
-        if game is None:
-            return
-        game["cover"] = path
-        # One field on one entry - the Games page and Settings hold
-        # their own copies of this file (see _launch_game).
-        storage.update_entry(GAMES_FILE, game_id, {"cover": path})
-        # Redrawn rather than one pixmap swapped: this row is rebuilt
-        # wholesale anyway (_refresh_games_row) and holding label
-        # references across that rebuild is what .claude/rules/ui.md
-        # warns against.
-        self._refresh_games_row()
 
     def _refresh_quick_list(self, data_file):
         """Redraw one Quick Apps/Websites list after something in it was

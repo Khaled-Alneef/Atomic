@@ -86,7 +86,8 @@ from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient,
 from PyQt6.QtWidgets import QWidget
 
 from . import theme
-from .widgets import hold_hover_cursor, release_hover_cursor
+from .widgets import (_vblank_ticker_for_use, hold_hover_cursor,
+                      release_hover_cursor)
 
 # The card geometry the old widgets had, kept to the pixel so the page
 # looks the same: a 180px card around a 160x216 cover with 10px of air,
@@ -128,11 +129,28 @@ CELL_CACHE = 120
 CELL_BUILD_PER_FRAME = 2
 
 # The scrollbar this widget paints for itself, since it is not inside a
-# QScrollArea any more. Same width as the app's QSS scrollbar so the
-# page's right edge is unchanged.
-BAR_WIDTH = 11
-BAR_MARGIN = 3
-BAR_MIN_THUMB = 36
+# QScrollArea any more.
+#
+# **These are the app stylesheet's own scrollbar numbers, and that is
+# the point - the owner, 24 August 2026: "change the scrollbar in the
+# manga/manhwa/manhua/anime/series/movies to make it look like the
+# scrollbar in the discovery page and the main page".** Those pages are
+# ordinary QScrollAreas and get theme.py's `QScrollBar` rules; this
+# widget owns its scrolling, so it paints its own, and the two had
+# drifted into different objects: an 11px groove inset 3px each side
+# gave a **5px** translucent grey pill here against the stylesheet's
+# full-width 11px SURFACE_HOVER bar that turns ACCENT under the pointer.
+# Read off theme so they cannot drift again.
+BAR_WIDTH = theme.SCROLLBAR_WIDTH
+# Top and bottom only, matching `QScrollBar:vertical { margin: 2px 0 }`.
+# The handle fills the groove's width - the stylesheet gives it no
+# left/right inset, and that is most of what made these look unalike.
+BAR_MARGIN = 2
+# `QScrollBar::handle:vertical { min-height: 28px }`.
+BAR_MIN_THUMB = 28
+# `border-radius: 5px` - a rounded rectangle, not a capsule. At the old
+# 5px width the two were the same shape; at 11 they are not.
+BAR_RADIUS = 5
 
 
 class FrameMotion:
@@ -179,6 +197,8 @@ class FrameMotion:
     FRICTION = 34.0
     RAMP = 40.0
     MAX_SPEED = 5200.0
+    # See widgets._Momentum.STOP_SPEED, including the one-pixel-per-
+    # refresh floor that was tried here and removed the same day.
     STOP_SPEED = 30.0
     ACCEL_WINDOW_S = 0.25
     ACCEL_NOTCHES = 5
@@ -371,7 +391,12 @@ class PosterGrid(QWidget):
     # Distance per notch, the same fraction of the viewport the rest of
     # the app uses (widgets._SmoothWheel.NOTCH_FRACTION, 40% slower as of
     # 24 August 2026) so one wheel click moves the same amount here.
-    NOTCH_FRACTION = 0.0924
+    # **0.0647 - 30% slower again, the owner, 24 August 2026: "make the
+    # scrolling in the whole app 30% slower (do NOT change the reading
+    # viewer)". 0.0924 x 0.70; the reader's own notch
+    # (windows.reader.WHEEL_STEP_PX) took its 30% separately and is
+    # deliberately untouched here.**
+    NOTCH_FRACTION = 0.0647
     NOTCH_FLOOR_PX = 25
 
     def __init__(self, cover_size, ground=None, parent=None):
@@ -388,6 +413,9 @@ class PosterGrid(QWidget):
         self._chips = {}                # (text, accent) -> rendered chip
         self._cells = {}                # index -> composited card, see _cell_pixmap
         self._drag_from = None          # scrollbar thumb drag anchor
+        # Whether this grid currently holds the shared vblank ticker -
+        # see _hold_vblank for the measurement that put it there.
+        self._vblank_on = False
         self._bar_hover = False
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -427,7 +455,14 @@ class PosterGrid(QWidget):
         # and antialiased paths per frame cost more than blitting. Text
         # is cached per record as QStaticText below; this is the same
         # idea for the placeholder.
-        placeholder = QPixmap(self._cover_w, self._cover_h)
+        # Cut at devicePixelRatio and tagged, like every other pixmap
+        # this widget draws: at 1.25 an untagged slab is stretched by Qt
+        # and its rounded corners go soft, which reads as a blurry card
+        # sitting beside sharp ones.
+        slab_ratio = self.devicePixelRatioF() or 1.0
+        placeholder = QPixmap(int(self._cover_w * slab_ratio),
+                              int(self._cover_h * slab_ratio))
+        placeholder.setDevicePixelRatio(slab_ratio)
         placeholder.fill(Qt.GlobalColor.transparent)
         slab = QPainter(placeholder)
         slab.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -633,12 +668,23 @@ class PosterGrid(QWidget):
             self.update()
 
     # ---- geometry helpers ------------------------------------------------
+    def _left_margin(self) -> int:
+        """What centres the rows: half of whatever width the columns do
+        not use - the owner's ask, 24 August 2026 ("make the rows in the
+        category pages in the mid, just like the genre page"). The grid
+        used to start every row at x=0 and leave all the slack on the
+        right, which reads as the page leaning left the moment the
+        window is wider than an exact number of columns."""
+        m = self._ensure_metrics()
+        used = (self._columns * (m["cell_w"] + GRID_SPACING)) - GRID_SPACING
+        return max(0, (self._grid_width() - used) // 2)
+
     def cell_rect(self, index: int) -> QRect:
         """In content space - y is measured from the top of all the rows,
         not from the top of the viewport."""
         m = self._ensure_metrics()
         row, col = divmod(index, max(1, self._columns))
-        x = col * (m["cell_w"] + GRID_SPACING)
+        x = self._left_margin() + col * (m["cell_w"] + GRID_SPACING)
         y = row * (m["cell_h"] + GRID_SPACING)
         return QRect(x, y, m["cell_w"], m["cell_h"])
 
@@ -654,7 +700,10 @@ class PosterGrid(QWidget):
         span_x = m["cell_w"] + GRID_SPACING
         span_y = m["cell_h"] + GRID_SPACING
         y = point.y() + self._motion.pos
-        col, rem_x = divmod(point.x(), span_x)
+        x = point.x() - self._left_margin()
+        if x < 0:
+            return -1
+        col, rem_x = divmod(x, span_x)
         row, rem_y = divmod(int(y), span_y)
         if col >= self._columns or rem_x >= m["cell_w"] or rem_y >= m["cell_h"]:
             return -1
@@ -675,6 +724,26 @@ class PosterGrid(QWidget):
             if not self._motion.frame_s:
                 self._motion.frame_s = self._refresh_interval()
             moving = self._motion.step()
+        # **Everything cached in device pixels is invalid the moment the
+        # widget's ratio changes** - the window was dragged to the other
+        # monitor. The composited cells, the chips and the placeholder
+        # were all cut at the old ratio, and drawing them tagged 1.25
+        # onto a 1.0 surface is a 0.8x nearest-neighbour scale on every
+        # frame: pixelated *and* shimmering while it scrolls, which is
+        # the owner's "the text and the images seems really stiff and
+        # they leave a trace". Covers are re-requested too - they were
+        # cut for the old screen by images.thumbnail_or_avatar, and the
+        # ratio it cuts for has just been repointed at the new one
+        # (images.set_device_ratio follows the window).
+        ratio_now = self.devicePixelRatioF() or 1.0
+        if getattr(self, "_cache_ratio", None) != ratio_now:
+            self._cache_ratio = ratio_now
+            self._metrics = None
+            self._cells.clear()
+            self._chips.clear()
+            self._requested.clear()
+            for record in self._records:
+                record["pixmap"] = None
         m = self._ensure_metrics()
         offset = self._motion.pos
         painter = QPainter(self)
@@ -740,6 +809,8 @@ class PosterGrid(QWidget):
         if moving:
             self._schedule_frame()
             self.scrolled.emit()
+        elif self._vblank_on:
+            self._release_vblank()
 
     def _schedule_frame(self):
         """Ask for the next frame when the panel can actually show one.
@@ -765,6 +836,8 @@ class PosterGrid(QWidget):
         motion its refresh is owed. That is the difference from the 6ms
         QTimer this module's docstring warns about - that one *drove* the
         position, this one only decides when to draw it."""
+        if self._hold_vblank():
+            return          # the panel itself asks for the next frame
         frame_s = self._motion.frame_s
         if frame_s <= 0.0:
             self.update()
@@ -776,6 +849,66 @@ class PosterGrid(QWidget):
         ahead = frame_s - ((time.perf_counter() - phase) % frame_s)
         QTimer.singleShot(max(0, int(round(ahead * 1000.0))),
                           Qt.TimerType.PreciseTimer, self.update)
+
+    def _hold_vblank(self) -> bool:
+        """Draw the next frame on the panel's own vblank instead of a
+        millisecond timer. True when that clock is available.
+
+        **Why, and it is not a preference - measured 24 August 2026, the
+        grid driven three times with everything else identical:**
+
+            run 1   236.1 steps/s,  1.6% of refreshes dead
+            run 2    65.2 steps/s, 72.9% dead
+            run 3   235.2 steps/s,  2.0% dead
+
+        Two runs perfect, one off a cliff. That is not variance, it is
+        the timer: `_schedule_frame` asks for 0-4ms and Windows rounds a
+        request it has not been asked to honour up to ~13.9ms, which is
+        72 frames a second - and 65 steps/s is that. Timer resolution is
+        a **system-global** setting, so whether this widget is smooth
+        depended on whether some other process on the machine happened
+        to have raised it, which is exactly the shape of the owner's
+        "sometimes the whole app seems lower in fps".
+
+        helpers/startup.allow_precise_timers raises it for this process,
+        and that is worth keeping - but a surface should not be one
+        failed API call away from a third of its frames. The vblank
+        ticker is the panel itself and cannot be quantised, so it is
+        used where it exists and the timer stays as the fallback."""
+        if self._vblank_on:
+            return True
+        ticker = _vblank_ticker_for_use()
+        if ticker is None:
+            return False
+        ticker.tick.connect(self._on_vblank)
+        ticker.acquire()
+        self._vblank_on = True
+        return True
+
+    def _release_vblank(self):
+        ticker = _vblank_ticker_for_use()
+        try:
+            if ticker is not None:
+                ticker.tick.disconnect(self._on_vblank)
+                ticker.release()
+        except Exception:
+            pass
+        self._vblank_on = False
+
+    def _on_vblank(self):
+        # One repaint per refresh while the motion runs; paintEvent
+        # releases the hold on the frame that stops.
+        self.update()
+
+    def hideEvent(self, event):
+        # **Released here as well as when the motion stops.** Pages
+        # rebuild from scratch on every visit, so a grid is routinely
+        # hidden and deleted mid-glide - and a hold that is never given
+        # back leaves the vblank thread awake for the life of the app,
+        # which is the exact cost the gate exists to remove.
+        if self._vblank_on:
+            self._release_vblank()
+        super().hideEvent(event)
 
     def _ask(self, ids):
         for index in ids:
@@ -796,14 +929,17 @@ class PosterGrid(QWidget):
         span = track_h - thumb_h
         travel = (self._motion.pos / self._motion.maximum) if self._motion.maximum > 0 else 0.0
         top = BAR_MARGIN + span * max(0.0, min(1.0, travel))
-        x = self.width() - BAR_WIDTH + BAR_MARGIN
-        w = BAR_WIDTH - 2 * BAR_MARGIN
+        x = self.width() - BAR_WIDTH
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(theme.rgba(theme.TEXT_MUTED,
-                                           110 if (self._bar_hover or self._drag_from) else 70)))
-        painter.drawRoundedRect(QRectF(x, top, w, thumb_h), w / 2.0, w / 2.0)
+        # SURFACE_HOVER at rest, ACCENT under the pointer or mid-drag -
+        # `QScrollBar::handle:vertical` and its `:hover` rule, which is
+        # what every other scrolling surface in the app shows.
+        painter.setBrush(QColor(theme.ACCENT if (self._bar_hover or self._drag_from)
+                                else theme.SURFACE_HOVER))
+        painter.drawRoundedRect(QRectF(x, top, BAR_WIDTH, thumb_h),
+                                BAR_RADIUS, BAR_RADIUS)
         painter.restore()
 
     def _thumb_rect(self) -> QRectF:
@@ -875,6 +1011,12 @@ class PosterGrid(QWidget):
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        # Smooth, because the cover tile may carry a different ratio
+        # than this cell for one build (cut for the previous monitor,
+        # not yet re-fetched). Scaling it nearest here bakes the
+        # pixelation into the cached card; smooth costs nothing when
+        # the ratios match, which is every steady-state frame.
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         rect = QRect(0, 0, size.width(), size.height())
         self._draw_cell_content(painter, m, record, rect)
         painter.end()
@@ -915,8 +1057,11 @@ class PosterGrid(QWidget):
             chip = self._chip(m, rating, accent=False)
             painter.drawPixmap(cover_x + 8,
                                cover_y + self._cover_h - 8 - m["chip_h"], chip)
-        if record.get("saved"):
-            chip = self._chip(m, "Saved", accent=True)
+        badge = "Saved" if record.get("saved") else (record.get("badge") or "")
+        if badge:
+            # One head slot: Saved (accent) outranks a caller's neutral
+            # badge - the genre page labels its rows Series/Movies here.
+            chip = self._chip(m, badge, accent=bool(record.get("saved")))
             painter.drawPixmap(cover_x + 8, cover_y + 8, chip)
 
         text_x = rect.x() + CARD_PADDING_X
