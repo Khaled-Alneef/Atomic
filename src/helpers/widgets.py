@@ -2307,13 +2307,17 @@ class _VBlankTicker(QObject):
         ATOMIC_VBLANK_TRUST=1, which is what shipped:
 
             surface            before                after
-            Watch categories   104.9 fps, 56.3% dead   221.8, 7.6%
-            Saved grid         148.6 fps, 38.1% dead   207.9, 13.4%
+            Watch categories   104.9 fps, 56.3% dead   221.8,  7.6%
+            Saved grid         148.6 fps, 38.1% dead   220.1,  8.3%
             Home               194.0 fps, 19.2% dead   230.8,  3.8%
+            reader strip       200.5 fps, 16.4% dead   234.0,  2.5%
 
         and the evenness with it - on the category grid the step spread
         went x2.22 -> x1.20 and the local step-to-step change 20/140% ->
-        17/57%. That is the owner's "the text labels and image cards
+        17/57%. The *travel* moved too, which is the half that explains
+        the feel: the same wheel cadence carried the reader strip 898
+        px/s before and 1330 after, because a starved clock is a starved
+        motion, not merely a low frame rate. That is the owner's "the text labels and image cards
         seem to be refreshing on a stiff way"; his "sometimes the whole
         app seems lower in fps" is the same fault on a machine where the
         call happens to work, since whether it does is a property of the

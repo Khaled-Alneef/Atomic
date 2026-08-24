@@ -686,23 +686,44 @@ cause of anything without re-measuring.
   with `windows`/`helpers` fixes it. Worth knowing before writing the
   same counter again.
 
-## Still open on scrolling, and measured rather than guessed
+## The reader strip, which was this file's Phase 2
 
-The widget-card grids remain the worst surface (13.4% dead against
-PosterGrid's 7.6%). Instrumented, the Saved grid pays **19
-`ContinueCover` paints per refresh, 4,149/s** - each one repainting its
-whole 216px cover rather than the exposed strip. The page behind it
-does *not* repaint per frame (`GlassPage`, 26 paints in 2.5s), so the
-opaque-ground fix is holding; the cost is in the cards themselves.
-`PosterGrid` already exists as the virtualized answer and the Saved tab
-does not use it. Not attempted tonight - it is a real rewrite of the
-hover tooltip, the continue button and the selection badges, and the
-dominant fault was elsewhere.
+Same fix, and it is now the **best** surface in the app - against 116
+frames/s and 16.2% judder when this file was written. Measured over a
+real 15,738px chapter of Kingdom:
 
-Also worth recording: the owner's library **on this machine** is 8
-titles and 0 series, so every saved-grid measurement without a seeded
-library measures the clamp, not the motion - the same trap this file
-already records for Home.
+    before   200.5 fps, 16.4% dead, x2.25,  898 px/s
+    after    234.0 fps,  2.5% dead, x1.33, 1330 px/s
+
+Note the px/s column, which appears in every one of these A/Bs: the
+same wheel cadence travels **half as far** with the broken clock. That
+is not a frame-rate artifact, it is the motion being starved of ticks,
+and it is probably what "stiff" actually felt like under the hand.
+
+## Two things that looked like defects and measured as neither
+
+**The widget-card grids are not slower than the painted one.** The
+first Saved-grid run said 207.9 fps / 13.4% dead against PosterGrid's
+221.8 / 7.6% - and that was the clamp, not the surface. The owner's
+library **on this machine** is 8 titles and 0 series, and a seeded 240
+all sharing one status collapses into a single horizontal strip, so the
+vertical range was 156px. Seeded across five statuses instead (real
+range), the same grid measures **220.1 fps, 8.3% dead, x1.20** - level
+with PosterGrid on every column. This is the trap this file already
+records for Home, hit twice more in one night: **check the range before
+believing the number.**
+
+**Forcing the scroll viewport opaque does nothing.** The Saved grid
+does pay 21 `ContinueCover` paints per refresh (4,595/s), each
+redrawing its whole 216px cover, and the page behind it repaints once
+per frame too - which reads like a scroll that is not blitting. Setting
+`WA_OpaquePaintEvent` on the viewport as well as on the body (it is
+False on the viewport and True on the body, measured) changed **nothing
+at all**: 219.8 -> 219.4 fps, 22,964 -> 22,864 cover paints. Not
+shipped. `ContinueCover.paintEvent` is a single `drawPixmap`, so the
+per-frame cost is a blit of ~21 covers and the surface still holds 220
+of 240 refreshes. Converting the Saved tab to `PosterGrid` would remove
+that work, but there is no longer a measurement asking for it.
 
 ---
 
