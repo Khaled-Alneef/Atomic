@@ -118,6 +118,15 @@ PREFETCH_ROWS = 2
 COVER_ASK_PER_FRAME = 4
 FAST_SCROLL_PX_S = 1500.0
 
+# How many composited cards to keep (see _cell_pixmap). A screenful is
+# about 32 at this size and PREFETCH_ROWS adds two rows either way, so
+# this holds the view and its margins without keeping bitmaps for a
+# 500-entry library nobody is looking at. Each is one cell of ARGB.
+CELL_CACHE = 120
+
+# How many of those to build ahead per frame - see paintEvent.
+CELL_BUILD_PER_FRAME = 2
+
 # The scrollbar this widget paints for itself, since it is not inside a
 # QScrollArea any more. Same width as the app's QSS scrollbar so the
 # page's right edge is unchanged.
@@ -319,6 +328,7 @@ class PosterGrid(QWidget):
         self._content_h = 0
         self._motion = FrameMotion()
         self._chips = {}                # (text, accent) -> rendered chip
+        self._cells = {}                # index -> composited card, see _cell_pixmap
         self._drag_from = None          # scrollbar thumb drag anchor
         self._bar_hover = False
         self.setMouseTracking(True)
@@ -369,6 +379,7 @@ class PosterGrid(QWidget):
                              theme.RADIUS, theme.RADIUS)
         slab.end()
         self._chips.clear()
+        self._cells.clear()
         self._metrics = {
             "title_font": title_font, "meta_font": meta_font,
             "chip_font": chip_font, "title_line": title_line,
@@ -522,6 +533,9 @@ class PosterGrid(QWidget):
     def set_items(self, records, keep_position=False):
         self._records = [dict(r) for r in records]
         self._requested.clear()
+        # Every composited card is keyed by index into the list that just
+        # went away - keeping them would paint the previous page's cards.
+        self._cells.clear()
         self._hover = -1
         if not keep_position:
             self._motion.set_position(0)
@@ -545,6 +559,7 @@ class PosterGrid(QWidget):
         if not (0 <= index < len(self._records)):
             return
         self._records[index]["pixmap"] = pixmap
+        self._forget_cell(index)
         # Whole frames, not cells: this surface draws the visible window
         # of records from scratch each time, and a frame is ~1.3ms, so a
         # cover landing costs one frame.
@@ -555,6 +570,7 @@ class PosterGrid(QWidget):
         if not (0 <= index < len(self._records)):
             return
         self._records[index]["saved"] = bool(saved)
+        self._forget_cell(index)
         if self._cell_in_view(index):
             self.update()
 
@@ -636,14 +652,33 @@ class PosterGrid(QWidget):
                             and index not in self._requested):
                         missing.append(index)
             missing = missing[:COVER_ASK_PER_FRAME]
+            # Cards to compose *before* they are needed. A row entering
+            # view is 8 uncached cells at 0.189ms each = 1.51ms landing
+            # on one frame (measured), which is what kept the paint's p95
+            # at 6.7ms while its median fell to 3.5. Building a couple a
+            # frame ahead of the edge spreads that: a row arrives every
+            # ~9 frames at a normal wheel pace, so two a frame stays in
+            # front of it and costs 0.38ms.
+            band = PREFETCH_ROWS * self._columns
+            ahead = []
+            for index in range(max(0, first - band),
+                               min(len(self._records), last + band)):
+                if index not in self._cells:
+                    ahead.append(index)
+                    if len(ahead) >= CELL_BUILD_PER_FRAME:
+                        break
         else:
             missing = []
+            ahead = []
         self._paint_scrollbar(painter)
         painter.end()
         if missing:
             for index in missing:
                 self._requested.add(index)
             QTimer.singleShot(0, lambda ids=tuple(missing): self._ask(ids))
+        if ahead:
+            QTimer.singleShot(
+                0, lambda ids=tuple(ahead), mm=m: self._precompose(mm, ids))
         if moving:
             # The next frame.
             self.update()
@@ -688,6 +723,35 @@ class PosterGrid(QWidget):
         return QRectF(self.width() - BAR_WIDTH, top, BAR_WIDTH, thumb_h)
 
     def _paint_cell(self, painter, m, index, rect):
+        """One card: the hover ring live, everything else as one blit.
+
+        **The owner, 24 August 2026:** *"when I move or scroll the text
+        labels and image cards seems to be refreshing on a stiff way"*.
+        He was describing the mechanism exactly. Every visible cell used
+        to redraw its cover, its chips and both labels on every frame,
+        and `drawStaticText` caches the text *layout*, not a bitmap - so
+        the glyphs were re-rasterised and re-hinted at each new integer
+        y, which is what "refreshing" looks like.
+
+        Measured that day, removing one thing at a time from the paint
+        (budget 6.94ms at 144Hz):
+
+            everything          med 4.21ms   p95 6.71
+            no labels           med 2.98ms   p95 5.65    <- text = 1.23ms
+            no covers           med 3.19ms   p95 5.62    <- covers = 1.02ms
+            no chips            med 4.10ms   p95 6.82    <- already cached
+            fillRect only       med 1.55ms   p95 3.10    <- the floor
+
+        Text was 29% of the frame. It is now composited into the cell
+        once and blitted after that. The hover ring stays live and
+        outside the cache, so pointing at a card does not rebuild it.
+
+        Why this matters beyond the milliseconds: a paint that overruns
+        the budget misses its vblank, and the motion model then correctly
+        advances *two* refreshes on the next frame - a double-length
+        step. The float step was measured dead even (median step-to-step
+        change 0.0%) with the outliers landing at exactly 2x. So the
+        judder was never the model; it was frames arriving late."""
         record = self._records[index]
         if index == self._hover:
             painter.save()
@@ -697,7 +761,55 @@ class PosterGrid(QWidget):
             painter.drawRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5),
                                     theme.RADIUS, theme.RADIUS)
             painter.restore()
+        painter.drawPixmap(rect.topLeft(), self._cell_pixmap(m, index))
 
+    def _cell_pixmap(self, m, index):
+        """The card's cover, chips and labels, drawn once.
+
+        Kept transparent outside the artwork so the hover ring painted
+        underneath still shows through. Bounded: only what is on screen
+        and a little past it is ever wanted, and an unbounded cache over
+        a 500-entry library would be tens of megabytes of card bitmaps
+        nobody is looking at."""
+        cached = self._cells.get(index)
+        if cached is not None:
+            return cached
+        record = self._records[index]
+        dpr = self.devicePixelRatioF()
+        size = self.cell_size()
+        pixmap = QPixmap(int(size.width() * dpr), int(size.height() * dpr))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        rect = QRect(0, 0, size.width(), size.height())
+        self._draw_cell_content(painter, m, record, rect)
+        painter.end()
+        if len(self._cells) >= CELL_CACHE:
+            # Oldest first - dicts keep insertion order, and the cells
+            # that fall out are the ones scrolled furthest away.
+            for stale in list(self._cells)[:len(self._cells) - CELL_CACHE + 1]:
+                del self._cells[stale]
+        self._cells[index] = pixmap
+        return pixmap
+
+    def _forget_cell(self, index):
+        self._cells.pop(index, None)
+
+    def _precompose(self, m, ids):
+        """Build cards just off the edge of the view, off the paint path.
+
+        Posted with singleShot like the cover requests are - and, exactly
+        as COVER_ASK_PER_FRAME records, being off the paint path does not
+        make it free, because a frame cannot be produced while it runs.
+        That is why it is a couple at a time and not the whole band."""
+        if self._metrics is not m:
+            return                      # fonts or cell size changed under us
+        for index in ids:
+            if 0 <= index < len(self._records) and index not in self._cells:
+                self._cell_pixmap(m, index)
+
+    def _draw_cell_content(self, painter, m, record, rect):
         cover_x = rect.x() + CARD_PADDING_X
         cover_y = rect.y() + CARD_PADDING_TOP
         pixmap = record.get("pixmap")

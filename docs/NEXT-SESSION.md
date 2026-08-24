@@ -5,16 +5,19 @@ Hand this to a fresh session; it is self-contained.
 
 ---
 
-## 0. Two open items for the owner, not for the agent
+## 0. One open item for the owner, not for the agent
 
 - **A GitHub personal access token was pasted in plaintext in chat and must
   be rotated.** GitHub > Settings > Developer settings > Personal access
   tokens > revoke. It was never written to any file, never placed in a
   remote URL, and never used.
-- **The new repo is still undecided.** `AtomicApplication/Atomic` was to get
-  a `Development` branch starting at 0.0.0, carrying the rules and the
-  release guide. The owner answered "wait" on both auth and contents, and
-  nothing was pushed. Nothing about it has been done. Ask before acting.
+
+**Closed 24 August 2026 - `AtomicApplication` does not exist.** An earlier
+version of this file left "the new repo is still undecided", naming an
+`AtomicApplication/Atomic` that was to start at 0.0.0. The owner's words:
+*"from now on, there is no account called AtomicApplication"*. There is one
+remote and it is `origin` = `github.com/Khaled-Alneef/Atomic`. Do not
+propose, create or push to any other; do not ask about it again.
 
 ---
 
@@ -338,3 +341,53 @@ native overlay bars.
 **Not tested:** hwdec through the render API - the spike's clip is
 uncompressed raw video, so `hwdec-current: no` proves nothing. Test that
 before building on this.
+
+---
+
+# Still open: the grid paints at about two thirds of the refresh rate
+
+This is the one thing on this page that is **not** resolved, and it is the
+one the owner can see. His words, and they name the mechanism exactly:
+*"when I move or scroll the text labels and image cards seems to be
+refreshing on a stiff way"*.
+
+The text half of that is fixed - cards are composited once and blitted
+now (`_cell_pixmap`), and the paint fell from 4.21ms median to 3.20-3.29,
+p95 6.71 to 6.07-6.32. The frozen exe delivers **143.7 presents/s with
+0-1% dead refreshes** on a 144Hz panel. Frame *delivery* is at the
+physical ceiling.
+
+**What is left.** Driving a sustained scroll, the velocity is dead
+constant - 4953 px/s, a flat trace, so this is not the wheel impulse
+model (RAMP/FRICTION) pulsing. Yet the per-present steps are strictly
+bimodal:
+
+    13x233  12x186  25x86  26x86  11x85  24x61  23x44
+
+One cluster, and another at **exactly double**. About a third of frames
+advance two refreshes' worth instead of one, at constant speed. That is
+what a stiff, pulsing scroll is.
+
+It is present with and without the dt snap (checked by toggling it on the
+same tree), and with and without the cell cache. It is not something
+added on 24 August.
+
+**The contradiction that has to be resolved first.** A third of frames
+advancing double implies the widget is painting at roughly 96/s, not 144.
+But the compositor reports a new frame on 99% of refreshes and only 1% of
+presents show no movement at all. Both numbers are from the validated
+Desktop Duplication instrument. **They cannot both be true as stated, and
+whichever one is being misread is the whole answer.** Do not build a fix
+on either until that is settled.
+
+Untested hypothesis, offered only as a starting point and explicitly not
+measured: a paint that finishes, blocks on a vsync-locked present, and
+therefore misses the next vblank, settling into an every-other-refresh
+cadence. Paint cost is 3.2ms against a 6.94ms budget, so the widget is
+not too slow to draw every refresh - which is what makes the cadence, not
+the cost, the suspect.
+
+What would settle it: timestamp every paintEvent entry and exit inside
+the running app, and line those up against the duplication instrument's
+present timestamps in the same run. Nothing so far has put both clocks on
+the same timeline; every measurement has had one or the other.
