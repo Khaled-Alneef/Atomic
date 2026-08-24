@@ -1736,6 +1736,22 @@ def search_field(placeholder: str, width: int = None) -> QLineEdit:
 MAX_TICK_MS = 16
 
 
+def screen_frame_s(widget=None) -> float:
+    """One display refresh in SECONDS, unrounded. 0.0 if unknown.
+
+    screen_tick_ms floors to whole milliseconds because a QTimer only
+    takes whole milliseconds. Nothing else may use that number as the
+    refresh interval: 6ms against a real 6.944ms is a 14% error, and
+    _Momentum._tick now snaps timestamps to this grid, where that error
+    would accumulate into exactly the beat the snap exists to remove."""
+    try:
+        screen = (widget.screen() if widget is not None else None)             or QApplication.primaryScreen()
+        rate = screen.refreshRate() if screen is not None else 0.0
+    except Exception:
+        rate = 0.0
+    return 1.0 / rate if rate and rate > 0 else 0.0
+
+
 def screen_tick_ms(widget=None) -> int:
     """One display refresh, in whole milliseconds.
 
@@ -2127,7 +2143,27 @@ class _Momentum(QObject):
     # but a lone notch then takes 553ms to settle and a flick coasts a
     # full second, which is floaty rather than smooth. 7: lone notch
     # settles in 440ms, peak 666 px/s for 75px, a flick coasts ~0.7s.
-    FRICTION = 7.0
+    # **Friction 34, not 7, and acceleration off** - the owner's ask,
+    # 24 August 2026: "remove the scrolling drift in the whole app", and
+    # in the same breath "fix the smear". This **supersedes** the earlier
+    # instruction the same day that stop-on-release was to be "ONLY IN
+    # READER MODE"; the reader simply got there first, and its numbers
+    # (windows.reader.READER_WHEEL_FRICTION) are the ones adopted here.
+    #
+    # Why these two constants and not MAX_SPEED, which was the first
+    # candidate. Smear on a sample-and-hold panel is velocity x frame
+    # hold time, and during a sustained scroll the average velocity is
+    #
+    #     distance_per_notch x notches_per_second
+    #
+    # in which FRICTION cancels out entirely. Capping MAX_SPEED does not
+    # reduce that average - it only defers distance into `_pending`,
+    # which then drains after the hand stops. That deferred distance IS
+    # drift, so the cap cannot be the answer to a request that asks for
+    # both. Acceleration can: it inflated a sustained scroll from the
+    # 0.0924-of-a-viewport notch to a measured ~115px, and removing it
+    # takes the velocity down with the travel per notch left alone.
+    FRICTION = 34.0
     # **5200, and the excess is kept, not thrown away.** The first cut
     # clamped the velocity and discarded what would not fit, so an
     # 8-notch flick travelled *less* per notch than slow scrolling
@@ -2161,14 +2197,15 @@ class _Momentum(QObject):
     # owner asked for smooth, not for a page that runs away.
     ACCEL_WINDOW_S = 0.25
     ACCEL_NOTCHES = 5
-    ACCEL_MAX = 1.7
+    ACCEL_MAX = 1.0
     # The longest step the integrator will take. A tick that is later
     # than two frames is integrated as two frames: the position lands a
     # little short rather than leaping - smoothness over accuracy, the
     # whole point of the model.
     MAX_DT = 2.0 / 144.0
 
-    def __init__(self, bar, tick_ms, parent=None, friction=None, accel_max=None):
+    def __init__(self, bar, tick_ms, parent=None, friction=None,
+                 accel_max=None, frame_s=None):
         """`friction` and `accel_max` override the class defaults for one
         surface. The reader passes a high friction so its strip **stops
         when the wheel stops** - the owner's ask, 24 August 2026: "while
@@ -2179,6 +2216,7 @@ class _Momentum(QObject):
         super().__init__(parent)
         self._bar = bar
         self._tick_ms = tick_ms
+        self._frame_s = frame_s
         if friction is not None:
             self.FRICTION = float(friction)
         if accel_max is not None:
@@ -2187,6 +2225,9 @@ class _Momentum(QObject):
         self._vel = 0.0
         self._pending = 0.0          # impulse not yet handed to the velocity
         self._last = 0.0
+        # Where the refresh grid is anchored - see _tick. Re-anchored
+        # whenever motion restarts.
+        self._phase = None
         self._kicks = collections.deque()
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -2241,9 +2282,32 @@ class _Momentum(QObject):
             self._timer.stop()
             return
         now = time.monotonic()
+        # **Snap to the refresh grid.** This timer runs at
+        # screen_tick_ms, which is 6ms on a 144Hz panel because a QTimer
+        # only takes whole milliseconds - so it fires about 166 times a
+        # second against 144 refreshes and the two beat. Measured on the
+        # grid surface, which had the same shape and is now fixed the
+        # same way (poster_grid.FrameMotion.step): the app produced 137
+        # positions a second while the compositor presented 109, and
+        # steps of 14px and 28px landed in the same run at a constant
+        # velocity.
+        #
+        # Anchoring to a fixed phase makes two ticks inside one refresh
+        # carry the same timestamp - the second moves nothing - and ticks
+        # in consecutive refreshes exactly one frame apart.
+        frame_s = self._frame_s() if self._frame_s is not None else 0.0
+        if frame_s > 0.0:
+            if self._phase is None:
+                self._phase = now
+            now = max(self._phase + round((now - self._phase) / frame_s) * frame_s,
+                      self._last)
         # Real elapsed time, capped: a tick that arrives late lands where
         # it should, and one that arrives after a stall does not teleport.
-        dt = min(self.MAX_DT, max(0.0, now - self._last))
+        # The cap comes from the real interval when it is known - a
+        # hardcoded 2/144 is 13.89ms, shorter than one 60Hz frame, and
+        # would fire on every ordinary tick on a 60Hz panel.
+        max_dt = 2.0 * frame_s if frame_s > 0.0 else self.MAX_DT
+        dt = min(max_dt, max(0.0, now - self._last))
         self._last = now
         if self._pending:
             handed = self._pending * (1.0 - math.exp(-self.RAMP * dt))
@@ -2270,12 +2334,14 @@ class _Momentum(QObject):
             self._bar.setValue(int(round(self._pos)))
             self._timer.stop()
             self._vel, self._pos = 0.0, None
+            self._phase = None
             return
         self._bar.setValue(int(round(self._pos)))
 
     def cancel(self):
         self._timer.stop()
         self._vel, self._pos, self._pending = 0.0, None, 0.0
+        self._phase = None
         self._kicks.clear()
 
 
@@ -2370,7 +2436,8 @@ class _SmoothWheel(QObject):
         self._started_at = 0.0
         # The motion itself lives in _Momentum (see its docstring for the
         # measurement that retired the per-notch curve this used to run).
-        self._motion = _Momentum(area.verticalScrollBar(), self._tick_ms, self)
+        self._motion = _Momentum(area.verticalScrollBar(), self._tick_ms, self,
+                                 frame_s=lambda: screen_frame_s(self._area))
         # Grabbing the scrollbar mid-glide must win instantly - an
         # animation still writing values under a held slider fights the
         # hand holding it.
@@ -2666,7 +2733,8 @@ class SideScroller(QWidget):
         # One motion object shared with the wheel, so a press landing
         # mid-glide adds to it instead of fighting it - which is what
         # the old code needed `_wheel_target = None` to paper over.
-        self._motion = _Momentum(self._bar, lambda: screen_tick_ms(self), self)
+        self._motion = _Momentum(self._bar, lambda: screen_tick_ms(self), self,
+                                 frame_s=lambda: screen_frame_s(self))
 
         area.viewport().installEventFilter(self)
         # maximumHeight, not height(): the caller pins the area's height

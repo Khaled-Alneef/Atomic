@@ -77,7 +77,8 @@ from helpers import (app_settings, child_process, downloads, history, images,
                      logs, lookup_pool, net, storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
                              finish_toast, frameless_dialog, show_toast,
-                             use_hover_cursor, _Momentum, screen_tick_ms)
+                             use_hover_cursor, _Momentum, screen_tick_ms,
+                             screen_frame_s)
 from windows.tracker import correct_progress, format_chapter_progress
 
 
@@ -1630,7 +1631,8 @@ class _StripView(QScrollArea):
         # sending more notches, not by adding speed that outlives them.
         self._wheel_motion = _Momentum(
             self.verticalScrollBar(), lambda: screen_tick_ms(self), self,
-            friction=READER_WHEEL_FRICTION, accel_max=1.0)
+            friction=READER_WHEEL_FRICTION, accel_max=1.0,
+            frame_s=lambda: screen_frame_s(self))
         self.verticalScrollBar().sliderPressed.connect(self._wheel_motion.cancel)
 
     # ---- state -------------------------------------------------------

@@ -3032,6 +3032,14 @@ def _preload_overlays():
             __import__(name)
         except Exception:
             logs.exception(f"could not preload {name}")
+    # And the tracker's own once-per-session costs, for the same reason
+    # and on the same timer - see tracker.prewarm for what they were
+    # measured costing on the first Home -> Watch.
+    try:
+        from windows import tracker
+        tracker.prewarm()
+    except Exception:
+        logs.exception("could not warm the tracker pages")
 
 
 def main():

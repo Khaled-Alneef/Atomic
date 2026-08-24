@@ -156,13 +156,33 @@ class FrameMotion:
 
     # See widgets._Momentum for what each of these was measured against;
     # they are deliberately the same numbers.
-    FRICTION = 7.0
+    # **Friction 34, not 7, and acceleration off** - the owner's ask,
+    # 24 August 2026: "remove the scrolling drift in the whole app", and
+    # in the same breath "fix the smear". This **supersedes** the earlier
+    # instruction the same day that stop-on-release was to be "ONLY IN
+    # READER MODE"; the reader simply got there first, and its numbers
+    # (windows.reader.READER_WHEEL_FRICTION) are the ones adopted here.
+    #
+    # Why these two constants and not MAX_SPEED, which was the first
+    # candidate. Smear on a sample-and-hold panel is velocity x frame
+    # hold time, and during a sustained scroll the average velocity is
+    #
+    #     distance_per_notch x notches_per_second
+    #
+    # in which FRICTION cancels out entirely. Capping MAX_SPEED does not
+    # reduce that average - it only defers distance into `_pending`,
+    # which then drains after the hand stops. That deferred distance IS
+    # drift, so the cap cannot be the answer to a request that asks for
+    # both. Acceleration can: it inflated a sustained scroll from the
+    # 0.0924-of-a-viewport notch to a measured ~115px, and removing it
+    # takes the velocity down with the travel per notch left alone.
+    FRICTION = 34.0
     RAMP = 40.0
     MAX_SPEED = 5200.0
     STOP_SPEED = 30.0
     ACCEL_WINDOW_S = 0.25
     ACCEL_NOTCHES = 5
-    ACCEL_MAX = 1.7
+    ACCEL_MAX = 1.0
     # A frame that arrives later than two refreshes is integrated as two:
     # the view lands a little short rather than leaping. 144Hz is this
     # machine's panel; screen_tick_ms is what knows better at runtime.
@@ -186,6 +206,10 @@ class FrameMotion:
         self.pending = 0.0
         self.maximum = 0.0
         self._last = None
+        # Where the refresh grid is anchored - see step(). Re-anchored
+        # every time motion restarts, so a long idle cannot let QPC and
+        # the panel's own raster drift apart.
+        self._phase = None
         self._kicks = []
 
     def running(self) -> bool:
@@ -209,6 +233,7 @@ class FrameMotion:
         self.vel = self.pending = 0.0
         self._kicks.clear()
         self._last = None
+        self._phase = None
 
     def set_position(self, value):
         self.pos = max(0.0, min(float(self.maximum), float(value)))
@@ -254,8 +279,40 @@ class FrameMotion:
         # matters only now that something else depends on dt.)
         max_dt = 2.0 * self.frame_s if self.frame_s > 0.0 else self.MAX_DT
         if self.frame_s > 0.0:
-            whole = int(round((now - self._last) / self.frame_s))
-            now = self._last + max(1, min(4, whole)) * self.frame_s
+            # **Snap to the refresh GRID, not by a whole refresh each
+            # time.** The first version of this added exactly one frame
+            # of motion per paint, which is only right if paints happen
+            # once per refresh. They do not. Measured 24 August 2026 with
+            # the app's paints and the compositor's presents on one
+            # shared QPC clock - the first measurement that ever put both
+            # on the same timeline:
+            #
+            #     app paints        137.4/s   interval median 5.80ms
+            #     DWM presents      109.5/s
+            #
+            # The widget free-runs: update() at the end of paintEvent
+            # asks for the next frame immediately and Qt's raster path
+            # does not block on vsync, so paints arrive FASTER than the
+            # panel refreshes. Adding a whole frame of motion to each
+            # such paint beat against the presents, and that is what
+            # produced steps of 14px and 28px in the same run at a
+            # dead-constant velocity.
+            #
+            # It did *not* change how fast the page travels - that was
+            # 2281 px/s before and 2289 after, and the excess motion was
+            # absorbed by the presents that showed nothing new. The
+            # defect was the unevenness, not the speed.
+            #
+            # Anchoring to a fixed phase fixes both: two paints inside
+            # one refresh get the SAME timestamp, so the second moves
+            # nothing and the panel still shows exactly one step per
+            # refresh; paints in consecutive refreshes are exactly one
+            # frame apart by construction.
+            if self._phase is None:
+                self._phase = now
+            snapped = self._phase + round((now - self._phase) / self.frame_s) * self.frame_s
+            # Never let the snap walk backwards past the last frame.
+            now = max(snapped, self._last)
         dt = min(max_dt, max(0.0, now - self._last))
         self._last = now
         if self.pending:
@@ -281,6 +338,7 @@ class FrameMotion:
         if abs(self.vel) < self.STOP_SPEED and not self.pending:
             self.vel = 0.0
             self._last = None
+            self._phase = None
             return False
         return True
 
@@ -680,9 +738,44 @@ class PosterGrid(QWidget):
             QTimer.singleShot(
                 0, lambda ids=tuple(ahead), mm=m: self._precompose(mm, ids))
         if moving:
-            # The next frame.
-            self.update()
+            self._schedule_frame()
             self.scrolled.emit()
+
+    def _schedule_frame(self):
+        """Ask for the next frame when the panel can actually show one.
+
+        `update()` on its own asks for it *immediately*, and Qt's raster
+        path does not block on vsync, so this widget free-ran. Measured
+        24 August 2026 with the app's paints and the compositor's
+        presents on one shared QPC clock:
+
+            paints 137.4/s, interval median 5.80ms   presents 109.5/s
+            after snapping the motion to the refresh grid:
+            paints 167.9/s, interval median 5.04ms   presents 124.9/s
+
+        Every paint above the present rate is thrown away - at ~3.1ms
+        each that was over a tenth of the machine's time drawing frames
+        nobody saw - and worse, painting at a rate the panel does not
+        share is what beat against it and produced steps of 17px and 35px
+        in the same run at a constant velocity.
+
+        Sleeping to the next grid boundary instead. The timer's own
+        jitter cannot hurt the position: `FrameMotion.step` snaps to the
+        same grid, so a frame that lands late still carries exactly the
+        motion its refresh is owed. That is the difference from the 6ms
+        QTimer this module's docstring warns about - that one *drove* the
+        position, this one only decides when to draw it."""
+        frame_s = self._motion.frame_s
+        if frame_s <= 0.0:
+            self.update()
+            return
+        phase = self._motion._phase
+        if phase is None:
+            self.update()
+            return
+        ahead = frame_s - ((time.perf_counter() - phase) % frame_s)
+        QTimer.singleShot(max(0, int(round(ahead * 1000.0))),
+                          Qt.TimerType.PreciseTimer, self.update)
 
     def _ask(self, ids):
         for index in ids:

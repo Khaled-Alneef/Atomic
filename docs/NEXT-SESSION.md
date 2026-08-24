@@ -344,7 +344,17 @@ before building on this.
 
 ---
 
-# Still open: the grid paints at about two thirds of the refresh rate
+# RESOLVED - and it was the opposite of what this section guessed
+
+**Read the resolution at the end of this file before anything below.**
+The section that follows is kept because its measurements are real and
+its reasoning is the trail; its conclusion is wrong. The grid was not
+painting at two thirds of the refresh rate. It was painting *faster*
+than the panel refreshes, which is why the two beat.
+
+---
+
+# The question as it stood: does the grid paint at two thirds of the refresh rate?
 
 This is the one thing on this page that is **not** resolved, and it is the
 one the owner can see. His words, and they name the mechanism exactly:
@@ -391,3 +401,72 @@ What would settle it: timestamp every paintEvent entry and exit inside
 the running app, and line those up against the duplication instrument's
 present timestamps in the same run. Nothing so far has put both clocks on
 the same timeline; every measurement has had one or the other.
+
+---
+
+# The resolution: both clocks on one timeline
+
+The question above was settled by doing the one thing no measurement had
+done - stamping the app's paints and the compositor's presents on the
+**same** clock. `QueryPerformanceCounter`, because that is what DXGI
+stamps `LastPresentTime` with, and because `time.perf_counter`'s
+reference point is documented as undefined and these are two processes.
+
+    app PAINTS          1038 = 137.4/s     interval median 5.80ms
+    compositor PRESENTS  827 = 109.5/s     ratio 1.26
+
+**The widget was painting faster than the panel refreshes** - 5.80ms
+between paints against a 6.944ms refresh - because `update()` at the end
+of `paintEvent` asks for the next frame immediately and Qt's raster path
+does not block on vsync. Not missed vblanks. Over-production.
+
+That made the first snap wrong *in kind*: it added one whole refresh of
+motion per paint, which is only correct if paints happen once per
+refresh. Two fixes, each measured on its own:
+
+  * **snap to the refresh GRID, not by an increment** - anchor a phase
+    and round to it, so two paints inside one refresh carry the same
+    timestamp and consecutive refreshes are exactly one frame apart;
+  * **schedule the next frame at the next grid boundary** instead of
+    immediately, so frames nobody can see are not drawn at all.
+
+        paint interval   5.80ms -> 6.68ms (one refresh)
+        paints:presents  1.26   -> 1.13
+        step spread      2.0-2.9x -> 1.1x
+        local jumps      42-74%   -> 3-7%
+
+The same shape existed in `widgets._Momentum`, whose QTimer runs at
+`screen_tick_ms` - 6ms on a 144Hz panel, because a QTimer only takes
+whole milliseconds, so ~166 ticks against 144 refreshes. Same phase snap
+applied; local step-to-step change fell from 24-28% to 0%.
+
+## Two traps this cost, both worth inheriting
+
+**A harness that measures one route first will make that route look
+slow.** "Home -> Watch takes 148.7ms against Read's 48.0" was screen
+capture start-up, paid by whichever transition ran first. With an order
+control and a throwaway grab, Watch is not consistently slower. The real
+difference was cold build cost, and it needed a harness with no screen
+capture in it at all to see.
+
+**"% off the global median" is not a judder metric.** It scores an
+*accelerating* scroll as uneven. Use the local step-to-step change.
+
+## What the smearing turned out to be
+
+The owner: *"the text labels and the images leave a traces"*. Frames
+pulled straight out of the compositor mid-scroll are **individually
+sharp** - 10.12 against 11.20 for a still frame, and one was saved and
+looked at. The app draws no traces. It is eye-tracked motion blur across
+a sample-and-hold panel, and it is `velocity x frame hold time`.
+
+Hold time is the panel's. Velocity, during a sustained scroll, is
+
+    distance_per_notch x notches_per_second
+
+**in which FRICTION cancels out entirely.** So capping `MAX_SPEED`
+cannot reduce it - it only defers distance into `_pending`, which drains
+after the hand stops, and that deferred distance *is* drift. Removing
+acceleration is what worked. See the note on `FRICTION` in
+`widgets._Momentum` for the numbers and for the trade that was accepted:
+smear down, evenness partly given back, a third more wheel per page.

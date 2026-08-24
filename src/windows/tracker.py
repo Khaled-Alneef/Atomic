@@ -273,6 +273,43 @@ _DISCOVER_DISK_TTL_S = 24 * 60 * 60
 _discover_disk_loaded = False
 
 
+def prewarm():
+    """Pay the tracker pages' once-per-session costs during idle.
+
+    **The owner's ask, 24 August 2026:** "make the sidebar transition
+    when going from main to watch exactly the same as from main to
+    read." It already is - same direction from `_direction_between`,
+    same `_sync_section_sidebar` swap, same duration. What differed was
+    when the slide got to *start*, because `_show_page` builds the
+    incoming page before it can grab it:
+
+        Home -> Watch   navigate_to blocked 145ms, first frame 148.7ms
+        Home -> Read    navigate_to blocked  45ms, first frame  48.0ms
+
+    Profiled, the Watch build's extra was two once-per-session costs and
+    nothing structural: `images.tinted_asset` for the filter glyph at
+    52ms for its two colours, and this function parsing a 541KB
+    discover_cache.json at 32ms. Both are already cached - `_tinted` and
+    `_discover_disk_loaded` - so the second visit was measured at 9.6ms,
+    faster than Read. Only the first one in a session was slow, and it
+    was slow on the one path where the user is watching an animation.
+
+    So the work moves to startup idle, beside the overlay preload that
+    exists for exactly the same reason (main._preload_overlays). Never
+    raises: a failed prewarm just means the old first-visit cost, which
+    is what happened before."""
+    try:
+        _load_discover_cache()
+    except Exception:
+        logs.exception("could not warm the discover cache")
+    try:
+        dpr = QApplication.primaryScreen().devicePixelRatio()
+        for colour in (theme.TEXT_MUTED, theme.TEXT):
+            images.tinted_asset(FILTER_ICON, colour, FILTER_ICON_HEIGHT, dpr)
+    except Exception:
+        logs.exception("could not warm the filter glyph")
+
+
 def _load_discover_cache():
     """Fold last session's browse rows into the in-memory cache, once.
 
