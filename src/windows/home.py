@@ -32,6 +32,7 @@ from helpers.widgets import (
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
     IN_PROGRESS_STATUSES, MANGA_TYPES, POSTER_SIZE, VIDEO_TYPES,
+    _cover_kind,
     ContinueCover, _progress_data_file, attach_continue_cover,
     format_chapter_progress, open_tracker_entry, shows_last_watched,
 )
@@ -902,8 +903,7 @@ class HomePage(GlassPage):
             (lambda u=_url, en=entry: cover_fetch.resolve(
                 u, imdb_id=en.get("imdb_id") or "",
                 title=en.get("title") or "",
-                kind=("reading" if en.get("type") in MANGA_TYPES
-                      else "video"))) if _url else None,
+                kind=_cover_kind(en.get("type")))) if _url else None,
             entry.get("title") or "", HERO_COVER_SIZE, _set_hero,
             persist=lambda path, en=entry: (
                 en.__setitem__("cover_path", str(path)),
@@ -1073,8 +1073,7 @@ class HomePage(GlassPage):
                 (lambda u=_url, en=entry: cover_fetch.resolve(
                     u, imdb_id=en.get("imdb_id") or "",
                     title=en.get("title") or "",
-                    kind=("reading" if en.get("type") in MANGA_TYPES
-                          else "video"))) if _url else None,
+                    kind=_cover_kind(en.get("type")))) if _url else None,
                 entry["title"], POSTER_SIZE,
                 cover.set_cover if isinstance(cover, ContinueCover) else cover.setPixmap,
                 persist=lambda path, en=entry: (

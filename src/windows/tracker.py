@@ -1993,6 +1993,16 @@ def discover_entry(item, entry_type):
     }
 
 
+def _cover_kind(entry_type) -> str:
+    """Which catalogues may answer for this row's art - see
+    cover_fetch.resolve. Anime is its own answer because its keyless
+    fallback (AniList, via the reading catalogues) is the same work
+    under the same title, which is not true of a live-action series."""
+    if entry_type in MANGA_TYPES:
+        return "reading"
+    return "anime" if entry_type == "Anime" else "video"
+
+
 class _GridCover:
     """What a painted-grid record carries where a widget card carried its
     cover QLabel: something with `setPixmap`, so `_on_discover_poster`
@@ -3674,8 +3684,7 @@ class TrackerPage(GlassPage):
                 (lambda u=_url, en=entry: cover_fetch.resolve(
                     u, imdb_id=en.get("imdb_id") or "",
                     title=en.get("title") or "",
-                    kind=("reading" if en.get("type") in MANGA_TYPES
-                          else "video"))),
+                    kind=_cover_kind(en.get("type")))),
                 entry["title"], POSTER_SIZE,
                 cover.set_cover if isinstance(cover, ContinueCover) else cover.setPixmap,
                 persist=lambda path, en=entry: (
@@ -5559,7 +5568,8 @@ class TrackerPage(GlassPage):
             # reading row off TMDB and a video row off MangaDex.
             path = cover_fetch.resolve(
                 url, imdb_id=imdb_id, title=title,
-                kind="reading" if str(kind).startswith("reading") else "video")
+                kind=("reading" if str(kind).startswith("reading")
+                      else "anime" if kind == "anime" else "video"))
         except Exception:
             path = None
         if path:
@@ -6799,8 +6809,8 @@ class TrackerPage(GlassPage):
             self._history_covers[row.get("key")] = (cover, row.get("title") or "")
             lookup_pool.submit(self._history_cover_worker, row.get("key"),
                                row.get("cover_url"), row.get("title") or "",
-                               "reading" if row.get("type") in MANGA_TYPES
-                               else "video", row.get("imdb_id") or "")
+                               _cover_kind(row.get("type")),
+                               row.get("imdb_id") or "")
         layout.addWidget(cover)
 
         column = QVBoxLayout()

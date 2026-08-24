@@ -752,11 +752,21 @@ IMDb id for video, MangaDex/AniList by strict title for reading). Every
 surface that draws a cover goes through it: Discover, Saved, Home,
 Schedule, History.
 
+**A keyless route, which is the state a new install is actually in.**
+`kind` now has three values, not two: reading rows ask MangaDex/AniList,
+plain video rows ask TMDB **and nothing else**, and anime asks TMDB then
+the reading catalogues - because an anime and its manga are the same
+work under the same title, so AniList answering for "Attack on Titan" is
+that franchise's own art. Measured with no TMDB key at all *and* metahub
+unreachable: Attack on Titan, Solo Leveling and Frieren all resolve;
+"The Boys" resolves nothing rather than wearing a manga cover.
+
 **Not confirmed:** that this *is* what the friend hit. It could not be -
-his machine was not available and the app logs nothing about a failed
-cover. What is confirmed is that the failure mode existed, was
-reachable, and is now covered. If it recurs, the next thing to add is a
-log line naming the host that refused.
+his machine was not available. What is confirmed is that the failure
+mode existed, was reachable, and is now covered both with a key and
+without one. And the next such report is answerable from the log:
+`cover_fetch._note_refusal` writes one line per host per session naming
+the host that would not answer.
 
 ## Sourcing speed, on Attack on Titan
 

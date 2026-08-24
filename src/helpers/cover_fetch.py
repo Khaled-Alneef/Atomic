@@ -28,6 +28,7 @@ how the History one ended up with the wrong condition.
 
 import os
 import threading
+import urllib.parse
 
 from PyQt6.QtCore import QObject
 from PyQt6.QtCore import pyqtSignal as Signal
@@ -53,6 +54,32 @@ def _connect_once():
     if not _connected:
         _signals.ready.connect(_on_ready)
         _connected = True
+
+
+# Hosts already reported as refusing, so the log carries one line each
+# rather than one per card. A set for the life of the process: this is a
+# note about the machine's network, and it does not change within a run.
+_refused = set()
+
+
+def _note_refusal(url):
+    """Say once, in the log, that a cover host would not answer.
+
+    **This exists because the report that started all of this was
+    undiagnosable.** A friend's install showed no art on Watch or Read
+    and nothing anywhere said why - the app had no second source and no
+    record of the first one failing, so the only way to find the cause
+    was to reproduce it on another machine. One line per host per
+    session makes the next such report answerable from the log."""
+    try:
+        host = urllib.parse.urlparse(url).netloc
+        if not host or host in _refused:
+            return
+        _refused.add(host)
+        logs.info(f"cover host would not answer: {host} "
+                  f"(falling back to the catalogues)")
+    except Exception:
+        pass
 
 
 # How long the second source is allowed, once the first has already
@@ -82,17 +109,36 @@ def resolve(url, *, imdb_id="", title="", kind="", timeout=8):
         host unreachable, before this     90 cards,  0 covers
         host unreachable, after this      90 cards, 90 covers
 
+    And with **no TMDB key at all** as well as that host unreachable,
+    which is the state a new install starts in: Attack on Titan, Solo
+    Leveling and Frieren all still resolve, keylessly, through the
+    reading catalogues; "The Boys" correctly resolves nothing rather
+    than wearing a manga cover.
+
     The order is cheapest-and-surest first: the row's own URL, that URL
     again with a longer budget (measured: the reading hosts
     intermittently take more than 8s to hand over a 17-477KB image and
     the very next attempt works), then a catalogue that does not share a
-    host with either. Video rows go to TMDB, which is the one key the
-    app already asks for in Settings; reading rows go to MangaDex/
-    AniList through `manga_sites.cover_for_title`, which is the same
-    strictly-matched lookup a coverless search result already uses.
+    host with either.
 
-    Never raises, and never returns a *wrong* cover: both fallbacks
-    match on an id or on a guarded title, because this project has
+    `kind` is what a row is, and it decides which catalogues may answer:
+
+      * "reading" - MangaDex then AniList, through
+        `manga_sites.cover_for_title`, the same strictly-matched lookup
+        a coverless search result already uses;
+      * "video"   - TMDB by IMDb id, the one key the app already asks
+        for in Settings, and nothing else: a live-action series has no
+        business inheriting art from a manga catalogue;
+      * "anime"   - TMDB first, then the reading catalogues. **A keyless
+        route matters most here and only here.** An anime and its manga
+        are the same work under the same title, so AniList answering for
+        "Attack on Titan" is that franchise's own art rather than
+        somebody else's - and AniList needs no key, which is the whole
+        point: a user who has pasted nothing still gets covers for the
+        medium this app is mostly used for.
+
+    Never raises, and never returns a *wrong* cover: every fallback
+    matches on an id or on a guarded title, because this project has
     shipped a card wearing another series' art before."""
     url = str(url or "")
     if url:
@@ -102,6 +148,7 @@ def resolve(url, *, imdb_id="", title="", kind="", timeout=8):
         path = images.download(url, timeout=20)
         if path:
             return path
+        _note_refusal(url)
     title = (title or "").strip()
     imdb_id = (imdb_id or "").strip()
     if kind != "reading" and (imdb_id or title):
@@ -115,7 +162,7 @@ def resolve(url, *, imdb_id="", title="", kind="", timeout=8):
             path = images.download(second, timeout=FALLBACK_TIMEOUT)
             if path:
                 return path
-    if kind != "video" and title:
+    if kind != "video" and title:       # "reading" and "anime"
         try:
             from . import manga_sites
             second = manga_sites.cover_for_title(title,
