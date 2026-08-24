@@ -604,6 +604,29 @@ QLabel#CardMeta {{
     font-size: 9pt;
     background: transparent;
 }}
+/* The little chips drawn ON a card's artwork (a rating, a Saved mark).
+   Object names rather than a per-widget setStyleSheet: every
+   setStyleSheet call is a style recomputation for that widget, and these
+   are built one per card while the grid fills under a scroll - measured
+   23 August 2026 as part of the 40-frames-a-second fill. The values are
+   the ones tracker._chip used inline, unchanged. */
+QLabel#ArtChip {{
+    background: {ACCENT_GRADIENT};
+    color: {ON_ACCENT};
+    border-radius: {RADIUS_SM}px;
+    padding: 2px 8px;
+    font-size: 8pt;
+    font-weight: 700;
+}}
+QLabel#ArtChipPlain {{
+    background: {BG};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_SM}px;
+    padding: 2px 7px;
+    font-size: 8pt;
+    font-weight: 700;
+}}
 QFrame#Hero {{
     background: transparent;
     border: none;
@@ -702,17 +725,6 @@ QPushButton::menu-indicator {{ image: none; width: 0px; height: 0px; }}
    own cards, and an accent disc there reads as one of them being
    selected. 15pt for the chevron, which is a small glyph at label
    size. */
-QPushButton#ScrollArrow {{
-    background: {SURFACE};
-    color: {TEXT};
-    border: 1px solid {BORDER};
-    border-radius: 15px;
-    padding: 0px 0px 3px 0px;
-    font-size: 15pt;
-    font-weight: 700;
-}}
-QPushButton#ScrollArrow:hover {{ background: {SURFACE_HOVER}; border: 1px solid {ACCENT}; }}
-QPushButton#ScrollArrow:pressed {{ background: {SURFACE_ACTIVE}; }}
 
 QPushButton#Flat {{
     background: transparent;

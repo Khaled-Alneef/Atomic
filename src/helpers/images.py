@@ -6,6 +6,9 @@ tile); the result is converted to a QPixmap right before it's handed to
 a Qt widget.
 """
 
+import os
+import io
+import time
 import hashlib
 import sys
 import threading
@@ -110,11 +113,191 @@ def cache_path_for_url(url: str) -> Path:
     return CACHE_DIR / f"{digest}{suffix}"
 
 
+# ---- keeping the cache a size, not a landfill ---------------------------
+#
+# **The owner's report, 24 August 2026: "the size of the image_cache is
+# insane! ... it was > 1.2 GB".** Measured on what had grown back in the
+# hours after he deleted it: 155.8MB in 1107 files, of which only 22
+# files (8.6MB) were referenced by anything saved, and 65 files over
+# 400KB held 93.9MB - a 2852x4096 JPEG at 3.7MB and a 1686x2528 PNG at
+# 4.8MB, stored in full to be drawn at 160x216 on a card or blurred into
+# a 1900x400 ground. Re-encoded at the bounds below those same 65 files
+# came to **16.4MB**, a 5.7x reduction with nothing visible lost,
+# because nothing ever draws them larger than this.
+#
+# Two rules, both in this file because download() is the one write
+# path every caller goes through:
+#   1. nothing larger than it can be drawn is ever stored (_shrink);
+#   2. the whole cache stays under CACHE_LIMIT_BYTES, evicting the
+#      least recently *used* file first and never one a saved entry
+#      points at (trim_cache) - run at launch and at close.
+#
+# A portrait is bounded by height: a card draws 216px, the hero ground
+# is 400px tall, and the details page blurs it. A landscape backdrop is
+# bounded by width: the owner called a w1280 backdrop blurry across a
+# 2560px window (artwork.BACKDROP_SIZE's note), so 2560 is the floor of
+# what that measurement allows, not a guess.
+SHRINK_MIN_BYTES = 300_000
+PORTRAIT_MAX_H = 1200
+LANDSCAPE_MAX_W = 2560
+CACHE_LIMIT_BYTES = 300 * 1024 * 1024
+# How stale a file's mtime may be before a cache hit refreshes it. The
+# trim evicts by mtime (Windows does not reliably keep atime), so a hit
+# has to say "still used" - but not with a disk write on every view.
+TOUCH_AFTER_S = 6 * 3600.0
+
+
+def _shrink(data: bytes) -> bytes:
+    """`data` re-encoded within the bounds above, or `data` itself when
+    it is already small enough (or not an image at all - an icon, a
+    favicon). JPEG unless the picture has transparency, which a logo or a
+    cut-out cover does and a JPEG would flatten to black."""
+    try:
+        with Image.open(io.BytesIO(data)) as opened:
+            opened.load()
+            w, h = opened.size
+            portrait = h >= w
+            bound = PORTRAIT_MAX_H if portrait else LANDSCAPE_MAX_W
+            dim = h if portrait else w
+            if dim <= bound:
+                return data
+            scale = bound / float(dim)
+            size = (max(1, round(w * scale)), max(1, round(h * scale)))
+            has_alpha = opened.mode in ("RGBA", "LA") or (
+                opened.mode == "P" and "transparency" in opened.info)
+            resized = opened.convert("RGBA" if has_alpha else "RGB").resize(
+                size, Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            if has_alpha:
+                resized.save(out, "PNG", optimize=True)
+            else:
+                resized.save(out, "JPEG", quality=86, optimize=True)
+            shrunk = out.getvalue()
+            return shrunk if len(shrunk) < len(data) else data
+    except Exception:
+        return data
+
+
+def _touch(path):
+    """Mark a cache file as used, for trim_cache's LRU - at most once per
+    TOUCH_AFTER_S so a hit is normally free."""
+    try:
+        if time.time() - path.stat().st_mtime > TOUCH_AFTER_S:
+            os.utime(path, None)
+    except OSError:
+        pass
+
+
+def protected_paths() -> set:
+    """Every image file a saved entry points at, lowercased - what
+    trim_cache must never delete, whatever its age."""
+    keep = set()
+    for name in ("series.json", "tracker.json", "games.json", "apps.json",
+                 "websites.json"):
+        try:
+            entries = storage.load(name, [])
+        except Exception:
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("cover_path", "hero_backdrop", "hero_logo", "icon_path"):
+                value = entry.get(key)
+                if value:
+                    keep.add(os.path.normcase(str(value)))
+    return keep
+
+
+def shrink_existing(budget_s: float = 6.0) -> int:
+    """Re-encode cache files already on disk that exceed the bounds - the
+    owner's existing cache was full of 4K originals stored before
+    _shrink existed. Oldest-modified first so a budgeted pass at each
+    launch works through the backlog rather than re-checking the same
+    recent files. Returns bytes saved. Never raises."""
+    started = time.monotonic()
+    saved = 0
+    try:
+        rows = []
+        for entry in os.scandir(CACHE_DIR):
+            if entry.is_file() and not entry.name.endswith(".part"):
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                if st.st_size > SHRINK_MIN_BYTES:
+                    rows.append((st.st_mtime, st.st_size, entry.path))
+        rows.sort()
+        for _, size, path in rows:
+            if time.monotonic() - started > budget_s:
+                break
+            try:
+                data = Path(path).read_bytes()
+                shrunk = _shrink(data)
+                if len(shrunk) >= len(data):
+                    # Already within bounds: bump it so the next pass does
+                    # not read it again before everything older.
+                    os.utime(path, None)
+                    continue
+                tmp = Path(path + ".part")
+                tmp.write_bytes(shrunk)
+                tmp.replace(path)
+                saved += size - len(shrunk)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return saved
+
+
+def trim_cache(limit: int = CACHE_LIMIT_BYTES, budget_s: float = 8.0) -> int:
+    """Bring the image caches under `limit` bytes, oldest-used first.
+    Returns the bytes freed. Never raises, never deletes a protected
+    file or a download in progress, and stops at `budget_s` so a close
+    is never held behind a slow disk."""
+    started = time.monotonic()
+    freed = 0
+    try:
+        roots = [CACHE_DIR, _TILE_DIR, storage.DATA_DIR / "logo_cache"]
+        rows = []
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for entry in os.scandir(root):
+                if not entry.is_file() or entry.name.endswith(".part"):
+                    continue
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue
+                rows.append((st.st_mtime, st.st_size, entry.path))
+        total = sum(size for _, size, _ in rows)
+        if total <= limit:
+            return 0
+        keep = protected_paths()
+        rows.sort()
+        for _, size, path in rows:
+            if total <= limit or time.monotonic() - started > budget_s:
+                break
+            if os.path.normcase(path) in keep:
+                continue
+            try:
+                os.unlink(path)
+            except OSError:
+                continue
+            total -= size
+            freed += size
+    except Exception:
+        pass
+    return freed
+
+
 def download(url: str, timeout: int = 8):
     """Download `url` into the local cache (or reuse a previous download)
-    and return its Path, or None on any failure."""
+    and return its Path, or None on any failure. Anything larger than the
+    app can draw is stored shrunk - see _shrink."""
     path = cache_path_for_url(url)
     if path.exists():
+        _touch(path)
         return path
     try:
         # net.ascii_url, not the raw string: a cover whose filename
@@ -140,6 +323,8 @@ def download(url: str, timeout: int = 8):
         # JPEG reproduced the failure exactly - which is the owner's
         # "sometimes the images appear but when go back and come again
         # they disappear".
+        if len(data) > SHRINK_MIN_BYTES:
+            data = _shrink(data)
         temporary = path.with_suffix(path.suffix + ".part")
         temporary.write_bytes(data)
         temporary.replace(path)

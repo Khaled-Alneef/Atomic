@@ -178,6 +178,28 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# The owner's Real-Debrid token, bundled **only when the file exists** -
+# the deliberate opposite of the TMDB check above, in both directions:
+#
+#   * It is appended to a.datas here rather than listed in datas=[...],
+#     because build.py reads that literal list with `ast` and rejects a
+#     build over any entry it cannot resolve to an existing file - which
+#     would turn "no rd_token.txt" into a failed build. A tokenless
+#     build is a *working app* here (episodes play from the swarm, the
+#     player never knew debrid existed), so the file must stay optional.
+#     The cost accepted: build.py's byte-compare does not verify this
+#     one entry, since it only checks the literal list.
+#   * It is gitignored, not committed like the TMDB one: that is a free
+#     read-only metadata key, this is a paid account credential on a
+#     public repository. It reaches users inside the exe, never through
+#     the repo - the owner places packaging/rd_token.txt by hand on the
+#     build machine (helpers/debrid._bundled_token reads it out of
+#     sys._MEIPASS, and a pasted Settings key always overrides it).
+RD_TOKEN_FILE = os.path.join(SPECPATH, "rd_token.txt")
+if os.path.isfile(RD_TOKEN_FILE):
+    a.datas += [("rd_token.txt", RD_TOKEN_FILE, "DATA")]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

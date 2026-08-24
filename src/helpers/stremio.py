@@ -5,6 +5,8 @@ fails soft (returns []/None) so a flaky connection never crashes the
 tracker UI - it just means no suggestions/covers/progress show up.
 """
 
+import time
+import re
 import json
 import urllib.error
 import urllib.parse
@@ -12,7 +14,7 @@ import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 
-from . import net
+from . import net, storage
 
 BASE_URL = "https://v3-cinemeta.strem.io"
 API_URL = "https://api.strem.io/api"
@@ -148,6 +150,60 @@ def fetch_meta(imdb_id: str, content_type: str = "series", timeout: int = 8):
         return None
     meta = (body or {}).get("meta")
     return meta if isinstance(meta, dict) else None
+
+
+# Cinemeta meta, kept on disk per title - the same files and shape the
+# details page writes (windows.details._meta_worker), so one fetch serves
+# the episode list, the search classifier and the player's audio hint.
+META_CACHE_TTL_S = 24 * 3600.0
+
+
+def _meta_cache_name(imdb_id, content_type) -> str:
+    safe = re.sub(r"[^a-z0-9]", "", str(imdb_id or "").lower())
+    return f"meta-{content_type}-{safe}.json"
+
+
+def fetch_meta_cached(imdb_id: str, content_type: str = "series",
+                      timeout: int = 8):
+    """fetch_meta, answered from disk when the title was seen inside
+    META_CACHE_TTL_S. Never raises; None when neither has it."""
+    name = _meta_cache_name(imdb_id, content_type)
+    try:
+        stored = storage.load(name, None)
+        if (isinstance(stored, dict) and isinstance(stored.get("meta"), dict)
+                and time.time() - float(stored.get("ts") or 0) < META_CACHE_TTL_S):
+            return stored["meta"]
+    except Exception:
+        pass
+    meta = fetch_meta(imdb_id, content_type, timeout)
+    if meta:
+        try:
+            storage.save(name, {"ts": time.time(), "meta": meta})
+        except Exception:
+            pass
+    return meta
+
+
+def looks_anime(meta) -> bool:
+    """Whether a Cinemeta record describes anime: the Animation genre
+    *and* Japan among its countries.
+
+    Both, because either alone is wrong in a way the owner would see.
+    Measured 24 August 2026: Demon Slayer and its Infinity Castle film
+    carry `genres: [Animation, ...]` with `country: Japan` (the film
+    says "Japan, United States"); House of the Dragon carries neither;
+    and a Cinemeta search for "Infinity Castle" also returns Castle in
+    the Sky - Ghibli, Japan, correctly anime - beside American animated
+    films that are not. The search's own result rows carry no genres at
+    all (measured: no `genres`, no genre `links`), which is why the
+    classifier needs the full meta and the cache above."""
+    if not isinstance(meta, dict):
+        return False
+    genres = {str(g).strip().lower() for g in (meta.get("genres") or meta.get("genre") or [])}
+    if "animation" not in genres and "anime" not in genres:
+        return False
+    country = str(meta.get("country") or "").lower()
+    return "japan" in country
 
 
 def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: int = 6):

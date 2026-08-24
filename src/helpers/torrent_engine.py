@@ -74,6 +74,113 @@ def unavailable_reason():
 # is also what lets the HTTP side just read the file back.
 _CACHE_DIR = os.path.join(tempfile.gettempdir(), "atomic-stream-cache")
 
+# **Fetched metadata is kept on disk, keyed by info hash.** Fetching it
+# from the swarm is the single most variable cost on the winner's
+# critical path - measured 22 August 2026 across the owner's three test
+# titles, the release that eventually won paid 0.7-5.8s for metadata
+# alone, and the race retries the same top-ranked releases on every
+# attempt (a re-pressed episode, the next episode of the same season
+# pack, a retry after a stall). A .torrent file is a few hundred KB at
+# most, reading it back is instant, and with it the episode check, the
+# tiny-file check and the dead-swarm clock all start at t=0 instead of
+# t=metadata. Written atomically (tmp + replace) so a killed process
+# cannot leave a truncated file that parses as garbage; a file that
+# fails to parse is ignored and the magnet path runs as before.
+_METADATA_DIR = os.path.join(_CACHE_DIR, "metadata")
+
+
+# **The DHT routing table is kept across runs.** Every launch used to
+# bootstrap from zero - the prewarm() measurement below records 0 nodes
+# at session birth and ~50 at 2.44s, and until that table exists the
+# first magnet has nobody to ask for peers. Harbor persists its table
+# for the same reason (dht.json, src-tauri/src/torrent_engine.rs tier 1).
+# Measured 23 August 2026 on the owner's connection: restoring the state
+# a 25-second-old session had saved put **71 nodes in the table at 1.0s
+# against 9 cold** (72 vs 30 at 3.0s). The file is ~1.5KB, written
+# atomically, and a file that fails to parse means a cold bootstrap -
+# exactly what always happened before.
+_SESSION_STATE_PATH = os.path.join(_CACHE_DIR, "session_state.bin")
+
+# A table smaller than this is not worth writing over what is already
+# on disk - saving the first seconds of a bootstrap would *replace* a
+# mature table with a nearly-empty one and make the next launch colder.
+_STATE_MIN_NODES = 40
+_STATE_SAVE_INTERVAL_S = 300.0
+_state_saved_at = 0.0
+
+
+def _restored_session_params():
+    """Last run's session state (DHT table included), or fresh params."""
+    try:
+        with open(_SESSION_STATE_PATH, "rb") as fh:
+            return lt.read_session_params(fh.read())
+    except Exception:
+        return lt.session_params()
+
+
+def _maybe_save_session_state():
+    """Write the session state to disk, throttled, and only when the
+    DHT table is worth keeping. Called from the window ticker, so a
+    session that streams anything at all saves within a second of its
+    table maturing, and every five minutes after."""
+    global _state_saved_at
+    now = time.time()
+    if now - _state_saved_at < _STATE_SAVE_INTERVAL_S:
+        return
+    current = _session
+    if current is None or lt is None:
+        return
+    try:
+        # One synchronous status() per tick until the table matures,
+        # none for the interval after each save. status() is a call
+        # into the session's own thread, which is why this is not done
+        # more often than the ticker already runs.
+        if int(current.status().dht_nodes) < _STATE_MIN_NODES:
+            return
+        buf = lt.write_session_params_buf(current.session_state())
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        tmp = _SESSION_STATE_PATH + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(buf)
+        os.replace(tmp, _SESSION_STATE_PATH)
+        _state_saved_at = now
+    except Exception:
+        # Throttle failures like successes - a session that cannot
+        # answer once should not be asked again every second.
+        _state_saved_at = now
+
+
+def _metadata_path(info_hash: str) -> str:
+    return os.path.join(_METADATA_DIR, info_hash + ".torrent")
+
+
+def _cached_torrent_info(info_hash: str):
+    """The torrent_info a previous session already paid the swarm for,
+    or None."""
+    try:
+        path = _metadata_path(info_hash)
+        if not os.path.isfile(path):
+            return None
+        return lt.torrent_info(path)
+    except Exception:
+        return None
+
+
+def _save_torrent_info(info_hash: str, handle):
+    try:
+        info = handle.torrent_file()
+        if info is None:
+            return
+        data = lt.bencode(lt.create_torrent(info).generate())
+        os.makedirs(_METADATA_DIR, exist_ok=True)
+        path = _metadata_path(info_hash)
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
 # Fixed so the Windows Firewall rule the user grants once keeps applying;
 # see the session settings for why 0 (random) re-prompts every launch.
 LISTEN_PORT = 47600
@@ -254,7 +361,12 @@ def _make_session():
         "strict_end_game_mode": False,
         "user_agent": "Atomic/1.0 libtorrent/2.1",
     }
-    session = lt.session(settings)
+    # Built from last run's saved state so the DHT table starts warm -
+    # see _SESSION_STATE_PATH for the 71-vs-9-nodes-at-1s measurement.
+    # The settings above always win over whatever was serialized.
+    params = _restored_session_params()
+    params.settings = settings
+    session = lt.session(params)
     for router in (("router.bittorrent.com", 6881),
                    ("router.utorrent.com", 6881),
                    ("dht.transmissionbt.com", 6881),
@@ -325,6 +437,10 @@ def _window_ticker():
         time.sleep(WINDOW_TICK_S)
         if session() is None:
             return
+        # Rides the ticker rather than owning a thread: the throttle
+        # inside means one status() probe per tick at most, and a save
+        # every five minutes - see _maybe_save_session_state.
+        _maybe_save_session_state()
         for torrent in list(_torrents.values()):
             # A download owns its own priorities (see download_whole);
             # a torrent with no chosen file has nothing to point at.
@@ -358,12 +474,67 @@ def session():
 CACHE_LIMIT_BYTES = 6 * 1024 * 1024 * 1024
 
 
+def _allocated_size(path, stat_result=None) -> int:
+    """How much disk a file actually occupies, not how big it claims to
+    be. Falls back to the apparent size when it cannot be asked.
+
+    **Streaming writes sparse files, and measuring them by `st_size`
+    emptied the cache every time it was looked at.** libtorrent creates
+    the whole file up front and fills in the pieces that arrive, so a
+    20GB pack holding 50MB of downloaded pieces *reports* 20GB. The old
+    code knew `st_size` over-reported and called that "the safe
+    direction - it only makes trimming more eager, never less"; eager is
+    not safe when it is wrong by two orders of magnitude.
+
+    Measured 23 August 2026 on the owner's own scratch (22 files):
+    **10.13 GB apparent against 0.32 GB actually allocated** - one 2.21GB
+    file occupied 0.000GB. Against a 6GB limit that reads as 169% full
+    when the truth is 5%, so every `maybe_trim` deleted almost the whole
+    cache, oldest-first. That is why on-disk pieces vanished between
+    sessions and a re-watched episode lost its instant start (a Demon
+    Slayer batch had been winning in ~6s off a 380MB recheck).
+
+    `GetCompressedFileSizeW` is the Windows answer - it reports the
+    allocated size for sparse *and* compressed files. On POSIX
+    `st_blocks` already says it. INVALID_FILE_SIZE is a legitimate low
+    word for a file over 4GB, so the error is read rather than the value
+    guessed at."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCompressedFileSizeW.argtypes = [
+                wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.GetCompressedFileSizeW.restype = wintypes.DWORD
+            high = wintypes.DWORD(0)
+            ctypes.set_last_error(0)
+            low = kernel32.GetCompressedFileSizeW(str(path), ctypes.byref(high))
+            if low != 0xFFFFFFFF or ctypes.get_last_error() == 0:
+                return (high.value << 32) | low
+        except Exception:
+            pass                # fall through to the apparent size
+    try:
+        stat_result = stat_result or os.stat(path)
+        blocks = getattr(stat_result, "st_blocks", None)
+        if blocks is not None:
+            return int(blocks) * 512
+        return int(stat_result.st_size)
+    except OSError:
+        return 0
+
+
 def trim_cache(limit: int = CACHE_LIMIT_BYTES) -> int:
     """Delete the least recently used scratch files until under `limit`.
 
     Returns the bytes freed. Oldest-touched first, and never a file
     belonging to a torrent this session still has open - that would be
-    deleting the thing currently playing."""
+    deleting the thing currently playing.
+
+    Sizes are what the files actually *occupy* (see _allocated_size), not
+    what they claim - the difference between the two is 10.13GB and
+    0.32GB on the owner's real cache, and measuring the wrong one made
+    this function delete nearly everything every time it ran."""
     if not os.path.isdir(_CACHE_DIR):
         return 0
     in_use = set()
@@ -382,11 +553,12 @@ def trim_cache(limit: int = CACHE_LIMIT_BYTES) -> int:
                 stat = os.stat(path)
             except OSError:
                 continue
-            # st_blocks is not on Windows; st_size over-reports a sparse
-            # file, which is the safe direction - it only makes trimming
-            # more eager, never less.
-            entries.append((stat.st_atime, stat.st_size, path))
-            total += stat.st_size
+            # What it occupies, not what it claims - see _allocated_size
+            # for the 10.13GB-vs-0.32GB measurement that made this the
+            # difference between trimming sanely and wiping the cache.
+            size = _allocated_size(path, stat)
+            entries.append((stat.st_atime, size, path))
+            total += size
     if total <= limit:
         return 0
 
@@ -487,6 +659,10 @@ class _Torrent:
         self.handle = handle
         self.info_hash = info_hash
         self.lock = threading.Lock()
+        # The highest file offset ever handed to a reader. Bytes below it
+        # have been served once already, which is the proof _serve needs
+        # to read them straight from the file - see the note there.
+        self.served_hwm = 0
         self.file_index = None
         self.last_touched = time.time()
         # Byte offset playback is going to *start* at, when a resume
@@ -510,6 +686,21 @@ class _Torrent:
         # (download_whole/_want_pieces), and a streaming window would
         # otherwise zero everything it is trying to fetch.
         self.want_whole = False
+        # **True until the first piece of the chosen file exists.** While
+        # warming, _apply_windows narrows the want-window to the urgent
+        # band alone, so the whole swarm lands on the piece playback is
+        # blocked on instead of being spread across the full window.
+        # Measured 22 August 2026 across the owner's three test titles:
+        # the big-piece packs (a 16MB-piece batch is normal for a
+        # multi-season BD release) pulled 1-74MB at 0.2-9MB/s and still
+        # had no complete first piece when their lane's budget ran out,
+        # in 2-7 lanes of nearly every run - a 12-piece window of 16MB
+        # pieces is 192MB of equally-wanted data, and at a few MB/s
+        # every piece fills evenly and none finishes. Cleared the moment
+        # the first piece lands (await_start) or a real HTTP read starts
+        # (_serve); the band anchors to the first *missing* piece, so a
+        # narrowed window can never go empty and idle the swarm.
+        self.warming = True
 
     # -- geometry -----------------------------------------------------
     @property
@@ -861,6 +1052,12 @@ class _Torrent:
             # the measurement.
             window_pieces = max(STREAM_WINDOW_MIN_PIECES,
                                 -(-STREAM_WINDOW_BYTES // self.piece_length()))
+            # Until the first piece exists there is nothing to play, so
+            # nothing beyond the urgent band is worth wanting - see
+            # `warming` in __init__ for the 74MB-and-no-first-piece
+            # measurement behind this.
+            if self.warming:
+                window_pieces = urgent_count
 
             priorities = [0] * total_pieces
             urgent_bands = []
@@ -1348,7 +1545,25 @@ def _episode_file_index(info, season, episode):
     return loose
 
 
-def _pick_file(info, season=None, episode=None, file_index=None):
+def movie_file_index(info, title):
+    """The index of the film `title` inside a multi-video release, or
+    None. Delegates to `debrid.movie_file`, which carries the
+    measurement and the reasoning - one rule, two call sites, because a
+    pack served by the engine is exactly as wrong as one served by
+    debrid."""
+    videos = _video_files(info)
+    if len(videos) <= 1:
+        return videos[0][0] if videos else None
+    try:
+        from . import debrid
+    except Exception:
+        return None
+    chosen = debrid.movie_file(videos, title,
+                              name_of=lambda c: c[1], size_of=lambda c: c[2])
+    return None if chosen is None else chosen[0]
+
+
+def _pick_file(info, season=None, episode=None, file_index=None, title=None):
     """Which file in the torrent to play, or **None when that cannot be
     answered**.
 
@@ -1387,11 +1602,18 @@ def _pick_file(info, season=None, episode=None, file_index=None):
     videos = _video_files(info)
     if season and episode and len(videos) > 1:
         return None
+    # **A film in a pack is identified by name too, not by size.** The
+    # rule above has always covered episodes; movies fell through to
+    # "largest video", which in a 263-film pack is simply the biggest
+    # film in it - measured serving Monty Python's Life of Brian for a
+    # request for The Dark Knight. See debrid.movie_file for the walk.
+    if not (season and episode) and len(videos) > 1:
+        return movie_file_index(info, title)
     return max(videos, key=lambda c: c[2])[0]
 
 
 def add(info_hash: str, *, trackers=(), season=None, episode=None,
-        file_index=None, metadata_timeout: float = 45.0,
+        title=None, file_index=None, metadata_timeout: float = 45.0,
         start_at=None):
     """Start streaming a torrent; returns its id, or None.
 
@@ -1424,11 +1646,16 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
             existing.set_start_seconds(start_at)
         try:
             wanted = (_pick_file(existing.info, season, episode,
-                                 file_index=file_index)
+                                 file_index=file_index, title=title)
                       if (season and episode) or file_index is not None
-                      else existing.file_index)
+                      or title else existing.file_index)
             if wanted is not None and wanted != existing.file_index:
                 existing.file_index = wanted
+                # A different file in the same pack starts cold: its
+                # first piece is what playback is now blocked on, so
+                # the narrow warming window applies again until it
+                # lands (await_start clears it).
+                existing.warming = not existing.have(existing.piece_at(0))
                 priorities = [0] * existing.info.files().num_files()
                 priorities[wanted] = 7
                 existing.handle.prioritize_files(priorities)
@@ -1463,6 +1690,12 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
     try:
         params = lt.parse_magnet_uri(magnet)
         params.save_path = _CACHE_DIR
+        # Metadata a previous attempt already fetched skips the whole
+        # metadata wait - see _METADATA_DIR. The magnet's trackers stay
+        # in params.trackers and are merged either way.
+        cached_info = _cached_torrent_info(info_hash)
+        if cached_info is not None:
+            params.ti = cached_info
         params.flags |= lt.torrent_flags.sequential_download
         # **Left auto-managed, and that was measured.** Clearing the
         # flag looked right - every torrent added here is one somebody
@@ -1491,6 +1724,11 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
         time.sleep(0.2)
     else:
         return None
+    # Paid the swarm for it - keep it, so the next attempt at this
+    # release (a retry, the next episode of the same pack) starts with
+    # the file list instead of the wait.
+    if cached_info is None:
+        _save_torrent_info(info_hash, handle)
 
     # Deliberately NOT sequential: `focus()` expresses the read position
     # as piece priorities, and sequential mode overrides them by pinning
@@ -1504,7 +1742,7 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
 
     info = handle.torrent_file()
     torrent.file_index = _pick_file(info, season, episode,
-                                    file_index=file_index)
+                                    file_index=file_index, title=title)
     if torrent.file_index is None:
         # **Nothing in this torrent can be shown to be the episode asked
         # for.** Give it straight back rather than streaming a guess -
@@ -1627,6 +1865,20 @@ def episode_file(info_hash: str):
             torrent.file_index))
     except Exception:
         return None
+
+
+def chosen_file_size(info_hash: str) -> int:
+    """The size in bytes of the file this torrent is going to serve, or
+    0 when that is not knowable. Known the moment the metadata lands,
+    which is what lets streams.prepare drop a release whose "movie" is
+    a 20MB sample before spending a data wait on it."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None or torrent.file_index is None:
+        return 0
+    try:
+        return int(torrent.file_size())
+    except Exception:
+        return 0
 
 
 def file_index_for(info_hash: str, season, episode):
@@ -1758,6 +2010,49 @@ INDEX_CRITICAL_BYTES = 1024 * 1024
 # enough that it cannot outlive the seek it exists to serve.
 ARM_RETRY_S = 8.0
 
+# **How a dead swarm is recognised before its budget runs out.** The
+# early-out proposed in streams.py's phase comment - "zero peers and
+# zero connect candidates a couple of seconds after metadata" - was
+# replayed against 12 recorded runs of the owner's three test titles on
+# 22 August 2026 and **never fires**: a dead release keeps 27-378
+# connect candidates the whole time it is dead, because the trackers
+# and DHT keep supplying addresses that then give nothing. What actually
+# separates dead from live, in every one of those runs, is what happens
+# right after the metadata lands: a dead release's peers collapse to
+# zero within half a second of has_metadata (4-18 peers connect, serve
+# the metadata, and every one of them is gone by the next sample) and
+# no payload byte ever arrives, while a live release keeps its peers
+# and starts delivering within a couple of seconds. Replayed with these
+# thresholds - no verdict before DEAD_GRACE_S of the wait, zero peers
+# and zero payload sustained for DEAD_QUIET_S, and any release that
+# ever delivered a payload block exempt for the rest of its wait - the
+# rule fired 16 times across those runs with zero false positives. The
+# exemption is not decoration: without it the one release that
+# delivered 1MB, went quiet for two seconds and then won (Top Gun run
+# 3) is killed mid-comeback.
+DEAD_GRACE_S = 2.0
+DEAD_QUIET_S = 1.5
+# One block of real payload is proof the swarm answers; below this the
+# counter movement is protocol noise.
+DELIVERED_MIN_BYTES = 16 * 1024
+
+# **A lane that is actively receiving payload is not given up on at its
+# soft deadline.** The other failure mode those 12 runs recorded, and
+# the dominant one for the series packs: a live swarm delivering
+# 0.5-1.5MB/s whose *piece size* is too big for the first piece to
+# complete inside QUEUED_DATA_WAIT - the lane was killed with 1-6MB
+# already fetched (once 74MB), and the next candidate was usually
+# another such pack starting again from zero. House of the Dragon
+# S01E05 walked 23 live-but-slow releases that way, 33.0s to a url.
+# So a lane at its soft deadline keeps waiting - up to the caller's
+# hard cap - while the trailing EXTEND_WINDOW_S of payload is at least
+# EXTEND_MIN_BYTES (~256KB/s, enough to finish a typical 4-8MB first
+# piece within the extension). A trickle does not qualify: 288KB in six
+# seconds is a swarm that answers and cannot feed a player, and it
+# should lose its lane.
+EXTEND_WINDOW_S = 2.0
+EXTEND_MIN_BYTES = 512 * 1024
+
 # **Resuming waits for the index rather than hoping for it.** The resume
 # offset is read out of the Cues, so nothing can be primed until they
 # are on disk; with the ordinary INDEX_WAIT they routinely arrived a
@@ -1863,7 +2158,7 @@ def await_start_band(info_hash: str, wait: float = None) -> bool:
 
 
 def await_start(info_hash: str, data_wait: float = 20.0,
-                index_wait: float = None):
+                index_wait: float = None, data_wait_max: float = None):
     """Wait for both things playback is blocked on, **at the same time**.
 
     Returns `(has_data, has_index)`.
@@ -1878,6 +2173,17 @@ def await_start(info_hash: str, data_wait: float = 20.0,
     handed a url. The same two things, waited on together, cost the
     longer of them.
 
+    `data_wait` is a *soft* deadline in two directions, both set by
+    replaying 12 recorded runs of the owner's titles (see DEAD_GRACE_S
+    and EXTEND_WINDOW_S above for the numbers): a swarm whose peers
+    vanished at metadata and never sent a payload byte is given up on
+    after DEAD_GRACE_S + DEAD_QUIET_S rather than at the deadline, and
+    a swarm actively delivering payload at the deadline keeps its
+    lane - up to `data_wait_max`, when the caller grants one - because
+    killing a live lane over a large first piece only hands the wait to
+    the next candidate, which starts again from zero. `data_wait_max`
+    None means the deadline is hard, which is the old behaviour.
+
     `has_data` False means the swarm is not answering and the caller
     should try another release. `has_index` False is not a failure: the
     url is handed over anyway and the index band stays priority 7, which
@@ -1890,20 +2196,70 @@ def await_start(info_hash: str, data_wait: float = 20.0,
     first_piece = torrent.piece_at(0)
     started = time.time()
     data_deadline = started + max(0.0, data_wait)
+    hard_deadline = (started + max(data_wait, data_wait_max)
+                     if data_wait_max else data_deadline)
     index_deadline = started + max(0.0, index_wait)
     got_data = got_index = False
+    # The dead/alive bookkeeping. Payload is measured against a baseline
+    # taken on the first sample rather than against zero: by the time
+    # this runs the torrent has already spent seconds trading metadata,
+    # and total_payload_download is not guaranteed to start clean.
+    payload_base = None
+    payload_now = 0
+    delivered = False
+    last_alive = started
+    recent = []                 # (t, payload) over the trailing window
+    next_status = 0.0
     while True:
         if not got_data:
             got_data = torrent.have(first_piece)
+            if got_data:
+                # The piece playback was blocked on exists - widen the
+                # window back out so the swarm builds real readahead.
+                torrent.warming = False
         if not got_index:
             got_index = not torrent._tail_pieces(INDEX_CRITICAL_BYTES)
         if got_data and got_index:
             break
         now = time.time()
-        # No data and out of time: this release is dead, say so now
-        # rather than spending the index budget on it as well.
-        if not got_data and now >= data_deadline:
-            break
+        if not got_data and now >= next_status:
+            # Status at 4Hz, not on every 0.05s tick - it is a
+            # synchronous call into the session, and six race lanes
+            # each polling at 20Hz is load the session does not owe.
+            next_status = now + 0.25
+            try:
+                status = torrent.handle.status()
+                payload_now = int(status.total_payload_download)
+                if payload_base is None:
+                    payload_base = payload_now
+                if payload_now - payload_base >= DELIVERED_MIN_BYTES:
+                    delivered = True
+                if delivered or int(status.num_peers) > 0:
+                    last_alive = now
+                recent.append((now, payload_now))
+                while recent and now - recent[0][0] > EXTEND_WINDOW_S:
+                    recent.pop(0)
+            except Exception:
+                last_alive = now        # cannot tell, so do not condemn
+        if not got_data:
+            # Dead: the metadata came and the swarm behind it
+            # evaporated - zero peers and not one payload block,
+            # sustained. Never inside the grace, and never for a
+            # release that has delivered anything (the one that
+            # delivered 1MB, went quiet and then *won* is why - see
+            # DEAD_GRACE_S above).
+            if (not delivered and now - started >= DEAD_GRACE_S
+                    and now - last_alive >= DEAD_QUIET_S):
+                break
+            if now >= data_deadline:
+                # Still flowing at the soft deadline? Keep the lane, up
+                # to the hard cap. The trailing-window test is what
+                # keeps a 288KB-in-six-seconds trickle from holding
+                # one - see EXTEND_MIN_BYTES.
+                flowing = (hard_deadline > now and recent
+                           and payload_now - recent[0][1] >= EXTEND_MIN_BYTES)
+                if not flowing:
+                    break
         if got_data and now >= index_deadline:
             break
         # The player released this torrent (moved on, or the race picked
@@ -1977,6 +2333,10 @@ class _Handler(BaseHTTPRequestHandler):
         # the Cues, and one window per reader is what stops them zeroing
         # each other's pieces.
         reader = id(self)
+        # A real read means playback has begun; if the warming narrow
+        # window is somehow still on (a path that skipped await_start),
+        # it must not strangle the readahead.
+        torrent.warming = False
         torrent.focus(start, reader=reader)
 
         piece_length = torrent.piece_length()
@@ -2017,12 +2377,38 @@ class _Handler(BaseHTTPRequestHandler):
                 # the life of this request because a 4MB piece is served
                 # in several writes and asking for it once per write
                 # would be several copies of the same read.
-                if cached_piece != piece:
+                data = None
+                # **A re-read of bytes already served comes from the file,
+                # not from libtorrent.** read_piece exists because a piece
+                # can read back as zeros for ~0.5s after have_piece() turns
+                # true (its docstring has the measurement), so a *first*
+                # read must go through the alert round trip. A byte that
+                # was handed to a reader before is past that window by
+                # definition, and reading it again through read_piece costs
+                # one alert round trip per piece for nothing.
+                #
+                # This is the owner's "when I change the embedded subtitles
+                # it freezes for ~5-10 sec" (23 August 2026). Measured by
+                # the Map agent that day: selecting an embedded sub track
+                # makes mpv drop its Range and reopen one from the file's
+                # first cluster, then re-read forward through everything
+                # it had already demuxed - 1.3MB at 12s in, 16.8MB at 60s
+                # in - and the picture stays frozen until that re-read
+                # catches up. Unthrottled (OS cache) it is a 10ms blip; at
+                # 1MB/s it was 5.5-8.2s. The re-read was paying the alert
+                # path for every piece it had already been served.
+                if offset + chunk <= torrent.served_hwm:
+                    try:
+                        with open(path, "rb") as handle:
+                            handle.seek(offset)
+                            data = handle.read(chunk) or None
+                    except (FileNotFoundError, OSError):
+                        data = None
+                if data is None and cached_piece != piece:
                     blob = torrent.read_piece(piece)
                     if blob is not None:
                         cached_piece, cached_bytes = piece, blob
-                data = None
-                if cached_piece == piece and cached_bytes is not None:
+                if data is None and cached_piece == piece and cached_bytes is not None:
                     piece_start = piece * piece_length - torrent.file_offset()
                     begin = offset - piece_start
                     if 0 <= begin < len(cached_bytes):
@@ -2043,6 +2429,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 offset += len(data)
                 remaining -= len(data)
+                if offset > torrent.served_hwm:
+                    torrent.served_hwm = offset
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
                 OSError):
             # The player moved on - normal, and it happens on every
@@ -2128,6 +2516,82 @@ def release(info_hash: str, delete_files: bool = False, force: bool = False):
         session().remove_torrent(torrent.handle, flags)
     except Exception:
         pass
+
+
+def prefetch_metadata(info_hash: str, *, trackers=(),
+                      metadata_timeout: float = 45.0) -> bool:
+    """Fetch a release's .torrent metadata into the disk cache and then
+    let the swarm go again. Returns whether the metadata is now cached.
+
+    **This is the half of "warm the next episode" that is safe to do
+    while something is playing.** Measured 23 August 2026, a cold Next
+    cost 35.0s, and the fixed part of that - the part that is the same
+    however good the swarm is - is the metadata round trip over DHT and
+    the trackers. The *data* half cannot be paid early without a second
+    swarm competing with the episode on screen for one connection, which
+    is exactly the starvation `_maybe_prewarm_next` guards against.
+
+    Metadata is a few hundred KB and no file payload is requested at all:
+    the torrent is added, its info dictionary saved by `_save_torrent_info`
+    (the same cache `add` consults through `_cached_torrent_info`), and
+    then removed from the session. A later `add` for the same release
+    finds `params.ti` already populated and skips the metadata wait
+    outright.
+
+    Never raises, and never disturbs a torrent that is already live - an
+    info hash currently held (the thing playing, or one the race is using)
+    is left exactly alone."""
+    key = (info_hash or "").strip().lower()
+    if lt is None or not re.fullmatch(r"[0-9a-f]{40}", key):
+        return False
+    if _cached_torrent_info(key) is not None:
+        return True                     # already paid for, nothing to do
+    if key in _torrents:
+        # Live already: adding a second handle for it would be a no-op at
+        # best and a fight over the same files at worst.
+        return False
+    magnet = "magnet:?xt=urn:btih:" + key
+    for tracker in trackers or ():
+        tracker = str(tracker)
+        if tracker.startswith("tracker:"):
+            tracker = tracker[len("tracker:"):]
+        elif tracker.startswith("dht:"):
+            continue
+        magnet += "&tr=" + urllib.parse.quote(tracker, safe="")
+    handle = None
+    try:
+        params = lt.parse_magnet_uri(magnet)
+        params.save_path = _CACHE_DIR
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        # Upload mode: libtorrent will take the metadata and ask for no
+        # piece data, which is the whole point of this function.
+        try:
+            params.flags |= lt.torrent_flags.upload_mode
+        except Exception:
+            pass
+        handle = session().add_torrent(params)
+        deadline = time.time() + metadata_timeout
+        while time.time() < deadline:
+            try:
+                if handle.status().has_metadata:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
+        else:
+            return False
+        _save_torrent_info(key, handle)
+        return _cached_torrent_info(key) is not None
+    except Exception:
+        return False
+    finally:
+        # Hand the swarm back either way - this must not leave a torrent
+        # announcing behind the episode being watched.
+        if handle is not None:
+            try:
+                session().remove_torrent(handle)
+            except Exception:
+                pass
 
 
 def clear_cache():

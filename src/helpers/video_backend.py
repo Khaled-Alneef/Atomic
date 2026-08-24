@@ -115,6 +115,29 @@ def default_options() -> dict:
     return {
         "vo": "gpu",
         "hwdec": "auto-safe",
+        # Lock frame presentation to the display's own raster instead of
+        # the audio clock. Measured 22 August 2026 on the owner's 144Hz
+        # panel (GTX 1660 SUPER, 1080p H.264 via d3d11va): with the
+        # default `video-sync=audio` mpv times frames on the audio clock
+        # and never aligns them to a vsync - the display-sync counters
+        # (vsync-ratio, vsync-jitter, mistimed-frame-count) do not even
+        # exist in that mode - so 24fps content lands a half-vsync off
+        # and pans micro-judder. With display-resample the same clip
+        # locked at vsync-ratio exactly 6.000 (144/23.976), jitter
+        # 0.000, 0 dropped / 0 delayed / 0 mistimed over 9s, and mpv
+        # measured the real raster itself (estimated-display-fps
+        # 144.003) - no refresh rate is hardcoded anywhere and none
+        # should be. Note what this does *not* do: a 23.976fps master
+        # still presents 23.976 distinct frames a second (measured; a
+        # 60fps clip presents 60.05) - nothing invents frames, each just
+        # holds for exactly 6 refreshes instead of roughly 6.
+        # interpolation+oversample costs nothing at an integer ratio and
+        # is what keeps non-integer ones (25fps content, a 60Hz second
+        # monitor) from beating: oversample repeats frames aligned to
+        # vsync rather than blending them, so anime line art stays sharp.
+        "video_sync": "display-resample",
+        "interpolation": True,
+        "tscale": "oversample",
         "keep_open": "yes",
         "idle": "yes",
         "ytdl": False,

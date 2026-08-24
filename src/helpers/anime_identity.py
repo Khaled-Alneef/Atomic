@@ -76,6 +76,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 
 from . import artwork, logs, net, storage
 
@@ -85,11 +86,23 @@ _TTL = 30 * 24 * 3600.0
 # A map built without AniList carries only TMDB's English arc names, which
 # miss the two Demon Slayer arcs whose romaji shares no word with the
 # English ("Yuukaku" for Entertainment District, "Katanakaji" for
-# Swordsmith Village). That is a *partial* answer and must not sit for a
-# month: it is re-resolved in six hours so a one-off AniList timeout
-# (measured 8.4s once, then 1.4s on the next try) heals itself rather
-# than baking in.
-_PARTIAL_TTL = 6 * 3600.0
+# Swordsmith Village). That is a *partial* answer and must not be cached
+# like a complete one.
+#
+# **Measured 23 August 2026 and worth knowing: AniList was answering 403
+# to this whole network at the time** (the documented rate-limit trap in
+# .claude/rules/integrations.md - not a 429, and measured lasting over an
+# hour). So the map for Demon Slayer came back TMDB-English-only, which
+# still catches "Hashira Geiko" (via "Hashira Training Arc") and "Mugen
+# Ressha" (via "Mugen Train Arc") but *not* "Yuukaku Hen" or "Katanakaji
+# no Sato Hen", whose romaji shares no word with TMDB's English. That is
+# a smaller filter, never a wrong one - it drops fewer rows, and still
+# drops none it should keep.
+#
+# 45 minutes, not six hours: the block lifts on its own, and the whole
+# point of marking a map partial is to pick the romaji up shortly after
+# it does rather than running degraded for the rest of the day.
+_PARTIAL_TTL = 45 * 60.0
 _CACHE_VERSION = 1
 _TIMEOUT = 8
 
@@ -205,6 +218,14 @@ def _anilist_media(title: str, attempts: int = 2):
                       and (m.get("startDate") or {}).get("year")]
             if usable:
                 return usable
+        except urllib.error.HTTPError as exc:
+            # **A 403/429 is the connection being refused, not this query
+            # failing** - .claude/rules/integrations.md records the same
+            # thing about search variants: "a second variant buys another
+            # 403 and another throttle wait". Retrying is pure delay, so
+            # give up now and let the partial map's short TTL re-ask later.
+            if exc.code in (403, 429):
+                return []
         except Exception:
             pass
         if attempt + 1 < attempts:
@@ -361,6 +382,70 @@ def arc_map(entry) -> dict:
     if record is not None and _fresh(record):
         return _arcs_of(record)
     _spawn_resolve(entry)               # cold or stale: warm it for next time
+    return {}
+
+
+def _cached_arcs(entry):
+    """The stored map for this entry without starting a resolve - the
+    poll half of `arc_map_soon`, which must not re-spawn on every tick."""
+    imdb_id = (entry or {}).get("imdb_id")
+    if not imdb_id:
+        return {}
+    with _memory_lock:
+        record = _memory.get(imdb_id)
+    if record is None:
+        record = _load_disk(imdb_id)
+        if record is not None:
+            with _memory_lock:
+                _memory[imdb_id] = record
+    if record is not None and _fresh(record):
+        return _arcs_of(record)
+    return {}
+
+
+def arc_map_soon(entry, timeout: float = 0.0) -> dict:
+    """The arc map, waiting up to `timeout` seconds for a resolve that is
+    already in flight, or `{}`.
+
+    `arc_map` deliberately never blocks, which is right while a lookup is
+    being *drawn* - but wrong at the one moment the answer decides what
+    gets played. Measured 23 August 2026: with a cold cache, "Kimetsu no
+    Yaiba - Yuukaku Hen" (season 3) won a race for S01E01, because the
+    map answered `{}` and the filter had nothing to judge with. A cold
+    first play was therefore still able to play the wrong season - the
+    exact complaint this module exists to fix.
+
+    So the *final* list waits a moment where a partial does not. By the
+    time this is called the fan-out has already run (0.4-2.4s measured),
+    which is time the background resolve has been running too, so the
+    usual cost here is zero; the timeout is only for the case where TMDB
+    is slower than the sources were."""
+    found = arc_map(entry)          # warm hit, or start the resolve
+    if found or timeout <= 0:
+        return found
+    # **Wait only for a resolve that is actually running.** `arc_map`
+    # answers `{}` without spawning anything for a non-anime entry or one
+    # with no IMDb id, so the poll below had nothing to poll for and slept
+    # out the whole timeout for an answer that was never coming.
+    #
+    # Measured 23 August 2026 inside find_streams, cold, on the owner's
+    # own entries: House of the Dragon (type "Series") paid **2.52s** here
+    # and Bleach: Thousand-Year Blood War (also filed "Series") **2.55s**,
+    # both returning 0 seasons - against fan-outs of 1.95s and 0.16s. So
+    # the flat ~2.5s tail on every cold press *was* this loop, and on the
+    # two titles measured it bought precisely nothing. find_streams for
+    # Bleach: 2.71s -> 0.16s.
+    imdb_id = (entry or {}).get("imdb_id")
+    with _inflight_lock:
+        pending = bool(imdb_id) and imdb_id in _inflight
+    if not pending:
+        return {}
+    deadline = time.monotonic() + float(timeout)
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        found = _cached_arcs(entry)
+        if found:
+            return found
     return {}
 
 

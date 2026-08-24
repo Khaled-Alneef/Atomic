@@ -30,6 +30,8 @@ same thing for video and the owner rightly called that broken.
 
 import datetime
 import re
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -43,7 +45,8 @@ from PyQt6.QtWidgets import (
     QMenu, QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import (anime_identity, app_settings, artwork, history, images,
+from helpers import (anime_identity, app_settings, artwork, hero_art, history,
+                     images,
                      logs, lookup_pool, net, storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, PickCombo, confirm,
                              frameless_dialog, scroll_area, show_toast,
@@ -120,7 +123,35 @@ ROW_EXTEND_MARGIN_PX = ROW_HEIGHT * 6
 
 # The scrim over the backdrop, top to bottom - heavier than the player's
 # loading frame because real text sits on this one.
-SCRIM = ((0.0, 14, 12, 9, 200), (0.45, 14, 12, 9, 170), (1.0, 14, 12, 9, 232))
+#
+# **Lifted, 23 August 2026 - the owner's "in the ch list page add the
+# cover as bg image but make it blurred!", sent with a screenshot of a
+# Berserk chapter list that is flat dark with no picture in it at all.**
+#
+# The page was already doing the work: `_reading_art_worker` falls back
+# to the entry's own cover when no AniList banner exists, and paintEvent
+# already turns a portrait cover into a blurred ground rather than
+# stretching it (see the note there). What was wrong is that at alpha
+# 200/170/232 over a ground blurred at 24x, there was nothing left to
+# see - the scrim was doing to a real backdrop what it does to an empty
+# one, so "no art" and "art" looked identical. That is why the owner read
+# it as a missing feature rather than an invisible one.
+#
+# The premise that reading was wrong, and the correction is worth
+# recording. The page was not scrimming an invisible picture - measured
+# on that entry in a real window, `_backdrop` was **None** nine seconds
+# after open: there was no picture at all, because the art chain is a
+# network chain and it delivered nothing. The fix is
+# `_seed_backdrop_from_cover`, which puts the entry's own cover up at
+# once from disk; the scrim was never the problem.
+#
+# So these stops stay close to the originals (200/170/232), lifted only
+# a little, because now there is reliably something behind them: the
+# cover has to read as a *ground*, not as a picture the page is sitting
+# on top of. Tried first at 168/132/200 with a 14x blur and photographed:
+# the result was a face filling the window, which is worse than the flat
+# black it replaced.
+SCRIM = ((0.0, 14, 12, 9, 196), (0.45, 14, 12, 9, 172), (1.0, 14, 12, 9, 224))
 
 CHAPTER_LIST_TIMEOUT = 45.0
 
@@ -211,13 +242,53 @@ class _Signals(QObject):
     saved_cover = Signal(str, str, str, str)
 
 
+# Cinemeta meta is kept on disk per title so the episode list can be drawn
+# from it at once and refreshed behind. Measured 23 August 2026: a warm
+# fetch is 82-91ms for a 130-150 episode series and **2.67s** for One
+# Piece's 1.39MB record on a cold connection, and nothing cached it - so
+# every open of a video details page paid that before a single row
+# existed. A day is generous for a schedule; a new episode's row is a
+# refresh away, and the refresh is emitted only when the list changed.
+META_CACHE_TTL_S = 24 * 3600.0
+
+
+def _meta_cache_name(imdb_id, content_type) -> str:
+    safe = re.sub(r"[^a-z0-9]", "", str(imdb_id or "").lower())
+    return f"meta-{content_type}-{safe}.json"
+
+
 def _meta_worker(signals, run, imdb_id, content_type):
-    """Never raises - lookup_pool workers die silently (see that module)."""
+    """Never raises - lookup_pool workers die silently (see that module).
+
+    Emits the cached meta first when there is one, then the live answer
+    only if its episode list differs - so a cached title draws its rows
+    immediately and a second emit never rebuilds identical rows."""
+    name = _meta_cache_name(imdb_id, content_type)
+    cached = None
+    try:
+        stored = storage.load(name, None)
+        if (isinstance(stored, dict) and isinstance(stored.get("meta"), dict)
+                and time.time() - float(stored.get("ts") or 0) < META_CACHE_TTL_S):
+            cached = stored["meta"]
+    except Exception:
+        cached = None
+    if cached is not None:
+        signals.meta.emit(run, cached)
     try:
         meta = stremio.fetch_meta(imdb_id, content_type) if stremio else None
     except Exception:
         logs.exception("details meta lookup failed")
         meta = None
+    if meta is None:
+        if cached is None:
+            signals.meta.emit(run, None)
+        return
+    try:
+        storage.save(name, {"ts": time.time(), "meta": meta})
+    except Exception:
+        pass
+    if cached is not None and (cached.get("videos") == meta.get("videos")):
+        return          # nothing the rows would show has changed
     signals.meta.emit(run, meta)
 
 
@@ -383,6 +454,18 @@ def _sources_worker(signals, run, entry, season, episode):
     signals.sources.emit(run, list(found or []), (season, episode), False)
 
 
+def _reading_logo_worker(signals, run, entry):
+    """The anime's TMDB title treatment for a reading entry, by title -
+    see artwork.logo_path_by_title for the strict match that keeps
+    "Animal Kingdom" off "Kingdom". Emits only when one exists."""
+    try:
+        path = artwork.logo_path_by_title(entry.get("title") or "")
+    except Exception:
+        path = None
+    if path:
+        signals.art.emit(run, "logo", str(path))
+
+
 def _reading_art_worker(signals, run, entry):
     """The reading page's ground: AniList's banner (or cover) for the
     title, downloaded into the app's one image cache.
@@ -526,6 +609,53 @@ def _chapters_worker(signals, run, entry, refresh=False):
         signals.chapters.emit(run, None)
         return
     signals.chapters.emit(run, list(chapters or []))
+
+
+# What a release *is*, read off its own name: the codec, the bit depth,
+# and the dynamic range. Ordered most-distinguishing first, and each entry
+# is (what to print, the patterns that mean it). Word-boundary matched so
+# "H264" in a group's name cannot masquerade as a codec claim - and read
+# from the release title only, which is the one string every provider
+# returns in the same shape.
+_CODEC_TAGS = (
+    ("HDR10+", (r"hdr10\+", r"hdr10plus")),
+    ("Dolby Vision", (r"dolby[\s._-]?vision", r"\bdv\b", r"\bdovi\b")),
+    ("HDR", (r"\bhdr\b",)),
+)
+_VIDEO_CODECS = (
+    ("AV1", (r"\bav1\b",)),
+    ("HEVC", (r"\bhevc\b", r"\bx265\b", r"\bh\.?265\b")),
+    ("H.264", (r"\bx264\b", r"\bh\.?264\b", r"\bavc\b")),
+)
+# "Hi10"/"Hi10P" is how fansub groups write 10-bit and it is common on
+# exactly the releases this app reaches (measured on the owner's Demon
+# Slayer list: [SCY] and [LostYears] both use it and neither says "10bit").
+_DEPTH_TAGS = (("10-bit", (r"10[\s._-]?bits?\b", r"\bhi10p?\b")),)
+
+
+def _codec_label(source, quality, meta_text) -> str:
+    """The line a source row leads with: what the file is, not who
+    listed it.
+
+    Built from the release name because that is where this information
+    actually lives - no provider returns a codec field. Falls back to the
+    resolution, and only then to a neutral word, so the row is never
+    blank: a release whose name says nothing is still a real choice and
+    has to be labelled something."""
+    text = f"{meta_text or ''} {source or ''}"
+    bits = []
+    for label, patterns in _VIDEO_CODECS:
+        if any(re.search(p, text, re.I) for p in patterns):
+            bits.append(label)
+            break
+    for group in (_CODEC_TAGS, _DEPTH_TAGS):
+        for label, patterns in group:
+            if any(re.search(p, text, re.I) for p in patterns):
+                bits.append(label)
+                break
+    if bits:
+        return "  ·  ".join(bits)
+    return _quality_label(quality) if quality else "Release"
 
 
 def _quality_label(value) -> str:
@@ -763,6 +893,12 @@ class DetailsPage(GlassPage):
         self._backdrop = None
         self._backdrop_scaled = None      # see paintEvent's size cache
         self._backdrop_size = None
+        # Whether _backdrop is a hero_art ground - already blurred, so it
+        # is expanded to cover the page rather than letterboxed across the
+        # top like a sharp 1900x400 AniList banner would be. Upscaling a
+        # blur costs it nothing; letterboxing one leaves two thirds of the
+        # page flat black, which is what the owner was looking at.
+        self._backdrop_is_ground = False
         self._meta = None
         self._videos = []
         # TMDB ratings for the season on screen, when Cinemeta had none.
@@ -807,6 +943,9 @@ class DetailsPage(GlassPage):
         self._blur_stills = app_settings.get_blur_episode_stills()
 
         self._signals = _Signals()
+        # After _signals: the ground may have to be composed on a
+        # worker and lands back through the `art` signal.
+        self._seed_backdrop_from_cover()
         self._signals.meta.connect(self._on_meta)
         self._signals.art.connect(self._on_art)
         self._signals.chapters.connect(self._on_chapters)
@@ -1145,8 +1284,20 @@ class DetailsPage(GlassPage):
             # _reading_art_worker and the three-catalogue chain behind it
             # are kept: the *cards* still want a cover, and the video
             # pages still want a backdrop. Only this page stopped asking.
-            pass
-            lookup_pool.submit(_reading_genres_worker, self._signals,
+            #
+            # The *logo* is a different matter - the owner, 24 August
+            # 2026: "make the logo instead of the name in the ch list if
+            # it is possible, otherwise a normal name as it is now". A
+            # reading title whose franchise is an anime TMDB has a title
+            # treatment for (Kingdom, One Piece, Hunter x Hunter) wears
+            # it where the name is, exactly as the video pages do through
+            # _art_worker; anything else keeps its typed name, which is
+            # what _on_art leaves up when nothing lands. Disk-cached by
+            # title, so a revisit is one stat and no request.
+            threading.Thread(target=_reading_logo_worker,
+                             args=(self._signals, self._run, dict(self.entry)),
+                             daemon=True).start()
+            lookup_pool.submit_watched(_reading_genres_worker, self._signals,
                                self._run, self.entry.get("title") or "")
             if chapter_source is None:
                 self._panel_note.setText("No chapter source in this build.")
@@ -1157,12 +1308,12 @@ class DetailsPage(GlassPage):
                 # chapters from whichever one is picked.
                 self._fill_site_rows()
             else:
-                lookup_pool.submit(_chapters_worker, self._signals, self._run,
+                lookup_pool.submit_watched(_chapters_worker, self._signals, self._run,
                                    dict(self.entry))
                 self._expect_list()
         elif self.entry.get("imdb_id") and stremio is not None:
             kind = "movie" if self.entry.get("type") == "Movie" else "series"
-            lookup_pool.submit(_meta_worker, self._signals, self._run,
+            lookup_pool.submit_watched(_meta_worker, self._signals, self._run,
                                self.entry.get("imdb_id"), kind)
             self._expect_list()
         elif stremio is not None and (self.entry.get("title") or "").strip():
@@ -1178,7 +1329,7 @@ class DetailsPage(GlassPage):
             # title" once that lookup has actually failed (see
             # _on_resolved_id).
             self._panel_note.setText("Looking this title up...")
-            lookup_pool.submit(_resolve_id_worker, self._signals, self._run,
+            lookup_pool.submit_watched(_resolve_id_worker, self._signals, self._run,
                                self.entry.get("title"), self.entry.get("type"))
             self._expect_list()
         else:
@@ -1202,7 +1353,7 @@ class DetailsPage(GlassPage):
         # and re-deriving it per feature would be three more lookups.
         self.entry["imdb_id"] = imdb_id
         kind = "movie" if self.entry.get("type") == "Movie" else "series"
-        lookup_pool.submit(_meta_worker, self._signals, self._run,
+        lookup_pool.submit_watched(_meta_worker, self._signals, self._run,
                            imdb_id, kind)
         # Now that the id is known, warm the arc-name season map too, so a
         # Discover anime that only just resolved is filtered on its first
@@ -1225,7 +1376,7 @@ class DetailsPage(GlassPage):
                 self._meta_retried = True
                 kind = ("movie" if self.entry.get("type") == "Movie"
                         else "series")
-                lookup_pool.submit(_meta_worker, self._signals, self._run,
+                lookup_pool.submit_watched(_meta_worker, self._signals, self._run,
                                    self.entry.get("imdb_id"), kind)
                 self._expect_list()
                 return
@@ -1241,12 +1392,163 @@ class DetailsPage(GlassPage):
         self._fill_seasons()
         self._fill_rows()
 
+    def _seed_backdrop_from_cover(self):
+        """Put a blurred ground made from the entry's **own cover** up, so
+        the page never opens with nothing behind it.
+
+        **The same picture the banners use** - the owner's follow-up, 23
+        August 2026: "the ch list page bg blur is not good make it as the
+        banners bg images!". The first attempt blurred the raw cover here
+        in Qt (scale down 32x, back up in two passes) and it was still a
+        zoomed, blocky crop: a portrait cover filling a 1600x900 page is
+        upscaled past 2x before any blur happens, and Qt has no real blur
+        without a QGraphicsEffect, which on a page ground would repaint on
+        every hover. `hero_art.wide_ground` already solves exactly this
+        with Pillow for the heroes, is disk-cached beside the cover, and
+        is very often already composed by the time this page opens -
+        Home's hero and the tracker's featured banner compose the same
+        file from the same cover.
+
+        Taken synchronously when it is on disk (a stat), on a worker when
+        it is not - composing is Pillow work and does not belong on the
+        UI thread while the page is being built.
+
+        The owner's ask, 23 August 2026 - "in the ch list page as in img 3
+        add the cover as bg image but make it blurred!" - and the
+        screenshot with it was a chapter list on flat black. Measured on
+        that same entry (Kingdom (WAN), a real window, 9s after open):
+        `self._backdrop` was still **None**. The art worker does chain
+        down to the entry's cover, but it is a network chain (AniList,
+        then MangaDex, then MangaUpdates) and for this entry it delivered
+        nothing at all - so the page the owner actually looks at had no
+        ground on any visit.
+
+        The cover is already on disk: it is the file the card he clicked
+        was drawn from. Reading it here costs one local decode on open and
+        needs no lookup, and paintEvent already knows what to do with a
+        portrait source - it blurs it into a ground rather than stretching
+        it (see the note there). A real landscape banner arriving later
+        still replaces this through `_on_art`; this is the floor, not the
+        ceiling.
+
+        Never raises: an entry with no cover on disk simply keeps the
+        flat ground it had before."""
+        try:
+            path = self._cover_source()
+            if not path:
+                # Nothing on disk yet. The cover may still be downloadable
+                # (a Discover entry carries only a URL), so hand the whole
+                # job to the worker rather than giving up here - it can
+                # afford the round trip and this thread cannot.
+                self._compose_ground_later("")
+                return
+            ready = hero_art.ground_ready(path)
+            if ready:
+                pixmap = QPixmap(str(ready))
+                if not pixmap.isNull():
+                    self._backdrop = pixmap
+                    self._backdrop_is_ground = True
+                return
+            # Not composed yet. Off the UI thread, and landing through
+            # the same `art` signal the network workers use, so it is
+            # dropped for a closed page like every other late answer.
+            #
+            # `_run` is read at *emit* time, not captured here. This runs
+            # from __init__, where _run is still 0 and the page's first
+            # load has not bumped it yet - capturing it meant the compose
+            # always landed on a stale run and was thrown away (measured:
+            # the ground never appeared at all). The ground belongs to the
+            # entry, not to a particular load of it, so whatever run is
+            # current when it finishes is the right one.
+            self._compose_ground_later(path)
+        except Exception:
+            pass
+
+    def _compose_ground_later(self, path):
+        """Compose the blurred ground off the UI thread and hand it back
+        through the `art` signal.
+
+        `_run` is read at *emit* time, not captured here. This runs from
+        __init__, where `_run` is still 0 and the page's first load has
+        not bumped it yet - capturing it meant the compose always landed
+        on a stale run and was thrown away (measured: the ground never
+        appeared at all). The ground belongs to the entry, not to a
+        particular load of it."""
+        def compose():
+            try:
+                source = path or self._cover_source(allow_download=True)
+                made = hero_art.wide_ground(source) if source else None
+            except Exception:
+                made = None
+            if not made:
+                return
+            try:
+                self._signals.art.emit(self._run, "ground", str(made))
+            except RuntimeError:
+                pass        # the page went away while this was composing
+
+        threading.Thread(target=compose, daemon=True,
+                         name="atomic-details-ground").start()
+
+    def _cover_source(self, allow_download=False):
+        """A local image file for this entry's cover, or "".
+
+        **Three rungs, and the second one is the fix.** The first version
+        of this read `entry["cover_path"]` and nothing else - and
+        `tracker.discover_entry` hardcodes `"cover_path": None`, so a
+        title opened from Discover (which is most of them, and is exactly
+        the screenshot the owner sent: "My Path to Killing Gods in Another
+        World", flat black) never had one. What it carries instead is
+        `cover_url`, and the card he clicked had *already downloaded that
+        very file* into the shared image cache - so the picture was on
+        disk the whole time under a name this function was not asking for.
+
+        Rung three downloads it - **only when `allow_download` is set**,
+        which is only ever on the compose worker. This is called from
+        __init__, and a download there would be a network round trip on
+        the UI thread while the page is being built.
+
+        Never raises; "" simply means the page keeps its flat ground."""
+        entry = self.entry or {}
+        path = entry.get("cover_path") or ""
+        if path and Path(path).exists():
+            return str(path)
+        url = entry.get("cover_url") or entry.get("poster") or ""
+        if not url:
+            return ""
+        try:
+            cached = images.cache_path_for_url(url)
+            if cached and Path(cached).exists():
+                return str(cached)
+        except Exception:
+            pass
+        if not allow_download:
+            return ""
+        try:
+            got = images.download(url)
+        except Exception:
+            got = None
+        return str(got) if got and Path(str(got)).exists() else ""
+
     def _on_art(self, run, kind, path):
         if run != self._run or self._closed:
             return
-        if kind == "backdrop":
+        if kind in ("backdrop", "ground"):
             pixmap = QPixmap(path)
-            self._backdrop = None if pixmap.isNull() else pixmap
+            if pixmap.isNull():
+                # **Keep whatever is already up.** A failed or empty
+                # backdrop used to clear the ground to None, which would
+                # now throw away the cover seeded in __init__ and put the
+                # page back on flat black - the very thing that seed
+                # exists to stop. Nothing arriving is not a reason to
+                # remove something that did.
+                return
+            # A real landscape banner from the network outranks the
+            # composed ground; the composed one must not overwrite it.
+            if kind == "ground" and self._backdrop is not None                     and not self._backdrop_is_ground:
+                return
+            self._backdrop = pixmap
+            self._backdrop_is_ground = (kind == "ground")
             self._backdrop_scaled = None
             self._backdrop_size = None
             self.update()
@@ -1277,7 +1579,7 @@ class DetailsPage(GlassPage):
             # slightly stale list, which is the better failure.
             if not self._chapters_retried:
                 self._chapters_retried = True
-                lookup_pool.submit(_chapters_worker, self._signals,
+                lookup_pool.submit_watched(_chapters_worker, self._signals,
                                    self._run, dict(self.entry))
                 self._expect_list()
                 return
@@ -1333,6 +1635,14 @@ class DetailsPage(GlassPage):
                 row.insertWidget(row.count() - 1, _chip(value))
 
         genres = [g for g in (meta.get("genres") or []) if g][:5]
+        # Carried on the entry the player is handed, so its audio default
+        # knows an anime film from a live-action one before its own meta
+        # fetch answers (player._audio_language_preference).
+        try:
+            self.entry["genres"] = list(meta.get("genres") or meta.get("genre") or [])
+            self.entry["country"] = str(meta.get("country") or "")
+        except Exception:
+            pass
         if genres:
             self._genres_head.setVisible(True)
             self._fill_genre_buttons(genres)
@@ -1594,12 +1904,12 @@ class DetailsPage(GlassPage):
             if chapter_source is None:
                 self._finish_refresh("No chapter source in this build.")
                 return
-            lookup_pool.submit(_chapters_worker, self._signals, self._run,
+            lookup_pool.submit_watched(_chapters_worker, self._signals, self._run,
                                dict(self.entry), True)
             self._expect_list()
         elif self.entry.get("imdb_id") and stremio is not None:
             kind = "movie" if self.entry.get("type") == "Movie" else "series"
-            lookup_pool.submit(_meta_worker, self._signals, self._run,
+            lookup_pool.submit_watched(_meta_worker, self._signals, self._run,
                                self.entry.get("imdb_id"), kind)
             self._expect_list()
         else:
@@ -1698,7 +2008,7 @@ class DetailsPage(GlassPage):
         self._panel_note.setText(
             f"Searching {site.get('name') or 'the site'} for "
             f"'{self.entry.get('title')}'...")
-        lookup_pool.submit(_site_resolve_worker, self._signals, self._run,
+        lookup_pool.submit_watched(_site_resolve_worker, self._signals, self._run,
                            dict(site), self.entry.get("title") or "")
 
     def _pick_mangadex(self):
@@ -1707,7 +2017,7 @@ class DetailsPage(GlassPage):
         self._chapters_retried = False
         self._panel_note.setVisible(True)
         self._panel_note.setText("Loading...")
-        lookup_pool.submit(_chapters_worker, self._signals, self._run,
+        lookup_pool.submit_watched(_chapters_worker, self._signals, self._run,
                            dict(self.entry))
 
     def _on_site_resolved(self, run, fields, site_name):
@@ -1736,7 +2046,7 @@ class DetailsPage(GlassPage):
         self._panel_note.setText(f"Loading chapters from {site_name}...")
         self._run += 1
         self._chapters_retried = False
-        lookup_pool.submit(_chapters_worker, self._signals, self._run,
+        lookup_pool.submit_watched(_chapters_worker, self._signals, self._run,
                            dict(self.entry))
         self._expect_list()
 
@@ -1788,7 +2098,7 @@ class DetailsPage(GlassPage):
             return dict(tmdb), "TMDB"
         if key not in self._tmdb_ratings_asked:
             self._tmdb_ratings_asked.add(key)
-            lookup_pool.submit(_episode_ratings_worker, self._signals,
+            lookup_pool.submit_watched(_episode_ratings_worker, self._signals,
                                self._run, imdb, season, list(self._videos))
         # Nothing yet - show Cinemeta's if it had any, and let the
         # fetch fill the rest in when it lands.
@@ -2160,7 +2470,17 @@ class DetailsPage(GlassPage):
 
         column = QVBoxLayout()
         column.setSpacing(3)
-        head = QLabel(str(source or "Source"))
+        # **The release's own properties, never the provider's name** -
+        # the owner's ask, 23 August 2026: "do not show addon/provider
+        # names, setup, or configuration anywhere in the UI ... show users
+        # only useful stream info: quality, size, seeders, codec/HDR".
+        # Where this used to print "Torrentio" or "Anime Tosho" - which
+        # tells the person choosing nothing about what they are choosing -
+        # it now prints what the file actually is. `source` is still
+        # carried on the stream dict and still used internally (the
+        # player remembers a chosen source across episodes); it is simply
+        # not shown.
+        head = QLabel(_codec_label(source, quality, meta_text))
         head.setStyleSheet(
             f"color: {theme.TEXT}; font-weight: 700; font-size: 11.5pt;"
             f" background: transparent; border: none;")
@@ -2434,6 +2754,10 @@ class DetailsPage(GlassPage):
                 page.closed.connect(self._on_overlay_closed)
         except Exception:
             logs.exception("details page could not open the chosen source")
+            # Out loud as well as in the log: a swallowed constructor error
+            # read as a dead button - the owner's "Play Film does nothing",
+            # 24 August 2026, was 31 of these in his own log.
+            show_toast(self, "Could Not Open the Player")
 
     # ---- actions ---------------------------------------------------------
     def _play(self, season, episode):
@@ -2448,6 +2772,10 @@ class DetailsPage(GlassPage):
                 page.closed.connect(self._on_overlay_closed)
         except Exception:
             logs.exception("details page could not open the player")
+            # Out loud as well as in the log: a swallowed constructor error
+            # read as a dead button - the owner's "Play Film does nothing",
+            # 24 August 2026, was 31 of these in his own log.
+            show_toast(self, "Could Not Open the Player")
 
     def _read(self, number):
         try:
@@ -3110,11 +3438,46 @@ class DetailsPage(GlassPage):
                 # by scaling down hard and back up - Qt has no blur
                 # without QGraphicsEffect, and an effect on the page's
                 # ground would repaint on every hover.
+                # **32x, up from 24.** A portrait cover has to cover a
+                # 1600x900 page, which blows a ~460px-wide image up more
+                # than 3x before any blur is applied, so the old divisor
+                # left recognisable faces across the whole window - see
+                # the note on SCRIM for the photograph that showed it. At
+                # 32 the source is 50px wide before it is blown back up,
+                # which is the colour-and-shape wash a ground should be.
                 small = self._backdrop.scaled(
-                    max(1, target.width() // 24), max(1, target.height() // 24),
+                    max(1, target.width() // 32), max(1, target.height() // 32),
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation)
-                self._backdrop_scaled = small.scaled(
+                # **Back up in two steps, not one.** A single 50px -> 1600px
+                # smooth scale still leaves visible square blocks - it was
+                # photographed doing exactly that - because Qt's filter
+                # samples a neighbourhood that is tiny relative to the jump.
+                # An intermediate pass gives the second scale something
+                # already smooth to interpolate, which is what turns the
+                # blocks into an actual blur. Two passes, not more: the
+                # third was not distinguishable from the second.
+                middle = small.scaled(
+                    max(1, target.width() // 6), max(1, target.height() // 6),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+                self._backdrop_scaled = middle.scaled(
+                    target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+            elif self._backdrop_is_ground:
+                # Already blurred by hero_art - fill the page. Cropped
+                # to the page's aspect *before* the smooth scale: a
+                # 1900x400 ground expanded to cover 1600x900 was being
+                # scaled to 4275x900 and then mostly discarded - 2.7x the
+                # pixels actually drawn. Measured 23 August 2026: 5.7ms ->
+                # 2.5ms at DPR 1, 13.7 -> 6.9 at DPR 2, on every first
+                # paint and every resize.
+                src = self._backdrop
+                want_w = max(1, src.height() * target.width() // max(1, target.height()))
+                if want_w < src.width():
+                    left = (src.width() - want_w) // 2
+                    src = src.copy(left, 0, want_w, src.height())
+                self._backdrop_scaled = src.scaled(
                     target, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation)
             else:
@@ -3255,6 +3618,50 @@ _BROWSE_LIMIT = 36
 _GENRE_CACHE = {}
 _GENRE_CACHE_MAX = 24
 
+# And the same rows on disk, so the first open of a session is as fast
+# as the second (the owner, 23 August 2026: "the same genre page
+# loading takes ~5-10 sec make it <500 ms" - the session cache above
+# never survived a restart, so "the same page" paid the full fetch
+# every launch). A day matches the discover browse cache's own disk
+# TTL; these listings are most-followed orderings that move slower
+# than that.
+_GENRE_DISK_FILE = "genre_cache.json"
+_GENRE_DISK_TTL_S = 24 * 60 * 60
+_GENRE_DISK_MAX = 40
+
+
+def _genre_disk_load(kind, genre):
+    """Rows for one (kind, genre) from disk, or None past the TTL.
+    Never raises - a missing or corrupt cache is a cold open."""
+    try:
+        stored = storage.load(_GENRE_DISK_FILE, {}) or {}
+        entry = stored.get(f"{kind}|{genre.strip().lower()}")
+        if not isinstance(entry, dict):
+            return None
+        if time.time() - float(entry.get("at", 0)) > _GENRE_DISK_TTL_S:
+            return None
+        rows = entry.get("rows")
+        return [r for r in rows if isinstance(r, dict)] if rows else None
+    except Exception:
+        return None
+
+
+def _genre_disk_store(kind, genre, rows):
+    """Best-effort write-through, oldest keys pruned past the bound."""
+    try:
+        stored = storage.load(_GENRE_DISK_FILE, {}) or {}
+        if not isinstance(stored, dict):
+            stored = {}
+        stored[f"{kind}|{genre.strip().lower()}"] = {
+            "at": time.time(), "rows": list(rows)}
+        while len(stored) > _GENRE_DISK_MAX:
+            oldest = min(stored, key=lambda k: stored[k].get("at", 0)
+                         if isinstance(stored[k], dict) else 0)
+            stored.pop(oldest, None)
+        storage.save(_GENRE_DISK_FILE, stored)
+    except Exception:
+        pass
+
 
 class GenreBrowsePage(GlassPage):
     """Everything else filed under one genre - a full page, the shape
@@ -3389,6 +3796,30 @@ class GenreBrowsePage(GlassPage):
             key = (self._genre, kind)
             rows = _GENRE_CACHE.get(key)
             if rows is None:
+                # Disk before network (measured 23 August 2026: the
+                # session cache never survived a restart, so "the same
+                # genre page" cost the full 5.5s fetch every launch;
+                # from here it costs a JSON read).
+                rows = _genre_disk_load(kind, self._genre)
+            if rows is None and kind == "reading":
+                # Second no-network answer: the category sections'
+                # cached browse filtered by the genre verdicts their
+                # classification sweep already stored. On the owner's
+                # machine this held a full page for every common genre
+                # (41 rows Action, 34 Fantasy, 30 Drama) against the
+                # 2.3-5.5s the live browse costs warm - and the live
+                # path reads the same sites the cache mirrors, so a
+                # genre thin here is thin there too. Not written to
+                # the disk cache: it re-derives from caches that
+                # refresh themselves, so storing a copy would only
+                # freeze it for a day. [] falls through - a cold
+                # machine still gets the real browse.
+                try:
+                    rows = list(discover.reading_genre_cached(
+                        self._genre, limit=_BROWSE_LIMIT)) or None
+                except Exception:
+                    rows = None
+            if rows is None:
                 try:
                     # **Reading genres come from the owner's own sites**
                     # (the owner's ask, 22 August 2026) - not MangaDex's
@@ -3407,9 +3838,11 @@ class GenreBrowsePage(GlassPage):
                     logs.exception("genre browse lookup failed")
                     rows = []
                 if rows:
-                    if len(_GENRE_CACHE) >= _GENRE_CACHE_MAX:
-                        _GENRE_CACHE.clear()
-                    _GENRE_CACHE[key] = rows
+                    _genre_disk_store(kind, self._genre, rows)
+            if rows:
+                if len(_GENRE_CACHE) >= _GENRE_CACHE_MAX:
+                    _GENRE_CACHE.clear()
+                _GENRE_CACHE[key] = list(rows)
             try:
                 self._signals.rows.emit(label, list(rows))
             except RuntimeError:

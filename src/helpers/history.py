@@ -243,6 +243,25 @@ def clear() -> bool:
         return False
 
 
+def update_cover(key: str, path: str) -> bool:
+    """Remember a cover that History fetched for itself, so the next
+    build draws it from disk. Only fills or repairs `cover_path`; the
+    URL the row was recorded with is left alone."""
+    try:
+        with _lock:
+            rows = _load()
+            row = _find(rows, key)
+            if row is None or not path:
+                return False
+            if row.get("cover_path") == str(path):
+                return True
+            row["cover_path"] = str(path)
+            _save(rows)
+            return True
+    except Exception:
+        return False
+
+
 def link_entry(entry) -> bool:
     """Record that this title now has a saved entry (or no longer does).
     Called after a save, so History and the tracker stay one story."""

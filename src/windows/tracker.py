@@ -12,6 +12,7 @@ jumps straight there. You can also just type your own title if it's not
 listed there.
 """
 
+import os
 import copy
 import re
 import threading
@@ -33,15 +34,17 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from helpers.poster_grid import PosterGrid
 from helpers import (
-    anilist, anime_sites, app_settings, history, images, logs, lookup_pool,
+    anilist, anime_sites, app_settings, cover_fetch, history, images, logs, lookup_pool,
     manga_sites, release_schedule, storage, stremio, theme, title_match,
 )
 from helpers.widgets import (
-    Card, CardDragReorder, CardTextLabel, GlassPage, HeroBanner,
-    SideScroller, confirm,
-    defer_grid_rebuild, finish_toast, frameless_dialog, inform, scroll_area,
-    search_field, show_toast, show_undo_toast, use_hover_cursor,
+    Card, CardDragReorder, CardTextLabel, GlassPage, HERO_COVER_SIZE,
+    HeroBanner, SideScroller, confirm,
+    defer_grid_rebuild, finish_toast, frameless_dialog, hero_logo_label,
+    hero_split, inform, scroll_area, search_field, set_hero_logo, show_toast,
+    show_undo_toast, use_hover_cursor,
 )
 
 # Soft, for the same reason reader.py soft-imports chapter_source: a
@@ -356,7 +359,11 @@ def _fetch_browse_rows(kind):
 
     The `medium:` kinds fill *all four* of their keys from the single
     sweep that produced them, so opening Manhwa after Manga costs
-    nothing at all."""
+    nothing at all.
+
+    Returns what the cache now holds - the merged list, not just the
+    page that was fetched - so a redraw fed by this keeps whatever
+    depth the user had already scrolled to."""
     if discover is None:
         return []
     try:
@@ -365,32 +372,57 @@ def _fetch_browse_rows(kind):
             rows = []
             for name, medium_rows in (found or {}).items():
                 clean = [r for r in (medium_rows or []) if isinstance(r, dict)]
-                _remember_browse_rows(f"medium:{name}", clean)
+                merged = _remember_browse_rows(f"medium:{name}", clean)
                 if f"medium:{name}" == kind:
-                    rows = clean
+                    rows = merged
+            if not rows:
+                # A sweep that failed outright must answer the cache,
+                # not [] - an empty answer here feeds a redraw that
+                # would blank a section the user is looking at.
+                cached = _DISCOVER_CACHE.get((kind, ""))
+                rows = list(cached[1]) if cached else []
             return rows
         for key, fetch in _BROWSE_ROWS:
             if key == kind:
                 rows = [r for r in (fetch() or []) if isinstance(r, dict)]
-                _remember_browse_rows(kind, rows)
-                return rows
+                return _remember_browse_rows(kind, rows)
         rows = [r for r in (discover.discover_video(
             kind, limit=DISCOVER_LIMIT) or []) if isinstance(r, dict)]
-        _remember_browse_rows(kind, rows)
-        return rows
+        return _remember_browse_rows(kind, rows)
     except Exception:
         logs.exception("browse rows failed for %s" % kind)
         return []
 
 
 def _remember_browse_rows(kind, rows):
-    """Write one kind's rows into both caches. Empty rows are *not*
-    stored: a source that answered nothing this minute must not blank a
-    section that has real rows on disk from last session."""
+    """Fold one freshly fetched first page into both caches and return
+    what the cache now holds.
+
+    **Merged, never overwritten - a refresh must not cut a grown list
+    back to page one.** The category pages grow this cache as the user
+    scrolls (load-on-scroll appends land in it); storing the refreshed
+    30-row first page over that threw the depth away, and worse: the
+    redraw it fed cut the on-screen grid back to 30 *while a skip=60
+    batch was in flight*, which is how the owner's series cache ended
+    up holding source rows 1-30 + 61-90 and the section latched "no
+    more" forever (23 August 2026 - see _category_skip). The fresh
+    page leads, because it is the source's current head; the old rows
+    it does not contain keep their order behind it.
+
+    Empty rows are *not* stored: a source that answered nothing this
+    minute must not blank a section that has real rows on disk from
+    last session."""
+    cached = _DISCOVER_CACHE.get((kind, ""))
+    kept = list(cached[1]) if cached else []
     if not rows:
-        return
-    _DISCOVER_CACHE[(kind, "")] = (time.monotonic(), rows)
-    _save_discover_row(kind, rows)
+        return kept
+    fresh_titles = {(r.get("title") or "").strip().lower() for r in rows}
+    merged = list(rows) + [
+        r for r in kept
+        if (r.get("title") or "").strip().lower() not in fresh_titles]
+    _DISCOVER_CACHE[(kind, "")] = (time.monotonic(), merged)
+    _save_discover_row(kind, merged)
+    return merged
 
 
 def prewarm_discover():
@@ -485,19 +517,97 @@ def _cached_upcoming_calendar():
     return None
 
 
+# The calendar's own disk copy, and why it exists: **AniList's 403 was
+# emptying the whole "Airing Soon" group** (the owner, 22 August 2026:
+# "the releasing date ... is only showing the saved"). Measured live the
+# same day - fetch_upcoming_airing raised RateLimited on the owner's
+# network - and _fetch_upcoming_calendar read that as "no rows", so
+# every unsaved title's date vanished while the saved ones kept theirs,
+# cached on their entries. The saved entries' cache has no equivalent
+# for a row that is not saved; this file is that equivalent. A calendar
+# covers a week (hours=168), so even a day-old copy still names most of
+# what is coming; rows whose time has passed are dropped by
+# _schedule_rows either way. Its own file, not _DISCOVER_CACHE_FILE:
+# these rows carry datetimes and a different shape, and
+# _load_discover_cache would otherwise sweep them up as a browse row.
+_SCHEDULE_CACHE_FILE = "schedule_cache.json"
+_SCHEDULE_DISK_TTL_S = 7 * 24 * 60 * 60
+
+
+def _save_upcoming_calendar(rows):
+    """Best-effort write-through; `at` becomes ISO text for JSON."""
+    try:
+        flat = []
+        for row in rows:
+            copy = dict(row)
+            when = copy.get("at")
+            if isinstance(when, datetime):
+                copy["at"] = when.astimezone(timezone.utc).isoformat()
+            flat.append(copy)
+        storage.save(_SCHEDULE_CACHE_FILE, {"at": time.time(), "rows": flat})
+    except Exception:
+        return
+
+
+def _load_upcoming_calendar():
+    """(age_seconds, rows) from disk, or None. Rows come back with real
+    datetimes and freshly stamped covers; unparseable rows are dropped
+    rather than trusted."""
+    try:
+        stored = storage.load(_SCHEDULE_CACHE_FILE, {})
+        raw = stored.get("rows")
+        wrote_at = stored.get("at")
+        if not raw or wrote_at is None:
+            return None
+        age = time.time() - float(wrote_at)
+        if age < 0 or age > _SCHEDULE_DISK_TTL_S:
+            return None
+        rows = []
+        for row in raw:
+            if not isinstance(row, dict) or not row.get("at"):
+                continue
+            copy = dict(row)
+            when = datetime.fromisoformat(copy["at"])
+            copy["at"] = (when if when.tzinfo
+                          else when.replace(tzinfo=timezone.utc))
+            rows.append(copy)
+        if not rows:
+            return None
+        _stamp_cached_covers(rows)
+        return age, rows
+    except Exception:
+        return None
+
+
 def _fetch_upcoming_calendar():
-    """AniList's airing week as schedule rows, cached. Never raises - it
-    runs on pool workers (prewarm_discover and the schedule's own
-    fetch), and RateLimited deliberately reads as no rows: the schedule
-    keeps its saved rows, the honest answer and not an error dialog."""
+    """AniList's airing week as schedule rows, cached in memory and on
+    disk. Never raises - it runs on pool workers (prewarm_discover and
+    the schedule's own fetch).
+
+    A refusal - RateLimited above all - answers with the **last good
+    calendar** instead of nothing: stale memory first, then the disk
+    copy. The fallback keeps its stale stamp (disk rows get `now - age`,
+    the same arithmetic _load_discover_cache uses), so the next visit's
+    _cached_upcoming_calendar still says "not fresh" and AniList is
+    re-asked then - shown-but-stale, never shown-and-final."""
     try:
         rows = anilist.fetch_upcoming_airing(hours=168, limit=40)
     except Exception:
-        return []
-    _stamp_cached_covers(rows)
+        rows = []
     if rows:
+        _stamp_cached_covers(rows)
         _SCHEDULE_UPCOMING_CACHE["upcoming"] = (time.monotonic(), rows)
-    return rows
+        _save_upcoming_calendar(rows)
+        return rows
+    stale = _SCHEDULE_UPCOMING_CACHE.get("upcoming")
+    if stale:
+        return stale[1]
+    loaded = _load_upcoming_calendar()
+    if loaded:
+        age, rows = loaded
+        _SCHEDULE_UPCOMING_CACHE["upcoming"] = (time.monotonic() - age, rows)
+        return rows
+    return []
 
 
 def _prepare_released_rows(found):
@@ -551,9 +661,62 @@ DISCOVER_SEARCH_HEIGHT = 46
 # card past it is behind an arrow the user has to press.
 DISCOVER_STRIP_CHUNK = 8
 
+# The category grids fill in smaller bites. A grid chunk lands while
+# the user is scrolling the very rows it grows, and its whole cost has
+# to fit inside a 16.7ms frame (CLAUDE.md rule 7): measured 23 August
+# 2026 on the Watch page, an 8-card chunk turn ran 13.5-34.0ms (card
+# build alone is ~1.1ms each), so every batch landed as a visible
+# hitch - the owner's "shaking and stuttering". At 4 the worst turn
+# measured 9.4-11.8ms across three runs, none over budget. The strips
+# keep 8: they fill behind a first paint on a page that is not being
+# scrolled yet.
+#
+# **1, down from 4, 23 August 2026 - because the budget above was the
+# wrong one.** 16.7ms is a 60Hz frame; this machine's panels report
+# **144.00Hz** (measured live through helpers/widgets.screen_tick_ms), so
+# a frame is **6.94ms** and a turn tuned to fit 16.7 was never going to.
+# This is the owner's "new loaded cards appearing while I am scrolling
+# ... make it >= 144 fps".
+#
+# Measured 23 August 2026 on the Watch page's Anime grid, a real window
+# at 1600x900, driving 40 real wheel notches from a cold grid, timing the
+# turn itself (not a guess at its parts):
+#
+#   chunk   _fill_row_rest turn: med / p95 / max      over 6.94ms
+#     4          3.88 / 10.19 / 29.08 ms                 17%
+#     2          2.45 /  6.66 / 12.57 ms                  5%
+#     1          1.06 /  3.35 /  9.01 ms                  0%
+#
+# One card per turn is the only value where the p95 clears the budget, so
+# that is the value. It halves the fill rate against chunk 2 (about 143
+# cards a second at DISCOVER_CHUNK_MS below, so a screenful in ~84ms and
+# a 90-card grid in ~0.6s), which stays well inside rule 7 - and the
+# owner asked for the scroll, explicitly and twice.
+#
+# Two things this is *not*, both measured rather than assumed:
+# `_maybe_load_more_category` runs on every scroll tick and costs
+# **0.02-0.03ms** (p95 0.05), so the per-tick slot is not a cost at all;
+# and a *settled* grid already scrolls at **3.21ms median, 3% over
+# budget** - the same code, with nothing left to load. The hitch is the
+# filling, exactly as the owner described it, and nothing else.
+CATEGORY_GRID_CHUNK = 1   # unused since poster_grid; the strips keep DISCOVER_STRIP_CHUNK
+
+# How close to a category page's bottom (px) the scroll gets before the
+# next batch is asked for. Two card rows' worth - a row is a ~306px card
+# plus 14px grid spacing (measured on the Popular Now strip, 22 August
+# 2026) - so the fetch is in flight while the user still has content to
+# look at, which is what makes the scroll read as continuous.
+CATEGORY_LOAD_MARGIN = 640
+
 # The width a Discover card's title is actually laid out at: the card is
 # POSTER_SIZE[0] + 20 wide and its layout keeps 8px of margin each side.
 DISCOVER_CARD_TEXT_WIDTH = POSTER_SIZE[0] + 20 - 16
+# How many lines of title every discover card reserves, whether or not it
+# needs them. Two: measured over the owner's real catalogue rows, a title
+# wraps to two lines often and to three essentially never at this width,
+# and a card that reserves what it might need cannot change height when
+# its neighbour turns out to need more (see _build_discover_card).
+DISCOVER_CARD_TITLE_LINES = 2
 # And how long between chunks. **Not zero**, and that is measured: a
 # zero timer posts an event the loop drains in the same round it is
 # already draining, so all ninety of Watch's cards were still built
@@ -562,7 +725,16 @@ DISCOVER_CARD_TEXT_WIDTH = POSTER_SIZE[0] + 20 - 16
 # August 2026). One frame's worth of delay puts a paint between every
 # pair of chunks instead, so the page is on screen while the rest of the
 # rows fill in behind it.
-DISCOVER_CHUNK_MS = 16
+#
+# **7ms, not 16** - the same 60Hz-vs-144Hz correction as
+# CATEGORY_GRID_CHUNK above. The number's *meaning* is "one frame's worth
+# of delay", and one frame on this machine is 6.94ms; leaving it at 16
+# while the chunk halved would have made the grid take more than twice as
+# long to fill for no benefit. Deliberately not zero, which is the
+# measurement this constant was created for: a zero timer is drained in
+# the same loop round, so all ninety cards were built before Qt sent one
+# paint (first frame 254-486ms after the click).
+DISCOVER_CHUNK_MS = 7
 # 450 originally; halved at the owner's ask ("the suggestion search is
 # too slow") - the debounce was a flat 450ms added on top of the network
 # round trip before a search even started. 250 still coalesces normal
@@ -1012,7 +1184,10 @@ def _open_manga_entry(parent, entry):
         return False
     music_url = app_settings.get_manga_music_url()
     if music_url:
-        webbrowser.open(music_url)
+        # The same launch form the reader uses. Opened raw here until 23
+        # August 2026, so the identical link autoplayed from the reader
+        # and sat waiting for a click from this door.
+        webbrowser.open(app_settings.music_launch_url(music_url))
     webbrowser.open(opened_url)
     return True
 
@@ -1331,6 +1506,15 @@ class _DiscoverSignals(QObject):
     # can hold: the clicked row's item dict, the resolved catalogue
     # row ({} = nothing matched well enough to open).
     schedule_open = Signal(object, object)
+    # A category page's next batch, fetched because the user scrolled
+    # near the bottom: kind, the fresh rows, the _category_run that
+    # asked, and where the source's cursor stands after this answer
+    # (the skip that was asked plus the rows that came back - raw rows,
+    # not deduplicated ones, because the source has consumed them
+    # either way; see _category_skip). Carried separately from
+    # `results`, which redraws the whole section - this one appends.
+    # See _maybe_load_more_category.
+    more_results = Signal(str, list, int, int)
 
 
 class _StayOpenMenu(QMenu):
@@ -1514,6 +1698,15 @@ class ContinueCover(QLabel):
         self.button.hide()
         self.button.move((self.width() - self.button.width()) // 2,
                          (self.height() - self.button.height()) // 2)
+
+    def set_cover(self, pixmap):
+        """Swap the artwork after a late fetch (see helpers/cover_fetch).
+        Not a bare setPixmap: the hover frost is cut from `_sharp`, so a
+        swapped pixmap has to reset both or the ring would frost the old
+        blank tile over the new cover."""
+        self._sharp = pixmap
+        self._frosted = None
+        self.setPixmap(pixmap)
 
     def _on_fade(self, value):
         self._mix = float(value)
@@ -1723,10 +1916,33 @@ def discover_entry(item, entry_type):
         # video rows, which have no such binding.
         "url": item.get("url") or "",
         "cover_url": item.get("poster") or None,
-        "cover_path": None,
+        # Carried through when the row's card already downloaded it (see
+        # _on_discover_poster). It was hardcoded None, which is why a
+        # details page opened straight from Discover had no picture to
+        # build its blurred ground from - details._cover_source now falls
+        # back to cover_url as well, but handing over the path it already
+        # has saves that page a lookup it does not need.
+        "cover_path": item.get("cover_path") or None,
         "site_id": item.get("site_id"),
         "imdb_id": item.get("imdb_id") or None,
     }
+
+
+class _GridCover:
+    """What a painted-grid record carries where a widget card carried its
+    cover QLabel: something with `setPixmap`, so `_on_discover_poster`
+    serves both kinds of card without knowing which it has."""
+
+    __slots__ = ("_grid", "_index")
+
+    def __init__(self, grid, index):
+        self._grid, self._index = grid, index
+
+    def setPixmap(self, pixmap):
+        try:
+            self._grid.set_cover(self._index, pixmap)
+        except RuntimeError:
+            pass        # the grid was rebuilt under the fetch
 
 
 class TrackerPage(GlassPage):
@@ -1853,6 +2069,10 @@ class TrackerPage(GlassPage):
         # one pixmap instead of rebuilding a row. Nothing in here outlives
         # the rebuild that filled it.
         self._discover_cards = {}
+        # Re-measured per rebuild: a fold or a DPI change can
+        # legitimately move them (see _build_discover_card).
+        self._discover_card_height = None
+        self._discover_line_heights = None
         self._discover_holders = {}
         self._discover_query = ""
 
@@ -2076,12 +2296,28 @@ class TrackerPage(GlassPage):
         self._category_layout = QVBoxLayout(self.category_tab)
         self._category_layout.setContentsMargins(0, 0, 0, 0)
         self._category_layout.setSpacing(14)
-        self.category_body = QWidget()
-        self._category_body_layout = QVBoxLayout(self.category_body)
-        self._category_body_layout.setSpacing(16)
-        self._category_body_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._category_layout.addWidget(
-            scroll_area(self.category_body, ground=theme.PANEL_FILL), stretch=1)
+        # **No scroll_area here any more.** The painted grid scrolls
+        # itself (helpers/poster_grid, 24 August 2026): it fills the tab,
+        # draws the visible cells at an offset and paints its own
+        # scrollbar, so there is no backing store for a QScrollArea to
+        # move. The note line sits above it, outside the scrolling, so it
+        # stays readable instead of scrolling away.
+        #
+        # One grid for the tab's whole life, not one per section: it
+        # carries the cover cache and the laid-out text of everything it
+        # holds, and a section change is `set_items` rather than a new
+        # widget with all of that to build again.
+        self._category_note_label = QLabel("", objectName="Muted")
+        self._category_note_label.setWordWrap(True)
+        self._category_layout.addWidget(self._category_note_label)
+        self._category_widget = PosterGrid(POSTER_SIZE, ground=theme.PANEL_FILL,
+                                           parent=self.category_tab)
+        self._category_widget.clicked.connect(self._on_category_grid_pick)
+        self._category_widget.needs_cover.connect(self._on_category_grid_cover)
+        self._category_layout.addWidget(self._category_widget, stretch=1)
+        # Kept as the width reference the card-host sizing walks
+        # (_grid_host); it is never shown.
+        self.category_body = self._category_widget
         self.category_tab.setVisible(False)
         layout.addWidget(self.category_tab, stretch=1)
         # Which category is showing, and its own run counter - a slow
@@ -2091,6 +2327,44 @@ class TrackerPage(GlassPage):
         self._category_run = 0
         self._category_signals = _DiscoverSignals()
         self._category_signals.results.connect(self._on_category_results)
+        # Load-on-scroll state for the category pages (the owner's ask,
+        # 22 August 2026: "make it always load more when the user
+        # scrolls down"). The rows currently drawn, the grid they sit
+        # in, whether a batch is in flight (never two at once), and the
+        # kinds whose source has genuinely run out - a batch that adds
+        # nothing new latches its kind rather than asking forever.
+        self._category_rows = []
+        self._category_grid = None
+        self._category_entry_type = ""
+        self._category_loading = False
+        self._category_no_more = set()
+        # Where the *source* is up to, per video kind - not the same
+        # number as len(_category_rows), and keeping them separate is
+        # the fix for "the series are not loading more" (23 August
+        # 2026). The screen count drifts from the source offset the
+        # moment anything is deduplicated or redrawn: the owner's real
+        # series cache held source rows 1-30 + 61-90 (a TTL refresh cut
+        # the screen back to 30 while a skip=60 batch was in flight),
+        # so every later ask at skip=len(rows)=60 answered thirty
+        # duplicates, fresh=0 latched _category_no_more, and the
+        # section was dead for good - while Cinemeta itself answered
+        # 27-30 fresh rows per page past skip=300 for all three kinds
+        # when probed. The cursor advances by what the source *returned*
+        # whether or not it was fresh, so an overlapped page moves past
+        # itself instead of re-asking the same offset forever.
+        self._category_skip = {}
+        # Consecutive answers that made no progress (failed fetch, or
+        # every row a duplicate), per kind. The latch used to be set on
+        # the first such answer, which turned one Cinemeta timeout -
+        # its slow tail is measured at 7-22s against a 20s cap - into
+        # "this section never loads more again this visit".
+        self._category_dry_strikes = {}
+        self._category_signals.more_results.connect(self._on_category_more)
+        # One signal covering what valueChanged and rangeChanged used to:
+        # the grid emits `scrolled` both when it moves and when its
+        # content height changes, so a batch that still leaves the user
+        # near the bottom pulls the next one without another wheel notch.
+        self._category_widget.scrolled.connect(self._maybe_load_more_category)
 
         # **The Saved grid is not built until Saved is looked at.**
         # These pages open on Discover every time (see below), so every
@@ -3199,16 +3473,31 @@ class TrackerPage(GlassPage):
         # one, including the bottom of its hover border, sat below the
         # visible row. That is the owner's "the hover highlight is going
         # down more than the scrollable row could show".
-        scroller._refit_height = lambda: self._fit_strip_height(area, strip)
+        scroller._refit_height = lambda: self._fit_strip_height(scroller, area,
+                                                                strip)
         return scroller
 
     @staticmethod
-    def _fit_strip_height(area, strip):
+    def _fit_strip_height(scroller, area, strip):
         """Grow a sideways row to whatever its cards now need.
 
         Only ever grows: shrinking mid-fill would make the row jump
         about as chunks land, and a row that is briefly too tall reads
-        as spacing while one that is too short clips its own cards."""
+        as spacing while one that is too short clips its own cards.
+
+        **The SideScroller grows too, and that is the fix for "the
+        highlight seems trimmed from the bottom" (the owner, 22 August
+        2026).** The wrapper takes its fixed height from the area at
+        construction - the height pinned from the *first chunk's* cards
+        - and it, not the area, is what the page lays out and what its
+        children are clipped to. Growing only the area left it hanging
+        past the wrapper's bottom edge: measured with a short-titled
+        first chunk and a three-line title arriving later, the area
+        regrew to 399px inside a wrapper still fixed at 287, clipping
+        101px of every card - the hover ring's bottom border, the title
+        tails and the scrollbar all cut off, which is exactly the
+        owner's screenshot. Wrapper first: its resizeEvent re-geometries
+        the area to the new rect."""
         try:
             cards = [w for w in strip.findChildren(Card)]
             for card in cards:
@@ -3218,6 +3507,8 @@ class TrackerPage(GlassPage):
             tallest = max([c.sizeHint().height() for c in cards] or [0])
             needed = (max(strip.sizeHint().height(), tallest)
                       + area.horizontalScrollBar().sizeHint().height())
+            if needed > scroller.height():
+                scroller.setFixedHeight(needed)
             if needed > area.height():
                 area.setFixedHeight(needed)
         except RuntimeError:
@@ -3253,6 +3544,21 @@ class TrackerPage(GlassPage):
             cover.setFixedSize(*POSTER_SIZE)
             cover.setPixmap(pixmap)
         card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # A cover that is not on disk is fetched and swapped in - the
+        # owner's "the main page ... does not load the images by itself"
+        # (helpers/cover_fetch has the walk). Written back so the next
+        # build finds it without asking.
+        if entry.get("cover_url") or entry.get("cover_path"):
+            _url = str(entry.get("cover_url") or "")
+            cover_fetch.ensure(
+                entry.get("id"), entry.get("cover_path"),
+                (lambda u=_url: images.download(u)) if _url else None,
+                entry["title"], POSTER_SIZE,
+                cover.set_cover if isinstance(cover, ContinueCover) else cover.setPixmap,
+                persist=lambda path, en=entry: (
+                    en.__setitem__("cover_path", str(path)),
+                    storage.update_entry(_progress_data_file(en), en.get("id"),
+                                         {"cover_path": str(path)})))
 
         if self._select_mode:
             # A child of the cover at a fixed corner offset, not a row in
@@ -3871,6 +4177,10 @@ class TrackerPage(GlassPage):
         run = self._discover_run
         self._discover_query = query
         self._discover_cards = {}
+        # Re-measured per rebuild: a fold or a DPI change can
+        # legitimately move them (see _build_discover_card).
+        self._discover_card_height = None
+        self._discover_line_heights = None
         self._discover_holders = {}
         self._featured_banner = None
         self._featured_save_btn = None
@@ -3953,6 +4263,11 @@ class TrackerPage(GlassPage):
         self._category_key = key
         self._category_run += 1
         run = self._category_run
+        # A new visit is a new paging cycle: whatever batch was in
+        # flight for the old run will be dropped by its run check, so
+        # holding the in-flight latch for it would block this section's
+        # first load-more for no reason.
+        self._category_loading = False
 
         # **The cache is read here, on the UI thread, not on a worker.**
         # These rows are the same rows Discover's are - same catalogue,
@@ -3975,13 +4290,18 @@ class TrackerPage(GlassPage):
             lookup_pool.submit_browse(self._category_worker, kind, run)
             return
 
-        _clear_layout(self._category_body_layout)
-        heading = QLabel(label, objectName="SectionTitle")
-        self._category_body_layout.addWidget(heading)
-        self._category_body_layout.addWidget(
-            QLabel(self._category_note(kind), objectName="Muted"))
-        self._category_body_layout.addWidget(
-            QLabel("Looking around...", objectName="Muted"))
+        # The old section's rows are gone; load-more must not measure the
+        # new section against them (a wrong `have` offset), nor append
+        # into a grid that is showing something else.
+        self._category_rows = []
+        self._category_grid = None
+        self._category_widget.set_items([])
+        # No SectionTitle over the body: the panel heading _set_tab just
+        # wrote is this same word, and the two sat stacked ("Series" big,
+        # "Series" small - the owner's screenshot, 22 August 2026). The
+        # note line stays; it says something the heading does not.
+        self._category_note_label.setText(
+            self._category_note(kind) + "   ·   Looking around...")
         lookup_pool.submit_browse(self._category_worker, kind, run)
 
     @staticmethod
@@ -4011,6 +4331,20 @@ class TrackerPage(GlassPage):
                         if row[2] == kind), None)
         if section is None:
             return
+        # A TTL refresh that changed nothing must not tear the grid
+        # down. This redraw used to run unconditionally ~1.3s after a
+        # stale section was drawn, destroying and rebuilding every
+        # card while the user was already scrolling them - measured 23
+        # August 2026: grid cut from 60 items to 30 and the scroll
+        # position clamped 1016 -> 776 mid-scroll, which is a visible
+        # jump on top of the shaking the append path caused. The
+        # worker's answer is the merged cache now, so "nothing changed"
+        # is the common case and costs a title-list comparison.
+        if results and [
+                (r.get("title") or "").strip().lower() for r in results
+        ] == [(r.get("title") or "").strip().lower()
+              for r in self._category_rows]:
+            return
         _key, label, _kind, entry_type = section
         self._draw_category(kind, results, label, entry_type, run)
 
@@ -4018,14 +4352,26 @@ class TrackerPage(GlassPage):
         """Put one category's rows on screen. Shared by the cache hit
         (drawn straight from _show_category) and the worker's answer, so
         both land identically."""
-        _clear_layout(self._category_body_layout)
-        self._category_body_layout.addWidget(
-            QLabel(label, objectName="SectionTitle"))
-        self._category_body_layout.addWidget(
-            QLabel(self._category_note(kind), objectName="Muted"))
+        # **A redraw of the section already on screen refills the grid
+        # it has; it does not replace it.** The cache hit draws first and
+        # the network's answer redraws a second later, and tearing the
+        # grid down between the two deleted a widget the user could be
+        # scrolling - measured 23 August 2026 as a RuntimeError on the
+        # Read page mid-sweep, and on screen as a jump. Covers already in
+        # hand are carried across by title.
+        if self._refill_grid(kind, results, entry_type):
+            return
+        # Reset before the empty-results return below, or load-more
+        # would keep measuring against a section that is off screen.
+        self._category_rows = []
+        self._category_grid = None
+        # Note only, no SectionTitle - see _show_category: the panel
+        # heading above the body already says this word.
+        self._category_note_label.setText(
+            self._category_note(kind) if results
+            else self._category_note(kind) + "   ·   Nothing to show right now.")
         if not results:
-            self._category_body_layout.addWidget(
-                QLabel("Nothing to show right now.", objectName="Muted"))
+            self._category_widget.set_items([])
             return
         # **The card set is stamped with _discover_run, not the run this
         # was called with, and that is the whole of the owner's "the
@@ -4054,11 +4400,334 @@ class TrackerPage(GlassPage):
         self._discover_run += 1
         card_run = self._discover_run
         self._discover_cards = {}
-        cards = [self._build_discover_card(kind, index, item, entry_type,
-                                           card_run)
-                 for index, item in enumerate(results)]
-        self._category_body_layout.addWidget(
-            self._build_card_grid(cards, self.category_body))
+        # Re-measured per rebuild: a fold or a DPI change can
+        # legitimately move them (see _build_discover_card).
+        self._discover_card_height = None
+        self._discover_line_heights = None
+        # What load-on-scroll appends to (_on_category_more): the rows
+        # on screen, the grid they live in, and the type a batch's
+        # cards save as. A redraw is a fresh paging cycle, so the
+        # kind's exhausted latch is lifted too - a TTL refresh hands
+        # this a new first page, and "ran out last cycle" says nothing
+        # about this one.
+        self._category_rows = list(results)
+        self._category_entry_type = entry_type
+        self._category_no_more.discard(kind)
+        self._category_dry_strikes.pop(kind, None)
+        # Best guess at where the source's cursor stands for what is on
+        # screen; every batch answer corrects it from then on (see
+        # _category_skip). A redraw is the one moment the guess can be
+        # wrong - a deduplicated or holed cache under-counts - and the
+        # overlap-advance in _on_category_more is what absorbs exactly
+        # that.
+        self._category_skip[kind] = len(results)
+        # The first page in one pass - today's behaviour, ~30 cards -
+        # and anything past it (a cache grown by earlier scrolling) in
+        # chunks through _fill_row_rest, exactly as a Discover row
+        # fills: a 100-card cache rebuilt in one loop here would stand
+        # in front of the section's first paint.
+        # **Every row goes in at once, as a record, not as a widget.**
+        # The grid is one painted widget (helpers/poster_grid) - five
+        # hundred records is one setFixedHeight, and a cover is one cell
+        # repaint when it lands. There is no chunking because there is
+        # nothing to chunk: a record is a dict. Covers are requested by
+        # the grid itself for the cells in view (needs_cover), so a deep
+        # page no longer downloads every poster at draw time.
+        grid = self._category_widget
+        grid._kind = kind
+        grid._entry_type = entry_type
+        grid._card_run = card_run
+        self._category_grid = grid
+        # A new section starts at the top; the grid is reused, so its
+        # offset would otherwise carry over from the last one.
+        grid.set_items([])
+        self._append_grid_records(kind, results, 0)
+
+    def _refill_grid(self, kind, results, entry_type) -> bool:
+        """Put `results` into the painted grid already showing `kind`.
+        False when there is no such grid, and the caller builds one."""
+        grid = self._category_grid
+        if (not isinstance(grid, PosterGrid)
+                or getattr(grid, "_kind", None) != kind or not results):
+            return False
+        carried = {}
+        for index in range(grid.count()):
+            record = grid.record(index)
+            if record and record.get("pixmap") is not None:
+                carried[record["title"].lower()] = record["pixmap"]
+        self._discover_run += 1
+        card_run = self._discover_run
+        self._discover_cards = {}
+        self._category_rows = list(results)
+        self._category_entry_type = entry_type
+        self._category_no_more.discard(kind)
+        self._category_dry_strikes.pop(kind, None)
+        self._category_skip[kind] = len(results)
+        saved_titles = self._saved_titles()
+        records = [self._grid_record(item, saved_titles) for item in results]
+        for record in records:
+            pixmap = carried.get(record["title"].lower())
+            if pixmap is not None:
+                record["pixmap"] = pixmap
+        # Keeps its scroll position: this is the network's answer
+        # redrawing what the cache already put on screen, and the user
+        # may be part-way down it. The click/cover signals are connected
+        # once, for the tab's life - what changes is the kind they are
+        # about, which the grid carries.
+        grid.set_items(records, keep_position=True)
+        grid._kind = kind
+        grid._entry_type = entry_type
+        grid._card_run = card_run
+        for index, item in enumerate(results):
+            self._discover_cards[(kind, index)] = {
+                "cover": _GridCover(grid, index),
+                "title": records[index]["title"],
+                "size": POSTER_SIZE, "item": item, "badge": None,
+                "badge_at_foot": False, "grid": grid, "index": index}
+        return True
+
+    def _grid_record(self, item, saved_titles):
+        """The painted grid's view of one catalogue row."""
+        title_text = (item.get("title") or "").strip()
+        return {"title": title_text,
+                "year": str(item.get("year") or "").strip(),
+                "rating": self._rating_text(item),
+                "saved": title_text.lower() in saved_titles,
+                "pixmap": None}
+
+    def _append_grid_records(self, kind, items, first_index):
+        """Hand rows to the painted grid and register their records so
+        the poster and Saved paths (shared with the Discover strips) keep
+        working unchanged - `_on_discover_poster` calls
+        record["cover"].setPixmap, and `_GridCover` answers that."""
+        grid = self._category_grid
+        if grid is None:
+            return
+        saved_titles = self._saved_titles()
+        records = [self._grid_record(item, saved_titles) for item in items]
+        grid.append_items(records)
+        for offset, item in enumerate(items):
+            index = first_index + offset
+            self._discover_cards[(kind, index)] = {
+                "cover": _GridCover(grid, index),
+                "title": records[offset]["title"],
+                "size": POSTER_SIZE, "item": item, "badge": None,
+                "badge_at_foot": False, "grid": grid, "index": index}
+
+    def _on_category_grid_pick(self, index):
+        """The one grid serves every section, so what a click means
+        depends on the kind it is currently showing - carried on the
+        widget rather than bound into a lambda per section, which is
+        what a reused widget makes wrong."""
+        grid = self._category_widget
+        self._on_grid_pick(getattr(grid, "_kind", ""), index,
+                           getattr(grid, "_entry_type", ""))
+
+    def _on_category_grid_cover(self, index):
+        grid = self._category_widget
+        self._on_grid_needs_cover(getattr(grid, "_kind", ""), index,
+                                  getattr(grid, "_card_run", -1))
+
+    def _on_grid_pick(self, kind, index, entry_type):
+        record = self._discover_cards.get((kind, index))
+        if record:
+            self._on_discover_pick(record["item"], entry_type)
+
+    def _on_grid_needs_cover(self, kind, index, run):
+        if run != self._discover_run:
+            return
+        record = self._discover_cards.get((kind, index))
+        if not record:
+            return
+        item = record["item"]
+        path = item.get("cover_path")
+        if path and not os.path.exists(str(path)):
+            # Evicted by images.trim_cache since the row learned its path:
+            # forget it and fetch by URL again, or the cell would draw
+            # blank for good.
+            item["cover_path"] = None
+            path = None
+        if path:
+            # On disk already, but **decoded on the pool, never here.**
+            # This used to call thumbnail_or_avatar on the UI thread,
+            # and for a cover with no pre-cut tile that is a full JPEG
+            # decode - the grid asks for ~35 covers per paint, so a page
+            # visited for the first time paid thirty-odd decodes inside
+            # one scroll tick. Measured 23 August 2026: Anime (tiles on
+            # disk from earlier visits) scrolled at a 7.2ms median gap,
+            # Movies and Manga (no tiles yet) at 7.5-8.9ms with p95 of
+            # 18-23ms - two to three dropped frames per burst.
+            lookup_pool.submit(self._warm_tile_worker, kind, index, path, run)
+            return
+        self._request_poster(kind, index, item, run)
+
+    def _warm_tile_worker(self, kind, index, path, run):
+        """Cut the cover's tile on a worker, then hand the path to the
+        same slot a download uses. `images._fitted` is documented as
+        thread-safe (PIL only); the slot's thumbnail_or_avatar then finds
+        the tile in the process cache and only converts to a QPixmap."""
+        try:
+            images._fitted(path, tuple(POSTER_SIZE), images._stamp(path))
+        except Exception:
+            pass
+        try:
+            self._discover_signals.poster.emit(kind, index, str(path), "", run)
+        except RuntimeError:
+            pass
+
+    def _maybe_load_more_category(self, *_args):
+        """Ask for the next batch when the category scroll nears its
+        bottom (the owner's ask, 22 August 2026: "make it always load
+        more when the user scrolls down").
+
+        One batch at a time (_category_loading), stopped for good per
+        kind once a batch comes back with nothing new
+        (_category_no_more) - the video catalogues page for hundreds of
+        rows, but the reading sweeps genuinely run out (measured: Manga
+        had 3 rows beyond its first 30 across the owner's sites), and
+        asking a dry source on every wheel notch would be a request per
+        scroll forever. Also fires on rangeChanged, so a viewport the
+        current rows don't fill pulls more without any scrolling."""
+        if not self.category_tab.isVisible() or self._category_loading:
+            return
+        section = next((row for row in self.CATEGORY_SECTIONS
+                        if row[0] == self._category_key), None)
+        if section is None or not self._category_rows:
+            return
+        kind = section[2]
+        if kind in self._category_no_more:
+            return
+        grid = self._category_widget
+        if grid.max_offset() - grid.scroll_offset() > CATEGORY_LOAD_MARGIN:
+            return
+        self._category_loading = True
+        # The browse pool, like every category fetch - the shared queue
+        # is drained by page-load backfill, and this answer is what the
+        # user is waiting at the bottom of the page for.
+        lookup_pool.submit_browse(
+            self._category_more_worker, kind, len(self._category_rows),
+            self._category_skip.get(kind, len(self._category_rows)),
+            self._category_run)
+
+    def _category_more_worker(self, kind, have, skip, run):
+        """Fetch rows past what is already on screen. Never raises - a
+        dead pool worker takes every queued browse with it - and always
+        reports, so a failed batch unlatches the in-flight flag rather
+        than blocking load-more for the section's life.
+
+        Video kinds page Cinemeta by `skip`, the *source's* cursor, not
+        the screen's row count - the two drift apart (see
+        _category_skip) and paging by the screen count is what killed
+        the Series section. The reading kinds have no offset to ask
+        for: the sweep is re-run wider (limit = `have` + one page) and
+        the overlap is dropped by title in _on_category_more -
+        measured, a doubled limit returned +29 new rows for Manhwa,
+        +25 Other, +11 Manhua, +3 Manga in 13.8s on the owner's own
+        sites."""
+        try:
+            if kind.startswith("medium:"):
+                medium = kind.split(":", 1)[1]
+                found = discover.reading_sites_by_medium_all(
+                    limit=have + DISCOVER_LIMIT)
+                rows = (found or {}).get(medium) or []
+            else:
+                rows = discover.discover_video(kind, query="",
+                                               limit=DISCOVER_LIMIT,
+                                               skip=skip)
+        except Exception:
+            rows = []
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        try:
+            self._category_signals.more_results.emit(
+                kind, rows, run, skip + len(rows))
+        except RuntimeError:
+            pass    # the page was torn down under the fetch
+
+    # How many no-progress answers in a row end paging for the visit.
+    # One is not enough to conclude anything: a single Cinemeta timeout
+    # (its slow tail is 7-22s, measured) answers [], and a single
+    # all-duplicate page just means the cursor guess was behind the
+    # rows on screen (the owner's holed series cache). Three failures
+    # or four overlapped pages in a row is a source that has genuinely
+    # stopped giving.
+    CATEGORY_EMPTY_STRIKES = 3
+    CATEGORY_OVERLAP_STRIKES = 4
+
+    def _on_category_more(self, kind, rows, run, next_skip):
+        # Unlatched before any drop-out: whatever happens to this
+        # batch, the next scroll may ask again.
+        self._category_loading = False
+        if run != self._category_run:
+            return
+        if rows and not kind.startswith("medium:"):
+            # The source consumed these rows whether or not the screen
+            # keeps any - advancing the cursor even for an all-overlap
+            # page is what lets the next ask move past it instead of
+            # replaying the same offset forever.
+            self._category_skip[kind] = max(
+                self._category_skip.get(kind, 0), next_skip)
+        have = {(r.get("title") or "").strip().lower()
+                for r in self._category_rows}
+        fresh = [r for r in rows
+                 if (r.get("title") or "").strip()
+                 and (r.get("title") or "").strip().lower() not in have]
+        if not fresh:
+            strikes = self._category_dry_strikes.get(kind, 0) + 1
+            self._category_dry_strikes[kind] = strikes
+            if not rows:
+                # Nothing came back at all: a dry source, or one
+                # timeout. Only a streak latches; a redraw also lifts
+                # the latch (_draw_category).
+                if strikes >= self.CATEGORY_EMPTY_STRIKES:
+                    self._category_no_more.add(kind)
+                return
+            if kind.startswith("medium:"):
+                # The widened sweep handed back only titles already on
+                # screen: the owner's sites are genuinely out (measured
+                # 22 August 2026: Manga had 3 rows beyond its first 30).
+                # Re-asking would repeat the whole multi-site sweep for
+                # the same answer.
+                self._category_no_more.add(kind)
+                return
+            if strikes >= self.CATEGORY_OVERLAP_STRIKES:
+                self._category_no_more.add(kind)
+                return
+            # A whole page of duplicates and a cursor that just moved
+            # past them: ask again right away, from the new offset -
+            # this is the self-heal for a screen/source desync, and
+            # waiting for another wheel notch would look exactly like
+            # "not loading more".
+            QTimer.singleShot(
+                0, lambda: _if_alive(self._maybe_load_more_category))
+            return
+        self._category_dry_strikes[kind] = 0
+        before = len(self._category_rows)
+        self._category_rows.extend(fresh)
+        # The module cache grows with the page, so a fold's re-wrap and
+        # the next visit redraw everything already fetched instead of
+        # cutting the grid back to page one - and the disk copy keeps
+        # the depth across a restart. The stamp is deliberately kept:
+        # extending a list is not refreshing it, and the TTL should
+        # still bring a fresh first page when it expires.
+        cached = _DISCOVER_CACHE.get((kind, ""))
+        if cached:
+            # Deduped against the *cache's* titles, not the screen's: a
+            # TTL refresh can have replaced the cached first page while
+            # these rows were in flight, and the two lists then overlap
+            # differently.
+            seen = {(r.get("title") or "").strip().lower()
+                    for r in cached[1]}
+            merged = list(cached[1]) + [
+                r for r in fresh
+                if (r.get("title") or "").strip().lower() not in seen]
+            _DISCOVER_CACHE[(kind, "")] = (cached[0], merged)
+            _save_discover_row(kind, merged)
+        if self._category_grid is None:
+            return
+        # Appended to the painted grid as records. Nothing on screen can
+        # move: the grid's height is rows x cell height and every
+        # existing cell keeps its rect by construction (poster_grid).
+        self._append_grid_records(kind, fresh, before)
 
     def _discover_subheading(self, kind="") -> str:
         if self._discover_query:
@@ -4107,9 +4776,16 @@ class TrackerPage(GlassPage):
             found = None
         rows = [item for item in (found or []) if isinstance(item, dict)]
         if rows:
-            _DISCOVER_CACHE[key] = (time.monotonic(), list(rows))
             if not query:
-                _save_discover_row(kind, rows)
+                # Through the merge, not an overwrite - a browse key is
+                # shared with the category pages, whose load-on-scroll
+                # grew it, and storing the refreshed first page over
+                # that is the truncation that broke Series paging (see
+                # _remember_browse_rows). The strip only draws a page's
+                # worth of whatever comes back (_on_discover_results).
+                rows = _remember_browse_rows(kind, rows)
+            else:
+                _DISCOVER_CACHE[key] = (time.monotonic(), list(rows))
         if stamp_and_rows is not None and not rows:
             return    # keep the stale-but-real list over an empty refresh
         self._discover_signals.results.emit(kind, rows, run)
@@ -4138,6 +4814,14 @@ class TrackerPage(GlassPage):
         entry_type = next((t for k, _l, t in self.DISCOVER_ROWS if k == kind),
                           self.ENTRY_TYPES[0])
         rows = list(results)
+        # A browse strip stays one page deep. The category pages grow
+        # the shared cache as the user scrolls - 523 rows under "anime"
+        # on the owner's machine, 23 August 2026 - and a sideways strip
+        # drawing all of it is hundreds of cards behind one arrow, each
+        # queueing a poster download. A typed search is left whole: its
+        # rows are what the user asked for.
+        if not self._discover_query:
+            rows = rows[:DISCOVER_LIMIT]
         # The top of the first row is drawn large instead of being
         # repeated behind itself in the strip below.
         if rows and kind == self.DISCOVER_ROWS[0][0]:
@@ -4193,14 +4877,19 @@ class TrackerPage(GlassPage):
                 return
         except RuntimeError:
             return      # the page went away under the timer
-        chunk = rows[:DISCOVER_STRIP_CHUNK]
-        rest = rows[DISCOVER_STRIP_CHUNK:]
         try:
             layout = content.layout() if content.layout() is not None else None
             inner = getattr(content, "_strip_layout", None)
             target = inner if inner is not None else layout
             if target is None:
                 return
+            # Grid chunks are half a strip's - a grid fills under the
+            # scroll the user is driving, so a chunk turn has to fit a
+            # frame (see CATEGORY_GRID_CHUNK).
+            step = DISCOVER_STRIP_CHUNK if inner is not None \
+                else CATEGORY_GRID_CHUNK
+            chunk = rows[:step]
+            rest = rows[step:]
             for index, item in enumerate(chunk):
                 card = self._build_discover_card(kind, offset + index, item,
                                                  entry_type, run)
@@ -4211,8 +4900,12 @@ class TrackerPage(GlassPage):
                 else:
                     columns = max(1, getattr(content, "_grid_columns", 5))
                     position = offset + index
+                    # AlignTop for the same reason _build_card_grid
+                    # gives it: a card must not stretch when a taller
+                    # neighbour joins its row.
                     target.addWidget(card, position // columns,
-                                     position % columns)
+                                     position % columns,
+                                     Qt.AlignmentFlag.AlignTop)
             # A chunk can carry the longest title in the row; see
             # _build_card_strip for why the row would otherwise clip it.
             refit = getattr(content, "_refit_height", None)
@@ -4253,6 +4946,11 @@ class TrackerPage(GlassPage):
         section = next((row for row in self.CATEGORY_SECTIONS
                         if row[0] == key), None)
         if section is None or not self.category_tab.isVisible():
+            return
+        if isinstance(getattr(self, "_category_grid", None), PosterGrid):
+            # The painted grid recomputes its columns in resizeEvent; a
+            # redraw here would throw away every cover already in hand
+            # for a re-wrap the widget has done on its own.
             return
         # Straight through _show_category: it reads the same cache the
         # grid was drawn from, so a fold re-wraps rather than re-fetches.
@@ -4302,8 +5000,18 @@ class TrackerPage(GlassPage):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(14)
         grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        # Each card pinned to its cell's top, because cards in one row
+        # differ in height (a two-line title is 16px taller) and a
+        # QGridLayout otherwise stretches every card to its row. That
+        # stretch is the owner's "existing loaded cards start shaking":
+        # load-on-scroll fills the last row a few cards per turn, and
+        # each taller arrival re-stretched the neighbours already on
+        # screen - measured 23 August 2026, two settled cards resized
+        # 280 -> 296px as a batch landed; with AlignTop, zero geometry
+        # changes on every existing card across the same append.
         for index, card in enumerate(cards):
-            grid.addWidget(card, index // columns, index % columns)
+            grid.addWidget(card, index // columns, index % columns,
+                           Qt.AlignmentFlag.AlignTop)
         # Kept for _fill_row_rest, which places later cards into the same
         # arrangement - a second guess at the column count would wrap
         # the tail differently from the head.
@@ -4314,12 +5022,24 @@ class TrackerPage(GlassPage):
     def _saved_titles(self):
         """This page's titles, lowercased, for "is it already saved".
 
+        Cached for the life of the page's entry list, because this is
+        called **once per card** while a grid fills under a scroll and it
+        rebuilds a set over every entry each time. `self.entries` is
+        replaced wholesale when it changes, so identity is a sound key
+        and a stale answer is not reachable.
+
         Title, not id: a Discover result carries a catalog's ids and the
         entry was very likely added from the same catalog, but it may
         equally have been typed in by hand - and the thing the user is
         looking at is the title."""
-        return {(entry.get("title") or "").strip().lower()
-                for entry in self.entries if entry.get("type") in self.ENTRY_TYPES}
+        cached = getattr(self, "_saved_titles_cache", None)
+        if cached is not None and cached[0] is self.entries:
+            return cached[1]
+        titles = {(entry.get("title") or "").strip().lower()
+                  for entry in self.entries
+                  if entry.get("type") in self.ENTRY_TYPES}
+        self._saved_titles_cache = (self.entries, titles)
+        return titles
 
     def _chip(self, parent, text, accent=True):
         """A little label drawn *on* the artwork - Harbor's shape, this
@@ -4328,17 +5048,12 @@ class TrackerPage(GlassPage):
         chip that took the press would leave a hole in its own target."""
         chip = QLabel(text, parent)
         chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        if accent:
-            chip.setStyleSheet(
-                f"background: {theme.ACCENT_GRADIENT}; color: {theme.ON_ACCENT};"
-                f" border-radius: {theme.RADIUS_SM}px; padding: 2px 8px;"
-                f" font-size: 8pt; font-weight: 700;")
-        else:
-            chip.setStyleSheet(
-                f"background: {theme.BG}; color: {theme.TEXT};"
-                f" border: 1px solid {theme.BORDER};"
-                f" border-radius: {theme.RADIUS_SM}px; padding: 2px 7px;"
-                f" font-size: 8pt; font-weight: 700;")
+        # An object name, not a setStyleSheet. Both look the same on
+        # screen (the rules in theme.py are these exact declarations),
+        # but setStyleSheet recomputes that widget's style on the spot -
+        # once per card, while the grid is filling under a scroll the
+        # user is driving. See theme.py's note beside QLabel#ArtChip.
+        chip.setObjectName("ArtChip" if accent else "ArtChipPlain")
         chip.adjustSize()
         # A child added to an already-visible parent does not show
         # itself - which is the case when _sync_discover_saved puts a
@@ -4352,6 +5067,12 @@ class TrackerPage(GlassPage):
         featured one, whose top-left already carries FEATURED. The
         height has to be measured rather than assumed - the chip is
         sized by its font and its stylesheet padding."""
+        grid = record.get("grid")
+        if grid is not None:
+            # A painted grid cell: the chip is painted, not a widget.
+            grid.mark_saved(record["index"], True)
+            record["badge"] = True
+            return None
         chip = self._chip(record["cover"], "Saved")
         if record.get("badge_at_foot"):
             chip.move(8, record["size"][1] - chip.height() - 8)
@@ -4469,6 +5190,14 @@ class TrackerPage(GlassPage):
         # never did (the Kingdom (WAN) report).
         if resolved_url and not (record.get("item") or {}).get("poster"):
             record["item"]["poster"] = resolved_url
+        # The *local* path too, not just the URL. `discover_entry` writes
+        # `cover_path: None` for anything opened from Discover, so the
+        # details page had no file to make its blurred ground from even
+        # though this worker had just downloaded one - the owner's flat
+        # black chapter list. Carrying it costs nothing: the path is
+        # already in hand here.
+        if path:
+            record["item"]["cover_path"] = str(path)
         try:
             record["cover"].setPixmap(images.thumbnail_or_avatar(
                 path, record["title"], record["size"]))
@@ -4517,16 +5246,72 @@ class TrackerPage(GlassPage):
         # is going down more than the scrollable row could show".
         title = CardTextLabel(title_text, DISCOVER_CARD_TEXT_WIDTH)
         title.setObjectName("CardTitle")
+        # **Every discover card is exactly the same height**, and that is
+        # the second half of the owner's "the cards flicker (shake) when
+        # more is loading" (23 August 2026). A grid row is as tall as its
+        # tallest card, so while cards differed - a one-line title against
+        # a two-line one, a year row present or absent - *every* card
+        # landing in a row could change that row's height and shift
+        # everything below it. Measured on the Watch page's Anime grid,
+        # card heights on one page ran 280 / 296 / 312 / 328, and a
+        # watched card was seen going (0, 296) -> (0, 248) and its
+        # neighbour (310, 296) -> (262, 247) - moving 48px with nobody
+        # touching it.
+        #
+        # Two lines of title always, and the year row always present even
+        # when there is no year, so the card's height does not depend on
+        # its content at all. `ensurePolished` first because the height
+        # comes from the QSS font (#CardTitle), which is not applied until
+        # polish - taking the metric before that is what produced the
+        # 296 -> 248 settle in the first place.
+        # **The two line heights are measured once per page, not once per
+        # card.** They come from the QSS fonts (#CardTitle, #CardMeta), so
+        # the first card has to be polished to read them - but polishing
+        # every card afterwards is style resolution against the whole
+        # stylesheet, on the UI thread, for a number that cannot have
+        # changed. Measured 23 August 2026: with a polish per label the
+        # grid painted at **40.7 frames a second while filling**, with
+        # gaps up to 108ms - the owner's "the scrolling ... is < 30 fps"
+        # and his "stuttering while the cards are loading", both of which
+        # this code introduced two days earlier while fixing the card
+        # shake.
+        if self._discover_line_heights is None:
+            title.ensurePolished()
+            probe = QLabel("", objectName="CardMeta")
+            probe.setParent(card)
+            probe.ensurePolished()
+            self._discover_line_heights = (
+                title.fontMetrics().lineSpacing(),
+                probe.fontMetrics().lineSpacing())
+            probe.deleteLater()
+        title_line, meta_line = self._discover_line_heights
+        title.setFixedHeight(title_line * DISCOVER_CARD_TITLE_LINES)
         card_layout.addWidget(title)
 
         year = str(item.get("year") or "").strip()
-        if year:
-            year_label = QLabel(year, objectName="CardMeta")
-            year_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            card_layout.addWidget(year_label)
+        year_label = QLabel(year, objectName="CardMeta")
+        year_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        year_label.setFixedHeight(meta_line)
+        card_layout.addWidget(year_label)
 
         card.clicked.connect(
             lambda it=item, et=entry_type: self._on_discover_pick(it, et))
+        # **One height for every discover card, computed once.** Fixing
+        # the title to two lines and always drawing the year row got the
+        # heights from 280/296/312/328 down to 291/292 - and one pixel is
+        # still enough, because a QGridLayout row is as tall as its
+        # tallest card, so a 292 landing in a row of 291s grows that row
+        # and shifts every row below it. That is the owner's "the cards
+        # do this while repositioning after the new cards loaded".
+        #
+        # Measured from the first card built for this page rather than
+        # written down as a number: it depends on the QSS fonts
+        # (#CardTitle, #CardMeta) and on the display's scaling, neither
+        # of which belongs in a constant.
+        if self._discover_card_height is None:
+            card.ensurePolished()
+            self._discover_card_height = max(1, card.sizeHint().height())
+        card.setFixedHeight(self._discover_card_height)
         self._discover_cards[(kind, index)] = record
         self._request_poster(kind, index, item, run)
         return card
@@ -4543,6 +5328,42 @@ class TrackerPage(GlassPage):
         layout.addWidget(self._build_featured_banner(item, entry_type, run))
         holder.setVisible(True)
 
+    # The key the featured banner's cover is registered under in
+    # `_discover_cards`, so it can ride the same resolver every card
+    # uses. A string no `kind` can collide with - kinds are catalogue
+    # row ids.
+    FEATURED_COVER_KEY = "__featured_cover__"
+
+    def _fill_featured_cover(self, item, run):
+        """Put the portrait cover on the left of the featured banner.
+
+        Registered as a card record rather than given a second resolver:
+        `_request_poster`/`_fetch_discover_poster`/`_on_discover_poster`
+        already know how to widen from a row's `poster` to the site's
+        series page to MangaDex/AniList by title, and a reading row very
+        often arrives with no art at all (the Madara search shape). A
+        parallel implementation here would be the one that misses that.
+
+        The `.256.jpg` -> `.512.jpg` swap is the existing trick for
+        getting a usable-resolution MangaDex cover out of a Discover row
+        (`_featured_backdrop_worker` makes the same one) - at 196x264 the
+        256px file is being upscaled, which shows on a banner in a way it
+        does not on a 160px card."""
+        title_text = (item.get("title") or "").strip()
+        poster = str(item.get("poster") or "")
+        wanted = dict(item)
+        if ".256.jpg" in poster:
+            wanted["poster"] = poster.replace(".256.jpg", ".512.jpg")
+        try:
+            self._featured_cover.setPixmap(
+                images.thumbnail_or_avatar(None, title_text, HERO_COVER_SIZE))
+        except Exception:
+            pass
+        self._discover_cards[(self.FEATURED_COVER_KEY, 0)] = {
+            "cover": self._featured_cover, "title": title_text,
+            "size": HERO_COVER_SIZE, "item": wanted}
+        self._request_poster(self.FEATURED_COVER_KEY, 0, wanted, run)
+
     def _build_featured_banner(self, item, entry_type, run):
         """The top result as Harbor's hero: the title's backdrop filling
         a rounded banner, the facts over its scrim, then View (the
@@ -4553,9 +5374,11 @@ class TrackerPage(GlassPage):
         # scroll body (#1a1712 measured through the corners), and that is
         # the colour the banner paints its corner outsides back to.
         banner = HeroBanner(theme.PANEL_FILL)
-        column = QVBoxLayout(banner)
-        column.setContentsMargins(32, 22, 32, 26)
-        column.setSpacing(10)
+        # Cover on the left, details on the right - the owner's ask of 23
+        # August 2026, the same call Home's hero makes so the two hero
+        # surfaces are one design (widgets.hero_split).
+        self._featured_cover, column = hero_split(banner)
+        self._fill_featured_cover(item, run)
 
         chip_row = QHBoxLayout()
         chip_row.setSpacing(8)
@@ -4569,38 +5392,37 @@ class TrackerPage(GlassPage):
         column.addLayout(chip_row)
         column.addStretch(1)
 
-        # The title treatment (a logo PNG) drawn in place of the typed
-        # name when the APIs have one - the owner's ask, 22 August 2026.
-        # Hidden until it lands; the text below carries the title until
-        # then and for anything with no logo.
-        self._featured_logo = QLabel("")
-        self._featured_logo.setVisible(False)
-        self._featured_logo.setStyleSheet("background: transparent;")
-        # A soft halo so the logo reads over the backdrop whatever its own
-        # colour - see the same treatment on Home's hero logo.
-        logo_shadow = QGraphicsDropShadowEffect(self._featured_logo)
-        logo_shadow.setBlurRadius(28)
-        logo_shadow.setOffset(0, 0)
-        logo_shadow.setColor(QColor(0, 0, 0, 200))
-        self._featured_logo.setGraphicsEffect(logo_shadow)
-        column.addWidget(self._featured_logo)
-
+        # The TMDB logo in place of the typed title when there is one,
+        # the name otherwise - see home._build_hero for the full walk,
+        # and for the hide-the-name rule that is deliberately not here.
+        logo_label = hero_logo_label()
+        column.addWidget(logo_label)
+        self._featured_logo_label = logo_label
         title = QLabel(title_text)
         title.setWordWrap(True)
         title.setStyleSheet(
-            f"color: {theme.TEXT}; font-size: 27pt; font-weight: 800;"
+            f"color: {theme.TEXT}; font-size: 25pt; font-weight: 800;"
             f" background: transparent;")
         column.addWidget(title)
         self._featured_title_label = title
 
+        # The medium, in accent, directly under the name - image 2's
+        # "Manga" line. Its own row rather than a bit in the meta line,
+        # because it is what the banner is *about*.
+        kind_label = QLabel(str(item.get("type") or entry_type or ""))
+        kind_label.setStyleSheet(
+            f"color: {theme.ACCENT}; font-size: 12pt; font-weight: 700;"
+            f" background: transparent;")
+        column.addWidget(kind_label)
+
         facts = QHBoxLayout()
         facts.setSpacing(10)
-        meta_bits = [str(item.get("year") or "").strip(),
-                     str(item.get("type") or entry_type)]
+        meta_bits = [str(item.get("year") or "").strip()]
         meta = QLabel("   ·   ".join(bit for bit in meta_bits if bit))
         meta.setStyleSheet(
             f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 600;"
             f" background: transparent;")
+        meta.setVisible(bool(meta.text()))
         facts.addWidget(meta)
         rating = self._rating_text(item)
         if rating:
@@ -4732,39 +5554,19 @@ class TrackerPage(GlassPage):
             pass    # the tab rebuilt under the fetch
 
     def _on_featured_overlay(self, logo_path, hide_title, run):
-        """The featured banner's title treatment. The logo replaces the
-        typed title; a real AniList reading banner (hide_title, no logo)
-        drops the text with nothing over it, because the banner already
-        carries the name. Same shape as Home's _apply_hero_overlay."""
+        """The banner's logo, back from the fetch thread: drawn in place
+        of the typed name when there is one. `hide_title` is ignored on
+        purpose - the name goes only when a logo stands in for it (the
+        23 August 2026 "where is the name on the banner????" was a
+        banner hidden on that flag with no logo to show)."""
         if run != self._discover_run:
             return
-        logo_label = getattr(self, "_featured_logo", None)
-        title_label = getattr(self, "_featured_title_label", None)
-        if logo_label is None or title_label is None:
+        logo_label = getattr(self, "_featured_logo_label", None)
+        title = getattr(self, "_featured_title_label", None)
+        if logo_label is None or title is None:
             return
-        pixmap = None
-        if logo_path:
-            try:
-                dpr = logo_label.devicePixelRatioF() or 1.0
-                pixmap = images.logo_pixmap(logo_path, 84, dpr)
-                if pixmap.isNull():
-                    pixmap = None
-                elif pixmap.width() / dpr > 480:
-                    pixmap = pixmap.scaledToWidth(
-                        int(480 * dpr),
-                        Qt.TransformationMode.SmoothTransformation)
-                    pixmap.setDevicePixelRatio(dpr)
-            except Exception:
-                pixmap = None
         try:
-            if pixmap is not None:
-                logo_label.setPixmap(pixmap)
-                logo_label.setVisible(True)
-                title_label.setVisible(False)
-            else:
-                logo_label.clear()
-                logo_label.setVisible(False)
-                title_label.setVisible(not hide_title)
+            set_hero_logo(logo_label, title, logo_path or None)
         except RuntimeError:
             pass    # the tab rebuilt under the fetch
 
@@ -5290,7 +6092,8 @@ class TrackerPage(GlassPage):
             entry.get("cover_path"), entry.get("title") or "", SCHEDULE_COVER_SIZE))
         row.addWidget(cover)
         item = entry.get("_catalogue_item")
-        if item is not None and not entry.get("cover_path"):
+        if item is not None and not (entry.get("cover_path")
+                                     and os.path.exists(str(entry.get("cover_path")))):
             # Art still in flight: remember the label so the download
             # landing swaps this one pixmap (_on_schedule_cover) rather
             # than waiting for the next rebuild.
@@ -5508,6 +6311,11 @@ class TrackerPage(GlassPage):
                                                        SCHEDULE_COVER_SIZE))
         except RuntimeError:
             pass        # the section rebuilt under the download
+        # Remembered on the row, so the next visit draws it straight away.
+        try:
+            history.update_cover(key, str(path))
+        except Exception:
+            pass
 
     def _build_history(self):
         _clear_layout(self._history_layout)
@@ -5568,7 +6376,12 @@ class TrackerPage(GlassPage):
         # everything else (the owner's screenshot: Lookism with a cover
         # in Discover and none here). Fetch it the same way the Discover
         # rows do; images.download caches, so this is one request ever.
-        if not row.get("cover_path") and row.get("cover_url"):
+        _cp = str(row.get("cover_path") or "")
+        if (not _cp or not os.path.exists(_cp)) and row.get("cover_url"):
+            # "Set but gone" counts as missing: the owner wiped
+            # image_cache and every History row still pointed at its old
+            # file, so this fetch never ran and the rows stayed blank
+            # whatever Discover had since re-downloaded.
             self._history_covers[row.get("key")] = (cover, row.get("title") or "")
             lookup_pool.submit(self._history_cover_worker, row.get("key"),
                                row.get("cover_url"))
@@ -6230,6 +7043,7 @@ class EntryForm(QDialog):
                             found = []
                         results.extend({**r, "_entry_type": entry_type}
                                        for r in found)
+                results = self._classify_series_hits(results)
             else:
                 results = manga_sites.search_all(text)
         except Exception:
@@ -6241,6 +7055,66 @@ class EntryForm(QDialog):
     # (Netflix)", "One Piece (Crunchyroll)") - that fan-out *was* the
     # per-entry source choice, presented in the title dropdown, so it goes
     # with the dropdown. One suggestion per title now.
+
+    # How many series-catalog hits get their genres looked up, and how
+    # long the whole lookup may hold the results. Twelve covers every
+    # suggestion the dropdown shows; the cached fetch is ~80ms warm and
+    # the pool runs them together, so the usual cost is a tenth of a
+    # second on top of the search itself.
+    SEARCH_CLASSIFY_LIMIT = 12
+    SEARCH_CLASSIFY_BUDGET_S = 3.0
+
+    def _classify_series_hits(self, results):
+        """Tag each series-catalog hit Anime or Series by what it *is*,
+        not by which Type the form happened to be on.
+
+        The owner's report, 24 August 2026: "the searching results are
+        showing some random series under anime section". Anime and
+        Series share Cinemeta's one series catalog, and the form's Type
+        claimed every hit from it - so with Type on Anime, House of the
+        Dragon was an anime. Cinemeta's search rows carry no genres (and
+        no genre links - measured), so each hit's full meta is read, from
+        the shared on-disk cache where there is one, and
+        stremio.looks_anime decides. A hit whose meta cannot be read in
+        time keeps the form's label, which is no worse than before."""
+        import concurrent.futures
+        shared = [r for r in results
+                  if r.get("_entry_type") in ("Anime", "Series") and r.get("id")]
+        if not shared:
+            return results
+        deadline = time.monotonic() + self.SEARCH_CLASSIFY_BUDGET_S
+        verdicts = {}
+        # Not a `with`: the context manager waits for every future on the
+        # way out, so one slow host would hold the search past its budget.
+        # And the budget expiring is an answer, not an error - measured in
+        # the harness, 24 August 2026: as_completed raises TimeoutError
+        # with a straggler pending, and uncaught that emptied the whole
+        # result list. What arrived in time is used; the rest keep the
+        # form's label.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        try:
+            jobs = {pool.submit(stremio.fetch_meta_cached, r["id"], "series"): r["id"]
+                    for r in shared[:self.SEARCH_CLASSIFY_LIMIT]}
+            try:
+                for job in concurrent.futures.as_completed(
+                        jobs, timeout=max(0.1, deadline - time.monotonic())):
+                    try:
+                        meta = job.result()
+                    except Exception:
+                        continue
+                    if meta:
+                        verdicts[jobs[job]] = stremio.looks_anime(meta)
+            except concurrent.futures.TimeoutError:
+                pass
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        out = []
+        for r in results:
+            verdict = verdicts.get(r.get("id"))
+            if verdict is not None and r.get("_entry_type") in ("Anime", "Series"):
+                r = {**r, "_entry_type": "Anime" if verdict else "Series"}
+            out.append(r)
+        return out
 
     def _label_for_result(self, provider, r):
         if provider == "manga_sites":

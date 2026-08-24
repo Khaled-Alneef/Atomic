@@ -251,10 +251,19 @@ def set_preferred_resolution(value: str):
 
 def get_auto_pick_source() -> bool:
     """Whether pressing an episode starts playing right away instead of
-    opening the source list first (the owner's ask - the picking step
-    was the slow part of starting anything). Defaults on; the player's
-    own source and resolution controls remain either way."""
-    return bool(_load().get("auto_pick_source", True))
+    opening the source list first.
+
+    **Defaults off** - the owner's ask, 23 August 2026: "in the settings
+    make the default for auto chose source is False when 1st time using
+    the app". It defaulted on because picking was the slow part of
+    starting anything; that is no longer true (a cached release resolves
+    in about a second), so the default can be the one that shows the
+    user what they are about to play. The player's own source and
+    resolution controls remain either way.
+
+    Only the *default* moves: `_load().get` returns a stored value
+    untouched, so anyone who has already turned it on keeps it on."""
+    return bool(_load().get("auto_pick_source", False))
 
 
 def set_auto_pick_source(enabled: bool):
@@ -285,6 +294,65 @@ def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 
 
+def music_launch_url(url: str) -> str:
+    """The saved music URL as it should actually be opened: exactly what
+    the user pasted, plus `autoplay=1`.
+
+    The owner's ask, 23 August 2026, with his own link as the example -
+    he pastes
+
+        https://www.youtube.com/watch?v=DtVmMBrUXMA&list=PLCKc9G3SIVum...
+
+    and the app opens
+
+        https://www.youtube.com/watch?v=DtVmMBrUXMA&list=PLCKc9G3SIVum...&autoplay=1
+
+    **The URL is preserved, not rebuilt.** The previous version (in
+    reader.py) reconstructed YouTube links from just `v` and `list`,
+    which silently dropped every other parameter the user had put there -
+    a `t=` start offset, an `index=`, the fragment - and deliberately
+    left `autoplay=1` off watch pages on the reasoning that YouTube
+    ignores it there. That reasoning is sound and does not matter: an
+    ignored parameter costs nothing, and the owner asked for it to be
+    there. Preserving the rest is a real fix either way.
+
+    The one rewrite kept is **/embed/ -> /watch**, because that one fixed
+    a bug that was on screen: an embed URL opened as a top-level document
+    has no embedding origin to check, so YouTube refuses it with "Error
+    153 - Video player configuration error". The embed form simply cannot
+    be the thing a browser navigates to, whatever parameters it carries.
+
+    Never raises: a custom scheme, or anything unparseable, comes back
+    exactly as it went in - those are for ShellExecute to judge."""
+    import urllib.parse
+    raw = str(url or "").strip()
+    if not raw.lower().startswith(("http://", "https://")):
+        return raw
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        host = parts.netloc.lower().removeprefix("www.")
+        path, query = parts.path, parts.query
+        if host in ("youtube.com", "m.youtube.com", "music.youtube.com") \
+                and path.startswith("/embed/"):
+            video = path[len("/embed/"):].strip("/")
+            if video:
+                pairs = [(k, v) for k, v in
+                         urllib.parse.parse_qsl(query, keep_blank_values=True)
+                         if k != "v"]
+                query = urllib.parse.urlencode([("v", video)] + pairs)
+                path = "/watch"
+        # Appended rather than merged, so a URL that already says
+        # autoplay keeps the value the user chose.
+        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+        if not any(k == "autoplay" for k, _ in pairs):
+            pairs.append(("autoplay", "1"))
+        return urllib.parse.urlunsplit((
+            parts.scheme, parts.netloc, path,
+            urllib.parse.urlencode(pairs), parts.fragment))
+    except Exception:
+        return raw
+
+
 def set_manga_music_url(url: str):
     data = _load()
     data["manga_music_url"] = url or ""
@@ -298,6 +366,9 @@ def set_manga_music_url(url: str):
 # it has it - and a table is what lets Settings draw the whole list
 # without being edited every time a source is added.
 #
+# Debrid is playback speed: a release the service has cached plays as a
+# plain HTTPS stream in seconds instead of waiting on a swarm (see
+# helpers/debrid.py for the 29-run measurement that bought this row).
 # TMDB is artwork. The subtitle ones are sources. The AI ones are
 # translators: with no Arabic subtitle available for a title (which is
 # the normal case for seasonal anime - measured repeatedly), an English
@@ -307,6 +378,19 @@ def set_manga_music_url(url: str):
 # Insertion order is the order Settings draws them, so it runs from the
 # one that changes what is on screen to the ones that change what a
 # track says.
+# **No "debrid" row, deliberately.** The owner's ask, 23 August 2026:
+# "the Debrid API key in the settings, remove it, I do not want the user
+# to enter it at all!! let all users use mine I provided you with!". The
+# service is not optional plumbing the user configures - it is how this
+# app starts playback in a couple of seconds, and it runs on the token
+# bundled in the build (helpers/debrid._bundled_token). Offering a field
+# for it advertised a decision nobody has to make.
+#
+# `get_debrid_key`/`set_debrid_key` still exist and still read
+# settings.json, so a key a user pasted before this simply keeps working
+# and keeps overriding the bundled one - it just cannot be entered or
+# seen any more. Removing the row is what was asked for; removing
+# somebody's stored key with it would be destroying their data.
 API_KEYS = {
     "tmdb": ("TMDB (The Movie Database)", "Title logos and backdrops"),
     "subdl": ("SubDL", "Arabic subtitles"),
@@ -354,6 +438,20 @@ API_KEY_URLS = {
     "gemini": "https://aistudio.google.com/apikey",
     "anthropic": "https://console.anthropic.com/settings/keys",
 }
+
+
+def get_debrid_key() -> str:
+    """The debrid API token the user pasted, or "" - which is the
+    normal state: the build may carry a bundled token of its own
+    (helpers/debrid._bundled_token, the same arrangement as TMDB's),
+    and this is the override that wins over it when the shared one is
+    locked or rate-limited. With neither, playback behaves exactly as
+    it did before debrid existed."""
+    return get_api_key("debrid")
+
+
+def set_debrid_key(value: str):
+    set_api_key("debrid", value)
 
 
 def get_tmdb_key() -> str:

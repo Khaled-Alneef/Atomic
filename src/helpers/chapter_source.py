@@ -567,6 +567,35 @@ def _load_store() -> dict:
     return _store_cache
 
 
+def warm_cache_async():
+    """Parse the cache file off the UI thread, ahead of the first reader.
+
+    The first cached_chapters() of a session paid the 1.88 MB parse
+    (37-42ms measured, 22 August 2026) on the UI thread, inside the
+    open-to-first-rows budget. main preloads windows.reader ~400ms after
+    the window is up, and that import calls this - so by the time a
+    title is clicked the store is already in memory and a cache hit is
+    the dictionary lookup it claims to be.
+
+    A single one-off daemon thread, not lookup_pool: chapter_source has
+    no Qt in it and nothing waits on this. Racing a UI-thread
+    _load_store() is benign - both parse the same file and publish the
+    same answer, the pattern reader._default_browser_path already
+    documents. Never raises."""
+    if _store_cache is not None:
+        return
+    import threading
+
+    def parse():
+        try:
+            _load_store()
+        except Exception:
+            pass        # the first real caller will just pay the parse
+
+    threading.Thread(target=parse, name="reader-cache-warm",
+                     daemon=True).start()
+
+
 def _cache_key(entry) -> str:
     return str((entry or {}).get("id") or (entry or {}).get("url") or "")
 

@@ -59,7 +59,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import (PageSlide, SmoothTween, confirm, install_edge_wheel,
+from helpers.widgets import (PageSlide, SmoothTween, confirm, hold_hover_cursor,
+                             install_edge_wheel, release_hover_cursor,
                              release_stale_hover_cursors, show_toast,
                              take_live_redo, take_live_undo, use_hover_cursor)
 from windows import home as home_page_module
@@ -441,6 +442,44 @@ class _UpdateCheckSignals(QObject):
     # back onto it. Nothing but the update dict (or None) crosses - a
     # failed check has nothing to say (see _update_check_worker).
     found = Signal(object)
+
+
+class _RailCursor(QObject):
+    """The pointing-hand cursor over a rail's rows - the owner's ask, 22
+    August 2026: "make the mouse cursor hover in the sidebar (main/read/
+    watch) change to finger-pointing shape".
+
+    A rail is one QListWidget, so its rows are drawn items rather than
+    widgets and `use_hover_cursor` (which is Enter/Leave on a *widget*)
+    has nothing per-row to attach to. This asks where the pointer
+    actually is instead - `indexAt`, hit-testing the view - so the hand
+    appears over a real row and not over the padding under the last one
+    or the blank spacer row between two blocks.
+
+    Deliberately *not* a permanent `setCursor` on the viewport, which is
+    what .claude/rules/ui.md warns against: it goes through the same
+    hold/release registry every other hover cursor here uses, so the
+    cursor watchdog can put it back after a modal dialog steals Qt's
+    idea of where the pointer is."""
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind in (QEvent.Type.MouseMove, QEvent.Type.Enter):
+            view = obj.parent()
+            try:
+                over_row = view.indexAt(event.position().toPoint()).isValid()
+            except (AttributeError, RuntimeError):
+                over_row = False
+            if over_row:
+                hold_hover_cursor(view)
+            else:
+                release_hover_cursor(view)
+        elif kind == QEvent.Type.Leave:
+            try:
+                release_hover_cursor(obj.parent())
+            except RuntimeError:
+                pass        # the rail went away under the pointer
+        return False
 
 
 class NavListWidget(QListWidget):
@@ -1008,6 +1047,13 @@ class MainWindow(QMainWindow):
         # 2, matching the item inset - without it a row renders edge to
         # edge and its selected pill is clipped by the widget border.
         rail.setSpacing(2)
+        # The pointing-hand cursor over a row (see _RailCursor). Installed
+        # on the viewport, which is what receives the mouse events, and
+        # parented to it so the filter dies with the rail. Here rather
+        # than at each of the three call sites, for the same reason every
+        # other property moved into this function: three copies drifted.
+        rail.viewport().setMouseTracking(True)
+        rail.viewport().installEventFilter(_RailCursor(rail.viewport()))
         rail.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Fixed)
         # QListWidget's item delegate paints with the widget's own font(),
@@ -2532,6 +2578,14 @@ class MainWindow(QMainWindow):
         # away, and there is no later chance to write it.
         self._geometry_save_timer.stop()
         self._save_window_geometry()
+        # The image caches are brought back under their limit on the way
+        # out as well as at launch - the owner's "> 1.2 GB" image_cache,
+        # 24 August 2026 (see images.trim_cache). Bounded by its own
+        # budget, so a slow disk cannot hold the window open.
+        try:
+            images.trim_cache(budget_s=2.0)
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def start_fullscreen(self):
@@ -2950,6 +3004,25 @@ def _prewarm_image_specs():
 PRELOAD_OVERLAYS_MS = 400
 
 
+def _prewarm_anime_identity():
+    """Resolve the arc-name season map for every tracked anime that has
+    an IMDb id, in the background. See the call site for why this is done
+    at launch rather than at play time; helpers/anime_identity dedupes an
+    in-flight id and returns immediately for one already cached, so this
+    is cheap to call on every start."""
+    from helpers import anime_identity
+    seen = set()
+    for data_file in ("series.json", "tracker.json"):
+        for entry in storage.load(data_file, []):
+            if entry.get("type") != "Anime":
+                continue
+            imdb_id = entry.get("imdb_id")
+            if not imdb_id or imdb_id in seen:
+                continue
+            seen.add(imdb_id)
+            anime_identity.prewarm(dict(entry))
+
+
 def _preload_overlays():
     """Import the player, reader and details modules ahead of the first
     click that needs one. Never raises: a failed preload just means the
@@ -3045,6 +3118,18 @@ def main():
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())
+    # And the caches trimmed to their limit, off the UI thread, once the
+    # prewarm has been queued - see images.trim_cache.
+    def _tidy_images():
+        # Shrink the backlog of oversized files first, then enforce the
+        # cap on whatever is left - both budgeted, both off the UI thread.
+        try:
+            images.shrink_existing()
+            images.trim_cache()
+        except Exception:
+            logs.exception("image cache tidy failed")
+    threading.Thread(target=_tidy_images, daemon=True,
+                     name="atomic-image-trim").start()
     # Same idea, same moment, for the Discover rows: the owner's "it
     # takes a few sec to show the lists" was never a slow fetch, only a
     # fetch that had not been started until the page was opened. Warmed
@@ -3055,6 +3140,26 @@ def main():
         tracker_module.prewarm_discover()
     except Exception:
         logs.exception("Could not prewarm the Discover rows")
+    # The arc-name season maps for tracked anime, warmed here for one
+    # reason: **AniList is what supplies the romaji, and AniList goes
+    # away.** Measured 23 August 2026, mid-session, it began answering
+    # 403 to this whole network (the documented rate-limit trap), and a
+    # map resolved during that window carries only TMDB's English arc
+    # names - enough to catch "Hashira Geiko" but not "Yuukaku Hen", so
+    # five wrong-season rows survived a Demon Slayer S01E01 lookup that
+    # a complete map cleared entirely.
+    #
+    # A complete map is cached for thirty days, so it only has to be
+    # built once during any healthy window. Warming at launch means that
+    # window is "some start-up in the last month" rather than "the moment
+    # the owner pressed play", which is the difference between the filter
+    # being reliable and being a coin toss. Costs two requests per anime
+    # title per month, deduplicated, on a background thread, and does
+    # nothing at all for a title already warm.
+    try:
+        _prewarm_anime_identity()
+    except Exception:
+        logs.exception("Could not prewarm the anime season maps")
     # Last, and on its own delay: the one thing here nobody is waiting
     # for. After whats_new deliberately - that dialog is modal, so a
     # timer armed before it would tick inside its nested event loop.

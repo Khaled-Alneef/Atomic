@@ -169,7 +169,7 @@ def _video_row(meta: dict, label: str):
 
 
 def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
-                   genre: str = "") -> list:
+                   genre: str = "", skip: int = 0) -> list:
     """Popular or searched titles for one of the video trackers.
 
     `kind` is "anime", "series" or "movie". An empty `query` returns the
@@ -179,6 +179,14 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
     any failure, an unknown kind, or nothing found; an unknown genre is
     a fast empty answer, never an unfiltered list (measured, see
     _video_catalog_urls).
+
+    `skip` pages the browse catalog past its first rows - the category
+    pages' load-on-scroll. Cinemeta's standard addon paging, measured
+    22 August 2026: `top/skip=100.json` answers 50 fresh rows, a
+    non-aligned `skip=30` answers row 31 onward, and the genre form
+    combines as `genre=Anime&skip=49` (50 rows, continuing exactly
+    where the 49-row first page ended). Ignored for a search - the
+    search catalog is one page.
 
     Anime search is a plain series search, deliberately: Cinemeta's
     search rows come back with `genres: null` (measured on every search
@@ -195,6 +203,7 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
     query = (query or "").strip()
     genre = (genre or "").strip()
     label = _KIND_LABELS[kind]
+    skip = max(0, int(skip or 0))
 
     if query:
         encoded = urllib.parse.quote(query)
@@ -204,6 +213,14 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
                 f"genre={urllib.parse.quote(genre)}.json"]
     else:
         urls = _video_catalog_urls(kind, content_type)
+    if skip and not query:
+        # Into the extra-args segment each URL already carries (or a
+        # fresh one), the addon-protocol way: ".../top/skip=30.json",
+        # ".../top/genre=Anime&skip=49.json". Applied to every URL in
+        # the anime fallback chain alike, so page 2 walks the same
+        # chain page 1 did and the first catalog that answers wins.
+        urls = [(u[:-5] + f"&skip={skip}.json" if "/top/" in u
+                 else u[:-5] + f"/skip={skip}.json") for u in urls]
 
     for index, url in enumerate(urls):
         body = _get_json(url, deadline, VIDEO_TIMEOUT)
@@ -716,6 +733,71 @@ def reading_sites_by_medium_all(limit: int = 30, deadline=None) -> dict:
         row["type"] = medium if medium in MEDIUM_LANGUAGES else "Manga"
         out[medium].append(row)
     return out
+
+
+def reading_genre_cached(genre: str, limit: int = 30) -> list:
+    """One genre's rows from what is already on disk - no network at
+    all, so it answers in the milliseconds a page open is allowed
+    (CLAUDE.md rule 7; the owner's ask, 23 August 2026: "the same genre
+    page loading takes ~5-10 sec make it <500 ms").
+
+    Where the seconds actually went, measured 23 August 2026: opening a
+    reading genre paid the live six-site browse *every time* - 5.47s
+    with a handful of uncached classifications, 2.28s with every cache
+    warm, of which 2.26s was discover_reading_sites alone. But both
+    halves of the answer were already sitting on disk: the category
+    sections' browse rows in discover_cache.json (164 distinct titles
+    on the owner's machine), and every title's genre verdict in
+    reading_meta.json (161 of those 164), written by the same
+    classification sweep the medium sections pay for. Filtering one
+    against the other answered 41 rows for Action, 34 Fantasy, 30
+    Drama - a full page - in ~0ms of network.
+
+    Honest about staleness: these are last browse's rows, at most a day
+    old (the discover cache's own disk TTL). [] when the caches cannot
+    answer - a cold machine falls through to reading_genre_sites."""
+    wanted = (genre or "").strip().lower()
+    if not wanted or limit <= 0:
+        return []
+    _load_reading_meta()
+    try:
+        stored = storage.load("discover_cache.json", {}) or {}
+    except Exception:
+        return []
+    if not isinstance(stored, dict):
+        return []
+    rows, seen = [], set()
+    # The medium keys first: their rows already passed the serving-site
+    # filter, so a card built from them opens a chapter list. The plain
+    # browse keys widen coverage behind them.
+    kinds = (["medium:%s" % name for name in (*MEDIUM_LANGUAGES, "Other")]
+             + ["reading", "reading_latest"])
+    for kind in kinds:
+        entry = stored.get(kind)
+        for row in (entry or {}).get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            title = (row.get("title") or "").strip()
+            if not title or title.lower() in seen:
+                continue
+            seen.add(title.lower())
+            rows.append(row)
+    kept = []
+    with _MEDIUM_LOCK:
+        genre_verdicts = dict(_GENRE_CACHE)
+        medium_verdicts = dict(_MEDIUM_CACHE)
+    for row in rows:
+        key = (row.get("title") or "").strip().lower()
+        tags = genre_verdicts.get(key)
+        if not tags or wanted not in (t.strip().lower() for t in tags):
+            continue
+        row = dict(row)
+        medium = medium_verdicts.get(key, "")
+        row["type"] = medium if medium in MEDIUM_LANGUAGES else "Manga"
+        kept.append(row)
+        if len(kept) >= limit:
+            break
+    return kept
 
 
 def reading_genre_sites(genre: str, limit: int = 30, deadline=None) -> list:

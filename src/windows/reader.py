@@ -77,7 +77,7 @@ from helpers import (app_settings, child_process, downloads, history, images,
                      logs, lookup_pool, net, storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
                              finish_toast, frameless_dialog, show_toast,
-                             use_hover_cursor)
+                             use_hover_cursor, _Momentum, screen_tick_ms)
 from windows.tracker import correct_progress, format_chapter_progress
 
 
@@ -101,6 +101,16 @@ try:
     from helpers import chapter_source
 except Exception:                                   # pragma: no cover
     chapter_source = None
+else:
+    # main preloads this module ~400ms after the window is up
+    # (_preload_overlays), so the reader cache's 1.88 MB parse happens
+    # on a worker long before any title is clicked - see
+    # chapter_source.warm_cache_async for the measurement.
+    try:
+        chapter_source.warm_cache_async()
+    except Exception:                               # pragma: no cover
+        pass
+
 
 
 # ---- budgets -------------------------------------------------------------
@@ -349,7 +359,22 @@ BOTTOM_GAP = 16
 # a smaller step cannot go "sluggish" against a mismatched animation
 # duration the way it could if one existed; it only ever changes how far
 # one notch moves.
-WHEEL_STEP_PX = 180
+#
+# 24 August 2026: **108, down 40% from 180** - the owner: "make scrolling
+# speed 40% slower in the whole app", this time with no reading-mode
+# carve-out (the 23 August ask had one; this one names the whole app,
+# and every one of the reader's own six tunings above went the same
+# direction). The "no smooth-scroll animation sits on top of this" note
+# above is no longer true either: the same ask called the app "super
+# super stiff", and a notch here was one immediate bar.setValue - the
+# only surface in the app that still snapped. It now goes through
+# widgets._Momentum like every other scroll area, so the number is a
+# resting travel per notch, not a jump.
+WHEEL_STEP_PX = 108
+
+# How fast a reader notch gives its speed back - see the _Momentum built
+# in _StripView.__init__ for why this surface does not coast.
+READER_WHEEL_FRICTION = 34.0
 
 # The gap drawn between pages. Zero for the vertical strips - a
 # webtoon's panels are cut mid-image and any spacing draws a seam
@@ -949,11 +974,23 @@ class _ChapterListView(QWidget):
         self._notice.setVisible(False)
         layout.addWidget(self._notice)
 
+        # **No QVBoxLayout on the body - rows are placed by hand.** Every
+        # row is the same height, and that uniformity is what a box
+        # layout cannot exploit: with 508 rows in a QVBoxLayout, each
+        # 24-row chunk's activation walked every item's sizeHint
+        # recursion and the inter-chunk stall grew linearly - measured
+        # 22 August 2026 on the owner's own One Piece list, 20ms at 24
+        # rows to 230ms by 480, ~3.3s to fill and each stall an eyeful
+        # over the 16.7ms frame budget. Pinning row sizeHints only cut
+        # it 3x (67ms stalls); the same fill with rows never shown was
+        # flat 8ms, so the whole growth was layout+paint. Fixed geometry
+        # makes an insert O(1): below-the-fold chunks expose nothing and
+        # paint nothing.
         self._body = QWidget(objectName="Bare")
-        self._rows = QVBoxLayout(self._body)
-        self._rows.setContentsMargins(0, 0, 8, 0)
-        self._rows.setSpacing(6)
-        self._rows.addStretch()
+        self._body.installEventFilter(self)
+        self._row_h = 0                 # measured off the first real row
+        self._skel_h = 0
+        self._skeleton_rows = []
 
         # What the rows were built from, and one handle per row for
         # restyling in place - see set_chapters for why the rows are
@@ -981,6 +1018,102 @@ class _ChapterListView(QWidget):
     def set_notice(self, text):
         self._notice.setText(text or "")
         self._notice.setVisible(bool(text))
+
+    # Manual row geometry - see __init__ for why there is no layout.
+    ROW_GAP = 6
+    ROW_RIGHT_PAD = 8       # clearance for the scrollbar, as the old
+                            # layout's right contents margin was
+
+    def _row_width(self):
+        return max(0, self._body.width() - self.ROW_RIGHT_PAD)
+
+    def _size_body(self):
+        """Fix the body's height to the whole list the moment the row
+        height is known, not as chunks land - so the scrollbar means the
+        real list from the first frame, instead of a thumb that shrinks
+        for three seconds while background chunks arrive."""
+        if self._row_h and self._built_from:
+            count = len(self._built_from)
+            self._body.setFixedHeight(count * (self._row_h + self.ROW_GAP)
+                                      - self.ROW_GAP)
+        elif self._skel_h and self._skeleton_rows:
+            count = len(self._skeleton_rows)
+            self._body.setFixedHeight(count * (self._skel_h + self.ROW_GAP)
+                                      - self.ROW_GAP)
+        else:
+            self._body.setFixedHeight(0)
+
+    def _place_rows(self):
+        """Re-width every placed row. Only ever needed when the body
+        itself changes width (a window resize, the scrollbar appearing) -
+        an insert never moves what is already there."""
+        width = self._row_width()
+        for index, row in enumerate(self._row_state):
+            row["card"].setGeometry(
+                0, index * (self._row_h + self.ROW_GAP), width, self._row_h)
+        for index, ghost in enumerate(self._skeleton_rows):
+            ghost.setGeometry(
+                0, index * (self._skel_h + self.ROW_GAP), width, self._skel_h)
+
+    def eventFilter(self, obj, event):
+        if obj is self._body and event.type() == QEvent.Type.Resize:
+            if event.size().width() != event.oldSize().width():
+                self._place_rows()
+        return super().eventFilter(obj, event)
+
+    def _clear_rows(self):
+        for row in self._row_state:
+            try:
+                row["card"].hide()
+                row["card"].deleteLater()
+            except RuntimeError:
+                pass        # already gone with a dead panel
+        self._row_state = []
+        self._clear_skeleton()
+        self._body.setFixedHeight(0)
+
+    def _clear_skeleton(self):
+        for ghost in self._skeleton_rows:
+            try:
+                ghost.hide()
+                ghost.deleteLater()
+            except RuntimeError:
+                pass
+        self._skeleton_rows = []
+
+    # A screenful of placeholders; the real first chunk is 24 for the
+    # same reason (CHUNK below).
+    SKELETON_ROWS = 12
+
+    def show_skeleton(self):
+        """Placeholder rows while the source is being fetched cold.
+
+        The cold path used to sit on a bare "Loading chapters..." until
+        the site's first page parsed - 1-13s measured, against the
+        owner's ask that the list *show* inside 100ms (22 August 2026).
+        These are outlines, deliberately not fake chapter rows built
+        from the entry's own numbers: a row that looks clickable and
+        opens nothing would be worse than the wait it papers over.
+        set_chapters clears them the moment anything real lands."""
+        if self._row_state or self._skeleton_rows:
+            return
+        fm = QFontMetrics(self.font())
+        # Approximates a real row: 10px margins each side of one line of
+        # text plus the badge's padding. Close is enough for an outline
+        # that only real rows replace.
+        self._skel_h = fm.height() + 28
+        width = self._row_width()
+        for index in range(self.SKELETON_ROWS):
+            ghost = QFrame(self._body)
+            ghost.setStyleSheet(
+                f"background: {theme.SURFACE}; "
+                f"border: 1px solid {theme.BORDER}; "
+                f"border-radius: {theme.RADIUS}px;")
+            ghost.setGeometry(0, index * (self._skel_h + self.ROW_GAP),
+                              width, self._skel_h)
+            ghost.show()
+            self._skeleton_rows.append(ghost)
+        self._size_body()
 
     # How many rows to build before giving the event loop a turn.
     #
@@ -1024,12 +1157,7 @@ class _ChapterListView(QWidget):
             return
         self._build_token += 1
         token = self._build_token
-        while self._rows.count() > 1:
-            item = self._rows.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._row_state = []
+        self._clear_rows()
         self._built_from = chapters
         self._marks = (current, read_up_to)
         # **The first screenful now, the rest on the event loop.**
@@ -1076,9 +1204,22 @@ class _ChapterListView(QWidget):
             return False
         chapters = self._built_from or []
         try:
+            width = self._row_width()
             for index in range(start, min(stop, len(chapters))):
-                self._rows.insertWidget(
-                    index, self._build_row(index, chapters[index]))
+                card = self._build_row(index, chapters[index])
+                card.setParent(self._body)
+                if not self._row_h:
+                    # Every row is structurally identical (elided
+                    # single-line labels, fixed-width flanks), so the
+                    # first one's hint prices them all - and pricing
+                    # them all once is what lets an insert be a
+                    # setGeometry instead of a layout activation.
+                    self._row_h = max(1, card.sizeHint().height())
+                    self._size_body()
+                card.setGeometry(
+                    0, index * (self._row_h + self.ROW_GAP),
+                    width, self._row_h)
+                card.show()
             self._update_marks(*self._marks)
         except RuntimeError:
             # The panel went away between chunks. Move the token so any
@@ -1227,7 +1368,8 @@ class _ChapterListView(QWidget):
         card.clicked.connect(lambda i=index: self.picked.emit(i))
         card.rightClicked.connect(
             lambda event, i=index: self._show_mark_menu(event, i))
-        self._row_state.append({"number": number, "number_label": number_label,
+        self._row_state.append({"card": card, "number": number,
+                                "number_label": number_label,
                                 "name": name, "mark": mark,
                                 "reading": False, "read": False})
         return card
@@ -1469,6 +1611,27 @@ class _StripView(QScrollArea):
         # to stay where it is and stay draggable.
         for bar in (self.verticalScrollBar(), self.horizontalScrollBar()):
             bar.installEventFilter(self)
+        # The wheel's motion - velocity and friction, shared with every
+        # scroll area in the app (see widgets._Momentum and WHEEL_STEP_PX).
+        # Grabbing the slider must win instantly over a glide still
+        # writing values under it, same as widgets._SmoothWheel.
+        # **No coast here, and that is deliberate** - the owner, 24
+        # August 2026: "while in reader mode remove the scrolling
+        # movement after the mouse scroll stops (there is a small
+        # after-scroll movement) ONLY IN READER MODE". The pages keep
+        # their momentum; a reader is aiming at a panel, so the strip
+        # tracks the wheel and stops with it.
+        #
+        # Friction 34/s rather than the app's 7: a notch's unfinished
+        # fraction is exp(-34t), so it is a pixel from done in ~110ms -
+        # smooth to the eye, over before the hand notices - against
+        # ~700ms of glide at 7. Acceleration is off for the same reason:
+        # a fast flick through a chapter should cover more ground by
+        # sending more notches, not by adding speed that outlives them.
+        self._wheel_motion = _Momentum(
+            self.verticalScrollBar(), lambda: screen_tick_ms(self), self,
+            friction=READER_WHEEL_FRICTION, accel_max=1.0)
+        self.verticalScrollBar().sliderPressed.connect(self._wheel_motion.cancel)
 
     # ---- state -------------------------------------------------------
     def set_zoom(self, key):
@@ -1520,6 +1683,9 @@ class _StripView(QScrollArea):
                                       Qt.AlignmentFlag.AlignHCenter)
             self._slots.append(slot)
             self._resize_slot(slot)
+        # A glide from the previous chapter must not keep writing into
+        # the new one.
+        self._wheel_motion.cancel()
         self.verticalScrollBar().setValue(0)
         self._sync_visible()
 
@@ -1535,6 +1701,7 @@ class _StripView(QScrollArea):
 
     def set_index(self, index):
         if 0 <= index < len(self._slots):
+            self._wheel_motion.cancel()
             self.verticalScrollBar().setValue(self._slots[index].y())
             self._sync_visible()
             self.positionChanged.emit()
@@ -1584,8 +1751,10 @@ class _StripView(QScrollArea):
         if not steps:
             super().wheelEvent(event)
             return
-        bar = self.verticalScrollBar()
-        bar.setValue(bar.value() - round(steps * WHEEL_STEP_PX))
+        # wheel up = value down; the integrator clamps at the strip's
+        # ends and reads the range live, so pages decoding mid-glide
+        # (the strip resizes on every one) just extend where it can go.
+        self._wheel_motion.kick(abs(steps) * WHEEL_STEP_PX, -1 if steps > 0 else 1)
         event.accept()
 
     def set_page_gap(self, gap):
@@ -1946,8 +2115,12 @@ class ReaderPage(GlassPage):
         # moment anything touched the zoom.
         self._apply_zoom()
 
-        self._show_only(self._message)
-        self._set_message("Loading chapters...", browser=False)
+        # Deliberately nothing shown yet: _load_chapters runs next in
+        # __init__ and picks the surface - the cached list, or the
+        # skeleton. Showing "Loading chapters..." here first meant every
+        # warm open flashed a message that was wrong within one tick
+        # (measured 22 August 2026: the message landed at 69ms and the
+        # cached list replaced it at 139ms).
 
     def _build_bar(self):
         bar = QWidget(objectName="ReaderBar")
@@ -2389,6 +2562,11 @@ class ReaderPage(GlassPage):
                 cached = None
             if cached:
                 run = self._run
+                # The list surface goes up now, in this same frame -
+                # empty for at most the one event-loop turn the deliver
+                # below waits, rather than behind a "Loading
+                # chapters..." message that a cache hit makes a lie.
+                self._show_only(self._list_view)
 
                 def deliver():
                     # The reader can be closed inside the one turn this
@@ -2402,6 +2580,16 @@ class ReaderPage(GlassPage):
 
                 QTimer.singleShot(0, deliver)
                 return
+            # Nothing cached: the skeleton, on screen inside this frame.
+            # The fetch behind it takes 1-13s to its first partial page
+            # and up to CHAPTER_LIST_TIMEOUT in full - a bare "Loading
+            # chapters..." sitting through that is exactly the owner's
+            # "the ch list takes a while to show" (22 August 2026).
+            self._list_view.set_notice(
+                "Fetching the chapter list from the source - the first "
+                "look at a series can take a few seconds.")
+            self._list_view.show_skeleton()
+            self._show_only(self._list_view)
         # **submit_watched, not submit.** This is the one lookup the user
         # is sitting in front of - they pressed a title and are looking
         # at an empty reader - and the shared queue is drained by three
@@ -3621,7 +3809,14 @@ def _origin_page_name(window):
 # _launch_music - because closing a window that happened to be carrying
 # the owner's other tabs would be a far worse bug than music that keeps
 # playing.
-_music = {"key": None, "hwnd": None, "settled": False}
+_music = {"key": None, "hwnd": None, "pid": None, "settled": False,
+          "gesture_sent": False, "pressed_at": None}
+
+# Every browser pid this session ever spawned for music, so a stuck
+# close can prove a process is ours before ending it - see
+# _force_close_music. Only ever grows; pids are 4 bytes and a session
+# spawns a handful.
+_music_pids = set()
 
 # Leaving a reader does not close the music instantly: opening a chapter
 # from the details list tears the old reader down and builds a new one,
@@ -3776,95 +3971,160 @@ def _default_browser_exe() -> str:
     return os.path.basename(_default_browser_path()).lower()
 
 
-def _autoplay_url(url: str) -> str:
-    """The configured music URL, rewritten to start playing on its own.
+# Why there is a keystroke in the music launch, and not an autoplay
+# flag. Chromium autoplays unmuted media only for sites the *profile*
+# has earned a high Media Engagement Index on, and nothing this app
+# does can grant that: measured 22-23 August 2026 with a probe page
+# reporting its own state, the owner's profile sat
+# `AudioContext state=suspended` from first paint through the whole
+# foreground grace and forever after, and his real signed-in YouTube
+# watch page sat on 0:00 with the big play button for 14+ seconds of
+# being foreground and unoccluded. `--autoplay-policy=
+# no-user-gesture-required` fixes exactly that, but only when the
+# launch *starts* the browser process, which forced a private
+# --user-data-dir profile - which is signed out, and the owner's music
+# URL is a private playlist on his Premium account, which a signed-out
+# profile cannot open at all. So the profile is the owner's own, and
+# playback is started by _grant_play_gesture instead: one real
+# OS-level `k` into the window, which Chromium counts as genuine user
+# activation where every scripted gesture is ignored.
+_MUSIC_GESTURE_DELAY_MS = 2500      # page-load headroom after first sight
+# How often to ask whether the browser has started making noise, while
+# deciding when to tuck its window away.
+#
+# **Measured 23 August 2026, because this poll runs on the UI thread:**
+# the first _browser_is_audible() call costs 48.7ms (COM init plus device
+# enumeration) and every one after it 3.5-5.2ms. 250ms with a ~4ms probe
+# is under 2% of the thread and never two probes inside one frame, which
+# is why it is safe here; the 48.7ms one is deliberately paid off-thread
+# by the launch worker before this poll ever starts (see
+# _open_music_quietly), because 48.7ms on the UI thread is three dropped
+# frames at 60Hz and the whole point of this poll is that the app stays
+# smooth while it runs.
+_MUSIC_AUDIBLE_POLL_MS = 250
+_MUSIC_GESTURE_POLL_MS = 400
 
-    The owner's ask: "make the music URL when on Youtube or any other
-    play the video directly, do not make the user go to the browser and
-    press play by himself."
-
-    **The /embed/ rewrite this used to do was the bug in the owner's
-    screenshot.** It turned a watch link into
-    `youtube.com/embed/<id>?autoplay=1`, which is not a page - it is the
-    player IFrame, and opened as a top-level document it has no
-    embedding origin to check, so YouTube refuses it with
-
-        Error 153 - Video player configuration error
-
-    and a "Watch video on YouTube" link, which is exactly what the music
-    URL showed. No parameter fixes that; the embed form simply cannot be
-    the thing a browser navigates to.
-
-    So a YouTube link is normalised to its **watch** page instead, which
-    is what a browser is meant to open and what starts playing on its
-    own - a watch page begins playback on load, which is why `autoplay=1`
-    is documented as ignored there: there is nothing for it to do.
-    Everything else gets a plain `autoplay=1`, which the sites that
-    support it read and the rest ignore as an unknown parameter.
-
-    Not a guarantee, and it cannot be one from here: browsers block
-    *unmuted* autoplay until a site has earned it, so a YouTube the
-    owner plays daily starts and a cold domain may still want one click.
-    This is the best a link can do without shipping a player - mpv is in
-    the app but has no yt-dlp behind it (see helpers/video_backend), so
-    it cannot open a YouTube page at all.
-
-    Never raises: an unparseable URL comes back exactly as it went in."""
-    if not str(url or "").lower().startswith(("http://", "https://")):
-        # A custom scheme (spotify:, a launcher URI) or plain nonsense -
-        # both are for ShellExecute to judge, not for this to rewrite.
-        return url
-    try:
-        parts = urllib.parse.urlsplit(url)
-        host = parts.netloc.lower().removeprefix("www.")
-        query = dict(urllib.parse.parse_qsl(parts.query))
-        video = ""
-        if host in ("youtube.com", "m.youtube.com", "music.youtube.com"):
-            if parts.path == "/watch":
-                video = query.get("v", "")
-            elif parts.path.startswith("/embed/"):
-                video = parts.path[len("/embed/"):]
-        elif host == "youtu.be":
-            video = parts.path.lstrip("/")
-        playlist = query.get("list", "")
-        if video:
-            # The watch page, carrying its playlist when it had one. A
-            # watch page starts playing by itself; the embed form that
-            # used to be built here is what produced Error 153.
-            wanted = {"v": video}
-            if playlist:
-                wanted["list"] = playlist
-            return urllib.parse.urlunsplit((
-                "https", "www.youtube.com", "/watch",
-                urllib.parse.urlencode(wanted), ""))
-        if playlist:
-            # A playlist with no video named: /playlist is the page for
-            # it, and `playnext=1` is YouTube's own "start the first
-            # one" - the closest a link can get without knowing an id.
-            return urllib.parse.urlunsplit((
-                "https", "www.youtube.com", "/playlist",
-                urllib.parse.urlencode({"list": playlist, "playnext": "1"}),
-                ""))
-        query["autoplay"] = "1"
-        return urllib.parse.urlunsplit((
-            parts.scheme or "https", parts.netloc, parts.path,
-            urllib.parse.urlencode(query), parts.fragment))
-    except Exception:
-        return url
+# How long the window must stay untouched *after the keystroke* before
+# the tuck may minimize it. The press starts the player, but the player
+# takes a beat to actually roll (0.3-1.5s observed before the first
+# audio), and a page hidden before its playback is really rolling can
+# defer or park it - which is the owner's original screenshot: parked
+# at 0:00 with the big play button, in the days when the window was
+# buried within 120ms. So a press buys playback a guaranteed stretch on
+# screen, and the tuck is re-armed from the press rather than only from
+# first sight. (An earlier version of this comment blamed the tuck for
+# a run that ended "paused at 0:01" - the audio meter showed that was
+# the keystroke itself pausing a page that had autoplayed, see
+# _browser_is_audible, and the tuck was innocent: playback that had
+# audibly started survived the minimize in every metered run.)
+_MUSIC_POST_PRESS_VISIBLE_S = 5.0
 
 
-def _window_exe(hwnd) -> str:
-    """Lowercased file name of the process owning `hwnd`, or ""."""
+def _send_key(vk):
+    """One real key press+release through SendInput. Goes to whatever
+    window holds the keyboard focus, which is why the caller must prove
+    that window is the music window first."""
     import ctypes
     from ctypes import wintypes
-    pid = wintypes.DWORD()
-    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    if not pid.value:
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.c_size_t)]
+
+    class _INPUTUNION(ctypes.Union):
+        # Padded to MOUSEINPUT's 32 bytes so sizeof(INPUT) is what
+        # user32 expects (40 on x64); a short struct makes SendInput
+        # reject the whole batch with ERROR_INVALID_PARAMETER.
+        _fields_ = [("ki", KEYBDINPUT), ("padding", ctypes.c_ubyte * 32)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+    down = INPUT(type=1)                        # INPUT_KEYBOARD
+    down.ki = KEYBDINPUT(vk, 0, 0, 0, 0)
+    up = INPUT(type=1)
+    up.ki = KEYBDINPUT(vk, 0, 2, 0, 0)          # KEYEVENTF_KEYUP
+    batch = (INPUT * 2)(down, up)
+    ctypes.windll.user32.SendInput(2, batch, ctypes.sizeof(INPUT))
+
+
+def _grant_play_gesture(hwnd, deadline):
+    """Press `k` in the music window, once, so the page starts playing.
+
+    A real input event is the one thing Chromium accepts as user
+    activation - the owner's page needs a play command it can attribute
+    to a person, and `k` is YouTube's own play/pause key (chosen over
+    space, which a focused button would swallow as a click).
+
+    Guarded hard, because a stray keystroke into the wrong window would
+    be a worse bug than silent music: it is sent only while the exact
+    window the sweep identified is the *foreground* window - a
+    foreground window of any other process, the owner's own browser
+    included, means no press - and at most once per launch
+    (_music["gesture_sent"]). Until the grace deadline it re-polls
+    rather than gives up, because the browser may still be putting the
+    window up; after it, never.
+
+    `k` toggles, so pressing a page that is already playing would
+    *pause* it - and that is not hypothetical: on the owner's profile a
+    handoff-launched window autoplays ~2s in while a cold-started one
+    parks at 0:00 (both measured, 23 August 2026). The audible check
+    below is what tells them apart: silence means the press is play,
+    sound means there is nothing to do."""
+    try:
+        if _music.get("hwnd") != hwnd or _music.get("gesture_sent"):
+            return              # a newer launch took over, or done
+        if _browser_is_audible():
+            # The page beat us to it. A handoff-launched window on the
+            # owner's profile autoplays on its own ~2s in, and `k` on a
+            # playing player is *pause* - measured doing exactly that,
+            # three runs, before this gate existed (see
+            # _browser_is_audible). Audible means finished here.
+            _music["gesture_sent"] = True
+            return
+        import ctypes
+        user32 = ctypes.windll.user32
+        if not user32.IsWindow(hwnd):
+            return
+        if user32.GetForegroundWindow() != hwnd:
+            if time.monotonic() < deadline:
+                QTimer.singleShot(
+                    _MUSIC_GESTURE_POLL_MS,
+                    lambda: _grant_play_gesture(hwnd, deadline))
+            return
+        _music["gesture_sent"] = True
+        # The tuck reads this: playback must get its runway on screen
+        # after the press - see _MUSIC_POST_PRESS_VISIBLE_S.
+        _music["pressed_at"] = time.monotonic()
+        _send_key(0x4B)                         # 'K'
+    except Exception:
+        pass        # a window that died mid-poll is not worth a log
+
+
+def _autoplay_url(url: str) -> str:
+    """The configured music URL, in the form it should be opened.
+
+    One line, because the implementation moved to
+    `app_settings.music_launch_url` - the reader is not the only thing
+    that opens this URL. `tracker._open_manga_entry` opens it too and was
+    passing it through raw, so the same link autoplayed from one door and
+    not the other; a transform used by two callers belongs beside the
+    setting rather than inside one page."""
+    return app_settings.music_launch_url(url)
+
+
+def _process_exe(pid) -> str:
+    """Lowercased file name of process `pid`, or ""."""
+    import ctypes
+    from ctypes import wintypes
+    if not pid:
         return ""
     # PROCESS_QUERY_LIMITED_INFORMATION. Not PROCESS_QUERY_INFORMATION:
     # the limited form is the one a normal process is allowed to open on
     # another process of the same user, and the browser is one.
-    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
     if not handle:
         return ""
     try:
@@ -3876,6 +4136,206 @@ def _window_exe(hwnd) -> str:
         return os.path.basename(buffer.value).lower()
     finally:
         ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _window_exe(hwnd) -> str:
+    """Lowercased file name of the process owning `hwnd`, or ""."""
+    import ctypes
+    from ctypes import wintypes
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return _process_exe(pid.value)
+
+
+def _browser_is_audible() -> bool:
+    """True when the default output device is currently carrying audio
+    from the default browser's processes.
+
+    This is the sensor that keeps _grant_play_gesture's `k` from doing
+    the opposite of its job. Measured 23 August 2026, owner's real
+    profile: a music window opened by *handoff* into his running Brave
+    autoplayed on its own ~2s after appearing (session peak 0.12-0.29 on
+    the meter), and the keystroke landed as *pause* - the audio died
+    within a second of the press, which is the whole of three runs that
+    ended "paused at 0:01". A cold-started browser never autoplayed
+    (0:00 with the play overlay for 14+ foreground seconds) and needs
+    the press. Silence is the one signal that separates the two.
+
+    Raw COM against WASAPI (MMDeviceEnumerator -> IAudioSessionManager2
+    -> per-session IAudioMeterInformation), no new dependency. Costs
+    ~1-3ms per call; called a handful of times per music launch. Any
+    failure anywhere returns False - the press then happens exactly as
+    it would have without this sensor. Never raises."""
+    if os.name != "nt":
+        return False
+    exe = _default_browser_exe()
+    if not exe:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_uint32), ("d2", ctypes.c_uint16),
+                    ("d3", ctypes.c_uint16), ("d4", ctypes.c_ubyte * 8)]
+
+    try:
+        ole32 = ctypes.windll.ole32
+
+        def guid(text):
+            out = GUID()
+            ole32.CLSIDFromString(text, ctypes.byref(out))
+            return out
+
+        # S_FALSE (already initialised, Qt does this) is fine.
+        ole32.CoInitialize(None)
+
+        def com(obj, index, argtypes, *args):
+            vtbl = ctypes.cast(
+                obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+            ).contents
+            proto = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                       *argtypes)
+            return proto(vtbl[index])(obj, *args)
+
+        def release(obj):
+            try:
+                if obj:
+                    com(obj, 2, [])
+            except Exception:
+                pass
+
+        CLSID_MMDeviceEnumerator = guid(
+            "{BCDE0395-E52F-467C-8E3D-C4579291692E}")
+        IID_IMMDeviceEnumerator = guid(
+            "{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+        IID_IAudioSessionManager2 = guid(
+            "{77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F}")
+        IID_IAudioSessionControl2 = guid(
+            "{BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D}")
+        IID_IAudioMeterInformation = guid(
+            "{C02216F6-8C67-4B5B-9D00-D008E73E0064}")
+
+        enum = ctypes.c_void_p()
+        if ole32.CoCreateInstance(
+                ctypes.byref(CLSID_MMDeviceEnumerator), None, 23,
+                ctypes.byref(IID_IMMDeviceEnumerator),
+                ctypes.byref(enum)) or not enum:
+            return False
+        device = ctypes.c_void_p()
+        manager = ctypes.c_void_p()
+        session_enum = ctypes.c_void_p()
+        audible = False
+        try:
+            # IMMDeviceEnumerator::GetDefaultAudioEndpoint(eRender,
+            # eMultimedia)
+            if com(enum, 4, [ctypes.c_uint, ctypes.c_uint,
+                             ctypes.POINTER(ctypes.c_void_p)],
+                   0, 1, ctypes.byref(device)) or not device:
+                return False
+            # IMMDevice::Activate(IAudioSessionManager2, CLSCTX_ALL)
+            if com(device, 3, [ctypes.POINTER(GUID), ctypes.c_uint,
+                               ctypes.c_void_p,
+                               ctypes.POINTER(ctypes.c_void_p)],
+                   ctypes.byref(IID_IAudioSessionManager2), 23, None,
+                   ctypes.byref(manager)) or not manager:
+                return False
+            if com(manager, 5, [ctypes.POINTER(ctypes.c_void_p)],
+                   ctypes.byref(session_enum)) or not session_enum:
+                return False
+            count = ctypes.c_int(0)
+            com(session_enum, 3, [ctypes.POINTER(ctypes.c_int)],
+                ctypes.byref(count))
+            for index in range(count.value):
+                session = ctypes.c_void_p()
+                if com(session_enum, 4,
+                       [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)],
+                       index, ctypes.byref(session)) or not session:
+                    continue
+                control2 = ctypes.c_void_p()
+                meter = ctypes.c_void_p()
+                try:
+                    if com(session, 0, [ctypes.POINTER(GUID),
+                                        ctypes.POINTER(ctypes.c_void_p)],
+                           ctypes.byref(IID_IAudioSessionControl2),
+                           ctypes.byref(control2)) or not control2:
+                        continue
+                    pid = ctypes.c_uint32(0)
+                    com(control2, 14, [ctypes.POINTER(ctypes.c_uint32)],
+                        ctypes.byref(pid))
+                    if _process_exe(pid.value) != exe:
+                        continue
+                    if com(session, 0, [ctypes.POINTER(GUID),
+                                        ctypes.POINTER(ctypes.c_void_p)],
+                           ctypes.byref(IID_IAudioMeterInformation),
+                           ctypes.byref(meter)) or not meter:
+                        continue
+                    peak = ctypes.c_float(0.0)
+                    com(meter, 3, [ctypes.POINTER(ctypes.c_float)],
+                        ctypes.byref(peak))
+                    # Playing audio measured 0.12-0.29; silence 0.0000.
+                    if peak.value > 0.01:
+                        audible = True
+                        break
+                finally:
+                    release(meter)
+                    release(control2)
+                    release(session)
+        finally:
+            release(session_enum)
+            release(manager)
+            release(device)
+            release(enum)
+        return audible
+    except Exception:
+        return False
+
+
+def _find_window_of_pid(pid, exclude=0) -> int:
+    """First visible, unowned top-level window belonging to `pid`, or 0.
+    `exclude` skips one handle - _force_close_music asks "does this
+    process own any window *besides* the one being closed".
+
+    When the music launch cold-starts the browser, the Popen'd pid *is*
+    the browser process and the window can be found by process id
+    instead of waiting for it to take the foreground. That wait was
+    measured failing 22 August 2026: on one first launch Brave put its
+    window up without ever becoming the foreground window, so the sweep
+    recorded no handle, nothing was ever tucked behind Atomic, and
+    stop_music had nothing to close. A handoff to an already-running
+    browser exits the launcher pid at once, and there the foreground
+    sweep is the answer instead - it also remains first try on a cold
+    start, and is what spots the window stealing focus back later."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def enum(hwnd, _lparam):
+        if exclude and int(hwnd) == int(exclude):
+            return True
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if (owner.value == pid and user32.IsWindowVisible(hwnd)
+                and not user32.GetWindow(hwnd, 4)):     # GW_OWNER: skip
+            found.append(int(hwnd))                     # popups/tooltips
+            return False        # stop the enumeration - found it
+        return True
+
+    try:
+        user32.EnumWindows(enum, 0)
+    except Exception:
+        pass        # a stopped enumeration reports failure; found[] is set
+    return found[0] if found else 0
+
+
+def _fallback_refront(window):
+    """The launch-time safety net: refront Atomic only when the sweep
+    never identified the music window at all (no browser association to
+    read, or the window never appeared). Once a window is known, the
+    tuck path is the sole owner of the refront - see the call site."""
+    if _music.get("hwnd") is None:
+        _refront(window)
 
 
 def _refront(window):
@@ -3924,23 +4384,66 @@ def _hush_browser_window(window, was_foreground):
     user32 = ctypes.windll.user32
     deadline = time.monotonic() + _MUSIC_HUSH_S
 
+    def first_sighting(hwnd):
+        # First sighting of the window this launch brought up. Left
+        # alone here on purpose - not pushed behind, not refronted-over,
+        # nothing - for _MUSIC_AUTOPLAY_GRACE_MS: touching it at all
+        # right now is what used to bury it within one
+        # _MUSIC_HUSH_STEP_MS of existing (see that constant's comment).
+        # Remembered so stop_music can still close exactly this handle
+        # even before the grace elapses.
+        _music["hwnd"] = int(hwnd)
+        # **Tucked as soon as it is actually heard, not when a timer says
+        # it probably started.** The owner, 23 August 2026: "the URL music
+        # opened correctly but it took long time to minimize!" - and he is
+        # right, the grace was being waited out in full every time even
+        # though playback was measured beginning at +0.8-1.5s.
+        #
+        # What makes the early tuck safe is the same sensor that gates the
+        # keypress (_browser_is_audible): once sound is coming out of the
+        # browser the page is unambiguously playing, and a *playing* media
+        # element keeps playing when its window is minimized - measured
+        # across five cycles, audible through the tuck and still audible
+        # 18-24s later. The visibility rule only governs whether playback
+        # may *start*.
+        #
+        # So the grace is now a ceiling rather than a fixed wait: poll for
+        # sound and tuck the moment it is there, and if it never comes,
+        # tuck at _MUSIC_AUTOPLAY_GRACE_MS exactly as before.
+        started = time.monotonic()
+
+        def tuck_when_playing(h=int(hwnd)):
+            if _music.get("hwnd") != h or _music.get("settled"):
+                return          # closed, replaced, or already tucked
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            audible = False
+            try:
+                audible = _browser_is_audible()
+            except Exception:
+                audible = False     # sensor unavailable: fall back to the timer
+            if audible or elapsed_ms >= _MUSIC_AUTOPLAY_GRACE_MS:
+                _tuck_music_window(h, window)
+                return
+            QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, tuck_when_playing)
+
+        # Not from zero: a window that has not painted yet cannot be
+        # playing, and the gesture below may still be owed.
+        QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, tuck_when_playing)
+        # The keystroke that actually starts playback - after a
+        # page-load beat, and only while the window is foreground
+        # inside this same grace period. See _grant_play_gesture.
+        gesture_deadline = (time.monotonic()
+                            + _MUSIC_AUTOPLAY_GRACE_MS / 1000.0)
+        QTimer.singleShot(
+            _MUSIC_GESTURE_DELAY_MS,
+            lambda h=int(hwnd): _grant_play_gesture(h, gesture_deadline))
+
     def sweep():
         try:
             hwnd = user32.GetForegroundWindow()
             if hwnd and hwnd != was_foreground and _window_exe(hwnd) == exe:
                 if _music.get("hwnd") is None:
-                    # First sighting of the window this launch brought
-                    # up. Left alone here on purpose - not pushed behind,
-                    # not refronted-over, nothing - for
-                    # _MUSIC_AUTOPLAY_GRACE_MS: touching it at all right
-                    # now is what used to bury it within one
-                    # _MUSIC_HUSH_STEP_MS of existing (see that constant's
-                    # comment). Remembered so stop_music can still close
-                    # exactly this handle even before the grace elapses.
-                    _music["hwnd"] = int(hwnd)
-                    QTimer.singleShot(
-                        _MUSIC_AUTOPLAY_GRACE_MS,
-                        lambda h=int(hwnd): _tuck_music_window(h, window))
+                    first_sighting(hwnd)
                 elif _music.get("settled"):
                     # Already had its grace period and been tucked away
                     # once - this is the same window stealing focus back
@@ -3950,6 +4453,13 @@ def _hush_browser_window(window, was_foreground):
                     # its one chance to decide whether to autoplay.
                     user32.ShowWindow(hwnd, 6)         # SW_MINIMIZE
                     _refront(window)
+            elif _music.get("hwnd") is None and _music.get("pid"):
+                # Not foreground - which a fresh profile's first launch
+                # never was, measured 22 August 2026 - but the process
+                # is our own child, so ask for its window directly.
+                hwnd = _find_window_of_pid(_music["pid"])
+                if hwnd and hwnd != was_foreground:
+                    first_sighting(hwnd)
             if time.monotonic() < deadline:
                 QTimer.singleShot(_MUSIC_HUSH_STEP_MS, sweep)
         except Exception:
@@ -3975,6 +4485,27 @@ def _tuck_music_window(hwnd, window):
     the window, or `stop_music` may have. Never raises."""
     if os.name != "nt" or _music.get("hwnd") != hwnd:
         return
+    # The keystroke may have landed late (the gesture polls for the
+    # window to be foreground); a tuck right on its heels pauses the
+    # playback it just started - measured, see
+    # _MUSIC_POST_PRESS_VISIBLE_S. Wait out the remainder first.
+    pressed = _music.get("pressed_at")
+    if pressed is not None:
+        remaining = _MUSIC_POST_PRESS_VISIBLE_S - (time.monotonic() - pressed)
+        # **Sound ends the wait early.** That wait exists to be sure the
+        # press actually took - and audio coming out of the browser is
+        # that certainty, arrived sooner. Without this the owner waits the
+        # full post-press window on top of everything else, which is his
+        # "took long time to minimize" (23 August 2026).
+        try:
+            if _browser_is_audible():
+                remaining = 0
+        except Exception:
+            pass                # no sensor: keep the conservative wait
+        if remaining > 0:
+            QTimer.singleShot(int(remaining * 1000) + 50,
+                              lambda: _tuck_music_window(hwnd, window))
+            return
     try:
         import ctypes
         user32 = ctypes.windll.user32
@@ -4062,6 +4593,17 @@ def _open_music_quietly(window, entry):
         Never raises - it is a thread, and an uncaught exception in one
         is silent."""
         try:
+            # Pay the audio sensor's one-off COM initialisation here,
+            # where nobody is waiting on it. Measured 23 August 2026: the
+            # first _browser_is_audible() call is 48.7ms and every one
+            # after it 3.5-5.2ms, and the tuck poll that follows runs on
+            # the UI thread - 48.7ms there is three dropped frames, and
+            # this makes it none. The answer is discarded on purpose;
+            # only the initialisation is wanted.
+            try:
+                _browser_is_audible()
+            except Exception:
+                pass
             if os.name == "nt":
                 path = _default_browser_path()
                 switch = _NEW_WINDOW_SWITCH.get(os.path.basename(path).lower())
@@ -4076,10 +4618,43 @@ def _open_music_quietly(window, entry):
                 # (see helpers/child_process).
                 with child_process.clean_environ():
                     if switch:
-                        subprocess.Popen(
-                            [path, switch, url],
+                        # **The owner's own profile, deliberately.** A
+                        # private --user-data-dir profile with
+                        # --autoplay-policy=no-user-gesture-required was
+                        # built and measured playing unaided (23 August
+                        # 2026) - and then removed, because the owner's
+                        # music URL is a *private* playlist on his
+                        # signed-in Premium account: a fresh profile is
+                        # signed out, cannot open a private playlist at
+                        # all, and loses Premium. What starts playback
+                        # instead is a real keystroke into the window -
+                        # see _grant_play_gesture. Do not bring the
+                        # private profile back without solving sign-in.
+                        args = [path, switch, url]
+                        if switch == "--new-window":
+                            # Chromium family only (Firefox has no such
+                            # switch). Applies when this launch *starts*
+                            # the browser; a handoff to a running
+                            # instance ignores it, and must: it would
+                            # change the owner's own browser session.
+                            # Measured 23 August 2026: without it, a
+                            # cold-started brave.exe (8 processes,
+                            # ~400MB) stayed resident minutes after
+                            # stop_music closed its window; with it, the
+                            # process exited 1s after the window closed.
+                            args.insert(2, "--disable-background-mode")
+                        proc = subprocess.Popen(
+                            args,
                             creationflags=getattr(subprocess,
                                                   "CREATE_NO_WINDOW", 0))
+                        # On a cold start this pid is the browser
+                        # process itself, so the sweep can find its
+                        # window even if it never takes the foreground
+                        # (see _find_window_of_pid); on a handoff it
+                        # exits at once and the foreground sweep is
+                        # what finds the window.
+                        _music["pid"] = proc.pid
+                        _music_pids.add(proc.pid)
                     else:
                         ctypes.windll.shell32.ShellExecuteW(
                             None, "open", url, None, None, 7)
@@ -4092,13 +4667,21 @@ def _open_music_quietly(window, entry):
 
     _music["key"] = key
     _music["hwnd"] = None       # filled in by the sweep below
+    _music["pid"] = None        # filled in by the launch thread
     _music["settled"] = False
+    _music["gesture_sent"] = False
+    _music["pressed_at"] = None
     _hush_browser_window(window, was_foreground)
-    # Fallback only - see the docstring above. Timed to start only once
-    # _hush_browser_window's own grace period has already ended, so this
-    # cannot bury a window that function is deliberately leaving alone.
-    QTimer.singleShot(_MUSIC_AUTOPLAY_GRACE_MS + 200, lambda: _refront(window))
-    QTimer.singleShot(_MUSIC_AUTOPLAY_GRACE_MS + 1200, lambda: _refront(window))
+    # Fallback only - see the docstring above, and they stand down the
+    # moment the sweep has identified the window: from then on the tuck
+    # owns the refront, and it may still be *waiting* (the keystroke
+    # gets a visible runway, _MUSIC_POST_PRESS_VISIBLE_S) - a blind
+    # refront here would cover the window mid-runway and pause the
+    # playback the press just started.
+    QTimer.singleShot(_MUSIC_AUTOPLAY_GRACE_MS + 200,
+                      lambda: _fallback_refront(window))
+    QTimer.singleShot(_MUSIC_AUTOPLAY_GRACE_MS + 1200,
+                      lambda: _fallback_refront(window))
 
 
 def _music_key(entry):
@@ -4139,7 +4722,10 @@ def stop_music(delay_ms: int = 0):
         return
     _cancel_music_stop()
     hwnd, _music["hwnd"], _music["key"] = _music["hwnd"], None, None
+    _music["pid"] = None
     _music["settled"] = False
+    _music["gesture_sent"] = False
+    _music["pressed_at"] = None
     if not hwnd or os.name != "nt":
         return
     try:
@@ -4150,8 +4736,74 @@ def stop_music(delay_ms: int = 0):
             # close the way its own X button does, so the browser saves
             # its session and the owner's other windows are untouched.
             user32.PostMessageW(hwnd, 0x0010, 0, 0)     # WM_CLOSE
+            # ...but a close request is not a close. Measured 23 August
+            # 2026: a music window holding two tabs answered WM_CLOSE
+            # with Brave's "Close all tabs?" modal, sat *disabled*
+            # behind it, and swallowed every further WM_CLOSE and
+            # SC_CLOSE whole - music playing invisibly forever. (Two
+            # tabs is what a handoff launch into the still-running
+            # music-profile process produced, twice in two runs; and
+            # seeding the profile preference that disables the modal
+            # did not survive Brave rewriting the file.) So the close
+            # is followed up - see _force_close_music.
+            QTimer.singleShot(900, lambda: _force_close_music(hwnd))
     except Exception:
         logs.exception("could not close the reading-music window")
+
+
+def _force_close_music(hwnd, attempt=0):
+    """Finish closing a music window that ignored stop_music's WM_CLOSE.
+
+    Two stages, 1.5s apart. First: if the window is disabled behind an
+    enabled popup of its own - Brave's "Close all tabs?" - post Enter to
+    accept the dialog's default, which is "Close all", the very thing
+    the WM_CLOSE asked for. Cheap, but measured unreliable: it closed
+    one such dialog and was swallowed by the next (23 August 2026,
+    posted key events only reach a Chromium dialog's button when the
+    dialog happens to hold focus). Second: if the window is *still*
+    alive, terminate its process - but only when its pid is one this
+    app itself Popen'd for music (_music_pids), meaning this launch
+    cold-started the browser; a pid not in the set (a handoff into the
+    owner's already-running browser, a sweep mis-latch onto one of his
+    own windows) is left alone, which is exactly the old behaviour.
+    Together with the other-windows check below, a terminate can only
+    ever hit a browser process this app started whose sole remaining
+    window is the stuck music window - at worst that costs a "restore
+    pages?" bubble on the owner's next browser start, against music
+    that would otherwise play invisibly forever. Never raises."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if not user32.IsWindow(hwnd):
+            return          # closed - done
+        if not user32.IsWindowEnabled(hwnd):
+            popup = user32.GetWindow(hwnd, 6)       # GW_ENABLEDPOPUP
+            if popup:
+                user32.PostMessageW(popup, 0x0100, 0x0D, 0)     # VK_RETURN down
+                user32.PostMessageW(popup, 0x0101, 0x0D, 0)     # VK_RETURN up
+        if attempt == 0:
+            QTimer.singleShot(1500, lambda: _force_close_music(hwnd, 1))
+            return
+        from ctypes import wintypes
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value or pid.value not in _music_pids:
+            return
+        # Never end a process that still owns another window: swapping
+        # titles closes A and opens B, and a handoff can put B's window
+        # in the very process A's stuck window belongs to. B survives;
+        # A's window stays stuck, which is the lesser wrong.
+        if _find_window_of_pid(pid.value, exclude=hwnd):
+            return
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x0001, False, pid.value)  # PROCESS_TERMINATE
+        if handle:
+            try:
+                kernel32.TerminateProcess(handle, 0)
+            finally:
+                kernel32.CloseHandle(handle)
+    except Exception:
+        pass        # a window that died in the meantime is not a problem
 
 
 def open_reader(window, entry, data_file="tracker.json", resume=True,

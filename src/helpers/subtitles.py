@@ -53,6 +53,14 @@ import zipfile
 
 from . import app_settings, net, title_match
 
+# The strict release-name reader, imported the same defensive way
+# streams.py imports it: a build where this fails checks one thing fewer,
+# not a subtitle search that will not run.
+try:
+    from . import indexers
+except Exception:  # pragma: no cover
+    indexers = None
+
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
 
@@ -521,20 +529,66 @@ def _subdl(query, deadline) -> list:
     if not isinstance(body, dict) or not body.get("status"):
         return []
     results = []
+    # **Every row the API returned used to be accepted unchecked**, and
+    # that is the owner's "the subtitles fetching from SubDL is not
+    # accurate at all!!" (23 August 2026). `lang` and `format` were both
+    # hardcoded - so a row in any language was labelled Arabic, and an
+    # .ass was labelled .srt - and neither the episode nor the title was
+    # ever compared against what was asked for. This was the only one of
+    # the four sources checking nothing: AnimeTosho, SubtitleCat and
+    # OpenSubtitles each verify something. And because `_rank` sorts by
+    # language first and every SubDL row *claimed* Arabic, whatever it
+    # returned sorted to the top of the panel and got auto-applied.
+    want_season = int(query.get("season") or 0) or None
+    want_episode = int(query.get("episode") or 0) or None
+    wanted_title = str(query.get("title") or "").strip()
     for item in body.get("subtitles") or []:
+        if not isinstance(item, dict):
+            continue
         path = str(item.get("url") or "")
         if not path:
             continue
+        # The row's *own* language, not the one we asked for. A missing
+        # field is trusted (the query said AR), a present-and-wrong one
+        # is dropped.
+        code = item.get("language") or item.get("lang")
+        if code and not is_arabic_code(code):
+            continue
+        # The row's own episode, where it states one. SubDL answers a
+        # season query with the whole season for some releases, and a
+        # pack row carries no numbers at all - which stays allowed,
+        # because that is a real subtitle for the episode, just not one
+        # that says so.
+        if want_episode is not None:
+            row_ep = item.get("episode")
+            if row_ep not in (None, "") and int(row_ep or 0) != want_episode:
+                continue
+            row_season = item.get("season")
+            if want_season and row_season not in (None, "") \
+                    and int(row_season or 0) != want_season:
+                continue
         name = str(item.get("release_name") or item.get("name") or "Arabic subtitle")
+        # A name search (no IMDb id) can answer with a different title
+        # entirely - the id search cannot, so it is exempt.
+        if not query.get("imdb_id") and wanted_title and indexers is not None:
+            try:
+                if not indexers.is_same_title(wanted_title, name):
+                    continue
+            except Exception:
+                pass
         results.append({
             "source": "SubDL",
             "name": name[:120],
             "release": name[:120],
-            "lang": "ar",
+            "lang": str(code or "ar").lower()[:5],
             # The API hands back a site-relative path; the files live on
             # the dl host, zipped.
             "url": urllib.parse.urljoin("https://dl.subdl.com/", path),
-            "format": "srt",
+            # Read off the row rather than asserted: an .ass handed to
+            # mpv named .srt is the bug that silently broke every .ass
+            # from every source once already (see _parse_ass).
+            "format": (str(item.get("format") or "").lower().lstrip(".")
+                       or format_of(name) or "srt"),
             "rating": 0,
         })
     return results
@@ -616,6 +670,29 @@ def search(title, *, year=None, season=None, episode=None, imdb_id=None,
     return _rank(results, query)
 
 
+# Which source's rows lead, once language has had its say.
+#
+# **OpenSubtitles first** - the owner's ask, 23 August 2026: "in the
+# subtitles list, make Opensubtitles on the top of the list."
+#
+# This is the only ordering that reaches the screen, and that is worth
+# stating because two others look like they should. `_SOURCES` below is
+# ASK order and is inert: every source is submitted at once and consumed
+# by `as_completed`, so its tuple order changes nothing. The panel then
+# groups by source in dict-insertion order, which means group order is
+# the order each source's first row appears in *this* ranking. So the
+# panel's group order was previously decided by whichever source happened
+# to answer fastest - non-deterministic run to run, the same shape as the
+# "22 / 10 / 16 rows" defect CLAUDE.md rule 7 records.
+#
+# **Below the Arabic term, never above it.** At index 0 this would lift
+# OpenSubtitles' English rows over real Arabic from SubDL or AnimeTosho,
+# which reverses the standing rule that English exists here only as
+# feedstock for the translator.
+SOURCE_PRIORITY = {"OpenSubtitles": 0, "SubDL": 1,
+                   "SubtitleCat": 2, "AnimeTosho": 3}
+
+
 def _rank(results, query) -> list:
     """Arabic before anything else, then exact episode match, then a real
     translation over a machine one, then whatever the source rated it.
@@ -629,6 +706,7 @@ def _rank(results, query) -> list:
     def key(item):
         name = (item.get("release") or item.get("name") or "").lower()
         return (0 if is_arabic_code(item.get("lang")) else 1,
+                SOURCE_PRIORITY.get(item.get("source"), 90),
                 0 if wanted and wanted in name else 1,
                 1 if item.get("translated") else 0,
                 -int(item.get("rating") or 0))

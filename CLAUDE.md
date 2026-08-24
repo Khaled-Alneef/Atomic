@@ -115,6 +115,36 @@ root, which updates itself from this repository's GitHub tags.
    Corollary: **say what was not measured.** "I did not exercise the
    browser launch live" is a finding. Silence about it is a claim.
 
+## Plan in named phases, always
+
+**The owner's ask, 23 August 2026**, after watching a run go past: *"the
+plan and phases method you used, I do not know what is it, but make it a
+rule to use it always it is good!"*
+
+What he was looking at is the **Workflow tool's phased plan** - a script
+that declares `meta.phases` up front (`[{title, detail}, ...]`) and then
+groups the work under `phase('Name')` calls, so the progress display
+reads as *Map → Fix → Verify* rather than as an undifferentiated stream
+of tool calls. He can watch it, and he can tell which part is which.
+
+So, for any request with more than one moving part:
+
+1. **Name the phases before starting**, in the order they will run, and
+   say what each one is for. Investigation is its own phase and comes
+   first - it is where rule 8's measuring lives.
+2. **Say which phase each piece of work belongs to** as it happens, so a
+   report can be read against the plan.
+3. **Verification is always its own final phase**, never folded into the
+   phase that made the change - see rule 8 step 5.
+4. Where the work genuinely fans out (several independent files to map,
+   several sources to measure), run it as an actual `Workflow` with
+   those phases; where it does not, the phases are still named in the
+   answer. **The phases are the deliverable, not the tool.**
+
+A phase that turns out to be unnecessary is dropped out loud. A phase
+that fails is reported as failed - "Verify" exists precisely so that a
+fix nobody proved has somewhere to be marked unproven.
+
 ## How work gets done here
 
 The session the user talks to is the **Manager**: plans the request,

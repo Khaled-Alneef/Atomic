@@ -1,5 +1,6 @@
 """Small reusable widgets shared across windows."""
 
+import collections
 import math
 import time
 import weakref
@@ -10,11 +11,11 @@ from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QBrush, QColor, QCursor, QDrag, QIcon,
                          QLinearGradient, QPainter, QPainterPath, QPen,
-                         QPixmap, QTransform)
+                         QPixmap, QRegion, QTransform)
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
-    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QSlider, QToolTip, QVBoxLayout, QWidget,
+    QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QScrollArea, QSlider, QToolTip, QVBoxLayout, QWidget,
 )
 
 from . import logs, theme
@@ -98,6 +99,32 @@ class LogoProgress(QWidget):
 
     def has_logo(self) -> bool:
         return self._pixmap is not None
+
+    def logo_region(self):
+        """The logo's own silhouette inside this widget, as a QRegion, or
+        None when there is no logo.
+
+        Used to clip the window *behind* the logo down to the logo, so a
+        loading mark over live video is the mark and nothing else - see
+        player.StartupBackdrop's stall mode. Built from the pixmap's
+        alpha, so it is a 1-bit shape: the edge is hard where the artwork
+        is soft, which is the price of a native child window that can
+        only be blended whole."""
+        if self._pixmap is None:
+            return None
+        target = self._target_rect(self._pixmap)
+        if target.width() <= 0 or target.height() <= 0:
+            return None
+        try:
+            scaled = self._pixmap.scaled(
+                target.width(), target.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            region = QRegion(scaled.mask())
+            region.translate(target.x(), target.y())
+            return region
+        except Exception:
+            return None
 
     def set_fraction(self, fraction: float):
         fraction = max(0.0, min(1.0, float(fraction or 0.0)))
@@ -1158,7 +1185,23 @@ class GridSelection:
 HERO_BANNER_HEIGHT = 300
 # The scrim's stops, left to right, as (position, alpha) over theme.BG:
 # heaviest where the text sits, nearly clear at the artwork's edge.
-HERO_BANNER_SCRIM = ((0.0, 242), (0.45, 175), (0.72, 95), (1.0, 30))
+#
+# **Carried further right, 23 August 2026, because the text moved.** The
+# hero is now cover-left / details-right (see hero_split), so the title
+# and its chips sit around the middle of the banner - where the old ramp
+# had already fallen to alpha 175 and was heading for 95. Text that read
+# cleanly when it was hard against the left edge does not read there. The
+# stops below keep the same shape and the same near-clear right edge, and
+# simply hold the dark longer across the band the words now occupy.
+HERO_BANNER_SCRIM = ((0.0, 244), (0.52, 214), (0.80, 140), (1.0, 56))
+
+# The portrait cover on the left of a hero, at banner scale.
+#
+# 3:4-ish and 264 tall so it clears the 300px banner with the 18px of
+# air hero_split leaves above and below. Deliberately not POSTER_SIZE
+# (160x216, windows.tracker): a card's cover is a thumbnail in a grid,
+# this one is the subject of the banner.
+HERO_COVER_SIZE = (196, 264)
 
 # The hero's own corner radius, larger than the app's RADIUS_LG.
 #
@@ -1475,6 +1518,117 @@ class HeroBanner(QFrame):
         painter.end()
 
 
+def hero_split(banner, cover_size=HERO_COVER_SIZE):
+    """Lay a hero out as **cover on the left, details on the right**, and
+    hand back `(cover_label, details_column)` for the caller to fill.
+
+    The owner's ask, 23 August 2026, with a mock-up: "change all banners
+    design to make it like image 2, the cover image (as in the cards) on
+    the left and the details on the right, do it for all watch and read
+    (Featured, top result, Continue reading, etc...)".
+
+    One function rather than the same QHBoxLayout written twice, because
+    "all banners" is exactly the requirement that a second copy quietly
+    fails: Home's continue hero (windows.home) and the tracker's Discover
+    featured/top-result banner (windows.tracker) are the two hero
+    surfaces in the app, they were already drifting apart in margins and
+    spacing, and any third one should be this shape by construction.
+
+    The cover is a plain QLabel because `images.thumbnail_or_avatar`
+    already returns a rounded, corner-cut, cache-warm portrait pixmap -
+    the very one the cards on the same page are drawing, so a hero cover
+    is a cache hit rather than a decode (see images._fitted). It is
+    transparent to the mouse so the banner's own `clicked` still fires
+    when the cover is what was pressed - the banner is one click target,
+    and a hole in the middle of it would be a bug nobody would look for.
+
+    The artwork behind is unchanged: it is still the landscape backdrop
+    under HERO_BANNER_SCRIM, which is what gives the banner its colour.
+    The cover sits on top of it, on the darkest end of the ramp."""
+    row = QHBoxLayout(banner)
+    row.setContentsMargins(26, 18, 32, 18)
+    row.setSpacing(24)
+
+    cover = QLabel(banner)
+    cover.setFixedSize(int(cover_size[0]), int(cover_size[1]))
+    cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    row.addWidget(cover, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    column = QVBoxLayout()
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(8)
+    row.addLayout(column, 1)
+    return cover, column
+
+
+# The title logo drawn in a hero in place of its typed name. Height
+# first, then a width cap so a very wide treatment (One Piece) does not
+# run into the details column's right edge on a narrow window; scaled
+# keeping aspect inside that box.
+HERO_LOGO_HEIGHT = 84
+HERO_LOGO_MAX_WIDTH = 480
+
+
+def hero_logo_label(parent=None) -> QLabel:
+    """The label a hero's TMDB title treatment is drawn into, hidden
+    until `set_hero_logo` gives it one.
+
+    Back by the owner's ask of 24 August 2026 - "instead of the name in
+    the banner, make it use the logo from TMDB, if it has no logo then
+    use the name normally" - after the 23 August redesign had dropped
+    it. What that redesign was actually reacting to was a banner with
+    *neither* logo nor name (a hide-the-name rule for AniList banner art
+    with no logo to stand in); the rule this time is only ever "logo
+    replaces name", never "hide the name", so a banner cannot lose its
+    title again. Shared between Home's continue hero and the tracker's
+    featured/top-result banner, like hero_split, so both wear it.
+
+    A soft shadow so a logo reads over the art whatever its own colour -
+    most treatments are light, some (Demon Slayer) are near-black, and
+    the scrim that carries white text cannot help those. Offset 0: a
+    halo lifting the shape off the ground rather than a drop under it."""
+    label = QLabel("", parent)
+    label.setVisible(False)
+    label.setStyleSheet("background: transparent;")
+    shadow = QGraphicsDropShadowEffect(label)
+    shadow.setBlurRadius(28)
+    shadow.setOffset(0, 0)
+    shadow.setColor(QColor(0, 0, 0, 200))
+    label.setGraphicsEffect(shadow)
+    return label
+
+
+def set_hero_logo(logo_label: QLabel, title_label: QLabel, path,
+                  height=HERO_LOGO_HEIGHT, max_width=HERO_LOGO_MAX_WIDTH) -> bool:
+    """Show `path` as the hero's logo and hide the typed title - or, when
+    there is no usable logo, the other way round. Returns whether a logo
+    is showing. Never leaves both hidden."""
+    from . import images
+    pixmap = None
+    if path:
+        try:
+            dpr = logo_label.devicePixelRatioF() or 1.0
+            pixmap = images.logo_pixmap(path, height, dpr)
+            if pixmap.isNull():
+                pixmap = None
+            elif pixmap.width() / dpr > max_width:
+                pixmap = pixmap.scaledToWidth(
+                    int(max_width * dpr), Qt.TransformationMode.SmoothTransformation)
+                pixmap.setDevicePixelRatio(dpr)
+        except Exception:
+            pixmap = None
+    if pixmap is not None:
+        logo_label.setPixmap(pixmap)
+        logo_label.setVisible(True)
+        title_label.setVisible(False)
+        return True
+    logo_label.clear()
+    logo_label.setVisible(False)
+    title_label.setVisible(True)
+    return False
+
+
 class GlyphButton(QPushButton):
     """A glyph button whose icon is painted rather than set as text.
 
@@ -1603,7 +1757,18 @@ def screen_tick_ms(widget=None) -> int:
         rate = 0.0
     if not rate or rate <= 0:
         return MAX_TICK_MS
-    return max(4, min(MAX_TICK_MS, int(round(1000.0 / rate))))
+    # **Floor, not round - and 144Hz is the one rate where that matters.**
+    # 1000/144 is 6.944ms; rounding gives 7ms, which is 142.86 positions a
+    # second against a panel asking for 144. So the tick this function
+    # exists to match was itself landing *under* the refresh rate, and
+    # every glide in the app - the wheel, the page slide, the sidebar
+    # fold, the sideways rows - was capped just below 144fps by the
+    # rounding alone. Checked at every rate involved: 60 -> 16ms (62.5/s),
+    # 120 -> 8ms (125/s), 144 -> 6ms (166.7/s), 165 -> 6ms (166.7/s),
+    # 240 -> 4ms (250/s); only 144 was short, and only under round().
+    # Flooring is never worse - a tick slightly faster than the panel is
+    # coalesced by the compositor, one slightly slower drops a frame.
+    return max(4, min(MAX_TICK_MS, int(1000.0 / rate)))
 
 
 def ease_out_cubic(fraction: float) -> float:
@@ -1909,6 +2074,211 @@ class PageSlide(QWidget):
         painter.end()
 
 
+class _Momentum(QObject):
+    """Wheel scrolling as velocity and friction, not as a curve restarted
+    on every notch.
+
+    **Why the old model felt "stiff as a board" (the owner, 24 August
+    2026), measured on Watch > Anime in a real 1600x900 window at
+    144Hz:** each notch restarted a 220ms OutCubic from the current
+    position, so speed depended only on the undelivered backlog, never
+    on the wheel's cadence. At one notch per 150ms the velocity was a
+    sawtooth - ~1500 px/s right after each notch, 215-290 px/s just
+    before the next, a 5-7x step fourteen times in a row. After a burst
+    the first 7ms frame moved 9.2% of the whole remaining distance (51-63
+    px in one frame). An 8-notch flick in 107ms travelled exactly as far
+    as 8 slow notches and was dead-stopped 205ms after the last one. And
+    19% of the glide's ticks moved nothing, because the cubic's tail
+    advances less than a pixel per tick and round() ate it. Frame rate
+    was never the problem: paint gaps were 5.9-6.4ms at every cadence.
+
+    So: a notch is an impulse added to a velocity; position integrates
+    every screen tick from real elapsed time; velocity decays as
+    exp(-FRICTION*dt). A single notch still travels its old distance
+    (impulse = distance x FRICTION) but settles along an exponential
+    tail rather than stopping dead; a second notch arrives while the
+    first is still moving and simply adds to it, so a steady cadence is
+    a steady speed; and notches in quick succession earn a little more
+    each (ACCEL_*), which is what makes a flick go somewhere. A notch
+    against the current direction kills that momentum first, so a
+    change of mind answers at once.
+
+    Shared by the pages' vertical scroll and the sideways card rows; the
+    arrow buttons keep their discrete tween because a press is a jump,
+    not scrolling. The reader's strip keeps its own physics as before."""
+
+    # Exponential decay rate, 1/s. A single notch's unfinished fraction
+    # after t seconds is exp(-FRICTION*t): at 16/s a 122px notch is
+    # under a pixel from done at ~300ms, against the cubic's 188ms dead
+    # stop - longer, and shaped like something that was moving.
+    # **12, down from 16, measured at the mid cadence.** At 16/s the speed
+    # between two notches 150ms apart fell from ~1650 to ~330 px/s - a
+    # steady hand still produced a pulse per notch. At 12 it keeps ~1/6
+    # more between notches and a lone notch still settles in ~350ms.
+    #
+    # **7, down from 12 - the owner, 24 August 2026: "super super stiff",
+    # make it smooth like Stremio/Harbor.** Measured on Watch > Anime at
+    # the mid cadence (one notch / 150ms), velocity in the 25ms before a
+    # notch against the 25ms after it: at 12 it was 444 -> 1352 px/s, a
+    # 3x pulse on every click - and with the 40% shorter notch asked for
+    # in the same breath it got *worse*, 184 -> 969 (5.3x), because a
+    # smaller impulse on the same steep decay is a smaller kick followed
+    # by the same brake. At 7 it is 413 -> 606 (1.5x); at 5 it is 1.3x
+    # but a lone notch then takes 553ms to settle and a flick coasts a
+    # full second, which is floaty rather than smooth. 7: lone notch
+    # settles in 440ms, peak 666 px/s for 75px, a flick coasts ~0.7s.
+    FRICTION = 7.0
+    # **5200, and the excess is kept, not thrown away.** The first cut
+    # clamped the velocity and discarded what would not fit, so an
+    # 8-notch flick travelled *less* per notch than slow scrolling
+    # (measured 826px against 1025) - the opposite of what a flick is.
+    # Whatever exceeds the ceiling now waits in `_pending` and feeds in
+    # as the speed decays, so a flick travels its full distance at a
+    # bounded speed. At 5200 px/s a tick two frames late moves ~72px.
+    # (4500 and the discard were measured on the way here: a 104px
+    # single-frame jump at 7000, then the short flick at 4500.)
+    MAX_SPEED = 5200.0
+    # superseded - see above; kept so the next reader knows it was tried
+    _OLD_MAX_SPEED_NOTE = "7000 then 4500"
+    # Below this the remaining distance (speed/FRICTION) is ~2px: snap
+    # it and stop, rather than ticking sub-pixel amounts into round().
+    STOP_SPEED = 30.0
+    # An impulse is not applied in one tick: it is handed over at this
+    # rate (1/s), so ~63% of a notch's speed has arrived after 14ms and
+    # ~90% after 33ms. Measured without it: velocity 313 px/s 25ms before
+    # a mid-cadence notch and 2001 px/s 25ms after - the same 6x step the
+    # old curve had, just with a tail. Ramping the impulse in is what
+    # makes a notch a push rather than a kick.
+    # **40, down from 70**, alongside FRICTION 7: the impulse now arrives
+    # over ~60ms instead of ~30, so the start of a notch is as soft as
+    # its end. Measured against 70 at friction 7: peak velocity of a
+    # lone notch 511 -> 666 px/s but no pulse difference at the mid
+    # cadence (1.5x both), and no change to travel or settle.
+    RAMP = 40.0
+    # Cadence acceleration: notches inside this window count, and the
+    # impulse scales from 1x for a lone notch to ACCEL_MAX once
+    # ACCEL_NOTCHES have landed in the window. Modest on purpose - the
+    # owner asked for smooth, not for a page that runs away.
+    ACCEL_WINDOW_S = 0.25
+    ACCEL_NOTCHES = 5
+    ACCEL_MAX = 1.7
+    # The longest step the integrator will take. A tick that is later
+    # than two frames is integrated as two frames: the position lands a
+    # little short rather than leaping - smoothness over accuracy, the
+    # whole point of the model.
+    MAX_DT = 2.0 / 144.0
+
+    def __init__(self, bar, tick_ms, parent=None, friction=None, accel_max=None):
+        """`friction` and `accel_max` override the class defaults for one
+        surface. The reader passes a high friction so its strip **stops
+        when the wheel stops** - the owner's ask, 24 August 2026: "while
+        in reader mode remove the scrolling movement after the mouse
+        scroll stops ... ONLY IN READER MODE". Reading is aiming at a
+        panel, not travelling, and a coast overshoots what you were
+        looking at."""
+        super().__init__(parent)
+        self._bar = bar
+        self._tick_ms = tick_ms
+        if friction is not None:
+            self.FRICTION = float(friction)
+        if accel_max is not None:
+            self.ACCEL_MAX = float(accel_max)
+        self._pos = None
+        self._vel = 0.0
+        self._pending = 0.0          # impulse not yet handed to the velocity
+        self._last = 0.0
+        self._kicks = collections.deque()
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.timeout.connect(self._tick)
+        # **A vblank-driven clock was built for this and measured
+        # worse - do not build it again.** The reasoning was sound: a
+        # QTimer takes whole milliseconds, so on a 144Hz panel it runs at
+        # 6ms against a 6.94ms refresh and the two beat, which is what
+        # poster_grid's docstring records as 43% of refreshes showing no
+        # movement. A thread blocking on IDXGIOutput::WaitForVBlank and
+        # posting a queued tick fixes the beat and creates a worse
+        # problem: the ticks arrive in bursts whenever the UI thread was
+        # busy, so the movement *between two paints* varies far more
+        # than the timer's does. Measured 24 August 2026 on Home, two
+        # runs each - judder 12.3/15.2% on the timer against **62.2 and
+        # 64.1%** on the vblank clock, with 73-77% of frames more than
+        # 30% off the frame before.
+        #
+        # The pacing can only be fixed where the position is computed
+        # *inside* the frame that draws it, which needs the surface to
+        # own its own painting - see helpers/poster_grid, which does
+        # exactly that and measures 2-6% judder. For a page built out of
+        # widgets there is no such point, and the timer is the best of
+        # the bad options.
+
+    def active(self) -> bool:
+        return self._timer.isActive()
+
+    def kick(self, distance_px, direction):
+        """One notch: `direction` is +1 to scroll forward (value up), -1
+        back. `distance_px` is the notch's resting travel."""
+        now = time.monotonic()
+        while self._kicks and now - self._kicks[0] > self.ACCEL_WINDOW_S:
+            self._kicks.popleft()
+        accel = 1.0 + (self.ACCEL_MAX - 1.0) * min(
+            1.0, len(self._kicks) / float(self.ACCEL_NOTCHES))
+        self._kicks.append(now)
+        if not self._timer.isActive() or self._pos is None:
+            self._pos = float(self._bar.value())
+            self._vel, self._pending = 0.0, 0.0
+            self._last = now
+        if self._vel * direction < 0 or self._pending * direction < 0:
+            # A reversal answers now, not after a decay.
+            self._vel, self._pending = 0.0, 0.0
+        self._pending += direction * float(distance_px) * self.FRICTION * accel
+        self._timer.setInterval(self._tick_ms())
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def _tick(self):
+        if self._pos is None:
+            self._timer.stop()
+            return
+        now = time.monotonic()
+        # Real elapsed time, capped: a tick that arrives late lands where
+        # it should, and one that arrives after a stall does not teleport.
+        dt = min(self.MAX_DT, max(0.0, now - self._last))
+        self._last = now
+        if self._pending:
+            handed = self._pending * (1.0 - math.exp(-self.RAMP * dt))
+            self._pending -= handed
+            self._vel += handed
+            if abs(self._pending) < 1.0:
+                self._vel += self._pending
+                self._pending = 0.0
+        capped = max(-self.MAX_SPEED, min(self.MAX_SPEED, self._vel))
+        if capped != self._vel:
+            self._pending += self._vel - capped     # kept, fed in later
+            self._vel = capped
+        self._pos += self._vel * dt
+        self._vel *= math.exp(-self.FRICTION * dt)
+        low, high = float(self._bar.minimum()), float(self._bar.maximum())
+        if self._pos <= low:
+            self._pos, self._vel = low, 0.0
+        elif self._pos >= high:
+            self._pos, self._vel = high, 0.0
+        if abs(self._vel) < self.STOP_SPEED and not self._pending:
+            # Snap the last couple of pixels and stop, so the tail is
+            # never a string of ticks that round to nothing.
+            self._pos = max(low, min(high, self._pos + self._vel / self.FRICTION))
+            self._bar.setValue(int(round(self._pos)))
+            self._timer.stop()
+            self._vel, self._pos = 0.0, None
+            return
+        self._bar.setValue(int(round(self._pos)))
+
+    def cancel(self):
+        self._timer.stop()
+        self._vel, self._pos, self._pending = 0.0, None, 0.0
+        self._kicks.clear()
+
+
 class _SmoothWheel(QObject):
     """Animated wheel scrolling for one QScrollArea.
 
@@ -1957,12 +2327,37 @@ class _SmoothWheel(QObject):
     # notch re-aims from where the view is now, so spinning the wheel
     # never queues 220ms of backlog.
     DURATION_MS = 220
-    # Distance per notch. Qt's own default is wheelScrollLines (3) x
-    # singleStep (20) = 60px; kept as the floor so nothing scrolls
-    # *slower* than it used to, but a taller viewport earns a longer
-    # stride - a tenth of a screen per notch was unusably slow on the
-    # tracker grids.
-    NOTCH_FLOOR_PX = 60
+    # Distance per notch, as a fraction of the viewport, and the floor
+    # under it for a short one.
+    #
+    # **0.154 and 42px, down 30% from 0.22 and 60px** - the owner's ask,
+    # 23 August 2026: "make the scrolling in all app slower by ~30%, BUT
+    # do not change the scrolling speed in the reading mode". Both numbers
+    # move together or the slowdown simply does not happen on a short
+    # viewport: the floor binds below 60/0.22 = 273px, so a dialog or a
+    # small panel would have kept the old stride entirely.
+    #
+    # The floor's original premise was "nothing scrolls slower than Qt's
+    # own wheelScrollLines(3) x singleStep(20) = 60px", and that premise
+    # is exactly what this ask overrides.
+    #
+    # DURATION_MS is deliberately *not* touched: it is how long a notch
+    # takes to settle, not how far it goes. Stretching it would make each
+    # notch feel laggy instead of shorter - the same distance/duration
+    # split reader.py:340-361 records across six tunings of its own step.
+    #
+    # Reading mode is untouched by construction: the reader's strip has
+    # its own physics (windows.reader.WHEEL_STEP_PX) and does not go
+    # through scroll_area(), so nothing here can reach it.
+    #
+    # **0.0924 and 25px, down 40% from 0.154 and 42px** - the owner, 24
+    # August 2026: "make scrolling speed 40% slower in the whole app".
+    # Measured on Watch > Anime, ten slow notches: 1267px -> 760px, i.e.
+    # 127 -> 76 per notch. The motion model's FRICTION/RAMP were retuned
+    # in the same pass (see _Momentum) because a shorter notch on the
+    # old decay measured *stiffer*, not just slower.
+    NOTCH_FRACTION = 0.0924
+    NOTCH_FLOOR_PX = 25
     # Never slower than this, whatever the screen claims. A refresh rate
     # of 0 is what a headless/offscreen platform reports.
     MAX_TICK_MS = 16
@@ -1973,12 +2368,9 @@ class _SmoothWheel(QObject):
         self._target = None
         self._from = 0.0
         self._started_at = 0.0
-        self._timer = QTimer(self)
-        # Precise, or Qt coalesces a 7ms timer up to the ordinary ~16ms
-        # granularity and hands back exactly the stepping this removes.
-        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._timer.setInterval(self._tick_ms())
-        self._timer.timeout.connect(self._tick)
+        # The motion itself lives in _Momentum (see its docstring for the
+        # measurement that retired the per-notch curve this used to run).
+        self._motion = _Momentum(area.verticalScrollBar(), self._tick_ms, self)
         # Grabbing the scrollbar mid-glide must win instantly - an
         # animation still writing values under a held slider fights the
         # hand holding it.
@@ -1989,38 +2381,8 @@ class _SmoothWheel(QObject):
     def _tick_ms(self) -> int:
         return screen_tick_ms(self._area)
 
-    def _start(self, target):
-        bar = self._area.verticalScrollBar()
-        self._from = float(bar.value())
-        self._target = target
-        self._started_at = time.monotonic()
-        # Re-read every glide: the window can have been dragged to the
-        # other monitor since the last one.
-        self._timer.setInterval(self._tick_ms())
-        if not self._timer.isActive():
-            self._timer.start()
-
-    def _tick(self):
-        if self._target is None:
-            self._timer.stop()
-            return
-        elapsed = (time.monotonic() - self._started_at) * 1000.0
-        fraction = min(1.0, elapsed / float(self.DURATION_MS))
-        # OutCubic, by hand: 1-(1-t)^3. The same curve the animation
-        # used, kept so the feel of a single notch is unchanged and only
-        # the number of steps in it goes up.
-        eased = 1.0 - (1.0 - fraction) ** 3
-        value = self._from + (self._target - self._from) * eased
-        self._area.verticalScrollBar().setValue(int(round(value)))
-        if fraction >= 1.0:
-            self._settled()
-
-    def _settled(self):
-        self._target = None
-        self._timer.stop()
-
     def _cancel(self):
-        self._timer.stop()
+        self._motion.cancel()
         self._target = None
 
     def eventFilter(self, obj, event):
@@ -2038,15 +2400,15 @@ class _SmoothWheel(QObject):
         if bar.maximum() <= bar.minimum():
             return False
         notch = max(self.NOTCH_FLOOR_PX,
-                    int(self._area.viewport().height() * 0.22))
-        current = self._target if self._target is not None else bar.value()
-        target = max(bar.minimum(), min(bar.maximum(),
-                                        int(current - steps * notch)))
-        if target == bar.value() and self._target is None:
+                    int(self._area.viewport().height() * self.NOTCH_FRACTION))
+        direction = -1 if steps > 0 else 1      # wheel up = value down
+        at_end = ((direction < 0 and bar.value() <= bar.minimum())
+                  or (direction > 0 and bar.value() >= bar.maximum()))
+        if at_end and not self._motion.active():
             # Already hard against this end - hand the notch back to Qt
             # so a parent scroller (if any) can take it.
             return False
-        self._start(target)
+        self._motion.kick(abs(steps) * notch, direction)
         event.accept()
         return True
 
@@ -2083,6 +2445,13 @@ class _EdgeWheelRelay(QObject):
     @staticmethod
     def _scrolls_vertically(area) -> bool:
         try:
+            if getattr(area, "accepts_relayed_wheel", False):
+                # A surface that scrolls itself rather than through a
+                # QScrollArea (helpers.poster_grid). Without this branch
+                # a notch over the page's margins reached nothing at all
+                # on the category pages, which is the very complaint
+                # _EdgeWheelRelay exists to answer.
+                return area.isVisible() and area.max_offset() > 0
             bar = area.verticalScrollBar()
         except RuntimeError:
             return False
@@ -2095,10 +2464,11 @@ class _EdgeWheelRelay(QObject):
         outward. Outward rather than from the window down, so a notch in
         a dialog's margin scrolls that dialog's list and not the page
         behind it."""
+        from .poster_grid import PosterGrid
         node = widget
         depth = 0
         while node is not None and depth < 12:
-            for area in node.findChildren(QAbstractScrollArea):
+            for area in node.findChildren((QAbstractScrollArea, PosterGrid)):
                 if self._scrolls_vertically(area):
                     return area
             node = node.parentWidget()
@@ -2134,7 +2504,9 @@ class _EdgeWheelRelay(QObject):
             return False
         self._relaying = True
         try:
-            QApplication.sendEvent(area.viewport(), event)
+            target = (area if getattr(area, "accepts_relayed_wheel", False)
+                      else area.viewport())
+            QApplication.sendEvent(target, event)
         finally:
             self._relaying = False
         return True
@@ -2255,59 +2627,23 @@ def scroll_area(body: QWidget, always_show_vbar: bool = False,
 
 
 # The round arrow buttons over a sideways-scrolling row, and the soft
-# edge they sit on. The fade is wider than the button so the cards
-# dissolve into the panel rather than sliding under a hard-edged disc.
-SIDE_ARROW_SIZE = 30
-SIDE_ARROW_INSET = 4
-SIDE_FADE_WIDTH = 64
-# One click moves most of a screenful, not a fixed number of cards: the
-# rows this wraps hold different card widths, and "nearly a viewport"
-# is the movement these arrows read as everywhere else.
-SIDE_SCROLL_STEP = 0.85
-SIDE_SCROLL_ANIM_MS = 240
-
-
-class _EdgeFade(QWidget):
-    """The soft edge under a scroll arrow: the panel colour at the outer
-    edge, fading to nothing a little way in, so a card being scrolled
-    past thins out instead of being cut in half by the button on top of
-    it.
-
-    Painted rather than a QSS gradient because it has to be transparent
-    at one end - a stylesheet background is composited as one opaque
-    rectangle, which would just paint a bar over the row. Mouse-
-    transparent, so the card underneath is still clickable right up to
-    the button itself."""
-
-    def __init__(self, parent, at_left: bool):
-        super().__init__(parent)
-        self._at_left = at_left
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        solid = QColor(theme.BG_ALT)
-        clear = QColor(theme.BG_ALT)
-        clear.setAlpha(0)
-        gradient = QLinearGradient(0, 0, self.width(), 0)
-        gradient.setColorAt(0.0, solid if self._at_left else clear)
-        gradient.setColorAt(1.0, clear if self._at_left else solid)
-        painter.fillRect(self.rect(), gradient)
+# **The sideways rows have no arrow buttons** - the owner's ask, 24
+# August 2026: "remove the arrows buttons from all horizontal rows
+# scrolling, make it just the scrollbar". The wheel over the row and the
+# row's own scrollbar are what move it. The edge fades went with them:
+# a fade existed only so a card would dissolve rather than be cut in
+# half by the disc sitting on top of it, and there is no disc now.
 
 
 class SideScroller(QWidget):
-    """A horizontally scrolling row with an arrow button at each end.
+    """A horizontally scrolling row: the wheel over it, its own
+    scrollbar, Shift+wheel, and dragging a card out of it.
 
-    The row keeps everything it already had - its scrollbar, Shift+wheel,
-    dragging a card out of it; the arrows are for reaching the rest of a
-    long row with the mouse alone, which previously meant aiming at a
-    2px scrollbar.
-
-    An arrow is shown only while there is something that way to reach, so
-    a row that fits entirely on screen carries no chrome at all. The area
-    is positioned by hand rather than laid out: the arrows and their
-    fades sit *over* it, and a layout would push them into a column
-    beside it."""
+    The area is positioned by hand rather than laid out - it filled the
+    whole widget under the arrows that used to float over it, and a
+    layout would have pushed them into a column beside it. Kept as-is
+    now they are gone: the geometry is one line and a layout would only
+    add a solver to it."""
 
     def __init__(self, area: QScrollArea, parent=None):
         super().__init__(parent)
@@ -2315,48 +2651,28 @@ class SideScroller(QWidget):
         area.setParent(self)
         self._bar = area.horizontalScrollBar()
 
-        # Animated rather than a jump: at this distance an instant
-        # scroll gives no sense of which way the row moved.
-        # Driven at the screen's refresh rate, not Qt's animation clock -
-        # the sideways rows stepped for exactly the reason the wheel did
-        # (see screen_tick_ms). Same curve, same duration, 2.4x the
-        # positions on this machine's 144Hz panels.
-        self._anim = SmoothTween(
-            self, lambda value: self._bar.setValue(int(round(value))),
-            SIDE_SCROLL_ANIM_MS, on_done=self._wheel_settled)
+        # **The arrows use the same momentum the wheel does** - the
+        # owner's ask, 24 August 2026, that the horizontal rows be made
+        # smooth. They used to run a 240ms SmoothTween, which is the
+        # per-press version of exactly the curve that was retired from
+        # the wheel for reading as stiff: it restarts from the current
+        # position and stops dead. Measured on a Discover row, twelve
+        # presses, two runs each:
+        #
+        #     tween     72-75 frames/s, judder 11.4-11.6%, 13-15% of
+        #               frames more than 30% off the frame before
+        #     momentum  126-129 frames/s, judder 7.0-7.7%, 3-4%
+        #
+        # One motion object shared with the wheel, so a press landing
+        # mid-glide adds to it instead of fighting it - which is what
+        # the old code needed `_wheel_target = None` to paper over.
+        self._motion = _Momentum(self._bar, lambda: screen_tick_ms(self), self)
 
-        self._fades = {}
-        self._buttons = {}
-        for at_left, glyph, tip in ((True, "‹", "Scroll left"),
-                                    (False, "›", "Scroll right")):
-            self._fades[at_left] = _EdgeFade(self, at_left)
-            button = QPushButton(glyph, self, objectName="ScrollArrow")
-            button.setFixedSize(SIDE_ARROW_SIZE, SIDE_ARROW_SIZE)
-            button.setToolTip(tip)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.clicked.connect(lambda _checked=False, left=at_left: self._scroll(left))
-            use_hover_cursor(button)
-            self._buttons[at_left] = button
-
-        # Both signals: the value moves when the user scrolls, and the
-        # range only becomes non-zero once the row has been laid out -
-        # at construction there is nothing to scroll yet and both arrows
-        # would be hidden forever.
-        self._bar.valueChanged.connect(self._sync_arrows)
-        self._bar.rangeChanged.connect(lambda *_: self._sync_arrows())
-        # The plain wheel moves the row sideways while the pointer is on
-        # it (the owner's ask) - see eventFilter. Where the glide is
-        # heading, for retargeting; None when settled.
-        self._wheel_target = None
         area.viewport().installEventFilter(self)
         # maximumHeight, not height(): the caller pins the area's height
         # before wrapping it, and the widget has not been laid out yet,
         # so height() is still the default 480.
         self.setFixedHeight(area.maximumHeight())
-        self._sync_arrows()
-
-    def _wheel_settled(self):
-        self._wheel_target = None
 
     def eventFilter(self, obj, event):
         """A plain vertical wheel notch over the row scrolls it sideways
@@ -2382,17 +2698,26 @@ class SideScroller(QWidget):
         bar = self._bar
         if bar.maximum() <= bar.minimum():
             return False    # the row fits - nothing to scroll
-        # A third of a viewport per notch: SIDE_SCROLL_STEP's near-screenful
-        # is right for a deliberate arrow press, and far too coarse for a
-        # wheel that delivers three notches in a flick.
-        notch = max(90, int(self._area.viewport().width() * 0.30))
-        current = self._wheel_target if self._wheel_target is not None else bar.value()
-        target = max(bar.minimum(), min(bar.maximum(),
-                                        int(current + (-steps) * notch)))
-        if target == bar.value() and self._wheel_target is None:
+        # A fifth of a viewport per notch - the row's own unit of
+        # travel now that the arrows are gone and the wheel (or the
+        # scrollbar) is the only way to move it.
+        # **0.21 and 63px, down 30% from 0.30 and 90px** - the same ask as
+        # _SmoothWheel.NOTCH_FRACTION, applied to the sideways card rows.
+        # Missing these two would have left every horizontal strip (Home's
+        # poster and games rows, the tracker's Saved and Discover strips)
+        # at full speed while the pages around them slowed.
+        # **0.126 and 38px, down a further 40% from 0.21 and 63px** -
+        # the owner's 24 August 2026 ask, whole app.
+        notch = max(38, int(self._area.viewport().width() * 0.126))
+        direction = 1 if steps < 0 else -1      # wheel down = row forward
+        at_end = ((direction < 0 and bar.value() <= bar.minimum())
+                  or (direction > 0 and bar.value() >= bar.maximum()))
+        motion = self._motion
+        if at_end and not motion.active():
             return False    # hard against this end - the page's notch
-        self._wheel_target = target
-        self._anim.start(bar.value(), target)
+        # Same integrator as the pages' vertical scroll (see _Momentum);
+        # the arrow buttons keep SmoothTween, a press being a jump.
+        motion.kick(abs(steps) * notch, direction)
         event.accept()
         return True
 
@@ -2420,37 +2745,6 @@ class SideScroller(QWidget):
 
     def _layout_children(self):
         self._area.setGeometry(self.rect())
-        row_height = self._row_height()
-        for at_left in (True, False):
-            fade = self._fades[at_left]
-            button = self._buttons[at_left]
-            fade.setGeometry(0 if at_left else self.width() - SIDE_FADE_WIDTH, 0,
-                             SIDE_FADE_WIDTH, row_height)
-            button.move(SIDE_ARROW_INSET if at_left
-                        else self.width() - SIDE_ARROW_SIZE - SIDE_ARROW_INSET,
-                        (row_height - SIDE_ARROW_SIZE) // 2)
-            fade.raise_()
-            button.raise_()
-
-    def _sync_arrows(self, *_args):
-        bar = self._bar
-        for at_left, visible in ((True, bar.value() > bar.minimum()),
-                                 (False, bar.value() < bar.maximum())):
-            self._fades[at_left].setVisible(visible)
-            self._buttons[at_left].setVisible(visible)
-
-    def _scroll(self, at_left: bool):
-        bar = self._bar
-        step = max(1, int(self._area.viewport().width() * SIDE_SCROLL_STEP))
-        target = bar.value() + (-step if at_left else step)
-        target = max(bar.minimum(), min(bar.maximum(), target))
-        # Stopped first: clicking twice quickly should continue from
-        # where the row is heading, not restart from where it was. The
-        # wheel's own target is dropped with it - stop() never emits
-        # finished, so without this a wheel glide cut off by an arrow
-        # press would leave a stale destination for the next notch.
-        self._wheel_target = None
-        self._anim.start(bar.value(), target)
 
 
 # ---- Frameless dialogs ---------------------------------------------------

@@ -18,7 +18,20 @@ from helpers import storage
 work = Path(tempfile.mkdtemp(prefix="atomic-test-"))
 shutil.copytree(Path(os.environ["APPDATA"]) / "Atomic", work, dirs_exist_ok=True)
 storage.DATA_DIR = work          # must happen before `import main` or any page
+try:
+    ...                          # the harness
+finally:
+    shutil.rmtree(work, ignore_errors=True)
 ```
+
+**The `finally` is not optional.** On 23 August 2026 about a hundred of
+these copies (50-100MB each) were left in `%TEMP%`, the drive hit 100%,
+and the next source patch - `open(path, "w")` truncates before it
+writes - left `player.py` at 0 bytes with ~900 uncommitted lines in it.
+Recovered by replaying the session transcripts against the surviving
+`__pycache__` bytecode, which is not a procedure anyone wants twice.
+Two rules that fall out of it: every harness deletes its copy, and a
+source patch writes to `path + ".tmp"` and `os.replace`s it.
 
 ## Offscreen for logic/flows
 

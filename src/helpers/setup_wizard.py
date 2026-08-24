@@ -208,8 +208,37 @@ class SetupWizard(QDialog):
         self.finish_btn.setVisible(last)
         # On the last step Finish is the close; a second escape hatch
         # beside it would just be a dimmer copy of the same action.
-        self.skip_btn.setVisible(not last)
+        self._sync_skip()
         (self.finish_btn if last else self.next_btn).setDefault(True)
+
+    def _has_tmdb_key(self) -> bool:
+        """Whether a TMDB key has been given - typed into the wizard now,
+        or already saved from an earlier run."""
+        edit = self.api_key_edits.get("tmdb")
+        if edit is not None and edit.text().strip():
+            return True
+        try:
+            return bool(app_settings.get_api_key("tmdb"))
+        except Exception:
+            return False
+
+    def _sync_skip(self):
+        """**Skip appears only once a TMDB key has been entered** - the
+        owner's ask, 23 August 2026: "in the setup window there was a skip
+        for now btn, make it appear but after the user enters the TMDB key
+        (TMDB KEY IS MUST)".
+
+        Hidden rather than disabled: a greyed-out Skip invites a click and
+        explains nothing, while a Skip that appears the moment the key
+        lands reads as the key having been accepted. The window's own
+        close button still exits, which is deliberate - this is a strong
+        nudge toward the one key the app genuinely needs, not a trap with
+        no way out."""
+        last = self._step == STEPS - 1
+        try:
+            self.skip_btn.setVisible(not last and self._has_tmdb_key())
+        except RuntimeError:
+            pass
 
     def _finish(self):
         # editingFinished only fires on focus-out/Return, so a key typed
@@ -339,6 +368,12 @@ class SetupWizard(QDialog):
                 hint.setContentsMargins(LABEL_COLUMN_WIDTH + 8, 0, 0, 4)
                 form.addWidget(hint)
                 self.api_key_edits[name] = edit
+                if name == "tmdb":
+                    # Live, not on editingFinished: the Skip button below
+                    # is gated on this field having something in it, and a
+                    # button that only appears once you click elsewhere
+                    # reads as broken.
+                    edit.textChanged.connect(lambda _t: self._sync_skip())
 
         form.addSpacing(12)
         show_keys = QCheckBox("Show keys")

@@ -113,14 +113,19 @@ RESOLUTION_LABELS = {
 # (which holds nothing else since the merge), and the three files the
 # app has grown since - history, downloads and the catalogue cache - are
 # offered instead of being unclearable.
+# **"Saved" leads every entry category** - the owner's ask, 23 August
+# 2026. "Anime" beside "Watch & Read History" reads as though it clears
+# anime *itself*; what it actually clears is the anime he has saved. The
+# three rows below the entry categories keep their own names, because
+# they are not saved entries and prefixing them would be a lie.
 CLEAR_CATEGORIES = [
-    ("Anime", "series.json", lambda e: e.get("type") == "Anime"),
-    ("Series", "series.json", lambda e: e.get("type") == "Series"),
-    ("Movies", "series.json", lambda e: e.get("type") == "Movie"),
-    ("Reading", "tracker.json", None),
-    ("Games", "games.json", None),
-    ("Apps", "apps.json", None),
-    ("Websites", "websites.json", None),
+    ("Saved Anime", "series.json", lambda e: e.get("type") == "Anime"),
+    ("Saved Series", "series.json", lambda e: e.get("type") == "Series"),
+    ("Saved Movies", "series.json", lambda e: e.get("type") == "Movie"),
+    ("Saved Reading", "tracker.json", None),
+    ("Saved Games", "games.json", None),
+    ("Saved Apps", "apps.json", None),
+    ("Saved Websites", "websites.json", None),
     # Not entries, but the three other things this app accumulates and
     # that someone clearing data plainly means to include.
     ("Watch & Read History", "history.json", None),
@@ -478,6 +483,19 @@ class SettingsDialog(QDialog):
         self.category_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.category_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.category_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # **No auto-scroll to the clicked row** - the owner's ask, 23
+        # August 2026: "when I click in the sidebar of the settings on
+        # Uninstall the list scrolls down!! do not make it do that!
+        # (there is no need for scroll in the settings sidebar)".
+        #
+        # Hiding the scrollbars does not stop a QListWidget scrolling:
+        # selecting a row calls scrollTo(EnsureVisible) on it, so if the
+        # viewport is even a pixel short of the last row - which is
+        # exactly the bottom row, Uninstall - clicking it slides the
+        # whole list up to reveal it, and with no scrollbar there is no
+        # way back down. The list is already sized to hold every row
+        # (below), so there is nothing it should ever need to scroll to.
+        self.category_list.setAutoScroll(False)
         self.category_list.setSpacing(2)
         for name in CATEGORIES:
             item = QListWidgetItem(f"  {name}")
@@ -1110,6 +1128,10 @@ class SettingsDialog(QDialog):
         show_keys.toggled.connect(self._toggle_api_key_echo)
         form.addWidget(show_keys)
 
+        # No debrid line here any more - the row is gone from
+        # app_settings.API_KEYS at the owner's ask and every build uses the
+        # bundled token, so describing a field that no longer exists would
+        # be the only place in the app still advertising the choice.
         note = QLabel(
             "TMDB already has a key built into this build - only paste one "
             "here if logos stop loading. Subtitles need at least one source "
@@ -1206,7 +1228,14 @@ class SettingsDialog(QDialog):
 
         self.clear_checks = []
         for name, _file, _predicate in CLEAR_CATEGORIES:
-            cb = QCheckBox(name)
+            # `&&`, not `&`: Qt reads a single ampersand in a button or
+            # checkbox label as a mnemonic accelerator and swallows it,
+            # so "Watch & Read History" was drawn as "Watch  Read
+            # History" with a hole where the ampersand should be - the
+            # owner's screenshot. The table keeps the real string,
+            # because it is also printed in the "... cleared." toast,
+            # where an escaped one would show through.
+            cb = QCheckBox(name.replace("&", "&&"))
             cb.toggled.connect(self._sync_clear_select_all)
             form.addWidget(cb)
             self.clear_checks.append(cb)

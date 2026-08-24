@@ -17,11 +17,15 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import (game_launch, global_search, images, launchers,
-                     lookup_pool, nav_config, storage, theme)
+# hero_art at module level costs nothing new: its imports (PIL via
+# helpers.images) are already pulled by this module's own `images`
+# import - measured, not assumed, 22 August 2026.
+from helpers import (app_art, cover_fetch, game_launch, global_search, hero_art,
+                     images, launchers, lookup_pool, nav_config, storage, theme)
 from helpers.widgets import (
-    Card, GlassPage, HeroBanner, SideScroller, inform, scroll_area,
-    search_field, use_hover_cursor,
+    Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, hero_logo_label,
+    hero_split, inform, scroll_area, search_field, set_hero_logo,
+    use_hover_cursor,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
@@ -68,11 +72,11 @@ SEARCH_BAR_MIN_WIDTH = 240
 HERO_SLIDE_LIMIT = 4
 HERO_SLIDE_INTERVAL_MS = 6000
 
-# The title logo drawn over the hero. Height first, then a width cap so a
-# very wide treatment (One Piece) does not run into the pagination dashes
-# on a narrow window; scaled keeping aspect inside that box.
-HERO_LOGO_HEIGHT = 84
-HERO_LOGO_MAX_WIDTH = 480
+# The hero's logo treatment (widgets.hero_logo_label) went with the
+# cover-left redesign of 23 August 2026 and is back by the owner's ask
+# of 24 August: the TMDB logo stands where the name does, and the name
+# is text when there is none. Only ever that swap - see _build_hero for
+# the hide-the-name rule that is *not* coming back with it.
 
 # Anime opens on the merged watch page now - there is no "anime" page
 # key left (see nav_config).
@@ -396,6 +400,32 @@ class HomePage(GlassPage):
         entries = [e for e in self._all_trackable_entries() if e.get("status") in IN_PROGRESS_STATUSES]
         return sorted(entries, key=lambda e: e.get("updated_at") or "", reverse=True)
 
+    def _hero_slide_entries(self):
+        """Up to HERO_SLIDE_LIMIT slides, deliberately mixed across
+        reading and watching rather than simply the newest four.
+
+        Sorted by recency alone the hero showed only manga - the owner's
+        report, 22 August 2026: he reads most days and watches in
+        bursts, so on his real data every one of the four newest
+        in-progress entries was a reading title and the carousel never
+        held a watching one, though five were in progress. The two media
+        now alternate, each lane newest-first, leading with whichever
+        was touched last - so the first slide is still the most recently
+        touched entry overall - and a lane running out hands its
+        remaining slots to the other."""
+        entries = self._in_progress_entries()
+        reading = [e for e in entries if e.get("type") in MANGA_TYPES]
+        watching = [e for e in entries if e.get("type") not in MANGA_TYPES]
+        lanes = [reading, watching]
+        if entries and entries[0].get("type") not in MANGA_TYPES:
+            lanes.reverse()
+        slides = []
+        while len(slides) < HERO_SLIDE_LIMIT and any(lanes):
+            for lane in lanes:
+                if lane and len(slides) < HERO_SLIDE_LIMIT:
+                    slides.append(lane.pop(0))
+        return slides
+
     def _recent_entries(self, entries):
         """Every entry, most recently touched first - no preview cap any
         more (the owner's ask: an added entry must always appear here).
@@ -451,7 +481,7 @@ class HomePage(GlassPage):
         the title and its progress over it, Continue beside a details
         button, the pagination dashes underneath - rotating through the
         in-progress entries. Replaces the fixed-width peek carousel."""
-        self._hero_entries = self._in_progress_entries()[:HERO_SLIDE_LIMIT]
+        self._hero_entries = self._hero_slide_entries()
         if not self._hero_entries:
             hero = QFrame(objectName="Hero")
             layout = QHBoxLayout(hero)
@@ -477,12 +507,22 @@ class HomePage(GlassPage):
         # lookup - see _hero_backdrop_worker and _remember_hero_overlay.
         self._hero_logos = {}
         self._hero_hide_title = {}
+        # Entries whose remembered ground was composed by an older
+        # hero_art: the old JPEG still exists on disk, so exists() alone
+        # would serve the superseded composition forever - the filename
+        # version bump in hero_art cannot reach a path already written
+        # onto an entry. Seeded anyway (old art on the first frame beats
+        # a flat panel), but the worker below re-runs and cross-fades
+        # the new composition in when it lands.
+        stale_grounds = set()
         for hero in self._hero_entries:
             hid = hero.get("id")
             stored = hero.get("hero_backdrop")
             try:
                 if stored and Path(stored).exists():
                     self._hero_backdrops[hid] = stored
+                    if hero_art.stale_ground(stored):
+                        stale_grounds.add(hid)
             except OSError:
                 pass        # an unreadable path is simply not a cache hit
             logo = hero.get("hero_logo")
@@ -501,9 +541,10 @@ class HomePage(GlassPage):
         # what the banner paints its corner outsides back to.
         banner = HeroBanner(theme.BG)
         self._hero_banner = banner
-        column = QVBoxLayout(banner)
-        column.setContentsMargins(36, 22, 36, 16)
-        column.setSpacing(10)
+        # Cover on the left, details on the right - the owner's ask of
+        # 23 August 2026, shared with the tracker's featured banner so
+        # the two hero surfaces stay one design (widgets.hero_split).
+        self._hero_cover, column = hero_split(banner)
 
         chip_row = QHBoxLayout()
         self._hero_chip = QLabel("")
@@ -516,33 +557,37 @@ class HomePage(GlassPage):
         column.addLayout(chip_row)
         column.addStretch(1)
 
-        # The title treatment (a transparent logo PNG) sits where the
-        # typed title does and replaces it when there is one - the owner's
-        # ask, 22 August 2026: "change the name in the banners to the logo
-        # from the APIs". Hidden until a logo lands; the text label below
-        # is what shows in the meantime and for a title that has no logo.
-        self._hero_logo = QLabel("")
-        self._hero_logo.setVisible(False)
-        self._hero_logo.setStyleSheet("background: transparent;")
-        # A soft shadow so a logo reads over the backdrop whatever its own
-        # colour - most title treatments are light and pop over a bright
-        # patch of art, but some (Demon Slayer) are near-black, and the
-        # scrim that carries the typed title cannot help a black logo the
-        # way it helps white text. Offset 0, so it is a halo lifting the
-        # shape off the ground rather than a drop under it.
-        shadow = QGraphicsDropShadowEffect(self._hero_logo)
-        shadow.setBlurRadius(28)
-        shadow.setOffset(0, 0)
-        shadow.setColor(QColor(0, 0, 0, 200))
-        self._hero_logo.setGraphicsEffect(shadow)
+        # The title treatment (a transparent TMDB logo PNG) sits where
+        # the typed title does and replaces it when there is one - the
+        # owner's ask, 24 August 2026: "instead of the name in the banner,
+        # make it use the logo from TMDB, if it has no logo then use the
+        # name normally". A reading title gets the logo of its anime
+        # (Kingdom, One Piece, Hunter x Hunter - artwork.logo_path_by_title).
+        #
+        # **Only that swap.** The first version of this (22 August) also
+        # hid the typed name for a reading title whose ground was real
+        # AniList banner art, on the theory that the name was inside the
+        # artwork - true of some banners, false of others - and the
+        # owner's 23 August report was a banner with no name anywhere on
+        # it ("where is the name on the banner????"). hero_hide_title is
+        # still written onto entries by the worker but is never read:
+        # the name hides only when a logo is actually drawn in its place.
+        self._hero_logo = hero_logo_label()
         column.addWidget(self._hero_logo)
-
         self._hero_title = QLabel("")
         self._hero_title.setWordWrap(True)
         self._hero_title.setStyleSheet(
-            f"color: {theme.TEXT}; font-size: 27pt; font-weight: 800;"
+            f"color: {theme.TEXT}; font-size: 25pt; font-weight: 800;"
             f" background: transparent;")
         column.addWidget(self._hero_title)
+
+        # The medium, in accent, directly under the name - image 2's
+        # "Manga" line.
+        self._hero_kind = QLabel("")
+        self._hero_kind.setStyleSheet(
+            f"color: {theme.ACCENT}; font-size: 12pt; font-weight: 700;"
+            f" background: transparent;")
+        column.addWidget(self._hero_kind)
 
         self._hero_meta = QLabel("")
         self._hero_meta.setStyleSheet(
@@ -574,6 +619,10 @@ class HomePage(GlassPage):
         buttons.addWidget(self._hero_view)
         buttons.addStretch(1)
         column.addLayout(buttons)
+
+        # Balances the stretch above the chip so the title block sits in
+        # the middle of the banner rather than against the dashes.
+        column.addStretch(1)
 
         # The pagination dashes, centred at the banner's foot - each one
         # jumps straight to its slide; the active one is longer and lit.
@@ -609,11 +658,14 @@ class HomePage(GlassPage):
         for entry in self._hero_entries:
             hid = entry.get("id")
             # Start the worker unless the whole banner is already known -
-            # its ground, its logo, and the hide-title decision. A cached
-            # ground alone is not enough now: the logo and that decision
-            # are what the overlay draws, and a title resolved before this
-            # change has neither on its entry yet.
-            if (hid in self._hero_backdrops and hid in self._hero_logos
+            # its ground (composed by the *current* hero_art, see
+            # stale_grounds above), its logo, and the hide-title
+            # decision. A cached ground alone is not enough now: the
+            # logo and that decision are what the overlay draws, and a
+            # title resolved before this change has neither on its
+            # entry yet.
+            if (hid in self._hero_backdrops and hid not in stale_grounds
+                    and hid in self._hero_logos
                     and hid in self._hero_hide_title):
                 continue
             threading.Thread(target=self._hero_backdrop_worker,
@@ -697,9 +749,11 @@ class HomePage(GlassPage):
         self._hero_chip.setText("CONTINUE READING" if reading
                                 else "CONTINUE WATCHING")
         self._hero_title.setText(entry["title"])
+        self._hero_kind.setText(str(entry.get("type") or ""))
         self._apply_hero_overlay()
-        meta_bits = [self._progress_meta_text(entry) or entry.get("status") or "",
-                     str(entry.get("type") or "")]
+        # The type moved up to its own accent line (_hero_kind), so it is
+        # not repeated here - this row is the progress and the status.
+        meta_bits = [self._progress_meta_text(entry) or entry.get("status") or ""]
         self._hero_meta.setText("   ·   ".join(bit for bit in meta_bits if bit))
         if reading:
             self._hero_view.setText("View Chapters")
@@ -734,7 +788,6 @@ class HomePage(GlassPage):
         from helpers import artwork
         try:
             if entry.get("type") in MANGA_TYPES:
-                from helpers import hero_art
                 # cover_path/cover_url are whatever the entry's own
                 # reading site already served - every tracked reading
                 # entry here carries both - so a title AniList cannot
@@ -817,30 +870,36 @@ class HomePage(GlassPage):
             entry = self._hero_entry()
         except (IndexError, ZeroDivisionError):
             return
-        hid = entry.get("id")
-        logo = self._hero_logos.get(hid)
-        pixmap = None
-        if logo:
-            try:
-                dpr = self._hero_logo.devicePixelRatioF() or 1.0
-                pixmap = images.logo_pixmap(logo, HERO_LOGO_HEIGHT, dpr)
-                if pixmap.isNull():
-                    pixmap = None
-                elif pixmap.width() / dpr > HERO_LOGO_MAX_WIDTH:
-                    pixmap = pixmap.scaledToWidth(
-                        int(HERO_LOGO_MAX_WIDTH * dpr),
-                        Qt.TransformationMode.SmoothTransformation)
-                    pixmap.setDevicePixelRatio(dpr)
-            except Exception:
-                pixmap = None
-        if pixmap is not None:
-            self._hero_logo.setPixmap(pixmap)
-            self._hero_logo.setVisible(True)
-            self._hero_title.setVisible(False)
-        else:
-            self._hero_logo.clear()
-            self._hero_logo.setVisible(False)
-            self._hero_title.setVisible(not self._hero_hide_title.get(hid, False))
+        # Logo in place of the name when this slide has one, the name
+        # otherwise - never neither (see _build_hero).
+        set_hero_logo(self._hero_logo, self._hero_title,
+                      self._hero_logos.get(str(entry.get("id") or ""))
+                      or self._hero_logos.get(entry.get("id")))
+        # The portrait cover. `images.thumbnail_or_avatar` is the same
+        # call every card on this page makes, so for a title already
+        # drawn in the poster grid below this is a cache hit and not a
+        # decode.
+        try:
+            self._hero_cover.setPixmap(images.thumbnail_or_avatar(
+                entry.get("cover_path"), entry.get("title") or "",
+                HERO_COVER_SIZE))
+        except Exception:
+            self._hero_cover.clear()
+        # Same rule as the grid below: missing on disk means fetch, and
+        # the swap only lands if this slide is still the one showing.
+        _url = str(entry.get("cover_url") or "")
+
+        def _set_hero(pixmap, en=entry):
+            if self._hero_entry() is en:
+                self._hero_cover.setPixmap(pixmap)
+        cover_fetch.ensure(
+            entry.get("id"), entry.get("cover_path"),
+            (lambda u=_url: images.download(u)) if _url else None,
+            entry.get("title") or "", HERO_COVER_SIZE, _set_hero,
+            persist=lambda path, en=entry: (
+                en.__setitem__("cover_path", str(path)),
+                storage.update_entry(_progress_data_file(en), en.get("id"),
+                                     {"cover_path": str(path)})))
 
     def _remember_hero_overlay(self, entry_id, logo_path, hide_title):
         """Persist a slide's logo and hide-title decision onto its entry,
@@ -938,6 +997,21 @@ class HomePage(GlassPage):
                 cover.setFixedSize(*POSTER_SIZE)
                 cover.setPixmap(pixmap)
             card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
+            # Fetched when it is not on disk, and written back - the owner's
+            # "the main page does not load the images by itself" (see
+            # helpers/cover_fetch). Before this, Home drew cover_path and
+            # nothing else, and only a visit to Discover ever re-created
+            # the file it was pointing at.
+            _url = str(entry.get("cover_url") or "")
+            cover_fetch.ensure(
+                entry.get("id"), entry.get("cover_path"),
+                (lambda u=_url: images.download(u)) if _url else None,
+                entry["title"], POSTER_SIZE,
+                cover.set_cover if isinstance(cover, ContinueCover) else cover.setPixmap,
+                persist=lambda path, en=entry: (
+                    en.__setitem__("cover_path", str(path)),
+                    storage.update_entry(_progress_data_file(en), en.get("id"),
+                                         {"cover_path": str(path)})))
 
             name = QLabel(entry["title"], objectName="CardTitle")
             name.setWordWrap(True)
@@ -1170,6 +1244,18 @@ class HomePage(GlassPage):
             icon.setPixmap(images.thumbnail_or_avatar(
                 entry.get("art") or entry.get("image"), entry["name"],
                 ROW_ICON_SIZE))
+            if data_file == APPS_FILE:
+                # The Apps page resolves artwork through app_art on its
+                # own build; Home only ever drew what that page had left
+                # behind - the owner's "the apps images do not load until
+                # I go to the apps page". Same lookup, from here.
+                cover_fetch.ensure(
+                    entry.get("id"), entry.get("art") or entry.get("image"),
+                    lambda n=entry.get("name") or "": app_art.fetch_art(n),
+                    entry["name"], ROW_ICON_SIZE, icon.setPixmap,
+                    persist=lambda path, en=entry: (
+                        en.__setitem__("art", str(path)),
+                        storage.update_entry(APPS_FILE, en.get("id"), {"art": str(path)})))
             row_layout.addWidget(icon)
             row_layout.addWidget(QLabel(entry["name"]))
             row_layout.addStretch()

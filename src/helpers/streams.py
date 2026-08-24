@@ -66,6 +66,15 @@ try:
 except Exception:  # pragma: no cover
     anime_identity = None
 
+# The debrid client (helpers/debrid). Same defensive import again: a
+# build without it plays from the swarm exactly as before, and so does a
+# build *with* it until a key is pasted in Settings - debrid.available()
+# is the gate on every use below.
+try:
+    from . import debrid
+except Exception:  # pragma: no cover
+    debrid = None
+
 SITES_FILE = "stream_addons.json"
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -201,20 +210,46 @@ DEFAULT_ADDONS = (
 )
 
 
-# The standard public trackers, used only for a stream whose addon
-# supplied none of its own (see prepare). These are the long-standing
-# open announce URLs that every torrent client ships defaults from -
-# nothing title-specific, just a way for the swarm to be discoverable at
-# all when the addon did not say where to look.
+# The public trackers merged into **every** torrent, not only the ones
+# whose addon supplied no announce list. That is how Harbor does it
+# (src-tauri/src/torrent_engine/trackers.rs merges its 34 into every
+# add), and the reasoning transfers: the addon's list is whatever was
+# scraped into the release listing, sometimes stale, and libtorrent
+# announces to all trackers in parallel (`announce_to_all_trackers` in
+# torrent_engine._make_session) so extra rows cost UDP packets, not
+# wall-clock.
+#
+# **Every row here answered a live announce probe twice, 23 August 2026,
+# from the owner's connection** (UDP connect handshake / HTTP announce
+# returning bencode, 20 threads, timings below are the two runs). The
+# previous eight-entry list was probed the same way and three of its
+# rows - open.tracker.cl, tracker.openbittorrent.com and
+# tracker1.bt.moack.co.kr - timed out in both runs, so a third of what
+# was being handed to every trackerless magnet was dead weight. Probed
+# but left out for failing or exceeding ~1s in either run: zhuqiy,
+# nekomi.cn, 7471.top, gcrenwp.top, anibt.net, dhitechnical.com,
+# tritan.gg, bittor.pw (http; its udp twin answered), bt1.archive.org
+# (udp; its http twin answered), and Harbor's zukizuki / yemekyedim /
+# tmtime.dev / manager.v6.navy.
 DEFAULT_TRACKERS = (
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.tracker.cl:1337/announce",
-    "udp://open.demonii.com:1337/announce",
-    "udp://tracker.torrent.eu.org:451/announce",
-    "udp://exodus.desync.com:6969/announce",
-    "udp://tracker.openbittorrent.com:6969/announce",
-    "udp://explodie.org:6969/announce",
-    "udp://tracker1.bt.moack.co.kr:80/announce",
+    "udp://tracker.opentrackr.org:1337/announce",    # 293 / 395ms
+    "udp://open.demonii.com:1337/announce",          # 593 / 686ms
+    "udp://tracker.torrent.eu.org:451/announce",     # 317 / 289ms
+    "udp://exodus.desync.com:6969/announce",         # 457 / 442ms
+    "udp://explodie.org:6969/announce",              # 416 / 502ms
+    "udp://open.stealth.si:80/announce",             # 325 / 328ms
+    "udp://tracker.dler.org:6969/announce",          # 513 / 409ms
+    "udp://tracker.qu.ax:6969/announce",             # 380 / 312ms
+    "udp://tracker-udp.gbitt.info:80/announce",      # 380 / 285ms
+    "udp://tracker.bittor.pw:1337/announce",         # 477 / 437ms
+    "http://bt1.archive.org:6969/announce",          # 577 / 718ms
+    "http://tracker.renfei.net:8080/announce",       # 479 / 514ms
+    "http://tracker.waaa.moe:6969/announce",         # 601 / 694ms
+    "http://tracker.mywaifu.best:6969/announce",     # 402 / 3547ms
+    "https://tr.nyacat.pw:443/announce",             # 428 / 670ms
+    "https://tracker.leechshield.link:443/announce", # 822 / 680ms
+    "https://tracker.pmman.tech:443/announce",       # 751 / 804ms
+    "https://t.213891.xyz:443/announce",             # 531 / 1023ms
 )
 
 SEEDED_FILE = "stream_addons_seeded.json"
@@ -305,11 +340,55 @@ def seed_default_addons() -> list:
 # tells you that** - the seeder count is measured wrong often enough to
 # be no help (a 2081-seeder film release that never completed a piece,
 # and a 701-seeder House of the Dragon release that answered no-peers).
-# The next thing worth measuring is an early-out: a release with zero
-# peers and zero connect candidates a couple of seconds after its
-# metadata lands is dead, and giving up on it then rather than at the
-# end of DATA_WAIT would cover more of the list in the same wall clock.
-# That has *not* been measured, so it is not in.
+#
+# **The early-out an earlier version of this comment proposed - zero
+# peers AND zero connect candidates shortly after metadata - was
+# measured 22 August 2026 and never fires.** Twelve instrumented runs
+# across the owner's three test titles, every added torrent's status
+# sampled at 5Hz: a dead release holds 27-378 connect candidates for
+# the whole of its budget, because the trackers and DHT keep supplying
+# addresses that then give nothing. What does separate dead from live
+# is *peers after metadata*: on every dead release the 4-18 peers that
+# served the metadata were all gone within half a second of it landing
+# and no payload byte ever followed, while every live one kept its
+# peers and delivered within a couple of seconds. That rule - and a
+# second one for the opposite failure, a *live* swarm killed at the
+# queued deadline mid-delivery because its first piece is bigger than
+# six seconds of its rate (House of the Dragon walked 23 of those,
+# 33.0s to a url) - now lives in torrent_engine.await_start; the
+# replay that set the thresholds is written above DEAD_GRACE_S there.
+# A third check rides the same moment metadata lands: a release whose
+# chosen file is under _MIN_REAL_SIZE (episodes) or _MIN_MOVIE_SIZE
+# (films) is a sample wearing the title's name, and one such 62MB
+# listing *won* a Top Gun race twice before this (reason "tiny-file").
+# And the metadata itself is now kept on disk
+# (torrent_engine._METADATA_DIR), because the winner paid 0.7-5.8s for
+# it and the race retries the same top releases on every attempt - a
+# cache hit is only possible for a release previously fetched to
+# completion, so it pays on re-presses and next-episodes of the same
+# pack, not on first sight.
+#
+# What the whole set bought, measured 22-23 August 2026 as an
+# interleaved A/B - alternating runs of the old semantics and the new
+# on the same titles inside the same hour, because swarm drift between
+# separate sessions had already invalidated one comparison that day.
+# prepare_fastest seconds, three runs each, min/median/max:
+#
+#                       old semantics       after (cold cache)
+#   Demon Slayer S01E01   6.5 / 6.8 / 10.7    4.4 / 5.4 / 5.6
+#   House Dragon S01E05   6.9 / 19.2 / 19.4   5.2 / 7.7 / 8.8
+#   Top Gun Maverick     11.1 / 11.3 / 11.5   5.3 / 8.4 / 10.5
+#
+# Two follow-up Top Gun runs spanned 6.9 and 19.6s - the second was a
+# round in which nearly every swarm refused, and no scheduling can
+# manufacture a seeder. The spread is the honest shape of this: the
+# median moved from ~7-19s to ~5-8s, the best case sits at 4.4-5.3s,
+# and a bad swarm round still costs double digits. The biggest single
+# contributor by lane logs was the warming window (piece-0 focus, see
+# torrent_engine._Torrent.warming); the dead-lane rule is what walks
+# the list twice as fast when the top is dead (lanes that held 6.8-11.5s
+# exit at ~2.1s); the width bump is what stopped Top Gun's one live
+# release waiting 5.5s for a lane.
 #
 # What did move, and is not a swarm accident, is the stall: see
 # torrent_engine._apply_windows and _Torrent.refresh_windows for the
@@ -385,7 +464,14 @@ QUEUED_DATA_WAIT = 6.0
 # matters once pieces start arriving - which is the moment there is a
 # winner and the rest are released. Two more lanes is two fewer serial
 # retries when the top of the list is dead.
-RACE_WIDTH = 6
+# **Eight, up from six, 22 August 2026.** Top Gun: Maverick's one
+# reliably-fast release sat at candidate #7 in all three interleaved
+# control runs, so it spent ~5.5s waiting for a lane and the whole
+# prepare pinned at 11.0-11.5s whatever else changed. The engine's
+# session limits (active_downloads 32) were sized for more than this
+# race already; see _make_session's note, which is the constraint that
+# actually bit last time.
+RACE_WIDTH = 8
 RACE_TIMEOUT = 45.0
 
 # **What a source the *user* picked by hand is allowed to cost before
@@ -412,6 +498,42 @@ RACE_TIMEOUT = 45.0
 # just no longer allowed to spend half a minute failing.
 SOLO_METADATA_TIMEOUT = 4.0
 SOLO_DATA_WAIT = 4.0
+# How long prepare() waits for its engine arm's own verdict after the
+# race budget expires - the arm is bounded by the same metadata/data
+# waits the budget was made of, so this is normally a few milliseconds
+# and three seconds is the ceiling for a slow unwind.
+ENGINE_VERDICT_GRACE_S = 3.0
+
+# ---- debrid budgets ---------------------------------------------------
+#
+# A cached release at the debrid service is 3-4 HTTPS round trips to a
+# CDN URL - the only route measured to make press-to-picture *consistent*
+# (the swarm's own numbers: 4 of 29 runs under 4.5s, medians 3.3-16.7s,
+# the same title spanning 3.2-13.3s within an hour). An uncached one is
+# known to be uncached at the first status read after selection, so a
+# miss costs a couple of round trips, never a swarm-sized wait.
+#
+# What a lone prepare() may spend asking debrid before the engine gets
+# its turn. Covers a slow magnet conversion; the typical uncached exit
+# is ~1-2s and the typical cached answer well inside 4.
+DEBRID_PREPARE_BUDGET_S = 8.0
+# The race's debrid lane: how many releases it may try and what each
+# attempt gets. Four attempts, not the whole list - every attempt is
+# API requests against the owner's account, and if the first few
+# well-seeded releases are not cached the rest are even less likely to
+# be (cache follows popularity), while the torrent lanes are already
+# racing the same list.
+# **Six, up from four, 23 August 2026.** Refused releases no longer cost
+# an attempt (see _debrid_lane), so the budget is now spent only on
+# releases that could actually answer - and on the titles measured the
+# cached one was not always in the top four.
+DEBRID_LANE_ATTEMPTS = 6
+DEBRID_ATTEMPT_BUDGET_S = 10.0
+# How long find_streams' cache-check flags may add to the *final* list's
+# return. Rows are already on screen through on_partial by then; this
+# only delays the finished ranking, and an answer that cannot arrive in
+# a couple of seconds is not worth more of the one-second rule's budget.
+DEBRID_CHECK_BUDGET_S = 2.5
 
 
 # --------------------------------------------------------- the engine
@@ -452,10 +574,10 @@ def _resume_seconds(start_at, duration):
     return start_at
 
 
-def prepare(stream: dict, *, season=None, episode=None,
+def prepare(stream: dict, *, season=None, episode=None, title=None,
             metadata_timeout: float = METADATA_TIMEOUT,
-            data_wait: float = DATA_WAIT,
-            start_at=None, duration=None) -> dict:
+            data_wait: float = DATA_WAIT, data_wait_max: float = None,
+            start_at=None, duration=None, debrid_first: bool = True) -> dict:
     """Make a torrent stream actually playable, immediately before playing.
 
     `start_at`/`duration` (seconds) say playback is going to *resume*
@@ -493,27 +615,180 @@ def prepare(stream: dict, *, season=None, episode=None,
     if not info_hash:
         return stream
 
-    prepared = _prepare_with_own_engine(stream, info_hash, season, episode,
-                                       metadata_timeout, data_wait,
-                                       _resume_seconds(start_at, duration))
-    if prepared is not None:
-        return prepared
+    # Debrid before the swarm, when a key is configured. A cached
+    # release answers in a few HTTPS round trips; an uncached one is
+    # known uncached in one or two and falls straight through to the
+    # engine. `debrid_first=False` is how prepare_fastest's torrent
+    # lanes opt out - the race runs its own single debrid lane, and
+    # eight lanes each re-asking the API would be eight times the
+    # requests for the same answer.
+    resume_at = _resume_seconds(start_at, duration)
+
+    def _engine():
+        return _prepare_with_own_engine(stream, info_hash, season, episode,
+                                        metadata_timeout, data_wait,
+                                        resume_at, data_wait_max, title=title)
+
+    if not debrid_first:
+        # prepare_fastest's torrent lanes: the race runs its own single
+        # debrid lane, and eight lanes each re-asking the API would be
+        # eight times the requests for one answer.
+        prepared = _engine()
+        if prepared is not None:
+            return prepared
+        stream["url"] = None
+        stream["reason"] = "no-engine"
+        return stream
+
+    # **Debrid and the swarm at the same time, not one after the other.**
+    #
+    # This was serial - debrid first, and only if it came back empty was
+    # the engine asked - and that is the owner's "the sourcing vid
+    # waiting time doubled or more in the last fixes you did", 23 August
+    # 2026. It became visible the moment a hand-picked source stopped
+    # being raced (player._prepare_stream_worker): `prepare_fastest`
+    # always ran its debrid lane *beside* its torrent lanes, so nothing
+    # ever waited on debrid before the swarm; a lone `prepare()` did the
+    # opposite, and an uncached release paid up to DEBRID_PREPARE_BUDGET_S
+    # of API round trips before a single peer was contacted.
+    #
+    # Racing them costs nothing that matters: the debrid arm is HTTPS
+    # round trips against an account, the engine arm is peers, and they
+    # contend for nothing. The engine's torrent is handed back if debrid
+    # wins, which is the same bookkeeping prepare_fastest already does
+    # for its losers.
+    import threading
+    winner = {}
+    engine_said = {}
+    done = threading.Event()
+    lock = threading.Lock()
+
+    def run(name, fn):
+        try:
+            got = fn()
+        except Exception:
+            got = None
+        if name == "engine":
+            # Kept even when it carries no url: it is the only thing that
+            # knows *why* (a dead swarm, or a build with no engine at
+            # all), and the player prints that reason. Without this the
+            # verdict below had to re-run the whole engine wait to learn
+            # something that had already been established.
+            with lock:
+                engine_said["result"] = got
+        # Only a stream with a url counts as a win: the engine answers
+        # with a url-less stream for a dead release, and treating that
+        # as an answer would cancel a debrid arm still in flight.
+        if not got or not got.get("url"):
+            return
+        with lock:
+            if winner:
+                if name == "engine":
+                    _release_quietly(info_hash)
+                return
+            winner.update(got)
+        done.set()
+
+    arms = [threading.Thread(target=run, args=("debrid", lambda: (
+                _prepare_with_debrid(stream, info_hash, season, episode,
+                                     title=title))), daemon=True),
+            threading.Thread(target=run, args=("engine", _engine), daemon=True)]
+    for arm in arms:
+        arm.start()
+    budget = max(1.0, float(metadata_timeout or METADATA_TIMEOUT)
+                 + float(data_wait or DATA_WAIT))
+    done.wait(budget)
+    # **The engine arm's verdict is waited for, not guessed.** Its own
+    # waits (metadata_timeout + data_wait) are what `budget` was built
+    # from, so at this point it is finishing; a short join collects its
+    # answer rather than inventing one. Before this, a budget that
+    # expired with the engine arm still running fell through to
+    # reason="no-engine" - and the player prints that as "This build has
+    # no torrent engine", which is what the owner saw on a film whose
+    # hand-picked source was merely dead for eight seconds (24 August
+    # 2026). The engine was there the whole time; the race just had not
+    # heard back from it.
+    for arm in arms:
+        arm.join(timeout=0.05)
+    with lock:
+        if winner:
+            return dict(winner)
+        verdict = engine_said.get("result")
+    if verdict is None and arms[1].is_alive():
+        arms[1].join(timeout=ENGINE_VERDICT_GRACE_S)
+        with lock:
+            if winner:
+                return dict(winner)
+            verdict = engine_said.get("result")
+    if verdict is not None:
+        return verdict
     stream["url"] = None
-    stream["reason"] = "no-engine"
+    # "no-engine" only when there is no engine. A release that produced
+    # no answer at all inside the grace is a dead release, and the
+    # player walks to the next source on that - exactly what it does for
+    # "no-peers".
+    try:
+        from . import torrent_engine
+        has_engine = torrent_engine.available()
+    except Exception:
+        has_engine = False
+    stream["reason"] = "timeout" if has_engine else "no-engine"
+    return stream
+
+
+def _prepare_with_debrid(stream, info_hash, season, episode, deadline=None,
+                         title=None):
+    """The stream served from the debrid service's own storage, or None
+    to mean "debrid cannot serve this" - no key, service dark, hash not
+    cached, or no file provably the right episode - in which case the
+    caller carries on to the engine exactly as if this did not exist.
+
+    The result is a plain HTTPS URL, so the finished stream is
+    `kind="direct"` - the shape the player already handles for addon
+    URLs, no player change involved. `info_hash` is kept for identity
+    (dedupe, the panel's selected row); every engine-side reader of it
+    (`file_progress`, `stats`, `release`) answers empty/quietly for a
+    hash the engine never added, checked before this was written.
+    `engine` is set so prepare_fastest can tell whose winner this is
+    when releasing the losers - the field is never printed, and neither
+    is any provider name (the owner's ask, 23 August 2026: the row says
+    what the *release* is, not who serves it)."""
+    if debrid is None:
+        return None
+    try:
+        if not debrid.available():
+            return None
+        got = debrid.playable_url(
+            info_hash, season=season, episode=episode,
+            deadline=deadline or net.deadline_in(DEBRID_PREPARE_BUDGET_S),
+            title=title)
+    except Exception:
+        return None
+    if not got or not got.get("url"):
+        return None
+    stream = dict(stream)
+    stream["url"] = got["url"]
+    stream["kind"] = "direct"
+    stream["engine"] = "debrid"
+    stream["reason"] = ""
+    stream["headers"] = {}
+    if got.get("file_name"):
+        stream["file_name"] = got["file_name"]
     return stream
 
 
 def _prepare_with_own_engine(stream, info_hash, season, episode,
                              metadata_timeout=None, data_wait=None,
-                             resume_at=None):
+                             resume_at=None, data_wait_max=None, title=None):
     """Stream through Atomic's own libtorrent engine.
 
     Returns the finished stream, or None to mean "this build has no
     engine at all" - deliberately distinct from returning a stream with
     no url, which means "the engine tried and this release is dead".
 
-    Trackers are supplied from `DEFAULT_TRACKERS` when the indexer gave
-    none of its own; that is not optional, see the note in `prepare`."""
+    `DEFAULT_TRACKERS` is merged into the addon's own list rather than
+    used only when that list is empty - see the note on the table for
+    why, and for the probe that chose its rows."""
     try:
         from . import torrent_engine
     except Exception:
@@ -522,11 +797,14 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
         return None
 
     trackers = list(stream.get("sources") or [])
-    if not trackers:
-        trackers = [f"tracker:{url}" for url in DEFAULT_TRACKERS]
+    have = {t[len("tracker:"):] if t.startswith("tracker:") else t
+            for t in trackers}
+    trackers += [f"tracker:{url}" for url in DEFAULT_TRACKERS
+                 if url not in have]
     try:
         added = torrent_engine.add(
             info_hash, trackers=trackers, season=season, episode=episode,
+            title=title,
             file_index=stream.get("file_index"),
             metadata_timeout=(METADATA_TIMEOUT if metadata_timeout is None
                               else metadata_timeout),
@@ -560,6 +838,28 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
             stream["reason"] = "wrong-episode"
             return stream
         stream["file_name"] = serves
+    # **And is the file big enough to be the thing asked for?** Also
+    # knowable the moment the metadata lands, and also checked here so
+    # it costs a lane nothing. A sub-30MB "episode" is a sample or a
+    # corrupt listing - the same _MIN_REAL_SIZE line the ranking
+    # already draws - and the floor stays low for episodes on purpose:
+    # a short anime special can be genuinely small, and a wrong drop
+    # plays nothing at all. A *movie* gets a higher floor: a 62MB "FULL
+    # IMAX 1080p" Top Gun: Maverick listing won two races on 22 August
+    # 2026 (first bytes after 10.1s both times) purely because
+    # everything above it was slower, and 62MB of H.264 is minutes of
+    # video, not a feature film. 200MB is still far below any real
+    # film encode.
+    floor = _MIN_REAL_SIZE if (season and episode) else _MIN_MOVIE_SIZE
+    try:
+        served_size = torrent_engine.chosen_file_size(info_hash)
+    except Exception:
+        served_size = 0
+    if 0 < served_size < floor:
+        _release_quietly(info_hash)
+        stream["url"] = None
+        stream["reason"] = "tiny-file"
+        return stream
     # **The first piece and the container's seek index, waited on
     # together.** mpv's first read of a fresh torrent is the opening of
     # the file and its *second* is a seek to 100% of it (Matroska writes
@@ -572,6 +872,10 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
         got_data, _got_index = torrent_engine.await_start(
             info_hash, data_wait=(DATA_WAIT if data_wait is None
                                   else data_wait),
+            # A lane still receiving payload at its soft deadline keeps
+            # waiting, up to this - see await_start and the race, which
+            # is the caller that grants it.
+            data_wait_max=data_wait_max,
             # Resuming needs the index for a different reason than
             # playback does - the resume offset is *read out of it* -
             # so it is worth a longer wait when there is one.
@@ -614,7 +918,63 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
 
 
 
-def prepare_fastest(candidates, *, season=None, episode=None,
+# **What a race proved dead is remembered on disk, not just for the one
+# call.** `failed` (below) already carries it between attempts inside a
+# single press, but a re-press, the next episode, or tomorrow's session
+# started from zero and re-walked the same dead swarms at 2-8s each -
+# the ground truth being that on Bleach S01E12 ten consecutive releases
+# answered `no-peers` once, and nothing stopped them answering it again.
+# Harbor persists the same lesson (src/lib/dead-streams.ts, localStorage,
+# 7-day TTL) and *drops* matching rows outright; this deliberately only
+# **reorders** - a remembered-dead release sorts behind the untried ones
+# and still gets its turn when everything ahead of it refused, so a
+# swarm that came back to life costs a few seconds of ordering rather
+# than being invisible for a week. Because the cost of being wrong is so
+# much lower than Harbor's, the TTL is shorter too (24h, not 7d - swarm
+# health in a release's first days is exactly when it moves; that number
+# is judgment, not a measurement). Only swarm verdicts are remembered:
+# `wrong-episode` and `tiny-file` are properties of the *metadata*, which
+# the disk cache (torrent_engine._METADATA_DIR) already makes instant to
+# re-check.
+DEAD_FILE = "stream_dead.json"
+DEAD_TTL_S = 24 * 3600
+_DEAD_REASONS = ("no-peers", "no-metadata")
+
+
+def _remembered_dead() -> dict:
+    """{info_hash: entry} for every release proved dead inside the TTL."""
+    try:
+        stored = storage.load(DEAD_FILE, {})
+        if not isinstance(stored, dict):
+            return {}
+        cutoff = time.time() - DEAD_TTL_S
+        return {h: e for h, e in stored.items()
+                if isinstance(e, dict) and e.get("ts", 0) >= cutoff}
+    except Exception:
+        return {}
+
+
+def _remember_dead(proved_dead, winner_hash=None):
+    """Fold this race's verdicts into the stored map. Expired entries
+    fall out here, and a winner that was in the map is removed - it just
+    disproved its own record."""
+    try:
+        kept = _remembered_dead()
+        changed = False
+        now = time.time()
+        for info_hash, reason in proved_dead or ():
+            if info_hash:
+                kept[info_hash] = {"ts": now, "reason": reason}
+                changed = True
+        if winner_hash and kept.pop(winner_hash, None) is not None:
+            changed = True
+        if changed:
+            storage.save(DEAD_FILE, kept)
+    except Exception:
+        pass
+
+
+def prepare_fastest(candidates, *, season=None, episode=None, title=None,
                     width: int = RACE_WIDTH, timeout: float = RACE_TIMEOUT,
                     failed=None, start_at=None, duration=None):
     """Start several releases at once; play whichever delivers data
@@ -673,9 +1033,24 @@ def prepare_fastest(candidates, *, season=None, episode=None,
     if not live:
         return None
 
+    # Releases a previous race proved dead go to the back of the line -
+    # never dropped, see the note on DEAD_FILE. The first candidate is
+    # exempt on purpose: when the source was picked by hand it arrives
+    # in slot 0 (see the docstring above), and the pick keeps its first
+    # lane whatever yesterday's race thought of it.
+    if len(live) > 2:
+        remembered = _remembered_dead()
+        if remembered:
+            head, tail = live[:1], live[1:]
+            fresh = [c for c in tail if c.get("info_hash") not in remembered]
+            stale = [c for c in tail if c.get("info_hash") in remembered]
+            if fresh and stale:
+                live = head + fresh + stale
+
     import threading
     winner = {}
     started = []
+    proved_dead = []
     done = threading.Event()
     lock = threading.Lock()
     cursor = [0]
@@ -712,11 +1087,22 @@ def prepare_fastest(candidates, *, season=None, episode=None,
                 queued = cursor[0] < len(live)
             try:
                 got = prepare(
-                    candidate, season=season, episode=episode,
+                    candidate, season=season, episode=episode, title=title,
                     metadata_timeout=(QUEUED_METADATA_TIMEOUT if queued
                                       else METADATA_TIMEOUT),
                     data_wait=QUEUED_DATA_WAIT if queued else DATA_WAIT,
-                    start_at=start_at, duration=duration)
+                    # The queued budget is soft where the swarm is
+                    # actually delivering: a live lane may keep waiting
+                    # up to the full DATA_WAIT rather than hand its
+                    # progress back and make the next candidate start
+                    # from zero - see torrent_engine.EXTEND_WINDOW_S
+                    # for the walk of 23 live-but-slow packs this ends.
+                    data_wait_max=DATA_WAIT if queued else None,
+                    start_at=start_at, duration=duration,
+                    # The race's one debrid lane (below) covers debrid;
+                    # a torrent lane asking too would multiply the same
+                    # API requests by the race's width.
+                    debrid_first=False)
             except Exception:
                 continue
             if not got.get("url"):
@@ -725,6 +1111,11 @@ def prepare_fastest(candidates, *, season=None, episode=None,
                     # A plain list append under the GIL - the caller
                     # reads it only after this call returns.
                     failed.append(candidate.get("info_hash"))
+                if got.get("reason") in _DEAD_REASONS:
+                    # Same GIL-append pattern; folded into the stored
+                    # map once, after the race settles.
+                    proved_dead.append((candidate.get("info_hash"),
+                                        got.get("reason")))
                 continue
             with lock:
                 if winner:
@@ -735,20 +1126,104 @@ def prepare_fastest(candidates, *, season=None, episode=None,
             done.set()
             return
 
+    # **One debrid lane rides beside the torrent lanes.** A cached
+    # release resolves to a CDN URL in a few HTTPS round trips - the
+    # consistent 2-4s start no swarm was measured to give - and running
+    # it in parallel rather than ahead of the race means an uncached
+    # hash (or a debrid outage) costs the race nothing at all: the
+    # torrent lanes never waited for it. It walks the cached-flagged
+    # rows first (find_streams marks them when the cache check
+    # answered), keeps the hand pick's slot-0 privilege, and counts as
+    # a lane in `running` so a race whose torrents all died quickly
+    # still waits for a debrid answer already in flight instead of
+    # reporting "none of these work" while a playable URL is seconds
+    # away.
+    def _debrid_lane():
+        ordered = live[:1] + sorted(
+            live[1:], key=lambda c: 0 if c.get("debrid_cached") else 1)
+        # Releases the service has already refused outright (451
+        # "infringing_file") are dropped here rather than left to be
+        # skipped inside playable_url, because the budget below counts
+        # *attempts* and a free skip is not an attempt. Measured 23 August
+        # 2026: all five top-ranked releases for House of the Dragon
+        # S01E05 and for Bleach TYBW S01E01 answer 451, so a lane that
+        # counted them never reached a release that could have answered.
+        try:
+            refused = debrid.refused_hashes()
+        except Exception:
+            refused = set()
+        if refused:
+            ordered = [c for c in ordered
+                       if (c.get("info_hash") or "").lower() not in refused]
+        for attempt, candidate in enumerate(ordered):
+            if attempt >= DEBRID_LANE_ATTEMPTS:
+                return
+            if done.is_set() or time.monotonic() >= deadline:
+                return
+            attempt_deadline = min(
+                deadline, time.monotonic() + DEBRID_ATTEMPT_BUDGET_S)
+            try:
+                got = _prepare_with_debrid(
+                    candidate, (candidate.get("info_hash") or "").lower(),
+                    season, episode, deadline=attempt_deadline, title=title)
+            except Exception:
+                got = None
+            if not got or not got.get("url"):
+                continue
+            with lock:
+                if winner:
+                    return
+                winner.update(got)
+            done.set()
+            return
+
+    def debrid_worker():
+        try:
+            _debrid_lane()
+        finally:
+            # Same last-lane-out bookkeeping as worker(): the race ends
+            # when every lane - this one included - is spent.
+            with lock:
+                running[0] -= 1
+                spent = running[0] <= 0
+            if spent:
+                done.set()
+
     lanes = max(1, min(width, len(live)))
-    running = [lanes]
+    use_debrid = False
+    if debrid is not None:
+        try:
+            use_debrid = debrid.available()
+        except Exception:
+            use_debrid = False
+    running = [lanes + (1 if use_debrid else 0)]
     threads = [threading.Thread(target=worker, daemon=True)
                for _ in range(lanes)]
+    if use_debrid:
+        threads.append(threading.Thread(target=debrid_worker, daemon=True))
     for thread in threads:
         thread.start()
     done.wait(timeout)
     with lock:
         result = dict(winner) if winner else None
         attempted = list(started)
+        verdicts = list(proved_dead)
+    # Which engine-held torrent, if any, the winner actually is. A
+    # debrid winner holds the same info_hash as a release a torrent
+    # lane may have started - that lane's torrent is a loser like the
+    # rest and must be released, or it keeps announcing under the CDN
+    # stream it just lost to.
+    winner_hash = None
+    if result and result.get("engine") == "atomic":
+        winner_hash = result.get("info_hash")
     if result:
         for info_hash in attempted:
-            if info_hash != result.get("info_hash"):
+            if info_hash != winner_hash:
                 _release_quietly(info_hash)
+    if verdicts or result:
+        # A debrid win says nothing about the swarm, so only an engine
+        # win clears its own dead record.
+        _remember_dead(verdicts, winner_hash)
     return result
 
 
@@ -890,6 +1365,9 @@ _SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(GB|GiB|MB|MiB)\b", re.I)
 # Below this an "episode" is a sample or a corrupt listing, not a file
 # worth preferring for being small - it sorts as size-unknown instead.
 _MIN_REAL_SIZE = 30 * 1024 * 1024
+# ...and below this a "movie" is - see the tiny-file check in
+# _prepare_with_own_engine for the 62MB feature film that won twice.
+_MIN_MOVIE_SIZE = 200 * 1024 * 1024
 
 
 def _size_of(title: str) -> int:
@@ -974,6 +1452,15 @@ def episode_fallbacks(season, episode, entry=None):
 # slowest of them - measured on the owner's real entries, 3.7-4.5s
 # serial against 1.3-2.6s here, on the same answers.
 LOOKUP_WORKERS = 6
+
+# How long the finished list may wait for the arc-name season map when it
+# was cold at the start of the lookup (see the final pass in
+# find_streams). Small on purpose: the fan-out has already run by then, so
+# the background resolve has had that long too and this is usually zero.
+# 2.5s is the measured TMDB round trip plus slack - long enough to catch
+# the resolve, short enough that a lookup which found nothing does not sit
+# here on top of everything else.
+ARC_MAP_FINAL_WAIT_S = 2.5
 
 
 # Where an addon stops printing the release and starts printing its own
@@ -1451,9 +1938,79 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
             stream["guessed_numbering"] = True
         results.extend(guessed)
 
+    # **The season pass, once more, on the finished list.** The per-source
+    # filter above uses whatever the arc map held when that source
+    # answered, which on a cold cache is nothing at all - and a cold cache
+    # is exactly a first play. Measured 23 August 2026: with the map cold,
+    # "Kimetsu no Yaiba - Yuukaku Hen" (season 3) won the race for an
+    # S01E01 ask, which is the owner's original complaint surviving in the
+    # one case the cache could not cover.
+    #
+    # This is the list `prepare_fastest` actually races and the list that
+    # gets cached, so it is the one that decides what plays. It waits a
+    # moment for the resolve started at the top of this function (see
+    # anime_identity.arc_map_soon); the fan-out has already run, so that
+    # wait is usually over before it begins.
+    #
+    # Rows fetched under the *fallback* numbering are exempt: they were
+    # asked for under a different season on purpose, so judging them
+    # against this one would throw away precisely what they exist to find.
+    if anime_identity is not None and episode and not arc_map:
+        try:
+            late_map = anime_identity.arc_map_soon(entry, ARC_MAP_FINAL_WAIT_S)
+        except Exception:
+            late_map = {}
+        if late_map:
+            guessed_rows = [s for s in results if s.get("guessed_numbering")]
+            real_rows = [s for s in results if not s.get("guessed_numbering")]
+            results = _drop_wrong_season(real_rows, season, episode, entry,
+                                         late_map) + guessed_rows
+
+    # Which of these releases the debrid service can serve instantly,
+    # asked once for the whole list rather than per row (Harbor batches
+    # the same way). Marked on the final list only - the partials have
+    # already been drawn by now, and the flag's consumers are the race's
+    # debrid lane and the source panel, both of which read the final
+    # list. Fails soft to nothing marked.
+    _flag_instant(results, deadline)
+
     ranked = _rank(results)
     _cache_put(cache_key, ranked)
     return ranked
+
+
+def _flag_instant(results, deadline):
+    """Mark every row whose release the debrid service holds cached.
+
+    `debrid_cached` is the machine-readable flag (the race's debrid lane
+    tries those rows first); the "Instant · " title prefix is the
+    visible one, and it is a claim about the *release* - it will start
+    in seconds - never a provider name in the list (the owner's ask, 23
+    August 2026). A prefix on the title rather than a new field because
+    the panels print the release title verbatim, so the mark rides into
+    every list without any UI change; it is added after all title
+    parsing (seeders, size, season filtering) has already happened."""
+    if debrid is None:
+        return
+    try:
+        if not debrid.available():
+            return
+        hashes = {s.get("info_hash") for s in results
+                  if s.get("info_hash") and s.get("kind") == "torrent"}
+        if not hashes:
+            return
+        check_deadline = min(deadline, net.deadline_in(DEBRID_CHECK_BUDGET_S))
+        cached = debrid.cached_hashes(hashes, deadline=check_deadline)
+        if not cached:
+            return
+        for stream in results:
+            if stream.get("info_hash") in cached:
+                stream["debrid_cached"] = True
+                title = stream.get("title") or ""
+                if not title.startswith("Instant · "):
+                    stream["title"] = f"Instant · {title}".strip(" ·")
+    except Exception:
+        pass
 
 
 def _rank(streams: list) -> list:

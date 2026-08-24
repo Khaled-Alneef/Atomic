@@ -64,7 +64,7 @@ from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
                          QLinearGradient, QPainter, QPen, QPixmap,
                          QPolygonF, QRegion)
 from PyQt6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
@@ -155,15 +155,31 @@ RESUME_MAX_FRACTION = 0.97
 # on, which is at or just past the request, and a strict >= would hang
 # the announcement on a rounding difference. It is deliberately not
 # generous either - the whole point is that the message follows the
-# picture rather than the intention (see _resume_where_it_stopped).
+# picture rather than the intention (see _load_into_mpv).
 RESUME_LANDED_TOLERANCE_S = 1.0
+
+# How long a seat (a resume point, or the position carried across a
+# source switch) may stay un-landed before the player stops promising it
+# and says so - the owner's "the Skipping to X:XX ... keeps loading but
+# never takes me there", 22 August 2026, where the wait had no end and
+# no message. 45s: the stream layer's own waits are 12s each, and the
+# owner's worst observed resume-to-picture wait was ~30s (his earlier
+# "it takes ~10-30 sec then the vid plays"), so anything past 45 is a
+# seat that is not coming and narrating it further is a lie. Not
+# measured against a genuinely dead swarm - those cannot be fabricated
+# on demand - but every live landing measured (three real titles,
+# 22 August 2026) came in far under it.
+SEAT_GIVE_UP_S = 45.0
 
 # When an episode counts as watched. Credits and a next-episode teaser
 # are routinely the last ~10%, so waiting for the file to actually end
 # would mean most finished episodes never got marked.
 WATCHED_FRACTION = 0.85
 
-SUB_SIZE_MIN, SUB_SIZE_MAX, SUB_SIZE_STEP = 28, 90, 4
+# Step of 2, not 4 - the owner's ask, 23 August 2026: one press of 4
+# jumped past the size he wanted. The buttons print the step
+# (add_stepper's step_text), so nothing else encodes this number.
+SUB_SIZE_MIN, SUB_SIZE_MAX, SUB_SIZE_STEP = 28, 90, 2
 SUB_SIZE_DEFAULT = 55          # mpv's own default for sub-font-size
 SUB_DELAY_STEP = 0.1
 
@@ -222,8 +238,19 @@ SUB_POS_OFFSET_MIN, SUB_POS_OFFSET_MAX, SUB_POS_OFFSET_STEP = -60, 10, 2
 # Sequence", "Opening Titles") needed it. This is half of the owner's
 # "it is not accurate at all, you must keep in mind that not all intros
 # start from 0:00"; the span check below is the other half.
-_CHAPTER_OPENING = ("opening", "op", "intro", "avant", "titles", "title",
-                    "theme")
+#
+# **"avant" is gone for the same reason, 23 August 2026.** It is the
+# Japanese BD chapter name for the avant-title - the cold open *before*
+# the OP - and disc rips are chaptered Avant / OP / Part A / Part B / ED.
+# With it here, Avant@0:00 and OP@1:30 both classified as openings, so
+# "Skip Intro" showed at 0:00, pressing it seeked to 1:30 - the start of
+# the real opening - where the second interval showed "Skip Intro" again.
+# That is the owner's report, word for word, and it reproduced exactly
+# from the unmodified functions. The general form of the same mistake
+# (an "Intro" chapter at 0:00 followed by "Opening") is handled in
+# _skips_from_chapters, which keeps only the last of two touching
+# openings.
+_CHAPTER_OPENING = ("opening", "op", "intro", "titles", "title", "theme")
 _CHAPTER_ENDING = ("ending", "ed", "outro", "credits", "closing")
 _CHAPTER_RECAP = ("recap", "previously", "prologue")
 # A chapter marker is only believed as an opening if it starts within
@@ -266,14 +293,21 @@ SKIP_BUTTON_MARGIN = 28
 # How long before the end of the file "Next Episode" appears even with no
 # ending interval known - most releases run credits over the last minute.
 NEXT_TAIL_S = 60.0
-# How close to the end of an episode the *next* episode's top release may
-# be created - see _maybe_prewarm_next. Three minutes rather than the
-# minute NEXT_TAIL_S uses for the button: metadata over DHT plus the
-# 12MB head is most of the twelve seconds between pressing a source and
-# seeing a picture, and it is worth starting before the credits so it is
-# finished by the time Next is pressed. The safety condition, not this
-# number, is what keeps it from costing the current episode anything.
-PREWARM_TAIL_S = 180.0
+# How far into an episode the *next* episode's top release may be
+# created - see _maybe_prewarm_next. This used to be a tail window
+# (last 180s of the episode), on the reasoning that only the credits
+# were safe; the owner's ask, 22 August 2026, is the opposite end:
+# "make the next ep loads after ~100 sec from the current ep started
+# playing so that when I go to next it goes smoothly". The judgement
+# call, made deliberately: warming this early means the next torrent
+# runs beside the playing one for most of the episode, and what makes
+# that safe is not this number but the same safety condition the tail
+# window had - nothing is warmed until the playing file is *complete*
+# (torrent_engine gives it priority 7, so on a live swarm it usually is
+# well before 100s), at which point playback reads from disk and the
+# connection is idle. An incomplete file keeps the warm waiting, however
+# far past 100s the episode is.
+PREWARM_AFTER_S = 100.0
 
 # 2x the per-request timeout the site modules use, for the same reason
 # they bound a chain rather than each step: several sources tried in
@@ -728,7 +762,7 @@ def resume_point(entry):
     body of the card plays the *next* episode (see _starting_episode),
     the button goes back to the one that was actually interrupted.
 
-    The two guards are the ones _resume_where_it_stopped already
+    The two guards are the ones PlayerPage._prime_seat already
     applies, and for the same reasons: under RESUME_MIN_S there is
     nothing worth going back to, and past RESUME_MAX_FRACTION the
     episode is finished and "continue" would mean its credits. An
@@ -1113,6 +1147,9 @@ class _WorkBridge(QObject):
     # Cinemeta's real episode list for this title. No run: it belongs to
     # the entry, which cannot change while the page lives.
     meta_ready = Signal(object)             # videos list
+    # What the title *is*, from the same record: {genres, country}. The
+    # audio default reads it - see _on_meta_facts.
+    meta_facts = Signal(object)
     # A torrent stream only becomes playable once the streaming server
     # has been handed its trackers, which takes a round trip (and may
     # start the server first). That cannot happen on the UI thread.
@@ -1175,6 +1212,17 @@ class StartupBackdrop(QWidget):
         super().__init__(parent)
         _make_native(self)
         self._pixmap = None
+        # Mid-playback stall mode (the owner's ask, 23 August 2026:
+        # "keep the video with ONLY logo loading"): the widget shrinks
+        # to a small badge around the logo and paints bare BG, no
+        # backdrop still, no scrim - the frozen video frame stays
+        # visible around it. The logo has to stay inside *this* widget
+        # either way: it is only ever visible because this window is
+        # native and sits over mpv's (see the class docstring), so
+        # "logo without the backdrop" is a mode of this surface, not a
+        # different widget. Entered/left in _show_buffer_frame and
+        # _reset_stall_frame.
+        self._stall = False
         # The cover-scaled copy for the current size. Backdrops are
         # full-resolution originals now (see artwork.BACKDROP_SIZE), and
         # smooth-scaling several megapixels on *every* paint - this
@@ -1193,11 +1241,20 @@ class StartupBackdrop(QWidget):
         self.update()
         return self._pixmap is not None
 
+    def set_stall(self, stalled: bool):
+        if self._stall != bool(stalled):
+            self._stall = bool(stalled)
+            self.update()
+
+    def stalled(self) -> bool:
+        return self._stall
+
     def paintEvent(self, event):
         painter = QPainter(self)
         rect = self.rect()
         painter.fillRect(rect, QColor(theme.BG))
-        if self._pixmap is not None and rect.width() > 0 and rect.height() > 0:
+        if (self._pixmap is not None and not self._stall
+                and rect.width() > 0 and rect.height() > 0):
             if self._scaled is None or self._scaled_size != rect.size():
                 # Cover, not fit: a 16:9 still in a 21:9 window would
                 # otherwise leave two black columns beside it, which
@@ -1538,10 +1595,63 @@ class OverlayPanel(QFrame):
         _clear_layout(self.footer_layout)
         if title:
             self.title_label.setText(title)
-        if bar is not None:
-            # After the refill has laid out - setting it now would clamp
-            # the value against the emptied body's range, which is 0.
-            QTimer.singleShot(0, lambda: bar.setValue(offset))
+        if bar is not None and offset:
+            # **Restored when the range comes back, not on a timer** -
+            # the owner's ask, 23 August 2026: "when I chose a subtitle,
+            # and it loads, do not make the list reload and take me back
+            # to the top so I need to scroll!".
+            #
+            # The original was a bare `QTimer.singleShot(0, setValue)`,
+            # and it did not work: measured in a harness driving the real
+            # panel, offset 838 in, **0** out. The event order on that
+            # first pass is rangeChanged(0, 0) - the scroll area
+            # recomputing against the body this method has just emptied -
+            # then the restore fires while maximum is still 0, so the
+            # setValue clamps to 0, and only afterwards does the range
+            # climb back (0, 1558), (0, 1617), (0, 1676).
+            #
+            # **The first attempt at this fix failed for a worse reason,
+            # and it is worth recording.** It waited on `rangeChanged` -
+            # correct - but kept the zero-timer "as a backstop", and that
+            # backstop ran first, clamped to 0 exactly as before, and
+            # then *disconnected the range handler* on its way out. The
+            # fix disabled itself. So: nothing here disconnects or gives
+            # up until the value has actually landed, and the backstop
+            # is late rather than immediate - it exists only for a refill
+            # that ends up shorter than it was, where the old offset is
+            # never reachable again and the new bottom is the best answer
+            # available.
+            state = {"done": False}
+
+            def _restore():
+                if state["done"]:
+                    return
+                try:
+                    bar.setValue(offset)
+                    landed = bar.value() == offset
+                except RuntimeError:
+                    state["done"] = True
+                    return
+                if landed:
+                    _finish()
+
+            def _finish():
+                state["done"] = True
+                try:
+                    bar.rangeChanged.disconnect(_on_range)
+                except Exception:
+                    pass
+
+            def _on_range(_lo, hi):
+                if hi >= offset:
+                    _restore()
+
+            bar.rangeChanged.connect(_on_range)
+            # Long enough that every rangeChanged of a normal refill has
+            # been and gone (the measured trace settles inside one event
+            # loop pass), short enough that a genuinely shorter list is
+            # not left scrolled somewhere arbitrary.
+            QTimer.singleShot(250, lambda: (_restore(), _finish()))
 
     def add_group(self, name):
         label = QLabel(name)
@@ -1647,7 +1757,7 @@ class OverlayPanel(QFrame):
         `step_text` puts the amount on the buttons themselves ("-0.1" /
         "+0.1"), the owner's ask - a bare +/- said which way but not by
         how much, and the delay button in particular moves in tenths
-        where the font one moves in fours.
+        where the font one moves in twos.
 
         Two lines rather than the old single row with the name on the
         left: at the panel's width that layout crowded the value column
@@ -1736,6 +1846,54 @@ class OverlayPanel(QFrame):
 # ---------------------------------------------------------------------
 
 
+class _KeyRelay(QObject):
+    """Send the keyboard to the player, wherever focus actually is.
+
+    **The player is not one window.** mpv renders into a native child
+    (`VideoSurface`), and the bars over it are native children too
+    (`_make_native`) - on Windows a native child takes the keyboard when
+    it is clicked, and Qt then delivers the key to *that* widget, not to
+    the page. So Space did nothing after a click on the control bar, and
+    a media key never reached the page at all. Raising or re-focusing
+    the page on every click was tried in this file's history and fights
+    the click it is answering.
+
+    An application filter is the one place that sees the key whatever
+    holds focus. It deliberately does **not** take keys away from
+    anything being typed into - the episode filter and the subtitle
+    search are QLineEdits inside the player, and "P" belongs to them
+    while they have the caret - nor while a modal dialog is up."""
+
+    def __init__(self, page):
+        super().__init__(page)
+        self._page = page
+
+    @staticmethod
+    def _is_typing(widget) -> bool:
+        while widget is not None:
+            if isinstance(widget, (QLineEdit, QComboBox)):
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        page = self._page
+        try:
+            if page is None or not page.isVisible() or page._closing:
+                return False
+        except RuntimeError:
+            return False        # the page went away under a queued key
+        app = QApplication.instance()
+        if app is not None and app.activeModalWidget() is not None:
+            return False
+        if self._is_typing(QApplication.focusWidget()):
+            return False
+        page.keyPressEvent(event)
+        return event.isAccepted()
+
+
 class PlayerPage(GlassPage):
     """The player, as a page covering the whole window.
 
@@ -1789,6 +1947,9 @@ class PlayerPage(GlassPage):
         # - applied, ruled out, or overtaken by a pick the user made.
         # See _auto_apply_subtitle.
         self._sub_auto_done = False
+        # Whether this episode's subtitle search has been fired - see
+        # _ensure_subtitle_search for when that is allowed to happen.
+        self._subs_search_started = False
         # The pick currently in flight, held until mpv confirms it loaded
         # so that only a subtitle that actually worked is remembered.
         self._pending_sub_choice = None
@@ -1838,18 +1999,40 @@ class PlayerPage(GlassPage):
         # ranker to prefer a Japanese track that does not exist. Same
         # answer the *player* opens on, from the same function, so the
         # download and the playback cannot disagree about a title.
+        self._anime_hint = None       # Cinemeta's verdict, once it answers
         self._dl_audio = ("jp" if "jpn" in self._audio_language_preference()
                           else "en")
         self._dl_folder = None
         self._temp_dir = None
-        self._pending_resume = None
-        # Where a seek the player owes is aiming, from the moment it is
-        # issued until the picture actually gets there. It exists because
-        # "Resumed From 9:23" used to be said at *load* time, over a
-        # black screen, 10-30s before the picture arrived (the owner's
-        # report); the seek is announced when it has landed now, and the
-        # wait is narrated in the meantime. See _on_property.
+        # Where the seat playback still owes is, from the moment a file
+        # is loaded until the picture actually gets there. It exists
+        # because "Resumed From 9:23" used to be said at *load* time,
+        # over a black screen, 10-30s before the picture arrived (the
+        # owner's report); the arrival is announced when it has happened
+        # now, and the wait is narrated in the meantime. See
+        # _load_into_mpv and _on_property.
         self._resume_target = None
+        # When that seat stops being promised - see SEAT_GIVE_UP_S.
+        self._seat_deadline = None
+        # mpv's first time-pos report after an at-seat open - the seek
+        # target echoed back, not a decoded frame. See _on_property.
+        self._seat_reported = None
+        # Whether mpv is currently playing the file this page last asked
+        # for. False from the moment a load is issued until the observed
+        # `path` property reports the new url. This is the gate that
+        # keeps the property stream honest across a load: mpv keeps
+        # emitting the *outgoing* file's time-pos for a few frames after
+        # loadfile is issued, and those stale events used to be read as
+        # the new source's first frame - which on a source switch
+        # satisfied the seat's landed check with the *old* position, so
+        # the seek into the new file was never re-issued and "Skipping
+        # to X:XX" described a journey nothing was making (the owner's
+        # report, 22 August 2026). Ordering makes the gate sound: mpv
+        # delivers property changes in emission order through one queued
+        # signal, so once `path` names the new file, every later
+        # time-pos is genuinely its.
+        self._file_ready = False
+        self._loading_url = None
         # The one sticky toast the player uses to narrate work that
         # happens over a live picture. Nothing else can: the loading
         # backdrop refuses to cover a running picture and the startup
@@ -1899,6 +2082,7 @@ class PlayerPage(GlassPage):
         self._work.sub_file_ready.connect(self._on_subtitle_file)
         self._work.logo_ready.connect(self._on_logo)
         self._work.meta_ready.connect(self._on_meta)
+        self._work.meta_facts.connect(self._on_meta_facts)
         self._work.stream_prepared.connect(self._on_stream_prepared)
         self._work.failed.connect(self._on_failed)
         # Its own slot, not _on_failed: a note is a *step* of the
@@ -1914,6 +2098,9 @@ class PlayerPage(GlassPage):
         # half-second.
         self._meta_aired = None       # {season: highest aired episode}
         self._meta_videos = None      # Cinemeta's raw rows, for the list
+        # None until Cinemeta has answered; then whether stremio.looks_anime
+        # says this title is anime. Read by _audio_language_preference.
+        self._anime_hint = None
         # Whether the next episode's sources have been prefetched into
         # streams' cache for this episode's run.
         self._prefetched = False
@@ -1923,6 +2110,10 @@ class PlayerPage(GlassPage):
         # all back.
         self._prewarm_hash = None
         self._prewarm_asked = False
+        # The metadata-only half of the next-episode warm, which
+        # runs on its own (earlier) condition - see
+        # _maybe_prewarm_next.
+        self._meta_prewarm_asked = False
         self._prewarm_checked = 0.0
         self._prewarmed = set()
         # Skip intervals for this episode: [{"type","start","end",...}].
@@ -1941,6 +2132,12 @@ class PlayerPage(GlassPage):
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        # See _KeyRelay: the keys have to arrive even when a native child
+        # of this page holds the keyboard.
+        self._key_relay = _KeyRelay(self)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self._key_relay)
 
         self.surface = VideoSurface(self)
         self._build_top_bar()
@@ -2038,6 +2235,13 @@ class PlayerPage(GlassPage):
         self._mouse_timer.timeout.connect(self._poll_mouse)
         self._save_timer = QTimer(self)
         self._save_timer.timeout.connect(self._save_position)
+        # The seat watchdog - its own timer rather than a check inside
+        # the time-pos handler, because the case it exists for is
+        # exactly the one where time-pos events stop arriving (mpv
+        # parked buffering at an offset whose data never comes).
+        self._seat_timer = QTimer(self)
+        self._seat_timer.setInterval(1000)
+        self._seat_timer.timeout.connect(self._seat_tick)
 
         if parent is not None:
             parent.installEventFilter(self)
@@ -2047,7 +2251,10 @@ class PlayerPage(GlassPage):
         # lands inside half a second - well before the stream lookup -
         # which is what lets _apply_meta_bounds catch a request for an
         # episode that does not exist before anything wrong plays.
-        if self.episode:
+        # For a film as well now: the same record says whether the title
+        # is anime, which is what decides the audio language (the owner's
+        # "the KNY Infinity Castle movie was playing in Spanish").
+        if self.episode or self.entry.get("imdb_id"):
             self._spawn(self._fetch_meta_worker)
 
         QTimer.singleShot(0, self._start)
@@ -2435,7 +2642,35 @@ class PlayerPage(GlassPage):
             logs.exception("episode-map lookup failed")
             meta = None
         if meta and not self._closing:
-            self._work.meta_ready.emit(list(meta.get("videos") or []))
+            self._work.meta_facts.emit({"genres": meta.get("genres") or meta.get("genre") or [],
+                                        "country": meta.get("country") or ""})
+            if meta.get("videos"):
+                self._work.meta_ready.emit(list(meta.get("videos") or []))
+
+    def _on_meta_facts(self, facts):
+        """Cinemeta's genres/country landed: decide the audio language
+        again if that changes the answer. `alang` was set at open from
+        the entry's type alone, and the first track pick may already have
+        happened - so when the verdict moves the preference, the pick is
+        made once more, on the same once-per-file rule."""
+        if self._closing:
+            return
+        try:
+            from helpers import stremio
+            verdict = stremio.looks_anime(facts)
+        except Exception:
+            verdict = False
+        before = self._audio_language_preference()
+        self._anime_hint = bool(verdict)
+        after = self._audio_language_preference()
+        if after == before or self.handle is None:
+            return
+        try:
+            self.handle["alang"] = ",".join(after)
+        except Exception:
+            pass
+        self._audio_default_done = False
+        self._apply_audio_default()
 
     def _on_meta(self, videos):
         """Fold Cinemeta's list into {season: highest aired episode} and
@@ -2898,7 +3133,10 @@ class PlayerPage(GlassPage):
                                  and target_season == int(self.season or 0))):
             self.toggle_episode_bar()
             return
-        self._save_position()
+        # The same instant reset Next gets - this path used to leave the
+        # outgoing episode playing under the lookup too, and it did not
+        # even hand its torrent back. See _leave_playback.
+        self._leave_playback("Loading the episode...")
         self.season = target_season
         self.episode = int(number)
         self.prev_btn.setEnabled(self.episode > 1)
@@ -2941,7 +3179,7 @@ class PlayerPage(GlassPage):
 
         for name in ("time-pos", "duration", "pause", "demuxer-cache-time",
                      "track-list", "volume", "mute", "speed", "core-idle",
-                     "paused-for-cache", "cache-buffering-state"):
+                     "paused-for-cache", "cache-buffering-state", "path"):
             self.handle.observe_property(name, self._mpv_property)
         self.handle.register_event_callback(self._mpv_event)
         # Both levers, and the delay too - an .ass needs sub-scale
@@ -3062,10 +3300,12 @@ class PlayerPage(GlassPage):
         # screen until the whole page closed.
         self._drop_sub_toast()
         # A new episode gets the remembered subtitle applied again -
-        # its own search is about to run and its own results are what
-        # _auto_apply_subtitle matches against.
+        # its own search is what _auto_apply_subtitle matches against.
         self._sub_auto_done = False
         self._pending_sub_choice = None
+        # And its own search, deferred to the first frame - see
+        # _ensure_subtitle_search.
+        self._subs_search_started = False
         # Fetched per episode rather than once per page: it is cached on
         # disk by title after the first call, so this costs nothing
         # after the first episode and still works when the page was
@@ -3086,6 +3326,10 @@ class PlayerPage(GlassPage):
         # it turns out not to be.
         self._prewarm_hash = None
         self._prewarm_asked = False
+        # The metadata-only half of the next-episode warm, which
+        # runs on its own (earlier) condition - see
+        # _maybe_prewarm_next.
+        self._meta_prewarm_asked = False
         self._prewarm_checked = 0.0
         # A new episode has its own opening, its own chapters and its own
         # AniSkip row - keeping the last one's would offer to skip into
@@ -3103,8 +3347,7 @@ class PlayerPage(GlassPage):
         # The previous episode's switch or seek is over whatever its
         # outcome was; a sticky toast about it would otherwise narrate
         # the old episode over the new one.
-        self._resume_target = None
-        self._pending_resume = None
+        self._clear_seat()
         self._finish_working()
         try:
             self.skip_btn.hide()
@@ -3149,7 +3392,14 @@ class PlayerPage(GlassPage):
         else:
             self._show_loading_soon("Looking for a source...")
             self._spawn(self._find_streams_worker, self._run)
-        self._search_subtitles()
+        # Deliberately no subtitle search here any more - it used to
+        # start beside the source lookup and competed with it for the
+        # connection while the owner was staring at the loading frame
+        # ("make the auto subtitles load after the source loading
+        # end"). _ensure_subtitle_search runs it at the first frame
+        # instead, and on demand the moment either panel that lists
+        # subtitles is opened - so picking by hand never waits on the
+        # deferral.
 
     # ---- background work ---------------------------------------------
     def _spawn(self, target, *args):
@@ -3179,6 +3429,19 @@ class PlayerPage(GlassPage):
         except Exception:
             logs.exception("Stream lookup failed")
             self._work.streams_ready.emit([], run, False)
+
+    def _ensure_subtitle_search(self):
+        """Start this episode's subtitle search, once.
+
+        Called from the first frame (the earliest moment the search can
+        no longer slow the path to picture) and from the subtitle and
+        download panels (the two places that show its results), so a
+        panel opened before the source has loaded still gets a search
+        under way immediately."""
+        if self._subs_search_started or self._closing:
+            return
+        self._subs_search_started = True
+        self._search_subtitles()
 
     def _search_subtitles(self):
         if subtitles_module is None:
@@ -3391,9 +3654,21 @@ class PlayerPage(GlassPage):
         if streams_module is None:
             return          # nothing can have produced a second batch
         known = {streams_module.stream_key(s) for s in self._streams}
+        # **Also by info hash, not only by stream_key.** `stream_key`
+        # prefers a row's `url`, and `_on_stream_prepared` writes the
+        # *prepared* stream (which has one) back over the row it started
+        # from - so from that moment the release actually playing has a
+        # different key than the row a later partial batch carries for
+        # the same release, and it was re-added here as a fresh,
+        # unselected row. Picking that row is a switch to the file
+        # already open, which is exactly the identical-path hang
+        # _switch_stream documents. Same release, same hash, one row.
+        known_hashes = {(s.get("info_hash") or "").lower()
+                        for s in self._streams if s.get("info_hash")}
         added = [s for s in incoming
                  if s.get("kind") != "drm"
-                 and streams_module.stream_key(s) not in known]
+                 and streams_module.stream_key(s) not in known
+                 and (s.get("info_hash") or "").lower() not in known_hashes]
         if not added:
             return
         cut = len(self._streams)
@@ -3506,13 +3781,26 @@ class PlayerPage(GlassPage):
         if self._closing or run != self._run or self.handle is None:
             return
         try:
-            self.handle.sub_add(path, "select")
+            # **Asynchronous, like every other track change.** `sub_add`
+            # is a synchronous command through mpv's core, and the core
+            # can be parked in a demuxer read on a torrent-backed stream
+            # - so a subtitle pick could hold the UI thread, and with it
+            # every paint, for as long as the swarm took. The visibility
+            # write goes the same way. The style and delay setters are
+            # property writes of their own and stay as they were: the
+            # Map of 23 August 2026 measured a synchronous libmpv get
+            # never exceeding 100ms even mid-stall.
+            if hasattr(self.handle, "command_async"):
+                self.handle.command_async("sub-add", str(path), "select")
+                self.handle.command_async("set", "sub-visibility", "yes")
+            else:                                   # pragma: no cover
+                self.handle.sub_add(path, "select")
+                self.handle["sub-visibility"] = True
             # Re-applied after the add, not before: a freshly selected
             # track starts from mpv's defaults, and an .ass needs the
             # scale lever rather than the font-size one.
             self._apply_sub_style()
             self._apply_sub_delay()
-            self.handle["sub-visibility"] = True
         except Exception:
             logs.exception("sub-add failed")
             self._finish_sub_toast("Subtitle Could Not Be Loaded")
@@ -3608,7 +3896,16 @@ class PlayerPage(GlassPage):
         stream = stream or {}
         quality = (stream.get("quality") or "").strip()
         self.res_pill.setText(quality.upper() if quality else "AUTO")
-        self.source_label.setText(stream.get("source") or "")
+        # **What is playing, not who listed it** - the owner's ask, 23
+        # August 2026: no provider or addon name anywhere in the UI. This
+        # printed "Torrentio"/"Anime Tosho", which says nothing about the
+        # picture on screen; it now says what the file is (codec, bit
+        # depth, dynamic range), read off the release name. The `source`
+        # field is untouched on the stream dict - _switch_stream still
+        # matches on it to keep a hand-picked provider across episodes.
+        from windows.details import _codec_label
+        self.source_label.setText(_codec_label(
+            stream.get("source"), quality, stream.get("title")))
 
     def _audio_language_preference(self):
         """Which audio language this entry should open on.
@@ -3625,7 +3922,46 @@ class PlayerPage(GlassPage):
         kind = str((self.entry or {}).get("type") or "").strip().lower()
         if kind == "anime":
             return ("jpn", "ja", "jp", "jpa")
+        # **A film or series that *is* anime opens in Japanese too.** The
+        # type alone said English for Demon Slayer: Infinity Castle (a
+        # Movie), so alang asked for a track the release did not have and
+        # mpv kept the Spanish one it opened on - the owner's report, 24
+        # August 2026. Cinemeta's genres and country decide (see
+        # stremio.looks_anime): carried on the entry by the details page
+        # when it has them, else learned by this page's own meta fetch.
+        # getattr, because __init__ asks this before every field exists
+        # (the download panel's default audio is chosen early) - measured
+        # 24 August 2026: the anime branch above returned first, so
+        # Frieren played while every Movie and Series raised
+        # AttributeError here and the player never opened.
+        hint = getattr(self, "_anime_hint", None)
+        if hint is None:
+            try:
+                from helpers import stremio
+                entry = self.entry or {}
+                if entry.get("genres") or entry.get("country"):
+                    hint = stremio.looks_anime(entry)
+            except Exception:
+                hint = None
+        if hint:
+            return ("jpn", "ja", "jp", "jpa")
         return ("eng", "en")
+
+    # Title words that mark an audio track as a language when its `lang`
+    # tag is absent or wrong - dual-audio rips routinely name the track
+    # ("AAC English", "ITA 5.1") without tagging it, and mpv's `alang`
+    # only ever reads the tag. Keyed by the preference tuple's first
+    # element (_audio_language_preference).
+    _AUDIO_TITLE_WORDS = {
+        "eng": ("english", "eng"),
+        "jpn": ("japanese", "jpn", "jap"),
+    }
+    # And words that mark a track as the one *not* to auto-pick even in
+    # the right language - a commentary or described-video mix. Never a
+    # hard exclusion: when it is the only match it still beats a track
+    # in the wrong language.
+    _AUDIO_AVOID_WORDS = ("commentary", "description", "descriptive",
+                          "narration")
 
     def _apply_audio_default(self):
         """Move to the preferred audio language, once per loaded file.
@@ -3646,25 +3982,95 @@ class PlayerPage(GlassPage):
         audio = [t for t in self._tracks if t.get("type") == "audio"]
         if not audio:
             return          # nothing published yet; a later emission has it
-        wanted = self._audio_language_preference()
-
-        def lang_of(track):
-            return str(track.get("lang") or "").strip().lower()
-
         current = next((t for t in audio if t.get("selected")), None)
         if current is None:
             return          # mpv has not settled on one yet
         self._audio_default_done = True
-        if lang_of(current) in wanted:
-            return
-        # Best match in preference order, so "jpn" beats "ja" rather
-        # than whichever happens to sit first in the container.
-        for code in wanted:
-            match = next((t for t in audio if lang_of(t) == code), None)
-            if match is not None:
-                self._pick_track("aid", match)
-                return
-        # Nothing in the release speaks it - mpv's own choice stands.
+        pick = self._preferred_audio_track(audio, current)
+        if pick is not None and pick is not current:
+            self._pick_track("aid", pick)
+
+    def _preferred_audio_track(self, audio, current):
+        """The track playback should move to, or None to keep `current`.
+
+        The owner's report this exists for, 23 August 2026: House of the
+        Dragon S01E03 auto-played in Italian. The file that did it is
+        readable in his own stream cache (S01E03 "Secondo del suo nome"
+        ITA.ENG WEB-DLMux, MeM.GP - 434MB pulled, so it genuinely
+        played) and its track table, read straight off those bytes, is:
+        audio 1 `ita`, flagged default; audio 2 **no language tag, no
+        title at all** - the English track. `alang=eng,en` matches
+        nothing there, mpv's default-flag choice (Italian) stood, and
+        the old exact `lang == "eng"` walk here also found nothing. Its
+        swarm was dead when re-tried (nothing in 60s), so the failure
+        and the fix were both proven through the real player on a
+        fabricated container of exactly that shape, plus a variant
+        whose English track is titled "AAC English" - Italian under
+        the shipped logic, English under this one, same files.
+
+        Hence three layers, in trust order: the lang tag as written,
+        the tag's base ("en-US" is English), then the track's own
+        *title* ("AAC English", "ENG") - and when nothing names the
+        language at all, a track carrying *no* language information
+        beats a selection explicitly tagged with the wrong one, which
+        is precisely the MeM.GP case. A commentary/described mix loses
+        to a clean one even when both match."""
+        wanted = self._audio_language_preference()
+        title_words = self._AUDIO_TITLE_WORDS.get(wanted[0], ())
+
+        def lang_of(track):
+            return str(track.get("lang") or "").strip().lower()
+
+        def tag_match(track):
+            raw = lang_of(track)
+            if not raw:
+                return False
+            # Exact first, then the base of a BCP-47-ish tag: releases
+            # write "en-US", "en_GB", even "eng-Atmos".
+            return raw in wanted or re.split(r"[-_]", raw, 1)[0] in wanted
+
+        def title_match(track):
+            title = str(track.get("title") or "").lower()
+            return any(re.search(r"\b" + word + r"\b", title)
+                       for word in title_words)
+
+        def avoid(track):
+            title = str(track.get("title") or "").lower()
+            return any(word in title for word in self._AUDIO_AVOID_WORDS)
+
+        def matches(track):
+            return tag_match(track) or title_match(track)
+
+        # The pick already speaks the language and is not a commentary:
+        # nothing to do. (A matching commentary is only left when no
+        # clean match exists - checked below.)
+        if matches(current) and not avoid(current):
+            return None
+        candidates = [t for t in audio if matches(t)]
+        if candidates:
+            # Clean mixes before commentary, a real tag before a title
+            # guess, the container's default flag before container order.
+            candidates.sort(key=lambda t: (avoid(t), not tag_match(t),
+                                           not t.get("default"),
+                                           t.get("id") or 0))
+            return None if candidates[0] is current else candidates[0]
+        # Nothing names the language at all. If mpv's own pick is
+        # explicitly tagged some *other* language, a track with no
+        # language information ("Track 2") is the better guess for an
+        # entry whose type says what the owner watches it in - a known
+        # miss loses to an unknown. An untagged current stays: there is
+        # nothing that says any other track beats it.
+        cur = lang_of(current)
+        if cur and cur not in ("und", "mul", "zxx", "unknown"):
+            unknown = [t for t in audio
+                       if lang_of(t) in ("", "und", "unknown")]
+            clean = [t for t in unknown if not avoid(t)]
+            unknown = clean or unknown
+            if unknown:
+                unknown.sort(key=lambda t: (not t.get("default"),
+                                            t.get("id") or 0))
+                return unknown[0]
+        return None     # nothing better than what mpv chose
 
     def _update_audio_pill(self):
         """The audio-language pill follows the selected audio track."""
@@ -3684,7 +4090,19 @@ class PlayerPage(GlassPage):
             self._show_drm(stream)
             return
         self._stream_index = index
-        self._hide_status()
+        # Only over a running picture. During startup this used to run
+        # unconditionally, and _hide_status drops the loading backdrop -
+        # measured live (Demon Slayer, Next pressed, 23 August 2026):
+        # the reset put the frame up instantly, the prefetched source
+        # list answered ~0.2s later, this hide tore the frame down, and
+        # _show_loading_soon's 350ms grace left the window blank at
+        # +0.35s. While the first frame is still owed, the frame stays;
+        # a stale dead-end box is repainted into the loading state
+        # instead of everything going dark.
+        if not self._awaiting_first_frame:
+            self._hide_status()
+        elif self._status_visible() and not self._loading_visible:
+            self._show_loading()
         self._update_source_display(stream)
 
         # A torrent arrives without a url on purpose: the streaming
@@ -3718,9 +4136,11 @@ class PlayerPage(GlassPage):
         plays", and telling the engine afterwards is worth nothing, so
         the record is read here instead.
 
-        The two guards are `_resume_where_it_stopped`'s own, held
-        identical on purpose: the engine must never be sent to prioritise
-        an offset the player is then not going to seek to."""
+        These are also the guards that decide whether the file *opens*
+        at the seat at all now (_load_into_mpv reads its answer from
+        here), which is what keeps the engine and mpv pointed at the
+        same offset by construction - the engine must never be sent to
+        prioritise an offset playback is then not going to start at."""
         if resume_at:
             return float(resume_at), float(self._duration or 0.0)
         try:
@@ -3785,34 +4205,43 @@ class PlayerPage(GlassPage):
                 and s.get("kind") != "drm"
                 and _canonical_quality(s.get("quality"))
                 == _canonical_quality(chosen.get("quality"))])
-            if solo and hasattr(streams_module, "prepare_fastest"):
-                # A hand-picked release races too - it simply goes in
-                # first. Measured: leaving it alone cost 23s when the
-                # pick was dead, and giving it a head start before the
-                # others joined was worse again (18.5s against 5.6s).
-                # See prepare_fastest.
-                rest = self._untried_first([
-                    s for i, s in enumerate(self._streams)
-                    if i != index and i not in self._dead_sources
-                    and s.get("kind") != "drm" and s.get("info_hash")
-                    and _canonical_quality(s.get("quality"))
-                    == _canonical_quality(chosen.get("quality"))])
-                stream = streams_module.prepare_fastest(
-                    [chosen] + rest, season=self.season, episode=self.episode,
-                    failed=failed,
-                    **_prime_kwargs(streams_module.prepare_fastest, prime))
+            wanted_title = (self.entry or {}).get("title") or ""
+            if solo:
+                # **A hand-picked release is played, not raced.** It used
+                # to go in as candidate 0 of a full race, on the measured
+                # grounds that a dead pick otherwise cost 23s. That trade
+                # is off: the owner, 23 August 2026 - "I changed the
+                # source it reloaded and resumed correctly but with the
+                # same video was playing in the 1st source ... the source
+                # is not really changing". It was changing; the race was
+                # handing back whichever release won, which for a second
+                # pick is very often the same one that won the first
+                # time. A pick the app can silently override is not a
+                # pick.
+                #
+                # What makes this affordable now is that the reason for
+                # racing it has largely gone: the debrid lane resolves a
+                # cached release in about a second, and SOLO_METADATA_
+                # TIMEOUT/SOLO_DATA_WAIT bound a dead pick at 4s + 4s
+                # before _try_next_source races the rest of the list
+                # anyway. So a live pick plays, and a dead one costs 8s
+                # and then behaves exactly as before.
+                stream = streams_module.prepare(
+                    chosen, season=self.season, episode=self.episode,
+                    title=wanted_title,
+                    metadata_timeout=streams_module.SOLO_METADATA_TIMEOUT,
+                    data_wait=streams_module.SOLO_DATA_WAIT,
+                    **_prime_kwargs(streams_module.prepare, prime))
             elif others and hasattr(streams_module, "prepare_fastest"):
                 stream = streams_module.prepare_fastest(
                     [chosen] + others, season=self.season, episode=self.episode,
-                    failed=failed,
+                    title=wanted_title, failed=failed,
                     **_prime_kwargs(streams_module.prepare_fastest, prime))
             else:
-                # A deliberate pick, or the last candidate. Either way it
-                # runs alone - and on a *bounded* budget, so a dead one
-                # falls through to _try_next_source in 8s instead of 24
-                # (see streams.SOLO_METADATA_TIMEOUT).
+                # The last candidate, alone, on the same bounded budget.
                 stream = streams_module.prepare(
                     chosen, season=self.season, episode=self.episode,
+                    title=wanted_title,
                     metadata_timeout=streams_module.SOLO_METADATA_TIMEOUT,
                     data_wait=streams_module.SOLO_DATA_WAIT,
                     **_prime_kwargs(streams_module.prepare, prime))
@@ -3938,8 +4367,8 @@ class PlayerPage(GlassPage):
         lands here, and this called `_play_stream(index)` with no
         resume - so the release it moved on to opened with
         `resume_at=None` and its first six time-pos readings were
-        0.0, 0.1, 0.2, 0.3, 0.4, 0.5. `_resume_where_it_stopped` cannot
-        cover for it either: the saved record lags by up to
+        0.0, 0.1, 0.2, 0.3, 0.4, 0.5. The saved resume record cannot
+        cover for it either: it lags by up to
         POSITION_SAVE_MS and does not exist at all in the first seconds
         of an episode.
 
@@ -4124,8 +4553,7 @@ class PlayerPage(GlassPage):
         # has to fetch the pieces at that offset before the picture can
         # come back, and saying so is the difference between "working"
         # and "broken".
-        seat = self._pending_resume if self._pending_resume is not None \
-            else self._resume_target
+        seat = self._resume_target
         if seat:
             return 0.55, f"Skipping to {_format_time(seat)}..."
         percent = getattr(self, "_buffering_percent", 0)
@@ -4193,13 +4621,25 @@ class PlayerPage(GlassPage):
         self._buffering_percent = 0
         # A fresh file gets a fresh audio pick - see _apply_audio_default.
         self._audio_default_done = False
-        self._resume_target = None
+        self._clear_seat()
         self._update_startup_status()
+
+        # Where this file should open: what the caller carried across a
+        # switch, else the saved resume record (same guards as ever -
+        # under RESUME_MIN_S there is nothing worth going back to, past
+        # RESUME_MAX_FRACTION the episode is effectively finished; see
+        # _prime_seat, the one place those guards live now). There used
+        # to be a "Resume from 12:34?" bar with Resume and Start Over on
+        # it; it is gone on purpose - the answer was Resume every single
+        # time, and ignoring the question for twelve seconds meant
+        # starting over, so the default was the option nobody wanted.
+        seat = self._prime_seat(resume_at)[0]
 
         # Headers before the load, not after: many of these hosts answer
         # 403 to a request without the Referer the page carried, and mpv
         # reads these options when it opens the url.
         headers = stream.get("headers") or {}
+        url = stream.get("url") or ""
         try:
             fields = [f"{name}: {value}" for name, value in headers.items()
                       if name.lower() != "user-agent"]
@@ -4207,61 +4647,113 @@ class PlayerPage(GlassPage):
             agent = next((v for k, v in headers.items() if k.lower() == "user-agent"), None)
             if agent:
                 self.handle["user-agent"] = agent
-            self.handle.play(stream.get("url") or "")
+            # **Reloading the identical path needs a stop first.** The
+            # gate below reopens only on a `path` property *change*, and
+            # torrent_engine.stream_url is a pure function of the info
+            # hash, so re-loading the URL already open reports nothing,
+            # leaves the gate shut and hangs the startup frame forever
+            # (the full walk is in _switch_stream). _switch_stream stops
+            # on its own account; this covers the other way in - a stall
+            # that sends _try_next_source back to a release resolving to
+            # the same URL.
+            if url and str(self._loading_url or "") == str(url):
+                self._stop_playback()
+            # The gate closes before the load is issued and reopens when
+            # the observed `path` names this url - see _file_ready.
+            self._file_ready = False
+            self._loading_url = url
+            if seat:
+                # **The file is opened at the seat, not played from the
+                # head and seeked after.** The old shape - load, wait
+                # for the first time-pos>0, then seek - was a race the
+                # owner lost ("the Skipping to X:XX after changing the
+                # source ... keeps loading but never takes me there"):
+                # a stale time-pos from the outgoing file could trigger
+                # the seek while the new file was still opening, mpv
+                # refused it, nothing re-issued it, and the new source
+                # played from 0:00 under a skip message that could not
+                # come true. A per-file start= has no such window, and
+                # it is exact, not keyframe-quantised: measured 22
+                # August 2026 against a deliberately slow (2.5s/request)
+                # http source with keyframes ~10.4s apart, start=8.05
+                # opened at time-pos 8.050 (a keyframe-only start would
+                # have landed at 0.0). It also asks the demuxer for the
+                # head and the seat's neighbourhood only - exactly the
+                # window _prime_seat already told the torrent engine to
+                # fetch first.
+                self.handle.loadfile(url, "replace", start=f"{float(seat):.3f}")
+            else:
+                self.handle.play(url)
             self.handle["pause"] = False
         except Exception:
             logs.exception("Starting playback failed")
             self._show_status("That source could not be opened. Try another one.")
             return
 
-        if resume_at:
-            self._pending_resume = float(resume_at)
-            # No toast here: a switch already has one up saying what it
-            # is doing, and the seat is what the user asked for rather
-            # than news. _resume_where_it_stopped is the case that owes
-            # a word, and it now waits until the seek has landed.
-        else:
-            self._resume_where_it_stopped()
+        if seat:
+            # **Announced when it has happened, not when it was
+            # decided** (the owner's earlier "resumed from 9:23 ... it
+            # takes ~10-30 sec then the vid plays"): _resume_target is
+            # only the promise; _on_property says "Resumed From" when
+            # the picture is actually at the seat, the startup gauge
+            # narrates the wait ("Skipping to 9:23..."), and the
+            # watchdog is what keeps the promise from outliving its
+            # truth - see _seat_tick.
+            self._resume_target = float(seat)
+            self._seat_deadline = time.monotonic() + SEAT_GIVE_UP_S
+            self._seat_timer.start()
+            if self._work_toast is not None:
+                # A switch has a toast up already ("Loading Source...");
+                # re-word it to what the wait is actually for. A fresh
+                # open has the loading frame instead, and the gauge
+                # carries the message there.
+                self._say_working(f"Skipping To {_format_time(seat)}...")
 
-    def _resume_where_it_stopped(self):
-        """Seek to the stored position, without asking.
+    def _clear_seat(self):
+        """Withdraw the seat promise - landed, superseded or given up."""
+        self._resume_target = None
+        self._seat_deadline = None
+        self._seat_reported = None
+        if self._seat_timer.isActive():
+            self._seat_timer.stop()
 
-        There used to be a "Resume from 12:34?" bar with Resume and Start
-        Over on it. It is gone on purpose: the answer was Resume every
-        single time, and a question whose answer is always the same is a
-        step, not a choice - worse, ignoring it for twelve seconds meant
-        starting over, so the default was the option nobody wanted.
+    def _seat_tick(self):
+        """Give up on a seat that is not landing, out loud.
 
-        The two guards that made the bar sensible are kept exactly as
-        they were, because they are what stops "always resume" from being
-        wrong: under RESUME_MIN_S there is nothing worth resuming to, and
-        past RESUME_MAX_FRACTION the episode is effectively finished and
-        resuming would open on the credits."""
-        record = load_resume(self.entry, self.season, self.episode)
-        if not record:
+        Runs on its own timer because the stuck case is precisely the
+        one with no time-pos events to hang a check on: mpv parked
+        buffering at an offset whose data never arrives. Playback is
+        left wherever it is - stopping it too would turn a failed skip
+        into a failed episode."""
+        if self._closing or self._resume_target is None:
+            self._clear_seat()
             return
-        position = float(record.get("position") or 0.0)
-        duration = float(record.get("duration") or 0.0)
-        if position < RESUME_MIN_S:
-            return
-        if duration and position > duration * RESUME_MAX_FRACTION:
-            return
-        # Not seeked here: nothing is decoded yet and mpv answers a seek
-        # on an unloaded file with an error. _on_property applies it on
-        # the first frame, the same path a source switch already uses.
-        self._pending_resume = position
-        # **Announced when it has happened, not when it was decided.**
-        # The owner's report: "when the alert 'resumed from 9:23'
-        # appears it does play with it, it takes ~10-30 sec then the vid
-        # plays". It was true - the toast went up the instant mpv was
-        # handed the url, which is before a single piece at that offset
-        # exists, so the message described something that had not
-        # happened yet and the screen behind it stayed black. It is now
-        # said by _on_property once playback is actually at the seat,
-        # and the wait itself is narrated from the moment the seek is
-        # issued ("Skipping To 9:23...") rather than left as a black
-        # screen. The loading gauge carries it too for the case where
-        # the seek is owed before the first frame (_startup_snapshot).
+        if self._seat_deadline and time.monotonic() > self._seat_deadline:
+            seat = self._resume_target
+            self._clear_seat()
+            if self._awaiting_first_frame:
+                # Not one frame arrived from this source: its head
+                # answered prepare, but the swarm never delivered the
+                # seat's window - measured live (Demon Slayer switch to
+                # an Anime Tosho release, 23 August 2026: 45s at 0:34
+                # with the position frozen and hwdec never engaged).
+                # "Playing From Here" would narrate a black stall, so
+                # walk to the next release instead, seat kept - the
+                # same move a failed prepare already makes.
+                self._say_working("That Source Stalled - Trying Another...")
+                if self._try_next_source(self._stream_index, resume_at=seat):
+                    return
+                self._finish_working()
+                self._show_status(
+                    "None of the sources for this would start.\n"
+                    "Try again in a moment, or pick one from the list.")
+            elif self._work_toast is not None:
+                self._finish_working(f"Could Not Skip To {_format_time(seat)}"
+                                     " - Playing From Here")
+            else:
+                show_toast(self._toast_anchor(),
+                           f"Could Not Skip To {_format_time(seat)}"
+                           " - Playing From Here")
 
     def _show_drm(self, stream):
         """The one case with no spinner and no retry: Widevine content is
@@ -4294,15 +4786,16 @@ class PlayerPage(GlassPage):
         if self.handle is None:
             return
         if not resuming:
-            # A seek the user asked for cancels one the player still
-            # owed. Without this, dragging the bar (or taking a skip
-            # offer) while the resume seek was still fetching its pieces
+            # A seek the user asked for cancels the seat the player
+            # still owed. Without this, dragging the bar (or taking a
+            # skip offer) while the seat was still fetching its pieces
             # left "Skipping To 9:23..." on screen describing a journey
             # nobody was on any more.
-            self._pending_resume = None
             if self._resume_target is not None:
-                self._resume_target = None
+                self._clear_seat()
                 self._finish_working()
+            else:
+                self._clear_seat()
         try:
             # precision="exact", not mpv's default "keyframes": measured
             # on a 10s test mp4, a seek to 6.0s landed at 4.7 because
@@ -4420,6 +4913,63 @@ class PlayerPage(GlassPage):
         panel.finish()
         self._show_panel(panel)
 
+    def _leave_playback(self, message):
+        """Everything leaving the current episode owes, in the order the
+        owner sees it: the startup frame up *instantly*, the outgoing
+        picture and sound genuinely stopped, its torrent handed back,
+        and the position saved for next time.
+
+        The frame used to be refused here and the old episode played on:
+        pressing Next only wrote "Loading..." while `_show_backdrop`'s
+        running-picture guard (correctly) declined to cover a picture
+        that was still running - and mpv was never told to stop, so the
+        old episode's audio ran under the whole source lookup (the
+        owner's report, 22 August 2026: Next must "immediately stop the
+        current playing and show bg image with the logo (like I just
+        entered the vid player)"). Setting _awaiting_first_frame before
+        the frame is what lets the backdrop cover; the stop is what
+        makes it honest.
+
+        Order matters twice over: the frame goes up before anything
+        that can touch mpv or libtorrent (either can block the UI
+        thread behind a torrent read - see torrent_engine._Torrent.
+        wait_for), and _save_position runs before the stop only because
+        it reads self._position, which the stop's time-pos=None events
+        cannot clobber (None is dropped in _on_property)."""
+        self._awaiting_first_frame = True
+        self._startup_fraction = 0.0
+        self._show_loading(message)
+        # Hand the old episode's bandwidth over. Switching away does
+        # not stop a torrent by itself: it keeps its priority-7 pieces
+        # and its reads, so the episode being started competed with the
+        # one being left - and those reads are what the UI thread ends
+        # up waiting behind.
+        self._release_playing_torrent()
+        self._save_position()
+        self._stop_playback()
+
+    def _stop_playback(self):
+        """Unload whatever mpv is playing, now, without waiting on it.
+
+        command_async, not command: a synchronous stop travels through
+        mpv's core, and the core can be parked mid-read on a torrent
+        piece that is not there - the exact moment this runs is the
+        moment the user is giving up on that source, so the UI thread
+        must not queue behind it. The gate closes here too: with no file
+        wanted, every property event still in flight is stale by
+        definition."""
+        self._file_ready = False
+        self._loading_url = None
+        if self.handle is None:
+            return
+        try:
+            if hasattr(self.handle, "command_async"):
+                self.handle.command_async("stop")
+            else:                                   # pragma: no cover
+                self.handle.command("stop")
+        except Exception:
+            logs.exception("Could not stop playback")
+
     def _change_episode(self, delta):
         """Step within this season, and refuse to step off the end of it.
 
@@ -4439,19 +4989,7 @@ class PlayerPage(GlassPage):
                 "The episode you are looking for is not released yet.")
             self._sync_episode_buttons()
             return
-        # **Before anything that touches mpv.** The loading frame is what
-        # makes Next feel instant; putting it up after _save_position
-        # meant the button did nothing visible until mpv answered, and
-        # mpv answers only when its play loop is not blocked reading
-        # torrent pieces (see torrent_engine._Torrent.wait_for).
-        self._show_loading("Loading the next episode...")
-        # And hand the old episode's bandwidth over. Switching away does
-        # not stop a torrent by itself: it keeps its priority-7 pieces
-        # and its reads, so the episode being started competed with the
-        # one being left - and those reads are what the UI thread ends
-        # up waiting behind.
-        self._release_playing_torrent()
-        self._save_position()
+        self._leave_playback("Loading the next episode...")
         self.episode = target
         self._panel_season = self.season   # prev/next stay within this season
         self._given_streams = None       # the handed-in list was for the old episode
@@ -4499,6 +5037,35 @@ class PlayerPage(GlassPage):
         if self._closing:
             return
         if name == "time-pos" and value is not None:
+            if not self._file_ready:
+                # A position from the file being *left*, not the one
+                # being loaded - see _file_ready in __init__ for the
+                # measured race this gate closes. Dropped whole: acting
+                # on it once mis-declared the new source's first frame
+                # and settled a seat with the old file's position.
+                return
+            if self._resume_target is not None and self._seat_reported is None:
+                # **The first time-pos of a file opened at a seat is the
+                # seek target itself, decoded or not.** Measured live,
+                # 23 August 2026, Demon Slayer S01E01 resumed at 22:54
+                # over a real swarm: mpv reported 1374.29 the instant
+                # the file opened, then sat on exactly that number for
+                # 16+ seconds while the pieces at that offset were still
+                # downloading - no frame existed, hwdec had not even
+                # engaged. Treating that report as playback declared the
+                # first frame, said "Resumed From 22:54" over a stalled
+                # screen, and disarmed the give-up watchdog. So the
+                # report is recorded (the bar may show it) and nothing
+                # else below runs until a position *different from it*
+                # arrives - and only decoded frames move time-pos, so a
+                # change is proof of picture.
+                self._seat_reported = self._position = float(value)
+                self.seek_bar.set_position(self._position)
+                self._update_time_label()
+                return
+            if (self._resume_target is not None
+                    and float(value) == self._seat_reported):
+                return          # still the same undecoded report
             if self._awaiting_first_frame and float(value) > 0:
                 # The first frame is the only proof that a source has
                 # actually started; until it lands, "nothing on screen"
@@ -4506,14 +5073,19 @@ class PlayerPage(GlassPage):
                 self._awaiting_first_frame = False
                 self._hide_status()
                 # A switch that was announced is now finished - unless
-                # it still owes a seek, in which case the toast keeps
-                # saying so until the picture is at the seat.
-                if self._work_toast is not None and self._pending_resume is None \
-                        and self._resume_target is None:
+                # it still owes a seat, in which case the toast keeps
+                # saying so until the picture is there.
+                if self._work_toast is not None and self._resume_target is None:
                     self._finish_working("Source Loaded")
-                # Playback is up - now spend idle time on the episode
-                # after this one, so Next answers from the cache instead
-                # of re-running the whole source fan-out.
+                # The picture is up: only now is the connection's slack
+                # spent on anything else. The subtitle search used to
+                # start beside the source lookup and competed with it
+                # for the path to first frame (the owner's "make the
+                # auto subtitles load after the source loading end").
+                self._ensure_subtitle_search()
+                # And idle time on the episode after this one, so Next
+                # answers from the cache instead of re-running the whole
+                # source fan-out.
                 self._prefetch_next_episode()
             self._position = float(value)
             self.seek_bar.set_position(self._position)
@@ -4521,20 +5093,29 @@ class PlayerPage(GlassPage):
             self._check_watched()
             self._refresh_skip_button()
             self._maybe_prewarm_next()
-            if self._pending_resume is not None and self._position > 0:
-                target, self._pending_resume = self._pending_resume, None
-                # Held until the picture is actually there: on a torrent
-                # the seek is the *start* of a wait, not the end of one
-                # (the pieces at that offset have to arrive), which is
-                # what made "Resumed From 9:23" a promise rather than a
-                # report. See _resume_where_it_stopped.
-                self._resume_target = target
-                self._say_working(f"Skipping To {_format_time(target)}...")
-                self._seek_absolute(target, resuming=True)
-            elif self._resume_target is not None and self._position >= \
+            if self._resume_target is not None and self._position >= \
                     self._resume_target - RESUME_LANDED_TOLERANCE_S:
-                seat, self._resume_target = self._resume_target, None
-                self._finish_working(f"Resumed From {_format_time(seat)}")
+                # The seat has landed - the file was opened at it (see
+                # _load_into_mpv's start=), so this fires on the first
+                # honest position of the new file, not on a promise.
+                seat = self._resume_target
+                self._clear_seat()
+                if self._work_toast is not None:
+                    self._finish_working(f"Resumed From {_format_time(seat)}")
+                else:
+                    # A fresh open resumes with no switch toast up; the
+                    # arrival still deserves its word.
+                    show_toast(self._toast_anchor(),
+                               f"Resumed From {_format_time(seat)}")
+        elif name == "path":
+            # The observed path is the load boundary: it names the new
+            # file the moment mpv begins it, after the last event the
+            # old file will ever emit. Matching against the url this
+            # page asked for (rather than "any non-empty path") keeps a
+            # superseded load from opening the gate for the one that
+            # replaced it.
+            self._file_ready = bool(value) and str(value) == \
+                str(self._loading_url or "")
         elif name == "duration" and value:
             self._duration = float(value)
             self.seek_bar.set_duration(self._duration)
@@ -4668,15 +5249,17 @@ class PlayerPage(GlassPage):
         never warmed at all - mpv is still pulling that one over the same
         connection and the engine cannot tell us how much is left.
 
-        Bounded to one release, started no earlier than PREWARM_TAIL_S
-        from the end, released the moment it stops being the thing the
-        next episode wants (see _load_into_mpv) or the page closes (see
-        _release_streams)."""
+        Bounded to one release, started no earlier than PREWARM_AFTER_S
+        into playback (the owner's "~100 sec from the current ep started
+        playing" - it was the last 180s of the episode before that, see
+        the constant for the judgement call), released the moment it
+        stops being the thing the next episode wants (see _load_into_mpv)
+        or the page closes (see _release_streams)."""
         if self._prewarm_asked or self._closing:
             return
         if not self.episode or not self._duration or streams_module is None:
             return
-        if self._duration - self._position > PREWARM_TAIL_S:
+        if self._position < PREWARM_AFTER_S:
             return
         if not self._has_next_episode():
             return
@@ -4687,6 +5270,25 @@ class PlayerPage(GlassPage):
         if now - self._prewarm_checked < 1.0:
             return
         self._prewarm_checked = now
+        # **The metadata half is paid at PREWARM_AFTER_S regardless**, and
+        # that is the owner's ask ("make the next ep loads after ~100 sec
+        # ... so that when I go to next it goes smoothly", 22 August
+        # 2026). The completeness gate below is right about *data* and
+        # wrong as a gate on everything: measured 23 August 2026, it held
+        # the whole prewarm back for an entire live session, because a
+        # streamed file is rarely complete before the episode ends - so
+        # the owner's Next stayed cold, which is the case this exists for.
+        #
+        # Metadata is a few hundred KB, asks for no piece data at all
+        # (torrent_engine.prefetch_metadata adds in upload mode and gives
+        # the swarm straight back), and it is the fixed cost of a cold
+        # Next - the part that does not get better with a good swarm. So
+        # it is safe to pay while something is playing, and it is most of
+        # what "goes smoothly" means.
+        if not self._meta_prewarm_asked:
+            self._meta_prewarm_asked = True
+            self._spawn(self._prewarm_metadata_worker, self.season,
+                        int(self.episode) + 1, self._run)
         if not self._playing_file_complete():
             return
         self._prewarm_asked = True
@@ -4712,6 +5314,37 @@ class PlayerPage(GlassPage):
                          or {}).get("finished"))
         except Exception:
             return False
+
+    def _prewarm_metadata_worker(self, season, episode, run):
+        """The next episode's .torrent metadata into the disk cache, so
+        pressing Next skips the metadata round trip.
+
+        No piece data is requested (see torrent_engine.prefetch_metadata),
+        so unlike `_prewarm_worker` this does not wait for the playing
+        file to be complete. Never raises - it is speculation, and a
+        failure must be indistinguishable from not having tried."""
+        try:
+            found = streams_module.find_streams(
+                self.entry, season=season, episode=episode,
+                deadline=net.deadline_in(STREAM_BUDGET_S))
+        except Exception:
+            return
+        if self._closing or run != self._run:
+            return
+        candidate = next((s for s in (found or [])
+                          if s.get("info_hash") and s.get("kind") != "drm"),
+                         None)
+        if candidate is None:
+            return
+        try:
+            from helpers import torrent_engine
+            if not torrent_engine.available():
+                return
+            torrent_engine.prefetch_metadata(
+                str(candidate.get("info_hash")),
+                trackers=candidate.get("trackers") or ())
+        except Exception:
+            return
 
     def _prewarm_worker(self, season, episode, run):
         """Never raises - this is pure speculation and a failure here
@@ -4908,6 +5541,10 @@ class PlayerPage(GlassPage):
         return panel
 
     def _open_subtitle_panel(self, rebuild=False):
+        # Opening the panel is a request for results, however early it
+        # comes - the automatic search waits for the first frame, a
+        # person asking must not (see _ensure_subtitle_search).
+        self._ensure_subtitle_search()
         panel = self._new_panel("Arabic Subtitles", "subs", rebuild)
         if panel is None:
             return          # the same button closed it
@@ -5038,8 +5675,14 @@ class PlayerPage(GlassPage):
     def _subtitles_off(self):
         if self.handle is not None:
             try:
-                self.handle["sub-visibility"] = False
-                self.handle["sid"] = "no"
+                # Same async route as _pick_track - the panel's Off row
+                # must not hitch behind a parked demuxer either.
+                if hasattr(self.handle, "command_async"):
+                    self.handle.command_async("set", "sub-visibility", "no")
+                    self.handle.command_async("set", "sid", "no")
+                else:                               # pragma: no cover
+                    self.handle["sub-visibility"] = False
+                    self.handle["sid"] = "no"
             except Exception:
                 logs.exception("Turning subtitles off failed")
         self._subtitle_label = "Off"
@@ -5603,6 +6246,10 @@ class PlayerPage(GlassPage):
         video (see the module docstring), and a modal dialog in the
         middle of a film is a heavier interruption than the panel the
         same buttons beside it already open."""
+        # The subtitle-to-save rows below come from the same search the
+        # subtitle panel shows; opening this panel is the same request
+        # (see _ensure_subtitle_search).
+        self._ensure_subtitle_search()
         panel = self._new_panel("Download", "download", rebuild)
         if panel is None:
             return          # the same button closed it
@@ -5810,12 +6457,47 @@ class PlayerPage(GlassPage):
         # A fresh pick by hand is a fresh answer to "which resolution",
         # so an earlier episode-long cross-over does not bind it.
         self._quality_given_up = False
-        self._release_playing_torrent(keep=chosen.get("info_hash"))
+        # Read before anything below can disturb it - the stop emits
+        # time-pos events, and this seat is where the switch has to land.
+        seat = self._position
         quality = (chosen.get("quality") or "").strip().upper()
+
+        # **The old file is stopped, not left running.** This is the
+        # owner's "it keeps loading forever, and sometimes only the audio
+        # plays from the old source", 23 August 2026, and it is the same
+        # defect `_leave_playback` was given on 22 August for Next - which
+        # this path never received. Three things were wrong at once and
+        # the stop fixes all three:
+        #
+        #  1. mpv was never told to unload, so for the whole prepare
+        #     (up to RACE_TIMEOUT) it went on decoding the outgoing file -
+        #     which is the audio the owner hears - while the release
+        #     underneath it had already been handed back one line later.
+        #  2. `_release_playing_torrent` removed that torrent from the
+        #     session while mpv still had a read open on its URL, so the
+        #     picture froze and only the already-demuxed audio survived.
+        #     Releasing now happens *after* the stop, in that order.
+        #  3. The forever-loading half: `_file_ready` reopens only on an
+        #     mpv `path` property **change** (_on_property), and
+        #     torrent_engine.stream_url is a pure function of the info
+        #     hash - so switching to a release that resolves to the URL
+        #     already loaded handed mpv a byte-identical path, `path`
+        #     never changed, the gate stayed shut, every time-pos was
+        #     dropped, `_awaiting_first_frame` never cleared and the
+        #     "Skipping to X:XX..." frame painted forever over a file
+        #     that was in fact playing. A stop drives `path` to None
+        #     first, so the reload is always a change.
+        self._awaiting_first_frame = True
+        self._startup_fraction = 0.0
+        self._show_loading(
+            f"Loading Source{f' ({quality})' if quality else ''}...")
+        self._save_position()
+        self._stop_playback()
+        self._release_playing_torrent(keep=chosen.get("info_hash"))
         self._say_working(f"Loading Source{f' ({quality})' if quality else ''}...")
         # Picked by hand from the sources panel - same rule as a
         # pick off the details page (see _prepare_stream_worker).
-        self._play_stream(index, resume_at=self._position, solo=True)
+        self._play_stream(index, resume_at=seat, solo=True)
 
     # ---- what the player says while it is busy over a live picture ----
     def _say_working(self, text):
@@ -6037,13 +6719,22 @@ class PlayerPage(GlassPage):
 
         `force` is the one exception, and it has exactly one caller:
         _show_buffer_frame, where the picture is *not* running - mpv has
-        stopped it dead on an empty cache - so there is nothing to cover
-        up and a frozen frame with no explanation is the worse of the
-        two. Nothing else may pass it."""
+        stopped it dead on an empty cache - and what goes up there is
+        the stall *badge* (logo over the frozen frame, no backdrop
+        image - see _show_buffer_frame), not this full frame. Nothing
+        else may pass it."""
         if self._closing:
             return
         if not force and self._position > 0 and not self._awaiting_first_frame:
             return
+        if not force:
+            # A full-frame caller (a cold open, Next's instant reset via
+            # _leave_playback). If the stall badge is still up from a
+            # stall the moment before, put the widget back into its
+            # full-window shape first - after the guard above, so a
+            # status box shown over a *running* picture can never flip
+            # the badge into a full frame over the video.
+            self._reset_stall_frame()
         self.backdrop.show()
         _raise_native(self.backdrop)
         self.logo.setVisible(self.logo.has_logo())
@@ -6065,26 +6756,40 @@ class PlayerPage(GlassPage):
         # leaving it up would hide the first frame it was waiting for.
         self.backdrop.hide()
         # And the buffering frame is that same widget, so its flag has to
-        # go too or _end_buffer_frame would think it is still up.
+        # go too or _end_buffer_frame would think it is still up - and
+        # its badge shape with it, or the next cold open would show a
+        # tiny rounded backdrop.
         self._buffer_delay.stop()
         self._buffer_frame_up = False
+        self._reset_stall_frame()
 
     # ---- the loading frame during a mid-playback stall ----------------
     def _begin_buffer_frame(self):
-        """Arm the loading frame for a stall that is still going in
+        """Arm the stall badge for a stall that is still going in
         BUFFER_FRAME_GUARD_MS.
 
-        The owner's ask was to show the loading image while buffering;
-        until now a stall mid-episode only wrote "Buffering..." into the
-        source label in the controls bar - which is hidden whenever the
-        controls are, so most stalls said nothing whatsoever and the
-        picture simply stopped.
+        Two owner asks, one day apart. 22 August: show the loading
+        image while buffering - before that, a stall mid-episode only
+        wrote "Buffering..." into the source label in the controls bar,
+        which is hidden whenever the controls are, so most stalls said
+        nothing whatsoever. 23 August, after seeing it: "make it just
+        shows the logo not the bg image (keep the video with ONLY logo
+        loading)" - the full backdrop belongs to a cold open, not to a
+        picture that was just there. So what goes up now is the badge
+        (see _show_buffer_frame), not the frame.
 
         Only over a *running* picture. During startup the ordinary
         loading frame is already up doing this job, and arming a second
         path to show it would fight _show_loading_soon's own guard."""
         if self._closing or self._awaiting_first_frame or self._position <= 0:
             return
+        # A stall is a stall, whoever caused it. The suppression that
+        # sat here for a track switch's own reconfigure existed only to
+        # hide the badge's box; the badge is clipped to the logo now
+        # (_layout_overlays), and the owner's next report was the exact
+        # case it hid - "when I change the embedded subtitles it freezes
+        # for ~5-10 sec (no loading logo)". So the logo shows for every
+        # wait past BUFFER_FRAME_GUARD_MS, a subtitle switch included.
         if self._buffer_frame_up or self._buffer_delay.isActive():
             return
         self._buffer_delay.start()
@@ -6094,12 +6799,30 @@ class PlayerPage(GlassPage):
             return
         if self._status_visible():
             return          # a dead-end message outranks it, as ever
+        if not self.logo.has_logo():
+            # No logo, nothing to badge. The full frame is not shown
+            # instead - the owner's ask, 23 August 2026, is exactly that
+            # a stall must not cover the picture with the backdrop image
+            # - so this rare case (no TMDB art) falls back to what
+            # stalls did before 22 August: the "Buffering..." note in
+            # the controls' source label.
+            return
         self._buffer_frame_up = True
+        # The badge, not the full frame - the owner's ask, 23 August
+        # 2026: "when it loads while playing ... make it just shows the
+        # logo not the bg image". Mode before geometry: _layout_overlays
+        # reads it to size the badge.
+        self.backdrop.set_stall(True)
         # Geometry before show, for the reason _show_status gives: these
         # are native child windows, and one shown before it is placed
         # paints in the window's top-left corner for a frame.
         self._layout_overlays()
         self._show_backdrop(force=True)
+        # The panels' glass, so the frozen frame reads through the badge
+        # rather than being punched out by a solid slab. Uniform DWM
+        # alpha like every other overlay here - LWA_COLORKEY rendered as
+        # black boxes on the owner's display (see the status stylesheet).
+        _set_window_alpha(self.backdrop, BAR_ALPHA)
         self.logo.set_fraction(
             min(1.0, max(0.0, getattr(self, "_buffering_percent", 0) / 100.0)))
 
@@ -6115,6 +6838,18 @@ class PlayerPage(GlassPage):
         # Not _hide_status: that also stops the startup gauge and clears
         # its text, and during a mid-playback stall neither is running.
         self.backdrop.hide()
+        self._reset_stall_frame()
+
+    def _reset_stall_frame(self):
+        """Put the backdrop back into its full-window shape after the
+        stall badge (see _show_buffer_frame): full opacity, no rounded
+        window region, full geometry. Safe to call at any time; a
+        backdrop that is not in stall mode is left alone."""
+        if not self.backdrop.stalled():
+            return
+        self.backdrop.set_stall(False)
+        _set_window_alpha(self.backdrop, 255)
+        self._layout_overlays()
 
     def _status_visible(self):
         return self.status.isVisible()
@@ -6546,6 +7281,24 @@ class PlayerPage(GlassPage):
                 continue
             rows.append({"type": kind, "start": start, "end": end,
                          "source": "chapters"})
+        # **Two openings that touch are a cold open and the real OP.** A
+        # chaptered release can name its first scene "Intro" (or, until
+        # today, "Avant") and its title sequence "Opening" right after it;
+        # both pass the window and span checks above, and the pair is
+        # precisely the owner's "Skip Intro at 0:00 takes me to the start
+        # of the intro, where there is a Skip Intro again". The later one
+        # is the title sequence, so it is the one kept. This runs here
+        # rather than relying on _on_skips' AniSkip-backed rule, because
+        # that rule only fires when AniSkip answers - and AniSkip is
+        # reached through an AniList id, which 403s for hours at a time.
+        openings = [r for r in rows if r["type"] == skiptimes.OPENING]
+        if len(openings) >= 2:
+            openings.sort(key=lambda r: r["start"])
+            dropped = set()
+            for earlier, later in zip(openings, openings[1:]):
+                if abs(float(later["start"]) - float(earlier["end"])) <= 1.0:
+                    dropped.add(id(earlier))
+            rows = [r for r in rows if id(r) not in dropped]
         return rows
 
     def _load_skip_times(self):
@@ -6752,7 +7505,6 @@ class PlayerPage(GlassPage):
         # is no logo the words take the centre themselves. Placed whether
         # or not either is showing: _show_status calls this while the
         # label is still hidden precisely so it appears in place.
-        self.backdrop.setGeometry(rect)
         width = min(680, max(320, rect.width() - 120))
         height = self.status.sizeHint().height() + 12
         # Much smaller than the old 46%-of-window treatment (the owner's
@@ -6761,8 +7513,63 @@ class PlayerPage(GlassPage):
         logo_width = max(160, min(int(rect.width() * 0.24), 300))
         logo_height = int(logo_width * 0.34)
         logo_y = int((rect.height() - logo_height) / 2)
-        self.logo.setGeometry(int((rect.width() - logo_width) / 2), logo_y,
-                              logo_width, logo_height)
+        if self.backdrop.stalled():
+            # Mid-playback stall: the backdrop window shrinks to a badge
+            # around the logo so the frozen frame stays visible around
+            # it (the owner's ask, 23 August 2026 - "keep the video with
+            # ONLY logo loading"). Same centre as the full-frame logo,
+            # so the mark does not jump between the two modes. This
+            # branch is here rather than in _show_buffer_frame because
+            # every later layout pass (a resize, _wake_controls bringing
+            # the bars back) runs through this method and would
+            # otherwise snap the badge back to full-window.
+            pad_x, pad_y = 28, 18
+            self.backdrop.setGeometry(
+                int((rect.width() - logo_width) / 2) - pad_x,
+                logo_y - pad_y,
+                logo_width + 2 * pad_x, logo_height + 2 * pad_y)
+            self.logo.setGeometry(pad_x, pad_y, logo_width, logo_height)
+            # **Clipped to the logo, not to a rounded rectangle** - the
+            # owner's ask, twice: "the loading icon still has a bg frame,
+            # remove the frame just keep the loading icon!".
+            #
+            # There is no border and no stylesheet to delete. The frame is
+            # this window: in stall mode it is a small native child filled
+            # with theme.BG, masked to a 16px rounded rect and blended
+            # whole by DWM (see _set_window_alpha), so what reads as a
+            # bordered panel is the mask edge of that fill against the
+            # video. It cannot simply paint nothing - `WS_EX_LAYERED` with
+            # LWA_ALPHA blends the whole window, there is no per-pixel
+            # alpha for a child window, and the colour-key route this file
+            # used to take was abandoned because antialiased edges stopped
+            # matching the key and rode every glyph as a halo (see
+            # _hard_edge_font).
+            #
+            # So the window is clipped to the logo's own silhouette
+            # instead. Only logo pixels remain, and the fill has nowhere
+            # left to show. The mask is 1-bit, so the logo's edge is hard
+            # rather than feathered - the honest cost of getting rid of
+            # the box without a per-pixel surface.
+            region = None
+            try:
+                region = self.logo.logo_region()
+            except Exception:
+                region = None
+            if region is not None and not region.isEmpty():
+                region.translate(pad_x, pad_y)
+                self.backdrop.setMask(region)
+            else:
+                # No logo art for this title: the badge is all there is
+                # to show, so it keeps its rounded frame.
+                _round_overlay(self.backdrop)
+        else:
+            self.backdrop.setGeometry(rect)
+            # Full-window again: drop the badge's rounded window region
+            # or it keeps clipping the full-size frame to a small
+            # rounded hole in the corner.
+            self.backdrop.clearMask()
+            self.logo.setGeometry(int((rect.width() - logo_width) / 2),
+                                  logo_y, logo_width, logo_height)
         status_y = (logo_y + logo_height + 14 if self.logo.has_logo()
                     else int((rect.height() - height) / 2))
         self.status.setGeometry(int((rect.width() - width) / 2), status_y,
@@ -6821,11 +7628,31 @@ class PlayerPage(GlassPage):
         return super().eventFilter(obj, event)
 
     # ---- keyboard ----------------------------------------------------
+    # The keyboard's own transport keys. **Bound here rather than left to
+    # Space alone** - the owner's ask, 24 August 2026: "make the pause and
+    # resume and next and prev buttons in the keyboard work while in a
+    # video player". Windows delivers a media key as WM_APPCOMMAND and Qt
+    # turns it into one of these key codes, so it arrives like any other
+    # key - but only at whatever has keyboard focus, which is what
+    # _KeyRelay exists to fix.
+    _MEDIA_PLAY_PAUSE = (Qt.Key.Key_MediaTogglePlayPause, Qt.Key.Key_MediaPlay,
+                         Qt.Key.Key_MediaPause)
+
     def keyPressEvent(self, event):
         key = event.key()
         self._wake_controls()
-        if key == Qt.Key.Key_Space:
+        if key == Qt.Key.Key_Space or key in self._MEDIA_PLAY_PAUSE:
             self.toggle_pause()
+        elif key == Qt.Key.Key_MediaStop:
+            # Stop pauses rather than closing the player: it sits next to
+            # Next on most keyboards, and losing the episode to a
+            # mis-hit is not a mistake worth allowing twice.
+            if not self._paused:
+                self.toggle_pause()
+        elif key in (Qt.Key.Key_MediaNext, Qt.Key.Key_N):
+            self._change_episode(1)
+        elif key in (Qt.Key.Key_MediaPrevious, Qt.Key.Key_P):
+            self._change_episode(-1)
         elif key == Qt.Key.Key_Left:
             self._seek_relative(-SEEK_STEP_S)
         elif key == Qt.Key.Key_Right:
@@ -6859,6 +7686,10 @@ class PlayerPage(GlassPage):
         if self._closing:
             return
         self._closing = True
+        relay = getattr(self, "_key_relay", None)
+        app = QApplication.instance()
+        if relay is not None and app is not None:
+            app.removeEventFilter(relay)
         self._save_position()
         self._idle_timer.stop()
         self._pointer_timer.stop()
@@ -6894,26 +7725,45 @@ class PlayerPage(GlassPage):
             self.on_close()
         self.closed.emit()
         self.hide()
-        # Land on Home, the owner's ask - the same rule the reader's
-        # door follows (reader.HOME_PAGE). Off a zero-timer and holding
-        # no reference to this page, because navigating rebuilds a whole
-        # page and doing it inline would keep the player on screen for
-        # the length of that build.
+        # **Leaving the player navigates nowhere.** It is an overlay over
+        # the central widget, not a page in the stack, so whatever it was
+        # opened over is still built, still scrolled where it was, and
+        # revealing it is both correct and free - the rule `reader.leave`
+        # already follows, and what this page's own `open_player`
+        # docstring promises ("coming back out of the player should land
+        # exactly where it was entered from").
+        #
+        # It used to navigate to Home here, which is the owner's report of
+        # 23 August 2026: "when I play an ep then press the back btn and
+        # in the ep list page press the back btn it takes me to home page,
+        # and I want it to take me to the last page i was in before
+        # entering the ep list page". The details page is *also* an
+        # overlay, so that navigation ran underneath a details page still
+        # on screen - silently swapping the tracker page beneath it for
+        # Home (and deleteLater-ing it), so the next Back on the episode
+        # list uncovered Home. Landing on Home was an earlier ask, since
+        # reversed for the reader for exactly the same reason.
         window = self.window()
-        navigate = getattr(window, "navigate_to", None)
 
         def land():
             try:
-                if callable(navigate):
-                    from windows.reader import HOME_PAGE
-                    navigate(HOME_PAGE, animate=False)
-                page = getattr(window, "_current_page", None)
-                if page is not None:
-                    page.setFocus()
+                # Focus what is actually on top. The details page the
+                # player was opened from is still covering the pages, and
+                # focusing the page underneath it would take the keyboard
+                # away from the episode list the user is now looking at -
+                # including the Esc that closes it.
+                overlay = None
+                top = getattr(window, "_top_overlay", None)
+                if callable(top):
+                    overlay = top()
+                target = overlay if overlay is not None else getattr(
+                    window, "_current_page", None)
+                if target is not None:
+                    target.setFocus()
             except RuntimeError:
                 pass        # the window went away first - app shutdown
             except Exception:
-                logs.exception("player could not return to Home")
+                logs.exception("player could not hand focus back")
 
         QTimer.singleShot(0, land)
         self.deleteLater()
@@ -6972,8 +7822,25 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     def on_close():
         window._player_page = None
 
-    page = PlayerPage(host, entry, season=season, episode=episode,
-                      streams=streams, on_close=on_close)
+    try:
+        page = PlayerPage(host, entry, season=season, episode=episode,
+                          streams=streams, on_close=on_close)
+    except Exception:
+        # A constructor that raises has already called QWidget.__init__
+        # with `host` as parent, so a half-built page is left alive under
+        # the central widget with none of its fields - and every later
+        # resize walks into it (31 "no attribute 'surface'" errors in
+        # the owner's log, 24 August 2026, one per failed open). Take
+        # them down before the error goes back to the caller.
+        for stray in host.findChildren(PlayerPage):
+            if not hasattr(stray, "surface"):
+                try:
+                    stray.hide()
+                    stray.setParent(None)
+                    stray.deleteLater()
+                except RuntimeError:
+                    pass
+        raise
     window._player_page = page
     page.setGeometry(host.rect())
     page.show()

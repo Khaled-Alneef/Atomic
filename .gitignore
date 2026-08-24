@@ -53,6 +53,16 @@ Thumbs.db
 # history from now on, so removing the file later does not unpublish it;
 # rotating the key is what does.
 
+# The owner's Real-Debrid token is the opposite call, and deliberately
+# so: the TMDB token is a free read-only metadata key, this is a *paid
+# account credential*, and on a public repository "committed" means
+# "published". It reaches users inside the built exe (Atomic.spec
+# bundles it when the file exists) and never through the repository.
+# The owner places the file himself; a tree without it builds fine and
+# simply ships an exe whose debrid stays dark until a key is pasted in
+# Settings.
+packaging/rd_token.txt
+
 # Window-event logs from the diagnostic rig used to chase the flashing
 # windows (packaging has no use for them; one got committed once).
 /events.jsonl
