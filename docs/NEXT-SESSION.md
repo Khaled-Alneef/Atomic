@@ -700,6 +700,26 @@ same wheel cadence travels **half as far** with the broken clock. That
 is not a frame-rate artifact, it is the motion being starved of ticks,
 and it is probably what "stiff" actually felt like under the hand.
 
+## The last two Qt animations, and a control that saved a wrong call
+
+`ContinueCover`'s hover frost and `HeroBanner`'s backdrop dissolve were
+the only fades still on `QVariantAnimation`, which runs off Qt's unified
+animation timer whatever the panel does. Sampled once per compositor
+present over six hover cycles on a 240Hz panel: **65 positions/s, 92.0%
+of refreshes repeating the previous one** - about thirteen levels of
+frost across a 220ms fade where fifty-three were available. Both are
+`SmoothTween` now; the same run measures **240 positions, one per
+refresh while a fade is actually running**, repeats down to 70.6% (and
+that remainder is the 2.4s between cycles when nothing is fading).
+
+**The control is the part worth keeping.** The first Saved-grid run
+after the swap read 196.8 fps / 18.0% dead against 220.1 / 8.3% before
+it, which looks exactly like a fade now competing with the scroll - the
+harness parks the pointer in the viewport, so cards fade continuously as
+they pass under it. Two more runs read 217.2 / 9.5% and 219.2 / 8.7%.
+It was variance. Had the first number been taken as the answer, a real
+improvement would have been reverted on one sample.
+
 ## Two things that looked like defects and measured as neither
 
 **The widget-card grids are not slower than the painted one.** The

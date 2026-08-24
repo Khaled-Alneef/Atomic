@@ -1364,10 +1364,16 @@ class HeroBanner(QFrame):
         # blink. Scaled copies are cached per size, not per paint, the
         # same stutter the details page's ground caches away.
         self._mix = 1.0
-        self._fade = QVariantAnimation(self)
-        self._fade.setDuration(self.FADE_MS)
-        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._fade.valueChanged.connect(self._on_fade)
+        # **SmoothTween, not QVariantAnimation** - the same swap this
+        # module's screen_tick_ms docstring argues for, applied to the
+        # last two fades that had not had it. Measured 24 August 2026 on
+        # a 240Hz panel, sampling the value once per compositor present
+        # over six hover cycles: the QVariantAnimation produced **65
+        # positions/s and 92.0% of refreshes repeated the previous
+        # one** - Qt's unified animation timer, ~16ms, whatever the
+        # panel does. A 220ms fade therefore showed about thirteen
+        # levels of frost where fifty-three were available.
+        self._fade = SmoothTween(self, self._on_fade, self.FADE_MS)
         self._scaled = {}
         # Armed by every resize, fired 90ms after the last one - see
         # _scaled_for. Long enough to cover a whole fold animation
@@ -1402,10 +1408,7 @@ class HeroBanner(QFrame):
         self._backdrop = incoming
         self._scaled = {}
         if fade and (self._previous is not None or incoming is not None):
-            self._fade.stop()
-            self._fade.setStartValue(0.0)
-            self._fade.setEndValue(1.0)
-            self._fade.start()
+            self._fade.start(0.0, 1.0, self.FADE_MS)
         else:
             self._mix = 1.0
             self.update()

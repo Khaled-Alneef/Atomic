@@ -21,8 +21,7 @@ import uuid
 import webbrowser
 from datetime import datetime, timedelta, timezone
 
-from PyQt6.QtCore import (QEasingCurve, QEvent, QObject, QPointF, QSize, Qt,
-                          QTimer, QVariantAnimation)
+from PyQt6.QtCore import (QEvent, QObject, QPointF, QSize, Qt, QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QColor, QCursor, QIcon, QLinearGradient, QPainter,
                          QPixmap, QPolygonF)
@@ -45,6 +44,7 @@ from helpers.widgets import (
     HeroBanner, SideScroller, confirm,
     defer_grid_rebuild, finish_toast, frameless_dialog, hero_logo_label,
     hero_split, inform, scroll_area, search_field, set_hero_logo, show_toast,
+    SmoothTween,
     show_undo_toast, use_hover_cursor,
 )
 
@@ -1747,9 +1747,16 @@ class ContinueCover(QLabel):
         # hand rather than swapped with setPixmap: a swap is a step, and
         # a step across a shelf of covers is a flash. See paintEvent.
         self._mix = 0.0
-        self._fade = QVariantAnimation(self)
-        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._fade.valueChanged.connect(self._on_fade)
+        # **SmoothTween, not QVariantAnimation** - the same swap this
+        # module's screen_tick_ms docstring argues for, applied to the
+        # last two fades that had not had it. Measured 24 August 2026 on
+        # a 240Hz panel, sampling the value once per compositor present
+        # over six hover cycles: the QVariantAnimation produced **65
+        # positions/s and 92.0% of refreshes repeated the previous
+        # one** - Qt's unified animation timer, ~16ms, whatever the
+        # panel does. A 220ms fade therefore showed about thirteen
+        # levels of frost where fifty-three were available.
+        self._fade = SmoothTween(self, self._on_fade, COVER_FADE_IN_MS)
         self.button = (_ContinueButton(self, tooltip) if tooltip
                        else _ContinueButton(self))
         # Wrapped so the callback is invoked with NO arguments.
@@ -1791,15 +1798,13 @@ class ContinueCover(QLabel):
         target = 1.0 if (hovered and self._frosted is not None) else 0.0
         if abs(target - self._mix) < 1e-3:
             return
-        self._fade.stop()
-        # Freeze slow, thaw fast - see COVER_FADE_IN_MS/_OUT_MS.
-        self._fade.setDuration(COVER_FADE_IN_MS if target > self._mix
-                               else COVER_FADE_OUT_MS)
         # From wherever it actually is, not from 0/1: crossing back over
-        # a card mid-thaw must not restart the whole fade.
-        self._fade.setStartValue(self._mix)
-        self._fade.setEndValue(target)
-        self._fade.start()
+        # a card mid-thaw must not restart the whole fade. SmoothTween
+        # re-aims on start(), so there is nothing to stop first.
+        # Freeze slow, thaw fast - see COVER_FADE_IN_MS/_OUT_MS.
+        self._fade.start(self._mix, target,
+                         COVER_FADE_IN_MS if target > self._mix
+                         else COVER_FADE_OUT_MS)
 
     def paintEvent(self, event):
         painter = QPainter(self)
