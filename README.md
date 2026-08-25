@@ -2,36 +2,39 @@
 
 Builds parked here so they can be downloaded and tried on another
 machine. **Nothing here is a release**: no tag, no version bump, and the
-in-app updater ignores this branch entirely.
+in-app updater ignores this branch.
 
 ## Current build
 
 | | |
 |---|---|
 | Version | 1.10.32 (unreleased) |
-| Built | 25 August 2026, third build of the day |
-| SHA-256 | `4438d972a8d08edde535eddb9b02f43caf5a68aa80917b3d1da9ceed7aa668a5` |
+| Built | 25 August 2026, fourth build |
+| SHA-256 | `ea2a8bc7b59e7fbf17bae40553e9fc489576eec433637bea1442489cc985e5eb` |
 
-### Fixed since the second build
+### Fixed since the third build
 
-- **Every sidebar row visible without scrolling.** The column now fits
-  itself to the window: separators are half a row (down from a whole
-  one), the logo band gives way when the rows need its space, and the
-  rows shrink to as little as 44px before anything scrolls. Measured at
-  720 / 768 / 900 / 1132px, folded and unfolded, three fold cycles each
-  - fits at all of them, and stable (no oscillation between passes).
-- **A host that refuses twice is not asked again for ten minutes.**
-  Reproduced this laptop's network by refusing the hosts its own log
-  names; two visits each to Watch and Read used to make **592 doomed
-  connection attempts** (344 to images.metahub.space, 187 to
-  api.themoviedb.org), each paying an 8s timeout and then a 20s retry
-  before falling back. Now **23**, and a second visit to a page draws
-  from the cache in 0.1-0.2s with no attempts at all. On a working
-  network nothing is marked refusing and covers arrive exactly as
-  before (91 + 60 on a first-run profile, checked).
+- **Covers were being thrown away after they arrived.** A grid cover is
+  requested when a cell scrolls into view and the answer comes back
+  seconds later; both ends were gated on a *run number* that advances on
+  every category switch, every search keystroke and every page visit, so
+  a late-but-still-correct cover was discarded and the cell stayed blank
+  until something rebuilt the grid. That is why walking away and coming
+  back "fixed" it, and why History and Schedule - which do not use runs
+  this way - were always fine. The answer is now matched to the *row*
+  it was fetched for: a cover five runs late is applied, one stamped for
+  a different row is still rejected (both checked).
+- **Source lookups skip hosts that are refusing**, like the covers
+  already do. On a network blocking the indexers a lookup now gives up
+  in 0.4-0.8s instead of waiting on each dead host in turn.
+- **The sidebar fits the window**: half-height separators, the logo band
+  giving way, rows down to 44px - every row on screen without scrolling
+  at 720 / 768 / 900 / 1132px, folded and unfolded.
 
-### What this does not fix
+### Still open, not in this build
 
-If the network blocks every image host, there is still nothing to draw
-- the app just fails fast and stays responsive instead of hanging for
-minutes. Covers that did arrive are now kept and redrawn instantly.
+The loading logo appearing the instant an episode is pressed, the
+statistics panel while sourcing, the reader's upward scrolling, and the
+white window that flashes when Discover is pressed - that last one I
+could not reproduce here (no stray Qt window appears, and every
+subprocess this app starts already suppresses its console).
