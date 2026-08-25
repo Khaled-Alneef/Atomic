@@ -401,6 +401,7 @@ def rate(entry, item: str, score, timeout: float = DEFAULT_TIMEOUT):
                                     "missing": False,
                                     "summary": summarise(document),
                                     "title": document.get("title") or ""})
+                remember_my_rating(entry, item, score)
                 return True, f"Rated {score}/{MAX_SCORE}"
         except Exception:
             logs.exception("community rating write failed")
@@ -434,6 +435,7 @@ def _rate_via_proxy(proxy, key, item, score, voter, entry, timeout):
     except Exception:
         return False, "That rating could not be sent - check the connection."
     if body.get("ok"):
+        remember_my_rating(entry, item, score)
         return True, f"Rated {score}/{MAX_SCORE}"
     logs.info(f"community ratings: proxy refused - {body.get('error')!r}")
     return False, "That rating was refused."
@@ -501,6 +503,42 @@ def _write_api(key, document, sha, token, timeout, message) -> bool:
             return False            # somebody else wrote first; caller retries
         logs.info(f"community ratings: write answered {error.code}")
         return False
+
+
+# This install's own scores, so a row can show what *you* gave it - the
+# community average beside IMDb answers a different question, and after
+# voting there is otherwise nothing at all to show until the CDN catches
+# up several minutes later.
+MINE_FILE = "my_ratings.json"
+
+
+def _mine() -> dict:
+    found = storage.load(MINE_FILE, {})
+    return found if isinstance(found, dict) else {}
+
+
+def my_rating(entry, item):
+    """This install's own score for one episode or chapter, or None."""
+    key = key_for(entry)
+    if not key or not item:
+        return None
+    try:
+        return int(_mine().get(f"{key}|{item}"))
+    except (TypeError, ValueError):
+        return None
+
+
+def remember_my_rating(entry, item, score):
+    """Keep a score locally the moment it is accepted. Never raises."""
+    key = key_for(entry)
+    if not key or not item:
+        return
+    try:
+        data = _mine()
+        data[f"{key}|{item}"] = int(score)
+        storage.save(MINE_FILE, data)
+    except Exception:
+        logs.exception("could not remember a rating")
 
 
 def clear_cache():

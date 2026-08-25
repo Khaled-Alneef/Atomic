@@ -2216,6 +2216,14 @@ class DetailsPage(GlassPage):
             return
         show_toast(self, message if message else
                    ("Rating saved" if ok else "That rating was not saved"))
+        if ok:
+            # Redraw so the chip shows the score straight away. It reads
+            # the *local* record (community_ratings.my_rating), which is
+            # written the moment the write is accepted - the community
+            # average behind it comes from a CDN with a five-minute cache
+            # and would otherwise leave the row looking unrated for
+            # minutes after voting.
+            self._refill_rows()
 
     def _refill_rows(self):
         """Redraw whichever list is on screen. The two fills are
@@ -2256,11 +2264,7 @@ class DetailsPage(GlassPage):
             score = actions.get(chosen)
             if score is None:
                 return False
-            threading.Thread(
-                target=_rate_worker,
-                args=(self._signals, self._run, dict(self.entry), item, score),
-                daemon=True).start()
-            show_toast(self, f"Rating {what.lower()} {score}/10...")
+            self._send_rating(item, score)
             return True
         return handle
 
@@ -2337,20 +2341,22 @@ class DetailsPage(GlassPage):
             # and the whole reason this is worth printing is that it is
             # *not* IMDb's.
             from helpers import community_ratings
-            ours = _user_rating(self._user_ratings,
-                                community_ratings.episode_item(season, number))
+            rate_key = community_ratings.episode_item(season, number)
+            ours = _user_rating(self._user_ratings, rate_key)
             if ours:
                 meta_line = f"{meta_line}   ·   {ours}" if meta_line else ours
             builders.append(
                 lambda t=title, m=meta_line, b=badge, up=upcoming,
-                s=season, e=number,
+                s=season, e=number, rk=rate_key,
                 still=str(video.get("thumbnail") or ""): self._row_card(
                     t, m, b,
                     (None if up else lambda s=s, e=e: self._start_episode(s, e)),
                     on_menu=(None if up
                              else lambda ev, s=s, e=e:
                              self._episode_menu(ev, s, e)),
-                    variant="episode", still_url=still))
+                    variant="episode", still_url=still,
+                    # Nothing to rate on an episode that has not aired.
+                    rate_item=(None if up else rk)))
             shown += 1
         self._queue_rows(builders)
         self._panel_note.setVisible(shown == 0)
@@ -2385,17 +2391,18 @@ class DetailsPage(GlassPage):
             # rows put theirs.
             from helpers import community_ratings
             meta = chapter_published(chapter)
-            ours = _user_rating(self._user_ratings,
-                                community_ratings.chapter_item(number))
+            rate_key = community_ratings.chapter_item(number)
+            ours = _user_rating(self._user_ratings, rate_key)
             if ours:
                 meta = f"{meta}   ·   {ours}" if meta else ours
             builders.append(
                 lambda t=title, d=meta,
                 b=(("watched", "DONE") if read else None),
-                n=number: self._row_card(
+                n=number, rk=rate_key: self._row_card(
                     t, d, b,
                     lambda n=n: self._read(n),
-                    on_menu=lambda ev, n=n: self._chapter_menu(ev, n)))
+                    on_menu=lambda ev, n=n: self._chapter_menu(ev, n),
+                    rate_item=rk))
             shown += 1
         self._queue_rows(builders)
         self._panel_note.setVisible(shown == 0)
@@ -2411,8 +2418,57 @@ class DetailsPage(GlassPage):
     # what sits at its left edge, and in whether its figures are prose
     # or chips - see _group_card and _source_card.
 
+    def _rate_chip(self, item):
+        """The little score button at the right of a row.
+
+        **The reason it exists is that the rating had no visible control
+        at all.** It was on the row's right-click menu, and a row shows
+        no sign of having one - the owner, 25 August 2026: "how can I
+        test the rating?? there is no buttons or labels for it!!". The
+        menu stays; this is the thing you can see.
+
+        It shows *your own* score, not the community average - the
+        average already sits in the meta line beside IMDb's, and the two
+        answer different questions. Unrated it reads "Rate", which is
+        also the invitation."""
+        from helpers import community_ratings
+        mine = community_ratings.my_rating(self.entry, item)
+        button = QPushButton(f"★ {mine}" if mine else "★ Rate",
+                             objectName="Ghost")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedHeight(26)
+        button.setToolTip("Your rating" if mine else "Rate this")
+        if not community_ratings.can_rate():
+            button.setEnabled(False)
+            button.setToolTip(
+                "Rating is not set up in this copy - see Settings > API Keys")
+        button.clicked.connect(
+            lambda _c=False, it=item, b=button: self._open_rate_menu(it, b))
+        return button
+
+    def _open_rate_menu(self, item, anchor):
+        """The 1-10 menu, under the chip that opened it."""
+        from helpers import community_ratings
+        menu = QMenu(self)
+        actions = {}
+        for score in range(community_ratings.MAX_SCORE,
+                           community_ratings.MIN_SCORE - 1, -1):
+            actions[menu.addAction(f"{score} / 10")] = score
+        chosen = menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        score = actions.get(chosen)
+        if score is not None:
+            self._send_rating(item, score)
+
+    def _send_rating(self, item, score):
+        """Post one score, and say so while it is in flight."""
+        threading.Thread(
+            target=_rate_worker,
+            args=(self._signals, self._run, dict(self.entry), item, score),
+            daemon=True).start()
+        show_toast(self, f"Rating {score}/10...")
+
     def _row_card(self, title, date_text, badge, on_click, on_menu=None,
-                  variant="chapter", still_url=None):
+                  variant="chapter", still_url=None, rate_item=None):
         """One content row: an episode, a chapter, a reading site, or
         the source picker's back row (`variant="back"`).
 
@@ -2487,6 +2543,8 @@ class DetailsPage(GlassPage):
             column.addWidget(date)
         row.addLayout(column, stretch=1)
 
+        if rate_item:
+            row.addWidget(self._rate_chip(rate_item))
         if badge:
             kind, text = badge
             row.addWidget(_badge(text, kind))
