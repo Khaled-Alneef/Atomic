@@ -721,8 +721,16 @@ def load_resume(entry, season, episode):
     return None
 
 
-def save_resume(entry, season, episode, position, duration):
-    """Remember where this episode got to.
+def save_resume(entry, season, episode, position, duration, release=None):
+    """Remember where this episode got to, **and what it was playing**.
+
+    `release` is the owner's ask of 25 August 2026: "make sure to use
+    the same source I used before, when I continue watching". Without it
+    the record held a position and nothing about where that position
+    came from, so continuing re-ran the whole race and very often landed
+    on a different release - a different encode, different audio and
+    subtitle tracks, and a seat measured against a runtime that was no
+    longer the same file's.
 
     update_entry first, because it re-reads the file and touches exactly
     one record - writing a whole list back from a page is what erased a
@@ -738,6 +746,10 @@ def save_resume(entry, season, episode, position, duration):
         "season": season, "episode": episode,
         "position": float(position or 0.0),
         "duration": float(duration or 0.0),
+        # Left alone when this call does not know it, rather than
+        # written as None: a save from a path with no stream in hand
+        # would otherwise erase the release the last one recorded.
+        **({"release": release} if release else {}),
         "updated_at": storage.now_iso()})
 
 
@@ -2083,6 +2095,7 @@ class PlayerPage(GlassPage):
 
         self.handle = None
         self._streams = []
+        self._resumed_release_first = False
         self._stream_index = 0
         # Whether _streams is the list playback is already running
         # against. Once it is, later batches from the same lookup may
@@ -3659,6 +3672,64 @@ class PlayerPage(GlassPage):
             logs.exception("Subtitle search failed")
             self._work.subs_ready.emit([], run)
 
+    def _release_record(self):
+        """What is playing, in the shape the resume file stores - see
+        save_resume. Info hash and stream_key both, because the key is
+        derived from the row's title and the same release listed by two
+        addons can word it differently."""
+        try:
+            stream = self._streams[self._stream_index] or {}
+        except Exception:
+            return None
+        key = ""
+        if streams_module is not None:
+            try:
+                key = streams_module.stream_key(stream)
+            except Exception:
+                key = ""
+        info_hash = (stream.get("info_hash") or "").lower()
+        if not key and not info_hash:
+            return None
+        return {"key": key, "info_hash": info_hash,
+                "file_index": stream.get("file_index"),
+                "title": (stream.get("title") or "")[:160]}
+
+    def _hoist_remembered_release(self, playable) -> bool:
+        """Put the release this episode was last watched with first.
+
+        Returns whether it was found, because that also decides *how* it
+        is started: found means play it alone (the same road a hand pick
+        takes), not race it against five others that would otherwise be
+        free to win. A release that is genuinely dead still costs only
+        SOLO_METADATA_TIMEOUT + SOLO_DATA_WAIT before _try_next_source
+        races the rest, so continuing on a swarm that has since died is
+        eight seconds slower and then behaves exactly as before."""
+        if streams_module is None:
+            return False
+        try:
+            record = load_resume(self.entry, self.season, self.episode) or {}
+        except Exception:
+            return False
+        release = record.get("release") or {}
+        info_hash = (release.get("info_hash") or "").lower()
+        key = release.get("key") or ""
+        if not info_hash and not key:
+            return False
+        for position, stream in enumerate(playable):
+            same_hash = bool(info_hash) and (
+                (stream.get("info_hash") or "").lower() == info_hash)
+            same_key = False
+            if key and not same_hash:
+                try:
+                    same_key = streams_module.stream_key(stream) == key
+                except Exception:
+                    same_key = False
+            if same_hash or same_key:
+                if position:
+                    playable.insert(0, playable.pop(position))
+                return True
+        return False
+
     def _playing_release(self) -> str:
         """The name of the release currently loaded, or "".
 
@@ -3820,6 +3891,10 @@ class PlayerPage(GlassPage):
             return
         drm = [s for s in incoming if s.get("kind") == "drm"]
         playable = [s for s in incoming if s.get("kind") != "drm"]
+        # Before the list is published, so index 0 is the remembered
+        # release and every index _play_stream/_dead_sources uses is
+        # taken from the final order.
+        self._resumed_release_first = self._hoist_remembered_release(playable)
         self._streams = playable + drm
         if not playable:
             # DRM only. The DRM row is put in before the fan-out starts,
@@ -3842,7 +3917,8 @@ class PlayerPage(GlassPage):
         # A list handed in by the details page is a source the user
         # picked by hand, with their choice at index 0 - start that
         # one alone rather than racing five others against it.
-        self._play_stream(0, solo=self._given_streams is not None)
+        self._play_stream(0, solo=(self._given_streams is not None
+                                   or self._resumed_release_first))
 
     def _merge_streams(self, incoming):
         """Fold a later batch into the list playback is already using.
@@ -5808,7 +5884,8 @@ class PlayerPage(GlassPage):
             return
         try:
             save_resume(self.entry, self.season, self.episode,
-                        self._position, self._duration)
+                        self._position, self._duration,
+                        release=self._release_record())
         except Exception:
             logs.exception("Could not save the resume position")
 
@@ -6647,12 +6724,20 @@ class PlayerPage(GlassPage):
         # and healthy number for 24fps content on a 240Hz display; only
         # the label was wrong.
         display = self._mpv_number("estimated-display-fps")
+        vsync = self._mpv_number("vsync-ratio")
         return {
             "resolution": (f"{int(width)}x{int(height)}"
                            if width and height else "-"),
             "fps": f"{fps:.2f}" if fps else "-",
             "display": f"{display:.0f} Hz" if display else "-",
-            "vsync": self._mpv_text("vsync-ratio", "-"),
+            # Rounded, because mpv hands this over as a raw double and
+            # the panel printed "10.132530120481928" across the owner's
+            # screenshot. The digits after the second are display-clock
+            # estimation noise, not information: 240/23.976 is 10.01,
+            # and what says whether the pacing is healthy is the dropped
+            # and late counts underneath, not this ratio's tail.
+            "vsync": (f"{vsync:.2f}" if vsync else
+                      self._mpv_text("vsync-ratio", "-")),
             # video-format ("h264"), not video-codec - the latter is
             # mpv's prose description and reads "H.264 / AVC / MPEG-4
             # AVC / MPEG-4 part 10" in a panel column a few dozen pixels

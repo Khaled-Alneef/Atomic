@@ -2622,7 +2622,13 @@ class _Momentum(QObject):
     # both. Acceleration can: it inflated a sustained scroll from the
     # 0.0924-of-a-viewport notch to a measured ~115px, and removing it
     # takes the velocity down with the travel per notch left alone.
-    FRICTION = 34.0
+    # **24, down from 34** - the owner, 25 August 2026, asking for the
+    # glide to carry further after the stop. Total travel is unchanged
+    # by this: `kick` scales the impulse by FRICTION (impulse = distance
+    # x FRICTION), so a notch still comes to rest exactly `distance_px`
+    # away and only the time it takes to get there grows. Lower friction
+    # is a longer, flatter tail, not a longer scroll.
+    FRICTION = 24.0
     # **5200, and the excess is kept, not thrown away.** The first cut
     # clamped the velocity and discarded what would not fit, so an
     # 8-notch flick travelled *less* per notch than slow scrolling
@@ -2768,9 +2774,22 @@ class _Momentum(QObject):
 
     def _start_ticking(self):
         """Clock the motion: the panel's own vblank where there is one,
-        the fallback QTimer where there is not. See _VBlankTicker for
-        the 13.9ms-per-4ms-timer measurement that makes the choice, and
-        for why the ticker only runs while somebody holds it."""
+        the fallback QTimer where there is not.
+
+        **Turning the ticker off was tried on 25 August 2026 and
+        measured worse - do not try it again without re-reading this.**
+        The proposal was reasonable and the note further up this class
+        supported it, recording an *earlier, ungated* vblank clock that
+        measured 62% judder. The gated one in this module is not that
+        clock. Measured A/B the same day, everything else held fixed,
+        two rounds of each on Home and Series, judder taken only over
+        frames that actually moved (a glide's 1px tail is 100% relative
+        variation and says nothing about what the eye sees):
+
+            PreciseTimer     home 23.9 / 20.2%    series 32.0 / 33.0%
+            vblank ticker    home 12.9 / 12.1%    series 15.0 / 10.0%
+
+        Roughly half the judder, on every run. The ticker stays."""
         ticker = _vblank_ticker_for_use()
         if ticker is not None:
             if not self._vblank_on:
@@ -2804,19 +2823,37 @@ class _Momentum(QObject):
             self._stop_ticking()
             return
         now = time.monotonic()
-        # **Snap to the refresh grid.** This timer runs at
-        # screen_tick_ms, which is 6ms on a 144Hz panel because a QTimer
-        # only takes whole milliseconds - so it fires about 166 times a
-        # second against 144 refreshes and the two beat. Measured on the
-        # grid surface, which had the same shape and is now fixed the
-        # same way (poster_grid.FrameMotion.step): the app produced 137
-        # positions a second while the compositor presented 109, and
-        # steps of 14px and 28px landed in the same run at a constant
-        # velocity.
+        # **Snap to the refresh grid**, and this survived being taken
+        # out and measured. The timer runs at screen_tick_ms, which is a
+        # whole number of milliseconds, so it beats against the panel's
+        # refresh: without anchoring, the app produced 137 positions a
+        # second while the compositor presented 109, and steps of 14px
+        # and 28px landed in the same run at a constant velocity.
         #
         # Anchoring to a fixed phase makes two ticks inside one refresh
-        # carry the same timestamp - the second moves nothing - and ticks
-        # in consecutive refreshes exactly one frame apart.
+        # carry the same timestamp - the second moves nothing - and
+        # ticks in consecutive refreshes exactly one frame apart.
+        #
+        # **Removed on 25 August 2026 and put back the same day**, on
+        # the ask to drive the model from actual elapsed time instead.
+        # Two things came out of trying it, and the second matters more
+        # than the first:
+        #
+        #  * the case for removing it rested on "41-61% of frames carry
+        #    no movement", and that number counts *paints*. These pages
+        #    free-run - they paint faster than the panel refreshes - so
+        #    paints that carry no movement were never frames anybody
+        #    saw. Counting paints as frames is what made it look broken.
+        #  * judder read 8-16% before and 25-42% after, but **do not
+        #    trust either number**: a control run of two *identical*
+        #    arms on this same harness measured 8.4% and 27.8%. The
+        #    metric cannot resolve a difference that size, so the
+        #    shipped behaviour was kept rather than swapped on a number
+        #    that turned out to be noise.
+        #
+        # Anything that revisits this needs a smoothness measurement
+        # that survives a two-arm control first. That is the actual
+        # blocker here, not the snapping.
         frame_s = self._frame_s() if self._frame_s is not None else 0.0
         if frame_s > 0.0:
             if self._phase is None:
@@ -3026,7 +3063,14 @@ class _SmoothWheel(QObject):
     # viewer)". 0.0924 x 0.70; the reader's own notch
     # (windows.reader.WHEEL_STEP_PX) took its 30% separately and is
     # deliberately untouched here.**
-    NOTCH_FRACTION = 0.0647
+    # **0.0800, raised 24% on 25 August 2026** - the owner again, the
+    # other way this time: "Raise scroll distance somewhat - 0.0647 is
+    # extremely conservative". Both of his asks are kept here on
+    # purpose, because they pull against each other and the next person
+    # to touch this needs to see that: 0.0647 came from two rounds of
+    # "make the scroll slower" on 24 August, and this is one step back
+    # from the second of them, not a return to where it started.
+    NOTCH_FRACTION = 0.0800
     NOTCH_FLOOR_PX = 25
     # Never slower than this, whatever the screen claims. A refresh rate
     # of 0 is what a headless/offscreen platform reports.

@@ -427,7 +427,14 @@ class PosterGrid(QWidget):
     # viewer)". 0.0924 x 0.70; the reader's own notch
     # (windows.reader.WHEEL_STEP_PX) took its 30% separately and is
     # deliberately untouched here.**
-    NOTCH_FRACTION = 0.0647
+    # **0.0800, raised 24% on 25 August 2026** - the owner again, the
+    # other way this time: "Raise scroll distance somewhat - 0.0647 is
+    # extremely conservative". Both of his asks are kept here on
+    # purpose, because they pull against each other and the next person
+    # to touch this needs to see that: 0.0647 came from two rounds of
+    # "make the scroll slower" on 24 August, and this is one step back
+    # from the second of them, not a return to where it started.
+    NOTCH_FRACTION = 0.0800
     NOTCH_FLOOR_PX = 25
 
     def __init__(self, cover_size, ground=None, parent=None):
