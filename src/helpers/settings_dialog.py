@@ -875,6 +875,26 @@ class SettingsDialog(QDialog):
         form.addWidget(auto_pick_hint)
 
         form.addSpacing(20)
+        form.addWidget(QLabel("Picture", objectName="SectionTitle"))
+        self.motion_smoothing_check = QCheckBox("Motion smoothing")
+        self.motion_smoothing_check.setChecked(app_settings.get_motion_smoothing())
+        self.motion_smoothing_check.toggled.connect(
+            app_settings.set_motion_smoothing)
+        form.addWidget(self.motion_smoothing_check)
+        motion_hint = QLabel(
+            "Off by default, and off is what most people want. The player "
+            "already locks every frame to your screen's refresh rate, which "
+            "is what stops panning judder - that is always on and is not "
+            "this setting. This one is different: it blends frames to "
+            "invent motion the release never had, so 24fps film looks like "
+            "video. Some people like it; it is the “soap opera” "
+            "look. Takes effect the next time something is played.",
+            objectName="Muted",
+        )
+        motion_hint.setWordWrap(True)
+        form.addWidget(motion_hint)
+
+        form.addSpacing(20)
         form.addWidget(QLabel("Episode List", objectName="SectionTitle"))
         self.blur_stills_check = QCheckBox("Blur episode images")
         self.blur_stills_check.setChecked(app_settings.get_blur_episode_stills())

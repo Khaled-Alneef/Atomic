@@ -15,89 +15,222 @@ from PyQt6.QtGui import QFont
 from . import storage
 
 # ---- Palette -------------------------------------------------------------
-# The "gold and black" theme (in the mood of the Harbor client). Six
-# tones are fixed by the app's color spec and everything else is derived
-# from them, so the whole UI stays one family rather than drifting per
-# page:
+# The Harbor navy + teal theme (the owner's reference screenshot,
+# 25 August 2026 - replaces the warm gold/near-black spec). Six tones
+# are fixed by the app's color spec and everything else is derived from
+# them, so the whole UI stays one family rather than drifting per page:
 #
-#   TEXT #F3EEE3 · TEXT_MUTED #B1A48B · SURFACE #1A1712
-#   SURFACE_HOVER #262117 · BORDER #3D3423 · ACCENT #F0B73F
+#   TEXT #E8EEF6 · TEXT_MUTED #93A1B5 · SURFACE #141B28
+#   SURFACE_HOVER #1C2534 · BORDER #2A3548 · ACCENT #2FB9A6
 #
-# Every derived tone keeps the spec's hue (a warm near-black around
-# 35-45 deg at low saturation, with the accent's gold at ~41) and only
-# moves lightness - a neutral gray mixed in anywhere reads as a dirty
-# patch against these, the same way it did against the navy palette
-# this replaces.
+# Every derived tone keeps the spec's hue (a cool navy around 215-222
+# deg at low value, with the accent's teal at ~172) and only moves
+# lightness - a neutral gray mixed in anywhere reads as a dirty patch
+# against these, the same way it did against the gold palette this
+# replaces.
 #
-# The accent is a *gold*, and that is why ON_ACCENT exists: white on
-# #F0B73F computes to a 1.8:1 contrast ratio - the exact same trap the
-# cyan it replaces had - where ON_ACCENT on the same fill computes to
-# 10.6:1 (and 7.4:1 on the gradient's deeper amber end, measured, not
-# eyeballed). Anything filled with the accent (or with ACCENT_GRADIENT)
-# takes ON_ACCENT for its text/glyph, never white.
-BG = "#0e0c09"           # app background - near-black, warm
-BG_ALT = "#14110c"       # secondary background (page panels)
+# The accent is a mid-value *teal*, and that is why ON_ACCENT survives
+# the hue change: white on #2FB9A6 computes to a 2.4:1 contrast ratio -
+# the same trap the gold and the cyan before it both had - where
+# ON_ACCENT on the same fill computes to 7.5:1 (and 4.6:1 on the
+# gradient's deeper sea-green end, against white's 4.0:1 there;
+# computed 25 August 2026, not eyeballed). Anything filled with the
+# accent (or with ACCENT_GRADIENT) takes ON_ACCENT for its text/glyph,
+# never white.
+BG = "#0a0e16"           # app background - near-black, cool navy
+BG_ALT = "#10151f"       # secondary background (page panels)
 # The two lobes of the nebula the page backdrop paints in from its right
-# edge (widgets.GlassPage): a gold core with an ember bloom off it.
-GLOW = "#5e4318"         # deep gold core of the backdrop glow
-GLOW_ALT = "#5c2a16"     # ...and the ember bloom beside it
-SIDEBAR = "#0b0a07"      # sidebar column
-SIDEBAR_SHEEN = "#191510"  # subtle highlight at the sidebar's top edge
-SIDEBAR_DEEP = "#070605"   # ...fading darker toward its bottom
-SURFACE = "#1a1712"      # cards / inputs ("card background")
-SURFACE_HOVER = "#262117"  # ...lifted on hover ("card elevated")
-SURFACE_ACTIVE = "#332b1c"
+# edge (widgets.GlassPage): a teal core with a blue bloom off it.
+GLOW = "#14515a"         # deep teal core of the backdrop glow
+GLOW_ALT = "#16375f"     # ...and the blue bloom beside it
+SIDEBAR = "#070a11"      # sidebar column
+SIDEBAR_SHEEN = "#121824"  # subtle highlight at the sidebar's top edge
+SIDEBAR_DEEP = "#05070c"   # ...fading darker toward its bottom
+SURFACE = "#141b28"      # cards / inputs ("card background")
+SURFACE_HOVER = "#1c2534"  # ...lifted on hover ("card elevated")
+SURFACE_ACTIVE = "#263143"
 # The lit top lip a "glass" panel catches - one step above SURFACE_HOVER
 # and used only as a gradient's first stop, never as a fill on its own.
-SURFACE_SHEEN = "#403520"
-BORDER = "#3d3423"
+SURFACE_SHEEN = "#2f3b4f"
+BORDER = "#2a3548"
 
-TEXT = "#f3eee3"
-TEXT_MUTED = "#b1a48b"
-TEXT_DIM = "#79705c"
+TEXT = "#e8eef6"
+TEXT_MUTED = "#93a1b5"
+TEXT_DIM = "#64718a"
 # Pure white, for text sitting directly over video/artwork (the player's
-# top bar) where the palette's warm-tinted TEXT reads as dingy against a
+# top bar) where the palette's blue-tinted TEXT reads as dingy against a
 # bright frame. Not for text on the app's own surfaces - TEXT is
 # calibrated against those.
 TEXT_OVER_MEDIA = "#ffffff"
 
-ACCENT = "#f0b73f"        # primary action - warm gold
-ACCENT_HOVER = "#f7c95f"
-ACCENT_ACTIVE = "#d99b21"
-# The deeper amber end every accent gradient runs into. The name keeps
-# the "blue" it had when the gradient ran cyan->blue, on purpose: every
-# consumer refers to the token, and renaming it would touch files this
-# values-only re-theme must not.
-ACCENT_BLUE = "#de901f"
-ACCENT_BLUE_HOVER = "#eba43c"
-ACCENT_SOFT = "#33270e"   # tinted background for the active nav item
+ACCENT = "#2fb9a6"        # primary action - teal
+ACCENT_HOVER = "#48d2be"
+ACCENT_ACTIVE = "#1f9a89"
+# The deeper sea-green end every accent gradient runs into. The name
+# keeps the "blue" it had when the gradient ran cyan->blue, on purpose:
+# every consumer refers to the token, and renaming it would touch files
+# this values-only re-theme must not.
+ACCENT_BLUE = "#1c8f80"
+ACCENT_BLUE_HOVER = "#26a795"
+ACCENT_SOFT = "#102a2c"   # tinted background for the active nav item
 # Text/glyph color on any accent-filled surface. See the note above -
-# white on gold is the one combination this palette cannot use.
-ON_ACCENT = "#140e02"
+# white on teal is the one combination this palette cannot use.
+ON_ACCENT = "#021815"
 
-SUCCESS = "#2ee0a4"
+# Green, but deliberately not the old #2ee0a4: that one sits at hue 160,
+# 12 deg off the new teal accent (172), and would read as a second
+# accent everywhere a DONE badge and a play button share a card. #4ade80
+# at hue 142 is 30 deg clear (computed 25 August 2026), still plainly
+# "success green" - and ON_ACCENT holds 10.5:1 on it, so badges filled
+# with it keep the same ink as accent fills.
+SUCCESS = "#4ade80"
 DANGER = "#ff5470"
 DANGER_HOVER = "#ff7285"
-# Shifted toward orange-red from the old amber #ffc857, which on this
-# palette would have been a near-twin of the gold accent (hue 43 vs 41).
-# At hue ~21 it stays a "warning" orange while reading as its own color
-# beside both ACCENT and the pinker DANGER.
-WARNING = "#ff8a4a"
+# Back to a true amber: the gold palette had to shift warning toward
+# orange-red because amber was a near-twin of the gold accent (hue 43 vs
+# 41). Against the teal accent that collision is gone - #f5b342 sits at
+# hue 38, 134 deg from ACCENT and 48 deg from DANGER's pink (computed
+# 25 August 2026), so it reads as its own color beside both.
+WARNING = "#f5b342"
 
-# Gold -> deeper amber, the app's primary-action fill (the sidebar's
-# "+", the accent buttons, the player's play disc). Written as functions
-# because QSS needs the gradient spelled out at each use and the
-# direction differs: a wide button reads best lit corner-to-corner, a
-# disc from its top.
-def accent_gradient(x1=0, y1=0, x2=1, y2=1, hover=False):
-    gold = ACCENT_HOVER if hover else ACCENT
-    amber = ACCENT_BLUE_HOVER if hover else ACCENT_BLUE
-    return (f"qlineargradient(x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2},"
-            f" stop:0 {gold}, stop:1 {amber})")
+def mix(base: str, other: str, amount: float) -> str:
+    """`base` blended `amount` (0..1) of the way toward `other`, as a
+    palette-shaped hex token.
+
+    Here rather than at a call site for the same reason `rgba` is: an
+    animated colour is still a colour, and the moment it is written as a
+    literal it stops tracking the palette. main._RailDelegate walks a
+    row's icon and label from TEXT_MUTED to TEXT along this - see
+    main.RAIL_TINTS for why the ramp is precomputed rather than
+    evaluated per frame."""
+    amount = 0.0 if amount < 0.0 else (1.0 if amount > 1.0 else float(amount))
+    start = base.lstrip("#")
+    end = other.lstrip("#")
+    channels = []
+    for index in (0, 2, 4):
+        first = int(start[index:index + 2], 16)
+        second = int(end[index:index + 2], 16)
+        channels.append(int(round(first + (second - first) * amount)))
+    return "#{:02x}{:02x}{:02x}".format(*channels)
+
+
+def lit_fill(top: str, body: str) -> str:
+    """`body` with `top` as a lit lip along its upper edge - the shade
+    every filled control in the reference carries.
+
+    Vertical, always. A fill lit from a corner reads as a flat wash on
+    anything wider than it is tall, because the eye has no horizon to
+    read the light against; the reference lights each control from its
+    top edge and lets it settle into the body colour, which is what
+    makes a 6px pill and a 46px button look like the same material."""
+    return (f"qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+            f" stop:0 {top}, stop:1 {body})")
+
+
+# **The accent ramp is top-lit and vertical** - the owner's ask, 25
+# August 2026, pointing at the reference's CONTINUE WATCHING chip and
+# Continue button: *"they do have some shade on them, make sure to
+# follow this style in the app"*.
+#
+# It ran corner-to-corner (0,0 -> 1,1) before. One call site had already
+# reached past that for (0,0,0,1) by hand - tracker.py's featured chip -
+# which is the same instinct arrived at independently.
+#
+# Three stops, not two, and this is the part that is easy to get wrong:
+# the lift is a *lip*, only the top 7% of the fill. A two-stop ramp
+# starting at the lifted colour makes the whole control paler instead of
+# lit, which is a different thing and reads as a washed-out button. The
+# reference's own highlight is a single brighter line at the top edge.
+ACCENT_LIP_MIX = 0.28      # how far the lip lifts toward TEXT
+ACCENT_LIP_STOP = 0.07     # ...and how little of the fill it covers
+
+
+def accent_stops(hover=False):
+    """The accent ramp as (position, colour) pairs.
+
+    The single source both the stylesheet and the hand-painted chips
+    read. poster_grid draws its chips with QPainter and repeated the two
+    stops as literals - with a comment still calling them "gold to
+    amber" a whole re-theme later. A ramp written twice is a ramp that
+    drifts, and that one had."""
+    teal = ACCENT_HOVER if hover else ACCENT
+    deep = ACCENT_BLUE_HOVER if hover else ACCENT_BLUE
+    return ((0.0, mix(teal, TEXT, ACCENT_LIP_MIX)),
+            (ACCENT_LIP_STOP, teal),
+            (1.0, deep))
+
+
+def accent_gradient(x1=0, y1=0, x2=0, y2=1, hover=False):
+    """The accent fill as QSS. Vertical by default now; the coordinates
+    stay parameterised for the one surface that wants another angle."""
+    stops = ", ".join(f"stop:{at} {colour}"
+                      for at, colour in accent_stops(hover))
+    return f"qlineargradient(x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2}, {stops})"
 
 
 ACCENT_GRADIENT = accent_gradient()
 ACCENT_GRADIENT_HOVER = accent_gradient(hover=True)
+
+# The quiet half of the accent language: the reference's CONTINUE
+# WATCHING chip is *not* a bright accent pill with dark ink on it - it
+# is a dark teal chip with mint lettering, which is what lets it sit on
+# a bright backdrop without competing with the Continue button beside
+# it. ACCENT_SOFT is that chip's body; the lip is mixed toward the
+# accent rather than toward TEXT, so the chip lights in its own hue.
+ACCENT_SOFT_GRADIENT = lit_fill(mix(ACCENT_SOFT, ACCENT, 0.22), ACCENT_SOFT)
+ACCENT_SOFT_TEXT = ACCENT_HOVER
+
+# **The accent splits in two** - the owner's ask, 25 August 2026, after
+# seeing the reference beside the app: *"yes split them, deeper teal
+# with white text"*.
+#
+# The reference reserves the bright teal for things that only have to be
+# *seen* - the mark, the active pager pill, a progress chunk, a chip on
+# artwork - and fills the things you *click* with a deeper teal carrying
+# white lettering. Atomic had one accent doing both jobs, which is why
+# its Continue button came out bright with near-black ink where the
+# reference's is deep with white.
+#
+# Contrast against white, computed 25 August 2026:
+#
+#   body #1a7568  5.54:1        foot #13594f  8.17:1
+#   body #1e8375  4.61:1 hover  foot #166459  7.00:1
+#   lip  #22897c  4.25:1        lip  #279486  3.71:1 hover
+#
+# The lip is the one pair under 4.5 and that is not a failure to fix: it
+# is the top 7% of the fill, a highlight line, and a button's label is
+# vertically centred - it sits on the body and the foot, which are the
+# two the ratio is actually about. Judging a control by its brightest
+# strip would forbid having a highlight at all, which is the feature.
+#
+# ON_ACCENT is not superseded and must not be swept up: it is still the
+# only readable ink on the *bright* accent (white on that is 2.44:1), and
+# every indicator still filled with it - ArtChip, the reader's language
+# badge, the details page's watched markers, both progress chunks -
+# keeps that pairing on purpose.
+ACCENT_DEEP = "#1a7568"
+ACCENT_DEEP_LIP = "#22897c"
+ACCENT_DEEP_FOOT = "#13594f"
+ACCENT_DEEP_HOVER = "#1e8375"
+ACCENT_DEEP_LIP_HOVER = "#279486"
+ACCENT_DEEP_FOOT_HOVER = "#166459"
+ACCENT_DEEP_ACTIVE = "#12524a"
+ON_ACCENT_DEEP = "#ffffff"
+
+
+def accent_button_gradient(x1=0, y1=0, x2=0, y2=1, hover=False):
+    """The fill for a *pressable* accent surface. Same three-stop shape
+    as accent_gradient - lip, body, foot - a couple of steps deeper so
+    white reads on it."""
+    lip = ACCENT_DEEP_LIP_HOVER if hover else ACCENT_DEEP_LIP
+    body = ACCENT_DEEP_HOVER if hover else ACCENT_DEEP
+    foot = ACCENT_DEEP_FOOT_HOVER if hover else ACCENT_DEEP_FOOT
+    return (f"qlineargradient(x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2},"
+            f" stop:0 {lip}, stop:{ACCENT_LIP_STOP} {body}, stop:1 {foot})")
+
+
+ACCENT_BUTTON_GRADIENT = accent_button_gradient()
+ACCENT_BUTTON_GRADIENT_HOVER = accent_button_gradient(hover=True)
 
 # The CARD_* glossy-gradient family is gone with the boxes it painted:
 # tiles are frameless in the Harbor language (see the #Card rules below)
@@ -145,34 +278,49 @@ NAV_FONT_SIZE = 13
 # draws that as nothing at all, silently.
 NAV_BULLET = "◈"
 
-# **Every rail row's icon is a bundled PNG now, not a font codepoint**
-# (the owner's sheet of 18, 22 August 2026). The files are alpha-only -
-# white RGB with the shape in the alpha - each trimmed to its ink and
-# padded back to a centred square with a 10% margin, so
-# images.tinted_asset can recolour one with SourceIn and hand back a
-# square whose ink is already centred in it. That squareness is what
-# lets the folded rail centre every row on one axis without a
-# per-shape offset table: main.py used to carry three tuned constants
-# for exactly two hand-drawn icons, and none of them are needed now.
+# **Every rail row's icon is a bundled SVG now, not a cut PNG and not a
+# font codepoint** (the owner's icon pack, 25 August 2026; the PNG sheet
+# of 18 it replaces landed 22 August). All 24x24, `fill="none"
+# stroke="#FFFFFF" stroke-width="2"` with round caps and joins, so
+# images.tinted_asset can recolour one with SourceIn exactly as it did
+# the alpha-only PNGs - the stroke's antialiased edge is the alpha.
 #
-# Recoloured rather than shipped gold: the row's colour is a state
-# (muted at rest, TEXT selected or hovered), and a coloured PNG would
-# ignore it the same way an emoji did - which is why these are not
-# emoji, and was already why they were not emoji when they were font
-# glyphs.
+# **Vector, so the rail stops paying for a raster scale.** A PNG cut at
+# one size was resampled to whatever the fold and the DPI asked for (26
+# expanded, 29 folded, x1.0/1.25/1.5/2.0); an SVG is rendered straight
+# at the device size instead - see images._rendered_svg. The squareness
+# the old sheet was hand-trimmed for is now the viewBox's, so the folded
+# rail still centres every row on one axis with no per-shape offset
+# table (main.py carried three tuned constants for exactly two
+# hand-drawn icons once; none are needed).
+#
+# Recoloured rather than shipped in a fixed colour: the row's colour is
+# a *state* - muted at rest, brightening toward TEXT as it is hovered or
+# selected, and main._RailDelegate lerps it across that range - and a
+# coloured file would ignore it the same way an emoji did.
 RAIL_ICON_DIR = "assets/icons"
+# What tells an icon row from a glyph row. Named here rather than typed
+# at each test, because the two ends have to move together: main.py's
+# _style_rail_item keys off exactly this suffix, and when it said ".png"
+# in one place and the files said ".svg" in the other, *every* row would
+# have silently fallen back to NAV_BULLET with nothing to say why.
+RAIL_ICON_SUFFIX = ".svg"
 
 
 def rail_icon(name: str) -> str:
     """`name` as the path images.tinted_asset wants, relative to the
     asset root. Written as a call rather than typed out per row so the
     tables below read as a mapping and the directory lives in one place.
-
-    The `.png` suffix is also what main._style_rail_item keys off to
-    tell an icon row from a glyph one - a Segoe private-use codepoint
-    can never end in it, so the test cannot go wrong on a future entry.
     """
-    return f"{RAIL_ICON_DIR}/{name}.png"
+    return f"{RAIL_ICON_DIR}/{name}{RAIL_ICON_SUFFIX}"
+
+
+def is_rail_icon(token) -> bool:
+    """True when `token` is one of the icon paths above rather than a
+    font codepoint - main._style_rail_item's test, living beside the
+    suffix it depends on. A Segoe private-use codepoint can never end in
+    it, so the test cannot go wrong on a future entry."""
+    return str(token).endswith(RAIL_ICON_SUFFIX)
 
 
 # The Segoe icon fonts still dress the Downloads, Settings, Back and
@@ -192,13 +340,14 @@ FONT_STACK_ICONS = ", ".join(f'"{name}"' for name in FONT_FAMILY_ICON_FALLBACKS)
 # Page key -> icon file. The two names that do not match their key are
 # the tracker pages: the key is "manga"/"series" because that is what
 # saved nav orders and the JSON files already say (see nav_config), and
-# the *rows* read "Read"/"Watch", so the artwork is reading.png and
-# watching.png. Anime merged into the Watch page long ago, so anime.png
-# belongs to the cat_anime section (main.SECTION_ICONS), not to a nav row.
+# the *rows* read "Read"/"Watch" - so the artwork is library.svg (a
+# shelf of books) and live-tv.svg. Anime merged into the Watch page long
+# ago, so anime.svg belongs to the cat_anime section
+# (main.SECTION_ICONS), not to a nav row.
 NAV_ICONS = {
     "home": rail_icon("home"),
-    "manga": rail_icon("reading"),
-    "series": rail_icon("watching"),
+    "manga": rail_icon("library"),
+    "series": rail_icon("live-tv"),
     "games": rail_icon("games"),
     "apps": rail_icon("apps"),
     "websites": rail_icon("websites"),
@@ -209,6 +358,28 @@ RADIUS_SM = 8
 RADIUS = 12
 RADIUS_LG = 18
 
+# The window's own top bar (helpers/window_chrome), which replaced the
+# native Windows caption. Here rather than in that module because the
+# stylesheet below needs both numbers and theme cannot import it back.
+TITLE_BAR_HEIGHT = 48
+TOP_SEARCH_HEIGHT = 34
+
+# The hero eyebrow: CONTINUE WATCHING / CONTINUE READING on Home, and
+# FEATURED / TOP RESULT on the tracker's featured banner. One string
+# because it is one design on two surfaces - widgets.hero_split already
+# says the two heroes are deliberately the same shape - and it had been
+# written out identically in both files, which is how the *last* pair of
+# duplicated colours got a re-theme behind before anyone noticed.
+#
+# Soft accent, not the bright fill it used to be: on the reference this
+# chip is dark teal with mint lettering, which is what lets it sit two
+# inches from the Continue button without the pair competing. A second
+# bright accent pill up there read as two primary actions.
+EYEBROW_CHIP_QSS = (
+    f"color: {ACCENT_SOFT_TEXT}; background: {ACCENT_SOFT_GRADIENT};"
+    f" border-radius: {RADIUS_SM}px; padding: 3px 10px;"
+    f" font-size: 8.5pt; font-weight: 700; letter-spacing: 1px;")
+
 
 def rgba(color: str, alpha: int) -> str:
     """A palette hex token as a QSS rgba() carrying `alpha`, so a
@@ -217,6 +388,7 @@ def rgba(color: str, alpha: int) -> str:
     value = color.lstrip("#")
     red, green, blue = (int(value[i:i + 2], 16) for i in (0, 2, 4))
     return f"rgba({red}, {green}, {blue}, {alpha})"
+
 
 # Also referenced outside the stylesheet (see windows.home) to compensate
 # fixed-width centered content for the vertical scrollbar's width - it
@@ -272,14 +444,15 @@ def _ensure_checkmark_asset() -> str:
     even on Windows, hence as_posix().
 
     Drawn in ON_ACCENT rather than white, because the checked indicator
-    is filled with the gold accent and a white tick on it is the same
+    is filled with the teal accent and a white tick on it is the same
     unreadable pairing ON_ACCENT exists to avoid. Written under a new
-    filename ("...gold") on purpose, the second rename for the same
-    reason as the first ("...dark"): this only creates what is missing,
-    so a recolored asset under the old name would never be drawn - every
-    existing install would keep its cyan-era tick forever.
+    filename ("...teal") on purpose, the third rename for the same
+    reason as the first two ("...dark", "...gold"): this only creates
+    what is missing, so a recolored asset under the old name would never
+    be drawn - every existing install would keep its gold-era tick
+    forever.
     """
-    path = storage.DATA_DIR / "ui_assets" / "checkmark_gold.png"
+    path = storage.DATA_DIR / "ui_assets" / "checkmark_teal.png"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
@@ -303,12 +476,13 @@ def _ensure_chevron_asset() -> str:
     size so it stays crisp on a 125%/150% display, same reason the
     checkmark above exists as a file at all.
 
-    "...warm" filename: drawn in TEXT_MUTED, which the gold re-theme
-    changed, and this function only creates what is missing - under the
-    old name every existing install would keep its blue-grey chevron
-    (the checkmark above carries the same trap, already paid for once).
+    "...cool" filename: drawn in TEXT_MUTED, which the navy re-theme
+    changed again, and this function only creates what is missing -
+    under the old name every existing install would keep its warm
+    gold-era chevron (the checkmark above carries the same trap, paid
+    for twice now).
     """
-    path = storage.DATA_DIR / "ui_assets" / "chevron_down_warm.png"
+    path = storage.DATA_DIR / "ui_assets" / "chevron_down_cool.png"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         img = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
@@ -432,8 +606,8 @@ QPushButton#NavButton:checked {{
    instead of having a label that only fits when expanded. Gold into
    amber, the app's one primary-action fill. */
 QPushButton#AddButton {{
-    background: {ACCENT_GRADIENT};
-    color: {ON_ACCENT};
+    background: {ACCENT_BUTTON_GRADIENT};
+    color: {ON_ACCENT_DEEP};
     border: none;
     border-radius: {RADIUS}px;
     text-align: center;
@@ -441,7 +615,7 @@ QPushButton#AddButton {{
     font-size: 16pt;
     font-weight: 700;
 }}
-QPushButton#AddButton:hover {{ background: {ACCENT_GRADIENT_HOVER}; }}
+QPushButton#AddButton:hover {{ background: {ACCENT_BUTTON_GRADIENT_HOVER}; }}
 QPushButton#AddButton:pressed {{ background: {ACCENT_ACTIVE}; }}
 
 QListWidget#NavList {{
@@ -455,10 +629,25 @@ QListWidget#NavList {{
    so nothing shifts when a row becomes the active one. 8px horizontal,
    down from 12: the leading glyph is wider than the bullet it
    replaced, and at 12 the longest label ("Movies & Series") elided -
-   measured on a real-window grab. */
+   measured on a real-window grab.
+
+   **No `background` and no `color` for a *state* any more: the hover
+   wash, the selected pill, its accent indicator and the row's text
+   colour are all painted by main._RailDelegate**, so they can animate
+   (25 August 2026 - the owner's Harbor nav feel: fade in over
+   120-160ms, and the selection moves to a new row rather than
+   snapping). A QSS rule cannot be interpolated, and leaving these here
+   would have painted a second, un-animated pill underneath the drawn
+   one; a `color` here would likewise win over the palette the delegate
+   sets, because QStyleSheetStyle configures the palette from the rule
+   after the delegate has filled it in.
+
+   What stays is everything geometric - padding, the transparent
+   resting border, the radius, the font - because those are what the
+   folded rail's icon centring and the row height were measured
+   against (see main._RailDelegate.initStyleOption). */
 QListWidget#NavList::item {{
     background: transparent;
-    color: {TEXT_MUTED};
     border: 1px solid transparent;
     border-radius: {RADIUS}px;
     padding: 11px 8px;
@@ -466,18 +655,74 @@ QListWidget#NavList::item {{
     font-size: {NAV_FONT_SIZE}pt;
     font-weight: 700;
 }}
-QListWidget#NavList::item:hover {{
-    background: {SURFACE};
-    color: {TEXT};
-}}
-/* Same soft pill as #NavButton:checked above - one active-row language
-   for both bars, per the Harbor reference. */
+/* Kept, and deliberately identical to the resting rule. The delegate
+   strips State_MouseOver/State_Selected off the option before handing
+   the row to drawControl, so neither of these can match while it is
+   installed - but a row drawn without it (the drag pixmap, a future
+   view) then still comes out flat instead of gaining a pill nothing
+   animates. */
+QListWidget#NavList::item:hover,
 QListWidget#NavList::item:selected {{
-    background: {SURFACE_HOVER};
-    color: {TEXT};
+    background: transparent;
     border: 1px solid transparent;
     border-radius: {RADIUS}px;
 }}
+
+/* ---- The window's own title bar ------------------------------------- */
+/* SIDEBAR, not BG: the bar and the sidebar column meet at a corner, and
+   two different near-blacks meeting there reads as a seam rather than as
+   one piece of chrome. The hairline underneath is what separates the
+   chrome from the page, and it is the only border on it. */
+QWidget#TitleBar {{
+    background: {SIDEBAR};
+    border-bottom: 1px solid {BORDER};
+}}
+QPushButton#BackButton {{
+    background: transparent;
+    color: {TEXT_MUTED};
+    border: none;
+    border-radius: {RADIUS_SM}px;
+    padding: 6px 14px;
+    font-family: {FONT_STACK_ICONS};
+    font-size: 10pt;
+    font-weight: 600;
+}}
+QPushButton#BackButton:hover {{
+    background: {SURFACE};
+    color: {TEXT};
+}}
+QPushButton#BackButton:disabled {{ color: {TEXT_DIM}; background: transparent; }}
+/* Square, full-height, no radius: these are Windows' caption buttons in
+   the place Windows' caption buttons go, and rounding them would put a
+   gap of bar colour in the window's own top-right corner. */
+QPushButton#WindowButton, QPushButton#WindowClose {{
+    background: transparent;
+    color: {TEXT_MUTED};
+    border: none;
+    border-radius: 0px;
+    padding: 0px;
+    font-family: {FONT_STACK_ICONS};
+}}
+QPushButton#WindowButton:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; }}
+QPushButton#WindowButton:pressed {{ background: {SURFACE_ACTIVE}; }}
+/* Red on hover, which is the one caption-button convention Windows users
+   read without looking - and the only place in the app DANGER is a
+   hover state rather than a warning. */
+QPushButton#WindowClose:hover {{ background: {DANGER}; color: {TEXT_OVER_MEDIA}; }}
+QPushButton#WindowClose:pressed {{ background: {DANGER_HOVER}; }}
+/* One search field for the whole app. Fully rounded, because it is the
+   only control on the bar that is not square and the pill is what tells
+   the eye it is a field rather than a label. */
+QLineEdit#TopSearch {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: {TOP_SEARCH_HEIGHT // 2}px;
+    padding: 4px 14px;
+    font-size: 10pt;
+}}
+QLineEdit#TopSearch:hover {{ border: 1px solid {mix(BORDER, ACCENT, 0.4)}; }}
+QLineEdit#TopSearch:focus {{ border: 1px solid {ACCENT}; background: {SURFACE_HOVER}; }}
 
 /* ---- Generic page chrome --------------------------------------------- */
 QWidget#Panel {{
@@ -670,42 +915,43 @@ QPushButton:hover {{
 QPushButton:pressed {{ background: {SURFACE_ACTIVE}; }}
 QPushButton:disabled {{ color: {TEXT_DIM}; }}
 
-/* The primary action anywhere in the app: gold into amber, with the
-   near-black ON_ACCENT on top - white on this gold is unreadable (see
-   the palette note). Rounded to RADIUS rather than RADIUS_SM so the ends
-   read as caps; padding is untouched, so nothing changes size. */
+/* The primary action anywhere in the app: the top-lit teal ramp with
+   near-black ON_ACCENT on it - white on this teal computes to 2.4:1
+   (see the palette note). Rounded to RADIUS rather than RADIUS_SM so
+   the ends read as caps; padding is untouched, so nothing changes
+   size. */
 QPushButton#Accent {{
-    background: {ACCENT_GRADIENT};
-    color: {ON_ACCENT};
+    background: {ACCENT_BUTTON_GRADIENT};
+    color: {ON_ACCENT_DEEP};
     border: none;
     border-radius: {RADIUS}px;
     padding: 10px 18px;
     font-weight: 700;
 }}
-QPushButton#Accent:hover {{ background: {ACCENT_GRADIENT_HOVER}; }}
-QPushButton#Accent:pressed {{ background: {ACCENT_ACTIVE}; }}
+QPushButton#Accent:hover {{ background: {ACCENT_BUTTON_GRADIENT_HOVER}; }}
+QPushButton#Accent:pressed {{ background: {ACCENT_DEEP_ACTIVE}; }}
 
 QPushButton#AccentIcon {{
-    background: {ACCENT_GRADIENT};
-    color: {ON_ACCENT};
+    background: {ACCENT_BUTTON_GRADIENT};
+    color: {ON_ACCENT_DEEP};
     border: none;
     border-radius: {RADIUS}px;
     padding: 0px;
     font-size: 18pt;
     font-weight: 700;
 }}
-QPushButton#AccentIcon:hover {{ background: {ACCENT_GRADIENT_HOVER}; }}
-QPushButton#AccentIcon:pressed {{ background: {ACCENT_ACTIVE}; }}
+QPushButton#AccentIcon:hover {{ background: {ACCENT_BUTTON_GRADIENT_HOVER}; }}
+QPushButton#AccentIcon:pressed {{ background: {ACCENT_DEEP_ACTIVE}; }}
 
 QPushButton#Danger {{
-    background: {DANGER};
+    background: {lit_fill(DANGER_HOVER, DANGER)};
     color: {ON_ACCENT};
     border: none;
 }}
-QPushButton#Danger:hover {{ background: {DANGER_HOVER}; }}
+QPushButton#Danger:hover {{ background: {lit_fill(mix(DANGER_HOVER, TEXT, 0.18), DANGER_HOVER)}; }}
 
 QPushButton#Icon {{
-    background: {SURFACE};
+    background: {lit_fill(SURFACE_HOVER, SURFACE)};
     color: {TEXT_MUTED};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
@@ -713,7 +959,7 @@ QPushButton#Icon {{
     font-size: 18pt;
     font-weight: 700;
 }}
-QPushButton#Icon:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; border: 1px solid {ACCENT}; }}
+QPushButton#Icon:hover {{ background: {lit_fill(SURFACE_ACTIVE, SURFACE_HOVER)}; color: {TEXT}; border: 1px solid {ACCENT}; }}
 /* A button carrying a menu (the tracker's filter) gets Qt's own little
    down-arrow drawn into it, beside the icon it already has. Nothing here
    wants two glyphs, so it is removed rather than styled. */
@@ -905,7 +1151,7 @@ QMenu::item {{
     padding: 8px 14px;
     border-radius: 6px;
 }}
-QMenu::item:selected {{ background: {ACCENT_GRADIENT}; color: {ON_ACCENT}; }}
+QMenu::item:selected {{ background: {ACCENT_BUTTON_GRADIENT}; color: {ON_ACCENT_DEEP}; }}
 QMenu::separator {{
     height: 1px;
     background: {BORDER};
@@ -968,7 +1214,15 @@ def apply_dark_titlebar(widget):
     if sys.platform != "win32":
         return
     try:
-        hwnd = int(widget.winId())
+        # **c_void_p, not a bare Python int.** ctypes types an untyped
+        # integer argument as C `int`, which truncates a 64-bit HWND to
+        # 32 bits and hands DWM a handle that is not one. Not a bug that
+        # has been observed here - HWNDs on this machine have stayed
+        # small enough - but `_set_window_transitions` a few lines below
+        # has always wrapped its handle and this one did not, and a
+        # latent truncation that only fires on unlucky handle values is
+        # exactly the kind of thing that reads as a random crash later.
+        hwnd = ctypes.c_void_p(int(widget.winId()))
         value = ctypes.c_int(1)
         # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 20H1+/Win11).
         # 19 = same attribute on earlier Win10 1809/1903 builds.

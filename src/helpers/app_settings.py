@@ -85,6 +85,27 @@ def set_hide_sections_from_home(enabled: bool):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_motion_smoothing() -> bool:
+    """Whether the player blends frames to make 24fps content *look*
+    smoother than it was shot.
+
+    **Off, and off is the honest default.** It is not the same thing as
+    the display synchronisation the player always does, and the two get
+    confused constantly - see helpers/video_backend.default_options,
+    which spells the difference out. Display sync aligns each frame the
+    file actually contains to the panel's raster; this invents in-between
+    ones. A 23.976fps master is not a performance problem to be fixed,
+    it is what the release contains, and blending it is a look some
+    people want and most call the soap-opera effect."""
+    return bool(_load().get("motion_smoothing", False))
+
+
+def set_motion_smoothing(enabled: bool):
+    data = _load()
+    data["motion_smoothing"] = bool(enabled)
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_fullscreen_on_startup() -> bool:
     """Whether an Atomic started by Windows' own startup entry opens full
     screen instead of maximized.

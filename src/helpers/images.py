@@ -21,6 +21,18 @@ from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 
+# The rail icons are SVG now (25 August 2026), and QPixmap cannot read
+# one - it answers a null pixmap, which every caller here reads as
+# "missing asset". Guarded so a build that somehow ships without QtSvg
+# degrades to the bullet fallback rather than failing to import at all;
+# packaging/Atomic.spec names PyQt6.QtSvg as a hiddenimport because a
+# guarded import is exactly what PyInstaller's static analysis skips
+# (the same reason libtorrent is listed there).
+try:
+    from PyQt6.QtSvg import QSvgRenderer
+except ImportError:                      # pragma: no cover - see above
+    QSvgRenderer = None
+
 from . import icon_extract, net, storage, theme
 
 CACHE_DIR = storage.DATA_DIR / "image_cache"
@@ -167,6 +179,39 @@ def _asset_dir() -> Path:
 _tinted = {}
 
 
+def _rendered_svg(path: Path, device_h: int) -> QPixmap:
+    """`path` rasterised at exactly `device_h` device pixels tall, in
+    whatever colour the file names - the caller fills it immediately
+    after, so only the alpha it produces matters.
+
+    Rendered *at* the target size rather than rendered once and scaled:
+    an SVG has no native resolution to lose, so going through a raster
+    intermediate would only add the resampling blur the whole
+    device-pixel discipline in this file exists to avoid. The width
+    follows the file's own viewBox aspect, because QSvgRenderer.render
+    stretches to fill whatever viewport it is given and a square
+    assumption would squash a non-square icon silently.
+
+    A null pixmap on any failure - unreadable file, no QtSvg - which is
+    the same answer QPixmap gives for a missing PNG, so callers need no
+    new branch."""
+    if QSvgRenderer is None:
+        return QPixmap()
+    renderer = QSvgRenderer(str(path))
+    if not renderer.isValid():
+        return QPixmap()
+    default = renderer.defaultSize()
+    device_w = (max(1, round(device_h * default.width() / default.height()))
+                if default.height() > 0 else device_h)
+    image = QImage(device_w, device_h, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    renderer.render(painter)
+    painter.end()
+    return QPixmap.fromImage(image)
+
+
 def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixmap:
     """A bundled image recoloured to `color`, scaled for `dpr` and tagged
     with it so it isn't blurry on a non-100% display (same reason as the
@@ -179,17 +224,29 @@ def tinted_asset(name: str, color: str, height: int, dpr: float = 1.0) -> QPixma
     and keeps alpha, so the shape and its antialiased edges survive.
 
     Scaled before it is filled - filling first would leave a flat block of
-    colour for the scaler to blur."""
+    colour for the scaler to blur.
+
+    **SVG and PNG both, through this one function.** The rail icons are
+    SVG (25 August 2026) and the tracker's filter button is still a PNG;
+    a second tinting helper for the new kind would have meant a second
+    cache, and the cache is the whole reason this function exists - the
+    rail delegate asks for a tint on every painted row."""
     key = (name, str(color), int(height), float(dpr))
     found = _tinted.get(key)
     if found is not None:
         return found
-    source = QPixmap(str(_asset_dir() / name))
-    if source.isNull():
-        return source  # missing asset: an empty icon, not a crash
+    path = _asset_dir() / name
     device_h = max(1, round(height * dpr))
-    scaled = source.scaledToHeight(device_h,
-                                   Qt.TransformationMode.SmoothTransformation)
+    if str(name).lower().endswith(".svg"):
+        scaled = _rendered_svg(path, device_h)
+        if scaled.isNull():
+            return scaled  # missing/unreadable asset: an empty icon, not a crash
+    else:
+        source = QPixmap(str(path))
+        if source.isNull():
+            return source  # missing asset: an empty icon, not a crash
+        scaled = source.scaledToHeight(
+            device_h, Qt.TransformationMode.SmoothTransformation)
     painter = QPainter(scaled)
     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
     painter.fillRect(scaled.rect(), QColor(color))

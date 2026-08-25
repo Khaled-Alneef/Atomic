@@ -318,18 +318,15 @@ class LinkGridPage(GridSelection, GlassPage):
         # No drag hint here any more: it named a right-click Move Up/Down
         # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
-        self.search_box = search_field(f"Search {self.TITLE.lower()}...", width=220)
         # Debounced rather than filtering on every keystroke: each redraw
         # rebuilds every card from scratch (pages hold no state - see
         # .claude/rules/ui.md), so typing six characters would otherwise
-        # rebuild the whole grid six times. Same 150ms as the tracker
-        # pages, which this is the extension of.
+        # rebuild the whole grid six times. Kept now that the field lives
+        # in the window's bar - `refresh_filter` starts it.
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
         self._search_timer.timeout.connect(self._refresh_grid)
-        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
-        top_row.addWidget(self.search_box)
         top_row.addWidget(self._build_select_button(
             f"Pick several {self.TITLE.lower()} and delete them at once"))
         panel_layout.addLayout(top_row)
@@ -434,10 +431,33 @@ class LinkGridPage(GridSelection, GlassPage):
         return self.entries
 
     def _search_query(self) -> str:
-        # getattr because _refresh_grid can run before the box exists on a
-        # page still being built.
-        box = getattr(self, "search_box", None)
-        return box.text().strip().lower() if box else ""
+        """What the one search field in the window's title bar currently
+        says, lowercased.
+
+        It used to be this page's own box. There is no page box any more
+        (the owner's ask, 25 August 2026: one bar that searches
+        everything, and remove the others), so the answer comes from the
+        window - `main.MainWindow.page_filter_text`. The seam is
+        deliberately this method and nothing else: every grid on the page
+        already funnelled through it, so the field moving out of the page
+        changed one line rather than every caller."""
+        window = self.window()
+        getter = getattr(window, "page_filter_text", None)
+        if not callable(getter):
+            return ""
+        return getter()
+
+    def refresh_filter(self):
+        """Redraw against the field's current text. Called by the window
+        as it is typed into.
+
+        Debounced through the same timer the page's own box used, and
+        for the same measured reason: a redraw rebuilds every card from
+        scratch, so six characters would otherwise rebuild the grid six
+        times."""
+        timer = getattr(self, "_search_timer", None)
+        if timer is not None:
+            timer.start()
 
     def _visible_entries(self):
         """What the grid draws: the sorted list narrowed by the search box.
@@ -482,7 +502,7 @@ class LinkGridPage(GridSelection, GlassPage):
         # that matches nothing must still drop the selection it hid.
         self._prune_selection({e.get("id") for e in entries})
         if not entries:
-            message = (f"Nothing here matches '{self.search_box.text().strip()}'."
+            message = (f"Nothing here matches '{self._search_query()}'."
                        if narrowed
                        else f"No {self.TITLE.lower()} yet - click '+' to create one.")
             self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)

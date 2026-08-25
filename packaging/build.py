@@ -28,9 +28,9 @@ PACKAGING_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGING_DIR.parent
 SRC_DIR = PROJECT_ROOT / "src"
 SPEC_FILE = PACKAGING_DIR / "Atomic.spec"
-# Everything the app ships as an image lives under src/assets/ now
-# (the nav icons cut from src/assets/Icons.png are in
-# src/assets/icons/). Atomic.spec resolves the same paths.
+# Everything the app ships as an image lives under src/assets/ now (the
+# nav icons, SVG since 25 August 2026, in src/assets/icons/).
+# Atomic.spec resolves the same paths.
 ASSETS_DIR = SRC_DIR / "assets"
 ICON_FILE = ASSETS_DIR / "app_icon.ico"
 DIST_DIR = PACKAGING_DIR / "dist"

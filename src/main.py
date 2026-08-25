@@ -18,9 +18,11 @@ the slide direction immediately too - nothing to keep in sync by hand.
 
 import sys
 import threading
+import time
 from pathlib import Path
 
 from helpers import (app_settings, downloads, global_search, images, layout, logs,
+                     window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
 from helpers.nav_config import (HOME_ITEM, nav_position, route_page,
@@ -34,12 +36,14 @@ from PyQt6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSize,
     Qt,
     QTimer,
     pyqtSignal as Signal,
 )
-from PyQt6.QtGui import QCursor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPalette,
+                         QPixmap)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -146,7 +150,15 @@ ADD_ITEMS = [
 ]
 
 ANIM_DURATION_MS = 220
-LOGO_HEIGHT = 120
+# **72, down from 120.** The logo band is decoration and the rows are
+# the furniture, so _fit_rails drops the band whole rather than squeeze
+# a row (see the note there) - and the window's new top bar took 48px
+# off the sidebar's height, which pushed an ordinary 1500x940 window
+# over that line. Measured 25 August 2026: at 120 the mark was gone at
+# every window size tried, including maximised; at 72 it is there at
+# all of them. The mark is drawn to fit the band, so this is a smaller
+# logo rather than a cropped one.
+LOGO_HEIGHT = 72
 
 # How long after the window is up the startup update check waits before
 # asking GitHub. Launch is already the busiest moment this app has - the
@@ -279,10 +291,11 @@ SECTION_BLOCKS = 3
 # key not named here is theme.NAV_BULLET, so an unmapped section still
 # gets a readable row in the collapsed rail.
 SECTION_BACK_ICON = "\uE72B"    # Back (left-pointing arrow)
-# **Every rail row's icon is a bundled PNG now** (the owner's sheet of
-# 18, 22 August 2026), not a Segoe Fluent codepoint and not a path this
-# app draws. theme.rail_icon names the files and theme.NAV_ICONS is the
-# page half of the mapping; SECTION_ICONS below is the section half.
+# **Every rail row's icon is a bundled SVG now** (the owner's icon pack,
+# 25 August 2026; the cut PNG sheet of 18 it replaces landed 22 August),
+# not a Segoe Fluent codepoint and not a path this app draws.
+# theme.rail_icon names the files and theme.NAV_ICONS is the page half
+# of the mapping; SECTION_ICONS below is the section half.
 #
 # It replaces two mechanisms, not one. Most rows typed a glyph as the
 # item's *text*; two - Saved and Anime - could not, because the font
@@ -473,11 +486,84 @@ RAIL_FOLDED_QSS = ("QListWidget#NavList::item {"
 # section key, so this is UserRole + 1.
 RAIL_ICON_ROLE = Qt.ItemDataRole.UserRole + 1
 
+# ---- The rail rows' motion ----------------------------------------------
+#
+# **The owner's ask, 25 August 2026: Harbor's nav feel** - normal /
+# hover / pressed / selected, a rounded background fading in on hover
+# with a brighter icon and label and a small horizontal nudge, a subtle
+# press, and a persistent stronger pill with a thin accent bar when
+# selected - the selection *animating* onto a new row rather than
+# snapping.
+#
+# Three durations rather than one, all inside the 120-160ms he named.
+# Press is the shortest on purpose: a press is feedback for something
+# already happening, and anything that outlives the click reads as lag.
+RAIL_HOVER_MS = 140.0
+RAIL_ACTIVE_MS = 160.0
+RAIL_PRESS_MS = 110.0
+
+# How far an expanded row's icon and label slide right as the row lights
+# up. **Integer pixels, and only on a row that has a label.** Fractional
+# translation resamples text, and a folded row *is* its icon - moving it
+# sideways is the exact failure this file has recorded twice (see
+# RAIL_FOLDED_QSS and _RailDelegate.initStyleOption for the ink-centring
+# measurements a 2px nudge would throw away).
+RAIL_NUDGE_PX = 2
+
+# The muted -> bright ramp a row's icon and label travel as it lights up,
+# **quantised, and that is the whole point.** images.tinted_asset caches
+# per (file, colour, size, ratio), so feeding it a continuously lerped
+# colour would mint a new pixmap on every frame and never hit the cache
+# again - the cache would grow without bound for the life of the process
+# and every frame would pay a fresh SVG render. Nine stops instead: at
+# 60Hz a 140ms fade is ~8.4 frames, so the ramp advances about one stop
+# per frame and the steps are not visible (TEXT_MUTED to TEXT is a
+# 4-stop-per-channel move in the blue channel - #93a1b5 -> #e8eef6).
+#
+# Bounded cost: 19 icons x 9 stops x 2 sizes (26 expanded, 29 folded) x
+# the ratios in play. The text colour is taken from the same ramp so the
+# label and the icon can never brighten out of step.
+RAIL_TINT_STOPS = 8
+RAIL_TINTS = tuple(theme.mix(theme.TEXT_MUTED, theme.TEXT, i / RAIL_TINT_STOPS)
+                   for i in range(RAIL_TINT_STOPS + 1))
+
+# The accent bar down the left of the selected pill. 3px wide with a
+# 1px inset, so on the *folded* rail it sits in the ~3.5px the centred
+# icon leaves at the row's edge and never crowds the picture - the
+# folded row is the tight case (36px wide holding a 29px icon), and the
+# icons' own 24-unit viewBox keeps their ink a further ~3.5px inside
+# that. Half the row tall so it reads as a marker rather than a border.
+RAIL_INDICATOR_WIDTH = 3.0
+RAIL_INDICATOR_INSET = 1.0
+RAIL_INDICATOR_HEIGHT = 0.5
+
+# Palette tokens parsed once. A QColor built from a hex string costs a
+# parse, and these are asked for on every painted row of every rail on
+# every frame of a fade - the alpha is the only thing that varies.
+_RAIL_WASHES = {}
+
+
+def _rail_wash(token: str, alpha: float) -> QColor:
+    """`token` from the palette at `alpha` (0..1), as a fill colour."""
+    base = _RAIL_WASHES.get(token)
+    if base is None:
+        base = QColor(token)
+        _RAIL_WASHES[token] = base
+    shade = QColor(base)
+    shade.setAlphaF(0.0 if alpha < 0.0 else (1.0 if alpha > 1.0 else alpha))
+    return shade
+
 # Section key -> icon file, the other half of theme.NAV_ICONS. The keys
 # are tracker.WATCH_CATEGORIES / READ_CATEGORIES plus the four standing
 # sections; an unmapped one still falls through to theme.NAV_BULLET, and
-# so does a *mapped* one whose PNG is missing from the bundle - see
+# so does a *mapped* one whose SVG is missing from the bundle - see
 # _rail_icon, which refuses to hand back a null pixmap.
+#
+# Four keys name a file that is not their key, because the icon pack
+# names pictures rather than this app's sections: schedule is
+# calendar.svg, cat_series is shows.svg (live-tv.svg is the Watch nav
+# row), cat_other is addons.svg, and on the nav side manga/series are
+# library.svg/live-tv.svg (see theme.NAV_ICONS).
 #
 # The three reading flavours keep three distinct pictures for the reason
 # they always did: "Manhwa" and "Manhua" differ by one letter and could
@@ -486,15 +572,15 @@ RAIL_ICON_ROLE = Qt.ItemDataRole.UserRole + 1
 SECTION_ICONS = {
     "discover": theme.rail_icon("discover"),
     "saved": theme.rail_icon("saved"),
-    "schedule": theme.rail_icon("schedule"),
+    "schedule": theme.rail_icon("calendar"),
     "history": theme.rail_icon("history"),
     "cat_movies": theme.rail_icon("movies"),
-    "cat_series": theme.rail_icon("series"),
+    "cat_series": theme.rail_icon("shows"),
     "cat_anime": theme.rail_icon("anime"),
     "cat_manga": theme.rail_icon("manga"),
     "cat_manhwa": theme.rail_icon("manhwa"),
     "cat_manhua": theme.rail_icon("manhua"),
-    "cat_other": theme.rail_icon("other"),
+    "cat_other": theme.rail_icon("addons"),
 }
 
 # The fold toggle's two faces - single Fluent chevrons, drawn large
@@ -586,6 +672,262 @@ class _RailCursor(QObject):
         return False
 
 
+class _RailMotion(QObject):
+    """One rail's hover / selected / pressed progress, and the only
+    thing that makes _RailDelegate's pill move.
+
+    **Not a widget per row.** The rails stay QListWidget + delegate
+    because that is what carries drag-to-reorder (InternalMove, see
+    _make_rail_list), the fold, and _fit_rails' pitch arithmetic - so
+    the "component" is this plus the delegate, not an animated button.
+
+    **One timer for the whole application, and it stops.** A timer per
+    row would be dozens; a timer per rail would be six and each would
+    tick alone. This is a class-level QTimer that runs only while at
+    least one rail has a value still moving, and `_tick` stops it on the
+    first pass where nothing changed - so an idle rail costs exactly
+    zero timer events, which is the property the owner asked to have
+    measured rather than asserted.
+
+    Values are held per row as [hover, active, press], each 0.0-1.0, and
+    a row with no entry is *settled at its target* (see `values`) - so
+    the common case, a rail sitting still, stores nothing at all and the
+    delegate reads the selection straight off the model.
+
+    The one subtlety is seeding: a value has to be pinned at what it was
+    **before** the state change that gives it a new target, or a row
+    whose pill should fade out has no memory that it was ever lit and
+    simply vanishes. `_pin` does that for hover and press (which this
+    object changes itself); selection arrives after the fact, so
+    `_on_selection` seeds from the signal's own deselected/selected
+    lists instead.
+    """
+
+    _TICK_MS = 16          # 60Hz - a rail's fade has the same budget as
+                           # a scroll frame (CLAUDE.md rule 7)
+    _timer = None
+    _live = []             # every _RailMotion with something to advance
+    _clock = 0.0           # monotonic stamp of the last tick
+
+    def __init__(self, rail):
+        super().__init__(rail)
+        self._rail = rail
+        self._hover_row = -1
+        self._press_row = -1
+        self._values = {}
+        self._last = 0.0
+        rail.viewport().installEventFilter(self)
+        model = rail.model()
+        # A refill renumbers the rows, so every stored value is about a
+        # row that no longer exists. Cleared rather than remapped: the
+        # rows genuinely are different rows, and animating between them
+        # would be animating between two unrelated things.
+        for signal in (model.modelReset, model.rowsInserted,
+                       model.rowsRemoved, model.rowsMoved):
+            signal.connect(self._reset)
+        selection = rail.selectionModel()
+        if selection is not None:
+            selection.selectionChanged.connect(self._on_selection)
+
+    # -- state ---------------------------------------------------------
+    def _target(self, row):
+        item = self._rail.item(row)
+        return (1.0 if row == self._hover_row else 0.0,
+                1.0 if item is not None and item.isSelected() else 0.0,
+                1.0 if row == self._press_row else 0.0)
+
+    def values(self, row):
+        """(hover, active, press) for `row`, for the delegate.
+
+        A row with no stored entry has nothing in flight, so its target
+        *is* its value - which is what lets a settled rail hold no state
+        and still paint its selected pill."""
+        found = self._values.get(row)
+        return tuple(found) if found is not None else self._target(row)
+
+    def _pin(self, row):
+        """Remember `row`'s value as of now, before the change about to
+        be made to its target."""
+        if row >= 0 and row not in self._values:
+            self._values[row] = list(self._target(row))
+
+    def _set_hover(self, row):
+        if row == self._hover_row:
+            return
+        self._pin(self._hover_row)
+        self._pin(row)
+        self._hover_row = row
+        self._start()
+
+    def _set_press(self, row):
+        if row == self._press_row:
+            return
+        self._pin(self._press_row)
+        self._pin(row)
+        self._press_row = row
+        self._start()
+
+    def _on_selection(self, selected, deselected):
+        # Seeded explicitly rather than through _pin: by the time this
+        # fires the model has already changed, so _pin would read the
+        # *new* target and the outgoing row would snap dark instead of
+        # fading. The signal's own lists are the only record of which
+        # row was which.
+        for index in deselected.indexes():
+            self._seed(index.row(), 1.0)
+        for index in selected.indexes():
+            self._seed(index.row(), 0.0)
+        self._start()
+
+    def _seed(self, row, active):
+        if row < 0 or row in self._values:
+            return
+        hover, _active, press = self._target(row)
+        self._values[row] = [hover, float(active), press]
+
+    def _reset(self, *_args):
+        self._values.clear()
+        self._hover_row = -1
+        self._press_row = -1
+        self._stop()
+
+    # -- events --------------------------------------------------------
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        try:
+            if kind in (QEvent.Type.MouseMove, QEvent.Type.Enter):
+                point = event.position().toPoint()
+                self._set_hover(self._rail.indexAt(point).row())
+                # A press that turned into a drag never delivers its
+                # release here, so a moving pointer with no button down
+                # is the backstop that keeps a pressed row from
+                # sticking bright.
+                if event.buttons() == Qt.MouseButton.NoButton:
+                    self._set_press(-1)
+            elif kind == QEvent.Type.Leave:
+                self._set_hover(-1)
+                self._set_press(-1)
+            elif kind == QEvent.Type.MouseButtonPress:
+                self._set_press(self._rail.indexAt(
+                    event.position().toPoint()).row())
+            elif kind in (QEvent.Type.MouseButtonRelease,
+                          QEvent.Type.MouseButtonDblClick):
+                self._set_press(-1)
+            elif kind in (QEvent.Type.DragEnter, QEvent.Type.DragMove,
+                          QEvent.Type.DragLeave, QEvent.Type.Drop):
+                # A drag delivers no MouseMove at all, so hover would
+                # freeze on whichever row the drag started from and stay
+                # lit under a pointer that has long left it.
+                self._set_hover(-1)
+                self._set_press(-1)
+        except (AttributeError, RuntimeError):
+            pass        # the rail went away under the pointer
+        return False    # never consumed - clicks and drags are unchanged
+
+    # -- the shared clock ----------------------------------------------
+    def _start(self):
+        if self not in _RailMotion._live:
+            _RailMotion._live.append(self)
+        timer = _RailMotion._timer
+        if timer is None:
+            timer = QTimer()
+            timer.setTimerType(Qt.TimerType.PreciseTimer)
+            timer.setInterval(_RailMotion._TICK_MS)
+            timer.timeout.connect(_RailMotion._tick_all)
+            _RailMotion._timer = timer
+        try:
+            if not timer.isActive():
+                _RailMotion._clock = time.monotonic()
+                timer.start()
+        except RuntimeError:
+            # Same shutdown race as _stop's - the wrapper outlived the
+            # C++ object. Drop it; the next _start makes a new one.
+            _RailMotion._timer = None
+
+    def _stop(self):
+        try:
+            _RailMotion._live.remove(self)
+        except ValueError:
+            pass
+        if _RailMotion._live or _RailMotion._timer is None:
+            return
+        try:
+            _RailMotion._timer.stop()
+        except RuntimeError:
+            # **The clock is shared and parentless, so Qt owns its
+            # lifetime and not this class.** On the way out the
+            # QApplication deletes the C++ timer while this Python
+            # wrapper still points at it, and every rail then runs
+            # `_reset` from its own destroyed() signal - so closing the
+            # window raised RuntimeError once per rail, inside a Qt
+            # slot, which is where an uncaught exception takes the whole
+            # process down with no traceback (helpers/logs exists for
+            # exactly that). Measured 25 August 2026 while walking every
+            # page: four of these per close.
+            #
+            # Dropping the reference is the whole fix - _start builds a
+            # fresh timer the next time anything animates.
+            _RailMotion._timer = None
+
+    @staticmethod
+    def _tick_all():
+        now = time.monotonic()
+        # Elapsed wall time, not a fixed step per tick: a frame the UI
+        # thread was too busy to deliver must not slow the fade down,
+        # or a fold or a page build stretches every animation behind it.
+        # Clamped so a suspended machine does not resume mid-fade.
+        elapsed = min(0.1, max(0.0, now - _RailMotion._clock))
+        _RailMotion._clock = now
+        for motion in list(_RailMotion._live):
+            try:
+                motion._tick(elapsed)
+            except RuntimeError:
+                # The rail's C++ side went away while it still had a
+                # value in flight. Dropped rather than left in the list:
+                # it would raise again on every tick from here on, and a
+                # timer callback that always raises is a timer that
+                # never stops.
+                motion._stop()
+
+    def _tick(self, elapsed):
+        steps = (elapsed * 1000.0 / RAIL_HOVER_MS,
+                 elapsed * 1000.0 / RAIL_ACTIVE_MS,
+                 elapsed * 1000.0 / RAIL_PRESS_MS)
+        moving = False
+        for row, held in list(self._values.items()):
+            target = self._target(row)
+            changed = False
+            for channel in (0, 1, 2):
+                want = target[channel]
+                have = held[channel]
+                if have == want:
+                    continue
+                step = steps[channel]
+                held[channel] = (min(want, have + step) if have < want
+                                 else max(want, have - step))
+                changed = True
+            if changed:
+                moving = True
+                self._repaint(row)
+            elif not any(held):
+                # Settled dark: nothing left to remember, and `values`
+                # answers from the target for a row with no entry.
+                self._values.pop(row, None)
+        if not moving:
+            # **This is what makes an idle rail cost nothing.** A row
+            # settled at 1.0 (the selected one) keeps its entry so it
+            # still paints its pill, but it is not *moving*, so the
+            # timer has no reason to keep firing.
+            self._stop()
+
+    def _repaint(self, row):
+        try:
+            index = self._rail.model().index(row, 0)
+            self._rail.viewport().update(self._rail.visualRect(index))
+        except RuntimeError:
+            pass
+
+
 class NavListWidget(QListWidget):
     """A QListWidget sized to fit its rows instead of stretching to fill
     the sidebar - the leftover space should go to the trailing stretch,
@@ -660,9 +1002,14 @@ def _rail_view_icon_size(widget) -> int:
 
 
 def _rail_icon(path, dpr, size=RAIL_ICON_SIZE):
-    """A rail row's decoration: TEXT_MUTED at rest, TEXT when the row is
-    selected. Hover is _RailDelegate's to draw - QStyle only ever asks an
-    icon for Normal, Disabled or Selected.
+    """A rail row's resting decoration, in TEXT_MUTED.
+
+    **One pixmap, no Selected variant any more.** It used to carry a
+    bright pixmap under QIcon.Mode.Selected so QStyle would swap it for
+    the active row; _RailDelegate now paints every row's icon at a colour
+    lerped along RAIL_TINTS, so the mode was dead weight - and a mode can
+    only ever be on or off, which is exactly what an animated row must
+    not be.
 
     **Returns None rather than an empty icon when the file is missing.**
     images.tinted_asset answers a missing asset with a null QPixmap, by
@@ -670,16 +1017,12 @@ def _rail_icon(path, dpr, size=RAIL_ICON_SIZE):
     rail is a *blank row*, with no label to say which one it is and
     nothing on screen to say anything is wrong. The caller falls back to
     theme.NAV_BULLET instead, so a bundle that shipped without one of the
-    PNGs loses the picture and keeps the row.
+    icons loses the picture and keeps the row.
     """
     normal = images.tinted_asset(path, theme.TEXT_MUTED, size, dpr)
     if normal.isNull():
         return None
-    built = QIcon(normal)
-    built.addPixmap(
-        images.tinted_asset(path, theme.TEXT, size, dpr),
-        QIcon.Mode.Selected)
-    return built
+    return QIcon(normal)
 
 
 class _RailDelegate(QStyledItemDelegate):
@@ -869,34 +1212,114 @@ class _RailDelegate(QStyledItemDelegate):
         return hint
 
     def paint(self, painter, option, index):
+        """The row's four states - normal, hover, pressed, selected -
+        drawn here rather than declared in QSS, because a stylesheet rule
+        cannot be interpolated and the owner asked for these to *move*.
+
+        The shape of it: fill the pill and the accent indicator by hand,
+        then strip State_Selected and State_MouseOver off the option and
+        hand the row to drawControl anyway. That last part is what keeps
+        this a small change - initStyleOption's folded centring,
+        sizeHint's row height and the style's own elide all still run
+        exactly as they did, and the only thing the style no longer does
+        is decide a colour."""
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
-        hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
-        if hovered and not (opt.state & QStyle.StateFlag.State_Selected):
-            path = index.data(RAIL_ICON_ROLE)
-            if path:
-                # Rebuilt in TEXT rather than swapped to the icon's
-                # Selected pixmap through a mode, because the style is
-                # what picks the mode and it will only ever pick
-                # Selected for a selected row. Cheap on repeat -
-                # images.tinted_asset caches per (file, colour, size,
-                # ratio), and a hover asks for one combination.
-                #
-                # The size and the ratio are read off the row, not off
-                # the sidebar's state: the delegate has no business
-                # knowing whether the rail is folded, and a previous
-                # pass shipped a snap-back here by deriving the artwork
-                # from something the paint could not see - the row
-                # shifted sideways under the pointer.
-                hot = images.tinted_asset(str(path), theme.TEXT,
-                                          _rail_view_icon_size(opt.widget),
-                                          _rail_dpr(opt.widget))
-                if not hot.isNull():
-                    opt.icon = QIcon(hot)
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
+        motion = getattr(widget, "_rail_motion", None)
+        if motion is not None:
+            hover, active, press = motion.values(index.row())
+        else:
+            # No controller (a bare view, a test harness): the states
+            # still read correctly, they just arrive fully on or off.
+            hover = 1.0 if opt.state & QStyle.StateFlag.State_MouseOver else 0.0
+            active = 1.0 if opt.state & QStyle.StateFlag.State_Selected else 0.0
+            press = 0.0
+
+        # **Both flags off before drawControl.** theme.py's #NavList
+        # ::item:hover / ::item:selected rules are neutral now, but the
+        # style also derives the icon mode and the text colour role from
+        # these - so leaving them set would put QPalette.HighlightedText
+        # under the label on the very row whose colour is being animated.
+        opt.state &= ~QStyle.StateFlag.State_Selected
+        opt.state &= ~QStyle.StateFlag.State_MouseOver
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        # A press insets the pill by a pixel instead of scaling the row.
+        # The owner asked for the press to be *subtle*, and a scale on a
+        # row this size reads as a wobble - it also moves the label,
+        # which no amount of easing makes look deliberate.
+        inset = press
+        pill = QRectF(opt.rect).adjusted(inset, inset, -inset, -inset)
+        radius = float(theme.RADIUS)
+        # Hover wash first, faded out by `active` rather than added to
+        # it: a selected row that is also hovered should read as one
+        # pill at its own strength, not as two fills stacked into a
+        # brighter third colour.
+        lift = hover * (1.0 - active)
+        if lift > 0.004:
+            painter.setBrush(_rail_wash(theme.SURFACE, lift))
+            painter.drawRoundedRect(pill, radius, radius)
+        if active > 0.004:
+            painter.setBrush(_rail_wash(theme.SURFACE_HOVER, active))
+            painter.drawRoundedRect(pill, radius, radius)
+        if press > 0.004:
+            painter.setBrush(_rail_wash(theme.SURFACE_ACTIVE, press * 0.45))
+            painter.drawRoundedRect(pill, radius, radius)
+        if active > 0.004:
+            # The thin accent bar down the pill's left edge. It grows as
+            # well as fades, which is what carries the eye from the old
+            # row to the new one - the two pills cross-fade in place
+            # because a selection here can move *between rails* (Home is
+            # its own list, and so is each nav block), so there is no one
+            # widget a single sliding pill could live in.
+            tall = pill.height() * RAIL_INDICATOR_HEIGHT * (0.45 + 0.55 * active)
+            painter.setBrush(_rail_wash(theme.ACCENT, active))
+            painter.drawRoundedRect(
+                QRectF(pill.left() + RAIL_INDICATOR_INSET,
+                       pill.center().y() - tall / 2.0,
+                       float(RAIL_INDICATOR_WIDTH), tall),
+                RAIL_INDICATOR_WIDTH / 2.0, RAIL_INDICATOR_WIDTH / 2.0)
+        painter.restore()
+
+        # One quantised step for the icon *and* the label, so they can
+        # never brighten out of step - see RAIL_TINTS for why the ramp is
+        # quantised at all.
+        tint = RAIL_TINTS[int(round(max(hover, active) * RAIL_TINT_STOPS))]
+        colour = QColor(tint)
+        opt.palette.setColor(QPalette.ColorRole.Text, colour)
+        opt.palette.setColor(QPalette.ColorRole.HighlightedText, colour)
+        path = index.data(RAIL_ICON_ROLE)
+        if path:
+            # The size and the ratio are read off the row, not off the
+            # sidebar's state: the delegate has no business knowing
+            # whether the rail is folded, and a previous pass shipped a
+            # snap-back here by deriving the artwork from something the
+            # paint could not see - the row shifted sideways under the
+            # pointer.
+            lit = images.tinted_asset(str(path), tint,
+                                      _rail_view_icon_size(widget),
+                                      _rail_dpr(widget))
+            if not lit.isNull():
+                opt.icon = QIcon(lit)
+
+        # The nudge, on a labelled row only (see RAIL_NUDGE_PX). Applied
+        # as a painter translation rather than by moving opt.rect,
+        # because the rect is what the style elides the label against -
+        # shifting it would re-elide "Movies & Series" a character
+        # shorter every time the row lit up.
+        offset = (int(round(RAIL_NUDGE_PX * max(hover, active)))
+                  if opt.text else 0)
+        if offset:
+            painter.save()
+            painter.translate(offset, 0)
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt,
                           painter, widget)
+        if offset:
+            painter.restore()
 
 
 def _fit_to_available_screen(rect):
@@ -1013,14 +1436,38 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        root_layout = QHBoxLayout(central)
+        # A column now, not a row: the window's own bar sits above the
+        # sidebar and the page, in the strip Windows used to draw its
+        # caption into (helpers/window_chrome explains how that strip
+        # became ours). The old row is `body`, unchanged inside it.
+        root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        root_layout.addWidget(self._build_sidebars())
+        self.title_bar = window_chrome.TitleBar(central)
+        self.title_bar.back.connect(self.navigate_back)
+        self.title_bar.minimise.connect(self.showMinimized)
+        self.title_bar.maximise.connect(self._toggle_maximised)
+        self.title_bar.close_window.connect(self.close)
+        self.top_search = self.title_bar.search
+        self.top_search.textEdited.connect(self._on_top_search)
+        self.top_search.installEventFilter(self)
+        root_layout.addWidget(self.title_bar)
+
+        body = QWidget(objectName="Bare")
+        body_row = QHBoxLayout(body)
+        body_row.setContentsMargins(0, 0, 0, 0)
+        body_row.setSpacing(0)
+        body_row.addWidget(self._build_sidebars())
 
         self.container = QWidget()
-        root_layout.addWidget(self.container, stretch=1)
+        body_row.addWidget(self.container, stretch=1)
+        root_layout.addWidget(body, stretch=1)
+        self._body = body
+        # The panel the one search field drops its results into, while
+        # one is open. Built on the first keystroke, dropped when it
+        # closes itself - see _on_top_search.
+        self._search_panel = None
 
         self._history = ["home"]
         self._history_index = 0
@@ -1036,6 +1483,18 @@ class MainWindow(QMainWindow):
 
         self._update_signals = _UpdateCheckSignals()
         self._update_signals.found.connect(self._on_update_found)
+
+        # No native caption from here on. Set before the first show()
+        # so the window is never created with a frame it then loses -
+        # changing the flag on a visible window re-creates it on
+        # Windows, which would drop the geometry just restored onto it.
+        window_chrome.make_frameless(self)
+        # Edge-resize. On the application, not on the window: presses on
+        # the perimeter land on whichever child covers it, so a filter
+        # installed on the window never sees them. helpers/window_chrome
+        # explains what that costs and how it is kept down.
+        self._resize_filter = window_chrome.ResizeFilter(self)
+        QApplication.instance().installEventFilter(self._resize_filter)
 
         self._restore_rect = None
         self._open_maximized = self._restore_window_geometry()
@@ -1262,6 +1721,13 @@ class MainWindow(QMainWindow):
         # attached to whichever row happened to hold one at build time.
         # Owned by the list, so it lives exactly as long as it does.
         rail.setItemDelegate(_RailDelegate(rail))
+        # The row animation. Here, not at the three call sites, for the
+        # same reason as everything else in this function - and it has to
+        # be built *after* the delegate, since the delegate reads it off
+        # the widget by this attribute name on every paint. Parented to
+        # the rail, so it dies with it and its shared timer loses its
+        # last subscriber when the last rail goes.
+        rail._rail_motion = _RailMotion(rail)
         if self._rail_bucket is not None:
             self._rail_bucket["rails"].append(rail)
         return rail
@@ -1403,17 +1869,29 @@ class MainWindow(QMainWindow):
                 return 0
 
             with_logo = largest(bare - (LOGO_HEIGHT if has_logo else 0))
-            if with_logo == natural:
-                fitted, drops = natural, False
+            if with_logo:
+                # **Keep the band whenever every row still fits with it
+                # there**, even if dropping it would allow a looser
+                # pitch. This used to drop it the moment `without` beat
+                # `with_logo` by a single pixel, and with eleven rows on
+                # the rail that is always - measured 25 August 2026, the
+                # mark was gone at 840, 900, 940, 1000 and maximised,
+                # i.e. it had stopped being a band that gives way under
+                # pressure and become one that is never drawn.
+                #
+                # The ask behind the old rule (25 August 2026: *"make
+                # all buttons showing without scrolling"*) is about
+                # scrolling, and a tighter pitch still shows every
+                # button without any. So the band now costs pitch rather
+                # than costing itself, and only goes when the rows
+                # genuinely cannot fit around it.
+                fitted, drops = with_logo, False
             else:
-                # The logo band is decoration and the rows are the
-                # navigation, so the band gives first - see the class
-                # note. Only then are the rows squeezed.
+                # Nothing fits at any pitch down to MIN_ROW_PITCH with
+                # the band in place - now it gives way, which is what it
+                # is for.
                 without = largest(bare)
-                if without > with_logo:
-                    fitted, drops = without, True
-                else:
-                    fitted, drops = (with_logo or MIN_ROW_PITCH), with_logo == 0
+                fitted, drops = (without or MIN_ROW_PITCH), True
             drop_logo = drop_logo or drops
             pitch = fitted if not pitch else min(pitch, fitted)
 
@@ -1721,30 +2199,36 @@ class MainWindow(QMainWindow):
         fold_row.addWidget(self.fold_btn)
         layout.addLayout(fold_row)
 
-        # Logo, centered - the artwork already has the "Atomic" wordmark
-        # built in, so it's the whole brand header on its own (no separate
-        # text label) - anchoring the top of the sidebar, with the nav
-        # list/Add button below pushed down to make room for it (see the
-        # extra spacing further down).
+        # Logo, centered - the brand mark alone is the whole header (no
+        # separate text label) - anchoring the top of the sidebar, with
+        # the nav list/Add button below pushed down to make room for it
+        # (see the extra spacing further down).
         logo_label = QLabel()
         # Centred on both axes, not just across: the label keeps the
         # expanded logo's full height at both widths (see below), so a
         # top-aligned rail mark would sit ~45px above where the same
         # mark sits unfolded.
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Scale to LOGO_HEIGHT *physical* pixels (source PNG is 1672px tall,
-        # plenty of headroom) and tag the result with the screen's DPI
-        # scale, or Qt stretches the merely-260px-tall pixmap to fill a
-        # 260*scale screen area on any non-100%-scaled display (125% here)
-        # and it comes out visibly blurry.
+        # **Matte, not the artwork's own shading** (the owner's ask,
+        # 25 August 2026: "make the atomic Icon in the sidebar folded/
+        # unfolded matte color not as is"): both sidebar marks are flat
+        # tinted silhouettes of the brand PNG - images.tinted_asset
+        # fills the alpha with one colour (SourceIn), scales to
+        # *physical* pixels and tags the ratio it landed on, so the mark
+        # stays crisp on a 125%/150% display (the same DPI rule the old
+        # hand-scaled pixmap followed here). ACCENT is the tone because
+        # that is the role the Harbor reference gives its own mark: the
+        # one accent-coloured thing on the sidebar column.
         dpr = QApplication.primaryScreen().devicePixelRatio()
+        # Loaded only for its aspect ratio (1536x1024) - the drawn
+        # pixmaps come from tinted_asset, which reads the file through
+        # its own cache.
         source = QPixmap(str(APP_DIR / "assets" / "atomic_icon.png"))
+        aspect = (source.height() / source.width()) if source.width() else 1.0
 
-        def _scaled(height):
-            shrunk = source.scaledToHeight(
-                int(height * dpr), Qt.TransformationMode.SmoothTransformation)
-            shrunk.setDevicePixelRatio(dpr)
-            return shrunk
+        def _tinted(height):
+            return images.tinted_asset("assets/atomic_icon.png", theme.ACCENT,
+                                       max(1, round(height)), dpr)
 
         # **Two sizes, and the header keeps its full height at both**
         # (the owner's ask, 25 August 2026: "make the Icons vertical
@@ -1758,9 +2242,8 @@ class MainWindow(QMainWindow):
         # blanked, because 120px of empty strip at the top of a 72px
         # rail reads as a layout bug; the artwork is a mark with no
         # wordmark in it, so it survives being small.
-        self._logo_wide = _scaled(LOGO_HEIGHT)
-        self._logo_rail = _scaled(
-            (SIDEBAR_COLLAPSED_WIDTH - 32) * source.height() / source.width())
+        self._logo_wide = _tinted(LOGO_HEIGHT)
+        self._logo_rail = _tinted((SIDEBAR_COLLAPSED_WIDTH - 32) * aspect)
         logo_label.setFixedHeight(LOGO_HEIGHT)
         self.logo_label = logo_label
         self._style_logo()
@@ -2189,27 +2672,31 @@ class MainWindow(QMainWindow):
         tooltip - one picture per row at both widths, so folding never
         swaps the symbol out from under the user.
 
-        `icon_token` is a bundled PNG's path for every row this app
+        `icon_token` is a bundled SVG's path for every row this app
         ships (theme.NAV_ICONS and SECTION_ICONS, both built by
         theme.rail_icon). It used to be a Segoe codepoint typed into the
         item's *text*, with two hand-drawn exceptions handed over as a
         decoration; now every row takes the decoration path and the text
         branch below is only a fallback - which is the point of it.
 
-        **A row must never come out blank, and a missing PNG is how that
-        happens quietly**: images.tinted_asset answers a missing asset
-        with a null pixmap by design, Qt draws a null pixmap as nothing,
-        and a folded row has no label to give it away. So _rail_icon
-        reports the miss instead of returning an empty icon, and the row
-        falls through to theme.NAV_BULLET - the same branch an unmapped
-        section key has always used.
+        **A row must never come out blank, and a missing file is how
+        that happens quietly**: images.tinted_asset answers a missing
+        asset with a null pixmap by design, Qt draws a null pixmap as
+        nothing, and a folded row has no label to give it away. So
+        _rail_icon reports the miss instead of returning an empty icon,
+        and the row falls through to theme.NAV_BULLET - the same branch
+        an unmapped section key has always used.
 
         The expanded font stays the two-family chain
         (theme.nav_row_font) even though nothing types a glyph in the
         normal case: it resolves the icon face first and falls through
         to the nav face, and an item carries exactly one font, so a
         fallback row typing a bullet still gets a face that has one."""
-        path = str(icon_token) if str(icon_token).endswith(".png") else ""
+        # theme.is_rail_icon, not a suffix typed here: this test and the
+        # suffix theme.rail_icon writes have to move together, and when
+        # they did not, *every* row fell back to the bullet with nothing
+        # on screen to say why (see theme.RAIL_ICON_SUFFIX).
+        path = str(icon_token) if theme.is_rail_icon(icon_token) else ""
         size = (RAIL_ICON_SIZE_FOLDED if self._sidebar_collapsed
                 else RAIL_ICON_SIZE)
         icon = _rail_icon(path, _rail_dpr(self), size) if path else None
@@ -2860,6 +3347,34 @@ class MainWindow(QMainWindow):
         # QEvent.Type enum member through Python's enum machinery, and
         # this used to ask four times per event.
         kind = event.type()
+        if (kind == QEvent.Type.KeyPress
+                and obj is getattr(self, "top_search", None)):
+            # Up/Down/Enter drive the results panel while the caret
+            # stays in the field - which is why the panel is shown
+            # without activating it (helpers/global_search).
+            key = event.key()
+            panel = self._search_panel
+            if panel is not None:
+                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    panel.move_selection(1 if key == Qt.Key.Key_Down else -1)
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    panel.open_current()
+                    self.top_search.clear()
+                    self._close_search_panel()
+                    return True
+            if key == Qt.Key.Key_Escape:
+                # Escape *leaves* the field, it does not merely empty
+                # it. Clearing alone left the caret blinking in a box
+                # the user had just said they were done with - reported
+                # once already, on Home's field, and this is the same
+                # ending applied to the one field that replaced it.
+                self.top_search.clear()
+                self._close_search_panel()
+                self.top_search.clearFocus()
+                if self._current_page is not None:
+                    self._current_page.setFocus()
+                return True
         if kind == QEvent.Type.Resize:
             if obj is getattr(self, "container", None):
                 self._fit_current_page()
@@ -3164,6 +3679,90 @@ class MainWindow(QMainWindow):
         else:
             theme.without_window_animation(self, self.showNormal)
 
+    # ---- The window's own frame ---------------------------------------
+    def _toggle_maximised(self):
+        """The bar's middle button, and a double-click on the bar (which
+        Windows delivers itself, because the bar answers HTCAPTION).
+
+        Not through theme.without_window_animation: that exists for the
+        maximized <-> full screen swap, where Windows' own animation
+        shows a frame of the wrong size. An ordinary maximise is the
+        animation the user expects to see."""
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            bar = getattr(self, "title_bar", None)
+            if bar is not None:
+                bar.set_maximised(self.isMaximized())
+                # Full screen is the one state with no chrome at all -
+                # the point of it is the picture, and the player and
+                # reader draw their own bars over the top anyway.
+                bar.setVisible(not self.isFullScreen())
+        super().changeEvent(event)
+
+    # ---- The one search field -----------------------------------------
+    def _on_top_search(self, text):
+        """Results drop out of the bar's field, on every page.
+
+        The panel is a list under the field rather than a page of its
+        own, for the reason helpers/global_search records: the field
+        lands under the eye and the results grow downwards from it
+        without the panel jumping about as they arrive."""
+        if not str(text).strip():
+            self._close_search_panel()
+            return
+        if self._search_panel is None:
+            self._search_panel = global_search.GlobalSearch(
+                self, anchor=self.top_search)
+            # It closes itself when a result is chosen, and deletes
+            # itself when it does; dropping the reference then is what
+            # keeps the next keystroke off a deleted panel.
+            self._search_panel.closed.connect(self._forget_search_panel)
+            self._search_panel.show()
+        self._search_panel.set_query(text)
+        # Typing also narrows the page underneath - the owner's ask, so
+        # that losing the per-page boxes loses no filtering with them.
+        self._refilter_current_page()
+
+    def _forget_search_panel(self):
+        self._search_panel = None
+
+    def _close_search_panel(self):
+        if self._search_panel is not None:
+            self._search_panel.close()
+            self._search_panel = None
+        self._refilter_current_page()
+
+    def page_filter_text(self) -> str:
+        """What the page on screen should narrow itself to.
+
+        Every grid page asks this through its own `_search_query()`,
+        which used to read a box the page owned. One field now, so the
+        answer comes from the window - see windows/games._search_query
+        and the two beside it."""
+        field = getattr(self, "top_search", None)
+        try:
+            return field.text().strip().lower() if field is not None else ""
+        except RuntimeError:
+            return ""
+
+    def _refilter_current_page(self):
+        """Ask the page to redraw against the field's current text.
+
+        Duck-typed like every other page hook here: a page that does not
+        filter simply has no refresh_filter, and nothing happens."""
+        page = self._current_page
+        hook = getattr(page, "refresh_filter", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception:
+                logs.exception("Could not re-filter the page")
+
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.AltModifier:
             if event.key() == Qt.Key.Key_Left:
@@ -3177,21 +3776,16 @@ class MainWindow(QMainWindow):
             return
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.key() == Qt.Key.Key_F:
-                # The page's own search box, not the global panel - F is
-                # "find in this list" everywhere else too.
-                #
-                # On Watch and Read that box is now the **Discover**
-                # search, and reaching it switches to Discover first
-                # (the owner's ask, 22 August 2026: "make the Ctrl+F go
-                # to discover search while in the watch or read pages").
-                # Every other page keeps exactly what it had: the saved
-                # rows' filter, which is what _focus_page_search
-                # declining falls through to.
-                if not self._focus_page_search():
-                    box = getattr(self._current_page, "search_box", None)
-                    if box is not None:
-                        box.setFocus()
-                        box.selectAll()
+                # **The one search field, on every page.** It used to be
+                # "this page's own box", with a special case sending the
+                # tracker pages to their Discover search - and there is
+                # no page box left to mean (the owner's ask, 25 August
+                # 2026: one bar that searches everything, and remove the
+                # others). Selected rather than cleared, so a second
+                # Ctrl+F types straight over an existing query instead
+                # of throwing away one that may still be wanted.
+                self.top_search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+                self.top_search.selectAll()
                 return
             if event.key() == Qt.Key.Key_Y:
                 # Redo: do again whatever Ctrl+Z just undid. Only ever
@@ -3290,23 +3884,21 @@ class MainWindow(QMainWindow):
         self._show_page(page_name, direction=self._direction_between(current, page_name), animate=animate)
 
     def _page_search_boxes(self):
-        """Every search field the page on screen owns, most specific
-        first.
+        """Every search field on screen, most specific first.
 
-        Duck-typed, like every other page hook here (SECTIONS,
-        relayout_for_sidebar): `search_box` is the filter a page draws
-        over its own saved rows, and `page_search_field()` is whatever
-        that page calls its main search - on the tracker pages, the
-        Discover box, which is built lazily and so has to be *asked*
-        for rather than read off the class."""
+        There is one in the ordinary case - the window's own. The
+        `search_box` branch is kept because two surfaces still own a
+        field that is genuinely theirs and not app-wide: the reader's
+        chapter filter and the player's episode list. Duck-typed, like
+        every other page hook here (SECTIONS, relayout_for_sidebar)."""
         page = self._current_page
-        boxes = [getattr(page, "search_box", None)]
-        field = getattr(page, "page_search_field", None)
-        if callable(field):
-            try:
-                boxes.append(field())
-            except RuntimeError:
-                pass        # the page went away under a queued key
+        # The window's own field first: it is the only one left on most
+        # pages, and where a page still owns one (the reader's chapter
+        # filter, the player's episode list) that one is more specific
+        # and comes after only because Escape prefers whatever has the
+        # focus - see _live_search_box.
+        boxes = [getattr(self, "top_search", None),
+                 getattr(page, "search_box", None)]
         return [box for box in boxes if box is not None]
 
     def _live_search_box(self):
@@ -3332,51 +3924,23 @@ class MainWindow(QMainWindow):
                 return box
         return None
 
-    def _focus_page_search(self) -> bool:
-        """Ctrl+F: put the cursor in this page's own search field, and
-        show the section that field lives in first.
-
-        False when the page has no such field, which is what leaves
-        Ctrl+F alone everywhere else. The section switch goes through
-        _on_section_clicked rather than the page's setter directly, so
-        the rail's highlight follows - a section reached by keyboard has
-        to look the same as one reached by clicking it."""
-        page = self._current_page
-        if not callable(getattr(page, "page_search_field", None)):
-            return False
-        section = getattr(page, "PAGE_SEARCH_SECTION", None)
-        current = getattr(page, "current_section", None)
-        if section is not None and (not callable(current)
-                                    or current() != section):
-            self._on_section_clicked(section)
-        # After the switch, never before: the section that owns the
-        # field is what builds it (tracker._show_discover).
-        box = page.page_search_field()
-        if box is None:
-            return False
-        box.setFocus(Qt.FocusReason.ShortcutFocusReason)
-        # Selected rather than cleared, so a second Ctrl+F over an
-        # existing query types straight over it without throwing away a
-        # query the user may have wanted to edit.
-        box.selectAll()
-        return True
-
     def open_global_search(self, initial=""):
-        """Ctrl+K, from any page: go to Home and put the cursor in its
-        search field.
+        """Ctrl+K, from any page.
 
-        Home rather than a panel over whatever page is showing, because
-        Home is where the field lives now - one search box, in one place,
-        reached from everywhere."""
-        self.navigate_to("home")
-        page = self._current_page
-        field = getattr(page, "search_bar", None)
+        It used to navigate to Home and land in the field there, because
+        that was where the one search box lived. The box is in the
+        window's own bar now (the owner's ask, 25 August 2026), so this
+        no longer moves the user off the page they were on to search -
+        which was always the odd part of it."""
+        field = getattr(self, "top_search", None)
         if field is None:
             return
-        field.setFocus()
+        field.setFocus(Qt.FocusReason.ShortcutFocusReason)
         if initial:
             field.setText(initial)
-            page._search_bar_typed(initial)
+            self._on_top_search(initial)
+        else:
+            field.selectAll()
 
     def go_back(self):
         if self._history_index > 0:

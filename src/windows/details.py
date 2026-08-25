@@ -831,8 +831,11 @@ def _badge(text, kind) -> QLabel:
     states the owner's reference picture colours differently. One word
     for finished across both media (the owner's ask), where this used to
     say WATCHED on episodes and READ on chapters."""
+    # ON_ACCENT on both fills: it computes 10.5:1 on SUCCESS (25 August
+    # 2026) - this held a hand-typed near-black green before, which the
+    # navy re-theme would have stranded.
     colours = {"watched": (theme.ON_ACCENT, theme.ACCENT_GRADIENT, theme.ACCENT),
-               "upcoming": ("#0d1206", theme.SUCCESS, theme.SUCCESS)}
+               "upcoming": (theme.ON_ACCENT, theme.SUCCESS, theme.SUCCESS)}
     fg, bg, border = colours[kind]
     label = QLabel(text)
     label.setStyleSheet(
@@ -1213,8 +1216,11 @@ class DetailsPage(GlassPage):
     def _build_panel(self) -> QWidget:
         panel = QFrame()
         panel.setFixedWidth(PANEL_WIDTH)
+        # theme.rgba over BG_ALT, not a hand-typed rgba: the old literal
+        # was a warm near-black the navy re-theme would have stranded as
+        # a brown pane over a cool backdrop.
         panel.setStyleSheet(
-            f"QFrame {{ background: rgba(17, 14, 10, 210);"
+            f"QFrame {{ background: {theme.rgba(theme.BG_ALT, 210)};"
             f" border: 1px solid {theme.BORDER};"
             f" border-radius: {theme.RADIUS_LG}px; }}")
         column = QVBoxLayout(panel)

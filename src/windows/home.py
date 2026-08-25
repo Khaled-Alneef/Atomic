@@ -10,7 +10,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
@@ -20,13 +20,13 @@ from PyQt6.QtWidgets import (
 # hero_art at module level costs nothing new: its imports (PIL via
 # helpers.images) are already pulled by this module's own `images`
 # import - measured, not assumed, 22 August 2026.
-from helpers import (app_art, cover_fetch, game_art, game_launch, global_search,
+from helpers import (app_art, cover_fetch, game_art, game_launch,
                      hero_art, images, launchers, lookup_pool, nav_config, storage,
                      theme)
 from helpers.widgets import (
     Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, _OpaqueGround,
     hero_logo_label,
-    hero_split, inform, scroll_area, search_field, set_hero_logo,
+    hero_split, inform, scroll_area, set_hero_logo,
     use_hover_cursor,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
@@ -67,10 +67,8 @@ QUICK_LIST_LIMIT = 5
 # The search field's width here. Wider than a page's own 220px filter box
 # because it searches everything rather than one list, and capped so it
 # stays a field rather than a banner across a 2048px display.
-SEARCH_BAR_WIDTH = 520
 # What it may shrink to before the page would rather clip it - narrow
 # enough that a 1000px window still shows a usable field.
-SEARCH_BAR_MIN_WIDTH = 240
 
 HERO_SLIDE_LIMIT = 4
 HERO_SLIDE_INTERVAL_MS = 6000
@@ -182,10 +180,7 @@ class HomePage(GlassPage):
         panel_layout.addWidget(scroll_area(body, always_show_vbar=True,
                                            ground=theme.BG, notch_scale=0.7))
 
-        # Greeting on the left, the app-wide search on the same line.
-        # Only this page carries the field: it searches everything, and
-        # Home is the page that is already about everything. Ctrl+K
-        # reaches the same panel from anywhere else.
+        # Greeting on the left, the clock on the right.
         header_row = QHBoxLayout()
         header = QVBoxLayout()
         header.setSpacing(2)
@@ -196,35 +191,21 @@ class HomePage(GlassPage):
         greeting_box.setLayout(header)
         header_row.addWidget(greeting_box)
 
+        # **The search field that used to sit between these two
+        # stretches is gone.** One bar in the window's title bar
+        # searches everything from every page now (the owner's ask, 25
+        # August 2026), and a second field on Home - directly under it -
+        # was the same question asked twice.
+        #
+        # Both stretches stay. They were here to centre the field
+        # between the greeting and the clock, and with it gone they are
+        # what still pushes the clock to the right edge; collapsing them
+        # to one would leave the clock floating beside the greeting.
         header_row.addStretch()
-        # A range, not a fixed width. Fixed at 520 the row's minimum came
-        # to 1733px - the greeting, the field and the greeting-width
-        # spacer that balances it - so on a 1400px window the row
-        # overflowed the viewport and the field was clipped off the right
-        # edge rather than sitting centred.
-        self.search_bar = search_field("Search everything...")
-        self.search_bar.setMinimumWidth(SEARCH_BAR_MIN_WIDTH)
-        self.search_bar.setMaximumWidth(SEARCH_BAR_WIDTH)
-        self.search_bar.textEdited.connect(self._search_bar_typed)
-        self.search_bar.installEventFilter(self)
-        # The results list under the field, built on the first keystroke
-        # and closed with the query.
-        self._search_results = None
-        # Top-aligned, which puts it on the greeting's own line: the
-        # block under it is two lines (greeting plus subtitle), so
-        # centring the field against the block dropped it into the gap
-        # between them - measured 11px below the greeting's centre, and
-        # visibly so. The field and the greeting line are within a pixel
-        # of the same height, so aligning their tops aligns their middles.
-        header_row.addWidget(self.search_bar, stretch=3, alignment=Qt.AlignmentFlag.AlignTop)
-        header_row.addStretch()
-        # Balances the greeting's width on the right, so the field lands
-        # centred in the page rather than centred in what is left over
-        # beside the greeting. Taken from the greeting's own hint at
-        # build time; the stretches either side do the rest. It carries
-        # the clock now - the balance was already the right shape and
-        # width for it, and a second widget beside it would have thrown
-        # the centring out by its own width.
+        # Capped at the greeting's width, which is what kept the field
+        # centred in the page rather than in what was left over beside
+        # the greeting. Kept with the field gone: it is still what stops
+        # a long clock string dragging the row's balance around.
         clock_box = QWidget(objectName="Bare")
         clock_box.setMaximumWidth(greeting_box.sizeHint().width())
         clock_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -321,63 +302,6 @@ class HomePage(GlassPage):
             body_layout.addWidget(widget)
 
         body_layout.addStretch()
-
-    def _search_bar_typed(self, text):
-        """Results appear under the field as it is typed into.
-
-        The panel is a list, not a second search box: it opens beneath
-        this field, follows it, and closes when there is nothing to
-        show."""
-        if not text.strip():
-            self._close_search_results()
-            return
-        if self._search_results is None:
-            self._search_results = global_search.GlobalSearch(
-                self.window(), anchor=self.search_bar)
-            # The panel can close without this page asking it to - it
-            # closes itself when a result is clicked - and it deletes
-            # itself when it does. Dropping the reference then is what
-            # keeps the next keystroke from talking to a deleted panel.
-            self._search_results.closed.connect(self._forget_search_results)
-            self._search_results.show()
-        self._search_results.set_query(text)
-
-    def _forget_search_results(self):
-        self._search_results = None
-
-    def _close_search_results(self):
-        if self._search_results is not None:
-            self._search_results.close()
-            self._search_results = None
-
-    def eventFilter(self, obj, event):
-        """Up/Down/Enter/Escape in the field drive the list under it -
-        the field keeps the focus while the list is being driven, which
-        is why the panel is shown without activating. Escape is the one
-        that ends it, focus included."""
-        if obj is self.search_bar and event.type() == QEvent.Type.KeyPress:
-            key = event.key()
-            if self._search_results is not None:
-                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
-                    self._search_results.move_selection(1 if key == Qt.Key.Key_Down else -1)
-                    return True
-                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                    self._search_results.open_current()
-                    self.search_bar.clear()
-                    self._close_search_results()
-                    return True
-            if key == Qt.Key.Key_Escape:
-                # Escape leaves the field, it doesn't just empty it -
-                # measured, clearing alone left the caret blinking in a
-                # box the user had just said they were done with, while
-                # the same key on a tracker page dropped focus onto the
-                # page. Same ending on both now.
-                self.search_bar.clear()
-                self._close_search_results()
-                self.search_bar.clearFocus()
-                self.setFocus()
-                return True
-        return super().eventFilter(obj, event)
 
     def _refresh_greeting(self):
         self.greeting_label.setText(f"{_greeting()} \U0001F44B")
@@ -554,10 +478,7 @@ class HomePage(GlassPage):
 
         chip_row = QHBoxLayout()
         self._hero_chip = QLabel("")
-        self._hero_chip.setStyleSheet(
-            f"color: {theme.ON_ACCENT}; background: {theme.ACCENT_GRADIENT};"
-            f" border-radius: {theme.RADIUS_SM}px; padding: 3px 10px;"
-            f" font-size: 8.5pt; font-weight: 700; letter-spacing: 1px;")
+        self._hero_chip.setStyleSheet(theme.EYEBROW_CHIP_QSS)
         chip_row.addWidget(self._hero_chip)
         chip_row.addStretch(1)
         column.addLayout(chip_row)
@@ -614,7 +535,7 @@ class HomePage(GlassPage):
         self._hero_view = QPushButton("")
         self._hero_view.setFixedHeight(46)
         self._hero_view.setStyleSheet(
-            f"QPushButton {{ background: {theme.rgba(theme.BG, 160)};"
+            f"QPushButton {{ background: {theme.lit_fill(theme.rgba(theme.SURFACE, 170), theme.rgba(theme.BG, 185))};"
             f" color: {theme.TEXT}; border: 1px solid {theme.TEXT_MUTED};"
             f" border-radius: {theme.RADIUS}px; padding: 8px 18px;"
             f" font-weight: 700; }}"
@@ -771,13 +692,24 @@ class HomePage(GlassPage):
             self._hero_backdrops.get(entry.get("id")), fade=fade)
         for i, dash in enumerate(self._hero_dashes):
             active = i == index
-            dash.setFixedSize(30 if active else 14, 6)
+            # 18 rather than 14 for a resting dash: the reference's
+            # active pill is about 1.5x its neighbours, not 2.1x.
+            dash.setFixedSize(30 if active else 18, 6)
+            # **Lit left-to-right, not top-down.** Every other filled
+            # control in the app takes theme's vertical ramp, and this
+            # is the one surface that cannot: at 6px tall the lip is
+            # 0.42px and simply does not render. The reference lights
+            # this pill along its length for the same reason, so the
+            # angle is passed rather than the default taken. A resting
+            # dash stays flat - it has no shade in the reference either.
+            fill = (theme.accent_gradient(0, 0, 1, 0) if active
+                    else theme.SURFACE_ACTIVE)
+            hot = (theme.accent_gradient(0, 0, 1, 0, hover=True) if active
+                   else theme.TEXT_MUTED)
             dash.setStyleSheet(
-                f"QPushButton {{ background:"
-                f" {theme.ACCENT if active else theme.SURFACE_ACTIVE};"
+                f"QPushButton {{ background: {fill};"
                 f" border: none; border-radius: 3px; padding: 0px; }}"
-                f"QPushButton:hover {{ background:"
-                f" {theme.ACCENT if active else theme.TEXT_MUTED}; }}")
+                f"QPushButton:hover {{ background: {hot}; }}")
 
     def _hero_backdrop_worker(self, entry):
         """One slide's ground, off the UI thread: TMDB's backdrop by

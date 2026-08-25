@@ -33,17 +33,18 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from helpers.poster_grid import PosterGrid
+from helpers.poster_grid import PosterGrid, PosterStrip
 from helpers import (
     anilist, anime_sites, app_settings, cover_fetch, history, images, logs, lookup_pool,
     manga_sites, release_schedule, storage, stremio, theme, title_match,
+    tvmaze,
 )
 from helpers.widgets import (
     Card, CardDragReorder, CardTextLabel, GlassPage, HERO_COVER_SIZE,
     _OpaqueGround,
     HeroBanner, SideScroller, confirm,
     defer_grid_rebuild, finish_toast, frameless_dialog, hero_logo_label,
-    hero_split, inform, scroll_area, search_field, set_hero_logo, show_toast,
+    hero_split, inform, scroll_area, set_hero_logo, show_toast,
     SmoothTween,
     show_undo_toast, use_hover_cursor,
 )
@@ -555,6 +556,11 @@ _SCHEDULE_UPCOMING_CACHE = {}
 # DISCOVER_LIMIT the shared cache holds; the schedule is a list, not a
 # poster grid.
 SCHEDULE_RELEASED_LIMIT = 20
+# How many catalogue rows "Airing Soon" keeps once AniList's anime and
+# TVmaze's series are merged. 40 was each source's own cap; the merged
+# list is sorted by time first, so this trims the far end of the week
+# rather than one service's contribution.
+SCHEDULE_UPCOMING_LIMIT = 40
 
 
 def _stamp_cached_covers(rows):
@@ -655,10 +661,21 @@ def _fetch_upcoming_calendar():
     the same arithmetic _load_discover_cache uses), so the next visit's
     _cached_upcoming_calendar still says "not fresh" and AniList is
     re-asked then - shown-but-stale, never shown-and-final."""
+    rows = []
     try:
-        rows = anilist.fetch_upcoming_airing(hours=168, limit=40)
+        rows += anilist.fetch_upcoming_airing(hours=168, limit=40) or []
     except Exception:
-        rows = []
+        pass        # AniList's half; TVmaze's below may still answer
+    # **Series too, not just anime** - the owner's ask, 25 August 2026.
+    # A separate try: these are two services and one being down must not
+    # take the other's rows with it, which is exactly what a single
+    # try/except around both would do.
+    try:
+        rows += tvmaze.fetch_upcoming_schedule(limit=40) or []
+    except Exception:
+        pass
+    rows.sort(key=lambda row: row.get("at"))
+    rows = rows[:SCHEDULE_UPCOMING_LIMIT]
     if rows:
         _stamp_cached_covers(rows)
         _SCHEDULE_UPCOMING_CACHE["upcoming"] = (time.monotonic(), rows)
@@ -718,7 +735,6 @@ def _fetch_released_rows():
 DISCOVER_DEBOUNCE_MS = 450
 # Tall enough to read as the page's own search bar rather than a field in
 # a form, and rounded to half its height so it is a true pill.
-DISCOVER_SEARCH_HEIGHT = 46
 
 # How many cards of a Discover row are built before the event loop gets
 # a turn. A strip is sideways-scrolling and shows about seven at the
@@ -2087,7 +2103,6 @@ class TrackerPage(GlassPage):
     # 2026: "make the Ctrl+F go to discover search while in the watch or
     # read pages"). main.py switches to this section before asking for
     # the field, because the section is what builds it.
-    PAGE_SEARCH_SECTION = TAB_DISCOVER
 
     def __init__(self, app):
         super().__init__(parent=None)
@@ -2287,21 +2302,15 @@ class TrackerPage(GlassPage):
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
         top_row.addStretch()
-        self.search_box = search_field("Search titles...", width=220)
-        # Restored before textChanged is wired up, not after: setText
-        # fires it, which would start the debounce timer for a redraw the
-        # _refresh_grid at the end of __init__ is about to do anyway.
-        self.search_box.setText(remembered.get("search", ""))
         # Debounced rather than filtering on every keystroke: each redraw
         # rebuilds every card from scratch (pages hold no state - see
         # .claude/rules/ui.md), so typing six characters would otherwise
-        # rebuild the whole grid six times.
+        # rebuild the whole grid six times. Kept now that the field lives
+        # in the window's bar - `refresh_filter` starts it.
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
         self._search_timer.timeout.connect(self._refresh_grid)
-        self.search_box.textChanged.connect(self._on_search_text_changed)
-        top_row.addWidget(self.search_box)
         # Symbol only, no label - it sits beside a search box that already
         # says what this row is for. The menu is attached with setMenu
         # rather than exec'd at a point worked out here, so Qt places it
@@ -2812,15 +2821,13 @@ class TrackerPage(GlassPage):
         replaced, not closed, and there is no hook that reliably runs
         before it goes."""
         _SESSION_VIEW_STATE[self._view_state_key()] = {
-            "search": self.search_box.text(),
+            # No "search" any more: the field is the window's, shared by
+            # every page, so remembering one page's query would put text
+            # back into a bar the user had moved on from.
             "status": set(self._status_filter),
             "type": set(self._type_filter),
             "tab": self._active_tab,
         }
-
-    def _on_search_text_changed(self, _text):
-        self._remember_view_state()
-        self._search_timer.start()
 
     # ------------------------------------------------------------------
     # The three sub-sections.
@@ -2984,22 +2991,40 @@ class TrackerPage(GlassPage):
             self._build_history()
         self._remember_view_state()
 
-    def page_search_field(self):
-        """Ctrl+F's target here: the Discover search box.
-
-        getattr, not attribute access - the Discover tab is built on
-        first use (_show_discover), so on a page whose remembered
-        section is Saved this attribute does not exist yet. main.py
-        shows PAGE_SEARCH_SECTION before calling, which is what builds
-        it; None only ever means a build that failed, and main falls
-        through rather than pretending the key did something."""
-        return getattr(self, "discover_search", None)
-
     def _search_query(self) -> str:
-        # getattr because _refresh_grid can run before the box exists on
-        # a page still being built.
-        box = getattr(self, "search_box", None)
-        return box.text().strip().lower() if box else ""
+        """What the one search field in the window's title bar says.
+
+        It used to be this page's own box; there is no page box now (the
+        owner's ask, 25 August 2026). One seam, so the field moving out
+        of the page changed this method rather than every caller."""
+        window = self.window()
+        getter = getattr(window, "page_filter_text", None)
+        return getter() if callable(getter) else ""
+
+    def refresh_filter(self):
+        """Redraw against the field's current text - the window calls
+        this as the bar is typed into.
+
+        **Which timer depends on which tab is showing**, and they are not
+        interchangeable: the saved grid is a local filter over rows
+        already in memory and redraws at 150ms, while Discover is a
+        catalog request over the network and waits DISCOVER_DEBOUNCE_MS
+        so a pause between keystrokes does not cost a round trip."""
+        if self._active_tab == TAB_DISCOVER:
+            timer = getattr(self, "_discover_timer", None)
+        else:
+            timer = getattr(self, "_search_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def start_search(self, query):
+        """Run `query` on the Discover tab, showing that tab first.
+
+        The entry point helpers.global_search uses when a result from
+        outside is chosen in the window's search panel."""
+        if self._active_tab != TAB_DISCOVER:
+            self._set_tab(TAB_DISCOVER)
+        self._start_discover(str(query or "").strip())
 
     def _build_filter_menu(self):
         """Built once per opening. The ticks are then kept right by
@@ -3597,7 +3622,7 @@ class TrackerPage(GlassPage):
 
         if not sections:
             if self._search_query():
-                message = f"Nothing here matches '{self.search_box.text().strip()}'."
+                message = f"Nothing here matches '{self._search_query()}'."
             elif narrowed:
                 message = "Nothing matches the filter - clear it from the filter button."
             else:
@@ -3636,6 +3661,43 @@ class TrackerPage(GlassPage):
         the bar itself, and the arrows SideScroller lays over each end
         move the row."""
         return self._build_card_strip([self._build_card(entry) for entry in group])
+
+    def _build_poster_strip(self, kind, rows, entry_type, run):
+        """One Discover row as a painted, virtualized surface.
+
+        Replaces ~20 Card widgets per row, each carrying a cover QLabel,
+        a title and a meta line: measured on the owner's real data,
+        Discover held **149 Card widgets and 795 widgets in total**, and
+        a scroll frame repainted 14-15 of them. See PosterStrip.
+
+        Everything the widget cards were wired into keeps working
+        unchanged, because the painted grids already had to: covers
+        arrive through `_on_discover_poster` writing to
+        record["cover"].setPixmap, which `_GridCover` answers, and a
+        click goes through `_on_grid_pick` exactly as the category tab's
+        does."""
+        strip = PosterStrip(POSTER_SIZE, ground=theme.PANEL_FILL)
+        # Carried on the widget rather than bound into the lambda: the
+        # same reason _on_category_grid_pick states, and it keeps the
+        # two grid surfaces reading alike.
+        strip._kind, strip._entry_type = kind, entry_type
+        strip.setFixedHeight(strip.sizeHint().height())
+        strip.clicked.connect(
+            lambda index, g=strip: self._on_grid_pick(
+                getattr(g, "_kind", ""), index, getattr(g, "_entry_type", "")))
+        strip.needs_cover.connect(
+            lambda index, g=strip: self._on_grid_needs_cover(
+                getattr(g, "_kind", ""), index, self._discover_run))
+        saved_titles = self._saved_titles()
+        records = [self._grid_record(item, saved_titles) for item in rows]
+        strip.set_items(records)
+        for index, item in enumerate(rows):
+            self._discover_cards[(kind, index)] = {
+                "cover": _GridCover(strip, index),
+                "title": records[index]["title"],
+                "size": POSTER_SIZE, "item": item, "badge": None,
+                "badge_at_foot": False, "grid": strip, "index": index}
+        return strip
 
     def _build_card_strip(self, cards):
         """The sideways-scrolling row itself, given the cards to fill it.
@@ -4379,29 +4441,20 @@ class TrackerPage(GlassPage):
             lookup_pool.submit_browse(_fetch_browse_rows, kind)
 
     def _build_discover_tab(self):
-        search_row = QHBoxLayout()
-        search_row.setContentsMargins(0, 0, 0, 0)
-        self.discover_search = search_field(f"Search {self.TITLE.lower()}...")
-        self.discover_search.setFixedHeight(DISCOVER_SEARCH_HEIGHT)
-        # A pill, where the app's own QLineEdit rule is a RADIUS_SM box.
-        # Spelled out per widget rather than added to theme.py, which is
-        # not this task's to touch - and every value in it is a token.
-        self.discover_search.setStyleSheet(
-            f"QLineEdit {{ background: {theme.SURFACE}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER};"
-            f" border-radius: {DISCOVER_SEARCH_HEIGHT // 2}px;"
-            f" padding: 6px 18px; font-size: 11pt; }}"
-            f"QLineEdit:focus {{ border: 1px solid {theme.ACCENT}; }}")
+        # **No search field of its own.** This tab had the last one left
+        # in the app; the window's title bar carries the only field now
+        # (the owner's ask, 25 August 2026), and typing into it while
+        # this tab is showing runs exactly the search this box used to -
+        # see `refresh_filter` and `_on_discover_search` below.
+        #
         # Debounced, and long (see DISCOVER_DEBOUNCE_MS): every pause
-        # rebuilds rows of poster cards behind a catalog request.
+        # rebuilds rows of poster cards behind a catalog request, which
+        # is why this timer is separate from the 150ms one the saved
+        # grid filters on.
         self._discover_timer = QTimer(self)
         self._discover_timer.setSingleShot(True)
         self._discover_timer.setInterval(DISCOVER_DEBOUNCE_MS)
         self._discover_timer.timeout.connect(self._on_discover_search)
-        self.discover_search.textChanged.connect(
-            lambda _text: self._discover_timer.start())
-        search_row.addWidget(self.discover_search, stretch=1)
-        self._discover_layout.addLayout(search_row)
 
         self.discover_body = QWidget()
         self._discover_body_layout = QVBoxLayout(self.discover_body)
@@ -4410,7 +4463,7 @@ class TrackerPage(GlassPage):
         self._discover_layout.addWidget(scroll_area(self.discover_body, ground=theme.PANEL_FILL), stretch=1)
 
     def _on_discover_search(self):
-        query = self.discover_search.text().strip()
+        query = self._search_query().strip()
         # Against the query the current rows were built from, not against
         # the box's previous text: typing a space and taking it away
         # again debounces to the same search, and re-running it would
@@ -5479,17 +5532,29 @@ class TrackerPage(GlassPage):
             # the owner's data with a paint spy, 22 August 2026, against
             # a 100ms budget). The rest of a row is off screen anyway:
             # a strip is sideways-scrolling and shows about seven.
-            head = rows[:DISCOVER_STRIP_CHUNK]
-            cards = [self._build_discover_card(kind, index, item, entry_type, run)
-                     for index, item in enumerate(head)]
-            # Browsing keeps the sideways strips; a typed search wraps
-            # into a grid instead (the owner's ask: "when the row is
-            # full start a new row") - thirty matches on one sideways
-            # line hides all but the first handful.
-            content = (self._build_card_grid(cards, self.discover_body)
-                       if self._discover_query
-                       else self._build_card_strip(cards))
-            rest = rows[DISCOVER_STRIP_CHUNK:]
+            if self._discover_query:
+                # A typed search wraps into a grid instead of a sideways
+                # line (the owner's ask: "when the row is full start a
+                # new row") - thirty matches on one strip hides all but
+                # the first handful. Still widget cards, and still
+                # chunked, because a grid of results is not the surface
+                # PosterStrip replaces.
+                head = rows[:DISCOVER_STRIP_CHUNK]
+                cards = [self._build_discover_card(kind, index, item,
+                                                   entry_type, run)
+                         for index, item in enumerate(head)]
+                content = self._build_card_grid(cards, self.discover_body)
+                rest = rows[DISCOVER_STRIP_CHUNK:]
+            else:
+                # **Browsing rows are one painted surface, not twenty
+                # widgets.** See poster_grid.PosterStrip for the
+                # measurement; the whole row is handed over at once
+                # because that surface only draws what is on screen, so
+                # there is nothing left for the chunked fill below to
+                # do - `rest` is empty and _fill_row_rest never runs for
+                # a strip any more.
+                content = self._build_poster_strip(kind, rows, entry_type, run)
+                rest = []
             if rest:
                 self._after_first_paint(
                     lambda: self._fill_row_rest(content, kind, rest,
@@ -6076,8 +6141,9 @@ class TrackerPage(GlassPage):
         a borrowed layout must not arrive with a borrowed accent."""
         title_text = (item.get("title") or "").strip()
         # theme.PANEL_FILL, not BG: Discover's banner sits on the panel
-        # scroll body (#1a1712 measured through the corners), and that is
-        # the colour the banner paints its corner outsides back to.
+        # scroll body (measured through the corners under the gold
+        # palette), and that is the colour the banner paints its corner
+        # outsides back to.
         banner = HeroBanner(theme.PANEL_FILL)
         # Cover on the left, details on the right - the owner's ask of 23
         # August 2026, the same call Home's hero makes so the two hero
@@ -6088,10 +6154,7 @@ class TrackerPage(GlassPage):
         chip_row = QHBoxLayout()
         chip_row.setSpacing(8)
         eyebrow = QLabel("TOP RESULT" if self._discover_query else "FEATURED")
-        eyebrow.setStyleSheet(
-            f"color: {theme.ON_ACCENT}; background: {theme.ACCENT_GRADIENT};"
-            f" border-radius: {theme.RADIUS_SM}px; padding: 3px 10px;"
-            f" font-size: 8.5pt; font-weight: 700; letter-spacing: 1px;")
+        eyebrow.setStyleSheet(theme.EYEBROW_CHIP_QSS)
         chip_row.addWidget(eyebrow)
         chip_row.addStretch(1)
         column.addLayout(chip_row)
@@ -6624,7 +6687,13 @@ class TrackerPage(GlassPage):
                 continue
             catalogue_rows.append((when, {
                 "title": title,
-                "type": "Anime",
+                # The row says what it is. It was hardcoded "Anime"
+                # because AniList was the only catalogue source; TVmaze
+                # supplies Series rows beside it now, and a series
+                # filed as anime lands in the wrong type filter.
+                "type": (item.get("type")
+                         if item.get("type") in self.ENTRY_TYPES
+                         else "Anime"),
                 "cover_path": item.get("cover_path") or None,
                 "next_release": {"episode": item.get("episode") or 0,
                                  "season": 0},

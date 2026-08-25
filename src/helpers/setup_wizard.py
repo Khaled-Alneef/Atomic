@@ -27,6 +27,11 @@ from .widgets import frameless_dialog, scroll_area, use_hover_cursor
 SHOW_DELAY_MS = 400
 
 STEPS = 4
+
+# The step pager's pills, matching Home's hero dashes.
+DOT_HEIGHT = 6
+DOT_WIDTH = 18
+DOT_WIDTH_ACTIVE = 30
 LOGO_HEIGHT = 96
 
 # Same column width as Settings' API Keys page, for the same reason it
@@ -135,13 +140,18 @@ class SetupWizard(QDialog):
         body.setContentsMargins(28, 20, 28, 16)
         body.setSpacing(12)
 
-        # Step indicator: one dot per step, the current one in accent.
+        # Step indicator: one pill per step, the current one lit - the
+        # same pager language as Home's hero dashes, which is the app's
+        # only other "which of N am I on" control. It was a row of
+        # bullet glyphs, which sized itself off the font rather than off
+        # anything, and read as punctuation left in the layout.
         dots_row = QHBoxLayout()
-        dots_row.setSpacing(8)
+        dots_row.setSpacing(6)
         dots_row.addStretch()
         self._dots = []
         for _ in range(STEPS):
-            dot = QLabel("●")
+            dot = QLabel("")
+            dot.setFixedHeight(DOT_HEIGHT)
             dots_row.addWidget(dot)
             self._dots.append(dot)
         dots_row.addStretch()
@@ -197,9 +207,15 @@ class SetupWizard(QDialog):
         self._step = max(0, min(STEPS - 1, step))
         self.stack.setCurrentIndex(self._step)
         for index, dot in enumerate(self._dots):
+            active = index == self._step
+            dot.setFixedWidth(DOT_WIDTH_ACTIVE if active else DOT_WIDTH)
+            # Lit along its length, not top-down: at DOT_HEIGHT the
+            # vertical ramp's lip is well under a pixel and does not
+            # render at all (see theme.accent_gradient's note, and the
+            # hero dashes, which hit this first).
             dot.setStyleSheet(
-                f"color: {theme.ACCENT if index == self._step else theme.TEXT_DIM};"
-                f" background: transparent;")
+                f"background: {theme.accent_gradient(0, 0, 1, 0) if active else theme.SURFACE_ACTIVE};"
+                f" border-radius: {DOT_HEIGHT // 2}px;")
         # Enabled rather than hidden: Back disappearing would shift Next
         # sideways under a pointer mid-click.
         self.back_btn.setEnabled(self._step > 0)

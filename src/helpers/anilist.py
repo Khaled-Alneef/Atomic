@@ -130,6 +130,12 @@ def fetch_upcoming_airing(hours: int = 168, limit: int = 40,
             "episode": int(row.get("episode") or 0),
             "at": datetime.fromtimestamp(int(row["airingAt"]), timezone.utc),
             "cover_url": (media.get("coverImage") or {}).get("large") or "",
+            # What the Schedule tab files the row under. Stated rather
+            # than assumed now that TVmaze's calendar is merged in
+            # beside this one (tvmaze.fetch_upcoming_schedule) - the tab
+            # used to type every catalogue row "Anime" because this was
+            # the only source it had.
+            "type": "Anime",
         })
     return out[:limit]
 

@@ -3185,8 +3185,11 @@ class PlayerPage(GlassPage):
         layout.addLayout(column, stretch=1)
         if upcoming:
             badge = QLabel("UPCOMING")
+            # ON_ACCENT, not a hand-typed dark green: it computes 10.5:1
+            # on SUCCESS (25 August 2026), and a literal here is exactly
+            # what a re-theme strands.
             badge.setStyleSheet(
-                f"color: #0d1206; background: {theme.SUCCESS};"
+                f"color: {theme.ON_ACCENT}; background: {theme.SUCCESS};"
                 f" border-radius: {theme.RADIUS_SM}px; padding: 2px 8px;"
                 f" font-weight: 700; font-size: 8.5pt;")
             layout.addWidget(badge)
@@ -6875,9 +6878,27 @@ class PlayerPage(GlassPage):
             # frame it showed late are different faults with the same
             # symptom, and reading only the first says "nothing is
             # wrong" for the second.
+            #
+            # **And a rate beside the totals, because the totals only
+            # ever go up.** Both of these are cumulative since the file
+            # opened, so watching them is watching a number that rises
+            # forever even on perfect playback - which reads as "late
+            # frames are accumulating" and cannot be told apart from
+            # pacing that is genuinely falling behind *now*. The
+            # per-second figure is the one that answers that: a healthy
+            # stream settles at 0.0/s with a total of whatever it
+            # collected during startup, and a real problem keeps a
+            # non-zero rate for as long as it lasts.
+            rate = 0.0
+            if delayed is not None:
+                now = time.monotonic()
+                last = getattr(self, "_late_sample", None)
+                if last is not None and now > last[0]:
+                    rate = max(0.0, (int(delayed) - last[1]) / (now - last[0]))
+                self._late_sample = (now, int(delayed))
             setters["dropped"](
                 "-" if dropped is None
-                else f"{int(dropped)} ({int(delayed or 0)} late)")
+                else f"{int(dropped)} ({int(delayed or 0)} late, {rate:.1f}/s)")
             buffer_s = live["buffer"]
             setters["buffer"]("-" if buffer_s is None else f"{buffer_s:.1f} s")
 
@@ -7175,10 +7196,10 @@ class PlayerPage(GlassPage):
         start = _text_button("Download", "Add this to the download queue")
         start.setStyleSheet(
             start.styleSheet()
-            + f"QPushButton {{ background: {theme.ACCENT_GRADIENT};"
-              f" color: {theme.ON_ACCENT};"
-              f" border: 1px solid {theme.ACCENT}; font-weight: 700; }}"
-              f"QPushButton:hover {{ background: {theme.ACCENT_GRADIENT_HOVER}; }}")
+            + f"QPushButton {{ background: {theme.ACCENT_BUTTON_GRADIENT};"
+              f" color: {theme.ON_ACCENT_DEEP};"
+              f" border: 1px solid {theme.ACCENT_DEEP_LIP}; font-weight: 700; }}"
+              f"QPushButton:hover {{ background: {theme.ACCENT_BUTTON_GRADIENT_HOVER}; }}")
         start.clicked.connect(self._dl_start)
         panel.footer_layout.addWidget(start)
         self._show_panel(panel)

@@ -1346,8 +1346,8 @@ class HeroBanner(QFrame):
     `ground` is the colour of the page *behind* the banner, which
     paintEvent paints back over the four corner outsides - see the note
     there. It is not one constant across the app: Home's hero sits on
-    theme.BG (#0e0c09) while Discover's featured banner sits on a
-    theme.PANEL_FILL (#1a1712) scroll body, and a corner filled with the
+    theme.BG (#0a0e16) while Discover's featured banner sits on a
+    theme.PANEL_FILL (#141b28) scroll body, and a corner filled with the
     wrong one would be a visible dark or light notch rather than no
     corner at all."""
 
@@ -2629,7 +2629,22 @@ class _Momentum(QObject):
     # x FRICTION), so a notch still comes to rest exactly `distance_px`
     # away and only the time it takes to get there grows. Lower friction
     # is a longer, flatter tail, not a longer scroll.
-    FRICTION = 24.0
+    # **The whole app now scrolls on the reader's profile** - the
+    # owner, 25 August 2026: "make the rest same as the reader". The
+    # reader was hand-tuned on 24 August to remove coasting entirely
+    # ("remove the mouse drift ENTIRELY"), and it kept that profile to
+    # itself while the pages ran a softer one. These four numbers are
+    # windows.reader's, verbatim:
+    #
+    #     notch      WHEEL_STEP_PX        76px, fixed, not a fraction
+    #     friction   READER_WHEEL_FRICTION  50
+    #     ramp       READER_WHEEL_RAMP      60
+    #     cap        max_speed              none
+    #
+    # A fixed notch rather than a fraction of the viewport is part of
+    # it: the reader travels the same distance per notch whatever the
+    # window height, and matching the feel means matching that too.
+    FRICTION = 50.0
     # **5200, and the excess is kept, not thrown away.** The first cut
     # clamped the velocity and discarded what would not fit, so an
     # 8-notch flick travelled *less* per notch than slow scrolling
@@ -2654,7 +2669,7 @@ class _Momentum(QObject):
     # indistinguishable at 30ms spacing. A hard flick did, and 22px of
     # ground between two frames is what reads as a smear; the distance
     # covered is identical.
-    MAX_SPEED = 3200.0
+    MAX_SPEED = math.inf
     # superseded - see above; kept so the next reader knows it was tried
     _OLD_MAX_SPEED_NOTE = "7000 then 4500"
     # Below this the remaining distance (speed/FRICTION) is ~2px: snap
@@ -2683,7 +2698,7 @@ class _Momentum(QObject):
     # its end. Measured against 70 at friction 7: peak velocity of a
     # lone notch 511 -> 666 px/s but no pulse difference at the mid
     # cadence (1.5x both), and no change to travel or settle.
-    RAMP = 40.0
+    RAMP = 60.0
     # Cadence acceleration: notches inside this window count, and the
     # impulse scales from 1x for a lone notch to ACCEL_MAX once
     # ACCEL_NOTCHES have landed in the window. Modest on purpose - the
@@ -3095,8 +3110,13 @@ class _SmoothWheel(QObject):
     # to touch this needs to see that: 0.0647 came from two rounds of
     # "make the scroll slower" on 24 August, and this is one step back
     # from the second of them, not a return to where it started.
-    NOTCH_FRACTION = 0.0800
-    NOTCH_FLOOR_PX = 25
+    # Zero on purpose: the notch is the reader's flat 76px now (see
+    # NOTCH_FLOOR_PX), and `max(floor, height * fraction)` with a zero
+    # fraction is exactly that. Kept as a constant rather than deleted
+    # because scroll_area's `notch_scale` still multiplies both, which
+    # is what keeps Home's own 0.7 working.
+    NOTCH_FRACTION = 0.0
+    NOTCH_FLOOR_PX = 76
     # Never slower than this, whatever the screen claims. A refresh rate
     # of 0 is what a headless/offscreen platform reports.
     MAX_TICK_MS = 16

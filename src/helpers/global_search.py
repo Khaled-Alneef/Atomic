@@ -27,13 +27,14 @@ the same function the entry's own page uses, so there is one open
 behaviour per kind of thing and this is not a second one.
 """
 
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import QObject, QPoint, QSize, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QDialog, QLabel, QListWidget, QListWidgetItem, QVBoxLayout,
+    QApplication, QDialog, QLabel, QListWidget, QListWidgetItem, QVBoxLayout,
 )
 
-from . import storage, theme
+from . import discover, logs, lookup_pool, storage, theme
 from .widgets import show_toast
 
 # The app's keyboard map. Listed in Settings under Keybinds - it lived in
@@ -56,6 +57,91 @@ SHORTCUTS = (
 PANEL_WIDTH = 620
 PANEL_TOP_FRACTION = 0.18
 MAX_RESULTS = 8
+
+# A poster is 2:3, so a 44px-tall thumbnail is about 29 wide - enough to
+# recognise a cover at a glance without turning the panel into a grid.
+THUMB_HEIGHT = 44
+# How many outside results ride under the owned ones. Deliberately few:
+# they are the answer to "do I have this?" coming back "no, but this
+# exists", not a browse - the Discover page is the browse.
+MAX_DISCOVER_RESULTS = 5
+
+# Marks a row as coming from outside rather than from a file the
+# app owns. An object rather than a string so it can never collide
+# with a real page name.
+_DISCOVER = object()
+
+
+class _DiscoverSignals(QObject):
+    """Carries an outside lookup back to the UI thread.
+
+    **Module level, not owned by the panel.** The panel is
+    WA_DeleteOnClose and a search outlives the keystroke that started it,
+    so a signals object parented to the panel would be freed while a
+    worker still held it - and emitting on a freed C++ object takes the
+    process with it. One object for the app's lifetime, with the query
+    carried alongside so a late answer to an abandoned query can be
+    dropped rather than shown."""
+
+    ready = Signal(str, list)
+
+
+_signals = _DiscoverSignals()
+
+# Scaled covers, keyed by (path, ratio). The panel rebuilds its rows on
+# every keystroke and the same handful of covers come back each time.
+_thumbs = {}
+
+
+def _thumbnail(entry) -> QIcon:
+    """The entry's own cover, read off disk.
+
+    **Never `cover_url`.** This is a dropdown that has to be on screen
+    inside a keystroke (CLAUDE.md rule 7), and a URL is a download per
+    row. An entry with no local cover gets no picture at all rather than
+    a placeholder - a column of identical grey blocks reads worse than a
+    clean list of titles.
+
+    Cut at the screen's devicePixelRatio and tagged with it, or the
+    thumbnails blur on any non-100% display (.claude/rules/ui.md)."""
+    app = QApplication.instance()
+    screen = app.primaryScreen() if app is not None else None
+    ratio = float(screen.devicePixelRatio()) if screen else 1.0
+    for key in ("cover_path", "icon_path", "image_path", "thumb_path"):
+        path = entry.get(key)
+        if not path:
+            continue
+        cached = _thumbs.get((path, ratio))
+        if cached is None:
+            source = QPixmap(str(path))
+            if source.isNull():
+                continue
+            scaled = source.scaledToHeight(
+                max(1, round(THUMB_HEIGHT * ratio)),
+                Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(scaled.height() / float(THUMB_HEIGHT))
+            cached = QIcon(scaled)
+            _thumbs[(path, ratio)] = cached
+        return cached
+    return QIcon()
+
+
+def discover_worker(query: str):
+    """Ask the outside sources what `query` finds, off the UI thread.
+
+    Never raises and always emits, even empty: the panel counts on an
+    answer to know the section is settled, and a worker that dies
+    silently leaves it waiting forever (.claude/rules/integrations.md).
+    """
+    rows = []
+    try:
+        for kind in ("series", "movie"):
+            rows += discover.discover_video(kind, query, limit=3) or []
+        rows += discover.discover_reading(query, limit=3) or []
+    except Exception:
+        logs.exception("Global search: the Discover lookup failed")
+    finally:
+        _signals.ready.emit(query, rows[:MAX_DISCOVER_RESULTS])
 
 # Which file holds what, and which page each entry belongs to. Since
 # the Anime merge (main._merge_anime_into_series), tracker.json is the
@@ -145,6 +231,7 @@ class GlobalSearch(QDialog):
         layout.setSpacing(8)
 
         self.results = QListWidget()
+        self.results.setIconSize(QSize(THUMB_HEIGHT, THUMB_HEIGHT))
         self.results.itemActivated.connect(self._open)
         self.results.itemClicked.connect(self._open)
         layout.addWidget(self.results)
@@ -157,26 +244,78 @@ class GlobalSearch(QDialog):
             f"QDialog {{ background: {theme.PANEL_FILL}; border: 1px solid {theme.BORDER};"
             f" border-radius: {theme.RADIUS}px; }}")
         self._rows = []
+        # The query these rows belong to, so a Discover answer that
+        # arrives after the user has typed on can be dropped instead of
+        # appended under the wrong search.
+        self._query = ""
+        self._discover_rows = []
+        _signals.ready.connect(self._on_discover_ready)
 
     def set_query(self, query: str):
         """Show what `query` finds. Returns whether anything was found -
-        the caller decides whether an empty panel is worth showing."""
+        the caller decides whether an empty panel is worth showing.
+
+        Two halves, in this order and never merged: what the user
+        already has, then what exists outside. The owner asked for one
+        bar that searches everything (25 August 2026), and "everything"
+        stops being useful the moment a title you own has to be picked
+        out of a list of ones you do not."""
+        self._query = query
         self.results.clear()
+        self._discover_rows = []
         self._rows = collect(query)
         for title, page, label, entry in self._rows:
             item = QListWidgetItem(f"{title}    ·    {label}")
+            item.setIcon(_thumbnail(entry))
             item.setData(Qt.ItemDataRole.UserRole, (page, entry))
             self.results.addItem(item)
         if self._rows:
             self.results.setCurrentRow(0)
-        self.results.setVisible(bool(self._rows))
-        self.empty.setVisible(not self._rows)
-        self.empty.setText("" if self._rows else f"Nothing matches '{query.strip()}'.")
-        self.results.setFixedHeight(
-            max(1, len(self._rows)) * (self.results.sizeHintForRow(0) if self._rows else 1) + 8)
+        # Fired even when the library already answered: "I have this, and
+        # there are two more seasons of it" is the useful answer.
+        # submit_latest, not submit - every debounced keystroke but the
+        # last is stale before it lands, and the shared queue is drained
+        # by page-load backfill this must not queue behind
+        # (.claude/rules/integrations.md).
+        if query.strip():
+            lookup_pool.submit_latest("global-search", discover_worker, query)
+        self._relayout(searching=bool(query.strip()))
+        return bool(self._rows)
+
+    def _on_discover_ready(self, query, rows):
+        """Outside results, appended under the owned ones."""
+        if query != self._query:
+            return          # the user typed on; this answers a dead query
+        self._discover_rows = list(rows or [])
+        for row in self._discover_rows:
+            bits = [row.get("type") or "", str(row.get("year") or "")]
+            label = "  ".join(bit for bit in bits if bit)
+            item = QListWidgetItem(
+                f"{row.get('title', '')}    ·    {label}  —  Discover")
+            item.setData(Qt.ItemDataRole.UserRole, (_DISCOVER, row))
+            self.results.addItem(item)
+        if not self._rows and self._discover_rows:
+            self.results.setCurrentRow(0)
+        self._relayout(searching=False)
+
+    def _relayout(self, searching):
+        """Size the panel to whatever it is currently showing.
+
+        Row heights vary now that owned rows carry a cover and Discover
+        rows do not, so this adds the rows up rather than multiplying by
+        the first one's hint - which under-measured the panel by the
+        difference and clipped the last row."""
+        count = self.results.count()
+        self.results.setVisible(count > 0)
+        self.empty.setVisible(count == 0)
+        if count == 0:
+            self.empty.setText(
+                "Searching…" if searching
+                else f"Nothing matches '{self._query.strip()}'.")
+        total = sum(self.results.sizeHintForRow(i) for i in range(count))
+        self.results.setFixedHeight(max(1, total) + 8)
         self.adjustSize()
         self.place()
-        return bool(self._rows)
 
     def move_selection(self, delta):
         if not self._rows:
@@ -213,13 +352,47 @@ class GlobalSearch(QDialog):
                       frame.y() + int(frame.height() * PANEL_TOP_FRACTION))
 
     def closeEvent(self, event):
+        # Disconnected by hand: _signals lives for the life of the app
+        # (see _DiscoverSignals), so a connection left behind would keep
+        # calling a slot on a panel Qt has already deleted.
+        try:
+            _signals.ready.disconnect(self._on_discover_ready)
+        except TypeError:
+            pass
         self.closed.emit()
         super().closeEvent(event)
 
     def _open(self, item):
         page_name, entry = item.data(Qt.ItemDataRole.UserRole)
         self.close()
+        if page_name is _DISCOVER:
+            # Hand it to the Discover page rather than opening it here.
+            # Adding a title is that page's flow - it resolves artwork,
+            # picks a medium and writes the entry - and a second way in
+            # would be a second behaviour to keep in step, which is the
+            # trap `open_entry` below exists to avoid.
+            open_discover(self._window, self._query, entry)
+            return
         open_entry(self._window, page_name, entry)
+
+
+def open_discover(window, query, row):
+    """Show an outside result on the Discover page.
+
+    Deliberately not "add it from here". Adding a title is the Discover
+    page's own flow - it resolves artwork, decides a medium and writes
+    the entry - and a second way in would be a second behaviour to keep
+    in step with the first. This puts the user in front of the same row
+    on the page that knows what to do with it."""
+    try:
+        window.navigate_to("discover", animate=False)
+        page = getattr(window, "_current_page", None)
+        start = getattr(page, "start_search", None)
+        if callable(start):
+            start(query)
+    except Exception:
+        logs.exception("Could not open the Discover page for a result")
+        show_toast(window, "Could Not Open Discover")
 
 
 def open_entry(parent, page_name, entry):

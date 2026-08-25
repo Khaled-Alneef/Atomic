@@ -30,6 +30,8 @@ import os
 import sys
 import threading
 
+from . import app_settings
+
 # Resolved once, at import: python-mpv finds the library through ctypes
 # at *its* import time, so the search path has to be in place before
 # `import mpv` happens anywhere in the process.
@@ -135,9 +137,34 @@ def default_options() -> dict:
         # is what keeps non-integer ones (25fps content, a 60Hz second
         # monitor) from beating: oversample repeats frames aligned to
         # vsync rather than blending them, so anime line art stays sharp.
+        # **Display synchronisation and frame generation are two
+        # different things, and this is the line between them.** They
+        # get conflated in every discussion of "smooth playback", and
+        # conflating them here once already produced a bug report
+        # ("make them at least 144!!!!" - see player._live_video_stats,
+        # where the same confusion is recorded from the other side).
+        #
+        #   video-sync + interpolation + tscale=oversample
+        #       = *synchronisation*. Every frame the file contains is
+        #         presented, aligned to the panel's raster, each held
+        #         for a whole number of refreshes. Nothing is invented:
+        #         a 23.976fps master still presents 23.976 distinct
+        #         frames a second (measured). oversample repeats, it
+        #         does not blend, so line art stays sharp.
+        #
+        #   tscale=mitchell (Motion Smoothing, below)
+        #       = *frame generation*. Blends adjacent frames to
+        #         synthesise motion the master never had. This is the
+        #         soap-opera effect, and it is a preference, not a fix.
+        #
+        # Native source FPS stays the default either way - neither of
+        # these changes how many frames the file has.
         "video_sync": "display-resample",
         "interpolation": True,
-        "tscale": "oversample",
+        # Off by default (app_settings.get_motion_smoothing), so what
+        # ships is synchronisation only.
+        "tscale": ("mitchell" if app_settings.get_motion_smoothing()
+                   else "oversample"),
         # **No scaler overrides - reverted 24 August 2026, same day they
         # went in.** spline36/deband landed as the answer to "stremio
         # has better quality" and the owner's very next report was "my

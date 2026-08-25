@@ -8,9 +8,10 @@ import re
 # regardless of the working directory it's invoked from.
 SRC_DIR = os.path.join(SPECPATH, "..", "src")
 # Everything the app ships as an image now lives under src/assets/,
-# with the cut nav icons in src/assets/icons/. src/assets/Icons.png is
-# the sheet they were cut from - kept as provenance, deliberately not
-# bundled (1.2MB nothing reads at runtime).
+# with the nav icons in src/assets/icons/ - SVG since 25 August 2026,
+# which is also when the 1.2MB Icons.png sheet the previous PNG set was
+# cut from went away. README.txt sits beside them and is deliberately
+# not bundled: nothing reads it at runtime.
 ASSETS_DIR = os.path.join(SRC_DIR, "assets")
 ICONS_DIR = os.path.join(ASSETS_DIR, "icons")
 ICON_FILE = os.path.join(ASSETS_DIR, "app_icon.ico")
@@ -125,23 +126,34 @@ a = Analysis(
            # cannot resolve makes it reject the build outright. Verbose
            # on purpose - the spec's own note above records that a
            # missing asset ships a button with no icon and says nothing.
-           (os.path.join(ICONS_DIR, "anime.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "apps.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "discover.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "games.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "history.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "home.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "manga.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "manhua.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "manhwa.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "movies.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "other.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "reading.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "saved.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "schedule.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "series.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "watching.png"), 'assets/icons'),
-           (os.path.join(ICONS_DIR, "websites.png"), 'assets/icons'),
+           #
+           # **SVG since 25 August 2026** (the owner's icon pack, which
+           # replaced the cut PNG sheet): rendered at the device size by
+           # images._rendered_svg instead of being resampled from one
+           # cut, so a folded row at 29px on a 150% display is as sharp
+           # as an expanded one at 26px on a 100% one. All nineteen are
+           # listed, including the two no rail row maps yet (search,
+           # settings) - a file in the pack that is not in the bundle is
+           # how the next row added here would ship blank.
+           (os.path.join(ICONS_DIR, "addons.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "anime.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "apps.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "calendar.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "discover.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "games.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "history.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "home.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "library.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "live-tv.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "manga.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "manhua.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "manhwa.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "movies.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "saved.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "search.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "settings.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "shows.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "websites.svg"), 'assets/icons'),
            # libmpv goes in as data, not as a `binaries` entry: it lands
            # at the bundle root either way, and PyInstaller does not need
            # to walk its dependency tree - it has none outside the
@@ -162,7 +174,13 @@ a = Analysis(
     # reason - the analysis skips guarded imports, and without it named
     # here the exe ships with no torrent engine and every torrent falls
     # back to needing Stremio installed.
-    hiddenimports=['mpv', 'libtorrent'],
+    # PyQt6.QtSvg for the same reason as the two above: helpers/images.py
+    # imports it inside a try/except so a machine without it degrades to
+    # the bullet fallback instead of failing to start, and a guarded
+    # import is precisely what PyInstaller's static analysis skips.
+    # Without it named here every rail icon in the frozen exe renders as
+    # nothing - a null pixmap, silently (25 August 2026).
+    hiddenimports=['mpv', 'libtorrent', 'PyQt6.QtSvg'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

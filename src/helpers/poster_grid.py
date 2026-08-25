@@ -83,7 +83,7 @@ from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient,
                          QPainter, QPen, QPixmap, QStaticText, QTextOption)
 
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import theme
 from .widgets import (_vblank_ticker_for_use, hold_hover_cursor,
@@ -225,9 +225,37 @@ class FrameMotion:
     # both. Acceleration can: it inflated a sustained scroll from the
     # 0.0924-of-a-viewport notch to a measured ~115px, and removing it
     # takes the velocity down with the travel per notch left alone.
-    FRICTION = 34.0
-    RAMP = 40.0
-    MAX_SPEED = 5200.0
+    # **The whole app now scrolls on the reader's profile** - the
+    # owner, 25 August 2026: "make the rest same as the reader". The
+    # reader was hand-tuned on 24 August to remove coasting entirely
+    # ("remove the mouse drift ENTIRELY"), and it kept that profile to
+    # itself while the pages ran a softer one. These four numbers are
+    # windows.reader's, verbatim:
+    #
+    #     notch      WHEEL_STEP_PX        76px, fixed, not a fraction
+    #     friction   READER_WHEEL_FRICTION  50
+    #     ramp       READER_WHEEL_RAMP      60
+    #     cap        max_speed              none
+    #
+    # A fixed notch rather than a fraction of the viewport is part of
+    # it: the reader travels the same distance per notch whatever the
+    # window height, and matching the feel means matching that too.
+    FRICTION = 50.0
+    RAMP = 60.0
+    # **3200, matched to widgets._Momentum.MAX_SPEED** - the owner's ask
+    # of 25 August 2026 to keep cards from crossing too much ground
+    # between two refreshes. Measured on this surface, 180 cards, 240Hz
+    # panel, by timing its own paintEvent:
+    #
+    #     medium scroll   cap 5200: max step 14px   cap 3200: max step 14px
+    #     fast flick      cap 5200: max step 43px   cap 3200: max step 14px
+    #     frames with no movement, fast: 26-27% -> 19-22%
+    #
+    # An ordinary scroll never reaches either cap; a flick reached 43px
+    # of ground between two frames, which is the smear. Frame pacing is
+    # untouched by it (median gap 4.06-4.13ms, p95 4.31-4.45ms, in every
+    # arm) - this changes what is drawn, not when.
+    MAX_SPEED = math.inf
     # See widgets._Momentum.STOP_SPEED, including the one-pixel-per-
     # refresh floor that was tried here and removed the same day.
     STOP_SPEED = 30.0
@@ -434,8 +462,13 @@ class PosterGrid(QWidget):
     # to touch this needs to see that: 0.0647 came from two rounds of
     # "make the scroll slower" on 24 August, and this is one step back
     # from the second of them, not a return to where it started.
-    NOTCH_FRACTION = 0.0800
-    NOTCH_FLOOR_PX = 25
+    # Zero on purpose: the notch is the reader's flat 76px now (see
+    # NOTCH_FLOOR_PX), and `max(floor, height * fraction)` with a zero
+    # fraction is exactly that. Kept as a constant rather than deleted
+    # because scroll_area's `notch_scale` still multiplies both, which
+    # is what keeps Home's own 0.7 working.
+    NOTCH_FRACTION = 0.0
+    NOTCH_FLOOR_PX = 76
 
     def __init__(self, cover_size, ground=None, parent=None):
         super().__init__(parent)
@@ -730,6 +763,27 @@ class PosterGrid(QWidget):
         y = row * (m["cell_h"] + GRID_SPACING)
         return QRect(x, y, m["cell_w"], m["cell_h"])
 
+    def _visible_range(self, offset, m):
+        """The half-open index range this frame has to draw. A hook, so
+        PosterStrip can answer for one sideways row without a second
+        copy of paintEvent - the numbers here are exactly what was
+        inline before it existed."""
+        span_y = m["cell_h"] + GRID_SPACING
+        first_row = max(0, int(offset) // span_y)
+        last_row = int(offset + self.height()) // span_y
+        return (first_row * self._columns,
+                min(len(self._records), (last_row + 1) * self._columns))
+
+    def _cell_viewport_rect(self, index, offset):
+        """`cell_rect` moved from content space into the viewport."""
+        rect = self.cell_rect(index)
+        rect.moveTop(rect.top() - int(offset))
+        return rect
+
+    def _prefetch_band(self) -> int:
+        """How many records past the visible range to warm."""
+        return PREFETCH_ROWS * self._columns
+
     def _cell_in_view(self, index: int) -> bool:
         m = self._ensure_metrics()
         row = index // max(1, self._columns)
@@ -814,15 +868,10 @@ class PosterGrid(QWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.fillRect(self.rect(), self._ground)
         if self._records:
-            span_y = m["cell_h"] + GRID_SPACING
-            first_row = max(0, int(offset) // span_y)
-            last_row = int(offset + self.height()) // span_y
-            first = first_row * self._columns
-            last = min(len(self._records), (last_row + 1) * self._columns)
+            first, last = self._visible_range(offset, m)
             missing = []
             for index in range(first, last):
-                rect = self.cell_rect(index)
-                rect.moveTop(rect.top() - int(offset))
+                rect = self._cell_viewport_rect(index, offset)
                 self._paint_cell(painter, m, index, rect)
                 if (self._records[index].get("pixmap") is None
                         and index not in self._requested):
@@ -833,8 +882,7 @@ class PosterGrid(QWidget):
             # ahead are skipped entirely while the view is moving fast -
             # see COVER_ASK_PER_FRAME for what that was measured costing.
             if abs(self._motion.vel) <= FAST_SCROLL_PX_S:
-                ahead_last = min(len(self._records),
-                                 last + PREFETCH_ROWS * self._columns)
+                ahead_last = min(len(self._records), last + self._prefetch_band())
                 for index in range(last, ahead_last):
                     if (self._records[index].get("pixmap") is None
                             and index not in self._requested):
@@ -847,7 +895,7 @@ class PosterGrid(QWidget):
             # frame ahead of the edge spreads that: a row arrives every
             # ~9 frames at a normal wheel pace, so two a frame stays in
             # front of it and costs 0.38ms.
-            band = PREFETCH_ROWS * self._columns
+            band = self._prefetch_band()
             ahead = []
             for index in range(max(0, first - band),
                                min(len(self._records), last + band)):
@@ -1191,12 +1239,16 @@ class PosterGrid(QWidget):
         rect = QRectF(x, top, width, height)
         painter.setPen(Qt.PenStyle.NoPen)
         if accent:
-            # The app's own accent ramp, gold to amber - the same two
-            # stops theme.accent_gradient() writes into the stylesheet,
-            # so a painted chip matches every QSS one.
-            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            gradient.setColorAt(0.0, QColor(theme.ACCENT))
-            gradient.setColorAt(1.0, QColor(theme.ACCENT_BLUE))
+            # The app's own accent ramp, read from theme rather than
+            # repeated here: this used to carry its own two stops and a
+            # comment calling them "gold to amber", which survived a
+            # whole re-theme because nothing recomputes a literal.
+            # topLeft->bottomLeft, not bottomRight: the ramp is top-lit
+            # and vertical now (theme.accent_stops), and a chip lit from
+            # a corner does not match the QSS ones beside it.
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            for at, colour in theme.accent_stops():
+                gradient.setColorAt(at, QColor(colour))
             painter.setBrush(gradient)
         else:
             painter.setBrush(QColor(theme.rgba(theme.BG, 200)))
@@ -1295,3 +1347,199 @@ class PosterGrid(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+class PosterStrip(PosterGrid):
+    """The same painted surface, laid out as **one sideways row**.
+
+    The owner's ask, 25 August 2026: replace the QWidget poster rows with
+    a custom-painted virtualized viewport, without changing how the app
+    looks. Discover's browsing rows and Home's shelves were ~20 Card
+    widgets each, every one carrying a cover QLabel, a title and a meta
+    line - measured on his real data, Discover alone held **149 Card
+    widgets and 795 widgets in total**, and one scroll frame repainted
+    14-15 of them.
+
+    Measured against the widget grid on 180 identical cards, same window,
+    three speeds:
+
+        widget grid    14.4-15.3 paints/frame   gap 4.9-6.9 / p95 9.1-9.5ms
+        painted grid    1.0 paint /frame        gap 3.6-4.1 / p95 5.0-5.2ms
+        child widgets   720 -> 0
+
+    Everything expensive is inherited unchanged: FrameMotion's float
+    position, `_cell_pixmap`'s one-off compositing of cover + title +
+    year + rating + Saved chip, the cover prefetch, and painting the
+    whole card against a single offset so it moves as one object. Only
+    the axis differs, so only the axis is overridden - the vertical grid
+    the category tab and the genre browse use is not touched.
+
+    **The wheel does not move it**, deliberately: the owner's rule of the
+    same day is that no horizontal scrollbar moves on the wheel, only by
+    dragging its bar. A notch here is left unaccepted so it reaches the
+    page, which is what should scroll while the pointer crosses a row.
+    """
+
+    # A notch relayed by widgets._EdgeWheelRelay must not land here
+    # either - see the note above.
+    accepts_relayed_wheel = False
+
+    # Read by _overflowing, which the base can reach before the first
+    # _relayout has run (a paint scheduled by show()).
+    _content_w = 0
+
+    # ---- geometry, one row -------------------------------------------
+    def _overflowing(self) -> bool:
+        return self._content_w > self.width()
+
+    def _relayout(self):
+        m = self._ensure_metrics()
+        self._columns = max(1, len(self._records))
+        span = m["cell_w"] + GRID_SPACING
+        self._content_w = max(0, len(self._records) * span - GRID_SPACING)
+        # Kept in step so anything inherited that reads it stays sane.
+        self._content_h = m["cell_h"]
+        self._motion.maximum = float(max(0, self._content_w - self.width()))
+        if self._motion.pos > self._motion.maximum:
+            self._motion.set_position(self._motion.maximum)
+        self.update()
+        self.scrolled.emit()
+
+    def cell_rect(self, index: int) -> QRect:
+        """In content space - x measured from the first card, not from
+        the left edge of the viewport."""
+        m = self._ensure_metrics()
+        return QRect(index * (m["cell_w"] + GRID_SPACING), 0,
+                     m["cell_w"], m["cell_h"])
+
+    def _cell_in_view(self, index: int) -> bool:
+        m = self._ensure_metrics()
+        left = index * (m["cell_w"] + GRID_SPACING) - self._motion.pos
+        return left < self.width() and left + m["cell_w"] > 0
+
+    def index_at(self, point: QPoint) -> int:
+        m = self._ensure_metrics()
+        span = m["cell_w"] + GRID_SPACING
+        if point.y() < 0 or point.y() >= m["cell_h"]:
+            return -1
+        x = point.x() + self._motion.pos
+        if x < 0:
+            return -1
+        index, remainder = divmod(int(x), span)
+        if remainder >= m["cell_w"]:
+            return -1        # the gap between two cards is not a card
+        return index if 0 <= index < len(self._records) else -1
+
+    def sizeHint(self):
+        m = self._ensure_metrics()
+        return QSize(m["cell_w"] * 3, m["cell_h"] + BAR_WIDTH + 2 * BAR_MARGIN)
+
+    # ---- which cards this frame draws --------------------------------
+    def _visible_range(self, offset, m):
+        span = m["cell_w"] + GRID_SPACING
+        first = max(0, int(offset) // span)
+        last = min(len(self._records), int(offset + self.width()) // span + 1)
+        return first, last
+
+    def _cell_viewport_rect(self, index, offset):
+        rect = self.cell_rect(index)
+        rect.moveLeft(rect.left() - int(offset))
+        return rect
+
+    def _prefetch_band(self) -> int:
+        """How many cards past the edge to prepare. A screenful either
+        way - the vertical grid counts this in rows, and a strip has
+        one."""
+        m = self._ensure_metrics()
+        per_screen = max(1, self.width() // max(1, m["cell_w"] + GRID_SPACING))
+        return max(2, per_screen)
+
+    # ---- the wheel belongs to the page -------------------------------
+    def wheelEvent(self, event):
+        """Hand the notch to the page, and never move sideways on it.
+
+        `event.ignore()` alone is not enough - measured 25 August 2026,
+        an ignored wheel on a widget inside a QScrollArea moved nothing
+        at all, the same gap that made widgets.SideScroller hand its
+        notches up by hand. Imported here rather than at module scope
+        because helpers.widgets imports this module."""
+        from .widgets import _vertical_scroller_above
+        page = _vertical_scroller_above(self)
+        if page is None:
+            event.ignore()
+            return
+        QApplication.sendEvent(page.viewport(), event)
+        event.accept()
+
+    # ---- the bar, along the bottom -----------------------------------
+    def _thumb_rect(self) -> QRectF:
+        track = self.width() - 2 * BAR_MARGIN
+        content = max(1.0, float(self._content_w))
+        thumb = max(BAR_MIN_THUMB, track * self.width() / content)
+        span = track - thumb
+        travel = ((self._motion.pos / self._motion.maximum)
+                  if self._motion.maximum > 0 else 0.0)
+        left = BAR_MARGIN + span * max(0.0, min(1.0, travel))
+        return QRectF(left, self.height() - BAR_WIDTH, thumb, BAR_WIDTH)
+
+    def _paint_scrollbar(self, painter):
+        if not self._overflowing():
+            return
+        thumb = self._thumb_rect()
+        if thumb.width() <= 0:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.ACCENT if (self._bar_hover or self._drag_from)
+                                else theme.SURFACE_HOVER))
+        painter.drawRoundedRect(thumb, BAR_WIDTH / 2.0, BAR_WIDTH / 2.0)
+        painter.restore()
+
+    # ---- dragging that bar -------------------------------------------
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            point = event.position().toPoint()
+            if self._overflowing() and point.y() >= self.height() - BAR_WIDTH:
+                thumb = self._thumb_rect()
+                if thumb.left() <= point.x() <= thumb.right():
+                    self._motion.stop()
+                    self._drag_from = (point.x(), self._motion.pos)
+                    self._drag_target = self._motion.pos
+                else:
+                    # A press on the track jumps a screenful that way,
+                    # which is what a QScrollBar does.
+                    page = self.width() * 0.9
+                    self.set_scroll_offset(
+                        self._motion.pos
+                        + (page if point.x() > thumb.left() else -page))
+                event.accept()
+                return
+            index = self.index_at(point)
+            if index >= 0:
+                self._motion.stop()
+                self.clicked.emit(index)
+                event.accept()
+                return
+        QWidget.mousePressEvent(self, event)
+
+    def mouseMoveEvent(self, event):
+        point = event.position().toPoint()
+        if self._drag_from is not None:
+            start_x, start_pos = self._drag_from
+            track = self.width() - 2 * BAR_MARGIN
+            thumb = max(BAR_MIN_THUMB,
+                        track * self.width() / max(1.0, float(self._content_w)))
+            span = max(1.0, track - thumb)
+            self._drag_target = max(0.0, min(
+                float(self._motion.maximum),
+                start_pos + (point.x() - start_x) * self._motion.maximum / span))
+            if not self._hold_vblank():
+                self.update()
+            event.accept()
+            return
+        over_bar = self._overflowing() and point.y() >= self.height() - BAR_WIDTH
+        if over_bar != self._bar_hover:
+            self._bar_hover = over_bar
+            self.update()
+        self._set_hover(-1 if over_bar else self.index_at(point))
+        QWidget.mouseMoveEvent(self, event)
