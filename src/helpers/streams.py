@@ -1341,6 +1341,24 @@ def arabic_rank(stream) -> int:
     return 2
 
 
+def _side_content_rank(stream) -> int:
+    """0 for an ordinary release, 1 for a franchise's extras.
+
+    **Demoted rather than dropped**, which is this codebase's standing
+    trade for "probably not what was asked for": an OVA pack is still
+    better than a blank screen when nothing else in the list will start,
+    and for the handful of titles whose OVAs really are the episodes it
+    remains reachable. What it may not do is win by default, which it
+    was doing - see indexers.is_side_content for the measured row."""
+    if indexers is None:
+        return 0
+    try:
+        return 1 if indexers.is_side_content(
+            _release_name(stream.get("title"))) else 0
+    except Exception:
+        return 0
+
+
 def _default_pick_key(stream, preferred):
     """The sort key deciding what plays by default. Smaller sorts first.
 
@@ -1385,11 +1403,16 @@ def _default_pick_key(stream, preferred):
     # Arabic, and among those the biggest swarm. See `arabic_rank` for
     # what counts as carrying it.
     arabic = arabic_rank(stream)
+    # **Extras sort below seasons, above everything unplayable.** Ahead
+    # of the resolution term so a 1080p OVA pack cannot outrank a 1080p
+    # season pack, and behind `resolvable` so it is still preferred to a
+    # row with no way to play it at all.
+    side = _side_content_rank(stream)
     if preferred != "best" and quality == preferred:
         size = int(stream.get("size_bytes") or 0)
         size_key = size if size >= _MIN_REAL_SIZE else float("inf")
-        return (drm, resolvable, 0, arabic, -raw_seeders, size_key)
-    return (drm, resolvable, 1, -_quality_rank(quality), arabic, -seeders)
+        return (drm, resolvable, side, 0, arabic, -raw_seeders, size_key)
+    return (drm, resolvable, side, 1, -_quality_rank(quality), arabic, -seeders)
 
 
 def _stremio_id(entry, season=None, episode=None) -> str:
@@ -1751,6 +1774,21 @@ def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
         # episode **01** when episode 1 of season 1 was asked for, and 1
         # is not the absolute index of anything but itself.
         absolute = absolute_episode(entry, season, episode)
+        # **Only when the absolute index is a *different* number.** For
+        # season 1 the two are the same, so the escape below asks "does
+        # this name state episode N with the season ignored" - which a
+        # season-4 pack answers yes to for every episode it holds.
+        # Measured 25 August 2026 on a real S01E02 lookup: rows called
+        # `Attack On Titan S04e01-30` and `... ALL SEASONS` were dropped
+        # by the conflict test and then let straight back in here, and
+        # they went on to fill the top of the list - which is both the
+        # "wrong season played" report and, once the file picker learned
+        # to refuse them, the "nothing plays at all" that replaced it.
+        # The Bleach TYBW case this exists for is untouched: absolute 42
+        # against episode 2 is a different number, which is the whole
+        # reason that case needs an escape and this one does not.
+        if absolute == episode:
+            absolute = None
         names = [_release_name(row.get("title")) for row in rows]
         stated = [indexers.stated_seasons(name) for name in names]
         # The arc tokens each name carries, as seasons - empty unless the

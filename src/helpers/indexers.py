@@ -214,6 +214,36 @@ def stated_seasons(release_title: str) -> set:
     return {s for s in seasons if 0 < s <= _MAX_SEASON}
 
 
+# **Extras a franchise ships beside its seasons.** OADs, OVAs, ONAs,
+# specials and picture dramas are numbered from 1 like an ordinary
+# season, so "OAD - 01" answers a request for episode 1 exactly as well
+# as the real first episode does - and on a well-seeded pack it wins.
+# Measured 25 August 2026 driving the real player at Attack on Titan
+# S01E01: it settled on `[Erai-raws] Shingeki no Kyojin OAD - 01 ~ 08`
+# and served `... OAD - 01`, which is not episode 1 of anything the
+# viewer asked for.
+_SIDE_CONTENT_RE = re.compile(
+    r"(?:^|[\s\-_\[(])(oad|ova|ona|specials?|picture\s*drama|"
+    r"recap|nc(?:op|ed))(?:s)?(?=[\s\-_\])]|$)", re.I)
+
+
+def is_side_content(release_title: str) -> bool:
+    """Whether this release is a franchise's extras rather than one of
+    its seasons.
+
+    **Only when it names no season of its own.** A complete collection
+    that happens to carry the OVAs too - `... S01-04 ... | OAD (OVA) |`,
+    a real row measured the same day - names seasons 1 through 4 and is
+    the *right* answer for an episode request; it must not be swept up
+    by a word appearing in its file list. So the marker counts only on a
+    release that states no season at all, which is what an extras-only
+    pack looks like."""
+    text = _strip_noise(release_title or "")
+    if not _SIDE_CONTENT_RE.search(text):
+        return False
+    return not stated_seasons(release_title or "")
+
+
 def episode_conflict(release_title: str, season, episode,
                      compare_season: bool = True, extra_seasons=None) -> bool:
     """True only when this name **positively states** it is something

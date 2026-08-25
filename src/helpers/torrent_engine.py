@@ -1498,6 +1498,63 @@ def _stem(name: str) -> str:
     return os.path.splitext(os.path.basename(name or ""))[0]
 
 
+def _path_seasons(name: str) -> set:
+    """Every season this file's own **directories** name.
+
+    **The season of a file in a big pack is written on the folder, not
+    on the file, and this app was throwing that away.** Measured 25
+    August 2026 on `[Anime Time] Attack On Titan (Complete Collection)
+    (S01-S04+OVA+Movies+Junior High)`, 131 videos, asked for S01E01:
+
+        30 files  Attack on Titan Season 4
+        25 files  Attack on Titan Season 1        <- where S01E01 lives
+        22 files  Attack on Titan Season 3
+        12 files  Attack On Titan Junior High     <- a different show
+        12 files  Attack on Titan Season 2
+         8 files  Attack On Titan OAD
+
+    and **not one file stem states a season at all** - they are numbered
+    absolutely (`Attack on Titan - 01`, `- 26`, `- 38`, `- 60`), so a
+    bare "01" appears in Season 1, in Junior High and in the OADs.
+    `_stem` reduced every path to its basename before judging it, which
+    deleted the only evidence there was. That is the owner's "when I
+    played aot s1 ep 1 then ep 2 both played episodes from s4".
+
+    The torrent's own root folder is deliberately **not** read: it is the
+    release title and names every season the pack holds, so counting it
+    would make every file claim all of them."""
+    parts = str(name or "").replace("/", "\\").split("\\")
+    if len(parts) < 3:
+        return set()            # no per-file directory to learn from
+    if indexers is None:
+        return set()
+    found = set()
+    for directory in parts[1:-1]:
+        try:
+            found |= indexers.stated_seasons(directory)
+        except Exception:
+            continue
+    return found
+
+
+def _names_show(stem: str, title) -> bool:
+    """Whether this file's own name carries the show being asked for.
+
+    A **tiebreak only, never a filter**: a fansub file is called
+    "[Erai-raws] Shingeki no Kyojin - 01" and would fail this against
+    "Attack on Titan", which is a legitimate file for that request. It
+    exists to separate two files that both loosely match inside one
+    directory - the same Complete Collection has
+    "Attack on Titan - 01.mkv" and "Creditless Ending 1.mkv" in its
+    Season 1 folder, and both read as episode 1."""
+    if not title or indexers is None:
+        return False
+    try:
+        return bool(indexers.is_same_title(str(title), str(stem)))
+    except Exception:
+        return False
+
+
 def _names_episode(stem: str, season, episode) -> bool:
     """Whether this file name says it is the episode asked for.
 
@@ -1523,26 +1580,143 @@ def _names_episode(stem: str, season, episode) -> bool:
                 and int(match.group(2)) == int(episode))
 
 
-def _episode_file_index(info, season, episode):
-    """The file whose *name* states this episode, or None. Deliberately
-    no largest-file fallback here: callers asking "does this pack hold
-    episode N" must get an honest no, not the biggest file wearing N's
-    number (see file_index_for).
+_EXTRAS_RE = re.compile(r"\b(extras?|specials?|creditless|nc(?:op|ed)|"
+                        r"bonus|sample|preview|pv|menu)\b", re.I)
+_LOOSE_NUM_RE = re.compile(r"(?:^|[\s\-_\[(])(\d{1,3})(?:v\d)?(?=[\s\-_\])]|$)")
 
-    An `SxxExx` name wins over a bare number when both are present - it
-    states the season too, so it is the stronger claim."""
+
+def _folder_episode_index(rows, episode):
+    """The file for `episode` inside one season's folder, read from the
+    folder's **own numbering**, or None.
+
+    **Season folders in these packs are numbered absolutely, and that is
+    the second half of the wrong-episode bug.** Measured 25 August 2026
+    on `[Anime Time] Attack On Titan (Complete Collection)`:
+
+        Attack on Titan Season 1    - 01 .. - 25
+        Attack on Titan Season 2    - 26 .. - 37
+        Attack on Titan Season 3    - 38 .. - 59
+        Attack on Titan Season 4    - 60 ..   plus "Season 4 - Finale 1..3"
+
+    so season 2 episode 1 is the file called `- 26`, and asking for a
+    file named "01" inside that folder finds nothing at all. Fixing only
+    the folder-matching would therefore have left every season past the
+    first still falling through to the addon's fileIdx, which is exactly
+    the pointer that was wrong.
+
+    The base is found as the **longest contiguous run** of numbers the
+    folder's files carry, not as the smallest number in it: the Season 4
+    folder also holds "Finale 1", "Finale 2" and "Finale 3", and the
+    smallest-number reading would make its episode 1 the finale. The run
+    60..86 is twenty-seven long and the run 1..4 is four, so the real
+    numbering wins by counting."""
+    numbers = {}
+    for index, _name, stem, _seasons in rows:
+        for found in _LOOSE_NUM_RE.findall(stem):
+            value = int(found)
+            if 0 < value <= 999:
+                numbers.setdefault(value, index)
+    if len(numbers) < 2:
+        return None, None
+    best_start = best_length = 0
+    for value in sorted(numbers):
+        if value - 1 in numbers:
+            continue                    # not the start of a run
+        length = 0
+        while value + length in numbers:
+            length += 1
+        if length > best_length:
+            best_start, best_length = value, length
+    if best_length < 2:
+        return None, None
+    wanted = best_start + int(episode) - 1
+    if wanted >= best_start + best_length:
+        return None, best_start         # the folder does not go that far
+    return numbers.get(wanted), best_start
+
+
+def _identify_episode_file(info, season, episode, title=None):
+    """`(index, strength)` for the file that holds this episode.
+
+    `strength` is how much the answer can be trusted, and it is what
+    lets `_pick_file` decide whether to override an addon's own
+    `fileIdx`:
+
+      * "exact"  - the file's name states `SxxExx` for this episode;
+      * "folder" - the file sits in a folder naming this season and its
+        name names this episode. That is what a Complete Collection
+        looks like (see `_path_seasons` for the 131-file measurement);
+      * "loose"  - a bare episode number, from a pack whose folders say
+        nothing about seasons at all. The weakest reading, and the one
+        that used to be applied to everything.
+
+    `(None, None)` means the pack cannot be shown to hold it - which for
+    a pack that *does* sort itself into seasons is a real answer, not a
+    failure: the race takes the next release rather than serving the
+    nearest thing."""
     if not (season and episode):
-        return None
-    loose = None
-    for index, name, _size in _video_files(info):
-        stem = _stem(name)
+        return None, None
+    season = int(season)
+    rows = [(index, name, _stem(name), _path_seasons(name))
+            for index, name, _size in _video_files(info)]
+
+    for index, _name, stem, _seasons in rows:
         match = _EPISODE_RE.search(stem)
-        if (match and int(match.group(1)) == int(season)
+        if (match and int(match.group(1)) == season
                 and int(match.group(2)) == int(episode)):
-            return index
-        if loose is None and _names_episode(stem, season, episode):
-            loose = index
-    return loose
+            return index, "exact"
+
+    # The folder says the season, the file says the episode. Preferring a
+    # file that also carries the show's name settles "Attack on Titan -
+    # 01.mkv" against "Creditless Ending 1.mkv", which sit in the same
+    # folder and both read as episode 1.
+    in_season = [row for row in rows if season in row[3]]
+    # Extras live under the season they belong to ("Season 1\\Extras"),
+    # so they inherit its number and would otherwise compete for the
+    # episode - "Creditless Ending 1.mkv" reads as episode 1 exactly as
+    # well as "Attack on Titan - 01.mkv" does.
+    main = [row for row in in_season if not _EXTRAS_RE.search(row[1])] or in_season
+    named = [row for row in main
+             if _names_episode(row[2], season, episode)]
+    by_folder, base = _folder_episode_index(main, episode) if in_season         else (None, None)
+    # **An absolutely-numbered folder outranks a file that merely reads
+    # as "1".** Season 4 of the pack above runs 60..86 and *also* holds
+    # "Attack on Titan Season 4 - Finale 1", which states season 4 and a
+    # loose 1, so the plain name match served the finale for S04E01
+    # (measured). Where the folder's own run starts above 1 that run is
+    # the numbering, and a file called 1 inside it is something else.
+    if by_folder is not None and base and base > 1:
+        return by_folder, "folder"
+    if named:
+        best = next((row for row in named if _names_show(row[2], title)),
+                    named[0])
+        return best[0], "folder"
+    if by_folder is not None:
+        return by_folder, "folder"
+
+    # If the pack sorts itself into seasons at all and the asked-for one
+    # holds nothing this app can identify, the pack does not hold the
+    # episode. Answered rather than guessed: the race takes the next
+    # release, which is this codebase's standing trade.
+    if any(row[3] for row in rows):
+        return None, "absent"
+
+    # No folder anywhere says anything about a season, so a loose number
+    # is the only evidence there is.
+    for index, _name, stem, _seasons in rows:
+        if _names_episode(stem, season, episode):
+            return index, "loose"
+    return None, None
+
+
+def _episode_file_index(info, season, episode, title=None):
+    """The file that holds this episode, or None - see
+    `_identify_episode_file`, which is this plus how sure it is.
+
+    Deliberately no largest-file fallback: callers asking "does this
+    pack hold episode N" must get an honest no, not the biggest file
+    wearing N's number (see file_index_for)."""
+    return _identify_episode_file(info, season, episode, title)[0]
 
 
 def movie_file_index(info, title):
@@ -1611,18 +1785,45 @@ def _pick_file(info, season=None, episode=None, file_index=None, title=None):
     be shown to hold the right episode is dropped and the race takes the
     next one, which is the standing trade in this codebase - a shorter
     list beats a wrong episode that plays."""
-    named = _episode_file_index(info, season, episode)
+    named, strength = _identify_episode_file(info, season, episode, title)
     if file_index is not None:
         try:
             index = int(file_index)
-            stem = _stem(info.files().file_path(index))
+            path = info.files().file_path(index)
+            stem = _stem(path)
+            seasons = _path_seasons(path)
         except Exception:
-            index, stem = None, ""
+            index, stem, seasons = None, "", set()
         if index is not None:
-            # Only a name that positively identifies *another* episode
-            # overrides the addon; a name that says nothing does not.
-            if named is not None and named != index and _EPISODE_RE.search(stem):
+            # **What we can see in the file tree beats what the addon
+            # says about it.** Measured 25 August 2026: for tt2560140:1:1
+            # the addon pointed at file 1 of the Complete Collection,
+            # which is `Attack On Titan Junior High\...Junior High -
+            # 01.mkv` - a different show. The old rule only overrode a
+            # fileIdx whose file *stated another SxxExx*, and no file in
+            # that 131-video pack states a season at all, so nothing
+            # contradicted it and Junior High played for every episode of
+            # every season asked for. That is the owner's "when I played
+            # aot s1 ep 1 then ep 2 both played episodes from s4".
+            #
+            # So a *positive* identification now wins outright, and only
+            # a positive one: "exact" reads SxxExx off the file and
+            # "folder" reads the season off the directory it is in, both
+            # of which are evidence the addon does not have. A "loose"
+            # read is a bare number and stays the weaker claim, so the
+            # fileIdx keeps its long-measured trust wherever this app
+            # cannot do better.
+            if (named is not None and named != index
+                    and strength in ("exact", "folder")):
                 return named
+            # "absent" is a positive finding too: the pack sorts itself
+            # into seasons and this episode is in none of them, so the
+            # fileIdx is pointing at something else whatever it says.
+            if strength == "absent":
+                return None
+            wrong_season = bool(seasons) and int(season or 0) not in seasons
+            if wrong_season:
+                return named    # None when there is nothing better
             return index
     if named is not None:
         return named

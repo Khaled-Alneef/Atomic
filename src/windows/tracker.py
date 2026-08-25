@@ -4319,6 +4319,7 @@ class TrackerPage(GlassPage):
         self._discover_card_height = None
         self._discover_line_heights = None
         self._discover_holders = {}
+        self._discover_shown = {}
         self._featured_banner = None
         self._featured_save_btn = None
         self._featured_title = ""
@@ -4368,6 +4369,44 @@ class TrackerPage(GlassPage):
             self._discover_holders[kind] = holder
             self._discover_body_layout.addWidget(section)
 
+        # **A cached row is drawn here, on this thread, before any
+        # worker runs.** The category sections have done this since 23
+        # August (see _show_category) and Discover did not, and the
+        # difference is what the owner reported on 25 August 2026: "in
+        # the anime/series/movies the cards change to mid rows sort
+        # after ~1sec from entering the page ... make it immediately".
+        #
+        # Measured on his data entering Watch, before this change:
+        #
+        #     0.02s  the page is built, all three rows empty
+        #     0.62s  Movies fills
+        #     1.35s  Anime fills
+        #     2.73s  Series fills
+        #
+        # Every one of those rows was already in the cache. The worker
+        # emits a cached hit immediately (see _discover_row_worker) -
+        # but `submit_latest` runs **one job at a time**, so row two's
+        # instant answer was queued behind row one's *network* fetch,
+        # and row three behind both. The rows therefore appeared one
+        # after another over nearly three seconds, each one pushing the
+        # ones below it down as it grew.
+        #
+        # Drawn straight from the cache there is nothing to wait for and
+        # nothing to push: the page arrives whole. A stale entry is
+        # still corrected in place afterwards, which is the same
+        # contract _show_category and _discover_row_worker already keep.
+        _load_discover_cache()
+        drawn = set()
+        now = time.monotonic()
+        for kind, _label, _entry_type in rows:
+            cached = _DISCOVER_CACHE.get((kind, query))
+            if not cached:
+                continue
+            self._on_discover_results(kind, list(cached[1]), run)
+            if now - cached[0] < _DISCOVER_CACHE_TTL_S:
+                drawn.add(kind)     # fresh: nothing to ask anybody
+            else:
+                drawn.add(kind)     # stale: asked below, but not re-drawn
         # One job per row rather than one job walking every row in turn:
         # the rows are independent requests to independent hosts, and
         # serialized they cost their *sum* - measured ~1.3s each against
@@ -4375,8 +4414,12 @@ class TrackerPage(GlassPage):
         # slowest single row is all it has to. submit_latest keyed per
         # row keeps the newest-wins behaviour typing relies on.
         for kind, _label, _entry_type in rows:
+            cached = _DISCOVER_CACHE.get((kind, query))
+            if cached and now - cached[0] < _DISCOVER_CACHE_TTL_S:
+                continue            # already on screen and still fresh
             lookup_pool.submit_latest(f"{self._discover_key()}-{kind}",
-                                      self._discover_row_worker, kind, query, run)
+                                      self._discover_row_worker, kind, query,
+                                      run, kind in drawn)
 
     def _discover_heading(self, kind, label, labelled) -> str:
         if self._discover_query:
@@ -5153,7 +5196,7 @@ class TrackerPage(GlassPage):
         return (self.DISCOVER_SUBHEADINGS.get(kind)
                 or "What the catalog is watching")
 
-    def _discover_row_worker(self, kind, query, run):
+    def _discover_row_worker(self, kind, query, run, already_drawn=False):
         """One row's rows, cached for the session.
 
         Must never raise - an uncaught exception here kills the pool's
@@ -5170,7 +5213,12 @@ class TrackerPage(GlassPage):
         stamp_and_rows = _DISCOVER_CACHE.get(key)
         if stamp_and_rows is not None:
             stamp, rows = stamp_and_rows
-            self._discover_signals.results.emit(kind, list(rows), run)
+            # `already_drawn` means _start_discover put exactly these
+            # rows on screen before this job was queued, so emitting
+            # them again is a second rebuild of a strip the user is
+            # already looking at.
+            if not already_drawn:
+                self._discover_signals.results.emit(kind, list(rows), run)
             if time.monotonic() - stamp < _DISCOVER_CACHE_TTL_S:
                 return
         try:
@@ -5208,6 +5256,45 @@ class TrackerPage(GlassPage):
             return    # keep the stale-but-real list over an empty refresh
         self._discover_signals.results.emit(kind, rows, run)
 
+    def _stable_discover_order(self, kind, results):
+        """`results`, re-ordered so nothing already on screen moves.
+
+        **A row that is being looked at must not re-sort under the
+        pointer.** The cached rows are drawn the moment the page opens
+        (see _start_discover) and the network's answer lands about a
+        second later - and the catalogue's "popular now" order is not
+        stable between two calls a second apart, so a straight redraw
+        shuffled every card. That is the second half of the owner's
+        "the cards change to mid rows sort after ~1sec from entering the
+        page ... make it immediately", 25 August 2026: measured on his
+        data, the anime row's fourth card went Jujutsu Kaisen -> Bleach
+        and the movie row gained one title, on a strip that had been
+        readable since 0.10s.
+
+        So a title already drawn keeps its place, and genuinely new
+        titles go on the end - the same rule `_merge_streams` follows
+        for the player's source list, and for the same reason. The fresh
+        order is used in full only when the strip is empty, which is the
+        first draw of a page that had no cache.
+
+        Nothing is dropped: a title the new answer no longer carries is
+        still removed, because it is filtered out of `order` below."""
+        results = list(results or [])
+        shown = getattr(self, "_discover_shown", {}).get(kind)
+        if not shown:
+            return results
+        rank = {title: index for index, title in enumerate(shown)}
+
+        def key(pair):
+            index, row = pair
+            title = (row.get("title") or "").strip().lower()
+            # Already on screen: keep its place. New: after everything
+            # that was, in the order the catalogue gave.
+            return (0, rank[title]) if title in rank else (1, index)
+
+        return [row for _k, row in
+                sorted(enumerate(results), key=lambda pair: key(pair))]
+
     def _on_discover_results(self, kind, results, run):
         if run != self._discover_run:
             return
@@ -5231,7 +5318,7 @@ class TrackerPage(GlassPage):
             return
         entry_type = next((t for k, _l, t in self.DISCOVER_ROWS if k == kind),
                           self.ENTRY_TYPES[0])
-        rows = list(results)
+        rows = self._stable_discover_order(kind, results)
         # A browse strip stays one page deep. The category pages grow
         # the shared cache as the user scrolls - 523 rows under "anime"
         # on the owner's machine, 23 August 2026 - and a sideways strip
@@ -5240,6 +5327,11 @@ class TrackerPage(GlassPage):
         # rows are what the user asked for.
         if not self._discover_query:
             rows = rows[:DISCOVER_LIMIT]
+        # What this row is showing, for the next answer to line up with.
+        if not hasattr(self, "_discover_shown"):
+            self._discover_shown = {}
+        self._discover_shown[kind] = [(row.get("title") or "").strip().lower()
+                                      for row in rows]
         # The top of the first row is drawn large instead of being
         # repeated behind itself in the strip below.
         if rows and kind == self.DISCOVER_ROWS[0][0]:

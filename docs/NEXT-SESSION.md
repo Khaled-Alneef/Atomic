@@ -849,3 +849,201 @@ delegate ceiling this file already derives (folded row 32px, margin 3,
 Verified in the frozen exe (26 present in `main`'s consts, 20 absent)
 and by ink measurement on a screenshot of the running app: the tall
 glyphs measure 24-26px.
+
+---
+
+# 25 August 2026 - five reports, and what each one turned out to be
+
+## 1. "aot s1 ep 1 then ep 2 both played episodes from s4"
+
+Two independent holes, both found by reading a real pack's file list
+rather than its release name.
+
+**The season of a file is written on its folder, and this app threw
+that away.** `_stem` reduced every path to its basename before judging
+it. Measured on `[Anime Time] Attack On Titan (Complete Collection)
+(S01-S04+OVA+Movies+Junior High)`, 131 videos, asked for S01E01:
+
+    30 files  Attack on Titan Season 4
+    25 files  Attack on Titan Season 1        <- where S01E01 lives
+    22 files  Attack on Titan Season 3
+    12 files  Attack On Titan Junior High     <- a different show
+    12 files  Attack on Titan Season 2
+     8 files  Attack On Titan OAD
+
+and **not one file stem states a season**: they are numbered absolutely
+(`- 01`, `- 26`, `- 38`, `- 60`), so a bare "01" exists in Season 1, in
+Junior High and in the OADs. The addon's `fileIdx` pointed at Junior
+High and nothing contradicted it, because the old override test was
+"does this name state another SxxExx" and that file states no season at
+all. Every episode of every season asked for served Junior High 01.
+
+Now: `_path_seasons` reads the directories (never the torrent's root
+folder, which names every season the pack holds), `_identify_episode_
+file` returns a *strength* with its answer, and a positive
+identification - "exact" from an SxxExx, "folder" from the directory
+plus the file - beats the addon outright. `_folder_episode_index` reads
+a folder's own numbering as the **longest contiguous run** of numbers
+its files carry, which is what makes season 2 episode 1 resolve to
+`- 26`; the run rather than the minimum, because the Season 4 folder
+also holds "Finale 1/2/3" and the smallest-number reading made the
+finale its episode 1. A pack that sorts into seasons and holds none
+matching is refused outright.
+
+Verified on that pack:
+
+    S01E01 -> Season 1\... - 01      S02E01 -> Season 2\... - 26
+    S01E02 -> Season 1\... - 02      S03E01 -> Season 3\... - 38
+    S01E25 -> Season 1\... - 25      S04E01 -> Season 4\... - 60
+    S04E05 -> Season 4\... - 64      S09E01 -> (refused)
+
+and re-checked against the ordinary single-season fansub batches, which
+resolve exactly as before. `debrid._episode_row` got the folder half of
+the same rule; it has no absolute-numbering reader yet, and nothing has
+asked for one.
+
+**And the list it chose from was wrong before the file was.** Rows
+named `Attack On Titan S04e01-30` were surviving an S01E02 request:
+`_drop_wrong_season` rejected them and then let them straight back in
+through the absolute-numbering escape, which asks "does this name state
+episode N with the season ignored" - and a season-4 pack answers yes
+for every episode it holds. The escape now applies only when the
+absolute index is a *different* number from the episode, which it never
+is for season 1. The Bleach TYBW case it exists for (absolute 42
+against episode 2) is untouched.
+
+**Franchise extras were winning too.** Driving the real player at
+S01E01 after both fixes, it settled on `[Erai-raws] Shingeki no Kyojin
+OAD - 01 ~ 08` and served `OAD - 01`. OADs, OVAs, ONAs and specials are
+numbered from 1 like a season. `indexers.is_side_content` marks a
+release as extras only when it carries one of those words **and states
+no season of its own** - so a complete collection that merely contains
+the OVAs is not swept up - and `_default_pick_key` sorts it below
+ordinary releases. Demoted, not dropped: an OVA pack still beats a
+blank screen when nothing else will start.
+
+End to end after all three, driving the real player:
+
+    S01E01 -> [DiabloTripleA] Attack on Titan - S01E01.mkv
+    S01E02 -> Shingeki No Kyojin 02 Multi FHD.mkv
+
+## 2. "I changed the source from inside the player and it got stuck"
+
+Reproduced by driving the real player and switching by hand. The trace:
+
+    switch to source 2   -> prepare says wrong-episode
+    _try_next_source     -> _play_stream(0)
+    prepare_fastest      -> a url, won by the release that had just
+                            been switched *away* from, so byte-identical
+                            to the one already loaded
+    _on_stream_prepared  -> _load_into_mpv
+    ... mpv's `path` stays None for the rest of the session
+
+`_load_into_mpv` handled the identical-URL case by issuing a stop first,
+so `path` would fall to None and rise again and the load gate - which
+reopens on a `path` **change** - could see it. But `_stop_playback` is
+`command_async` while `loadfile` is synchronous, and a synchronous
+command executes in mpv's core ahead of an async one already queued: the
+stop landed *after* the load and unloaded the file it had just opened.
+
+The gate now also opens on mpv's own **file-loaded event**, so the
+reload of an identical URL is an ordinary case and the stop is gone.
+Proven deterministically on a generated clip - load, then load the same
+URL again: `file_ready` is True afterwards with no path change at all -
+and the real switch, which used to be terminal, now walks back and
+resumes.
+
+**A second defect found on the way, and it is why the first fix did not
+work at first.** `str(event.event_id)` reads `<MpvEventID 8
+file-loaded>` - lowercase, hyphenated, wrapped - so the existing
+`endswith("END_FILE")` had **never once matched**. The end-of-file
+branch has been dead for as long as it has existed; its only job is
+marking an episode watched at the very end, which the WATCHED_FRACTION
+check on time-pos had been quietly covering. Both are matched on the
+readable name now.
+
+## 3. "it shows skip intro, while it is not the intro"
+
+The API was being used, and the API is what was wrong. Asked live:
+
+    From Old Country Bumpkin to Master Swordsman
+      ep1  op 0.00 -> 90.00   ep2  op 0.00 -> 90.00   ep3  op 0.00 -> 90.00
+
+Three episodes, the same two round numbers, over a frame screenshotted
+at 0:12 showing story. Surveyed 26 openings across ten of the owner's
+titles before drawing a line, because "starts at zero" alone does not
+condemn one: 6 start under 1.0s and 20 later, and Spy x Family's
+`0.00 + 96.02` and `0.00 + 90.12` are real. What separates them is that
+a real submission carries a *measured* length while the default carries
+the nominal 90.00 exactly. `skiptimes._is_placeholder_opening` drops
+only that shape. Re-run over the same ten titles: the reported show now
+has no opening, Angel's inconsistent ep3 goes, Spy x Family keeps both,
+and all 20 later-starting openings are untouched.
+
+Also fixed, and visible in the same screenshot: a chapter marker
+claiming the opening starts at 0:00 was offered in the second or two
+before AniSkip answered. `_on_skips` already knew such a marker loses to
+a real crowd interval; it was simply being applied after the button had
+been on screen. `_current_skip` holds it until the crowd has reported.
+
+## 4. "while dragging the scrollbar it shows that all items are moving in steps"
+
+He is right and it is not judder. Measured on the real Anime grid, a
+constant-velocity drag, offset sampled once per compositor present:
+
+    pointer at 125Hz   125.0 moving fps   47.9% of refreshes dead
+                       9.00px steps, evenly spaced (local change 10%)
+    pointer at 240Hz   233.5 moving fps    2.7% dead, 5.00px steps
+
+`mouseMoveEvent` wrote the position straight through, and an ordinary
+mouse reports 125 times a second, so every second refresh showed the
+previous frame again and the content moved in 9px jumps. The drag sets a
+*target* now and the frame clock closes the gap
+(`DRAG_FOLLOW_TAU_S = 12ms`, about 8ms of lag - under one mouse sample):
+
+    pointer at 125Hz, after   236.4 moving fps   1.5% dead, 5.00px steps
+
+at the same travel (1160 px/s either way). Wheel scrolling re-measured
+on the same surface and unchanged.
+
+**Not done, and worth knowing:** the QScrollArea surfaces (Home,
+Discover, Saved, the reader strip) still step the same way on a bar
+drag. Taking that over means consuming the scrollbar's own mouse events
+and re-deriving the value from the track geometry, which is a real risk
+of breaking scrolling app-wide for a case the wheel does not share. The
+owner's "when accelerating, not moving itself" is the drag, not the
+wheel model: `ACCEL_MAX` is already 1.0 in both motion models.
+
+## 5. "the cards change to mid rows sort after ~1sec from entering the page"
+
+Two causes, both measured entering Watch on his data:
+
+    0.02s  the page is built, all three rows empty
+    0.62s  Movies fills
+    1.35s  Anime fills
+    2.73s  Series fills
+
+Every one of those rows was already in the cache. The worker emits a
+cached hit immediately - but `submit_latest` runs **one job at a time**,
+so row two's instant answer was queued behind row one's *network* fetch.
+`_start_discover` reads the cache on the UI thread now and draws it
+before any worker runs, exactly as `_show_category` has since 23 August:
+all three rows are up at **0.10s**.
+
+And the network's answer a second later re-sorted them, because
+"popular now" is not stable between two calls: the anime row's fourth
+card went Jujutsu Kaisen -> Bleach. `_stable_discover_order` keeps a
+title already on screen in its place and appends genuinely new ones,
+the same rule `_merge_streams` follows for the player's source list.
+Verified: the drawn order is byte-identical before and after the
+refresh.
+
+## What was not verified
+
+Driving the *frozen* app through synthetic mouse and keyboard input did
+not work - Windows refuses the foreground to a process whose console has
+focus, so the clicks and Ctrl+2 landed nowhere. What was checked on the
+exe is that it launches, chooses the `dwm` clock, and renders Home with
+its art; every behavioural fix above was verified against the real page
+and player objects over the real network and real swarms, and the frozen
+archive was read back to confirm it carries each one.

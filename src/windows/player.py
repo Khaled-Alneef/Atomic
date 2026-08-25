@@ -1199,6 +1199,7 @@ class _MpvBridge(QObject):
     """mpv's thread -> Qt. Nothing else crosses."""
     prop = Signal(str, object)      # property name, new value
     ended = Signal(str)             # end-file reason
+    loaded = Signal()               # mpv finished opening a file
 
 
 class _WorkBridge(QObject):
@@ -2222,6 +2223,7 @@ class PlayerPage(GlassPage):
         self._bridge = _MpvBridge()
         self._bridge.prop.connect(self._on_property)
         self._bridge.ended.connect(self._on_ended)
+        self._bridge.loaded.connect(self._on_file_loaded)
         self._work = _WorkBridge()
         self._work.streams_ready.connect(self._on_streams)
         self._work.subs_ready.connect(self._on_subtitles)
@@ -2276,6 +2278,9 @@ class PlayerPage(GlassPage):
         self._skip_offer = None
         # Whether this episode has already been asked about.
         self._skips_asked = False
+        # Whether the crowd lookup has reported for this episode - see
+        # _current_skip, which holds a 0:00 chapter opening until it has.
+        self._skips_answered = False
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
@@ -3496,6 +3501,9 @@ class PlayerPage(GlassPage):
         # the middle of this one.
         self._skips = []
         self._skips_asked = False
+        # Whether the crowd lookup has reported for this episode - see
+        # _current_skip, which holds a 0:00 chapter opening until it has.
+        self._skips_answered = False
         # A resolution the user pinned by hand. Cleared *here*, at an
         # episode boundary, and nowhere else on the success path - see
         # _on_stream_prepared for the report that made that the rule.
@@ -4900,19 +4908,27 @@ class PlayerPage(GlassPage):
             agent = next((v for k, v in headers.items() if k.lower() == "user-agent"), None)
             if agent:
                 self.handle["user-agent"] = agent
-            # **Reloading the identical path needs a stop first.** The
-            # gate below reopens only on a `path` property *change*, and
-            # torrent_engine.stream_url is a pure function of the info
-            # hash, so re-loading the URL already open reports nothing,
-            # leaves the gate shut and hangs the startup frame forever
-            # (the full walk is in _switch_stream). _switch_stream stops
-            # on its own account; this covers the other way in - a stall
-            # that sends _try_next_source back to a release resolving to
-            # the same URL.
-            if url and str(self._loading_url or "") == str(url):
-                self._stop_playback()
-            # The gate closes before the load is issued and reopens when
-            # the observed `path` names this url - see _file_ready.
+            # **There used to be a stop here, and it was the hang.**
+            # Re-loading a URL mpv already has open produces no `path`
+            # *change*, so the gate below could not reopen - and the fix
+            # for that was to stop first, driving `path` to None. But
+            # `_stop_playback` is `command_async` and `loadfile` is
+            # synchronous, and a synchronous command executes in mpv's
+            # core ahead of an async one already queued: the stop landed
+            # *after* the load and unloaded the file it had just opened,
+            # leaving `path` None for good. That is the owner's "I
+            # changed the source from inside the player and it got
+            # stuck" (25 August 2026) - see `_on_file_loaded`, which now
+            # opens the gate on mpv's own file-loaded event and makes
+            # the identical-URL reload an ordinary case rather than one
+            # needing a trick.
+            #
+            # `loadfile(..., "replace")` already replaces whatever is
+            # playing, so nothing about mpv needed the stop either.
+            #
+            # The gate closes before the load is issued and reopens on
+            # file-loaded, or when the observed `path` names this url -
+            # see _file_ready.
             self._file_ready = False
             self._loading_url = url
             if seat:
@@ -5299,11 +5315,66 @@ class PlayerPage(GlassPage):
             pass        # the page is going away; nothing to report to
 
     def _mpv_event(self, event):
+        """mpv's own events, named the way mpv actually names them.
+
+        **The id does not stringify as a constant, and the check here
+        was written as though it did.** Measured 25 August 2026 against
+        the vendored libmpv: `str(event.event_id)` reads
+        `<MpvEventID 8 file-loaded>` and `<MpvEventID 7 end-file>` -
+        lowercase, hyphenated, wrapped. So `endswith("END_FILE")` had
+        never once matched, and the end-of-file branch below has been
+        dead for as long as it has existed (its only job is marking an
+        episode watched at the very end, which the WATCHED_FRACTION
+        check on time-pos had been quietly covering).
+
+        Matched on the readable name now, case-folded, so both this and
+        the file-loaded gate that `_on_file_loaded` depends on actually
+        fire."""
         try:
-            if str(getattr(event, "event_id", "")).endswith("END_FILE"):
+            name = str(getattr(event, "event_id", "")).lower()
+            if "end-file" in name:
                 self._bridge.ended.emit("eof")
+            elif "file-loaded" in name:
+                self._bridge.loaded.emit()
         except Exception:
             pass
+
+    def _on_file_loaded(self):
+        """mpv has opened a file - the second way the load gate opens.
+
+        **The first way is a `path` property *change*, and a change is
+        exactly what re-loading the same URL does not produce.** That is
+        the shape behind the owner's "I changed the source from inside
+        the player and it got stuck", 25 August 2026, and the trace of
+        it reads:
+
+            switch to source 2 -> prepare says wrong-episode
+            _try_next_source  -> _play_stream(0)
+            prepare_fastest   -> a url, and the race is won by the
+                                 release that had just been switched
+                                 *away* from, so it is byte-identical to
+                                 the one already loaded
+            _on_stream_prepared -> _load_into_mpv
+            ... path stays None for the rest of the session
+
+        `_load_into_mpv` handled the identical-URL case by issuing a
+        stop first, so that `path` would fall to None and rise again -
+        but that stop is `command_async` while `loadfile` is
+        synchronous, and a synchronous command executes in the core
+        ahead of an async one already queued. The stop therefore lands
+        *after* the load and unloads the file that was just opened.
+
+        Opening the gate on mpv's own `file-loaded` event removes the
+        need for that stop entirely: the event fires whatever the path
+        did, so a reload of the same URL is no longer a special case.
+        The path check stays as well - the two agree in the ordinary
+        case, and the path is the stricter of the two when a superseded
+        load answers late."""
+        if self._closing or self.handle is None:
+            return
+        if not self._loading_url:
+            return
+        self._file_ready = True
 
     # ---- property updates (Qt thread) --------------------------------
     def _on_property(self, name, value):
@@ -7985,6 +8056,9 @@ class PlayerPage(GlassPage):
     def _on_skips(self, found, run):
         if self._closing or run != self._run:
             return
+        # The crowd has now spoken, whatever it said - see _current_skip
+        # for what was being held back until it did.
+        self._skips_answered = True
         # Chapters win where both have an interval of the same kind: the
         # release's own markers are about *this* cut of the episode,
         # while a crowd entry may be about another release entirely.
@@ -8062,6 +8136,23 @@ class PlayerPage(GlassPage):
         rolling."""
         position = self._position
         for row in self._skips:
+            # **A chapter marker claiming the opening starts at 0:00 is
+            # not offered until the crowd answer is in.** The chapters
+            # are read the instant the file loads and AniSkip answers a
+            # second or two later, so the merge in `_on_skips` - which
+            # already knows a near-zero chapter opening loses to a real
+            # crowd interval - was being applied *after* the button had
+            # been on screen. Measured over 18 real AniSkip openings,
+            # none begins before 27.4s; a marker at zero is a cold open
+            # or a title card carrying an opening-ish word, and the two
+            # seconds it takes to find that out are exactly the seconds
+            # the owner is looking at the screen.
+            if (not self._skips_answered
+                    and row.get("source") == "chapters"
+                    and row.get("type") == skiptimes.OPENING
+                    and float(row.get("start") or 0.0)
+                    < CHAPTER_OPENING_MIN_START_S):
+                continue
             if row["start"] <= position < row["end"] - 0.5:
                 if row["type"] == skiptimes.ENDING:
                     if self._has_next_episode():

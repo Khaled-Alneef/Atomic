@@ -119,6 +119,37 @@ PREFETCH_ROWS = 2
 COVER_ASK_PER_FRAME = 4
 FAST_SCROLL_PX_S = 1500.0
 
+# **How fast the view catches up with a dragged scrollbar.**
+#
+# The owner, 25 August 2026: "while dragging the scrollbar in low-mid
+# speed it shows that all items on the screen are moving in steps". He
+# is right, and it is not judder - it is the pointer's own sample rate
+# arriving on a 240Hz panel. Measured that day on the real Anime grid,
+# a constant-velocity drag with the offset sampled once per compositor
+# present:
+#
+#     pointer at 125Hz   125.0 moving fps   47.9% of refreshes dead
+#                        9.00px steps (even: local change 10%)
+#     pointer at 240Hz   233.5 moving fps    2.7% dead, 5.00px steps
+#
+# So every second refresh showed the previous frame again and the
+# content moved in 9px jumps instead of 4.9px ones. Nothing was
+# stuttering; there were simply half as many positions as refreshes,
+# because `mouseMoveEvent` wrote the position straight through and an
+# ordinary mouse reports 125 times a second.
+#
+# The view now *follows* the pointer instead of tracking it exactly: the
+# drag sets a target and every refresh moves a fixed fraction of the way
+# there, so a frame exists for every refresh whatever the mouse reports
+# at. The fraction comes from a time constant so it is the same feel at
+# any refresh rate. 12ms puts the view within a pixel of the pointer in
+# about three refreshes at 240Hz - a lag of roughly 8ms, which is under
+# one 125Hz mouse sample and cannot be felt on a drag.
+DRAG_FOLLOW_TAU_S = 0.012
+# Below this the follow is over and the target is dropped, so a settled
+# drag stops asking for frames.
+DRAG_SETTLE_PX = 0.4
+
 # How many composited cards to keep (see _cell_pixmap). A screenful is
 # about 32 at this size and PREFETCH_ROWS adds two rows either way, so
 # this holds the view and its margins without keeping bitmaps for a
@@ -413,6 +444,10 @@ class PosterGrid(QWidget):
         self._chips = {}                # (text, accent) -> rendered chip
         self._cells = {}                # index -> composited card, see _cell_pixmap
         self._drag_from = None          # scrollbar thumb drag anchor
+        # Where a drag wants the view to be, while the frame clock
+        # closes the gap - see DRAG_FOLLOW_TAU_S. None when no drag is
+        # settling.
+        self._drag_target = None
         # Whether this grid currently holds the shared vblank ticker -
         # see _hold_vblank for the measurement that put it there.
         self._vblank_on = False
@@ -724,6 +759,25 @@ class PosterGrid(QWidget):
             if not self._motion.frame_s:
                 self._motion.frame_s = self._refresh_interval()
             moving = self._motion.step()
+        elif self._drag_target is not None:
+            # Following a dragged scrollbar - see DRAG_FOLLOW_TAU_S.
+            # Inside the frame that draws it, for the same reason the
+            # momentum model is: the position belongs to the frame that
+            # shows it, so the steps are even by construction.
+            frame_s = self._motion.frame_s or self._refresh_interval()
+            if not frame_s:
+                frame_s = 1.0 / 60.0
+                self._motion.frame_s = frame_s
+            gap = self._drag_target - self._motion.pos
+            if abs(gap) <= DRAG_SETTLE_PX:
+                self._motion.pos = self._drag_target
+                self._drag_target = None
+                self.scrolled.emit()
+            else:
+                self._motion.pos += gap * (
+                    1.0 - math.exp(-frame_s / DRAG_FOLLOW_TAU_S))
+                moving = True
+                self.scrolled.emit()
         # **Everything cached in device pixels is invalid the moment the
         # widget's ratio changes** - the window was dragged to the other
         # monitor. The composited cells, the chips and the placeholder
@@ -1163,13 +1217,22 @@ class PosterGrid(QWidget):
         if self._drag_from is not None:
             # Dragging the painted thumb: the pointer's travel down the
             # track maps to the content's travel past the viewport.
+            #
+            # **A target, not a position.** Writing the position through
+            # meant one new position per mouse sample, which is 125 a
+            # second against 240 refreshes - see DRAG_FOLLOW_TAU_S for
+            # the measurement. The frame clock closes the gap instead,
+            # so every refresh has somewhere to move to.
             start_y, start_pos = self._drag_from
             track_h = self.height() - 2 * BAR_MARGIN
             thumb_h = max(BAR_MIN_THUMB,
                           track_h * self.height() / max(1.0, float(self._content_h)))
             span = max(1.0, track_h - thumb_h)
-            self.set_scroll_offset(start_pos
-                                   + (point.y() - start_y) * self._motion.maximum / span)
+            self._drag_target = max(0.0, min(
+                float(self._motion.maximum),
+                start_pos + (point.y() - start_y) * self._motion.maximum / span))
+            if not self._hold_vblank():
+                self.update()
             event.accept()
             return
         over_bar = self._overflowing() and point.x() >= self.width() - BAR_WIDTH
@@ -1192,7 +1255,9 @@ class PosterGrid(QWidget):
             if self._overflowing() and point.x() >= self.width() - BAR_WIDTH:
                 thumb = self._thumb_rect()
                 if thumb.contains(QRectF(point.x(), point.y(), 1, 1).topLeft()):
+                    self._motion.stop()
                     self._drag_from = (point.y(), self._motion.pos)
+                    self._drag_target = self._motion.pos
                 else:
                     # A press on the track jumps a screenful that way,
                     # which is what a QScrollBar does.
@@ -1215,6 +1280,10 @@ class PosterGrid(QWidget):
     def mouseReleaseEvent(self, event):
         if self._drag_from is not None:
             self._drag_from = None
+            # The target is left in place: the follow has a few
+            # milliseconds still to run and letting it finish is what
+            # makes a release land exactly where the thumb was let go,
+            # rather than a pixel or two short of it.
             self.update()
             event.accept()
             return

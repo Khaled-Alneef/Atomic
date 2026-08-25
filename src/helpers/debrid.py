@@ -502,20 +502,53 @@ def pick_file(files, season=None, episode=None, title=None):
     return _big_enough(max(videos, key=lambda r: r[2]), _MIN_MOVIE_BYTES)
 
 
+def _row_seasons(path) -> set:
+    """Every season this file's own folders name - the same reading as
+    torrent_engine._path_seasons, which carries the measurement. The
+    torrent's root folder is skipped: it is the release title and names
+    every season the pack holds."""
+    parts = str(path or "").replace("/", "\\").split("\\")
+    if len(parts) < 3 or indexers is None:
+        return set()
+    found = set()
+    for directory in parts[1:-1]:
+        try:
+            found |= indexers.stated_seasons(directory)
+        except Exception:
+            continue
+    return found
+
+
 def _episode_row(videos, season, episode):
-    """The row whose *name* states this episode, or None. An SxxEyy name
+    """The row whose *path* states this episode, or None. An SxxEyy name
     wins over a bare number when both are present - it states the season
     too, so it is the stronger claim (torrent_engine._episode_file_index,
-    same order)."""
+    same order).
+
+    **The folder counts as well as the file.** A season pack's files are
+    routinely numbered absolutely inside per-season folders, so a bare
+    "01" can belong to any season in the torrent - measured on a real
+    131-file Attack on Titan collection, where it served the Junior High
+    spin-off for every episode asked for. A row whose folders name a
+    *different* season is therefore not a candidate, and one whose
+    folders name the right season is preferred over one that says
+    nothing."""
+    season = int(season)
     loose = None
     for row in videos:
         stem = _stem(row[1])
+        seasons = _row_seasons(row[1])
+        if seasons and season not in seasons:
+            continue                    # positively another season
         match = _EPISODE_RE.search(stem)
-        if (match and int(match.group(1)) == int(season)
+        if (match and int(match.group(1)) == season
                 and int(match.group(2)) == int(episode)):
             return row
-        if loose is None and _names_episode(stem, season, episode):
-            loose = row
+        if _names_episode(stem, season, episode):
+            if season in seasons:
+                return row              # folder agrees: the stronger read
+            if loose is None:
+                loose = row
     return loose
 
 

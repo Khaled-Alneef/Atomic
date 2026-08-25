@@ -194,6 +194,45 @@ def mal_id(title: str, timeout: float = DEFAULT_TIMEOUT, season=None):
     return found
 
 
+# **An opening filed at exactly 0.0 and exactly 90.0 seconds long is a
+# default somebody typed, not a measurement.**
+#
+# The owner, 25 August 2026, with a screenshot: "it shows skip intro,
+# while it is not the intro now, not all intros [are] in the beginning of
+# the video ... you should always use the API". The API *was* being used,
+# and the API is what was wrong - asked live that day, AniSkip answers
+# `From Old Country Bumpkin to Master Swordsman` with
+#
+#     ep1  op 0.00 -> 90.00      ep2  op 0.00 -> 90.00
+#     ep3  op 0.00 -> 90.00
+#
+# three episodes, the same two round numbers each time, over a frame the
+# owner screenshotted at 0:12 showing story.
+#
+# Surveyed over 26 openings across ten of his titles before drawing this
+# line, because "starts at zero" alone is not enough to condemn one:
+#
+#     6 openings start under 1.0s, 20 start later
+#     Spy x Family     ep1 0.00 + 96.02   ep2 0.00 + 90.12   - real
+#     Frieren          ep3 1.35 + 90.00                      - real
+#     Attack on Titan  ep3 4.00 + 92.00                      - real
+#
+# So a show whose opening genuinely runs from the first frame exists and
+# must keep its button. What separates it is that a real submission
+# carries a measured length - 96.02, 90.12, 92.00 - while the default
+# carries the nominal 90.00 exactly. Both halves must match before an
+# interval is thrown away, and only for an opening: an ending or a recap
+# at 0.0 is already handled by ENDING_MIN_POSITION and its neighbours.
+PLACEHOLDER_START_S = 0.05
+PLACEHOLDER_SPAN_S = 90.0
+PLACEHOLDER_SPAN_EPSILON_S = 0.05
+
+
+def _is_placeholder_opening(kind, start, span) -> bool:
+    return (kind == OPENING and start < PLACEHOLDER_START_S
+            and abs(span - PLACEHOLDER_SPAN_S) < PLACEHOLDER_SPAN_EPSILON_S)
+
+
 def _clean(intervals, episode_length=0.0):
     """Drop what cannot be a real opening/ending/recap, resolve crowd
     entries that contradict each other, and sort by start."""
@@ -216,6 +255,8 @@ def _clean(intervals, episode_length=0.0):
         if length and start >= length:
             continue
         kind = row.get("type") or OPENING
+        if _is_placeholder_opening(kind, start, span):
+            continue        # a typed default, not a measured opening
         # **Where it sits, not only how long it is** - see the note on
         # ENDING_MIN_POSITION for the four measured intervals this
         # rejects and the one screenshot it explains.
