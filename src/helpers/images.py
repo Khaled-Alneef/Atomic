@@ -428,11 +428,17 @@ def trim_cache(limit: int = CACHE_LIMIT_BYTES, budget_s: float = 8.0) -> int:
 def download(url: str, timeout: int = 8):
     """Download `url` into the local cache (or reuse a previous download)
     and return its Path, or None on any failure. Anything larger than the
-    app can draw is stored shrunk - see _shrink."""
+    app can draw is stored shrunk - see _shrink.
+
+    A host that has refused twice in the last ten minutes is skipped
+    without a request, so the caller reaches its fallback now instead of
+    after two timeouts - see net.host_refusing for the measurement."""
     path = cache_path_for_url(url)
     if path.exists():
         _touch(path)
         return path
+    if net.host_refusing(url):
+        return None
     try:
         # net.ascii_url, not the raw string: a cover whose filename
         # carries a non-ASCII character - an Arabic-Indic digit, a
@@ -462,8 +468,10 @@ def download(url: str, timeout: int = 8):
         temporary = path.with_suffix(path.suffix + ".part")
         temporary.write_bytes(data)
         temporary.replace(path)
+        net.note_host_success(url)
         return path
     except Exception:
+        net.note_host_failure(url)
         # Never leave a half-written file where a later run will mistake
         # it for a finished download.
         try:

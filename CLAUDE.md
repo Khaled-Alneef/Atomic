@@ -1,8 +1,9 @@
 # Atomic
 
 A PyQt6 desktop dashboard for one person's anime, reading, series, games,
-apps and websites. Ships as a single `Atomic.exe` committed at the repo
-root, which updates itself from this repository's GitHub tags.
+apps and websites. Ships as `Atomic.zip` - one `Atomic.exe` inside it -
+committed at the repo root, which updates itself from this repository's
+GitHub tags.
 
     src/main.py     window, sidebar, navigation, full screen
     src/windows/    the pages - home, tracker (Anime/Reading/Series), games, link_grid
@@ -28,8 +29,15 @@ root, which updates itself from this repository's GitHub tags.
    lands, not after. Once the user says **approved**, commit and push
    per rule 4.
 4. **Every approved change bumps the third part of `APP_VERSION`**, in
-   the same commit as the source change. `Atomic.exe` is gitignored on
-   `development` and tracked only on `main`, at a release.
+   the same commit as the source change. `Atomic.exe` and `Atomic.zip`
+   are gitignored on `development`; the **zip** is tracked on `main`, at
+   a release (rule 8).
+
+   **The first zipped release carries both**, and only that one: every
+   install already out there runs an updater that looks for
+   `Atomic.exe` and nothing else, so a release without it leaves them
+   unable to update in place. Once a zip-aware build is what people are
+   running, later releases drop the exe.
    - **"Approved"** (tested, not released): commit and push to
      `development` - 1.0.1 → 1.0.2.
    - **"Approved, release it"**: skip the `development` push; use the
@@ -72,7 +80,32 @@ root, which updates itself from this repository's GitHub tags.
 
    None of it was Python, Qt, or the owner's connection, and no rewrite
    in another language would have touched any of it.
-8. **Find the cause before writing the fix - by measurement, not by
+8. **Ship the zip, never the bare exe.** The owner's rule, 25 August
+   2026, after a build he could not download: `Atomic.zip` is what goes
+   on `main` at a release and on `remote-tests`, and the exe is not
+   committed beside it.
+
+   It is a measurement, not a preference. The bare exe was refused on
+   download as `Trojan:Win32/Wacatac.B!ml` - Microsoft's *machine
+   learning* classifier, no signature match - while **the identical
+   bytes inside a zip downloaded cleanly**. Before concluding that, all
+   seven builds of that day were compared out of the `remote-tests`
+   history: same 193 bundled entries (nothing ever added), same 347
+   Python modules (none added), byte-identical bootloader (the first
+   differing byte is the PE TimeDateStamp at 0x108), and every one of
+   them scanning clean under Defender with cloud protection on and the
+   Mark-of-the-Web set. `upx=True` in `Atomic.spec` has never applied -
+   upx.exe is not installed - so the usual first suspect was never in
+   play. Nothing in the code was ever shown to cause it; the container
+   was.
+
+   `python packaging/build.py --zip` writes it. `helpers/updater.py`
+   prefers `Atomic.zip` at a tag and falls back to `Atomic.exe`, so
+   releases already published still install - **do not remove that
+   fallback**, and see rule 4 for what the first zipped release has to
+   carry.
+
+9. **Find the cause before writing the fix - by measurement, not by
    reading.** The owner's ask, 21 August 2026, after the pass above
    landed every item on his list: *"make the method you used (accurate
    calculations, finding new solutions) a rule for you and the other

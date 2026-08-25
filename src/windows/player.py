@@ -6635,6 +6635,16 @@ class PlayerPage(GlassPage):
         # already running at the panel's full rate with nothing dropped.
         # So the row says which number it is, and the display rate sits
         # beside it where the claim can be checked.
+        #
+        # **And the row is named the right way round now** - the owner,
+        # 25 August 2026, reading it at 10.0: "why is it 10 FPR???????".
+        # It said "Frames per refresh", which would mean ten frames
+        # squeezed into one refresh; mpv's `vsync-ratio` is the
+        # reciprocal of that - "for how many vsyncs a frame is displayed
+        # on average" - and 10 is exactly 240 / 23.976, one video frame
+        # held for ten refreshes of his 240Hz panel. That is the correct
+        # and healthy number for 24fps content on a 240Hz display; only
+        # the label was wrong.
         display = self._mpv_number("estimated-display-fps")
         return {
             "resolution": (f"{int(width)}x{int(height)}"
@@ -6684,6 +6694,17 @@ class PlayerPage(GlassPage):
         info_hash = self._playing_info_hash()
 
         setters = {}
+        # **While the loading screen is up, this panel used to say
+        # nothing at all** - the owner, 25 August 2026: "the statistics
+        # are not showing anything while logo loading". Everything below
+        # is read from mpv and from a torrent handle, and during startup
+        # there is neither: no file open, and often no release chosen
+        # yet. So the first thing the panel carries is the same phase
+        # the loading gauge is showing, which is the only honest answer
+        # to "what is it doing" at that moment - and the one worth
+        # having, because it names *which* step is slow.
+        panel.add_group("Startup")
+        setters["startup"] = panel.add_stat("Doing", "-")
         panel.add_group("Source")
         if info_hash:
             row = QHBoxLayout()
@@ -6707,7 +6728,7 @@ class PlayerPage(GlassPage):
         # for the subtitle panel applies to any row that tries to hold
         # more than a couple of value pairs.
         for pairs in ((("resolution", "Resolution"), ("fps", "Video FPS")),
-                      (("display", "Display"), ("vsync", "Frames per refresh")),
+                      (("display", "Display"), ("vsync", "Refreshes per frame")),
                       (("video", "Video"), ("audio", "Audio")),
                       (("hwdec", "Decode"), ("bitrate", "Bitrate")),
                       (("dropped", "Dropped"), ("buffer", "Buffer"))):
@@ -6722,6 +6743,17 @@ class PlayerPage(GlassPage):
             panel.body_layout.addWidget(holder)
 
         def refresh():
+            if self._awaiting_first_frame:
+                try:
+                    _fraction, text = self._startup_snapshot()
+                except Exception:
+                    text = ""
+                # One line: the snapshot's second line is the reassuring
+                # half ("The first few seconds take longest.") and this
+                # is a stats row, not a loading screen.
+                setters["startup"](text.splitlines()[0] if text else "Starting...")
+            else:
+                setters["startup"]("Playing")
             if info_hash:
                 try:
                     from helpers import torrent_engine

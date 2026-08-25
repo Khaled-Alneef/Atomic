@@ -467,14 +467,23 @@ def _user_ratings_worker(signals, run, entry):
 
     One HTTPS GET of a small public file, and a 404 - nobody has rated
     this yet - is the ordinary answer. Never raises: no community score
-    beside IMDb's is a missing decoration, never an error."""
+    beside IMDb's is a missing decoration, never an error.
+
+    **The emit is inside the guard too**, which is not belt and braces:
+    closing the page while this is in flight deletes the QObject the
+    signal lives on, and emitting on a deleted one raises RuntimeError
+    from a daemon thread with no handler above it (seen in a harness,
+    25 August 2026). Nothing is waiting on the answer by then."""
     found = {}
     try:
         from helpers import community_ratings
         found = community_ratings.fetch(entry) or {}
     except Exception:
         logs.exception("user ratings lookup failed")
-    signals.user_ratings.emit(run, found)
+    try:
+        signals.user_ratings.emit(run, found)
+    except RuntimeError:
+        pass                # the page went away under the lookup
 
 
 def _rate_worker(signals, run, entry, item, score):
@@ -486,7 +495,10 @@ def _rate_worker(signals, run, entry, item, score):
         ok, message = community_ratings.rate(entry, item, score)
     except Exception:
         logs.exception("user rating write failed")
-    signals.rating_saved.emit(run, bool(ok), str(message))
+    try:
+        signals.rating_saved.emit(run, bool(ok), str(message))
+    except RuntimeError:
+        return              # see _user_ratings_worker
     if ok:
         _user_ratings_worker(signals, run, entry)
 
@@ -1150,6 +1162,24 @@ class DetailsPage(GlassPage):
         download_row.addStretch(1)
         left.addSpacing(8)
         left.addLayout(download_row)
+
+        # **Directly under Download** (the owner's ask, 25 August 2026:
+        # "make the rate button under the button download ch/ep in the
+        # list page"). Same shape and size as the button above it, so
+        # the two read as the pair of secondary actions they are - the
+        # primary one is Continue, above both.
+        self._rate_btn = QPushButton()
+        self._rate_btn.setFixedHeight(44)
+        self._rate_btn.setMinimumWidth(280)
+        self._rate_btn.setStyleSheet(self._download_btn.styleSheet())
+        use_hover_cursor(self._rate_btn)
+        self._rate_btn.clicked.connect(lambda _c=False: self._open_rate_menu())
+        self._sync_rate_button()
+        rate_row = QHBoxLayout()
+        rate_row.addWidget(self._rate_btn)
+        rate_row.addStretch(1)
+        left.addSpacing(8)
+        left.addLayout(rate_row)
         left.addStretch(2)
 
         root.addLayout(left, stretch=1)
@@ -1274,8 +1304,14 @@ class DetailsPage(GlassPage):
         self._save_btn.setFixedHeight(44)
         use_hover_cursor(self._save_btn)
         self._save_btn.clicked.connect(self._save_entry)
-        self._save_btn.setVisible(not self.entry.get("id"))
+        # **Into the layout first, and only then made visible.** The
+        # owner, 25 August 2026, with a screenshot: "a small window
+        # (white) appears then closes in a moment". This is it - a
+        # parentless widget that is shown is a *window* to Qt, title bar
+        # and all, until something reparents it a frame later. Every
+        # unsaved title opened from Discover flashed one.
         column.addWidget(self._save_btn)
+        self._save_btn.setVisible(not self.entry.get("id"))
 
         self._search = QLineEdit()
         self._search.setPlaceholderText(
@@ -1677,12 +1713,39 @@ class DetailsPage(GlassPage):
             return
         read = self._last_read()
         total = len({c.get("number") for c in self._chapters})
-        self._facts.setText(
-            f"{total} chapters"
-            + (f"  ·  read up to {read:g}" if read else ""))
+        self._set_facts([f"{total} chapters"]
+                        + ([f"read up to {read:g}"] if read else []))
         self._fill_rows()
 
     # ---- the facts column ---------------------------------------------
+    def _set_facts(self, parts):
+        """Remember what this page knows about the title, and draw it.
+
+        One place, because the Atomic score has to ride along with every
+        one of them and the three callers that used to `setText` here
+        directly each knew about only their own half - the video facts,
+        the chapter count, and the chapter count again after a
+        mark-as-read."""
+        self._facts_parts = [str(p) for p in parts if str(p).strip()]
+        self._render_facts()
+
+    def _render_facts(self):
+        """The facts line as it stands, with what Atomic's users think of
+        this title on the end of it.
+
+        **Beside IMDb's number, for the title as a whole** (the owner's
+        ask, 25 August 2026: "make it appear next to the IMDB rating for
+        the whole watchable and readable"). A reading title has no IMDb
+        figure to sit beside - no catalogue rates scanlations - so there
+        it joins the chapter count, which is that line's own facts."""
+        from helpers import community_ratings
+        parts = list(getattr(self, "_facts_parts", ()))
+        ours = _user_rating(self._user_ratings,
+                            community_ratings.title_item(self.entry))
+        if ours:
+            parts.append(f"★ {ours}")
+        self._facts.setText("   ·   ".join(parts))
+
     def _fill_facts(self):
         meta = self._meta or {}
         parts = [str(meta.get("runtime") or "").strip(),
@@ -1690,7 +1753,7 @@ class DetailsPage(GlassPage):
         rating = str(meta.get("imdbRating") or "").strip()
         if rating:
             parts.append(f"★ {rating} IMDb")
-        self._facts.setText("   ·   ".join(p for p in parts if p))
+        self._set_facts(parts)
 
         def fill(row, values):
             # **Cleared first, then filled.** This ran on every meta
@@ -1962,10 +2025,23 @@ class DetailsPage(GlassPage):
     def _refresh_list(self):
         """Ask the source for this list again (the panel's refresh
         button). Reading skips chapter_source's six-hour disk cache;
-        video simply re-fetches the Cinemeta meta, which is not cached.
-        The button disables itself until the answer lands, so a series
-        of impatient presses cannot stack lookups."""
-        if self._closed or self._site_choice_pending:
+        video re-asks Cinemeta and redraws only if the episode list
+        actually changed (see _meta_worker). The button disables itself
+        until the answer lands, so a series of impatient presses cannot
+        stack lookups."""
+        if self._closed:
+            return
+        if self._site_choice_pending:
+            # **The one press that used to do nothing at all.** While a
+            # reading title is asking which site to read it from, this
+            # returned immediately - and the button stayed enabled, so
+            # it looked live and was not (measured 25 August 2026 on the
+            # owner's own entries: rows unchanged, note unchanged, no
+            # request made). Re-listing the sites is what a press means
+            # here: the list is `manga_sites.list_sites()`, which the
+            # user may have just added a row to in Settings, and the
+            # page holds no other way to pick that up.
+            self._fill_site_rows()
             return
         self._run += 1
         self._meta_retried = False
@@ -2189,6 +2265,7 @@ class DetailsPage(GlassPage):
         try:
             from helpers import community_ratings
             self._user_ratings = community_ratings.cached(self.entry) or {}
+            self._render_facts()
             if not community_ratings.needs_fetch(self.entry):
                 return
         except Exception:
@@ -2206,10 +2283,12 @@ class DetailsPage(GlassPage):
         if run != self._run or self._closed:
             return
         if dict(found or {}) == self._user_ratings:
-            return              # nothing moved; no need to rebuild rows
+            return              # nothing moved
         self._user_ratings = dict(found or {})
-        if self._source_pick is None:
-            self._refill_rows()
+        # The facts line, not the rows: the score is the title's now, so
+        # a late answer costs one label rather than a whole list rebuild
+        # (which on a 249-chapter series was 249 cards).
+        self._render_facts()
 
     def _on_rating_saved(self, run, ok, message):
         if run != self._run or self._closed:
@@ -2217,56 +2296,13 @@ class DetailsPage(GlassPage):
         show_toast(self, message if message else
                    ("Rating saved" if ok else "That rating was not saved"))
         if ok:
-            # Redraw so the chip shows the score straight away. It reads
-            # the *local* record (community_ratings.my_rating), which is
+            # Redraw so the button shows the score straight away. It
+            # reads the *local* record (community_ratings.my_rating),
             # written the moment the write is accepted - the community
-            # average behind it comes from a CDN with a five-minute cache
-            # and would otherwise leave the row looking unrated for
-            # minutes after voting.
-            self._refill_rows()
-
-    def _refill_rows(self):
-        """Redraw whichever list is on screen. The two fills are
-        independent and only one of them is ever showing."""
-        try:
-            if self._is_reading:
-                self._fill_chapter_rows()
-            else:
-                self._fill_episode_rows()
-        except RuntimeError:
-            pass            # the page went away under a late answer
-
-    def _rate_menu(self, menu, item, what):
-        """The "Rate" submenu for one row, and the action that sends it.
-
-        Returns a callable taking the chosen QAction, or None when there
-        is nothing to rate. A submenu of ten rather than a dialog: the
-        row's menu is already open under the pointer and a rating is one
-        press."""
-        from helpers import community_ratings
-        if not item:
-            return None
-        menu.addSeparator()
-        mine = menu.addMenu(f"Rate This {what}")
-        if not community_ratings.can_rate():
-            # No proxy configured *and* no token pasted - see
-            # community_ratings.can_rate. Most copies will have a proxy
-            # baked in and never see this.
-            disabled = mine.addAction("Rating is not set up in this copy")
-            disabled.setEnabled(False)
-            return lambda _chosen: None
-        actions = {}
-        for score in range(community_ratings.MAX_SCORE,
-                           community_ratings.MIN_SCORE - 1, -1):
-            actions[mine.addAction(f"{score} / 10")] = score
-
-        def handle(chosen):
-            score = actions.get(chosen)
-            if score is None:
-                return False
-            self._send_rating(item, score)
-            return True
-        return handle
+            # average behind it comes from a CDN with a five-minute
+            # cache and would otherwise leave the title looking unrated
+            # for minutes after voting.
+            self._sync_rate_button()
 
     def _on_episode_ratings(self, run, key, mapping):
         """A season's TMDB ratings arrived: keep them and redraw the
@@ -2334,29 +2370,22 @@ class DetailsPage(GlassPage):
             stars = _episode_rating(rating_map.get(number), rating_label)
             if stars:
                 meta_line = f"{meta_line}   ·   {stars}" if meta_line else stars
-            # And what people using Atomic thought of it, beside the
-            # catalogue's own number (the owner's ask, 25 August 2026).
-            # Its own label rather than a second bare figure: the two are
-            # different scales with different populations behind them,
-            # and the whole reason this is worth printing is that it is
-            # *not* IMDb's.
-            from helpers import community_ratings
-            rate_key = community_ratings.episode_item(season, number)
-            ours = _user_rating(self._user_ratings, rate_key)
-            if ours:
-                meta_line = f"{meta_line}   ·   {ours}" if meta_line else ours
+            # **No Atomic score on the row, and no rate chip on it
+            # either** (the owner's ask, 25 August 2026: "make the rating
+            # of Atomic users for the whole watchable or readable not the
+            # ch or the ep"). Both moved to the title: the score sits
+            # beside IMDb's in the facts line and the control sits under
+            # Download - see _render_facts and _build's rate button.
             builders.append(
                 lambda t=title, m=meta_line, b=badge, up=upcoming,
-                s=season, e=number, rk=rate_key,
+                s=season, e=number,
                 still=str(video.get("thumbnail") or ""): self._row_card(
                     t, m, b,
                     (None if up else lambda s=s, e=e: self._start_episode(s, e)),
                     on_menu=(None if up
                              else lambda ev, s=s, e=e:
                              self._episode_menu(ev, s, e)),
-                    variant="episode", still_url=still,
-                    # Nothing to rate on an episode that has not aired.
-                    rate_item=(None if up else rk)))
+                    variant="episode", still_url=still))
             shown += 1
         self._queue_rows(builders)
         self._panel_note.setVisible(shown == 0)
@@ -2385,24 +2414,16 @@ class DetailsPage(GlassPage):
             read = number is not None and (
                 (read_up_to and number <= read_up_to)
                 or history.chapter_key(number) in self._history_marks)
-            # A chapter has no IMDb rating - no catalogue rates
-            # scanlations - so the Atomic score is the only one these
-            # rows can carry, and it goes in the same place the episode
-            # rows put theirs.
-            from helpers import community_ratings
+            # No per-chapter score and no per-chapter control - see the
+            # episode rows for the ask that moved both to the title.
             meta = chapter_published(chapter)
-            rate_key = community_ratings.chapter_item(number)
-            ours = _user_rating(self._user_ratings, rate_key)
-            if ours:
-                meta = f"{meta}   ·   {ours}" if meta else ours
             builders.append(
                 lambda t=title, d=meta,
                 b=(("watched", "DONE") if read else None),
-                n=number, rk=rate_key: self._row_card(
+                n=number: self._row_card(
                     t, d, b,
                     lambda n=n: self._read(n),
-                    on_menu=lambda ev, n=n: self._chapter_menu(ev, n),
-                    rate_item=rk))
+                    on_menu=lambda ev, n=n: self._chapter_menu(ev, n)))
             shown += 1
         self._queue_rows(builders)
         self._panel_note.setVisible(shown == 0)
@@ -2418,46 +2439,64 @@ class DetailsPage(GlassPage):
     # what sits at its left edge, and in whether its figures are prose
     # or chips - see _group_card and _source_card.
 
-    def _rate_chip(self, item):
-        """The little score button at the right of a row.
+    def _sync_rate_button(self):
+        """The Rate control's label, for whatever this title's state is.
 
-        **The reason it exists is that the rating had no visible control
-        at all.** It was on the row's right-click menu, and a row shows
-        no sign of having one - the owner, 25 August 2026: "how can I
-        test the rating?? there is no buttons or labels for it!!". The
-        menu stays; this is the thing you can see.
+        **It sits under Download, and it rates the title** (the owner's
+        ask, 25 August 2026 - see community_ratings' module note for why
+        the per-row chips this replaces were the wrong unit). It shows
+        *your own* score, not the community average: the average sits in
+        the facts line beside IMDb's, and the two answer different
+        questions.
 
-        It shows *your own* score, not the community average - the
-        average already sits in the meta line beside IMDb's, and the two
-        answer different questions. Unrated it reads "Rate", which is
-        also the invitation."""
+        **Never disabled.** The first cut greyed it out when this copy
+        had no way to write, with the reason in a tooltip - which is the
+        same failure that put it here in the first place ("how can I
+        test the rating?? there is no buttons or labels for it!!"): a
+        dead control explains nothing to somebody pressing it. It stays
+        pressable and says what is missing, in a toast, on the press."""
         from helpers import community_ratings
-        mine = community_ratings.my_rating(self.entry, item)
-        button = QPushButton(f"★ {mine}" if mine else "★ Rate",
-                             objectName="Ghost")
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setFixedHeight(26)
-        button.setToolTip("Your rating" if mine else "Rate this")
+        mine = community_ratings.my_rating(self.entry,
+                                           community_ratings.title_item(self.entry))
+        what = "Manga" if self._is_reading else (
+            "Film" if self.entry.get("type") == "Movie" else "Series")
+        self._rate_btn.setText(f"  ★  Your Rating: {mine}/10" if mine
+                               else f"  ☆  Rate This {what}")
+        self._rate_btn.setToolTip(
+            "Change your rating" if mine
+            else "Give this title a score other Atomic users will see")
+
+    def _open_rate_menu(self):
+        """The 1-10 menu, at the pointer that opened it.
+
+        `QCursor.pos()`, not `button.mapToGlobal(...)`: this app runs on
+        two monitors at different scale factors, where mapToGlobal
+        divides by the *other* screen's factor and lands the popup a
+        couple of hundred pixels away (.claude/rules/ui.md). The cursor
+        is already in global coordinates and is where the press was."""
+        from helpers import community_ratings
         if not community_ratings.can_rate():
-            button.setEnabled(False)
-            button.setToolTip(
-                "Rating is not set up in this copy - see Settings > API Keys")
-        button.clicked.connect(
-            lambda _c=False, it=item, b=button: self._open_rate_menu(it, b))
-        return button
-
-    def _open_rate_menu(self, item, anchor):
-        """The 1-10 menu, under the chip that opened it."""
-        from helpers import community_ratings
+            # Said out loud rather than drawn as a disabled button - see
+            # _sync_rate_button. Reading scores never needs any of this;
+            # only adding one does.
+            #
+            # It no longer names a Settings field: the GitHub key came
+            # out of Settings on 25 August (the owner's ask - see
+            # app_settings.API_KEY_GROUPS), so sending a rating now waits
+            # on the write proxy being deployed rather than on anything
+            # the user can paste.
+            show_toast(self, "Sending ratings is not switched on in this "
+                             "copy yet", duration_ms=4000)
+            return
         menu = QMenu(self)
         actions = {}
         for score in range(community_ratings.MAX_SCORE,
                            community_ratings.MIN_SCORE - 1, -1):
             actions[menu.addAction(f"{score} / 10")] = score
-        chosen = menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        chosen = menu.exec(QCursor.pos())
         score = actions.get(chosen)
         if score is not None:
-            self._send_rating(item, score)
+            self._send_rating(community_ratings.title_item(self.entry), score)
 
     def _send_rating(self, item, score):
         """Post one score, and say so while it is in flight."""
@@ -2468,7 +2507,7 @@ class DetailsPage(GlassPage):
         show_toast(self, f"Rating {score}/10...")
 
     def _row_card(self, title, date_text, badge, on_click, on_menu=None,
-                  variant="chapter", still_url=None, rate_item=None):
+                  variant="chapter", still_url=None):
         """One content row: an episode, a chapter, a reading site, or
         the source picker's back row (`variant="back"`).
 
@@ -2536,15 +2575,35 @@ class DetailsPage(GlassPage):
             f" background: transparent; border: none;")
         column.addWidget(head)
         if date_text:
-            date = QLabel(date_text)
+            # **Elided, like the title above it, and for a reason that
+            # was on screen** (the owner, 25 August 2026: "why is it
+            # shifted the Done??"). A plain QLabel with word wrap off
+            # reports its *whole string* as its minimum width, and this
+            # row lives in a fixed 490px panel: one long meta line -
+            # "Apr 6, 2013   ·   TMDB 8.8   ·   Atomic 9.5 (2)" - pushed
+            # the scroll host wider than its viewport, and since the
+            # host is one width for every row, *every* row's right edge
+            # went past the panel and the DONE badge was cut in half.
+            #
+            # Measured on the real page, one variable at a time, on the
+            # owner's own screenshot row (Attack on Titan S01E01) in a
+            # 458px viewport:
+            #
+            #     as shipped (plain label + rate chip)   707px
+            #     plain label, no chip                   617px
+            #     elided label + chip                    313px
+            #     elided label, no chip (now)            223px
+            #
+            # So the chip was not the cause - the meta line alone was
+            # 159px over the panel - and taking the chip off (which the
+            # title-level rating did anyway) would not have fixed this.
+            date = _ElidedLabel(date_text)
             date.setStyleSheet(
                 f"color: {theme.TEXT_MUTED}; font-size: 9.5pt;"
                 f" background: transparent; border: none;")
             column.addWidget(date)
         row.addLayout(column, stretch=1)
 
-        if rate_item:
-            row.addWidget(self._rate_chip(rate_item))
         if badge:
             kind, text = badge
             row.addWidget(_badge(text, kind))
@@ -3096,13 +3155,10 @@ class DetailsPage(GlassPage):
         menu.addSeparator()
         mark_all = menu.addAction("Mark All as Watched")
         clear_all = menu.addAction("Mark All as Unwatched")
-        from helpers import community_ratings
-        rate = self._rate_menu(menu,
-                               community_ratings.episode_item(season, episode),
-                               "Episode")
+        # No "Rate This Episode" here any more: a rating is the title's
+        # now, and its control is the button under Download (the owner's
+        # ask - see community_ratings' module note).
         chosen = menu.exec(event.globalPosition().toPoint())
-        if rate is not None and rate(chosen):
-            return
         if chosen is pick_source:
             self._open_source_picker(season, episode)
             return
@@ -3203,12 +3259,8 @@ class DetailsPage(GlassPage):
         menu.addSeparator()
         mark_all = menu.addAction("Mark All as Read")
         clear_all = menu.addAction("Mark All as Unread")
-        from helpers import community_ratings
-        rate = self._rate_menu(menu, community_ratings.chapter_item(number),
-                               "Chapter")
+        # See _episode_menu: rating moved to the title.
         chosen = menu.exec(event.globalPosition().toPoint())
-        if rate is not None and rate(chosen):
-            return
         numbers = [c_num for c_num in
                    (chapter_number(c) for c in self._chapters)
                    if c_num is not None]
@@ -3237,9 +3289,8 @@ class DetailsPage(GlassPage):
             return
         read = self._last_read()
         total = len({c.get("number") for c in self._chapters})
-        self._facts.setText(
-            f"{total} chapters"
-            + (f"  ·  read up to {read:g}" if read else ""))
+        self._set_facts([f"{total} chapters"]
+                        + ([f"read up to {read:g}"] if read else []))
         self._fill_rows()
 
     # ---- downloading ----------------------------------------------------

@@ -14,6 +14,7 @@ dist/
 # every time it is committed. Adding it to a release commit needs
 # `git add -f`, since this rule would otherwise skip it.
 /Atomic.exe
+/Atomic.zip
 
 # The video player's decode engine (libmpv-2.dll, ~120MB unpacked).
 # Same argument as Atomic.exe above: it is a rebuildable artifact, not

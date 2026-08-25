@@ -105,9 +105,22 @@ def _headers(referer: str = None) -> dict:
 def _get(url: str, timeout: float, referer: str = None,
          max_bytes: int = net.MAX_RESPONSE_BYTES) -> str:
     request = urllib.request.Request(url, headers=_headers(referer))
+    # A host that has refused twice recently is skipped rather than
+    # waited on - see net.host_refusing for the measurement. Source
+    # lookups fan out over many hosts at once, so on a network that
+    # blocks some of them this is the difference between a lookup
+    # bounded by the slowest live host and one bounded by the deadline.
+    if net.host_refusing(url):
+        raise ConnectionError(f"{net._url_host(url)} is refusing connections")
     deadline = net.deadline_in(timeout)
-    with net.urlopen(request, timeout=timeout) as response:
-        return net.read_text(response, deadline, max_bytes)
+    try:
+        with net.urlopen(request, timeout=timeout) as response:
+            text = net.read_text(response, deadline, max_bytes)
+    except Exception:
+        net.note_host_failure(url)
+        raise
+    net.note_host_success(url)
+    return text
 
 
 def _get_json(url: str, timeout: float):

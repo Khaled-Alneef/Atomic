@@ -474,9 +474,29 @@ def _post_text(url: str, fields: dict, timeout: int, accept: str = "*/*") -> str
         "Accept": accept,
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
     })
+    return _read(req, url, timeout)
+
+
+def _read(req, url, timeout):
+    """One request, with the refusing-host skip on it.
+
+    **A site that has refused twice recently is not asked again**, the
+    same rule the covers and TMDB now follow (net.host_refusing). These
+    sites are the reading covers' only fallback, and on a network that
+    blocks them each search re-paid the timeout per title - measured on
+    the owner's work network reproduced here: 15 attempts per host per
+    page visit, none of which could have succeeded."""
+    if net.host_refusing(url):
+        raise ConnectionError(f"{net._url_host(url)} is refusing connections")
     deadline = net.deadline_in(timeout)
-    with net.urlopen(req, timeout=timeout) as resp:
-        return net.read_text(resp, deadline)
+    try:
+        with net.urlopen(req, timeout=timeout) as resp:
+            text = net.read_text(resp, deadline)
+    except Exception:
+        net.note_host_failure(url)
+        raise
+    net.note_host_success(url)
+    return text
 
 
 def _post_json(url: str, fields: dict, timeout: int):
@@ -493,9 +513,7 @@ def _get(url: str, timeout: int, extra_headers: dict = None) -> str:
         "User-Agent": "Mozilla/5.0 PC-App/1.0",
         **(extra_headers or {}),
     })
-    deadline = net.deadline_in(timeout)
-    with net.urlopen(req, timeout=timeout) as resp:
-        return net.read_text(resp, deadline)
+    return _read(req, url, timeout)
 
 
 def _search_madara(base_url: str, query: str, timeout: int) -> list:

@@ -167,7 +167,7 @@ def _required_datas():
 
 
 def _canon(name):
-    """An archive entry name with its separators flattened, so a lookup
+    r"""An archive entry name with its separators flattened, so a lookup
     cannot fail on `/` against `\` - see the note in _required_datas."""
     return str(name).replace("\\", "/").lower()
 
@@ -304,6 +304,27 @@ def main():
     shutil.copy2(built_exe, final_exe)
     _refresh_shell_icon(final_exe)
     print(f"\nDone: {final_exe}")
+    if "--zip" in sys.argv[1:]:
+        print(f"Zipped: {_write_zip(final_exe)}")
+
+
+def _write_zip(exe: Path) -> Path:
+    """`Atomic.zip`, holding the one executable - what a release and the
+    remote-tests branch ship (CLAUDE.md rule 8).
+
+    Not made on every build: it costs ten seconds and another 95MB on
+    disk, and a local test run needs the exe rather than the archive, so
+    the release and the remote-tests push ask for it with --zip.
+
+    One file, named exactly `Atomic.exe` at the root of the archive -
+    `updater._exe_from_zip` refuses anything else rather than guessing
+    which of several executables to install."""
+    import zipfile
+    archive = PROJECT_ROOT / "Atomic.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED,
+                         compresslevel=6) as bundle:
+        bundle.write(exe, "Atomic.exe")
+    return archive
 
 
 if __name__ == "__main__":

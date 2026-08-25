@@ -407,9 +407,17 @@ AI_KEYS = ("openai", "deepseek", "gemini", "anthropic")
 # The heading each key sits under in Settings, in this order. A key with
 # no group here would simply not be drawn, so a new one has to be filed.
 API_KEY_GROUPS = (
-    # Reading the community scores needs nothing; this is only for
-    # *adding* one - see helpers/community_ratings.
-    ("Atomic User Ratings", ("github",)),
+    # **No GitHub row** (the owner's ask, 25 August 2026: "remove the
+    # github token insert in settings"). It only ever unlocked *sending*
+    # a rating, and asking somebody to make a fine-grained token with
+    # write access to a repository - so that a score can be posted - is
+    # the wrong price for the feature. Reading the community scores has
+    # never needed anything.
+    #
+    # The key itself stays in API_KEYS above and community_ratings still
+    # reads it, so an install that already has one keeps working; there
+    # is simply nowhere to type a new one. Writing is the write proxy's
+    # job (tools/ratings-worker), which needs nothing from the user.
     ("Artwork", ("tmdb",)),
     ("Subtitle Sources", ("subdl", "subsource")),
     ("AI Subtitle Translation", AI_KEYS),

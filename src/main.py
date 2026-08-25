@@ -62,9 +62,10 @@ from PyQt6.QtWidgets import (
 from helpers.settings_dialog import SettingsDialog
 from helpers.widgets import (PageSlide, SmoothTween, confirm, hold_hover_cursor,
                              install_edge_wheel, release_hover_cursor,
-                             release_stale_hover_cursors, show_toast,
-                             take_live_redo, take_live_undo, use_hover_cursor,
-                             warm_display_clock)
+                             install_stray_window_guard,
+                             release_stale_hover_cursors, scroll_area,
+                             show_toast, take_live_redo, take_live_undo,
+                             use_hover_cursor, warm_display_clock)
 from windows import home as home_page_module
 from windows import link_grid as link_grid_module
 from windows import tracker as tracker_module
@@ -204,7 +205,18 @@ SIDEBAR_WIDTH = 220
 # 40px icon needs a 46px row, a 50px viewport, and the collapsed rail
 # holds viewport + 32px of holder chrome (measured 36 in 68). See
 # RAIL_ICON_SIZE for the centring measurement 84 was chosen against.
-SIDEBAR_COLLAPSED_WIDTH = 68
+#
+# **72, up from 68 - the owner's ask, 25 August 2026: "make the folded
+# sidebar icons 10% larger".** The same arithmetic as the 84/40 pairing
+# above, run for the 29px folded icon (RAIL_ICON_SIZE_FOLDED): the
+# delegate centres an icon only at or under `row - 2*margin`, margin is
+# 3, and a row lays out at `viewport - 2*spacing` with spacing 2 - so 29
+# needs a 35px row, a 39px viewport, and 39 + 32 of holder chrome is 71.
+# 72 rather than 71 keeps the width even, which is what puts the row's
+# true centre on a whole pixel (the +0.5px floor recorded at
+# RAIL_ICON_SIZE is what an odd cell costs). Measured after the change:
+# viewport 40, row 36, ceiling 30 >= 29.
+SIDEBAR_COLLAPSED_WIDTH = 72
 SIDEBAR_ANIM_MS = 180
 # The spacing every sidebar's QVBoxLayout is built with, and the slack
 # NavListWidget.sizeHint keeps under its last row - both read by
@@ -232,6 +244,24 @@ RAIL_GAP_FALLBACK = 44
 # Named rather than written as 20, because both halves are values that
 # live elsewhere and could move.
 RAIL_GAP_SLACK = NAV_LIST_BOTTOM_MARGIN + SIDEBAR_LAYOUT_SPACING * 2
+
+# **A block gap is half a row now** (the owner, 25 August 2026: "in the
+# sidebar reduce the spaces of empty buttons (separators) by 50%"). It
+# was a whole blank row, which on a laptop was two rows' worth of column
+# spent on air while real rows had nowhere to go.
+RAIL_GAP_FRACTION = 0.5
+
+# How short a row may be squeezed to keep every one of them on screen,
+# and what a row spends on air before anything is drawn in it (theme.py
+# gives #NavList::item 11px top and bottom).
+#
+# **44 because that is where a row stops reading as a button**: at the
+# natural 63 the icon box is 41px, at 44 it is 22, and below that the
+# icon is smaller than the 20px grid the sheet is drawn on. A window too
+# short even for 44 keeps the scrolling column (_rail_scroller) as the
+# last resort, so a row is never lost - it just has to be scrolled to.
+MIN_ROW_PITCH = 44
+ROW_PADDING = 22
 
 # How many blocks the section rail draws. Fixed rather than read off the
 # showing page, because the bar is built once and refilled per page -
@@ -353,6 +383,28 @@ SECTION_BACK_ICON = "\uE72B"    # Back (left-pointing arrow)
 # SIDEBAR_COLLAPSED_WIDTH stays 68: that pairing is what shipped before
 # the 40/84 experiment, not new geometry.
 RAIL_ICON_SIZE = 26
+
+# **The folded rail draws its icons bigger than the expanded one now**
+# (the owner, 25 August 2026: "make the folded sidebar icons 10%
+# larger"). 26 * 1.1 = 28.6, and 29 is the integer above it; the rail
+# grew with it (SIDEBAR_COLLAPSED_WIDTH 68 -> 72) because the delegate's
+# centring ceiling is a property of the *row*, not of the icon - see
+# _RailDelegate.initStyleOption for the mechanism and
+# SIDEBAR_COLLAPSED_WIDTH for the arithmetic.
+#
+# Two sizes rather than one, which is new here: every previous change
+# moved both widths together on the grounds that a row shows the same
+# picture folded and unfolded. It still does - only the size differs,
+# and only in the state where the icon *is* the row. An expanded row's
+# icon sits beside a 13pt label and is sized against it; a folded one
+# has nothing beside it to be out of scale with.
+#
+# Nothing reads this constant at paint time: _RailDelegate takes the
+# size off the rail's own iconSize (kept in step by
+# _sync_rail_icon_widths), because a delegate deriving artwork from
+# state it cannot see is what shipped a snap-back the last time - see
+# its paint().
+RAIL_ICON_SIZE_FOLDED = 29
 
 # Applied to a rail while it is folded - see _sync_rail_icon_widths for
 # the measurement. Only the padding is named, so every other property of
@@ -589,7 +641,23 @@ def _rail_dpr(widget):
         return 1.0
 
 
-def _rail_icon(path, dpr):
+def _rail_view_icon_size(widget) -> int:
+    """The icon size the rail `widget` is currently drawing at.
+
+    Read off the view rather than off the window's collapsed flag: a
+    delegate paints rows for three different rails and has no business
+    knowing which of them is folded, and deriving artwork from state the
+    paint cannot see is what shipped a sideways snap-back once already
+    (see _RailDelegate.paint). _sync_rail_icon_widths is what keeps the
+    view's iconSize true."""
+    try:
+        size = int(widget.iconSize().height()) if widget is not None else 0
+    except (AttributeError, RuntimeError):
+        size = 0
+    return size if size > 0 else RAIL_ICON_SIZE
+
+
+def _rail_icon(path, dpr, size=RAIL_ICON_SIZE):
     """A rail row's decoration: TEXT_MUTED at rest, TEXT when the row is
     selected. Hover is _RailDelegate's to draw - QStyle only ever asks an
     icon for Normal, Disabled or Selected.
@@ -602,12 +670,12 @@ def _rail_icon(path, dpr):
     theme.NAV_BULLET instead, so a bundle that shipped without one of the
     PNGs loses the picture and keeps the row.
     """
-    normal = images.tinted_asset(path, theme.TEXT_MUTED, RAIL_ICON_SIZE, dpr)
+    normal = images.tinted_asset(path, theme.TEXT_MUTED, size, dpr)
     if normal.isNull():
         return None
     built = QIcon(normal)
     built.addPixmap(
-        images.tinted_asset(path, theme.TEXT, RAIL_ICON_SIZE, dpr),
+        images.tinted_asset(path, theme.TEXT, size, dpr),
         QIcon.Mode.Selected)
     return built
 
@@ -662,9 +730,24 @@ class _RailDelegate(QStyledItemDelegate):
             # to the row instead means AlignCenter lands the icon on the
             # true centre and there is no constant to keep true.
             #
-            # `margin` is read from the style rather than assumed - it is
-            # PM_FocusFrameHMargin + 1, which is the expression
-            # viewItemLayout itself uses, and it measures 3 here.
+            # **`margin` is measured off the style, not computed from a
+            # pixel metric - and the metric was wrong.** This used to
+            # read PM_FocusFrameHMargin + 1 (the expression
+            # QCommonStylePrivate::viewItemLayout itself uses), which
+            # answers 3 here; the cell Qt actually lays out starts 4px
+            # in. Measured 25 August 2026 by asking the style where the
+            # decoration goes - `SE_ItemViewItemDecoration` came back at
+            # x=6 for an item at x=2, at every decoration width from 10
+            # to 50 - so the offset is a constant of the *style*, and
+            # QStyleSheetStyle (which is what is in front of the base
+            # style whenever an app stylesheet is set) does not agree
+            # with the base style's own metric. That one pixel is the
+            # +1.04px right-skew this file has twice recorded as fixed
+            # and twice had reported again.
+            #
+            # Asking costs one subElementRect per painted row and cannot
+            # drift: whatever the style does, the cell is made symmetric
+            # against where it actually lands.
             #
             # This leans on the folded rail having no horizontal padding
             # (RAIL_FOLDED_QSS): `rect` here is the whole item, and
@@ -672,8 +755,11 @@ class _RailDelegate(QStyledItemDelegate):
             # the two are the same row only while that padding is 0.
             widget = option.widget
             style = widget.style() if widget is not None else QApplication.style()
-            margin = style.pixelMetric(
-                QStyle.PixelMetric.PM_FocusFrameHMargin, None, widget) + 1
+            size = _rail_view_icon_size(widget)
+            option.decorationSize = QSize(size, size)
+            cell = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemDecoration, option, widget)
+            margin = max(0, cell.x() - option.rect.x())
             # **The `max(...)` here has a ceiling, and RAIL_ICON_SIZE must
             # stay under it.** Found 22 August 2026 while trying to raise
             # RAIL_ICON_SIZE to 28: every folded row shifted **+1.5px
@@ -706,9 +792,16 @@ class _RailDelegate(QStyledItemDelegate):
             # RAIL_ICON_SIZE instead stays at or under `32 - margin*2`
             # (26) - see its own comment for why 26 rather than a smaller
             # safe value.
+            #
+            # **The size is the rail's own iconSize, not a constant.**
+            # The folded rail draws at RAIL_ICON_SIZE_FOLDED and the
+            # expanded one at RAIL_ICON_SIZE; _sync_rail_icon_widths
+            # sets that on the view at each fold, so this reads the
+            # state off the widget it is painting rather than off the
+            # window's fold flag, which the delegate cannot see (the
+            # same rule paint() below records paying for).
             option.decorationSize = QSize(
-                max(RAIL_ICON_SIZE, option.rect.width() - margin * 2),
-                RAIL_ICON_SIZE)
+                max(size, option.rect.width() - margin * 2), size)
 
     def sizeHint(self, option, index):
         """An icon row is exactly as tall as a typed one.
@@ -731,14 +824,40 @@ class _RailDelegate(QStyledItemDelegate):
         empty label, and answers 40 for the same row carrying one
         character of the folded rail's 14pt icon face - so the
         placeholder did not reproduce the old height, it invented a
-        taller one. Measured on the real window: rows went 33 -> 40."""
+        taller one. Measured on the real window: rows went 33 -> 40.
+
+        **The placeholder is back, and it is right this time, because
+        the face under it changed.** A folded icon row now carries the
+        nav face rather than the icon one (_style_rail_item, 25 August
+        2026 - the owner's ask that folded and unfolded rows sit at the
+        same y), and the two things that made the old attempt wrong were
+        both that font: it measured a *different* face, and it measured
+        it against a row whose height came from the icon face too. What
+        is left is the one difference this cannot reach otherwise - an
+        empty string does not measure as tall as a typed one in the same
+        face. Measured on the real window: folded rows 55px against the
+        expanded 59 with no placeholder, 59 with it."""
         hint = super().sizeHint(option, index)
         if not index.data(RAIL_ICON_ROLE):
+            return hint
+        # **An explicitly pinned height wins.** _fit_rails shrinks the
+        # rows to keep every one of them on a short screen, and it does
+        # that by setting the item's own size hint - which the height
+        # computed below would otherwise throw away, silently, leaving
+        # the rows at their natural 59px and the column scrolling
+        # anyway. Measured before this line: item hint 40px,
+        # sizeHintForRow 59px, body still 189px past its viewport.
+        explicit = index.data(Qt.ItemDataRole.SizeHintRole)
+        if isinstance(explicit, QSize) and explicit.height() > 0:
+            hint.setHeight(explicit.height())
             return hint
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         opt.icon = QIcon()
         opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasDecoration
+        if not opt.text:
+            opt.text = "A"
+            opt.features |= QStyleOptionViewItem.ViewItemFeature.HasDisplay
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
         plain = style.sizeFromContents(
@@ -768,7 +887,7 @@ class _RailDelegate(QStyledItemDelegate):
                 # from something the paint could not see - the row
                 # shifted sideways under the pointer.
                 hot = images.tinted_asset(str(path), theme.TEXT,
-                                          RAIL_ICON_SIZE,
+                                          _rail_view_icon_size(opt.widget),
                                           _rail_dpr(opt.widget))
                 if not hot.isNull():
                     opt.icon = QIcon(hot)
@@ -937,6 +1056,11 @@ class MainWindow(QMainWindow):
         # leaves an overlay properly instead of walking page history
         # underneath it. Nothing is lost by narrowing this one.
         self.container.installEventFilter(self)
+        # One more fit once the event loop has laid the window out: the
+        # pass during construction reads a viewport that has not settled
+        # and lands on a smaller pitch than there is room for (measured
+        # at 900px: 44 during the build, 59 once shown).
+        QTimer.singleShot(0, self._fit_rails)
         self.sidebar_holder.installEventFilter(self)
         QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
 
@@ -961,6 +1085,15 @@ class MainWindow(QMainWindow):
         # one is. _layout_sidebars is the single place geometry is
         # derived from these.
         self._section_bar_showing = False
+        # Every scrolling rail column in the window (_rail_scroller), so
+        # the fold can set their scrollbar policy without naming them.
+        self._rail_scrollers = []
+        # The same columns with their rails and gaps, for _fit_rails.
+        self._rail_columns = []
+        self._rail_bucket = None
+        # The row pitch and icon size the last fit settled on.
+        self._rail_pitch = 0
+        self._rail_icon_px = RAIL_ICON_SIZE
         # The sidebar-swap compositor while one runs (widgets.PageSlide).
         self._bar_slide = None
         # Every Downloads/Settings pair on screen - one per sidebar (see
@@ -1104,8 +1237,19 @@ class MainWindow(QMainWindow):
         # other property moved into this function: three copies drifted.
         rail.viewport().setMouseTracking(True)
         rail.viewport().installEventFilter(_RailCursor(rail.viewport()))
-        rail.setSizePolicy(QSizePolicy.Policy.Preferred,
+        # **Ignored, not Preferred, across.** A rail is 184px wide
+        # expanded and 32px folded, and it must take whatever the column
+        # hands it either way. Inside the scrolling column
+        # (_rail_scroller) Preferred meant the body kept the rail's
+        # *expanded* width hint after a fold - measured: rail viewports
+        # still 256px in a 90px rail, rows laid out 262px wide, so every
+        # folded icon was drawn off the right-hand edge and the rail
+        # looked empty. setMinimumWidth(0) for the other half of it:
+        # QAbstractScrollArea reports a minimum of its own that a layout
+        # will not go under.
+        rail.setSizePolicy(QSizePolicy.Policy.Ignored,
                            QSizePolicy.Policy.Fixed)
+        rail.setMinimumWidth(0)
         # QListWidget's item delegate paints with the widget's own font(),
         # not the ::item QSS font-family - the stylesheet rule alone is
         # silently ignored for list items, so it has to be set here too.
@@ -1116,6 +1260,8 @@ class MainWindow(QMainWindow):
         # attached to whichever row happened to hold one at build time.
         # Owned by the list, so it lives exactly as long as it does.
         rail.setItemDelegate(_RailDelegate(rail))
+        if self._rail_bucket is not None:
+            self._rail_bucket["rails"].append(rail)
         return rail
 
     def _make_rail_gap(self):
@@ -1130,6 +1276,8 @@ class MainWindow(QMainWindow):
         gap.setFixedHeight(RAIL_GAP_FALLBACK)
         gap.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._rail_gaps.append(gap)
+        if self._rail_bucket is not None:
+            self._rail_bucket["gaps"].append(gap)
         return gap
 
     def _make_nav_gap(self):
@@ -1139,21 +1287,171 @@ class MainWindow(QMainWindow):
         self._nav_gaps.append(gap)
         return gap
 
-    def _sync_rail_gaps(self):
-        """Every block gap set to exactly one row's height.
+    def _rail_gap_height(self, pitch=None) -> int:
+        """A block gap: half a row (RAIL_GAP_FRACTION).
 
         Measured off a real row rather than assumed - the QSS gives
         ::item 11px of vertical padding on top of whatever the font
         needs, so the number is a product of the stylesheet and the
         font, not something worth hard-coding twice."""
-        row = self.home_list.sizeHintForRow(0)
-        pitch = (row if row > 0 else RAIL_GAP_FALLBACK) + self.home_list.spacing() * 2
-        height = max(1, pitch - RAIL_GAP_SLACK)
+        if pitch is None:
+            pitch = getattr(self, "_rail_pitch", 0) or None
+        if pitch is None:
+            row = self.home_list.sizeHintForRow(0)
+            pitch = (row if row > 0 else RAIL_GAP_FALLBACK)
+            pitch += self.home_list.spacing() * 2
+        return max(1, int(pitch * RAIL_GAP_FRACTION) - RAIL_GAP_SLACK)
+
+    def _sync_rail_gaps(self):
+        """Every block gap set to half a row's height."""
+        height = self._rail_gap_height()
         for gap in getattr(self, "_rail_gaps", ()):
             try:
                 gap.setFixedHeight(height)
             except RuntimeError:
                 pass
+
+    def _fit_rails(self):
+        """Shrink the sidebar until every row is on screen without a
+        scroll - the owner's ask, 25 August 2026: *"make all buttons
+        showing without scrolling"*.
+
+        Two levers, spent in this order, because they cost different
+        things:
+
+        1. **The logo band.** It is decoration; the rows are the
+           navigation. Measured on the window that started this: at
+           720px the main bar needs 1115px of column for 160px of fixed
+           furniture, 120px of logo, eleven rows and two gaps.
+        2. **The row pitch**, down to MIN_ROW_PITCH. At 720px that
+           settles on ~46px against the natural 63, which still holds a
+           readable label and a ~24px icon.
+
+        Below that the scrolling column is still there and still works -
+        losing rows off the bottom is the one outcome this must not
+        have, and a 400px window is not worth deforming every row for.
+
+        The arithmetic is done against the *body's* size hint rather
+        than by adding up the furniture: the hint already counts the
+        margins, the spacings and whatever else a bar carries, and the
+        two bars carry different things (the section bar has Back and a
+        separator where the main one has a logo).
+        """
+        columns = list(getattr(self, "_rail_columns", ()))
+        if not columns:
+            return
+        base_icon = (RAIL_ICON_SIZE_FOLDED if self._sidebar_collapsed
+                     else RAIL_ICON_SIZE)
+        # Natural first: clear every pinned hint, so what a row asks for
+        # unaided is what the search below starts from.
+        for bucket in columns:
+            for rail in bucket["rails"]:
+                for index in range(rail.count()):
+                    rail.item(index).setSizeHint(QSize())
+                rail.updateGeometry()
+
+        def content(bucket, pitch):
+            """What this column needs at `pitch`, computed rather than
+            measured.
+
+            **Measured is what it used to be, and that oscillated.** The
+            body's own sizeHint is a cache of the last layout - the one
+            this pass is about to change - so reading it back gave a
+            different answer every fold: 53px, then 44, then 52, each
+            correct for the layout before it. This is
+            NavListWidget.sizeHint's arithmetic written out (rows at the
+            pitch, plus its bottom margin), so it depends on nothing
+            this function then sets."""
+            rows = [r.count() for r in bucket["rails"] if r.count()]
+            gaps = len(bucket["gaps"])
+            total = sum(n * pitch + NAV_LIST_BOTTOM_MARGIN for n in rows)
+            total += gaps * self._rail_gap_height(pitch)
+            total += SIDEBAR_LAYOUT_SPACING * max(0, len(rows) + gaps - 1)
+            return total
+
+        pitch, drop_logo = 0, False
+        for bucket in columns:
+            area = bucket.get("area")
+            rails = [r for r in bucket["rails"] if r.count()]
+            if area is None or not rails:
+                continue
+            try:
+                natural = max(r.sizeHintForRow(0) + r.spacing() * 2
+                              for r in rails)
+                room = area.viewport().height()
+            except RuntimeError:
+                continue
+            if room <= 0 or natural <= 0:
+                continue
+            # **Normalised to "no logo at all", never to the band's
+            # current height.** Reading the live height made the answer
+            # depend on the last pass's answer: drop the band, and the
+            # next pass sees 0 to reclaim, decides the rows fit without
+            # dropping anything, puts the band back, and the rows
+            # overflow again. Measured at 900px: pitch 60 with the band
+            # restored and the column scrolling, on the second pass.
+            bare = room + (self.logo_label.height()
+                           if bucket is columns[0] else 0)
+            has_logo = bucket is columns[0]
+
+            def largest(limit):
+                for candidate in range(natural, MIN_ROW_PITCH - 1, -1):
+                    if content(bucket, candidate) <= limit:
+                        return candidate
+                return 0
+
+            with_logo = largest(bare - (LOGO_HEIGHT if has_logo else 0))
+            if with_logo == natural:
+                fitted, drops = natural, False
+            else:
+                # The logo band is decoration and the rows are the
+                # navigation, so the band gives first - see the class
+                # note. Only then are the rows squeezed.
+                without = largest(bare)
+                if without > with_logo:
+                    fitted, drops = without, True
+                else:
+                    fitted, drops = (with_logo or MIN_ROW_PITCH), with_logo == 0
+            drop_logo = drop_logo or drops
+            pitch = fitted if not pitch else min(pitch, fitted)
+
+        if not pitch:
+            return
+        # One pitch for the whole window, not one per bar: the two bars
+        # swap places in the same column, and rows that changed height on
+        # the swap would read as the list jumping.
+        self._rail_pitch = pitch
+        icon_px = max(16, min(base_icon, pitch - ROW_PADDING))
+        rebuild_icons = icon_px != self._rail_icon_px
+        self._rail_icon_px = icon_px
+        for bucket in columns:
+            for rail in bucket["rails"]:
+                try:
+                    if rebuild_icons:
+                        rail.setIconSize(QSize(icon_px, icon_px))
+                        for index in range(rail.count()):
+                            item = rail.item(index)
+                            path = item.data(RAIL_ICON_ROLE)
+                            if path:
+                                item.setIcon(_rail_icon(str(path),
+                                                        _rail_dpr(self),
+                                                        icon_px) or QIcon())
+                except RuntimeError:
+                    pass
+        self._sync_rail_gaps()
+        self._sync_rail_icon_widths()
+        self._sync_home_list_height()
+        self._set_logo_height(0 if drop_logo else LOGO_HEIGHT)
+
+    def _set_logo_height(self, height):
+        """The logo band's height - LOGO_HEIGHT when the rows fit
+        around it, 0 when they do not (see _fit_rails)."""
+        height = max(0, min(LOGO_HEIGHT, int(height)))
+        if height == self.logo_label.height():
+            return
+        self.logo_label.setFixedHeight(height)
+        self.logo_label.setVisible(height > 0)
+        self._style_logo()
 
     def _sync_rail_icon_widths(self):
         """Pin every folded row to the width the rail actually has, so
@@ -1193,6 +1491,19 @@ class MainWindow(QMainWindow):
         # getattr throughout: this runs from _populate_nav_list, which
         # the main bar builds before the section bar or the Home row
         # exist at all.
+        # **No scrollbar while folded.** The rail is 36px of viewport
+        # there and Qt would take ~10 of them for the bar, which both
+        # looks wrong and narrows the box the folded icons are centred
+        # in (_RailDelegate reads the row width). The wheel still
+        # scrolls the column either way.
+        for area in getattr(self, "_rail_scrollers", ()):
+            try:
+                area.setVerticalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                    if self._sidebar_collapsed
+                    else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            except RuntimeError:
+                pass
         rails = list(getattr(self, "nav_lists", ()))
         rails += list(getattr(self, "section_lists", ()))
         rails.append(getattr(self, "home_list", None))
@@ -1240,32 +1551,108 @@ class MainWindow(QMainWindow):
                 sheet = RAIL_FOLDED_QSS if self._sidebar_collapsed else ""
                 if rail.styleSheet() != sheet:
                     rail.setStyleSheet(sheet)
+                # The folded rail draws a larger icon than the expanded
+                # one (RAIL_ICON_SIZE_FOLDED). Set here rather than in
+                # _make_rail_list because it changes with the fold, and
+                # this is the one place every rail is already walked on
+                # every fold - _RailDelegate reads it back off the view.
+                size = (RAIL_ICON_SIZE_FOLDED if self._sidebar_collapsed
+                        else RAIL_ICON_SIZE)
+                if rail.iconSize().height() != size:
+                    rail.setIconSize(QSize(size, size))
                 items = [rail.item(i) for i in range(rail.count())]
-                # Back to the delegate's own hint first, or the widths
-                # read below would be last fold's pinned ones.
-                for item in items:
-                    item.setSizeHint(QSize())
-                if not items or not self._sidebar_collapsed:
+                if not items:
                     continue
-                # **Only measure a rail that is actually at rail width.**
-                # This runs from _populate_nav_list and from the fold
-                # *before* the width animation, where the rows are still
-                # 184px wide and pinning to them puts the icon 5.7px off
-                # centre - worse than the 1.1px being fixed. The
-                # post-animation call in _toggle_sidebar's landed() is
-                # the one that does the work.
-                if rail.viewport().width() > SIDEBAR_COLLAPSED_WIDTH:
-                    continue
+                # **Only pin a rail that is actually at its settled
+                # width.** This runs from _populate_nav_list and from the
+                # fold *before* the width animation, where the rows are
+                # still 184px wide and pinning to them puts the icon
+                # 5.7px off centre - worse than the 1.1px being fixed.
+                # The post-animation call in _toggle_sidebar's landed()
+                # is the one that does the work.
+                settled = (rail.viewport().width() <= SIDEBAR_COLLAPSED_WIDTH
+                           if self._sidebar_collapsed
+                           else rail.viewport().width() > SIDEBAR_COLLAPSED_WIDTH)
                 rail.doItemsLayout()
                 target = rail.viewport().width() - rail.spacing() * 2
                 if target <= 0:
                     continue
+                # **Height as well as width, and in both states.** The
+                # fitted pitch (_fit_rails) is what keeps every row on a
+                # short screen, and it can only be applied here - a
+                # cleared hint would put the delegate's natural 63px
+                # back and lose the bottom rows again.
+                pitch = getattr(self, "_rail_pitch", 0)
+                height = max(1, pitch - rail.spacing() * 2) if pitch else 0
                 for item in items:
-                    if item.data(RAIL_ICON_ROLE):
-                        height = rail.visualItemRect(item).height()
-                        item.setSizeHint(QSize(target, height))
+                    if not height:
+                        item.setSizeHint(QSize())
+                        continue
+                    # **The height goes on whether or not the width has
+                    # settled.** It does not depend on the width, and
+                    # gating both meant a fold applied neither until
+                    # some later pass - measured: the folded column
+                    # still 179px past its viewport while the expanded
+                    # one fitted exactly.
+                    width = target if settled else (item.sizeHint().width()
+                                                    or target)
+                    item.setSizeHint(QSize(max(1, width), height))
+                # **updateGeometry, or none of that reaches the layout.**
+                # NavListWidget.sizeHint is computed from
+                # sizeHintForRow, and Qt caches a widget's size hint
+                # until it is told otherwise - measured: rows correctly
+                # pinned to 40px while the rail went on reporting the
+                # 453px it wanted at the old row height, so the column
+                # scrolled with every row already short enough to fit.
+                rail.updateGeometry()
             except RuntimeError:
                 pass                # the rail is being torn down
+
+    def _rail_scroller(self, layout):
+        """The rails, in a column that scrolls when the window is too
+        short to hold them, added to `layout`. Returns the layout to put
+        them in.
+
+        **Measured 25 August 2026, on the owner's work laptop and then
+        here at the same window height**: at 720px the reading block is
+        handed **131px for 453px of rows**, so five of its seven rows
+        were not drawn and nothing on screen said so - his screenshot
+        shows Manhwa cut through the middle and Manhua simply absent.
+        The sidebar's column is fixed furniture (logo, Home, the blocks,
+        Downloads, Settings) and on a laptop it does not fit; a
+        QVBoxLayout answers that by squeezing whatever will squeeze,
+        which for a rail means clipping rows off the bottom.
+
+        This pre-dates the logo keeping its height while folded (25
+        August) - at 720px the *expanded* bar clipped exactly as much -
+        but that change removed the 124px of relief folding used to
+        give, so the folded bar lost rows too. Both are fixed by the
+        rows having somewhere to go.
+
+        No ground colour: the sidebar is a vertical gradient
+        (theme.py's #Sidebar), and an opaque flat body would paint a
+        flat strip down the middle of it. A rail is a dozen rows, so the
+        repaint this costs is nothing - see scroll_area's note for where
+        that matters and where it does not."""
+        body = QWidget(objectName="Bare")
+        column = QVBoxLayout(body)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(SIDEBAR_LAYOUT_SPACING)
+        # Everything built from here until the next call belongs to this
+        # column - see _fit_rails, which has to know which rows share a
+        # viewport before it can decide how tall they may be.
+        self._rail_bucket = {"body": body, "rails": [], "gaps": []}
+        self._rail_columns.append(self._rail_bucket)
+        area = scroll_area(body)
+        area.setObjectName("Bare")
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Vertical policy is set per fold in _sync_rail_icon_widths: a
+        # scrollbar inside the 36px folded rail would both look wrong and
+        # narrow the viewport the folded icons are centred against.
+        layout.addWidget(area, stretch=1)
+        self._rail_scrollers.append(area)
+        self._rail_bucket["area"] = area
+        return column
 
     def _build_fold_button(self):
         """One fold toggle - the main bar and the section bar each carry
@@ -1338,18 +1725,43 @@ class MainWindow(QMainWindow):
         # list/Add button below pushed down to make room for it (see the
         # extra spacing further down).
         logo_label = QLabel()
-        logo_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # Centred on both axes, not just across: the label keeps the
+        # expanded logo's full height at both widths (see below), so a
+        # top-aligned rail mark would sit ~45px above where the same
+        # mark sits unfolded.
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Scale to LOGO_HEIGHT *physical* pixels (source PNG is 1672px tall,
         # plenty of headroom) and tag the result with the screen's DPI
         # scale, or Qt stretches the merely-260px-tall pixmap to fill a
         # 260*scale screen area on any non-100%-scaled display (125% here)
         # and it comes out visibly blurry.
         dpr = QApplication.primaryScreen().devicePixelRatio()
-        logo_pixmap = QPixmap(str(APP_DIR / "assets" / "atomic_icon.png")).scaledToHeight(
-            int(LOGO_HEIGHT * dpr), Qt.TransformationMode.SmoothTransformation)
-        logo_pixmap.setDevicePixelRatio(dpr)
-        logo_label.setPixmap(logo_pixmap)
+        source = QPixmap(str(APP_DIR / "assets" / "atomic_icon.png"))
+
+        def _scaled(height):
+            shrunk = source.scaledToHeight(
+                int(height * dpr), Qt.TransformationMode.SmoothTransformation)
+            shrunk.setDevicePixelRatio(dpr)
+            return shrunk
+
+        # **Two sizes, and the header keeps its full height at both**
+        # (the owner's ask, 25 August 2026: "make the Icons vertical
+        # position in the sidebar while folded = to the unfolded
+        # position"). Folding used to hide this label outright, and the
+        # whole column below it jumped up by the 124px that freed -
+        # measured on the real window, Home at y=190 expanded and y=66
+        # folded. Every row's y is now the same at both widths.
+        #
+        # The mark shrinks to the rail's inner width rather than being
+        # blanked, because 120px of empty strip at the top of a 72px
+        # rail reads as a layout bug; the artwork is a mark with no
+        # wordmark in it, so it survives being small.
+        self._logo_wide = _scaled(LOGO_HEIGHT)
+        self._logo_rail = _scaled(
+            (SIDEBAR_COLLAPSED_WIDTH - 32) * source.height() / source.width())
+        logo_label.setFixedHeight(LOGO_HEIGHT)
         self.logo_label = logo_label
+        self._style_logo()
         layout.addWidget(logo_label)
 
         layout.addSpacing(16)
@@ -1376,7 +1788,16 @@ class MainWindow(QMainWindow):
         # A minimal explicit height (one row + its own top/bottom inset)
         # keeps that gap consistent instead.
         self._sync_home_list_height()
-        layout.addWidget(self.home_list)
+        # Everything from Home down to the last block scrolls together -
+        # see _rail_scroller for the window height that made that
+        # necessary.
+        column = self._rail_scroller(layout)
+        column.addWidget(self.home_list)
+        # Home is built before the column exists (it has to be, the
+        # scroller is created around it), so it is registered by hand -
+        # without this the fit budgets for ten rows and lays out
+        # eleven, which is exactly one row of overflow.
+        self._rail_bucket["rails"].insert(0, self.home_list)
 
         # **One row of air, then the blocks** (the owner's ask, 22 August
         # 2026 - see nav_config.NAV_GROUPS for what the blocks are and
@@ -1392,7 +1813,7 @@ class MainWindow(QMainWindow):
         # bar's - which is exactly what happened when the two were one
         # list and _refresh_nav_list ran.
         self._nav_gaps = []
-        layout.addWidget(self._make_nav_gap())
+        column.addWidget(self._make_nav_gap())
 
         # One list per block, not one list with separators in it: a
         # QListWidget in InternalMove mode will happily drop a row past
@@ -1402,18 +1823,19 @@ class MainWindow(QMainWindow):
         self.nav_lists = []
         for index, group in enumerate(visible_nav_groups()):
             if index:
-                layout.addWidget(self._make_nav_gap())
+                column.addWidget(self._make_nav_gap())
             nav_list = self._make_rail_list(draggable=True)
             nav_list.itemClicked.connect(self._on_nav_item_clicked)
             nav_list.model().rowsMoved.connect(self._on_nav_reordered)
             self.nav_lists.append(nav_list)
-            layout.addWidget(nav_list)
+            column.addWidget(nav_list)
+        column.addStretch()
         self._populate_nav_list()
 
-        # Add and Settings both sit at the very bottom, Add directly
-        # above Settings, with the stretch above them pushing the pair
-        # down clear of the nav list.
-        layout.addStretch()
+        # Add and Settings both sit at the very bottom. The scrolling
+        # rail column above them takes the slack now (it is the layout's
+        # only stretch), so there is no addStretch here - one would fight
+        # it for the same space and shrink the rows back.
 
         # No Add button here any more (the owner's ask). The menu itself
         # survives - Ctrl+N still opens it (see the shortcut, which calls
@@ -1488,15 +1910,19 @@ class MainWindow(QMainWindow):
         # past anything in the list, so a spacer row would be draggable
         # and the grouping would last until the first drag.
         self.section_lists = []
+        # Scrolling, like the main bar's - and this one needs it more:
+        # Read publishes eight sections against the main bar's seven
+        # rows, with Back and a separator above them.
+        column = self._rail_scroller(layout)
         for index in range(SECTION_BLOCKS):
             if index:
-                layout.addWidget(self._make_rail_gap())
+                column.addWidget(self._make_rail_gap())
             rail = self._make_rail_list(draggable=True)
             rail.itemClicked.connect(self._on_section_item_clicked)
             rail.model().rowsMoved.connect(self._on_sections_reordered)
             self.section_lists.append(rail)
-            layout.addWidget(rail)
-        layout.addStretch()
+            column.addWidget(rail)
+        column.addStretch()
 
         # This bar's own Downloads and Settings (the owner's ask): the
         # section bar takes the main one's place over a tracker page, and
@@ -1534,7 +1960,7 @@ class MainWindow(QMainWindow):
                                       SECTION_ICONS.get(key, theme.NAV_BULLET))
             rail.updateGeometry()
         self._sync_rail_gaps()
-        self._sync_rail_icon_widths()
+        self._fit_rails()
 
     def _sync_section_list(self, page):
         """Make the section rows match `page`: refill when its SECTIONS
@@ -1782,7 +2208,9 @@ class MainWindow(QMainWindow):
         to the nav face, and an item carries exactly one font, so a
         fallback row typing a bullet still gets a face that has one."""
         path = str(icon_token) if str(icon_token).endswith(".png") else ""
-        icon = _rail_icon(path, _rail_dpr(self)) if path else None
+        size = (RAIL_ICON_SIZE_FOLDED if self._sidebar_collapsed
+                else RAIL_ICON_SIZE)
+        icon = _rail_icon(path, _rail_dpr(self), size) if path else None
         if icon is not None:
             item.setData(RAIL_ICON_ROLE, path)
             item.setIcon(icon)
@@ -1797,10 +2225,21 @@ class MainWindow(QMainWindow):
             glyph = theme.NAV_BULLET if path else str(icon_token)
         if self._sidebar_collapsed:
             item.setText(glyph)
-            # Kept even with nothing to type: the row's height comes off
-            # its font (see _RailDelegate.sizeHint), and this is the face
-            # the folded rail has always measured 33px against.
-            item.setFont(theme.icon_font())
+            # **The nav face, not the icon face, on a row that types
+            # nothing** (the owner's ask, 25 August 2026: "make the
+            # Icons vertical position in the sidebar while folded = to
+            # the unfolded position"). A row's height comes off its font
+            # (see _RailDelegate.sizeHint), and the two faces do not
+            # measure the same: folded rows came out 57px against the
+            # expanded 59, so every row below the first sat 2px further
+            # up than its unfolded self and the drift accumulated down
+            # the column - 124px at Home, 140px by Manhua (measured on
+            # the real window before this change).
+            #
+            # A *fallback* row still types a bullet from the icon face
+            # and keeps it: that row has a glyph to render, and its
+            # height was never the one out of step.
+            item.setFont(theme.icon_font() if glyph else theme.nav_row_font())
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setToolTip(name)
         else:
@@ -1820,6 +2259,15 @@ class MainWindow(QMainWindow):
         it has to be re-measured whenever the sidebar folds."""
         self.home_list.setFixedHeight(
             self.home_list.sizeHintForRow(0) + self.home_list.spacing() * 2)
+
+    def _style_logo(self):
+        """The brand mark at whichever size the current width wants.
+
+        The label's *height* never changes (see _build_sidebar): it is
+        what holds every row below it at the same y folded and
+        unfolded."""
+        self.logo_label.setPixmap(self._logo_rail if self._sidebar_collapsed
+                                  else self._logo_wide)
 
     def _style_downloads_btn(self):
         """Same two-width treatment as the Settings button below it: glyph
@@ -2025,7 +2473,7 @@ class MainWindow(QMainWindow):
         collapsed = self._sidebar_collapsed
 
         self._sync_fold_buttons()
-        self.logo_label.setVisible(not collapsed)
+        self._style_logo()
         self._style_downloads_btn()
         self._style_settings_btn()
         # The section bar can only be off screen while this button is
@@ -2047,7 +2495,7 @@ class MainWindow(QMainWindow):
         # A folded row is shorter than an expanded one, so the blocks'
         # gaps are re-measured rather than left at the other width's.
         self._sync_rail_gaps()
-        self._sync_rail_icon_widths()
+        self._fit_rails()
 
         target = SIDEBAR_COLLAPSED_WIDTH if collapsed else SIDEBAR_WIDTH
         # setFixedWidth pins min and max together, so the animation drives
@@ -2089,7 +2537,11 @@ class MainWindow(QMainWindow):
             # 184px row and pinned the Saved icon to it, which put the
             # bookmark 5.7px off centre in a 36px rail instead of 1.1px
             # - worse than the bug it fixes (measured).
-            self._sync_rail_icon_widths()
+            self._fit_rails()
+            # Once more when the layout has caught up with the width the
+            # fold just set: the pass above runs in the same turn as
+            # setFixedWidth, so a rail can still report the old viewport.
+            QTimer.singleShot(0, self._fit_rails)
 
         if self._sidebar_anim is not None:
             self._sidebar_anim.stop()
@@ -2171,7 +2623,7 @@ class MainWindow(QMainWindow):
             # after it (measured with the hide/restore probe).
             gap.setVisible(rail is not None and rail.count() > 0)
         self._sync_rail_gaps()
-        self._sync_rail_icon_widths()
+        self._fit_rails()
 
     def _refresh_nav_list(self):
         """Called by Settings when a section is hidden/unhidden, so the
@@ -3049,6 +3501,12 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # The sidebar re-fits with the window: how many rows fit without
+        # scrolling is a function of its height (see _fit_rails).
+        try:
+            self._fit_rails()
+        except Exception:
+            logs.exception("sidebar fit failed")
         self._fit_current_page()
         self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
 
@@ -3223,6 +3681,10 @@ def main():
     # scrollbar above all (the owner's ask). One filter for every page,
     # kept alive by the app it is parented to.
     install_edge_wheel(app)
+    # A parentless widget that gets shown becomes a window with a title
+    # bar - the owner's "a small window appears then closes". Suppressed
+    # and named in the log; see widgets._StrayWindowGuard.
+    install_stray_window_guard(app)
 
     # Before the window exists: the pages it builds each load their own
     # file, and the move has to be finished before either looks.

@@ -18,6 +18,7 @@ was already copied once (anime_sites, then manga_sites) and the second
 copy is how the first fix failed to reach the other five files.
 """
 
+import threading
 import time
 import urllib.parse
 
@@ -113,6 +114,73 @@ def ascii_url(url: str) -> str:
         urllib.parse.quote(parts.path, safe=_URL_SAFE),
         urllib.parse.quote(parts.query, safe=_URL_SAFE),
         urllib.parse.quote(parts.fragment, safe=_URL_SAFE)))
+
+
+# ---- hosts that are refusing -----------------------------------------
+#
+# **A host that has just refused twice is not worth asking again for a
+# while**, and this is where that is remembered so every caller can
+# agree about it.
+#
+# Measured 25 August 2026 against the owner's work laptop, whose network
+# refuses the image and metadata hosts (its atomic.log names
+# images.metahub.space, live.metahub.space, storage.azorafly.com, and
+# api.themoviedb.org resetting at the TLS handshake). Reproduced here by
+# refusing the same hosts, one session, two visits to each of two pages:
+#
+#     images.metahub.space   344 attempts
+#     api.themoviedb.org     187 attempts
+#
+# every one of them to a host that had already refused every previous
+# ask. The cost is not the failures, it is the waiting - a cover tries
+# its host at 8s, retries at 20s, and only then falls back - so a page
+# of thirty cards through lookup_pool's four workers draws nothing for
+# minutes, and the next visit starts over.
+#
+# Time-limited, and two failures before it counts, so a host that
+# hiccups is not written off; one success clears it at once. Nothing
+# here refuses anything by itself: a caller asks, and decides.
+REFUSED_HOST_TTL_S = 600
+REFUSED_HOST_FAILURES = 2
+_refused_hosts = {}
+_refused_lock = threading.Lock()
+
+
+def _url_host(url) -> str:
+    try:
+        text = url if isinstance(url, str) else url.full_url
+        return urllib.parse.urlparse(str(text)).netloc.lower()
+    except Exception:
+        return ""
+
+
+def host_refusing(url) -> bool:
+    """Whether this URL's host has refused enough, recently enough, to
+    be worth skipping rather than waiting on."""
+    host = _url_host(url)
+    if not host:
+        return False
+    with _refused_lock:
+        failures, when = _refused_hosts.get(host, (0, 0.0))
+    return (failures >= REFUSED_HOST_FAILURES
+            and time.time() - when < REFUSED_HOST_TTL_S)
+
+
+def note_host_failure(url):
+    host = _url_host(url)
+    if not host:
+        return
+    with _refused_lock:
+        failures, _when = _refused_hosts.get(host, (0, 0.0))
+        _refused_hosts[host] = (failures + 1, time.time())
+
+
+def note_host_success(url):
+    host = _url_host(url)
+    if not host:
+        return
+    with _refused_lock:
+        _refused_hosts.pop(host, None)
 
 
 def deadline_in(timeout: float) -> float:

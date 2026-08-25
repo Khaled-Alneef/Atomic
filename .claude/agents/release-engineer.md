@@ -65,12 +65,18 @@ stale.
 ## The updater's contract with GitHub
 
 A released build asks `/repos/.../tags`, keeps two-part tags, takes the
-highest, then reads `/repos/.../contents/Atomic.exe?ref=<tag>` for
-download URL, size, and git blob hash, verifying the download against
-that hash before replacing anything. So: **a tag is a release**,
-whatever branch it's on (GitHub's tag list is per repository, not per
-branch), and the exe must be committed at the tagged commit, not
-attached as a Release asset. After any release, confirm end to end with
+highest, then reads `/repos/.../contents/Atomic.zip?ref=<tag>` -
+falling back to `Atomic.exe` - for download URL, size, and git blob
+hash, verifying the download against that hash before replacing
+anything. A zip is unpacked after that check and must hold exactly one
+.exe. So: **a tag is a release**, whatever branch it's on (GitHub's tag
+list is per repository, not per branch), and the artifact must be
+committed at the tagged commit, not attached as a Release asset.
+
+**The zip is the artifact** (CLAUDE.md rule 8), and the exe fallback
+exists for the releases already published - never remove it. The first
+zipped release carries both, so installs running a pre-zip updater can
+still find what they know. After any release, confirm end to end with
 `updater.check_for_update()`, `APP_VERSION` temporarily lowered.
 
 ## Repo weight

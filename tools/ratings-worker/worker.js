@@ -54,7 +54,13 @@
  */
 
 const KEY_RE = /^[a-z0-9_-]{1,80}$/;
-const ITEM_RE = /^(\d{1,3}x\d{1,4}|c\d{1,6}(\.\d{1,2})?)$/;
+// "title" is the bucket the app writes now - one score for the whole
+// work rather than one per episode or chapter (the owner's ask, 25
+// August 2026; see helpers/community_ratings' module note). The two
+// older shapes stay accepted so a copy of Atomic that has not updated
+// yet keeps working, and so the votes already stored under them remain
+// writable.
+const ITEM_RE = /^(title|\d{1,3}x\d{1,4}|c\d{1,6}(\.\d{1,2})?)$/;
 const VOTER_RE = /^[a-f0-9]{8,32}$/;
 const MIN_SCORE = 1;
 const MAX_SCORE = 10;

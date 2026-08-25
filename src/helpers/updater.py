@@ -54,7 +54,7 @@ from . import child_process, net
 # `development`, counting up from the last release; two parts on a build
 # that is being released, bumped in the same commit that tags it - or the
 # new build goes on offering itself an update.
-APP_VERSION = "1.10.32"
+APP_VERSION = "1.10.33"
 
 # What counts as a release: exactly two numeric parts, with or without the
 # leading v. Development builds are tagged (if at all) with three, and are
@@ -65,6 +65,21 @@ RELEASE_TAG_RE = re.compile(r"^v?\d+\.\d+$")
 
 REPO = "Khaled-Alneef/Atomic"
 EXE_NAME = "Atomic.exe"
+# **A release ships as a zip, and the updater looks for that first.**
+#
+# The owner's rule of 25 August 2026 (CLAUDE.md rule 8), and it is a
+# measurement: the bare exe was refused on download as
+# `Trojan:Win32/Wacatac.B!ml` - Microsoft's ML classifier, no signature
+# match - while the identical bytes inside a zip downloaded cleanly.
+# Seven builds were compared before concluding that (same bundled
+# entries, same modules, byte-identical bootloader, all scanning clean
+# locally with cloud protection on), so it is the container that is
+# refused, not anything in the file.
+#
+# EXE_NAME stays as the fallback and must: every release already
+# published carries the bare exe, and an install updating from one of
+# those has to keep working.
+ZIP_NAME = "Atomic.zip"
 API_ROOT = f"https://api.github.com/repos/{REPO}"
 
 _HEADERS = {
@@ -124,23 +139,36 @@ def check_for_update(timeout: int = 10):
     if parse_version(tag_name) <= parse_version(APP_VERSION):
         return None
 
-    try:
-        meta = _get_json(f"{API_ROOT}/contents/{EXE_NAME}?ref={tag_name}", timeout)
-    except Exception as exc:
+    # The zip first, the bare exe second - see ZIP_NAME. A tag carrying
+    # both (which the first zipped release is expected to, so installs
+    # running an older updater can still find what they know) resolves
+    # to the zip here.
+    meta, asset, failure = None, "", None
+    for name in (ZIP_NAME, EXE_NAME):
+        try:
+            found = _get_json(f"{API_ROOT}/contents/{name}?ref={tag_name}",
+                              timeout)
+        except Exception as exc:
+            failure = failure or exc
+            continue
+        if found.get("download_url"):
+            meta, asset = found, name
+            break
+    if meta is None:
+        if failure is not None:
+            raise UpdateError(
+                f"{tag_name} is available, but its download could not be read "
+                f"from the repository ({_readable_network_error(failure)})")
         raise UpdateError(
-            f"{tag_name} is available, but its {EXE_NAME} could not be read "
-            f"from the repository ({_readable_network_error(exc)})") from exc
-
-    url = meta.get("download_url")
-    if not url:
-        raise UpdateError(f"{tag_name} has no {EXE_NAME} committed to it.")
+            f"{tag_name} has neither {ZIP_NAME} nor {EXE_NAME} committed to it.")
 
     return {
         "version": tag_name.lstrip("vV"),
         "tag": tag_name,
-        "url": url,
+        "url": meta.get("download_url"),
         "size": meta.get("size") or 0,
         "sha": meta.get("sha") or "",
+        "asset": asset,
     }
 
 
@@ -193,6 +221,16 @@ def download_update(update: dict, progress=None, timeout: int = 60) -> Path:
             "The downloaded file didn't match the checksum GitHub reported, "
             "so it hasn't been installed.")
 
+    if (update.get("asset") or "").lower().endswith(".zip"):
+        # **Unpacked here, not by the swap script.** The verification
+        # above is of the bytes GitHub served, so it has to happen on
+        # the zip; what apply_update hands to the swap has to be the
+        # executable. Anything that is not one .exe inside is refused
+        # rather than guessed at - a release whose zip holds something
+        # else is a packaging mistake, and installing it would be worse
+        # than saying so.
+        data = _exe_from_zip(data)
+
     handle, temp_path = tempfile.mkstemp(prefix="Atomic-update-", suffix=".exe")
     try:
         with os.fdopen(handle, "wb") as file:
@@ -200,6 +238,26 @@ def download_update(update: dict, progress=None, timeout: int = 60) -> Path:
     except OSError as exc:
         raise UpdateError(f"Couldn't write the download to disk: {exc}") from exc
     return Path(temp_path)
+
+
+def _exe_from_zip(data: bytes) -> bytes:
+    """The one executable inside a downloaded release zip."""
+    import io as _io
+    import zipfile
+    try:
+        with zipfile.ZipFile(_io.BytesIO(data)) as archive:
+            names = [n for n in archive.namelist()
+                     if n.lower().endswith(".exe") and not n.endswith("/")]
+            if len(names) != 1:
+                raise UpdateError(
+                    f"The download should hold exactly one .exe and holds "
+                    f"{len(names)} - it has not been installed.")
+            return archive.read(names[0])
+    except UpdateError:
+        raise
+    except Exception as exc:
+        raise UpdateError(
+            f"The download could not be unpacked: {exc}") from exc
 
 
 # Windows won't let a running executable be replaced, so the swap happens

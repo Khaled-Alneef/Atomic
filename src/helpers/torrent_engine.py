@@ -1585,6 +1585,21 @@ _EXTRAS_RE = re.compile(r"\b(extras?|specials?|creditless|nc(?:op|ed)|"
 _LOOSE_NUM_RE = re.compile(r"(?:^|[\s\-_\[(])(\d{1,3})(?:v\d)?(?=[\s\-_\])]|$)")
 
 
+def _loose_numbers(stem: str) -> set:
+    """Every plausible episode number a file name states on its own.
+
+    The same reading `_folder_episode_index` counts with, pulled out so
+    `_pick_file` can ask the one question that matters when an addon
+    points somewhere the names disagree with: *does the file it chose
+    claim to be a different episode?*"""
+    out = set()
+    for found in _LOOSE_NUM_RE.findall(str(stem or "")):
+        value = int(found)
+        if 0 < value <= 999:
+            out.add(value)
+    return out
+
+
 def _folder_episode_index(rows, episode):
     """The file for `episode` inside one season's folder, read from the
     folder's **own numbering**, or None.
@@ -1821,6 +1836,24 @@ def _pick_file(info, season=None, episode=None, file_index=None, title=None):
             # fileIdx is pointing at something else whatever it says.
             if strength == "absent":
                 return None
+            # **A loose reading wins too, but only against a file that
+            # contradicts itself.** The owner, 25 August 2026: *"the
+            # same source in Silo series ep 1 s1 sometimes plays a diff
+            # ep"* - *sometimes* because the fileIdx is the addon's
+            # claim, and two addons offering the same release can
+            # disagree about it, so which episode played depended on
+            # which row was clicked.
+            #
+            # The test is deliberately two-sided: some other file reads
+            # as the episode asked for, *and* the file this index points
+            # at states a number that is not it. Both halves are
+            # positive evidence, so this cannot fire on a pack whose
+            # names say nothing - which is the case the fileIdx was
+            # measured right for, six of six, and still owns.
+            if named is not None and named != index and strength == "loose":
+                claimed = _loose_numbers(stem)
+                if claimed and int(episode) not in claimed:
+                    return named
             wrong_season = bool(seasons) and int(season or 0) not in seasons
             if wrong_season:
                 return named    # None when there is nothing better

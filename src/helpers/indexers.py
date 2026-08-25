@@ -97,9 +97,22 @@ TITLE_WORD_FRACTION = 0.6
 def _get(url, timeout):
     request = urllib.request.Request(
         url, headers={"User-Agent": _UA, "Accept": "application/json, */*"})
+    # A host that has refused twice recently is skipped rather than
+    # waited on - see net.host_refusing for the measurement. Source
+    # lookups fan out over many hosts at once, so on a network that
+    # blocks some of them this is the difference between a lookup
+    # bounded by the slowest live host and one bounded by the deadline.
+    if net.host_refusing(url):
+        raise ConnectionError(f"{net._url_host(url)} is refusing connections")
     deadline = net.deadline_in(timeout)
-    with net.urlopen(request, timeout=timeout) as response:
-        return net.read_text(response, deadline, net.MAX_RESPONSE_BYTES)
+    try:
+        with net.urlopen(request, timeout=timeout) as response:
+            text = net.read_text(response, deadline, net.MAX_RESPONSE_BYTES)
+    except Exception:
+        net.note_host_failure(url)
+        raise
+    net.note_host_success(url)
+    return text
 
 
 def _get_json(url, timeout):

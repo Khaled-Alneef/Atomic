@@ -17,8 +17,9 @@ from PyQt6.QtGui import (QBitmap, QBrush, QColor, QCursor, QDrag, QIcon,
                          QPixmap, QRegion, QTransform)
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
-    QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollArea, QSlider, QStyle, QStyleOptionSlider,
+    QDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsPixmapItem,
+    QGraphicsScene, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QPushButton, QScrollArea, QSlider, QStyle, QStyleOptionSlider,
     QToolTip, QVBoxLayout, QWidget,
 )
 
@@ -1682,16 +1683,75 @@ def hero_logo_label(parent=None) -> QLabel:
     A soft shadow so a logo reads over the art whatever its own colour -
     most treatments are light, some (Demon Slayer) are near-black, and
     the scrim that carries white text cannot help those. Offset 0: a
-    halo lifting the shape off the ground rather than a drop under it."""
+    halo lifting the shape off the ground rather than a drop under it.
+
+    **The halo is baked into the pixmap now, not a live
+    QGraphicsDropShadowEffect** (the owner, 25 August 2026: the
+    scrolling frame rate). A live effect re-runs its Gaussian blur every
+    time the widget repaints - and every scroll frame repaints the whole
+    viewport on these pages (measured: 167 of 217 body paints during one
+    scroll were full-viewport, on every page tried and on a minimal
+    QScrollArea built in the same window, so it is how QScrollArea
+    scrolls rather than anything one page does). Blurring a 1304x84
+    logo 240 times a second is pure waste when the image never changes.
+    Measured on Watch > Discover, real wheel scrolling on the owner's
+    240Hz panel:
+
+        with the live effect     218-222 positions/s
+        with it removed          232 positions/s
+
+    `bake_halo` renders the same effect once, through the same Qt code
+    path, so the picture is unchanged - checked against a live-effect
+    render, 0.9% of sampled pixels differing by more than 16 levels, all
+    of it resampling noise at the edges."""
     label = QLabel("", parent)
     label.setVisible(False)
     label.setStyleSheet("background: transparent;")
-    shadow = QGraphicsDropShadowEffect(label)
-    shadow.setBlurRadius(28)
-    shadow.setOffset(0, 0)
-    shadow.setColor(QColor(0, 0, 0, 200))
-    label.setGraphicsEffect(shadow)
     return label
+
+
+HERO_LOGO_HALO_RADIUS = 28
+HERO_LOGO_HALO_COLOUR = QColor(0, 0, 0, 200)
+
+
+def bake_halo(pixmap: QPixmap, radius=HERO_LOGO_HALO_RADIUS,
+              colour=HERO_LOGO_HALO_COLOUR):
+    """`pixmap` with a soft dark halo painted around it, and the padding
+    that was added on each side.
+
+    Rendered through QGraphicsDropShadowEffect itself rather than an
+    approximation, so this is the same blur the live effect drew - just
+    computed once instead of once per frame. ~1.7ms for a hero logo,
+    paid when the logo arrives.
+
+    The canvas grows by `radius` on every side because that is where the
+    blur goes; `set_hero_logo` gives the label negative contents margins
+    of the same size, so neither the label's size hint nor the ink's
+    position moves."""
+    dpr = pixmap.devicePixelRatio() or 1.0
+    pad = int(round(radius * dpr))
+    scene = QGraphicsScene()
+    item = QGraphicsPixmapItem(pixmap)
+    effect = QGraphicsDropShadowEffect()
+    # In device pixels, like the canvas below: the scene knows nothing
+    # about the ratio the pixmap is tagged with.
+    effect.setBlurRadius(radius * dpr)
+    effect.setOffset(0, 0)
+    effect.setColor(colour)
+    item.setGraphicsEffect(effect)
+    scene.addItem(item)
+    canvas = QImage(pixmap.width() + 2 * pad, pixmap.height() + 2 * pad,
+                    QImage.Format.Format_ARGB32_Premultiplied)
+    canvas.fill(0)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    scene.render(painter,
+                 QRectF(pad, pad, pixmap.width(), pixmap.height()),
+                 QRectF(0, 0, pixmap.width(), pixmap.height()))
+    painter.end()
+    baked = QPixmap.fromImage(canvas)
+    baked.setDevicePixelRatio(dpr)
+    return baked, int(round(pad / dpr))
 
 
 def set_hero_logo(logo_label: QLabel, title_label: QLabel, path,
@@ -1714,6 +1774,18 @@ def set_hero_logo(logo_label: QLabel, title_label: QLabel, path,
         except Exception:
             pixmap = None
     if pixmap is not None:
+        # The halo, once (see hero_logo_label). Negative margins of
+        # exactly the padding keep the label the size it was and the ink
+        # where it was - a QLabel draws its pixmap from the *contents*
+        # rect, so shrinking that by the padding cancels it out on both
+        # axes at once.
+        try:
+            haloed, pad = bake_halo(pixmap)
+            logo_label.setContentsMargins(-pad, -pad, -pad, -pad)
+            pixmap = haloed
+        except Exception:
+            logs.exception("hero logo halo failed")
+            logo_label.setContentsMargins(0, 0, 0, 0)
         logo_label.setPixmap(pixmap)
         logo_label.setVisible(True)
         title_label.setVisible(False)
@@ -2841,6 +2913,29 @@ class _Momentum(QObject):
         self._bar.setValue(int(round(self._pos)))
         return True
 
+    def shift(self, delta):
+        """Move the glide's own position by `delta`, because something
+        else just moved the bar under it.
+
+        **Without this the two fight, and the frame rate is what pays.**
+        The reader compensates the scrollbar when a page above the
+        viewport settles into its real height (reader._resize_slot);
+        this model integrates a *float* position and writes
+        int(round(pos)) every refresh, so after such a correction its
+        next write lands back where the bar already was - no value
+        change, no repaint, a dead frame. Measured on the owner's
+        240Hz panel, a 25-notch scroll on a manhwa chapter:
+
+            downward   528 value changes, 4.41ms mean gap,  3.5% late
+            upward     314 value changes, 9.57ms mean gap, 79.7% late
+
+        - and upward is exactly the direction in which pages above the
+        viewport are being loaded and resized. Scrolling *down* resizes
+        slots below the viewport, which needs no correction at all.
+        """
+        if self._pos is not None:
+            self._pos += float(delta)
+
     def cancel(self):
         self._stop_ticking()
         self._vel, self._pos, self._pending = 0.0, None, 0.0
@@ -3203,6 +3298,85 @@ class _EdgeWheelRelay(QObject):
         finally:
             self._relaying = False
         return True
+
+
+class _StrayWindowGuard(QObject):
+    """Keep an accidental top-level window off the screen, and say what
+    it was.
+
+    **The owner's report, 25 August 2026, with a screenshot:** *"when I
+    press on discover a small window (white) appear then closes in a
+    moment"* - a title bar with the app's icon and an empty grey body,
+    over the details page while its list said "Loading...".
+
+    A widget with no parent and no window flags of its own is a *child*
+    that nobody parented; Qt turns it into a window the moment it is
+    shown, with a title bar and everything. Nothing in this app ever
+    wants that: every real window here sets flags (Window, Dialog,
+    Popup, ToolTip) or is the main window itself. So the rule is exact -
+    default flags plus no parent plus being shown - and anything
+    matching it is a bug rather than a design.
+
+    I could not reproduce it here (two passes watching every top-level
+    widget during Discover and a details load, 3ms apart, nothing
+    appeared), so this both prevents it and names the class in the log
+    the next time it happens - which is the only way to fix the cause
+    from a machine that is not this one.
+    """
+
+    def __init__(self, app):
+        super().__init__(app)
+        self._named = set()
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.Show:
+            return False
+        if not isinstance(obj, QWidget) or obj.parentWidget() is not None:
+            return False
+        # **Not by window flags.** By the time Show arrives Qt has
+        # already promoted the accident to a Window, so the flags say
+        # the same thing for both cases (measured: a parentless QLabel
+        # shown reports Qt.Window, exactly as a QDialog does). What
+        # separates them is what the object *is* and what it asked for:
+        # every deliberate window here is a dialog, a menu, the main
+        # window, or carries a flag that makes it a popup/tooltip/
+        # frameless surface. A bare QLabel or QWidget is nobody's window.
+        if isinstance(obj, (QDialog, QMenu, Toast)) or obj.inherits("QMainWindow"):
+            return False
+        flags = obj.windowFlags()
+        # **The type is a masked field, not a bit.** Qt.Tool is
+        # Popup|Dialog and Qt.ToolTip is Popup|Sheet, so `flags & Tool`
+        # is true for a plain Window as well - measured: the parentless
+        # label this exists to catch reports 0x8800f001, whose low
+        # nibble is Window, and it matched Tool, Popup and Dialog alike.
+        # Comparing the masked value is the only test that separates
+        # them.
+        kind = flags & Qt.WindowType.WindowType_Mask
+        if kind in (Qt.WindowType.Dialog, Qt.WindowType.Popup,
+                    Qt.WindowType.ToolTip, Qt.WindowType.Tool,
+                    Qt.WindowType.Sheet, Qt.WindowType.Drawer,
+                    Qt.WindowType.SplashScreen, Qt.WindowType.Desktop):
+            return False
+        # A hint, so `&` *is* right for this one: anything drawing its
+        # own chrome (frameless_dialog) is deliberate.
+        if flags & Qt.WindowType.FramelessWindowHint:
+            return False
+        name = f"{type(obj).__name__}#{obj.objectName() or '-'}"
+        if name not in self._named:
+            self._named.add(name)
+            logs.info(f"stray window suppressed: {name} - a parentless "
+                      f"widget was shown and Qt made it a window")
+        obj.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        obj.hide()
+        return True
+
+
+def install_stray_window_guard(app) -> QObject:
+    """Stop a parentless widget from flashing up as a window - see
+    _StrayWindowGuard. Call once, from main()."""
+    guard = _StrayWindowGuard(app)
+    app.installEventFilter(guard)
+    return guard
 
 
 def install_edge_wheel(app) -> QObject:

@@ -1952,7 +1952,19 @@ class _StripView(QScrollArea):
         above = slot.y() + slot.height() <= bar.value()
         slot.setFixedSize(width, height)
         if above:
-            bar.setValue(bar.value() + (height - previous))
+            delta = height - previous
+            bar.setValue(bar.value() + delta)
+            # **And the glide is told, or it undoes this.** The wheel
+            # model carries its own float position and writes
+            # int(round(...)) every refresh; a correction it does not
+            # know about is one it writes straight back over, costing a
+            # repaint each time. See widgets._Momentum.shift for the
+            # measurement - it is the whole of the reader's "scrolling
+            # upward is really low fps".
+            for motion in (getattr(self, "_wheel_motion", None),
+                           getattr(self, "_drag_motion", None)):
+                if motion is not None:
+                    motion.shift(delta)
 
     # ---- loading -----------------------------------------------------
     def _sync_visible(self):

@@ -38,13 +38,20 @@ actually contains (`docs/RELEASING.md` is the long form).
 `docs/ROADMAP.md` is development-only and never ships: drop it from
 every snapshot.
 
+**The artifact is `Atomic.zip`, not the bare exe** (CLAUDE.md rule 8):
+a downloaded .exe is refused as `Trojan:Win32/Wacatac.B!ml` while the
+same bytes inside a zip come through. The **first** zipped release
+commits both, because every install already out there runs an updater
+that looks for `Atomic.exe` alone; after that one, drop the exe.
+
 ```
-rm -f Atomic.exe                        # untracked here; checkout refuses otherwise
+rm -f Atomic.exe Atomic.zip             # untracked here; checkout refuses otherwise
 git checkout main
 git read-tree -u --reset development    # main's tree becomes development's
-python packaging/build.py               # build the release exe from that source
+python packaging/build.py --zip         # build the release exe and zip it
 python packaging/check_release_notes.py # fail if this version has no notes
-git add -f Atomic.exe                   # gitignored, so -f is required
+git add -f Atomic.zip                   # gitignored, so -f is required
+git add -f Atomic.exe                   # first zipped release only - see above
 git rm --cached docs/ROADMAP.md && rm -f docs/ROADMAP.md
 git commit -m "Atomic 1.1"
 git tag -a v1.1 -m "Atomic 1.1"

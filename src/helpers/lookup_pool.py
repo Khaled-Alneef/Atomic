@@ -93,6 +93,37 @@ def submit_browse(fn, *args, **kwargs):
     _browse_queue.put((fn, args, kwargs))
 
 
+# The fourth queue: cover art, and **newest first**.
+#
+# **The owner, 25 August 2026:** *"when I go to discover then another
+# page, it removes the images from all pages"*. Discover asks for a
+# cover per cell - dozens of them - and they went on the shared queue
+# above, the same four workers that fetch Home's covers, the Saved
+# grid's, History's and Schedule's. Walking away from Discover does not
+# unqueue any of it, so the next page's covers waited behind a backlog
+# for a page nobody was looking at any more. On a network where each
+# fetch is slow, that reads as "the images are gone".
+#
+# LIFO, not FIFO, and that is the whole design: covers are independent
+# of each other and none of them is more *correct* than another, so the
+# only thing that matters is which page the user is looking at now - and
+# that is always the most recent request. A stale backlog still drains,
+# last, into whatever the disk cache can keep.
+#
+# Three workers: enough that a page fills in parallel, few enough that
+# the shared queue still has room to breathe beside it.
+COVER_WORKERS = 3
+
+_cover_queue = queue.LifoQueue()
+_cover_workers = []
+
+
+def submit_cover(fn, *args, **kwargs):
+    """Queue one cover fetch. Newest first - see COVER_WORKERS."""
+    _ensure_workers(_cover_workers, _cover_queue, COVER_WORKERS, "lookup-cover")
+    _cover_queue.put((fn, args, kwargs))
+
+
 def _ensure_workers(workers, work_queue, count, name):
     with _workers_lock:
         if workers:

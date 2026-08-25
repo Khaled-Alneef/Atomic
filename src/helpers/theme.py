@@ -737,6 +737,36 @@ QPushButton#Small {{
     padding: 6px 4px;
 }}
 
+/* The section pills in a tracker page's header (Saved / Schedule /
+   History). Quiet at rest so the page title leads, and the checked one
+   wears the same soft pill the sidebar's active row does - one
+   active-thing language across the window.
+
+   **There was no rule for these at all until 25 August 2026**, so they
+   fell through to the generic QPushButton above: a slab with a border,
+   identical whether or not it was the section on screen, since nothing
+   styled :checked either. The icon each one carries is set in
+   tracker._build_header_tabs, tinted to match these two colours. */
+QPushButton#Ghost {{
+    background: transparent;
+    color: {TEXT_MUTED};
+    border: 1px solid transparent;
+    border-radius: {RADIUS}px;
+    padding: 7px 14px;
+    font-size: 10pt;
+    font-weight: 700;
+}}
+QPushButton#Ghost:hover {{
+    background: {SURFACE};
+    color: {TEXT};
+    border: 1px solid transparent;
+}}
+QPushButton#Ghost:checked {{
+    background: {SURFACE_HOVER};
+    color: {TEXT};
+    border: 1px solid transparent;
+}}
+
 /* ---- Inputs ------------------------------------------------------------ */
 QLineEdit, QComboBox, QPlainTextEdit {{
     background: {SURFACE};

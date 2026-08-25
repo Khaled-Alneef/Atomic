@@ -121,9 +121,22 @@ def _get_json(url, timeout):
         joiner = "&" if "?" in url else "?"
         url = f"{url}{joiner}api_key={urllib.parse.quote(credential)}"
     request = urllib.request.Request(url, headers=headers)
+    # **Skip a host that has already refused twice**, rather than paying
+    # its timeout again per card. On the owner's work network TMDB's
+    # handshake is reset, and this path was measured making 187 attempts
+    # in one session - each one a cover or a rating waiting on a
+    # connection that was never going to open. See net.host_refusing.
+    if net.host_refusing(url):
+        raise ConnectionError(f"{net._url_host(url)} is refusing connections")
     deadline = net.deadline_in(timeout)
-    with net.urlopen(request, timeout=timeout) as response:
-        return json.loads(net.read_text(response, deadline))
+    try:
+        with net.urlopen(request, timeout=timeout) as response:
+            answer = json.loads(net.read_text(response, deadline))
+    except Exception:
+        net.note_host_failure(url)
+        raise
+    net.note_host_success(url)
+    return answer
 
 
 def _tmdb_id(imdb_id: str, timeout, title: str = ""):

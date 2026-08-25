@@ -159,6 +159,11 @@ STREMIO_CATALOG_BY_TYPE = {"Anime": "series", "Series": "series", "Movie": "movi
 FILTER_ICON = "assets/filter_icon.png"
 FILTER_ICON_HEIGHT = 18
 
+# The icon on a header section pill. 16, against the pill's 10pt label:
+# the same ratio the sidebar rows use (26px icon, 13pt label), so the
+# two read as the same pair of things at two sizes.
+HEADER_TAB_ICON = 16
+
 POSTER_SIZE = (160, 216)
 
 # What a page's own width carries beyond a scrolling body's: the panel
@@ -1533,8 +1538,18 @@ class _DiscoverSignals(QObject):
     # nothing downloaded), the cover URL the file came from ("" when the
     # row already carried one - it is only reported when the worker had
     # to resolve it from the series page, so the UI thread can write it
-    # back onto the row's dict; see _on_discover_poster), run.
-    poster = Signal(str, int, str, str, int)
+    # back onto the row's dict; see _on_discover_poster), and the
+    # **stamp** of the row it was fetched for.
+    #
+    # A stamp, not a run number: a cover takes seconds to arrive and the
+    # run advances on every category switch and every keystroke, so
+    # matching on the run threw away answers that were still perfectly
+    # good (see _on_grid_needs_cover). The stamp identifies the *row* -
+    # its id, its IMDb id, its url or its title - so a late answer is
+    # applied when that row is still in that cell and ignored when the
+    # cell now holds something else, which is the thing the run was
+    # standing in for.
+    poster = Signal(str, int, str, str, str)
     # The hero banner's ground - a local backdrop path, run.
     featured_backdrop = Signal(str, int)
     # The featured banner's title treatment: a logo path ("" = none),
@@ -2835,16 +2850,80 @@ class TrackerPage(GlassPage):
 
     def _build_header_tabs(self, header):
         """The Saved / Schedule / History pills, or nothing on a page
-        that has no such sections (Discover)."""
+        that has no such sections (Discover).
+
+        **Each carries the same picture its sidebar row does** (the
+        owner's ask, 25 August 2026: "add icons for the saved/history/
+        schedule tabs"). The artwork is the bundled sheet's, by the
+        section's own key - one image per section across the whole
+        window, so the pill and the rail row cannot drift apart.
+
+        Two tints per button, not one: Qt asks a QIcon for the Off state
+        and the On state separately, and the pill's label changes colour
+        between them (theme's #Ghost rules), so a single pixmap would
+        leave the icon muted on the section actually showing."""
         self._header_tab_buttons = {}
+        # Where a second press on the open pill returns to - see
+        # _toggle_tab. None means "the page's default section".
+        self._tab_before_pill = None
         labels = dict(TABS)
+        dpr = float(self.devicePixelRatioF() or 1.0)
         for key in getattr(self, "HEADER_TABS", ()) or ():
-            button = QPushButton(labels.get(key, key), objectName="Ghost")
+            button = QPushButton(f"  {labels.get(key, key)}",
+                                 objectName="Ghost")
+            icon = QIcon()
+            rest = images.tinted_asset(theme.rail_icon(key), theme.TEXT_MUTED,
+                                       HEADER_TAB_ICON, dpr)
+            if not rest.isNull():
+                icon.addPixmap(rest, QIcon.Mode.Normal, QIcon.State.Off)
+                icon.addPixmap(
+                    images.tinted_asset(theme.rail_icon(key), theme.TEXT,
+                                        HEADER_TAB_ICON, dpr),
+                    QIcon.Mode.Normal, QIcon.State.On)
+                button.setIcon(icon)
+                button.setIconSize(QSize(HEADER_TAB_ICON, HEADER_TAB_ICON))
             button.setCheckable(True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(lambda _c=False, k=key: self._set_tab(k))
+            button.clicked.connect(lambda _c=False, k=key: self._toggle_tab(k))
             header.addWidget(button)
             self._header_tab_buttons[key] = button
+
+    def _toggle_tab(self, key):
+        """A pill press: open that section, or - pressed again while it
+        is already open - go back to the list it was opened from.
+
+        **The owner's ask, 25 August 2026:** *"in the saved/history/
+        schedule tabs make it when I click it again it go back to the
+        full list"*. Saved, Schedule and History are views *over* the
+        browse the user was in; the way out was the sidebar, which means
+        leaving the header to undo something the header did.
+
+        Where "back" goes is where they came from - the category they
+        were browsing (Movies, Manhwa...) or Discover - remembered at
+        the moment the pill was pressed, never a fixed destination: on
+        Read, pressing Saved from Manhwa and pressing it again should
+        land on Manhwa, not on some default the page picked."""
+        if self._active_tab == key:
+            self._set_tab(self._tab_before_pill or DEFAULT_TAB)
+            return
+        if key not in dict(TABS) or key == DEFAULT_TAB:
+            self._tab_before_pill = None
+        else:
+            # Only a *browse* is worth returning to - and **a pill
+            # pressed from another pill leaves that memory alone**.
+            #
+            # The owner, 25 August 2026: "while I am in anime page, when
+            # I click on saved then scheduled then history then click on
+            # history again to go back, it takes me to discovery". It
+            # did, because each press overwrote the memory with whatever
+            # was showing, and a pill is not a browse - so the third
+            # press had nothing to go back to and fell through to the
+            # page default. Anime is what he was in when the chain
+            # started, and Anime is where the chain should end.
+            categories = {row[0] for row in self.CATEGORY_SECTIONS}
+            if self._active_tab in categories or self._active_tab == TAB_DISCOVER:
+                self._tab_before_pill = self._active_tab
+        self._set_tab(key)
 
     def _sync_header_tabs(self):
         """Check the pill for the section showing, and uncheck the rest -
@@ -5028,8 +5107,23 @@ class TrackerPage(GlassPage):
             self._on_discover_pick(record["item"], entry_type)
 
     def _on_grid_needs_cover(self, kind, index, run):
-        if run != self._discover_run:
-            return
+        """A cell came into view without a cover.
+
+        **No run check here, and that is the fix** (the owner, 25 August
+        2026: "the images are not loading... in history and schedule
+        they load perfectly"). `needs_cover` arrives on *scroll*, which
+        is whenever the user moves - long after the run it was filled
+        under may have advanced, because a run advances on every
+        category switch, every search keystroke and every page visit.
+        Dropping the request then left that cell blank until something
+        rebuilt the grid, which is why the covers came back only after
+        walking away and returning.
+
+        What makes it safe to ignore the run is `_discover_cards`: it is
+        rebuilt whenever the grid is refilled, so a record found at
+        (kind, index) is by definition the row on screen now. The
+        *answer* still has to prove it belongs to that row - see
+        _on_discover_poster."""
         record = self._discover_cards.get((kind, index))
         if not record:
             return
@@ -5051,11 +5145,12 @@ class TrackerPage(GlassPage):
             # disk from earlier visits) scrolled at a 7.2ms median gap,
             # Movies and Manga (no tiles yet) at 7.5-8.9ms with p95 of
             # 18-23ms - two to three dropped frames per burst.
-            lookup_pool.submit(self._warm_tile_worker, kind, index, path, run)
+            lookup_pool.submit_cover(self._warm_tile_worker, kind, index, path,
+                                     self._row_stamp(item))
             return
         self._request_poster(kind, index, item, run)
 
-    def _warm_tile_worker(self, kind, index, path, run):
+    def _warm_tile_worker(self, kind, index, path, stamp):
         """Cut the cover's tile on a worker, then hand the path to the
         same slot a download uses. `images.warm` is documented as
         thread-safe (PIL only) and cuts at the device size the UI asks
@@ -5066,7 +5161,8 @@ class TrackerPage(GlassPage):
         except Exception:
             pass
         try:
-            self._discover_signals.poster.emit(kind, index, str(path), "", run)
+            self._discover_signals.poster.emit(kind, index, str(path), "",
+                                               stamp)
         except RuntimeError:
             pass
 
@@ -5645,6 +5741,18 @@ class TrackerPage(GlassPage):
             text = str(raw).strip()
             return f"★ {text}" if text else ""
 
+    @staticmethod
+    def _row_stamp(item) -> str:
+        """What identifies a row well enough to say a late cover still
+        belongs to it: whichever id the catalogue gave it, else its url,
+        else its title. See _DiscoverSignals.poster."""
+        item = item or {}
+        for field in ("id", "imdb_id", "url", "poster", "title"):
+            value = str(item.get(field) or "").strip()
+            if value:
+                return value
+        return ""
+
     def _request_poster(self, kind, index, item, run):
         url = (item or {}).get("poster")
         # A reading row can arrive with no cover at all: the Madara
@@ -5663,10 +5771,11 @@ class TrackerPage(GlassPage):
         # The shared, bounded pool: a row is up to DISCOVER_LIMIT images
         # and a page can have two rows, so a thread each is exactly the
         # shape that once put 651 connections in flight (see lookup_pool).
-        lookup_pool.submit(self._fetch_discover_poster, kind, index, url, run,
-                           page_url, title, (item or {}).get("imdb_id") or "")
+        lookup_pool.submit_cover(self._fetch_discover_poster, kind, index, url,
+                                 self._row_stamp(item), page_url, title,
+                                 (item or {}).get("imdb_id") or "")
 
-    def _fetch_discover_poster(self, kind, index, url, run, page_url="",
+    def _fetch_discover_poster(self, kind, index, url, stamp, page_url="",
                                title="", imdb_id=""):
         """Resolve one card's art, in three widening steps.
 
@@ -5720,13 +5829,19 @@ class TrackerPage(GlassPage):
                 pass
         self._discover_signals.poster.emit(kind, index,
                                            str(path) if path else "",
-                                           resolved, run)
+                                           resolved, stamp)
 
-    def _on_discover_poster(self, kind, index, path, resolved_url, run):
-        if run != self._discover_run or not path:
+    def _on_discover_poster(self, kind, index, path, resolved_url, stamp):
+        if not path:
             return
         record = self._discover_cards.get((kind, index))
         if not record:
+            return
+        # **The row still has to be the row this was fetched for**, but
+        # that is a question about identity, not about how many searches
+        # have run since - see _DiscoverSignals.poster and
+        # _on_grid_needs_cover for the covers this used to throw away.
+        if stamp and self._row_stamp(record.get("item")) != stamp:
             return
         # A cover the worker had to dig out of the series page is written
         # back onto the row's dict, on this thread with every other

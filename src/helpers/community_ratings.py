@@ -1,8 +1,26 @@
-"""What people using Atomic thought of an episode or a chapter.
+"""What people using Atomic thought of a series, a film or a book.
 
 **The owner's ask, 25 August 2026:** *"next to the imdb rating on each of
 ep/ch lists pages, add Atomic Users Rating, make write and read the
-ratings from github"*.
+ratings from github"* - and, the same day, after seeing it: *"make the
+rating of Atomic users for the whole watchable or readable not the ch or
+the ep"*.
+
+## One score per title, not per episode
+
+The first cut rated an *episode* (`1x5`) or a *chapter* (`c247`), which
+is the wrong unit twice over. It is not what the number it sits beside
+means - IMDb's figure on a details page is the whole series' - and it
+asks a population of a handful of people to fill hundreds of buckets, so
+nearly every row shows nothing and the few that do carry one vote. One
+bucket per title concentrates the same votes into the number the page is
+actually about. `TITLE_ITEM` is that bucket, and it is the only item
+this app writes now.
+
+Per-episode votes already stored are neither read nor deleted: they sit
+in the same file under their own keys, ignored by a page that no longer
+asks for them, and `summarise` still returns them for anything that
+does.
 
 ## Where it lives, and why there
 
@@ -155,21 +173,25 @@ def key_for(entry) -> str:
     return "t-" + hashlib.sha1(title.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def episode_item(season, episode) -> str:
-    """The bucket one episode's votes sit in - "1x5"."""
-    try:
-        return f"{int(season or 1)}x{int(episode)}"
-    except (TypeError, ValueError):
-        return ""
+# **The one bucket a rating goes in: the title as a whole** (the owner's
+# ask - see the module note). Kept as a name rather than typed at each
+# call site because it is also what the write proxy validates against
+# (tools/ratings-worker/worker.js) and the two have to agree.
+#
+# `episode_item`/`chapter_item` used to live here and are gone with the
+# per-row control they fed. Their votes are still in the store under
+# "1x5"/"c247" and `summarise` still reports them; nothing writes those
+# shapes any more.
+TITLE_ITEM = "title"
 
 
-def chapter_item(number) -> str:
-    """The bucket one chapter's votes sit in. `%g` so 247 and 247.0 are
-    the same bucket while 247.5 keeps its half."""
-    try:
-        return f"c{float(number):g}"
-    except (TypeError, ValueError):
-        return ""
+def title_item(entry=None) -> str:
+    """The bucket this title's votes sit in.
+
+    Takes `entry` it does not use, so that a caller reads as "the item
+    for this entry" and a future per-season or per-volume bucket can be
+    added without changing every call site."""
+    return TITLE_ITEM
 
 
 # ------------------------------------------------------------- settings
@@ -341,8 +363,23 @@ def _read_raw(key, timeout):
 
 # ---------------------------------------------------------------- write
 
+def _kind(entry, item: str) -> str:
+    """"reading" or "video", for the stored file's own label.
+
+    Read off the entry, with the item shape as the fallback. It used to
+    be the item alone ("c247" is a chapter, anything else a video), and
+    that stopped being answerable the moment the bucket became `title`
+    for both media."""
+    medium = str((entry or {}).get("type") or "").strip().lower()
+    if medium in ("manga", "manhwa", "manhua", "novel", "book", "comic"):
+        return "reading"
+    if medium:
+        return "video"
+    return "reading" if str(item or "").startswith("c") else "video"
+
+
 def rate(entry, item: str, score, timeout: float = DEFAULT_TIMEOUT):
-    """Record this install's score for one episode or chapter.
+    """Record this install's score for one title.
 
     Returns `(ok, message)`. Never raises. Call it from a worker thread -
     it is a GET and a PUT against api.github.com.
@@ -392,8 +429,7 @@ def rate(entry, item: str, score, timeout: float = DEFAULT_TIMEOUT):
             votes[voter] = {"score": score, "at": storage.now_iso()}
             document.setdefault("key", key)
             document.setdefault("title", str((entry or {}).get("title") or ""))
-            document.setdefault(
-                "kind", "reading" if item.startswith("c") else "video")
+            document.setdefault("kind", _kind(entry, item))
             ok = _write_api(key, document, sha, token, timeout,
                             f"Rate {document.get('title') or key} {item}")
             if ok:
@@ -420,7 +456,7 @@ def _rate_via_proxy(proxy, key, item, score, voter, entry, timeout):
     payload = json.dumps({
         "key": key, "item": item, "score": score, "voter": voter,
         "title": str((entry or {}).get("title") or "")[:200],
-        "kind": "reading" if item.startswith("c") else "video",
+        "kind": _kind(entry, item),
     }).encode("utf-8")
     request = urllib.request.Request(
         proxy, data=payload, method="POST",

@@ -982,6 +982,47 @@ def discover_reading_sites(query: str = "", limit: int = 30,
                 by_site.pop(name, None)
         index += 1
 
+    # **A typed search is ranked by the title, not by whose turn it is.**
+    #
+    # The owner, 25 August 2026: *"the 3asq website manga do not appear
+    # when searching for them in the discovery, like Kingdom (WAN) and
+    # One piece and HxH"*. They did appear - just not where anyone would
+    # look. The interleave above exists so a *browse* shows every site
+    # rather than thirty rows of whichever answered first, and it was
+    # being applied to searches too, so "One Piece" led with "One Piece
+    # Special: Boichi Crossover" and "One Piece Strong World 0" and put
+    # the actual One Piece fifth, while "Kingdom" buried "Kingdom" and
+    # "Kingdom (WAN)" under "Eternal Kingdom" and "How I destroyed my
+    # kingdom!".
+    #
+    # Ranked, not filtered: everything the sites answered is still here
+    # and the interleave still decides ties, so no site loses its place
+    # and nothing is thrown away on a guess about what the user meant.
+    if query:
+        from . import title_match
+        wanted = title_match.normalize(query)
+
+        def rank(row):
+            raw = row.get("title") or ""
+            name = title_match.normalize(raw)
+            if name == wanted:
+                # **The plainest of the exact matches first.** normalize
+                # drops the parenthetical, so "One Piece (French)" and
+                # "One Piece" both come back exact and the site's own
+                # order decided between them - which put the French
+                # edition above the manga. Length is what separates
+                # them, and it keeps "Kingdom" ahead of "Kingdom (WAN)"
+                # while leaving the two adjacent, which is the pair the
+                # owner is choosing between.
+                return (0, len(raw))
+            if name.startswith(wanted):
+                return (1, len(raw))
+            if wanted in name:
+                return (2, len(raw))
+            return (3, len(raw))
+
+        interleaved.sort(key=rank)      # stable: ties keep the interleave
+
     out = []
     for row in interleaved[:limit]:
         out.append({

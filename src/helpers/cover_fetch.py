@@ -199,7 +199,10 @@ def ensure(key, path, fetch, title, size, setter, persist=None):
             waiters.append((setter, title, tuple(size), persist))
             return True
         _waiting[key] = [(setter, title, tuple(size), persist)]
-    lookup_pool.submit(_worker, key, fetch, tuple(size))
+    # The covers queue, not the shared one: see lookup_pool.submit_cover
+    # for why a page of them must never sit in front of a chapter list -
+    # or behind the last page's backlog.
+    lookup_pool.submit_cover(_worker, key, fetch, tuple(size))
     return True
 
 
