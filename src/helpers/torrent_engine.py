@@ -1187,6 +1187,32 @@ class _Torrent:
                     priorities[piece] = 1
             handle.prioritize_pieces(priorities)
 
+            # **Clear the old deadlines before writing the new ones -
+            # this is what made seeking take longer the more you
+            # seeked.** `set_piece_deadline` is relative to now, and
+            # nothing ever removed one, so every piece any earlier
+            # window had asked for kept a deadline that is now in the
+            # *past*. libtorrent orders its picker by deadline, so those
+            # expired entries sort ahead of the fresh 200ms one belonging
+            # to the place the user just seeked to: the seek waits behind
+            # every position previously visited, in the order they were
+            # visited. The priority array below already covers the union
+            # of every live reader's window (see the docstring), and
+            # `wait_for` re-asserts the deadline on the exact piece it is
+            # blocked on every poll, so clearing loses nothing.
+            #
+            # Measured 25 August 2026, Attack on Titan S01E02, a 4.33GB
+            # release with 8.39MB pieces: after the head landed, seeks to
+            # 25%, 55% and 80% each got **no piece at all inside 45s**.
+            # The floor here is one whole piece either way - 8.39MB is
+            # ~11s at what that swarm gave - which is the honest reason
+            # "Skipping to..." is not a one-second operation on a
+            # torrent, whatever this fixes.
+            try:
+                handle.clear_piece_deadlines()
+            except Exception:
+                pass
+
             # **A deadline on every piece of the window, in order.**
             #
             # Priority says *whether* to fetch a piece; only a deadline

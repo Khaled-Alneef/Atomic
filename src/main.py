@@ -61,7 +61,9 @@ from PyQt6.QtWidgets import (
 )
 from helpers.settings_dialog import SettingsDialog
 from helpers.widgets import (PageSlide, SmoothTween, confirm, hold_hover_cursor,
-                             install_edge_wheel, release_hover_cursor,
+                             install_edge_wheel,
+                             install_horizontal_wheel_guard,
+                             release_hover_cursor,
                              install_stray_window_guard,
                              release_stale_hover_cursors, scroll_area,
                              show_toast, take_live_redo, take_live_undo,
@@ -3681,6 +3683,7 @@ def main():
     # scrollbar above all (the owner's ask). One filter for every page,
     # kept alive by the app it is parented to.
     install_edge_wheel(app)
+    install_horizontal_wheel_guard(app)
     # A parentless widget that gets shown becomes a window with a title
     # bar - the owner's "a small window appears then closes". Suppressed
     # and named in the log; see widgets._StrayWindowGuard.

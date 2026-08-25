@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
     QDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsPixmapItem,
     QGraphicsScene, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QPushButton, QScrollArea, QSlider, QStyle, QStyleOptionSlider,
+    QMenu, QPushButton, QScrollArea, QScrollBar, QSlider, QStyle,
+    QStyleOptionSlider,
     QToolTip, QVBoxLayout, QWidget,
 )
 
@@ -2638,7 +2639,22 @@ class _Momentum(QObject):
     # bounded speed. At 5200 px/s a tick two frames late moves ~72px.
     # (4500 and the discard were measured on the way here: a 104px
     # single-frame jump at 7000, then the short flick at 4500.)
-    MAX_SPEED = 5200.0
+    # **3200, down from 5200** - the owner, 25 August 2026, and it is a
+    # cap on how far the view moves *between two frames*, never on how
+    # far a flick travels. Measured on Series by instrumenting the
+    # scroll body's own paints, 240Hz panel:
+    #
+    #     flick                 cap 5200            cap 3200
+    #     8 notches @ 30ms      2459 px/s,  9px     2337 px/s,  9px
+    #     15 notches @ 10ms     5457 px/s, 22px     3558 px/s, 14px
+    #     25 notches @ 6ms      5655 px/s, 22px     3900 px/s, 14px
+    #     travel, all six runs  510-721px           512-721px
+    #
+    # An ordinary scroll never reaches either cap - the two are
+    # indistinguishable at 30ms spacing. A hard flick did, and 22px of
+    # ground between two frames is what reads as a smear; the distance
+    # covered is identical.
+    MAX_SPEED = 3200.0
     # superseded - see above; kept so the next reader knows it was tried
     _OLD_MAX_SPEED_NOTE = "7000 then 4500"
     # Below this the remaining distance (speed/FRICTION) is ~2px: snap
@@ -2722,6 +2738,7 @@ class _Momentum(QObject):
         # vblank ticker (see _start_ticking) - the QTimer below is only
         # the fallback clock for machines with no vblank to wait on.
         self._vblank_on = False
+        self._last_value = None
         # Where the refresh grid is anchored - see _tick. Re-anchored
         # whenever motion restarts.
         self._phase = None
@@ -2818,42 +2835,50 @@ class _Momentum(QObject):
             self._vblank_on = False
         self._timer.stop()
 
+    def _set_value(self, value: int):
+        """Write the bar only when the rounded pixel actually changed - a
+        redundant setValue repaints the whole scroll body for no visible
+        movement."""
+        if value != self._last_value:
+            self._last_value = value
+            self._bar.setValue(value)
+
     def _tick(self):
         if self._pos is None:
             self._stop_ticking()
             return
         now = time.monotonic()
-        # **Snap to the refresh grid**, and this survived being taken
-        # out and measured. The timer runs at screen_tick_ms, which is a
-        # whole number of milliseconds, so it beats against the panel's
-        # refresh: without anchoring, the app produced 137 positions a
-        # second while the compositor presented 109, and steps of 14px
-        # and 28px landed in the same run at a constant velocity.
+        # **Snap to the refresh grid**, and this has now survived being
+        # taken out twice, the second time against a much better
+        # instrument than the first.
         #
-        # Anchoring to a fixed phase makes two ticks inside one refresh
-        # carry the same timestamp - the second moves nothing - and
-        # ticks in consecutive refreshes exactly one frame apart.
+        # The timer runs at screen_tick_ms, a whole number of
+        # milliseconds, so it beats against the panel's refresh: without
+        # anchoring, the app produced 137 positions a second while the
+        # compositor presented 109. Anchoring to a fixed phase makes two
+        # ticks inside one refresh carry the same timestamp and ticks in
+        # consecutive refreshes exactly one frame apart. `now` is also
+        # floored at `_last`, which is what stops it walking backwards.
         #
-        # **Removed on 25 August 2026 and put back the same day**, on
-        # the ask to drive the model from actual elapsed time instead.
-        # Two things came out of trying it, and the second matters more
-        # than the first:
+        # **Measured 25 August 2026 by instrumenting the scroll body's
+        # own paints and the pixels moved between them** - the right
+        # measurement, and not the one used the first time round. As
+        # shipped, 8 notches on Home and Series:
         #
-        #  * the case for removing it rested on "41-61% of frames carry
-        #    no movement", and that number counts *paints*. These pages
-        #    free-run - they paint faster than the panel refreshes - so
-        #    paints that carry no movement were never frames anybody
-        #    saw. Counting paints as frames is what made it look broken.
-        #  * judder read 8-16% before and 25-42% after, but **do not
-        #    trust either number**: a control run of two *identical*
-        #    arms on this same harness measured 8.4% and 27.8%. The
-        #    metric cannot resolve a difference that size, so the
-        #    shipped behaviour was kept rather than swapped on a number
-        #    that turned out to be noise.
+        #     body paints 214/s and 198/s, median gap 4.2ms on a 240Hz
+        #     panel - one paint per refresh
+        #     0% and 2% of paints moved 0px - no duplicate frames
+        #     deltas a clean ramp: 2 2 3 3 2 4 5 5 5 6 6 5 5 6 7 7 7 ...
         #
-        # Anything that revisits this needs a smoothness measurement
-        # that survives a two-arm control first. That is the actual
-        # blocker here, not the snapping.
+        # With the snapping removed and the model on raw elapsed time,
+        # the same run on Series gave
+        #
+        #     2 2 2 -1 -1 -3 -2 1 2 2 2 3 3 3 1 1 2 3 3 3 -1 -2 1 2 -1 ...
+        #
+        # - the view moving *backwards* between frames during a downward
+        # scroll. The "duplicate frame" this was meant to cure does not
+        # exist on this surface; the earlier 41-61% figure counted every
+        # widget in the app rather than the scroll body.
         frame_s = self._frame_s() if self._frame_s is not None else 0.0
         if frame_s > 0.0:
             if self._phase is None:
@@ -2896,12 +2921,12 @@ class _Momentum(QObject):
             # Snap the last couple of pixels and stop, so the tail is
             # never a string of ticks that round to nothing.
             self._pos = max(low, min(high, self._pos + self._vel / self.FRICTION))
-            self._bar.setValue(int(round(self._pos)))
+            self._set_value(int(round(self._pos)))
             self._stop_ticking()
             self._vel, self._pos = 0.0, None
             self._phase = None
             return
-        self._bar.setValue(int(round(self._pos)))
+        self._set_value(int(round(self._pos)))
 
     # **How fast the view catches up with a dragged scrollbar**, and why
     # a drag needs catching up with at all: an ordinary mouse reports 125
@@ -3444,6 +3469,69 @@ def install_stray_window_guard(app) -> QObject:
     return guard
 
 
+class _HorizontalWheelGuard(QObject):
+    """The wheel never moves a horizontal scrollbar; dragging it does.
+
+    The owner's ask, 25 August 2026: "do not make the mouse scroll moves
+    any horizontal scrollbar, make it only used by dragging the
+    scrollbar in the whole app". Sideways rows are everywhere here -
+    Discover's strips, Home's shelves, the reader's zoomed page - and a
+    tilt wheel, or the sideways component a trackpad reports while the
+    finger is going down, slid them under a pointer that was trying to
+    scroll the page.
+
+    **Filtered at the scrollbar, not at each viewport, because that is
+    where Qt actually decides.** Measured on Qt 6.11, 25 August 2026,
+    against a scroll area with both bars and one with only a horizontal
+    bar:
+
+        vertical wheel       -> V bar   (h-only area: moves nothing)
+        horizontal wheel     -> H bar   dH +60
+        shift + wheel        -> V bar   dV +284
+
+    So QAbstractScrollArea forwards the wheel to the horizontal bar
+    only on a genuine horizontal delta, and it forwards it as a real
+    event to that bar - which means one filter here covers every scroll
+    area in the app, including the ones not written yet, and needs no
+    special case for Shift (it does not swap axes on this platform).
+
+    Only Wheel is taken. Press, move and release reach the bar exactly
+    as before, so the handle still drags."""
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Type.Wheel
+                and isinstance(obj, QScrollBar)
+                and obj.orientation() == Qt.Orientation.Horizontal):
+            event.accept()
+            return True
+        return False
+
+
+def _vertical_scroller_above(widget):
+    """The nearest ancestor scroll area that can actually scroll
+    vertically, or None. Ancestors only - a sibling is not behind the
+    pointer."""
+    node = widget.parentWidget() if widget is not None else None
+    while node is not None:
+        if isinstance(node, QAbstractScrollArea):
+            try:
+                bar = node.verticalScrollBar()
+            except RuntimeError:
+                return None
+            if bar is not None and bar.maximum() > bar.minimum():
+                return node
+        node = node.parentWidget()
+    return None
+
+
+def install_horizontal_wheel_guard(app) -> QObject:
+    """Stop the wheel from moving any horizontal scrollbar - see
+    _HorizontalWheelGuard. Call once, from main()."""
+    guard = _HorizontalWheelGuard(app)
+    app.installEventFilter(guard)
+    return guard
+
+
 def install_edge_wheel(app) -> QObject:
     """Make the wheel work over page margins app-wide - see
     _EdgeWheelRelay. Returns the filter so the caller can keep it
@@ -3614,59 +3702,45 @@ class SideScroller(QWidget):
         self.setFixedHeight(area.maximumHeight())
 
     def eventFilter(self, obj, event):
-        """A plain vertical wheel notch over the row scrolls it sideways
-        (the owner's ask - the row is the thing under the pointer, and
-        aiming at its 11px scrollbar to move it was the alternative).
-
-        Retargeting, not restarting, same as widgets._SmoothWheel: a
-        second notch mid-glide moves the destination and the animation
-        re-aims from wherever the row currently is. A notch against a
-        hard end is left unconsumed so Qt hands it up to the page, which
-        is what should scroll then - without that, a row parked at its
-        start would swallow every upward notch and the page would refuse
-        to move while the pointer crossed it."""
+        """The wheel does not move this row - it moves the page behind
+        it. See the note below for why, and why it has to be handed up
+        by hand rather than simply not consumed."""
         if event.type() != QEvent.Type.Wheel or obj is not self._area.viewport():
             return False
-        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
-                                | Qt.KeyboardModifier.ShiftModifier):
-            return False    # zoom and Qt's own horizontal-wheel chord
-        delta = event.angleDelta().y() or event.angleDelta().x()
-        steps = delta / 120.0
-        if not steps:
+        page = _vertical_scroller_above(self)
+        if page is None:
             return False
-        bar = self._bar
-        if bar.maximum() <= bar.minimum():
-            return False    # the row fits - nothing to scroll
-        # A fifth of a viewport per notch - the row's own unit of
-        # travel now that the arrows are gone and the wheel (or the
-        # scrollbar) is the only way to move it.
-        # **0.21 and 63px, down 30% from 0.30 and 90px** - the same ask as
-        # _SmoothWheel.NOTCH_FRACTION, applied to the sideways card rows.
-        # Missing these two would have left every horizontal strip (Home's
-        # poster and games rows, the tracker's Saved and Discover strips)
-        # at full speed while the pages around them slowed.
-        # **0.126 and 38px, down a further 40% from 0.21 and 63px** -
-        # the owner's 24 August 2026 ask, whole app.
-        # **0.088 and 27px - 30% down again, same day, same words**
-        # ("make the scrolling in the whole app 30% slower").
-        # **0.0616 and 19px - and this cut is the horizontal rows' own**,
-        # the owner, 24 August 2026: "make the horizontal scrollbars
-        # slower by 30% (in the whole app)". Every sideways strip goes
-        # through here - Home's poster and games rows, the tracker's
-        # Saved and Discover strips - so one number covers "the whole
-        # app" for this axis.
-        notch = max(19, int(self._area.viewport().width() * 0.0616))
-        direction = 1 if steps < 0 else -1      # wheel down = row forward
-        at_end = ((direction < 0 and bar.value() <= bar.minimum())
-                  or (direction > 0 and bar.value() >= bar.maximum()))
-        motion = self._motion
-        if at_end and not motion.active():
-            return False    # hard against this end - the page's notch
-        # Same integrator as the pages' vertical scroll (see _Momentum);
-        # the arrow buttons keep SmoothTween, a press being a jump.
-        motion.kick(abs(steps) * notch, direction)
-        event.accept()
+        QApplication.sendEvent(page.viewport(), event)
         return True
+
+    # **A wheel notch over a sideways row no longer scrolls it sideways.**
+    # The owner, 25 August 2026: "do not make the mouse scroll moves any
+    # horizontal scrollbar, make it only used by dragging the scrollbar
+    # in the whole app" - said twice, the second time after a first
+    # attempt that only blocked the wheel at the scrollbar itself and
+    # left this untouched. That guard was necessary and not sufficient:
+    # Qt routes a wheel to a horizontal QScrollBar only on a genuine
+    # horizontal delta (measured on Qt 6.11), and this filter never sent
+    # one - it took a *vertical* notch on the row's viewport and drove
+    # the horizontal bar through _Momentum, writing setValue() directly.
+    # Nothing watching the scrollbar could ever have seen it.
+    #
+    # It replaces an earlier ask of the owner's ("the row is the thing
+    # under the pointer, and aiming at its 11px scrollbar to move it was
+    # the alternative"), so both are recorded here rather than one
+    # quietly overwriting the other.
+    #
+    # **Handed up by hand, because Qt will not do it.** Simply not
+    # consuming the notch was tried first and leaves the row swallowing
+    # it: measured 25 August 2026 on a horizontal-only QScrollArea
+    # nested inside a vertical one, a vertical notch on the inner
+    # viewport moved *neither* - QAbstractScrollArea accepts a wheel
+    # whether or not it has anywhere to go, so nothing propagates to the
+    # page. _EdgeWheelRelay would catch it, but only by hit-testing the
+    # real cursor, which is the wrong thing to depend on for the app's
+    # most repeated gesture. So the notch is sent to the nearest
+    # ancestor that can actually scroll vertically, which lands it on
+    # that area's _SmoothWheel and glides exactly like a direct one.
 
     def content_widget(self):
         """The widget the wrapped area scrolls - what a walk over the
