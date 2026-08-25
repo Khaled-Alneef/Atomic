@@ -26,18 +26,33 @@ can show the scores whether or not its owner has ever pasted a token.
 A 404 is the normal answer for a title nobody has rated and reads as an
 empty result, never an error.
 
-## Writing needs a token, and says so when it has none
+## Writing goes through a proxy, so nobody has to hold a token
 
-The GitHub contents API needs write access to the repository, which is
-the owner's to grant (`.claude/rules/integrations.md`: a key is fine,
-pasted in Settings; an installed application is not). Without one the
-rating control is drawn read-only and explains itself rather than
-failing when pressed.
+The GitHub contents API needs write access, and a token for it **cannot
+be shipped inside the exe**. Measured 25 August 2026 rather than
+assumed: the TMDB token bundled in Atomic.exe comes back out of the
+archive by name in 0ms with PyInstaller's own reader, and Atomic.exe is
+committed to `main` at every release - so a GitHub PAT put there would
+be published in a public repository and revoked by secret scanning
+within minutes, breaking ratings for everyone rather than for whoever
+extracted it.
 
-**The path is built from a sanitised key and nothing else.** That token
-can write anywhere in the repository, so `_safe_key` reduces an id to
-`[a-z0-9_-]` before it is ever put in a URL - a title carrying `../` must
-not be able to reach `src/`.
+So the token lives on a small endpoint of the owner's instead
+(`tools/ratings-worker/worker.js`, a Cloudflare Worker) and the app
+carries only its URL, which is not a secret. `DEFAULT_PROXY` is that
+URL; with it set, an ordinary copy of Atomic can rate with nothing
+pasted anywhere, which is the whole point.
+
+A token pasted in Settings still works and is the fallback - it is what
+the owner tests with, and what keeps ratings working if the endpoint is
+ever taken down. With neither, the rating control is drawn read-only and
+says so rather than failing when pressed.
+
+**The path is built from a sanitised key and nothing else**, on both
+sides. A write token can reach a whole repository, so `_safe_key`
+reduces an id to `[a-z0-9_-]` before it is ever put in a URL - a title
+carrying `../` must not be able to reach `src/` - and the worker checks
+the same shape again before it touches anything.
 
 ## Who voted
 
@@ -56,6 +71,7 @@ import json
 import re
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -63,6 +79,20 @@ from . import app_settings, logs, net, storage
 
 _UA = "Atomic/1.0"
 DEFAULT_TIMEOUT = 8
+
+# **Where a rating is posted so that anybody can leave one.**
+#
+# Filled in once the worker in tools/ratings-worker/ is deployed; a URL
+# is not a secret and shipping one is safe, which is exactly what
+# shipping the token would not be - measured 25 August 2026: the TMDB
+# token bundled in Atomic.exe comes back out of the archive by name in
+# 0ms, and Atomic.exe is committed to `main` at every release, so a
+# GitHub PAT put there would be published and auto-revoked by secret
+# scanning within minutes.
+#
+# Empty means no proxy: writing then needs a token the owner pasted, and
+# without one the app says so instead of failing when pressed.
+DEFAULT_PROXY = ""
 
 # Where the store lives. Overridable in settings so it can be pointed at
 # a fork or a private mirror without a new build - see `_repo`/`_branch`.
@@ -156,10 +186,17 @@ def _token() -> str:
     return app_settings.get_api_key("github")
 
 
+def _proxy() -> str:
+    return (app_settings.get_ratings_proxy() or DEFAULT_PROXY).strip().rstrip("/")
+
+
 def can_rate() -> bool:
     """Whether this install can *add* a rating. Reading never needs
-    this."""
-    return bool(_token())
+    this.
+
+    True as soon as there is a proxy to post to, whether or not the user
+    has a token of their own - which is the point of having one."""
+    return bool(_proxy() or _token())
 
 
 # ---------------------------------------------------------------- cache
@@ -322,11 +359,25 @@ def rate(entry, item: str, score, timeout: float = DEFAULT_TIMEOUT):
         return False, "That is not a score."
     if not MIN_SCORE <= score <= MAX_SCORE:
         return False, f"A score runs from {MIN_SCORE} to {MAX_SCORE}."
+    voter = app_settings.get_voter_id()
+    # **The proxy first, and for most installs it is the only route.**
+    # It holds the write token on the owner's own endpoint rather than
+    # inside the binary, so an ordinary copy of Atomic can leave a rating
+    # with nothing pasted anywhere. A token, where one *has* been pasted,
+    # stays as the fallback - it is what the owner tests with, and what
+    # works if the proxy is ever taken down.
+    proxy = _proxy()
+    if proxy:
+        ok, message = _rate_via_proxy(proxy, key, item, score, voter,
+                                      entry, timeout)
+        if ok or not _token():
+            return ok, message
+        # A proxy that answered badly while a token is available is worth
+        # one direct attempt rather than a refusal.
     token = _token()
     if not token:
-        return False, ("Add a GitHub token under Settings > API Keys to "
-                       "rate episodes.")
-    voter = app_settings.get_voter_id()
+        return False, ("Ratings cannot be sent from this copy yet - there "
+                       "is no rating service configured.")
     # **Two attempts, and the second is not optimism.** The contents API
     # rejects a write whose `sha` is not the file's current one, which is
     # exactly what happens when somebody else rated the same title
@@ -357,6 +408,35 @@ def rate(entry, item: str, score, timeout: float = DEFAULT_TIMEOUT):
         if attempt == 0:
             time.sleep(0.4)
     return False, "That rating could not be saved. Try again in a moment."
+
+
+def _rate_via_proxy(proxy, key, item, score, voter, entry, timeout):
+    """Post one rating to the write proxy. Returns `(ok, message)`.
+
+    Deliberately tells the caller nothing about the endpoint: whether the
+    token behind it is healthy is not this app's business, and a failure
+    here reads the same as any other failed write."""
+    payload = json.dumps({
+        "key": key, "item": item, "score": score, "voter": voter,
+        "title": str((entry or {}).get("title") or "")[:200],
+        "kind": "reading" if item.startswith("c") else "video",
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        proxy, data=payload, method="POST",
+        headers={"User-Agent": _UA, "Content-Type": "application/json"})
+    try:
+        deadline = net.deadline_in(timeout)
+        with net.urlopen(request, timeout=timeout) as response:
+            body = json.loads(net.read_text(response, deadline) or "{}")
+    except urllib.error.HTTPError as error:
+        logs.info(f"community ratings: proxy answered {error.code}")
+        return False, "That rating could not be saved. Try again in a moment."
+    except Exception:
+        return False, "That rating could not be sent - check the connection."
+    if body.get("ok"):
+        return True, f"Rated {score}/{MAX_SCORE}"
+    logs.info(f"community ratings: proxy refused - {body.get('error')!r}")
+    return False, "That rating was refused."
 
 
 def _api_headers(token):

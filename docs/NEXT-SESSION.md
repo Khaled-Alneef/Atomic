@@ -1244,3 +1244,65 @@ first because the drag state was assigned *after* `installEventFilter`,
 and again because the filter asked `self._area.verticalScrollBar()` on
 every event and that reaches into C++ for an area these pages routinely
 delete. The bar is held by identity now and the whole branch is wrapped.
+
+---
+
+# 25 August 2026 - the write token cannot ship in the exe
+
+The owner asked whether a GitHub token could be embedded in Atomic.exe
+so that any copy could write a rating directly. **No, and the second
+reason is the decisive one.**
+
+  * **A bundled file is not hidden.** Measured, not argued: the exe's own
+    archive lists `tmdb_token.txt` by name and PyInstaller's reader hands
+    it over in **0ms**. Encrypting it moves the problem rather than
+    solving it - the app must decrypt at runtime, so the key ships too.
+  * **Atomic.exe is committed to `main` at every release.** So anything
+    bundled in it is published in a public repository, where GitHub
+    scans for its own token patterns and revokes what it finds. An
+    embedded PAT would be dead within minutes of a release and ratings
+    would break for *everyone*, not just whoever extracted it. (The TMDB
+    token survives this only because it is not a scanned pattern. That is
+    luck, not safety.)
+  * **The blast radius is the repository.** A Contents:write token on
+    Atomic can rewrite `development`'s source and `main`'s release
+    snapshots, not only the ratings branch.
+
+## What ships instead
+
+`tools/ratings-worker/worker.js` - a Cloudflare Worker holding the token
+as an encrypted variable. The app posts
+`{key, item, score, voter, title, kind}` and carries only the URL, which
+is not a secret. `community_ratings.DEFAULT_PROXY` is where that URL
+goes; a token pasted in Settings remains the fallback, which is what the
+owner tests with and what keeps ratings alive if the endpoint goes away.
+
+Deployment is four steps in a browser and is written at the top of the
+worker file. It needs a fine-grained token scoped to one repository with
+Contents:read-and-write and nothing else - the owner's to make, like
+every other key here.
+
+**What it does not do, said plainly:** it does not prove who is voting.
+Anyone who finds the URL can post, and can invent voter ids. That is
+bounded on purpose - the token reaches one repository's contents, the
+store is a branch nothing merges from, and it is restorable with a force
+push from a local copy. If it is ever abused, change the worker's URL
+and ship a build; the token itself never leaves Cloudflare.
+
+## What was verified
+
+The client and the contract, against a local stand-in implementing the
+worker's route, field validation and merge:
+
+    no proxy, no token   can_rate False
+    proxy only           can_rate True      <- the point of it
+    valid episode        Rated 9/10         valid chapter  Rated 8/10
+    re-rate same item    one vote, score replaced, not stacked
+    score 42             refused before it is sent
+    proxy unreachable    "could not be sent - check the connection"
+
+and the payload the app posts matches what the worker parses.
+
+**Not verified: the worker itself.** It is JavaScript and there is no
+Node on this machine, so it has been read carefully and never executed.
+The first real rating through it is the test.

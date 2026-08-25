@@ -2241,7 +2241,10 @@ class DetailsPage(GlassPage):
         menu.addSeparator()
         mine = menu.addMenu(f"Rate This {what}")
         if not community_ratings.can_rate():
-            disabled = mine.addAction("Add a GitHub token in Settings")
+            # No proxy configured *and* no token pasted - see
+            # community_ratings.can_rate. Most copies will have a proxy
+            # baked in and never see this.
+            disabled = mine.addAction("Rating is not set up in this copy")
             disabled.setEnabled(False)
             return lambda _chosen: None
         actions = {}

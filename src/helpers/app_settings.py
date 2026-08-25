@@ -492,6 +492,25 @@ def get_voter_id() -> str:
     return voter
 
 
+def get_ratings_proxy() -> str:
+    """Where a rating is posted, when it is not written directly.
+
+    A URL, not a secret - which is the whole point of it: the write token
+    lives on that endpoint instead of inside Atomic.exe, where anything
+    bundled is both extractable in milliseconds and published to a public
+    repository at every release. See tools/ratings-worker/worker.js.
+
+    Empty falls back to community_ratings.DEFAULT_PROXY, and if that is
+    empty too, to writing directly with a token the owner pasted."""
+    return str(_load().get("ratings_proxy") or "")
+
+
+def set_ratings_proxy(value: str):
+    data = _load()
+    data["ratings_proxy"] = (value or "").strip()
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_ratings_repo() -> str:
     """Where the community ratings are kept, "owner/name". Empty means
     the app's own repository (community_ratings.DEFAULT_REPO) - this is
