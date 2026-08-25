@@ -24,27 +24,50 @@ HOME_ITEM = ("Home", "home")
 #
 # Drag-to-reorder still works *inside* a block (see main._on_nav_reordered)
 # and no longer across them, which is the whole point of grouping them.
+# **One rail, and the sections are on it** - the owner's ask, 25 August
+# 2026: *"cancel the second sidebar for the watch and read, make the
+# main sidebar: Home / one icon empty space / discover (for all,
+# watch/read) / movies / series / anime / manga / manhwa / manhua / one
+# icon empty space / games / apps / webs"*.
+#
+# A row is a **route**, `page` or `page:section`. The six type rows are
+# the catalogue browse the section rail used to hold, so Movies is the
+# Watch page showing its Movies section and Manga is the Read page
+# showing its Manga one; `discover` is a page of its own that browses
+# both media at once, which is what "for all, watch/read" asks for.
+#
+# Saved, Schedule and History are not rows here and are not gone: they
+# are the header tabs on whichever of the two pages is showing (see
+# tracker.TrackerPage.HEADER_TABS). They are one thing per page rather
+# than six rows repeated twice, which is what took them off the rail.
 NAV_GROUPS = [
     [
-        # Page key stays "series" - it is what saved nav orders,
-        # hidden-section lists and series.json already refer to. Anime
-        # merged into this page (the owner's ask - one watch page under
-        # the camera glyph), so there is no "anime" nav entry any more; a
-        # saved order or hidden-sections list still naming it is simply
-        # filtered out by the by_page lookups below rather than migrated.
-        #
-        # "Watch" and "Read" (the owner's ask), not "Movies & Series" and
-        # "Reading" - the verbs; Home's rows keep the longer "Reading"/
-        # "Watching" headings, also the owner's ask.
-        ("Watch", "series"),
-        ("Read", "manga"),
-        ("Games", "games"),
+        ("Discover", "discover"),
+        ("Movies", "series:cat_movies"),
+        ("Series", "series:cat_series"),
+        ("Anime", "series:cat_anime"),
+        ("Manga", "manga:cat_manga"),
+        ("Manhwa", "manga:cat_manhwa"),
+        ("Manhua", "manga:cat_manhua"),
     ],
     [
+        ("Games", "games"),
         ("Apps", "apps"),
         ("Websites", "websites"),
     ],
 ]
+
+
+def route_page(route: str) -> str:
+    """The page half of a route - "series" out of "series:cat_anime"."""
+    return str(route or "").split(":", 1)[0]
+
+
+def route_section(route: str) -> str:
+    """The section half, or "" when the route names a whole page."""
+    parts = str(route or "").split(":", 1)
+    return parts[1] if len(parts) == 2 else ""
+
 
 # Flattened, for everything that only cares about the order - Home's
 # preview rows, nav_position, the saved drag order.
@@ -57,6 +80,17 @@ def ordered_nav_items():
     the end."""
     order = app_settings.get_nav_order()
     by_page = {item[1]: item for item in NAV_ITEMS}
+    # **A saved order from before the rows were routes is not an order
+    # any more.** It named whole pages - games, websites, apps, series,
+    # manga - and none of those is a row now except the three launchers,
+    # so applying it put Games, Websites and Apps at the *top* of the
+    # rail and left every new row appended after them (measured on the
+    # owner's own settings.json). An order that knows nothing of the row
+    # this layout is built around is stale by definition, so it is
+    # dropped rather than half-applied; the first drag writes a fresh
+    # one.
+    if "discover" not in order:
+        order = []
     ordered = [by_page[p] for p in order if p in by_page]
     ordered += [item for item in NAV_ITEMS if item[1] not in order]
     return ordered
@@ -107,5 +141,13 @@ def nav_position(page_name: str) -> int:
     sorts last."""
     if page_name == HOME_ITEM[1]:
         return -1
-    pages = [item[1] for item in ordered_nav_items()]
-    return pages.index(page_name) if page_name in pages else len(pages)
+    routes = [item[1] for item in ordered_nav_items()]
+    if page_name in routes:
+        return routes.index(page_name)
+    # A bare page name - "series", "manga" - now that the rail holds
+    # routes. Its first section's row is where that page lives, which is
+    # what a slide direction and Home's row order both want.
+    for index, route in enumerate(routes):
+        if route_page(route) == page_name:
+            return index
+    return len(routes)

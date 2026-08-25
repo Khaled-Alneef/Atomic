@@ -23,7 +23,8 @@ from pathlib import Path
 from helpers import (app_settings, downloads, global_search, images, layout, logs,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
-from helpers.nav_config import (HOME_ITEM, nav_position, visible_nav_groups,
+from helpers.nav_config import (HOME_ITEM, nav_position, route_page,
+                                route_section, visible_nav_groups,
                                 visible_nav_items)
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -71,7 +72,7 @@ from windows.apps import AppsPage
 from windows.downloads_page import DownloadsPage
 from windows.games import GamesPage
 from windows.home import HomePage
-from windows.tracker import MangaPage, SeriesPage
+from windows.tracker import DiscoverPage, MangaPage, SeriesPage
 from windows.websites import WebsitesPage
 
 APP_DIR = Path(__file__).resolve().parent
@@ -107,6 +108,9 @@ PAGES = {
     # camera glyph, the owner's ask). Anything still asking for it by
     # name - an old saved nav order, a stale history entry - resolves
     # through _page_name below rather than KeyErroring mid-navigation.
+    # One Discover for both media - the sidebar's own row (see
+    # nav_config.NAV_GROUPS).
+    "discover": DiscoverPage,
     "manga": MangaPage,
     "series": SeriesPage,
     "games": GamesPage,
@@ -117,9 +121,15 @@ PAGES = {
 
 
 def _page_name(name: str) -> str:
-    """A page key that exists today. "anime" merged into "series"; saved
-    nav orders, session histories and shortcuts may still say it."""
-    return "series" if name == "anime" else name
+    """The page a route names, as a key that exists today.
+
+    Routes are `page` or `page:section` since the section rail was folded
+    into the main one (see nav_config.NAV_GROUPS), so everything that
+    looks a page up has to take the half in front of the colon. "anime"
+    merged into "series" long before that; saved nav orders, session
+    histories and shortcuts may still say it."""
+    page = route_page(name)
+    return "series" if page == "anime" else page
 
 
 # label, page to jump to, action to run on that page once it's showing
@@ -1644,9 +1654,14 @@ class MainWindow(QMainWindow):
         out beneath while the incoming one slides in on top - and the
         holder's width never changes, so the page content to the right
         does not move (measured: see the swap harness)."""
-        sectioned = getattr(page, "SECTIONS", None) is not None
-        if sectioned:
-            self._sync_section_list(page)
+        # **Always the main rail now.** The section bar is gone as a
+        # concept: its rows are on the main rail as routes (see
+        # nav_config.NAV_GROUPS) and the three that are not - Saved,
+        # Schedule, History - are header tabs on the page itself. The
+        # machinery below is left in place rather than deleted because it
+        # is what puts the main bar back, and because a page type wanting
+        # a rail of its own is a one-line change again.
+        sectioned = False
         if sectioned == self._section_bar_showing:
             return
         self._settle_swap()
@@ -1717,8 +1732,26 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def _style_nav_item(self, item, name, page_name):
-        self._style_rail_item(item, name,
-                              theme.NAV_ICONS.get(page_name, theme.NAV_BULLET))
+        """A nav row's picture, looked up by route.
+
+        Three tries, widest last: the whole route (nothing uses one yet,
+        but a row wanting its own picture should be able to say so), the
+        *section* it names - which is where the six type rows get theirs,
+        from the same SECTION_ICONS the section rail used to draw - and
+        finally the page. A row that matches none keeps the bullet, as
+        it always did."""
+        section = route_section(page_name)
+        page = _page_name(page_name)
+        icon = (theme.NAV_ICONS.get(page_name)
+                or (SECTION_ICONS.get(section) if section else None)
+                or theme.NAV_ICONS.get(page)
+                # SECTION_ICONS by page name too: "discover" is a whole
+                # page now and its picture has always lived there, so
+                # without this the one row on the rail with no section
+                # was the one row drawn as a bullet.
+                or SECTION_ICONS.get(page)
+                or theme.NAV_BULLET)
+        self._style_rail_item(item, name, icon)
 
     def _style_rail_item(self, item, name, icon_token):
         """Harbor's row language, shared by the nav list and the section
@@ -2777,10 +2810,26 @@ class MainWindow(QMainWindow):
         return "down" if nav_position(to_page) > nav_position(from_page) else "up"
 
     def navigate_to(self, page_name, animate=True):
-        page_name = _page_name(page_name)
+        """Go to a route - `page` or `page:section`.
+
+        A route naming a section of the page already showing does not
+        rebuild it: switching from Movies to Anime is the same page
+        changing what it lists, and tearing it down would throw away its
+        covers and its scroll position to draw the same widget again."""
+        route = page_name if ":" in str(page_name) else _page_name(page_name)
         current = self._history[self._history_index]
-        if current == page_name:
+        if current == route:
             return
+        if (route_section(route)
+                and _page_name(current) == _page_name(route)
+                and self._current_page is not None):
+            self._history = self._history[: self._history_index + 1]
+            self._history.append(route)
+            self._history_index += 1
+            self._sync_nav_highlight(route)
+            self._apply_route_section(self._current_page, route)
+            return
+        page_name = route
         self._history = self._history[: self._history_index + 1]
         self._history.append(page_name)
         self._history_index += 1
@@ -2911,8 +2960,26 @@ class MainWindow(QMainWindow):
             else:
                 rail.clearSelection()
 
+    def _apply_route_section(self, page, route):
+        """Put `page` on the section its route names, if it names one.
+
+        Duck-typed like every other page hook here: a page with no
+        sections simply has no `set_active_section` and the route cannot
+        carry one either."""
+        section = route_section(route)
+        if not section:
+            return
+        setter = getattr(page, "set_active_section", None)
+        if setter is None:
+            return
+        try:
+            setter(section)
+        except Exception:
+            logs.exception("could not open the section a nav row names")
+
     def _show_page(self, page_name, direction="down", animate=True):
-        page_name = _page_name(page_name)
+        if ":" not in str(page_name):
+            page_name = _page_name(page_name)
         # A navigation arriving mid-fold (Ctrl+3 while the sidebar is
         # still folding) would otherwise leave the outgoing page's
         # picture sitting over the incoming one - the fold's own tween
@@ -2921,7 +2988,8 @@ class MainWindow(QMainWindow):
         self._sync_nav_highlight(page_name)
 
         old_page = self._current_page
-        new_page = PAGES[page_name](self)
+        new_page = PAGES[_page_name(page_name)](self)
+        self._apply_route_section(new_page, page_name)
         new_page.setParent(self.container)
         self._current_page = new_page
 

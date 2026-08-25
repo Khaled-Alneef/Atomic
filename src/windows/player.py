@@ -142,6 +142,18 @@ SPEED_PRESETS = (0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
 # Windows' own default double-click time is ~500ms; 380ms is a touch
 # tighter so a deliberate slow "pause, then pause again" is not eaten.
 DOUBLE_CLICK_S = 0.38
+# **And within this far of the first click**, which is the half Windows
+# itself checks and this did not. The owner, 25 August 2026:
+# "sometimes clicking on the vid player screen takes more than one click
+# to resume/pause (no windows open!)". Clicking to pause and clicking
+# again a moment later to resume is an ordinary thing to do, and with
+# time as the only test the second one was read as a double-click: the
+# pause was *restored* to where it had been before the first click, so
+# the picture carried on exactly as if neither click had happened.
+# Windows' own rule is GetDoubleClickTime AND SM_CXDOUBLECLK, and a real
+# double-click does not travel - the system default is 4px either way,
+# and this is generous against a 2560-wide picture.
+DOUBLE_CLICK_PX = 24
 
 # Below this there is nothing worth resuming from, and above it the
 # episode is effectively finished - offering "resume at 99%" is worse
@@ -2219,6 +2231,10 @@ class PlayerPage(GlassPage):
         # pause callback and could land on the wrong state).
         self._last_click_time = 0.0
         self._pause_before_click = False
+        # Where the last click landed, so the next one can be told from a
+        # double-click by distance as well as by time - see
+        # DOUBLE_CLICK_PX.
+        self._last_click_pos = None
 
         self._bridge = _MpvBridge()
         self._bridge.prop.connect(self._on_property)
@@ -6602,10 +6618,30 @@ class PlayerPage(GlassPage):
         height = self._mpv_number("height")
         fps = (self._mpv_number("estimated-vf-fps")
                or self._mpv_number("container-fps"))
+        # **Two frame rates, not one, and conflating them cost a bug
+        # report.** The owner, 25 August 2026: "the vid player frames are
+        # still <60 make them at least 144!!!!" - reading this panel's
+        # single "FPS" row, which was the *video's* rate. Measured the
+        # same day on his own machine, Attack on Titan S01E01 (AV1
+        # 1920x1080, d3d11va):
+        #
+        #     estimated-vf-fps        23.98   the file's own frame rate
+        #     estimated-display-fps  239.99   the panel, driven by mpv
+        #     vsync-ratio             10.0    240 / 23.976, exactly
+        #     dropped 0, late 0, a/v sync -0.00009
+        #
+        # 23.976 is what the release contains; no player can turn that
+        # into 144 without inventing frames, and the display side was
+        # already running at the panel's full rate with nothing dropped.
+        # So the row says which number it is, and the display rate sits
+        # beside it where the claim can be checked.
+        display = self._mpv_number("estimated-display-fps")
         return {
             "resolution": (f"{int(width)}x{int(height)}"
                            if width and height else "-"),
-            "fps": f"{fps:.1f}" if fps else "-",
+            "fps": f"{fps:.2f}" if fps else "-",
+            "display": f"{display:.0f} Hz" if display else "-",
+            "vsync": self._mpv_text("vsync-ratio", "-"),
             # video-format ("h264"), not video-codec - the latter is
             # mpv's prose description and reads "H.264 / AVC / MPEG-4
             # AVC / MPEG-4 part 10" in a panel column a few dozen pixels
@@ -6670,7 +6706,8 @@ class PlayerPage(GlassPage):
         # fixed-width column, and the same crowding add_stepper records
         # for the subtitle panel applies to any row that tries to hold
         # more than a couple of value pairs.
-        for pairs in ((("resolution", "Resolution"), ("fps", "FPS")),
+        for pairs in ((("resolution", "Resolution"), ("fps", "Video FPS")),
+                      (("display", "Display"), ("vsync", "Frames per refresh")),
                       (("video", "Video"), ("audio", "Audio")),
                       (("hwdec", "Decode"), ("bitrate", "Bitrate")),
                       (("dropped", "Dropped"), ("buffer", "Buffer"))):
@@ -6707,6 +6744,8 @@ class PlayerPage(GlassPage):
             live = self._playback_stats()
             setters["resolution"](live["resolution"])
             setters["fps"](live["fps"])
+            setters["display"](live["display"])
+            setters["vsync"](live["vsync"])
             setters["video"](live["video"])
             setters["audio"](live["audio"])
             setters["hwdec"](live["hwdec"])
@@ -7832,10 +7871,36 @@ class PlayerPage(GlassPage):
                 self._click_toggle(position)
 
     def _is_active(self) -> bool:
+        """Is this app the one in front?
+
+        **Qt's answer alone was losing clicks.** `isActiveWindow()` is a
+        cached flag updated when Qt processes the activation message, and
+        the mouse here is read from a 40ms poll of the OS - so a press
+        that arrives in the same breath as the activation is judged
+        against a flag that has not caught up, `_press_on_video` stays
+        False, and the click does nothing. The user presses again and it
+        works, which is the owner's "takes more than one click".
+
+        So the OS is asked as well, and either answer counts. What this
+        does *not* change is the rule the flag was there for: when
+        another application really is in front, both answers are False
+        and a click that only raises this window still does not pause
+        it."""
         try:
             window = self.window()
-            return window is not None and window.isActiveWindow()
+            if window is None:
+                return False
+            if window.isActiveWindow():
+                return True
         except RuntimeError:
+            return False
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            front = ctypes.windll.user32.GetForegroundWindow()
+            return bool(front) and int(front) == int(window.winId())
+        except Exception:
             return False
 
     def _is_click(self, position) -> bool:
@@ -7893,8 +7958,14 @@ class PlayerPage(GlassPage):
         if self.handle is None or self._status_visible():
             return
         now = time.monotonic()
-        if now - self._last_click_time <= DOUBLE_CLICK_S:
+        near = True
+        if self._last_click_pos is not None:
+            moved = ((position.x() - self._last_click_pos.x()) ** 2
+                     + (position.y() - self._last_click_pos.y()) ** 2)
+            near = moved <= DOUBLE_CLICK_PX ** 2
+        if now - self._last_click_time <= DOUBLE_CLICK_S and near:
             self._last_click_time = 0.0
+            self._last_click_pos = None
             try:
                 self.handle["pause"] = self._pause_before_click
             except Exception:
@@ -7902,6 +7973,7 @@ class PlayerPage(GlassPage):
             self.toggle_fullscreen()
             return
         self._last_click_time = now
+        self._last_click_pos = position
         self._pause_before_click = self._paused
         self._wake_controls()
         self.toggle_pause()

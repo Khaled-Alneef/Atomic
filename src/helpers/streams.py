@@ -2238,6 +2238,66 @@ def _flag_instant(results, deadline):
         pass
 
 
+# **How far down the seeder order the Arabic preference may reach.**
+#
+# The owner, 25 August 2026: *"we are now making the auto source
+# selection based on the embedded arabic, keep it but if the selected
+# source is not on top5 (on seeds num), then auto select the 1st has
+# most seeds num"*.
+#
+# Both halves matter and they pull against each other. Arabic-first is
+# his standing ask (see `arabic_rank`) and it is why the pick is not
+# simply the biggest swarm; but a release can state Arabic and have
+# three seeders, and a source nobody is seeding is not a source. Five is
+# his number: among the five healthiest releases at the chosen
+# resolution, take the one carrying Arabic; if the Arabic one is not
+# even in that five, its swarm is too far behind to be worth the
+# subtitles and the biggest swarm plays instead.
+#
+# Only the *head* is corrected - the list the panel prints keeps the
+# Arabic order, because that is the order he asked to read it in and the
+# correction is about what plays without being asked.
+SEEDER_SHORTLIST = 5
+
+
+def _promote_seeded_head(ranked: list, preferred: str) -> list:
+    """Put the biggest swarm first when the ranked head is not among the
+    healthiest few - see SEEDER_SHORTLIST.
+
+    Judged inside one resolution, because that is the group the pick is
+    made in: the preferred one when it has anything playable, otherwise
+    whatever the ranking led with, so a title with no 1080p is compared
+    against itself rather than against nothing."""
+    playable = [row for row in ranked
+                if row.get("kind") != "drm"
+                and (row.get("url") or row.get("info_hash"))
+                and not _side_content_rank(row)]
+    if len(playable) < 2:
+        return ranked
+    head = playable[0]
+
+    def quality_of(row):
+        value = (row.get("quality") or "").lower()
+        return "2160p" if value == "4k" else value
+
+    wanted = quality_of(head)
+    if preferred != "best" and any(quality_of(r) == preferred for r in playable):
+        wanted = preferred
+    group = [row for row in playable if quality_of(row) == wanted]
+    if len(group) < 2 or head not in group:
+        return ranked
+    by_seeders = sorted(group, key=lambda r: -int(r.get("seeders") or 0))
+    if head in by_seeders[:SEEDER_SHORTLIST]:
+        return ranked           # the Arabic pick is healthy enough
+    best = by_seeders[0]
+    if best is head or int(best.get("seeders") or 0) <= 0:
+        return ranked
+    moved = list(ranked)
+    moved.remove(best)
+    moved.insert(ranked.index(head), best)
+    return moved
+
+
 def _rank(streams: list) -> list:
     """Playable before unplayable, then the default-pick order (see
     _default_pick_key).
@@ -2259,7 +2319,7 @@ def _rank(streams: list) -> list:
             continue
         seen.add(marker)
         unique.append(stream)
-    return unique
+    return _promote_seeded_head(unique, preferred)
 
 
 def stream_key(stream):

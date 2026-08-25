@@ -2227,6 +2227,8 @@ class TrackerPage(GlassPage):
         # _set_tab rewrites it on every section switch.
         self.title_label = QLabel(self.TITLE, objectName="PanelTitle")
         header.addWidget(self.title_label)
+        header.addSpacing(18)
+        self._build_header_tabs(header)
         header.addStretch()
         # No refresh button: opening the page is the refresh (see
         # _auto_refresh). A button that had to be pressed, and then sat
@@ -2823,6 +2825,37 @@ class TrackerPage(GlassPage):
         remembered in the session store (see _set_tab)."""
         self._set_tab(key)
 
+    # **The three sections that are not sidebar rows.** The rail carries
+    # the catalogue - Discover and the six type rows - and these three
+    # are about *this* library rather than the catalogue, so they live on
+    # the page they belong to (the owner's ask, 25 August 2026: one
+    # sidebar, and these had nowhere else to go). One row of pills beside
+    # the heading rather than six repeated rail rows.
+    HEADER_TABS = (TAB_SAVED, TAB_SCHEDULE, TAB_HISTORY)
+
+    def _build_header_tabs(self, header):
+        """The Saved / Schedule / History pills, or nothing on a page
+        that has no such sections (Discover)."""
+        self._header_tab_buttons = {}
+        labels = dict(TABS)
+        for key in getattr(self, "HEADER_TABS", ()) or ():
+            button = QPushButton(labels.get(key, key), objectName="Ghost")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _c=False, k=key: self._set_tab(k))
+            header.addWidget(button)
+            self._header_tab_buttons[key] = button
+
+    def _sync_header_tabs(self):
+        """Check the pill for the section showing, and uncheck the rest -
+        a category or Discover leaves all three off, which is right: none
+        of them is what is on screen."""
+        for key, button in getattr(self, "_header_tab_buttons", {}).items():
+            try:
+                button.setChecked(key == self._active_tab)
+            except RuntimeError:
+                pass        # the page was torn down under a late call
+
     def _set_tab(self, key):
         """Show one sub-section.
 
@@ -2833,6 +2866,7 @@ class TrackerPage(GlassPage):
         if key not in dict(TABS) and key not in categories:
             key = DEFAULT_TAB
         self._active_tab = key
+        self._sync_header_tabs()
         labels = dict(TABS)
         labels.update({row[0]: row[1] for row in self.CATEGORY_SECTIONS})
         self.title_label.setText(labels.get(key, key))
@@ -7102,6 +7136,47 @@ class SeriesPage(TrackerPage):
     # The same rows in the three blocks the rail draws them in,
     # with a row of air between each pair - see _section_groups.
     SECTION_GROUPS = _section_groups(WATCH_CATEGORIES)
+
+
+class DiscoverPage(TrackerPage):
+    """Discover for both media at once - the owner's ask, 25 August 2026:
+    a single "discover (for all, watch/read)" row on the one sidebar.
+
+    A TrackerPage with the union of the two pages' browse rows and no
+    categories of its own. Everything else it inherits already works per
+    *row* rather than per page: each DISCOVER_ROWS entry carries the type
+    a pick from it becomes, and `_progress_data_file` files a saved entry
+    by that type - so a manga picked here lands in tracker.json and an
+    anime in series.json, exactly as if it had been picked on its own
+    page.
+
+    `DATA_FILE`/`ENTRY_TYPES` are the video ones because something has to
+    lead the Add form; nothing about saving from a Discover row consults
+    them (see above)."""
+
+    DATA_FILE = "series.json"
+    ENTRY_TYPES = ("Anime", "Series", "Movie", "Manga", "Manhwa", "Manhua")
+    TITLE = "Discover"
+    TYPE_OPTIONS = list(ENTRY_TYPES)
+    SUPPORTS_PROGRESS_SYNC = False
+    SPLIT_SECTIONS_BY_TYPE = False
+    # Video first, then reading - the order the sidebar lists the type
+    # rows in, so the page reads down in the same order the rail does.
+    DISCOVER_ROWS = (("anime", "Anime", "Anime"),
+                     ("series", "Series", "Series"),
+                     ("movie", "Movies", "Movie"),
+                     ("reading", "Manga", "Manga"),
+                     ("reading_latest", "Latest", "Manga"))
+    DISCOVER_HEADINGS = {"reading": "Popular Reading",
+                         "reading_latest": "Latest Chapters"}
+    DISCOVER_SUBHEADINGS = {"reading_latest":
+                            "Where the newest chapters landed"}
+    DISCOVER_BROWSE_ONLY = ("reading_latest",)
+    CATEGORY_SECTIONS = ()
+    # No rail of its own and no header tabs: this page is one thing.
+    SECTIONS = ()
+    SECTION_GROUPS = ()
+    HEADER_TABS = ()
 
 
 class _SearchSignals(QObject):

@@ -1117,3 +1117,130 @@ or two. The alternative, if this ever needs to be open: votes as
 **issue comments** (any GitHub account can comment on a public repo)
 aggregated into these same JSON files by an Action. Not built - there is
 nobody to build it for yet.
+
+---
+
+# 25 August 2026 - one rail, and the player was never slow
+
+## The sidebar is one rail now
+
+The owner: *"cancel the second sidebar for the watch and read"*, and a
+list of exactly eleven rows. A nav row is a **route** now - `page` or
+`page:section` (`nav_config.route_page`/`route_section`) - so the six
+type rows are the catalogue sections the second rail used to hold:
+
+    Home                        discover        -> DiscoverPage
+    (gap)                       series:cat_movies / cat_series / cat_anime
+    Discover Movies Series      manga:cat_manga / cat_manhwa / cat_manhua
+    Anime Manga Manhwa Manhua   games apps websites
+    (gap)  Games Apps Websites
+
+`navigate_to` on a route whose page is already showing **does not
+rebuild it** - Movies to Anime is one page changing what it lists, and
+tearing it down would throw away its covers and its scroll position.
+`_sync_section_sidebar` now always hands the column to the main bar; the
+swap machinery is left in place because it is what puts that bar back.
+
+**Saved / Schedule / History are header tabs**, on the page they belong
+to (`TrackerPage.HEADER_TABS`), chosen over six repeated rail rows
+because they are about *this library* rather than the catalogue. Asked
+in advance rather than guessed - the alternative reading was that the
+type rows should list his own titles, and that would have been a
+different build.
+
+**Discover is a page of its own** (`tracker.DiscoverPage`) carrying the
+union of both media's browse rows. Nothing about saving needed changing:
+each DISCOVER_ROWS entry already carries the type a pick becomes and
+`_progress_data_file` files it by that type, so a manga picked there
+lands in tracker.json and an anime in series.json.
+
+**Two things this broke and how they read.** A saved drag order from
+before the routes named whole pages, so it put Games, Websites and Apps
+at the *top* of the rail and appended everything else - an order that
+does not contain "discover" is now dropped rather than half-applied. And
+the Discover row drew as a bullet, because the icon lookup tried the
+route, the section and the page against `theme.NAV_ICONS` but never
+`SECTION_ICONS` by page name, which is where "discover" has always kept
+its picture.
+
+## The video player was never running at <60
+
+The owner: *"the vid player frames are still <60 make them at least
+144!!!!"*. Measured before touching anything, Attack on Titan S01E01
+(AV1 1920x1080, d3d11va) on his 240Hz panel:
+
+    estimated-vf-fps        23.98    the file's own frame rate
+    estimated-display-fps  239.99    the panel, driven by mpv
+    vsync-ratio             10.0     240 / 23.976, exactly
+    dropped 0, late 0, a/v sync -0.00009, display-sync-active True
+
+So the display side is already at the panel's full rate with nothing
+dropped, and 23.976 is what the release *contains* - no player turns
+that into 144 without inventing frames. What he was reading is the
+Statistics panel's single "FPS" row, which was the video's number. It is
+three rows now: **Video FPS**, **Display**, **Frames per refresh**.
+
+**Frame interpolation is deliberately not enabled.** `interpolation` is
+already on with `tscale=oversample`, which repeats frames aligned to
+vsync rather than blending them - the choice made so anime line art
+stays sharp. A blending kernel would generate real in-between frames and
+genuinely smooth 24fps motion, at two costs this file already records:
+it softens line art, and per-frame GPU work at 1440p/240Hz is what froze
+*both* his monitors when spline36+deband went in. Worth offering as a
+setting; not worth switching on unmeasured.
+
+## Clicking the picture sometimes did nothing
+
+Two causes, both in `_click_toggle`/`_is_active`:
+
+* **A double-click was tested by time alone.** Click to pause, click
+  again a moment later to resume - an ordinary thing - and the second
+  was read as a double-click: the pause was *restored* to where it had
+  been before the first, so the picture carried on as if neither click
+  had happened. Windows' own rule is time AND distance; `DOUBLE_CLICK_PX`
+  is the missing half.
+* **Qt's `isActiveWindow()` is a cached flag** and the mouse here is a
+  40ms poll of the OS, so a press arriving with the activation was
+  judged against a flag that had not caught up and was dropped. The OS
+  is asked as well now (`GetForegroundWindow`), and either answer
+  counts - which leaves the rule that flag was there for intact: when
+  another app really is in front both answers are False and a raising
+  click still does not pause.
+
+## Auto-pick: Arabic first, but only among the healthy
+
+*"keep it but if the selected source is not on top5 (on seeds num), then
+auto select the 1st has most seeds num"*. `SEEDER_SHORTLIST = 5`:
+inside the chosen resolution, the Arabic-carrying release keeps the pick
+while it is among the five biggest swarms; below that the biggest swarm
+plays instead. Only the **head** is corrected - the list the panel
+prints keeps the Arabic order, because that is the order he asked to
+read it in. Checked both ways: an Arabic release at 3 seeders behind six
+healthier ones loses the pick; the same release at 500 (fourth
+healthiest) keeps it.
+
+## The drag follow, now on every surface
+
+The painted grid got this on 25 August; the QScrollArea surfaces - Home,
+Discover, Saved, the reader strip, the player's panels - are the rest of
+the app and they had it too. `_SmoothWheel` takes the thumb drag over
+(a press on the *track* still belongs to Qt) and `_Momentum.follow`
+closes the gap on the frame clock. Interleaved, two runs each:
+
+    Qt writing the value    120.3 fps, 49.9% dead, 6.00px steps
+    following the pointer   210.4 / 170.4 fps, 12.3% / 29.0% dead,
+                            3.00-4.00px steps
+
+at the same travel (697 vs 696 px/s). **Say the other half too:** the
+local step-to-step change gets *worse* in percentage terms (17% -> 40-50%
+median), because a QScrollArea's position is an integer bar value and
+3px steps quantise to 3/4/3/2 where 6px ones did not. The absolute
+jitter is no larger; the metric is reading a smaller base.
+
+**One trap paid for twice, both fatal.** An exception raised inside a Qt
+event filter takes the process down rather than propagating - exit 127,
+no traceback, the whole app dying while building a page. It happened
+first because the drag state was assigned *after* `installEventFilter`,
+and again because the filter asked `self._area.verticalScrollBar()` on
+every event and that reaches into C++ for an area these pages routinely
+delete. The bar is held by identity now and the whole branch is wrapped.
