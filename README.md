@@ -1,39 +1,33 @@
 # Remote Tests
 
-**Nothing here is a release**: no tag, no version bump, and the in-app
-updater ignores this branch.
+Builds parked here so they can be downloaded and tried on another
+machine. **Nothing here is a release**: no tag, no version bump, and the
+in-app updater ignores this branch.
 
-| file | what it is |
+**The build ships as `Atomic.zip`, never as a bare `Atomic.exe`** - the
+owner's standing rule of 25 August 2026, and it is a measurement, not a
+preference: the exe was blocked on download as
+`Trojan:Win32/Wacatac.B!ml` while the identical bytes inside a zip
+downloaded cleanly. See CLAUDE.md rule 9.
+
+## Current build
+
+| | |
 |---|---|
-| `Atomic.exe` | the current build (seventh of 25 August 2026) |
-| `Atomic.zip` | the same exe, zipped - usually gets past a browser's "not commonly downloaded" block |
-| `Atomic-build1.exe` | **the first build of the day**, from before the flagging started |
+| Version | 1.10.32 (unreleased) |
+| Built | 25 August 2026, seventh build |
+| Download | `Atomic.zip` - extract, then run `Atomic.exe` |
 
-## The virus warning: what was checked, and the one test left
+## What was ruled out when the warning started
 
-Measured 25 August 2026, on the seven builds pushed here today,
-extracted from this branch's own history:
+Seven builds were compared, extracted from this branch's own history:
+the same 193 bundled entries in every one (nothing added, ever), the
+same 347 Python modules (none added), a byte-identical bootloader (the
+first differing byte is the PE TimeDateStamp at 0x108), and all seven
+scanning clean under Defender with cloud protection on and the
+Mark-of-the-Web set. `upx=True` in Atomic.spec has never applied -
+upx.exe is not installed - so the usual first suspect was never in play.
 
-* **Same 193 bundled entries** in every build - no DLL, no data file
-  and no dependency was added at any point.
-* **Same 347 Python modules**, none added. The last three builds differ
-  from the last un-flagged one by nine module updates in total:
-  build 5 (cover_fetch, lookup_pool, widgets, details, player, reader,
-  tracker), build 6 (discover), build 7 (torrent_engine).
-* **The bootloader is byte-identical.** The first byte that differs
-  between two builds is offset 0x108 - the PE TimeDateStamp - and 4093
-  of the first 4096 bytes match.
-* **Every one of the seven scans clean** under Defender with cloud
-  protection on (MAPSReporting 2, block-at-first-sight enabled) and with
-  the Mark-of-the-Web set to this branch's raw URL.
-* `upx=True` in Atomic.spec **has never applied** - upx.exe is not
-  installed, so PyInstaller silently skips it. The usual first suspect
-  for Wacatac!ml on PyInstaller builds was never in play.
-
-So nothing found so far can be pinned on the code. **`Atomic-build1.exe`
-is the experiment that settles it**: download it now.
-
-* build 1 blocked too -> it is reputation or the machine's policy, not
-  the code, and no code change will clear it.
-* build 1 clean, current one blocked -> it *is* one of those nine
-  modules, and there is enough here to bisect them.
+Nothing in the code was ever shown to cause it, and the zip downloading
+cleanly while the same bytes as an .exe did not is the evidence that it
+was the container, not the contents.
