@@ -9,36 +9,23 @@ in-app updater ignores this branch.
 | | |
 |---|---|
 | Version | 1.10.32 (unreleased) |
-| Built | 25 August 2026, fifth build |
-| SHA-256 | `efa32eec935bb7f977e7d20f537eaa870e7f2228bed0a537c06357a2a5090895` |
+| Built | 25 August 2026, sixth build |
+| SHA-256 | `3f5dd40b7a1788e77ee7f0903ce92ff6f5d616ad67e4e0da3573a0b3a632bc8b` |
 
-### Fixed since the fourth build
+### Fixed since the fifth build
 
-- **The white window that flashes.** Found: the details page made its
-  "Save to My List" button visible *before* adding it to the layout, and
-  a parentless widget that is shown is a window to Qt - title bar and
-  all - until something reparents it a frame later. Every unsaved title
-  opened from Discover flashed one. Fixed at the source, and a guard now
-  suppresses the whole class of it and names the widget in the log.
-- **Pill chains return to the browse they started from.** Anime ->
-  Saved -> Schedule -> History -> History now lands back on Anime, not
-  on Discover: a pill pressed from another pill no longer overwrites
-  what "back" means.
-- **Covers have their own queue, newest first.** Discover's cover
-  fetches shared the four workers that fetch every other page's covers,
-  its chapter lists and its schedules - one visit leaves ~114 queued
-  jobs behind, and the next page's covers waited behind all of them.
-- **The statistics panel says what startup is doing** instead of a
-  panel of dashes while the loading screen is up.
-- **The reader's upward scrolling**: one real desync fixed (a page
-  settling into its real height moved the scrollbar without telling the
-  glide). The rest is measured but not fixed - see below.
+**Discover's reading search is ranked by the title now.** The rows were
+never missing - they were ordered by whose turn it was. The interleave
+exists so a *browse* shows every site rather than thirty rows of
+whichever answered first, and it was being applied to searches too:
 
-### Measured, not fixed
+    "One Piece"   led with One Piece Special: Boichi Crossover,
+                  then One Piece Strong World 0 - the manga was fifth
+    "Kingdom"     led with Eternal Kingdom and How I destroyed my
+                  kingdom! - Kingdom and Kingdom (WAN) were ninth
 
-Scrolling up in the reader produces ~166 frames a second against 240
-down. The motion model and the paint are both innocent (paint costs
-0.26-0.51ms either way, and the position maths stays exact); the UI
-thread stalls ~6ms per frame going up, two vblank ticks queue, and the
-second collapses into the same frame slot. Finding what stalls it needs
-a sampling profiler on the UI thread.
+Now every one of them leads with the right title from 3asq: Kingdom,
+then Kingdom (WAN); One Piece ahead of One Piece (French); Hunter X
+Hunter for both "Hunter x Hunter" and "HxH". Ranked, not filtered -
+nothing a site answered is thrown away, and the interleave still
+decides ties, so no site loses its place.
