@@ -9,32 +9,36 @@ in-app updater ignores this branch.
 | | |
 |---|---|
 | Version | 1.10.32 (unreleased) |
-| Built | 25 August 2026, fourth build |
-| SHA-256 | `ea2a8bc7b59e7fbf17bae40553e9fc489576eec433637bea1442489cc985e5eb` |
+| Built | 25 August 2026, fifth build |
+| SHA-256 | `efa32eec935bb7f977e7d20f537eaa870e7f2228bed0a537c06357a2a5090895` |
 
-### Fixed since the third build
+### Fixed since the fourth build
 
-- **Covers were being thrown away after they arrived.** A grid cover is
-  requested when a cell scrolls into view and the answer comes back
-  seconds later; both ends were gated on a *run number* that advances on
-  every category switch, every search keystroke and every page visit, so
-  a late-but-still-correct cover was discarded and the cell stayed blank
-  until something rebuilt the grid. That is why walking away and coming
-  back "fixed" it, and why History and Schedule - which do not use runs
-  this way - were always fine. The answer is now matched to the *row*
-  it was fetched for: a cover five runs late is applied, one stamped for
-  a different row is still rejected (both checked).
-- **Source lookups skip hosts that are refusing**, like the covers
-  already do. On a network blocking the indexers a lookup now gives up
-  in 0.4-0.8s instead of waiting on each dead host in turn.
-- **The sidebar fits the window**: half-height separators, the logo band
-  giving way, rows down to 44px - every row on screen without scrolling
-  at 720 / 768 / 900 / 1132px, folded and unfolded.
+- **The white window that flashes.** Found: the details page made its
+  "Save to My List" button visible *before* adding it to the layout, and
+  a parentless widget that is shown is a window to Qt - title bar and
+  all - until something reparents it a frame later. Every unsaved title
+  opened from Discover flashed one. Fixed at the source, and a guard now
+  suppresses the whole class of it and names the widget in the log.
+- **Pill chains return to the browse they started from.** Anime ->
+  Saved -> Schedule -> History -> History now lands back on Anime, not
+  on Discover: a pill pressed from another pill no longer overwrites
+  what "back" means.
+- **Covers have their own queue, newest first.** Discover's cover
+  fetches shared the four workers that fetch every other page's covers,
+  its chapter lists and its schedules - one visit leaves ~114 queued
+  jobs behind, and the next page's covers waited behind all of them.
+- **The statistics panel says what startup is doing** instead of a
+  panel of dashes while the loading screen is up.
+- **The reader's upward scrolling**: one real desync fixed (a page
+  settling into its real height moved the scrollbar without telling the
+  glide). The rest is measured but not fixed - see below.
 
-### Still open, not in this build
+### Measured, not fixed
 
-The loading logo appearing the instant an episode is pressed, the
-statistics panel while sourcing, the reader's upward scrolling, and the
-white window that flashes when Discover is pressed - that last one I
-could not reproduce here (no stray Qt window appears, and every
-subprocess this app starts already suppresses its console).
+Scrolling up in the reader produces ~166 frames a second against 240
+down. The motion model and the paint are both innocent (paint costs
+0.26-0.51ms either way, and the position maths stays exact); the UI
+thread stalls ~6ms per frame going up, two vblank ticks queue, and the
+second collapses into the same frame slot. Finding what stalls it needs
+a sampling profiler on the UI thread.
