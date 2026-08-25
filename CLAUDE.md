@@ -25,7 +25,14 @@ GitHub tags.
    even to look something up.
 3. **Implement, then stop.** Finish, rebuild locally (`build` skill),
    leave it for the user to test - don't commit or push on your own
-   initiative, however small the change. Testing happens before code
+   initiative, however small the change.
+
+   **`remote-tests` is pushed only when the user says to push to it.**
+   His rule, 25 August 2026, stated as its own line because "rebuild it"
+   had started to read as "and put it where I can install it". It is the
+   branch he installs from on another machine, so a push to it lands a
+   build on a device he may be in the middle of testing on. Rebuild
+   locally and say it is ready; wait to be told. Testing happens before code
    lands, not after. Once the user says **approved**, commit and push
    per rule 4.
 4. **Every approved change bumps the third part of `APP_VERSION`**, in

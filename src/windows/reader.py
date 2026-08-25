@@ -77,7 +77,8 @@ from PyQt6.QtWidgets import (
 from helpers import (app_settings, child_process, downloads, history, images,
                      logs, lookup_pool, net, storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
-                             finish_toast, frameless_dialog, show_toast,
+                             finish_toast, frameless_dialog,
+                             freeze_covered, show_toast,
                              use_hover_cursor, _Momentum, screen_tick_ms,
                              screen_frame_s)
 from windows.tracker import correct_progress, format_chapter_progress
@@ -5220,5 +5221,11 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
     page.follow(host)
     page.show()
     page.raise_()
+    # The sidebar and the page container are covered, not hidden, so
+    # without this they keep repainting behind an opaque overlay -
+    # measured at 67,090 paint events in 3.6s of scrolling, and the
+    # reason scrolling up ran slower than scrolling down. See
+    # widgets._CoveredFreeze for the numbers.
+    freeze_covered(page)
     page.setFocus()
     return page

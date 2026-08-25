@@ -50,7 +50,8 @@ from helpers import (anime_identity, app_settings, artwork, hero_art, history,
                      logs, lookup_pool, net, storage, theme)
 from helpers.poster_grid import PosterGrid
 from helpers.widgets import (Card, GlassPage, GlyphButton, PickCombo, confirm,
-                             frameless_dialog, scroll_area, show_toast,
+                             frameless_dialog, freeze_covered,
+                             scroll_area, show_toast,
                              use_hover_cursor)
 
 try:
@@ -1831,6 +1832,7 @@ class DetailsPage(GlassPage):
         page.follow(host)
         page.show()
         page.raise_()
+        freeze_covered(page)   # see widgets._CoveredFreeze
         page.setFocus()
         return page
 
@@ -4338,5 +4340,6 @@ def open_details(window, entry):
     page.follow(host)
     page.show()
     page.raise_()
+    freeze_covered(page)   # see widgets._CoveredFreeze
     page.setFocus()
     return page

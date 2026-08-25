@@ -5129,6 +5129,8 @@ class TrackerPage(GlassPage):
             return
         item = record["item"]
         path = item.get("cover_path")
+        if self._place_cached_poster(kind, index, item):
+            return
         if path and not os.path.exists(str(path)):
             # Evicted by images.trim_cache since the row learned its path:
             # forget it and fetch by URL again, or the cell would draw
@@ -5753,8 +5755,49 @@ class TrackerPage(GlassPage):
                 return value
         return ""
 
+    def _place_cached_poster(self, kind, index, item) -> bool:
+        """Put a cover up **now** when this process has already drawn it.
+
+        A row rebuilt on a revisit carries its poster URL but not its
+        `cover_path`, so every cover went the long way round - a pool
+        job, a `download()` that only stats an already-cached file, a
+        signal - for a pixmap sitting in memory. The page therefore
+        filled in from blank on every single visit, which is the owner's
+        "why do the images have to reload from the start when I switch
+        page and come back", 25 August 2026. Measured on his data that
+        day, per visit: Series asked for 90 covers and got 90 disk hits
+        both times, Discover 169 then 177, Reading 57 then 61.
+
+        Only a pixmap already in `images._PIXMAP` qualifies. A decode is
+        deliberately still pushed to the pool - that rule was bought
+        with a measurement of its own (see _on_grid_needs_cover: 18-23ms
+        p95 frame gaps when ~35 covers were decoded inside one scroll
+        tick), and this must not undo it."""
+        record = self._discover_cards.get((kind, index))
+        if not record or record.get("cover") is None:
+            return False
+        path = (item or {}).get("cover_path")
+        if not path:
+            url = (item or {}).get("poster") or (item or {}).get("cover_url")
+            if url:
+                candidate = images.cache_path_for_url(url)
+                if candidate.exists():
+                    path = str(candidate)
+        if not path:
+            return False
+        size = record.get("size") or POSTER_SIZE
+        if images.cached_thumbnail(path, size) is None:
+            return False
+        item["cover_path"] = str(path)
+        self._on_discover_poster(kind, index, str(path), "",
+                                 self._row_stamp(item))
+        return True
+
     def _request_poster(self, kind, index, item, run):
         url = (item or {}).get("poster")
+        # Already drawn once this run: straight to the card, no pool.
+        if self._place_cached_poster(kind, index, item):
+            return
         # A reading row can arrive with no cover at all: the Madara
         # search endpoint returns titles and links only, which is why a
         # search for "kingdom" drew a wall of letter avatars while the
@@ -6080,7 +6123,15 @@ class TrackerPage(GlassPage):
         facts = QHBoxLayout()
         facts.setSpacing(10)
         meta_bits = [str(item.get("year") or "").strip()]
-        meta = QLabel("   ·   ".join(bit for bit in meta_bits if bit))
+        # **Parented on construction.** `facts` is a free-standing
+        # QHBoxLayout until it is added below, so addWidget reparents
+        # nothing and the setVisible(True) under it was landing on a
+        # widget with no parent - which Qt promotes to a window and
+        # widgets.install_stray_window_guard then suppresses, so the
+        # banner's year simply never drew. Same trap that had already
+        # cost the Apps page its browse button; found by walking every
+        # page with the guard logging what it caught.
+        meta = QLabel("   ·   ".join(bit for bit in meta_bits if bit), banner)
         meta.setStyleSheet(
             f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 600;"
             f" background: transparent;")

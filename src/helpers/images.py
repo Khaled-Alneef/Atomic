@@ -771,6 +771,32 @@ def prewarm(specs):
     threading.Thread(target=worker, daemon=True).start()
 
 
+def cached_thumbnail(path, size=(64, 64)):
+    """The finished tile for `path` **if it is already in this process's
+    cache**, else None. Never decodes, never opens the image, and costs
+    one stat().
+
+    Exists so a page rebuilt on a revisit can put its covers up in the
+    frame it is built in, instead of queueing a worker round trip for a
+    pixmap that is already in memory. Pages here rebuild from scratch on
+    every visit, so without it every return to a page re-ran the whole
+    lazy-cover dance and the covers visibly filled in again - the
+    owner's "why do the images have to reload from the start when I
+    switch page and come back", 25 August 2026. Measured on his data
+    that day: Series asked for 90 covers on the first visit and the same
+    90 on the second, every one already on disk, and Discover 169 then
+    177.
+
+    Returning None is the ordinary case on a cold page and is not a
+    failure - the caller falls back to the pool exactly as before, which
+    is what keeps a full JPEG decode off the UI thread (see
+    _on_grid_needs_cover for the 18-23ms p95 that bought that rule)."""
+    if not path:
+        return None
+    size = tuple(size)
+    return _PIXMAP.get((str(path), _stamp(path), size, device_ratio()))
+
+
 def thumbnail_or_avatar(path, label_text, size=(64, 64)) -> QPixmap:
     """Best-effort thumbnail: try to load `path` as an image, and fall
     back to blank_tile's empty rounded slab. `label_text` no longer

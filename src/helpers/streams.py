@@ -1312,6 +1312,15 @@ def _quality_rank(quality: str) -> int:
 # stop meaningfully changing how fast playback starts.
 _SEEDER_CEILING = 200
 
+# **How big a swarm an Arabic release needs before it is preferred.**
+# The owner's refinement, 25 August 2026: "make it always choose the one
+# has Arabic subtitles embedded IF IT HAS > 50 SEEDS, otherwise chose
+# the one has more seeds". The preference below him was unconditional,
+# so a three-seeder Arabic release beat a three-hundred-seeder one - a
+# subtitle track bought with minutes of black screen, and the reason
+# auto-sourcing had started landing on releases that would not start.
+ARABIC_MIN_SEEDERS = 50
+
 
 # **Does this release carry Arabic subtitles in the file?**
 #
@@ -1340,6 +1349,12 @@ _SEEDER_CEILING = 200
 _ARABIC_FLAG = "\U0001F1F8\U0001F1E6"
 _ARABIC_WORD_RE = re.compile(r"\b(arabic|ara|ar)\b", re.I)
 _MULTISUB_RE = re.compile(r"multi[\s._-]*subs?", re.I)
+
+
+# What `arabic_rank` returns for a release that says nothing about
+# subtitles - and the rank an Arabic release is demoted to when its
+# swarm is under ARABIC_MIN_SEEDERS.
+_ARABIC_UNSTATED = 2
 
 
 def arabic_rank(stream) -> int:
@@ -1415,7 +1430,12 @@ def _default_pick_key(stream, preferred):
     # not in conflict: among the 1080p rows, prefer the one that carries
     # Arabic, and among those the biggest swarm. See `arabic_rank` for
     # what counts as carrying it.
-    arabic = arabic_rank(stream)
+    # Gated on the swarm, not stated alone - see ARABIC_MIN_SEEDERS.
+    # Below the gate a release drops to the same rank as one that says
+    # nothing about subtitles, so the whole field is then decided by
+    # seeders, which is exactly "otherwise chose the one has more seeds".
+    arabic = (arabic_rank(stream) if raw_seeders > ARABIC_MIN_SEEDERS
+              else _ARABIC_UNSTATED)
     # **Extras sort below seasons, above everything unplayable.** Ahead
     # of the resolution term so a 1080p OVA pack cannot outrank a 1080p
     # season pack, and behind `resolvable` so it is still preferred to a

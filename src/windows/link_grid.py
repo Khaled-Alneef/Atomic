@@ -710,7 +710,18 @@ class TargetRow(QWidget):
         self.target_edit.editingFinished.connect(self._notify_change)
         row.addWidget(self.target_edit, stretch=1)
 
-        self.browse_btn = QPushButton("...", objectName="Small")
+        # **Parented on construction, not by the addWidget below.** `row`
+        # is a free-standing QHBoxLayout at this point - it is not
+        # attached to a widget until `layout.addLayout(row)` at the end -
+        # so adding to it reparents nothing, and the setVisible(True)
+        # underneath was landing on a widget with no parent. Qt promotes
+        # that to a *window*, and widgets.install_stray_window_guard
+        # then suppresses it for good: the owner's log carries "stray
+        # window suppressed: QPushButton#Small" and the Apps page had
+        # lost its browse-for-an-exe button. Same trap as details.py's
+        # Save button; the guard now reconsiders too, but a widget that
+        # never becomes a stray needs neither fix.
+        self.browse_btn = QPushButton("...", self, objectName="Small")
         self.browse_btn.setFixedWidth(36)
         self.browse_btn.clicked.connect(self._browse)
         self.browse_btn.setVisible(kind == "app")

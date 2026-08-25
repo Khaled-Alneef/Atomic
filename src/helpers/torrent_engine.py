@@ -1150,6 +1150,41 @@ class _Torrent:
             for piece in start_band:
                 if 0 <= piece < total_pieces:
                     priorities[piece] = 7
+
+            # **The rest of this file stays wanted, at priority 1** - and
+            # that is what `download_whole`'s docstring has always
+            # claimed streaming does, while this array was built as
+            # `[0] * total_pieces` and never raised.
+            #
+            # A piece at 0 is not "fetch later", it is "do not want",
+            # and libtorrent drops a peer that holds nothing wanted
+            # (close_redundant_connections). So the swarm was being cut
+            # down to whoever happened to hold the ~24MB window.
+            # Measured 25 August 2026 on Solo Leveling S02E05, a release
+            # advertising **701 seeders**: the engine opened 22
+            # connections and was down to **2 peers, 2 seeds, 2
+            # connections** nine seconds later, and stayed there for the
+            # rest of a 45s run at 0.3-0.5 MB/s - the owner's "10 peers
+            # only gives me around 2 MB, while in stremio the 10 peers
+            # gives around 10 MB".
+            #
+            # Anchoring the window at the first *missing* piece (see the
+            # 22 August note above) fixed the total collapse to zero;
+            # this fixes the standing case, where a peer is dropped for
+            # not holding the few pieces being read right now.
+            #
+            # Priority 1 against the bands' 4 and 7, so ordering is
+            # untouched: the head still arrives first, the deadlines
+            # below still decide sequence, and this only fills what is
+            # otherwise idle capacity. **Other files in a pack stay at
+            # 0** - `_set_wanted_files` exists so one episode out of a
+            # 28-episode pack does not drag the other 27 down with it,
+            # and this must not undo that: the loop is bounded to this
+            # file's own pieces.
+            for piece in range(max(0, file_first),
+                               min(total_pieces - 1, file_last) + 1):
+                if priorities[piece] == 0:
+                    priorities[piece] = 1
             handle.prioritize_pieces(priorities)
 
             # **A deadline on every piece of the window, in order.**

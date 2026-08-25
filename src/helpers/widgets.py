@@ -3368,7 +3368,28 @@ class _StrayWindowGuard(QObject):
                       f"widget was shown and Qt made it a window")
         obj.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         obj.hide()
+        # **A widget that gains a parent a moment later was never a
+        # stray, and suppressing it for good is worse than the flash
+        # this guard exists to stop.** It cost the Apps page its
+        # browse-for-an-exe button ("..."), which is built, shown, and
+        # only then added to its row - the flash never reached the
+        # screen, but WA_DontShowOnScreen stayed set and the button was
+        # gone from then on. One turn of the event loop later is enough
+        # to tell the two apart: a real stray still has no parent.
+        QTimer.singleShot(0, lambda ref=weakref.ref(obj): self._reconsider(ref))
         return True
+
+    def _reconsider(self, ref):
+        obj = ref()
+        if obj is None:
+            return
+        try:
+            if obj.parentWidget() is None:
+                return          # genuinely parentless: stay suppressed
+            obj.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+            obj.setVisible(True)
+        except RuntimeError:
+            pass                # deleted in the meantime
 
 
 def install_stray_window_guard(app) -> QObject:
@@ -3816,3 +3837,102 @@ def inform(parent, title, text, ok_text="OK"):
     """A themed notice with one OK. For what a toast is too quiet for;
     Enter and Esc both dismiss it."""
     _message_dialog(parent, title, text, ok_text).exec()
+
+
+class _CoveredFreeze(QObject):
+    """Stops the widgets a full-window overlay covers from repainting.
+
+    The reader, the player and the details page are all opened as a
+    child of the window's *central widget*, laid over the sidebar and
+    the page container rather than replacing them - which is what makes
+    the sidebar disappear while reading with no state in main.py to get
+    stuck in (see reader.open_reader). What that costs is that the
+    covered widgets are still `isVisible()`, so every timer, clock,
+    marquee and hover on the page underneath still asks Qt to repaint,
+    and Qt still walks them - invisibly, behind an opaque overlay.
+
+    Measured 25 August 2026, scrolling the reader by wheel notch, and
+    the direction is the whole tell: scrolling *down* left the UI thread
+    38% idle inside win32u (waiting on the present), while scrolling
+    *up* was only 12% idle and spent 40% inside Qt6Gui - painting, not
+    presenting. Per-widget paint counts named the culprits, and none of
+    them were in the reader: Card#HomeItem, HeroBanner, the sidebar's
+    NavList, ContinueCover. Freezing them:
+
+        upward   180 -> 233 frames/s, 67,090 -> 16,880 paint events
+        downward 234 -> 235 frames/s (already idle; nothing to win)
+
+    which also removes the up/down asymmetry the owner reported - the
+    two directions now measure the same.
+
+    `setUpdatesEnabled(False)` rather than `hide()`, deliberately:
+    hiding changes `isVisible()` for everything underneath and hands
+    the host's QHBoxLayout a reason to re-lay-out the page container,
+    where freezing touches neither. Both measured the same win (+63%),
+    so the safer one wins on nothing but risk.
+
+    Restoring is tied to *both* the overlay hiding and its destruction,
+    because a frozen sidebar that never thaws is a frozen app: the
+    overlays close with `hide()` then `deleteLater()`, and a crash
+    between the two would otherwise leave the chrome painted once and
+    never again.
+    """
+
+    def __init__(self, overlay, covered):
+        super().__init__(overlay.parent())
+        self._overlay = overlay
+        self._covered = list(covered)
+        self._held = False
+        overlay.installEventFilter(self)
+        overlay.destroyed.connect(self._finish)
+        self._hold()
+
+    def _set(self, enabled: bool):
+        for widget in self._covered:
+            try:
+                widget.setUpdatesEnabled(enabled)
+            except RuntimeError:
+                pass        # deleted underneath us; nothing to restore
+
+    def _hold(self):
+        if not self._held:
+            self._held = True
+            self._set(False)
+
+    def _release(self):
+        if self._held:
+            self._held = False
+            self._set(True)
+
+    def _finish(self):
+        self._release()
+        self.deleteLater()
+
+    def eventFilter(self, obj, event):
+        if obj is self._overlay:
+            kind = event.type()
+            if kind in (QEvent.Type.Hide, QEvent.Type.Close):
+                self._release()
+            elif kind == QEvent.Type.Show:
+                self._hold()
+        return False
+
+
+def freeze_covered(overlay) -> QObject:
+    """Stop what `overlay` covers from repainting behind it, until it
+    goes away. Call once, right after a full-window overlay is shown.
+
+    Only siblings that are visible *and* still painting are taken, so
+    overlays stack correctly: a player opened over a details page
+    freezes the details page and leaves the sidebar - already frozen by
+    details - alone, and closing the player thaws only what it froze.
+    """
+    host = overlay.parent()
+    if host is None:
+        return None
+    covered = [child for child in host.children()
+               if isinstance(child, QWidget) and child is not overlay
+               and child.isVisible() and child.updatesEnabled()]
+    if not covered:
+        return None
+    return _CoveredFreeze(overlay, covered)

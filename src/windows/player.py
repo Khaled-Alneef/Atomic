@@ -72,7 +72,8 @@ from helpers import (skiptimes, app_settings, artwork, downloads, logs, net, sto
                      theme, video_backend)
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
                              PickCombo,
-                             confirm, finish_toast, scroll_area, show_toast,
+                             confirm, finish_toast, freeze_covered,
+                             scroll_area, show_toast,
                              use_hover_cursor)
 
 # Soft imports. These two modules are written alongside this page and a
@@ -8535,9 +8536,27 @@ class PlayerPage(GlassPage):
     _MEDIA_PLAY_PAUSE = (Qt.Key.Key_MediaTogglePlayPause, Qt.Key.Key_MediaPlay,
                          Qt.Key.Key_MediaPause)
 
+    # **Only a key this player acts on brings the chrome back.** The
+    # owner's ask, 25 August 2026: "when I press any button on the
+    # keyboard the ui in vid player appears - do not make it appear when
+    # I press any btn e.g. raising the windows sound". Windows delivers
+    # its own volume keys as Key_VolumeUp/Down/Mute to whatever has
+    # focus, and the launcher and browser keys the same way, so "any
+    # key" was never the right trigger. Escape is deliberately not in
+    # here: it closes a panel, leaves full screen or leaves the player,
+    # and none of those is a request to see the bars.
+    _WAKING_KEYS = frozenset({
+        Qt.Key.Key_Space, Qt.Key.Key_MediaTogglePlayPause, Qt.Key.Key_MediaPlay,
+        Qt.Key.Key_MediaPause, Qt.Key.Key_MediaStop, Qt.Key.Key_MediaNext,
+        Qt.Key.Key_MediaPrevious, Qt.Key.Key_N, Qt.Key.Key_P,
+        Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+        Qt.Key.Key_F, Qt.Key.Key_F11, Qt.Key.Key_M,
+    })
+
     def keyPressEvent(self, event):
         key = event.key()
-        self._wake_controls()
+        if key in self._WAKING_KEYS:
+            self._wake_controls()
         if key == Qt.Key.Key_Space or key in self._MEDIA_PLAY_PAUSE:
             self.toggle_pause()
         elif key == Qt.Key.Key_MediaStop:
@@ -8742,5 +8761,6 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     page.setGeometry(host.rect())
     page.show()
     page.raise_()
+    freeze_covered(page)   # see widgets._CoveredFreeze
     page.setFocus()
     return page
