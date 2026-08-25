@@ -1047,3 +1047,73 @@ exe is that it launches, chooses the `dwm` clock, and renders Home with
 its art; every behavioural fix above was verified against the real page
 and player objects over the real network and real swarms, and the frozen
 archive was read back to confirm it carries each one.
+
+---
+
+# 25 August 2026 - Atomic user ratings
+
+The owner: *"next to the imdb rating on each of ep/ch lists pages, add
+Atomic Users Rating, make write and read the ratings from github"*.
+
+## Where it lives
+
+A branch of this repository, `ratings`, holding `ratings/<key>.json` -
+one file per title. **A branch of its own** because `main` carries
+released snapshots and `development` carries source, and neither wants a
+commit every time somebody rates an episode; nothing on it is ever
+merged. One file per *title* rather than per episode because the details
+page needs a whole season at once, and because two people rating
+different titles then never collide.
+
+`<key>` is an IMDb id where there is one and a hash of the normalised
+title otherwise (reading titles have none). An episode's bucket is
+`1x5`; a chapter's is `c247`.
+
+## Reading is keyless, writing needs a token
+
+Reads come from `raw.githubusercontent.com`, which serves that branch
+publicly - measured 200 with no credential, 481ms cold and 0ms cached.
+A 404 is "nobody has rated this yet" and is an ordinary answer.
+
+Writes go through the contents API and need a token with Contents write
+on the repository, pasted under **Settings > API Keys > Atomic User
+Ratings**. Without one the Rate submenu is drawn disabled and says so.
+
+**The path is built from a sanitised key and nothing else** - that token
+can write anywhere in the repo, so `_safe_key` reduces an id to
+`[a-z0-9_-]` first (`../../src/main.py` becomes `src-main-py`).
+
+## Who voted
+
+`app_settings.get_voter_id()`, a random uuid made once per install. It
+exists so a second rating replaces the first instead of stacking; it is
+not an identity and nothing is derived from the machine.
+
+## What was verified, and what was not
+
+Read path, end to end against the real branch: a seeded Attack on Titan
+file (written by this module's own document builder, so the stored shape
+is the writer's) comes back as
+`{1x1: 9.5/2 votes, 1x5: 8.0/1, 1x25: 9.5/2}`, and the real details page
+prints `Apr 6, 2013 . TMDB 8.8 . Atomic 9.5 (2)` on the right rows. The
+chapter list does the same for a seeded reading title.
+
+Write path, against a stubbed transport - every branch of it: refusal
+with no token, refusal out of range, creating a file that does not
+exist, merging into one that does, **replacing** this install's earlier
+vote rather than stacking, preserving another install's, and the
+409 conflict retry (two PUTs, both votes intact afterwards).
+
+**Not verified: the live PUT.** It needs the owner's GitHub token, which
+this session did not have and deliberately did not go looking for in the
+credential store. Paste one in Settings and rate an episode; if it does
+not save, the log line is written by `community_ratings` and names the
+status GitHub answered.
+
+## If it ever needs to work for people without repo access
+
+The contents API needs write access, which suits an owner and a friend
+or two. The alternative, if this ever needs to be open: votes as
+**issue comments** (any GitHub account can comment on a public repo)
+aggregated into these same JSON files by an Action. Not built - there is
+nobody to build it for yet.

@@ -236,6 +236,13 @@ class _Signals(QObject):
     # run, (imdb_id, season) key, {episode_number: score}. See
     # DetailsPage._on_episode_ratings.
     episode_ratings = Signal(int, object, object)
+    # This title's Atomic user ratings - run, {item: {score, votes}}.
+    # One file per title covers a whole season and every chapter, so
+    # this arrives once per open rather than per row. See
+    # helpers/community_ratings and DetailsPage._on_user_ratings.
+    user_ratings = Signal(int, object)
+    # The result of adding one, said in a toast: run, ok, message.
+    rating_saved = Signal(int, bool, str)
     # A just-saved entry's downloaded cover: entry id, data file, the
     # cover URL it came from ("" when the entry already knew it), local
     # path. Crossed back so the storage write happens on the UI thread
@@ -453,6 +460,35 @@ def _sources_worker(signals, run, entry, season, episode):
         logs.exception("details source lookup failed")
         found = []
     signals.sources.emit(run, list(found or []), (season, episode), False)
+
+
+def _user_ratings_worker(signals, run, entry):
+    """This title's Atomic user ratings, off the UI thread.
+
+    One HTTPS GET of a small public file, and a 404 - nobody has rated
+    this yet - is the ordinary answer. Never raises: no community score
+    beside IMDb's is a missing decoration, never an error."""
+    found = {}
+    try:
+        from helpers import community_ratings
+        found = community_ratings.fetch(entry) or {}
+    except Exception:
+        logs.exception("user ratings lookup failed")
+    signals.user_ratings.emit(run, found)
+
+
+def _rate_worker(signals, run, entry, item, score):
+    """Send one rating. Never raises - the answer is a toast either
+    way, and a failed write must not take the page with it."""
+    ok, message = False, "That rating could not be saved."
+    try:
+        from helpers import community_ratings
+        ok, message = community_ratings.rate(entry, item, score)
+    except Exception:
+        logs.exception("user rating write failed")
+    signals.rating_saved.emit(run, bool(ok), str(message))
+    if ok:
+        _user_ratings_worker(signals, run, entry)
 
 
 def _reading_logo_worker(signals, run, entry):
@@ -702,6 +738,30 @@ def _episode_rating(value, source="IMDb") -> str:
     return f"{source} {score:g}"
 
 
+def _user_rating(summary, item) -> str:
+    """One row's Atomic score as "Atomic 8.4 (12)", or "" when nobody
+    has rated it.
+
+    The vote count is printed because with two or three people behind a
+    number it is most of what the number means - "Atomic 10" from one
+    person and from forty are not the same claim, and IMDb's own figure
+    beside it carries thousands."""
+    row = (summary or {}).get(item or "")
+    if not row:
+        return ""
+    try:
+        score = float(row.get("score"))
+        votes = int(row.get("votes") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if score <= 0 or votes <= 0:
+        return ""
+    # One decimal, like the IMDb and TMDB figures it sits beside - "8"
+    # next to "8.5" reads as a different kind of number rather than the
+    # same one rounder.
+    return f"Atomic {score:.1f} ({votes})"
+
+
 def _pretty_date(value) -> str:
     """`Jul 25, 2026` out of an ISO stamp, or the raw text if it will not
     parse - a wrong-looking date is more honest than a hidden one."""
@@ -912,6 +972,11 @@ class DetailsPage(GlassPage):
         self._tmdb_ratings = {}
         self._tmdb_ratings_key = None
         self._tmdb_ratings_asked = set()
+        # This title's Atomic user ratings, {item: {score, votes}} - see
+        # helpers/community_ratings. Seeded from the on-disk cache so a
+        # title opened before shows its scores in the first frame, then
+        # refreshed from GitHub.
+        self._user_ratings = {}
         self._chapters = []
         self._season = 0
         self._is_reading = self.entry.get("type") in MANGA_TYPES
@@ -961,6 +1026,8 @@ class DetailsPage(GlassPage):
         self._signals.site_resolved.connect(self._on_site_resolved)
         self._signals.resolved_id.connect(self._on_resolved_id)
         self._signals.episode_ratings.connect(self._on_episode_ratings)
+        self._signals.user_ratings.connect(self._on_user_ratings)
+        self._signals.rating_saved.connect(self._on_rating_saved)
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -1274,6 +1341,7 @@ class DetailsPage(GlassPage):
             # And the sources for whatever Continue would play, warmed
             # into streams' own cache while the page is being read.
             self._prefetch_sources()
+        self._start_user_ratings()
         if self._is_reading:
             # **No artwork ground on a reading page at all** - the
             # owner's ask, 21 August 2026: "remove all readings bg image
@@ -2112,6 +2180,87 @@ class DetailsPage(GlassPage):
         # fetch fill the rest in when it lands.
         return cine, "IMDb"
 
+    def _start_user_ratings(self):
+        """Draw whatever is cached, then refresh it from GitHub.
+
+        Cached first for the same reason the category sections read
+        their cache on the UI thread: a title opened twice should show
+        its scores in the first frame rather than a second later."""
+        try:
+            from helpers import community_ratings
+            self._user_ratings = community_ratings.cached(self.entry) or {}
+            if not community_ratings.needs_fetch(self.entry):
+                return
+        except Exception:
+            logs.exception("cached user ratings failed")
+            return
+        # A dedicated thread rather than lookup_pool - the shared queue
+        # is drained by covers and chapter lists, and this is one small
+        # GET the page is waiting to draw.
+        threading.Thread(
+            target=_user_ratings_worker,
+            args=(self._signals, self._run, dict(self.entry)),
+            daemon=True).start()
+
+    def _on_user_ratings(self, run, found):
+        if run != self._run or self._closed:
+            return
+        if dict(found or {}) == self._user_ratings:
+            return              # nothing moved; no need to rebuild rows
+        self._user_ratings = dict(found or {})
+        if self._source_pick is None:
+            self._refill_rows()
+
+    def _on_rating_saved(self, run, ok, message):
+        if run != self._run or self._closed:
+            return
+        show_toast(self, message if message else
+                   ("Rating saved" if ok else "That rating was not saved"))
+
+    def _refill_rows(self):
+        """Redraw whichever list is on screen. The two fills are
+        independent and only one of them is ever showing."""
+        try:
+            if self._is_reading:
+                self._fill_chapter_rows()
+            else:
+                self._fill_episode_rows()
+        except RuntimeError:
+            pass            # the page went away under a late answer
+
+    def _rate_menu(self, menu, item, what):
+        """The "Rate" submenu for one row, and the action that sends it.
+
+        Returns a callable taking the chosen QAction, or None when there
+        is nothing to rate. A submenu of ten rather than a dialog: the
+        row's menu is already open under the pointer and a rating is one
+        press."""
+        from helpers import community_ratings
+        if not item:
+            return None
+        menu.addSeparator()
+        mine = menu.addMenu(f"Rate This {what}")
+        if not community_ratings.can_rate():
+            disabled = mine.addAction("Add a GitHub token in Settings")
+            disabled.setEnabled(False)
+            return lambda _chosen: None
+        actions = {}
+        for score in range(community_ratings.MAX_SCORE,
+                           community_ratings.MIN_SCORE - 1, -1):
+            actions[mine.addAction(f"{score} / 10")] = score
+
+        def handle(chosen):
+            score = actions.get(chosen)
+            if score is None:
+                return False
+            threading.Thread(
+                target=_rate_worker,
+                args=(self._signals, self._run, dict(self.entry), item, score),
+                daemon=True).start()
+            show_toast(self, f"Rating {what.lower()} {score}/10...")
+            return True
+        return handle
+
     def _on_episode_ratings(self, run, key, mapping):
         """A season's TMDB ratings arrived: keep them and redraw the
         rows, unless the page moved on (a new lookup, a different entry)
@@ -2178,6 +2327,17 @@ class DetailsPage(GlassPage):
             stars = _episode_rating(rating_map.get(number), rating_label)
             if stars:
                 meta_line = f"{meta_line}   ·   {stars}" if meta_line else stars
+            # And what people using Atomic thought of it, beside the
+            # catalogue's own number (the owner's ask, 25 August 2026).
+            # Its own label rather than a second bare figure: the two are
+            # different scales with different populations behind them,
+            # and the whole reason this is worth printing is that it is
+            # *not* IMDb's.
+            from helpers import community_ratings
+            ours = _user_rating(self._user_ratings,
+                                community_ratings.episode_item(season, number))
+            if ours:
+                meta_line = f"{meta_line}   ·   {ours}" if meta_line else ours
             builders.append(
                 lambda t=title, m=meta_line, b=badge, up=upcoming,
                 s=season, e=number,
@@ -2216,8 +2376,18 @@ class DetailsPage(GlassPage):
             read = number is not None and (
                 (read_up_to and number <= read_up_to)
                 or history.chapter_key(number) in self._history_marks)
+            # A chapter has no IMDb rating - no catalogue rates
+            # scanlations - so the Atomic score is the only one these
+            # rows can carry, and it goes in the same place the episode
+            # rows put theirs.
+            from helpers import community_ratings
+            meta = chapter_published(chapter)
+            ours = _user_rating(self._user_ratings,
+                                community_ratings.chapter_item(number))
+            if ours:
+                meta = f"{meta}   ·   {ours}" if meta else ours
             builders.append(
-                lambda t=title, d=chapter_published(chapter),
+                lambda t=title, d=meta,
                 b=(("watched", "DONE") if read else None),
                 n=number: self._row_card(
                     t, d, b,
@@ -2865,7 +3035,13 @@ class DetailsPage(GlassPage):
         menu.addSeparator()
         mark_all = menu.addAction("Mark All as Watched")
         clear_all = menu.addAction("Mark All as Unwatched")
+        from helpers import community_ratings
+        rate = self._rate_menu(menu,
+                               community_ratings.episode_item(season, episode),
+                               "Episode")
         chosen = menu.exec(event.globalPosition().toPoint())
+        if rate is not None and rate(chosen):
+            return
         if chosen is pick_source:
             self._open_source_picker(season, episode)
             return
@@ -2966,7 +3142,12 @@ class DetailsPage(GlassPage):
         menu.addSeparator()
         mark_all = menu.addAction("Mark All as Read")
         clear_all = menu.addAction("Mark All as Unread")
+        from helpers import community_ratings
+        rate = self._rate_menu(menu, community_ratings.chapter_item(number),
+                               "Chapter")
         chosen = menu.exec(event.globalPosition().toPoint())
+        if rate is not None and rate(chosen):
+            return
         numbers = [c_num for c_num in
                    (chapter_number(c) for c in self._chapters)
                    if c_num is not None]

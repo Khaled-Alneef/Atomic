@@ -392,6 +392,7 @@ def set_manga_music_url(url: str):
 # seen any more. Removing the row is what was asked for; removing
 # somebody's stored key with it would be destroying their data.
 API_KEYS = {
+    "github": ("GitHub", "Rating episodes and chapters"),
     "tmdb": ("TMDB (The Movie Database)", "Title logos and backdrops"),
     "subdl": ("SubDL", "Arabic subtitles"),
     "subsource": ("SubSource", "Arabic subtitles"),
@@ -406,6 +407,9 @@ AI_KEYS = ("openai", "deepseek", "gemini", "anthropic")
 # The heading each key sits under in Settings, in this order. A key with
 # no group here would simply not be drawn, so a new one has to be filed.
 API_KEY_GROUPS = (
+    # Reading the community scores needs nothing; this is only for
+    # *adding* one - see helpers/community_ratings.
+    ("Atomic User Ratings", ("github",)),
     ("Artwork", ("tmdb",)),
     ("Subtitle Sources", ("subdl", "subsource")),
     ("AI Subtitle Translation", AI_KEYS),
@@ -415,6 +419,8 @@ API_KEY_GROUPS = (
 # "paste your API key" with no idea which page issues it is not an
 # instruction anybody can follow.
 API_KEY_HELP = {
+    "github": ("github.com/settings/tokens - a fine-grained token with "
+               "Contents: read and write on the Atomic repository"),
     "tmdb": "themoviedb.org/settings/api - the v4 read access token, or the v3 key",
     "subdl": "subdl.com/panel/api",
     "subsource": "subsource.net - account settings",
@@ -430,6 +436,7 @@ API_KEY_HELP = {
 # to be clickable. Keyed identically to API_KEYS; a key with no row here
 # simply gets no link, never a broken one.
 API_KEY_URLS = {
+    "github": "https://github.com/settings/tokens",
     "tmdb": "https://www.themoviedb.org/settings/api",
     "subdl": "https://subdl.com/panel/api",
     "subsource": "https://subsource.net",
@@ -465,6 +472,49 @@ def get_tmdb_key() -> str:
 
 def set_tmdb_key(value: str):
     set_api_key("tmdb", value)
+
+
+def get_voter_id() -> str:
+    """This install's id for the community ratings, made once.
+
+    **Not an identity.** It exists so that rating the same episode twice
+    replaces the first score instead of stacking a second one, which is
+    the only thing the store needs to tell two votes apart. It is a
+    random uuid: no name, no account, nothing derived from the machine,
+    and it never leaves the ratings file it is written into."""
+    data = _load()
+    voter = str(data.get("ratings_voter_id") or "")
+    if not voter:
+        import uuid
+        voter = uuid.uuid4().hex[:16]
+        data["ratings_voter_id"] = voter
+        storage.save(SETTINGS_FILE, data)
+    return voter
+
+
+def get_ratings_repo() -> str:
+    """Where the community ratings are kept, "owner/name". Empty means
+    the app's own repository (community_ratings.DEFAULT_REPO) - this is
+    here so a fork or a private mirror can be pointed at without a new
+    build, not because anybody is expected to set it."""
+    return str(_load().get("ratings_repo") or "")
+
+
+def set_ratings_repo(value: str):
+    data = _load()
+    data["ratings_repo"] = (value or "").strip()
+    storage.save(SETTINGS_FILE, data)
+
+
+def get_ratings_branch() -> str:
+    """The branch inside that repository. Empty means the default."""
+    return str(_load().get("ratings_branch") or "")
+
+
+def set_ratings_branch(value: str):
+    data = _load()
+    data["ratings_branch"] = (value or "").strip()
+    storage.save(SETTINGS_FILE, data)
 
 
 def get_api_key(name: str) -> str:
