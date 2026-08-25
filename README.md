@@ -1,32 +1,39 @@
 # Remote Tests
 
 Builds parked here so they can be downloaded and tried on another
-machine. **Nothing here is a release**: no tag, no version bump, and
-the in-app updater ignores this branch entirely (`updater.RELEASE_TAG_RE`
+machine. **Nothing here is a release**: no tag, no version bump, and the
+in-app updater ignores this branch entirely (`updater.RELEASE_TAG_RE`
 matches `^v?\d+\.\d+$`, which a branch name cannot be). Releases still
 happen on `main` alone.
-
-The branch has no shared history with `development` or `main` - it is a
-single orphan commit holding one file, so it costs the repository the
-binary and nothing else.
 
 ## Current build
 
 | | |
 |---|---|
-| Version | 1.10.32 (unreleased - `development` at e04b6ba plus uncommitted work) |
-| Built | 25 August 2026 |
-| SHA-256 | `2fdb83601649d185129ae8c73aa69b424766568291e63b857509738527289a00` |
+| Version | 1.10.32 (unreleased) |
+| Built | 25 August 2026, second build of the day |
+| SHA-256 | `92ef95e576f2163c051633852e0292f57f4a59a62fac21d17dcffe7dc746bd5a` |
 
-What is in it beyond 1.10.32: icons on the Saved/Schedule/History pills,
-the folded sidebar holding the icon rows at their unfolded positions with
-10% larger icons, Atomic user ratings moved to the whole title, the DONE
-badge no longer cut off in the episode/chapter list, the statistics
-panel's "Refreshes per frame" row named the right way round, and the hero
-logo's halo baked into the pixmap so it is not re-blurred on every scroll
-frame (Watch > Discover: 207-222 scroll positions/s -> 239, on a 240Hz
-panel).
+### Fixed since the first build here
+
+- **Sidebar rows no longer disappear on a short window.** Measured at a
+  720px-tall window: the reading block was handed 131px for 453px of
+  rows, so five of its seven rows were not drawn and nothing said so.
+  The rails now sit in a scrolling column - every row is reachable at
+  any window height, folded or not.
+- **No GitHub token field in Settings** (or in the first-run wizard).
+- **Pressing an open Saved/Schedule/History pill goes back** to the
+  browse it was opened from.
 
 Windows SmartScreen will warn before it runs: the exe is unsigned and a
-fresh upload has no download reputation. That is roadmap item #8, and it
-is a false positive - verify the SHA-256 above if in doubt.
+fresh upload has no download reputation. Roadmap item #8; it is a false
+positive - verify the SHA-256 above if in doubt.
+
+### If artwork, logos or sources do nothing on a work network
+
+The TMDB key is **bundled in this exe** - it is not something to paste.
+Blank covers, no title logos and no playing sources together mean the
+network is refusing the hosts, not that the app is unconfigured. Check
+`%APPDATA%\Atomic\atomic.log`, and try opening
+`https://images.metahub.space/poster/medium/tt2560140/img` in a browser
+on that machine.
