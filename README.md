@@ -15,39 +15,36 @@ cleanly.
 
 | | |
 |---|---|
-| Version | 1.10.41 (unreleased) |
-| Built | 26 August 2026, tenth build |
-| SHA-256 | `451136266f6a0d2f9317404bff96df4a327071e597cf39e457c4b2e9a0e05911` |
+| Version | 1.10.43 (unreleased) |
+| Built | 26 August 2026, eleventh build |
+| SHA-256 | `48c20bc8f5d25d8f6d40b13a9149984dceb16e31ae28890242ef485a12b494b6` |
 
 Extract, then run `Atomic.exe`.
 
-**New in this one:** the sidebar icons move. Not just a pill fading in
-behind a brightening glyph - the compass turns, the gear turns further,
-the house lifts, the book tilts, each keyed to what the icon is. Eased
-at paint, so a reversal is smooth from wherever it currently is.
+**New in this one:** every sidebar icon has its own animation. Not one
+transform with different numbers - the compass finds north, sparkles
+sprinkle outward one after another, the Atomic mark switches on inside
+the monitor, the gear turns and settles, books rearrange, a page turns,
+a strip scrolls, a plugin snaps into its frame. Twenty icons are drawn
+as cached layers so their parts can move independently; nothing parses
+SVG while anything is animating.
 
-That work found a real trap worth recording: **QPointF was never
-imported into main.py**, so the first version killed the process on the
-first hovered frame - a NameError inside a paintEvent, which PyQt6
-answers by aborting, leaving no traceback and nothing for faulthandler
-to report either. Found by bisecting the paint in three stages behind an
-env flag. Measured after the fix: 551 pixels of a Discover row and 442
-of an Anime row differ between transform-on and transform-off at
-identical tint, against an icon of about 676 - so most of the glyph
-genuinely moves, and after three rapid sweeps the shared timer is
-stopped with no row holding state.
+Three stuck-state bugs of one family, all fixed: the continue ring stayed
+lit on a card after clicking it (the fade is what hides it, and opening
+the player over Home stops covered widgets repainting, so the fade froze
+partway); a poster strip could keep a hover with the pointer elsewhere;
+and a drifting button could stay lit. A Leave is not guaranteed when
+something opens *over* a widget.
 
-The player and the reader now both cover the window's own bar; the
-episode and chapter lists keep it. Every page follows the sidebar fold
-frame by frame rather than snapping when it lands - the heaviest grid
-paints 35 times at 4.5ms apart against 2 paints 190ms apart before.
-Enter in the search bar reaches Discover even before suggestions arrive.
-Disabled controls no longer offer the pointing hand. Settings' Uninstall
-row is finally the same shape as the eight above it.
+Searching from an episode or chapter list reaches Discover now - it used
+to navigate the page stack underneath a list that was still on top.
+Settings' sidebar does not scroll at all, and its Uninstall row finally
+matches the eight above it. The hero banner's picture follows the fold
+instead of resizing once at the end of it.
 
-Earlier passes in this build: seeking that lands where you pressed
-(measured live on Attack on Titan S01E02), Motion Smoothing that
-actually engages, Airing Soon carrying series as well as anime, and the
+Earlier in this build: seeking that lands where you pressed, Motion
+Smoothing that actually engages, the player and reader covering the
+window's own bar, Airing Soon carrying series as well as anime, and the
 Harbor navy/teal re-theme throughout.
 
 ## What was ruled out when the warning started
