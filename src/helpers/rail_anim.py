@@ -70,8 +70,15 @@ LAYERS = {
     # put and a needle that can point somewhere.
     "discover": {
         "ring": _svg('<circle cx="12" cy="12" r="9"/>'),
-        "needle": _svg('<path d="m15.5 8.5-2.3 4.7-4.7 2.3 2.3-4.7'
-                       ' 4.7-2.3Z"/>'),
+        # **Wider than the pack drew it** (the owner, 26 August 2026:
+        # "it seems thin"). The shape is a needle along NE-SW with its
+        # two side points at +/-1.2 units across the axis; those are the
+        # only two numbers that set its width, and they are now 1.8 -
+        # 3.4 units wide becomes 5.1, with the 9.9-unit length and both
+        # tips left exactly where they were, so it still points at the
+        # same angle and _discover's -45 degree swing is unaffected.
+        "needle": _svg('<path d="M15.5 8.5 13.8 13.8 8.5 15.5'
+                       ' 10.2 10.2Z"/>'),
     },
     # House, and a window that lights up inside it.
     "home": {
@@ -163,8 +170,10 @@ LAYERS = {
                      '<rect x="14" y="14" width="7" height="7" rx="1.5"/>'),
         "focus": _svg('<rect x="14" y="3" width="7" height="7" rx="1.5"/>'),
     },
-    # **The shell never moves.** What moves is the stick and the two
-    # buttons - somebody playing, not a gamepad being waved about.
+    # **The whole pad turns, since 26 August 2026** - the owner's ask:
+    # the right-hand side rises to the top on hover. The stick and the
+    # buttons keep their own small motion inside that turn, which is
+    # what stops the rotation reading as a spinning sticker.
     "games": {
         "shell": _svg('<rect x="2" y="6" width="20" height="12" rx="5"/>'),
         "stick": _svg('<path d="M7 10v4M5 12h4"/>'),
@@ -191,10 +200,21 @@ LAYERS = {
         # own centre fold as the vertical divider gives each panel four
         # times the area, and the icon already draws that line.
         "rule": _svg('<path d="M5.6 12.6h12.8" stroke-width="1.4"/>'),
-        "panel1": _filled('<rect x="5.8" y="7.4" width="5.3" height="4.2"'
-                          ' rx="0.6"/>'),
-        "panel2": _filled('<rect x="13" y="13.6" width="5.3" height="4.0"'
-                          ' rx="0.6"/>'),
+        # **All four quadrants, since 26 August 2026** - the owner's
+        # report: two lit corners and two empty ones read as a book with
+        # something missing rather than as a page of panels. The two new
+        # ones are exact mirrors of the two that were already proven to
+        # sit inside the outline (top-right mirrors top-left across the
+        # fold, bottom-left mirrors bottom-right), so neither can cross
+        # the curved page edge that the note above exists to warn about.
+        "panel_tl": _filled('<rect x="5.8" y="7.4" width="5.3" height="4.2"'
+                            ' rx="0.6"/>'),
+        "panel_tr": _filled('<rect x="13" y="7.4" width="5.3" height="4.2"'
+                            ' rx="0.6"/>'),
+        "panel_bl": _filled('<rect x="5.8" y="13.6" width="5.3" height="4.0"'
+                            ' rx="0.6"/>'),
+        "panel_br": _filled('<rect x="13" y="13.6" width="5.3" height="4.0"'
+                            ' rx="0.6"/>'),
     },
     # A strip you scroll: the frame holds, the content moves up.
     "manhwa": {
@@ -338,7 +358,24 @@ def _anime(p, box, t, layer):
     places by the layers; what this does is start them a little nearer
     the middle, so they read as having come out of the star, and let
     them arrive one after another rather than all at once."""
-    _draw(p, layer("star"), box, scale=1.0 + 0.06 * math.sin(math.pi * t))
+    # **It shrinks on hover rather than swelling.** It used to breathe
+    # up by 6%, and at rest the star's points already come within 1.1
+    # grid units of where the sparkles settle - so growing it closed
+    # that to 0.8 and the two read as touching (the owner, 26 August
+    # 2026). The arithmetic, in grid units: the top sparkle's stroked
+    # edge reaches y=7.3 (nominal 6.3 plus the 2-unit stroke's half),
+    # and the star's stroked point reaches y=6.4 (nominal 7.4 less the
+    # same half) - so at rest they already overlap by ~0.9 units, and
+    # growing the star made it worse. A settled 0.70 puts the star's
+    # point at 8.3 and opens a real gap of about 0.5 units. Anything
+    # milder does not separate them at all: 0.80 was tried first and
+    # measured as still one unbroken run of ink down the centre column.
+    # small sine is kept so the shrink has some life in it, and the
+    # settled size differs from rest by a lot, which is the "a held
+    # hover must not look like nothing happened" rule this file records
+    # elsewhere.
+    _draw(p, layer("star"), box,
+          scale=1.0 - 0.30 * t + 0.03 * math.sin(math.pi * t))
     for name, start, (ux, uy) in (("up", 0.00, (0.0, -1.0)),
                                   ("right", 0.12, (1.0, 0.0)),
                                   ("down", 0.24, (0.0, 1.0)),
@@ -346,10 +383,28 @@ def _anime(p, box, t, layer):
         step = _stagger(t, start, 0.5)
         if step <= 0.0:
             continue
-        inward = 2.4 * (1.0 - step)
+        # Inward at the start so they read as coming out of the star,
+        # and **0.6 units further out than their resting place once
+        # settled**. The star shrinking to 0.70 separates the two at
+        # 96px but not at the size the rail actually draws: measured
+        # 26 August 2026 at 29px, star-alone still left one unbroken
+        # run of ink down the centre column, because 0.5 grid units is
+        # 0.6px there. This pushes the settled gap to ~1.1 units, which
+        # is the ~1.3px that makes it visible on the real icon. Not
+        # more than 0.6: the top sparkle's stroked edge is then 0.9
+        # units from the viewBox, and anything further clips it.
+        travel = 2.4 * (1.0 - step) - 0.6 * step
         _draw(p, layer(name), box,
-              dx=-ux * inward, dy=-uy * inward,
-              scale=0.45 + 0.55 * step, opacity=step,
+              dx=-ux * travel, dy=-uy * travel,
+              # Settling at 0.85 rather than full size, and that is what
+              # buys the room to move out at all: at full size the top
+              # sparkle's stroked edge already sits 1.5 grid units from
+              # the viewBox, which at 26px is 1.6px - so travelling
+              # outward from there clipped it (measured, ink in row 0).
+              # 0.85 pulls the outer edge back in by more than the 0.6
+              # it then travels, and pulls the inner edge in too, so the
+              # gap to the star widens from both sides at once.
+              scale=0.45 + 0.40 * step, opacity=step,
               # Its own centre, not the icon's: scaling a sparkle about
               # the middle of the box would drag it off its point.
               pivot=(12.0 + ux * 7.6, 12.0 + uy * 7.6))
@@ -403,9 +458,30 @@ def _apps(p, box, t, layer):
           pivot=(17.5, 6.5))
 
 def _games(p, box, t, layer):
-    """Somebody using the controller: the stick goes over and comes
-    back, then two buttons go down in turn. The shell never moves - a
-    gamepad that tilts reads as being waved about rather than played."""
+    """The pad turns a quarter to the left, bringing its right-hand
+    side up to the top, while the stick and buttons work inside it.
+
+    **A quarter turn, not a half.** The owner asked for "180 to the
+    left ... the right side of the icon rotate to be on top", and those
+    are two different angles: a half turn puts the right side on the
+    *left* and leaves the pad upside down. The stated outcome - right
+    side on top - is a quarter turn, so that is what this does. Change
+    the -90 below to -180 if the half turn was meant literally.
+
+    Negative degrees because Qt's y axis points down, so a negative
+    angle is the counter-clockwise (leftward) one on screen; measured
+    by drawing it, not by reading the sign convention.
+
+    The turn is applied to the painter rather than per layer: `_draw`
+    rotates and scales about one shared pivot, and the stick and buttons
+    need their own pivots for their own motion."""
+    unit = box.width() / 24.0
+    centre_x = box.left() + 12.0 * unit
+    centre_y = box.top() + 12.0 * unit
+    p.save()
+    p.translate(centre_x, centre_y)
+    p.rotate(-90.0 * t)
+    p.translate(-centre_x, -centre_y)
     _draw(p, layer("shell"), box)
     # Out and back inside the first six-tenths - **plus a small residue
     # that stays.** A sequence that returns everything exactly where it
@@ -422,6 +498,7 @@ def _games(p, box, t, layer):
           pivot=(15.5, 11.0))
     _draw(p, layer("b"), box, scale=1.0 - 0.10 * t - 0.32 * press_b,
           pivot=(18.0, 13.5))
+    p.restore()
 
 def _manga(p, box, t, layer):
     """The page rules itself into comic panels and they light in
@@ -434,8 +511,12 @@ def _manga(p, box, t, layer):
     # The rule slides a fraction as it arrives, which is the "panel
     # coming alive" nudge - the book itself never moves.
     _draw(p, layer("rule"), box, dy=-0.5 * (1.0 - t), opacity=t)
-    _draw(p, layer("panel1"), box, opacity=0.75 * _stagger(t, 0.05, 0.35))
-    _draw(p, layer("panel2"), box, opacity=0.75 * _stagger(t, 0.38, 0.4))
+    # Reading order, left to right then down - four staggers across the
+    # sweep rather than two, so the last one still lands by t=1.0.
+    _draw(p, layer("panel_tl"), box, opacity=0.75 * _stagger(t, 0.04, 0.30))
+    _draw(p, layer("panel_tr"), box, opacity=0.75 * _stagger(t, 0.22, 0.30))
+    _draw(p, layer("panel_bl"), box, opacity=0.75 * _stagger(t, 0.40, 0.30))
+    _draw(p, layer("panel_br"), box, opacity=0.75 * _stagger(t, 0.58, 0.34))
 
 def _manhwa(p, box, t, layer):
     """A strip scrolls: the frame holds, the content travels up inside

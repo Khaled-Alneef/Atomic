@@ -535,12 +535,6 @@ RAIL_TINT_STOPS = 8
 RAIL_TINTS = tuple(theme.mix(theme.TEXT_MUTED, theme.TEXT, i / RAIL_TINT_STOPS)
                    for i in range(RAIL_TINT_STOPS + 1))
 
-# The accent bar down the left of the selected pill. 3px wide with a
-# 1px inset, so on the *folded* rail it sits in the ~3.5px the centred
-# icon leaves at the row's edge and never crowds the picture - the
-# folded row is the tight case (36px wide holding a 29px icon), and the
-# icons' own 24-unit viewBox keeps their ink a further ~3.5px inside
-# that. Half the row tall so it reads as a marker rather than a border.
 # **What each icon *does* when the pointer arrives.** The owner's ask,
 # 26 August 2026: not just a pill fading in behind a brightening glyph,
 # but the glyph itself performing a small motion that means something -
@@ -653,9 +647,6 @@ def _icon_motion(name: str, hover: float, labelled: bool):
     return dx * eased, dy * eased, deg, 1.0 + grow * eased
 
 
-RAIL_INDICATOR_WIDTH = 3.0
-RAIL_INDICATOR_INSET = 1.0
-RAIL_INDICATOR_HEIGHT = 0.5
 
 # Palette tokens parsed once. A QColor built from a hex string costs a
 # parse, and these are asked for on every painted row of every rail on
@@ -1441,20 +1432,14 @@ class _RailDelegate(QStyledItemDelegate):
         if press > 0.004:
             painter.setBrush(_rail_wash(theme.SURFACE_ACTIVE, press * 0.45))
             painter.drawRoundedRect(pill, radius, radius)
-        if active > 0.004:
-            # The thin accent bar down the pill's left edge. It grows as
-            # well as fades, which is what carries the eye from the old
-            # row to the new one - the two pills cross-fade in place
-            # because a selection here can move *between rails* (Home is
-            # its own list, and so is each nav block), so there is no one
-            # widget a single sliding pill could live in.
-            tall = pill.height() * RAIL_INDICATOR_HEIGHT * (0.45 + 0.55 * active)
-            painter.setBrush(_rail_wash(theme.ACCENT, active))
-            painter.drawRoundedRect(
-                QRectF(pill.left() + RAIL_INDICATOR_INSET,
-                       pill.center().y() - tall / 2.0,
-                       float(RAIL_INDICATOR_WIDTH), tall),
-                RAIL_INDICATOR_WIDTH / 2.0, RAIL_INDICATOR_WIDTH / 2.0)
+        # **No accent bar down the pill's left edge** - removed at the
+        # owner's ask, 26 August 2026 ("all sidebar icons have a
+        # vertical line on their left in teal colour, remove it"). It
+        # was a 3px marker, half the row tall, that grew as well as
+        # faded to carry the eye between rails. The selected pill and
+        # the brightened glyph already say which row is current, and he
+        # reads the bar as clutter beside the icon; don't reinstate it
+        # without asking.
         painter.restore()
 
         # One quantised step for the icon *and* the label, so they can
@@ -4059,7 +4044,11 @@ class MainWindow(QMainWindow):
         if self._was_maximized:
             theme.without_window_animation(self, self.showMaximized)
         else:
-            theme.without_window_animation(self, self.showNormal)
+            # Same Win32 rescue as _toggle_maximised: leaving full
+            # screen into a window Windows had snapped hits exactly the
+            # showNormal() no-op measured in window_chrome.
+            theme.without_window_animation(
+                self, lambda: window_chrome.restore_from_maximised(self))
 
     # ---- The window's own frame ---------------------------------------
     def _looks_maximised(self) -> bool:
@@ -4072,8 +4061,17 @@ class MainWindow(QMainWindow):
         middle button read "not maximised", tried to maximise a window
         already the size of the screen, and nothing happened. That is
         the owner's report of 26 August 2026. Comparing geometry answers
-        for both routes in."""
-        if self.isMaximized():
+        for both routes in.
+
+        **And `isMaximized()` goes stale as well as being incomplete.**
+        Once window_chrome.restore_from_maximised has brought a
+        Windows-snapped window down, the window is visibly 1280x840 and
+        Qt still reports isMaximized() True (measured 26 August 2026).
+        Trusting it there left the bar showing "restore" over an
+        already-restored window, and the next press tried to restore it
+        again instead of maximising. Windows' own IsZoomed is right
+        through all of it, so it is asked first."""
+        if window_chrome.is_zoomed(self):
             return True
         try:
             screen = self.screen()
@@ -4091,13 +4089,22 @@ class MainWindow(QMainWindow):
         if not self._looks_maximised():
             self.showMaximized()
             return
-        self.showNormal()
-        # **And check it actually came down.** A window that filled the
-        # screen by snapping rather than by maximising has no maximized
-        # state for showNormal() to leave, so it stays exactly where it
-        # was - which reads as a dead button. The saved restore rect is
-        # what it should go back to; without one, something visibly
-        # smaller than the screen will do.
+        # **Not plain showNormal().** After a drag-to-the-top snap that
+        # call returns cleanly and changes nothing - Windows keeps
+        # WS_MAXIMIZE set and the window keeps filling the screen. The
+        # measurement, and why clearing Qt's own flag instead is worse,
+        # are in window_chrome.restore_from_maximised.
+        window_chrome.restore_from_maximised(self)
+        # Qt may post no WindowStateChange for a restore it did not
+        # perform itself, so the bar is told directly rather than left
+        # waiting for changeEvent to notice.
+        bar = getattr(self, "title_bar", None)
+        if bar is not None:
+            bar.set_maximised(self._looks_maximised())
+        # **And check it actually came down.** Belt and braces now that
+        # the call above handles the snapped case: if the window is
+        # still the size of the screen, put it back on its saved restore
+        # rect; without one, something visibly smaller will do.
         try:
             screen = self.screen()
             avail = screen.availableGeometry() if screen else None

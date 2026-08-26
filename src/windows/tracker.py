@@ -525,18 +525,25 @@ def prewarm_discover():
         if not (cached and now - cached[0] < _DISCOVER_CACHE_TTL_S):
             warm.append(kind)
             break
+    # The Watch Schedule's calendar (the owner's "the schedule is taking
+    # too long to load"): warmed at launch so the tab's first build finds
+    # its rows in hand. Covers are not fetched here - the tab downloads
+    # the few it is missing when actually opened.
+    #
+    # **Queued ahead of the browse rows, not after them.** It used to go
+    # last, and BROWSE_WORKERS is 2 against six queued jobs, so the
+    # calendar started only once four others had drained - measured 5.28s
+    # from launch before it landed (26 August 2026). Schedule is one
+    # click from a cold start, sitting in the window's own bar; the
+    # Discover rows are not needed until Discover is opened, and they
+    # lose nothing by following. Ordering only - no extra request.
+    if _cached_upcoming_calendar() is None:
+        lookup_pool.submit_browse(_fetch_upcoming_calendar)
     for kind in warm:
         cached = _DISCOVER_CACHE.get((kind, ""))
         if cached and now - cached[0] < _DISCOVER_CACHE_TTL_S:
             continue
         lookup_pool.submit_browse(_fetch_browse_rows, kind)
-    # The Watch Schedule's calendar gets the same treatment (the owner's
-    # "the schedule is taking too long to load"): warmed at launch so the
-    # tab's first build finds its rows in hand. Covers are not fetched
-    # here - the tab downloads the few it is missing when actually
-    # opened.
-    if _cached_upcoming_calendar() is None:
-        lookup_pool.submit_browse(_fetch_upcoming_calendar)
 
 
 # The Watch Schedule's airing calendar, module-side like _DISCOVER_CACHE
@@ -585,6 +592,32 @@ def _cached_upcoming_calendar():
     cached = _SCHEDULE_UPCOMING_CACHE.get("upcoming")
     if cached and time.monotonic() - cached[0] < _DISCOVER_CACHE_TTL_S:
         return cached[1]
+    return None
+
+
+def _stale_upcoming_calendar():
+    """Rows worth drawing *now* when nothing fresh is in hand - an
+    expired memory copy, or last session's disk copy.
+
+    Deliberately a second function rather than loosening the one above.
+    `_cached_upcoming_calendar` answers "does this need refreshing",
+    and answering that with stale rows would stop the refresh happening
+    at all; this answers "is there anything to put on screen while we
+    wait", which is rule 7's question and has a different answer. The
+    stamp stays stale on purpose, so the fetch still runs and still
+    replaces these.
+
+    Never a fetch, and the disk read happens once - it seeds the memory
+    dict, so a second call is a dict lookup."""
+    cached = _SCHEDULE_UPCOMING_CACHE.get("upcoming")
+    if cached and cached[1]:
+        return cached[1]
+    loaded = _load_upcoming_calendar()
+    if loaded:
+        age, rows = loaded
+        if rows:
+            _SCHEDULE_UPCOMING_CACHE["upcoming"] = (time.monotonic() - age, rows)
+            return rows
     return None
 
 
@@ -6698,6 +6731,20 @@ class TrackerPage(GlassPage):
             self._queue_schedule_covers(rows)
             return
         self._schedule_upcoming_asked = True
+        # **Nothing fresh - so show the old calendar rather than a bare
+        # section.** Measured 26 August 2026, on the owner's report that
+        # Schedule "takes ~1.5 sec": the build itself is 44-48ms with 40
+        # rows in hand, so the page was never slow - what was missing was
+        # its content, which only existed once the network answered. A
+        # calendar covers a week, so last session's copy still names most
+        # of what is coming, and _schedule_rows drops anything whose time
+        # has passed. The fetch below still runs and still replaces
+        # these; this is rule 7's "show what there is, fill the rest in".
+        if self.SCHEDULE_CATALOGUE != "released":
+            stale = _stale_upcoming_calendar()
+            if stale:
+                self._schedule_upcoming = list(stale)
+                self._queue_schedule_covers(stale)
         lookup_pool.submit(self._schedule_upcoming_worker)
 
     def _schedule_upcoming_worker(self):

@@ -219,6 +219,37 @@ RD_TOKEN_FILE = os.path.join(SPECPATH, "rd_token.txt")
 if os.path.isfile(RD_TOKEN_FILE):
     a.datas += [("rd_token.txt", RD_TOKEN_FILE, "DATA")]
 
+# Two payloads PyInstaller collects that nothing in this app can reach,
+# dropped after the analysis rather than through `excludes=`: both are
+# *binaries* pulled in by their package's hook, and excludes= only
+# reaches Python imports.
+#
+# Measured 26 August 2026 against the 1.10.46 archive - 244.5MB
+# uncompressed / 99.2MB compressed, all of which the onefile bootloader
+# inflates into %TEMP% before any app code runs (1.85s and 1.86s to a
+# visible window here, against 0.90s and 1.18s for the same build as
+# onedir - so the unpack is about half of startup on a fast disk, and
+# more than that on the slow one somebody downloads to):
+#
+#   PIL/_avif.cp313-win_amd64.pyd       7.89MB raw / 4.32MB zipped
+#   PyQt6/Qt6/bin/Qt6Pdf.dll            4.61MB raw / 2.46MB zipped
+#   PyQt6/.../imageformats/qpdf.dll     0.04MB raw
+#
+# 12.5MB off every launch's unpack and 6.8MB off every download, for two
+# formats grep finds no mention of anywhere in src/. Pillow's hook
+# collects _avif because the wheel ships it; Qt6Pdf arrives with PyQt6
+# whether or not QtPdf is ever imported.
+#
+# opengl32sw.dll (20.64MB, the largest single candidate) is deliberately
+# **not** here. It is Qt's software OpenGL fallback, so the machine that
+# needs it is one whose drivers cannot give Qt a GL context - exactly the
+# machine this cannot be tested on. 20MB is not worth a blank window
+# somebody else gets.
+_DEAD_WEIGHT = ("/pil/_avif", "/qt6pdf.dll", "/imageformats/qpdf.dll")
+a.binaries = [entry for entry in a.binaries
+              if not any(dead in "/" + entry[0].lower().replace("\\", "/")
+                         for dead in _DEAD_WEIGHT)]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

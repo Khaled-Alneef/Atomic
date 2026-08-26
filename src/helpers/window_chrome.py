@@ -126,6 +126,7 @@ _CORNERS = (
 # Window styles. WS_CAPTION is deliberately absent - putting it back is
 # putting the title bar back.
 GWL_STYLE = -16
+SW_RESTORE = 9
 WS_THICKFRAME = 0x00040000
 WS_MAXIMIZEBOX = 0x00010000
 WS_MINIMIZEBOX = 0x00020000
@@ -166,6 +167,59 @@ def make_frameless(window):
         # refuses the change - the window is still frameless and still
         # draggable, it just will not snap.
         return True
+    return True
+
+
+def is_zoomed(window) -> bool:
+    """Whether Windows itself considers the window maximised.
+
+    Not the same question as `isMaximized()` - see the note in
+    `restore_from_maximised` for the measurement where the two
+    disagreed."""
+    if not WINDOWS:
+        return bool(window.isMaximized())
+    try:
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        return bool(ctypes.windll.user32.IsZoomed(hwnd))
+    except Exception:
+        return bool(window.isMaximized())
+
+
+def restore_from_maximised(window) -> bool:
+    """Bring a window down out of maximised, including when Windows put
+    it there rather than Qt. Returns whether the Win32 route was needed.
+
+    **`showNormal()` is not enough**, measured 26 August 2026 on the
+    owner's report that the bar's maximise button does nothing after
+    dragging the window to the top edge. That drag is Windows' own
+    maximise (WM_SYSCOMMAND / SC_MAXIMIZE), and afterwards:
+
+        A  normal                       qtMax=False  WS_MAXIMIZE=False  1100x700
+        B  windows-side SC_MAXIMIZE     qtMax=True   WS_MAXIMIZE=True   2048x1104
+        C  after showNormal()           qtMax=True   WS_MAXIMIZE=True   2048x1104
+        D  after clearing Qt's flag     qtMax=False  WS_MAXIMIZE=True   2048x1104
+        E  after ShowWindow(SW_RESTORE) qtMax=False  WS_MAXIMIZE=False  1100x700
+
+    C is the bug: the call returns cleanly and changes nothing. D is why
+    the obvious workaround is worse than the bug - Qt then believes the
+    window is normal while Windows keeps it zoomed, and every
+    setGeometry is ignored for as long as that lasts, which is a window
+    that can no longer be resized at all. Only E actually works.
+
+    The previous attempt at this fixed the *detection* (see
+    `MainWindow._looks_maximised`, which compares geometry because
+    `isMaximized()` alone missed the snapped case) and then called
+    `showNormal()` anyway - so the button knew perfectly well it should
+    restore, asked to, and was ignored. Detection was never the half
+    that was broken."""
+    window.showNormal()
+    if not is_zoomed(window):
+        return False
+    try:
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+    except Exception:
+        return False
     return True
 
 
@@ -403,6 +457,12 @@ class TitleBar(QWidget):
                 button.setText(label[0])
             button.clicked.connect(
                 lambda _checked=False, k=key: self.section.emit(k))
+            # The hand cursor, same as the window buttons below get.
+            # Missed when these three moved up here off the tracker
+            # pages, where their old header pills were widgets.Card and
+            # got it for free - so the only three buttons in the app
+            # that kept an arrow were these (the owner, 26 August 2026).
+            use_hover_cursor(button)
             left_row.addWidget(button)
             self.section_buttons[key] = button
         left_row.addStretch(1)
