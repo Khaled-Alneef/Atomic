@@ -815,6 +815,22 @@ class PosterGrid(QWidget):
         This ordering is the whole fix (see the module docstring): the
         position belongs to the frame that shows it, so the steps the eye
         integrates are even by construction."""
+        # **A hover is only real while the pointer is genuinely inside.**
+        # A Leave is not guaranteed: clicking a card opens the details
+        # page or the player *over* this grid, which covers it without
+        # the pointer ever crossing its edge, so the card kept its play
+        # button lit and still had it on the way back (the owner's
+        # screenshot, 26 August 2026 - a Watching card showing Continue
+        # with the mouse nowhere near it). The same class of bug this
+        # file's siblings record: ask where the pointer actually is
+        # rather than trusting the event that should have arrived
+        # (.claude/rules/ui.md).
+        #
+        # underMouse(), not widgetAt(QCursor.pos()): Qt already tracks
+        # this per widget, so it is a flag read rather than a hit test
+        # of the whole tree, and this runs on every paint.
+        if self._hover >= 0 and not self.underMouse():
+            self._set_hover(-1)
         moving = self._motion.running()
         if moving:
             if not self._motion.frame_s:
@@ -1300,6 +1316,14 @@ class PosterGrid(QWidget):
             self.update()
         self._set_hover(-1 if over_bar else self.index_at(point))
         super().mouseMoveEvent(event)
+
+    def hideEvent(self, event):
+        # Covered or navigated away from: whatever was lit is not lit
+        # any more, and there may be no Leave to say so.
+        self._set_hover(-1)
+        if self._bar_hover:
+            self._bar_hover = False
+        super().hideEvent(event)
 
     def leaveEvent(self, event):
         self._set_hover(-1)

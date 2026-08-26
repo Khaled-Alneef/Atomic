@@ -2041,6 +2041,18 @@ class DriftButton(QPushButton):
         return gradient
 
     def paintEvent(self, event):
+        # **Lit only while the pointer is genuinely on it.** A Leave is
+        # not guaranteed - a click here can open a full-window surface
+        # over this button, which covers it without the pointer crossing
+        # its edge, and it would then still be lit on the way back. Same
+        # class of bug as the poster grid's stuck play button (the
+        # owner's screenshot, 26 August 2026); same cure, which is to
+        # ask where the pointer is rather than trust the event that
+        # should have come. Unwound rather than snapped, so a button
+        # caught this way still fades out like any other.
+        if self._hover > 0.0 and not self.underMouse():
+            self._hover_tween.start(self._hover, 0.0, self.HOVER_MS)
+            self._press_tween.start(self._press, 0.0, self.PRESS_MS)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect())

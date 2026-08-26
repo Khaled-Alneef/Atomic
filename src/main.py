@@ -4092,11 +4092,28 @@ class MainWindow(QMainWindow):
         self._refilter_current_page()
 
     def _search_in_discover(self, query):
-        """Show `query`'s full results on the Discover page."""
+        """Show `query`'s full results on the Discover page.
+
+        **Any overlay is left first, and that is the whole of the bug
+        this answers.** The details page - the episode and chapter list -
+        is a full-window child laid *over* the page stack rather than an
+        entry in it, so navigating underneath one changes a page nobody
+        can see and leaves the list sitting on top. Searching from an
+        episode list therefore looked like Enter did nothing at all (the
+        owner, 26 August 2026). `navigate_back` is what already knows
+        how to leave whichever surface is up, and it is what the mouse's
+        back button uses."""
         query = str(query or "").strip()
         if not query:
             return
         self._close_search_panel()
+        # Repeatedly: the genre browse can sit over the details page,
+        # which sits over the page stack. Bounded rather than `while`,
+        # so a surface that refuses to leave cannot spin here.
+        for _ in range(4):
+            if self._top_overlay() is None:
+                break
+            self.navigate_back()
         self.navigate_to("discover", animate=False)
         page = self._current_page
         start = getattr(page, "start_search", None)

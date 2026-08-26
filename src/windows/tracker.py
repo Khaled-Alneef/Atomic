@@ -1829,6 +1829,17 @@ class ContinueCover(QLabel):
         target = 1.0 if (hovered and self._frosted is not None) else 0.0
         if abs(target - self._mix) < 1e-3:
             return
+        if target == 0.0 and not self.isVisible():
+            # Nothing will tick a fade on a widget that is not being
+            # painted - settle it now instead of leaving a lit ring for
+            # whenever this is shown again. See hideEvent.
+            try:
+                self._fade.stop()
+            except Exception:
+                pass
+            self._mix = 0.0
+            self.button.hide()
+            return
         # From wherever it actually is, not from 0/1: crossing back over
         # a card mid-thaw must not restart the whole fade. SmoothTween
         # re-aims on start(), so there is nothing to stop first.
@@ -1836,6 +1847,31 @@ class ContinueCover(QLabel):
         self._fade.start(self._mix, target,
                          COVER_FADE_IN_MS if target > self._mix
                          else COVER_FADE_OUT_MS)
+
+    def hideEvent(self, event):
+        """**A fade that is interrupted never finishes, and the ring it
+        was fading out is still on screen when the page comes back.**
+
+        The button's visibility is driven from `_on_fade`, so it is only
+        hidden by a tick of the tween - and the tween stops ticking the
+        moment this widget stops being painted. Clicking a card opens
+        the player or the details page *over* Home, and
+        widgets._CoveredFreeze then deliberately stops every covered
+        widget repainting; the thaw that `_CardHoverRelay._unhover` had
+        just started is frozen partway, `_mix` never reaches 0, and the
+        continue ring is still lit on a card nobody is pointing at when
+        the overlay closes. That is the owner's screenshot of 26 August
+        2026.
+
+        So going out of sight settles it by hand rather than leaving it
+        to a tween that will not run."""
+        try:
+            self._fade.stop()
+        except Exception:
+            pass
+        self._mix = 0.0
+        self.button.hide()
+        super().hideEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)

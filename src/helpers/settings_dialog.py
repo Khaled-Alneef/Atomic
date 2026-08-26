@@ -338,6 +338,32 @@ class _UpdateSignals(QObject):
     downloaded = Signal(object, str)   # downloaded Path (or None), error message
 
 
+class _NoScrollList(QListWidget):
+    """The settings sidebar, which does not scroll at all.
+
+    Every category fits - the list is sized to hold all of them (see
+    where its height is set) - so there is nothing below the fold to
+    reach, and the ways it could still move were all bugs. Selecting a
+    row used to slide the list (fixed once with setAutoScroll(False),
+    the owner's "when I click Uninstall the list scrolls down!!"), and
+    the wheel could still shift it a few pixels with the scrollbars
+    hidden, which leaves rows off the top with no way back.
+
+    The wheel is ignored rather than consumed, so the gesture is simply
+    not this widget's - nothing behind it scrolls either, and that is
+    the intent (the owner, 26 August 2026: remove it completely).
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+    def scrollContentsBy(self, dx, dy):
+        # Belt and braces: anything that asks the view to scroll - a
+        # keyboard move, an ensureVisible from deep inside Qt - is
+        # answered by not moving.
+        return
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -479,7 +505,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(14, 20, 14, 16)
         layout.setSpacing(4)
 
-        self.category_list = QListWidget(objectName="SettingsNav")
+        self.category_list = _NoScrollList(objectName="SettingsNav")
         self.category_list.setFrameShape(QFrame.Shape.NoFrame)
         self.category_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.category_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
