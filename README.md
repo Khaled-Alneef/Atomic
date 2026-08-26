@@ -15,28 +15,29 @@ cleanly.
 
 | | |
 |---|---|
-| Version | 1.10.45 (unreleased) |
-| Built | 26 August 2026, thirteenth build |
-| SHA-256 | `4ce81b5d039291e4089c51ffcb511c1f27b2c11ccb9133d183750576128941de` |
+| Version | 1.10.46 (unreleased) |
+| Built | 26 August 2026, fourteenth build |
+| SHA-256 | `4dfc2f9008ebbd34b7873d17492f760efaf48c16dd98d838ff75cd7b7d2d6e53` |
 
 Extract, then run `Atomic.exe`.
 
-**New in this one:** Saved, Schedule and History moved out of the
-tracker page headers and into the window's own bar - one set instead of
-two, reachable from anywhere. Opening one shows a Watch/Read pair inside
-it, and pressing a section keeps whichever medium you were already in.
+**New in this one:** a wheel notch starts moving on the frame you turn
+it. The scrolling was already interpolating properly - 21 steps in a
+clean ease-out over 144ms - but the first tick arrived 39ms late while
+the shared clock woke up, and a stall followed by a run is what reads as
+a jump. The distance per notch is unchanged.
 
-The sidebar mark turns as the rail folds, and four icons were rewritten:
-the Anime star is centred now and throws sparkles to the four compass
-points, Manga lights comic panels across the book, Websites loads a page
-and becomes ready, Apps opens one tile while the rest step back, and the
-Games controller takes input without the shell moving.
+Teal has depth in it at rest: the accent ramp runs corner to corner
+rather than top to bottom, with a soft upper-left glint, a 1.5px lift on
+hover and a 1px settle on press. Badges like CONTINUE WATCHING carry the
+same material one step quieter, so the call to action still wins.
 
-Also in this build: the top bar survives full screen and lost its Back
-button, every sidebar icon has its own animation, three hover states
-that could stick are fixed, searching from an episode or chapter list
-reaches Discover, the Settings sidebar no longer scrolls, and the hero
-banner's picture follows the sidebar fold.
+Also in this build: Saved, Schedule and History moved into the window's
+bar with a Watch/Read pair inside each, the sidebar mark turns as the
+rail folds, every sidebar icon animates as the thing it depicts, the top
+bar survives full screen and lost its Back button, three stuck hover
+states are fixed, and searching from an episode or chapter list reaches
+Discover.
 
 Earlier: seeking that lands where you pressed (measured live on Attack
 on Titan S01E02), Motion Smoothing that actually engages, the player and
