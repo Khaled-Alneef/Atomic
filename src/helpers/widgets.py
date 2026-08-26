@@ -1960,6 +1960,15 @@ def magnifier_icon(color: str = None, size: int = SEARCH_ICON_SIZE) -> QIcon:
     return QIcon(pixmap)
 
 
+# How far a hovered button's face rises, and how far a press puts it
+# back. Small numbers on purpose - the ask was "gently energized", not a
+# mobile button popping out.
+LIFT_PX = 1.5
+PRESS_PX = 1.0
+# The upper-left highlight's strength at rest, as an alpha of TEXT.
+CORNER_GLINT = 0.055
+
+
 class DriftButton(QPushButton):
     """A button whose hover *arrives* instead of switching on.
 
@@ -2026,13 +2035,24 @@ class DriftButton(QPushButton):
         super().mouseReleaseEvent(event)
 
     def _ramp(self, rect, hover):
-        gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        """The fill, lit corner to corner.
+
+        Diagonal rather than top-down: a tone that shifts across both
+        axes is what gives a 46px button depth, where a lit lip alone
+        leaves the body flat. Same stops the stylesheet uses
+        (theme.accent_button_stops), so a painted button and a QSS one
+        are the same material."""
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
         if self._kind == "accent":
             for at, colour in theme.accent_button_stops(hover=hover):
                 gradient.setColorAt(at, QColor(colour))
             return gradient
-        # "quiet": the translucent slab over artwork, lit the same way.
-        top = QColor(theme.SURFACE_HOVER if hover else theme.SURFACE)
+        # "quiet": the translucent slab over artwork. Its hover picks up
+        # a teal *tint* rather than becoming a primary button - the
+        # hierarchy is the point, and a secondary that turns solid teal
+        # on hover reads as two calls to action.
+        top = QColor(theme.mix(theme.SURFACE, theme.ACCENT_DEEP, 0.22)
+                     if hover else theme.SURFACE)
         top.setAlpha(215 if hover else 185)
         foot = QColor(theme.SURFACE if hover else theme.BG)
         foot.setAlpha(215 if hover else 195)
@@ -2055,7 +2075,15 @@ class DriftButton(QPushButton):
             self._press_tween.start(self._press, 0.0, self.PRESS_MS)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect())
+        # **The lift.** Hover raises the fill a pixel and a half, a
+        # press puts it back down - the label does not move with it,
+        # deliberately: QPushButton draws that through the style and
+        # translating this painter would not reach it, and at this
+        # distance the surface rising under a fixed label reads as the
+        # button lifting rather than as a misalignment. Nothing about
+        # the layout changes either way.
+        lift = -LIFT_PX * self._hover + PRESS_PX * self._press
+        rect = QRectF(self.rect()).adjusted(0.0, lift, 0.0, lift)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._ramp(rect, hover=False))
         painter.drawRoundedRect(rect, self._radius, self._radius)
@@ -2069,6 +2097,24 @@ class DriftButton(QPushButton):
             painter.setBrush(self._ramp(rect, hover=True))
             painter.drawRoundedRect(rect, self._radius, self._radius)
             painter.setOpacity(1.0)
+        # A soft highlight in the upper-left corner, present at rest and
+        # a little stronger under the pointer. Low opacity on purpose:
+        # this is depth, not gloss.
+        glint = QLinearGradient(rect.topLeft(), rect.center())
+        edge = QColor(theme.TEXT)
+        edge.setAlphaF(CORNER_GLINT * (0.55 + 0.45 * self._hover))
+        gone = QColor(edge)
+        gone.setAlphaF(0.0)
+        glint.setColorAt(0.0, edge)
+        glint.setColorAt(1.0, gone)
+        painter.setBrush(glint)
+        painter.drawRoundedRect(rect, self._radius, self._radius)
+        # Pressed: the whole face takes a shade of the page under it.
+        if self._press > 0.001:
+            shade = QColor(theme.BG)
+            shade.setAlphaF(0.16 * self._press)
+            painter.setBrush(shade)
+            painter.drawRoundedRect(rect, self._radius, self._radius)
         painter.end()
         super().paintEvent(event)
 
@@ -2890,6 +2936,11 @@ class _Momentum(QObject):
     # lone notch 511 -> 666 px/s but no pulse difference at the mid
     # cadence (1.5x both), and no change to travel or settle.
     RAMP = 60.0
+    # How much of a notch's impulse becomes velocity on the spot rather
+    # than arriving through RAMP. Enough that the first frame after the
+    # wheel already moves a visible pixel or two; small enough that the
+    # start still reads as a push. See kick for the measurement.
+    IMMEDIATE_SHARE = 0.34
     # Cadence acceleration: notches inside this window count, and the
     # impulse scales from 1x for a lone notch to ACCEL_MAX once
     # ACCEL_NOTCHES have landed in the window. Modest on purpose - the
@@ -2992,8 +3043,45 @@ class _Momentum(QObject):
         if self._vel * direction < 0 or self._pending * direction < 0:
             # A reversal answers now, not after a decay.
             self._vel, self._pending = 0.0, 0.0
-        self._pending += direction * float(distance_px) * self.FRICTION * accel
+        impulse = direction * float(distance_px) * self.FRICTION * accel
+        # **A share of the notch is handed over at once.** The rest
+        # arrives through RAMP as before, which is what keeps a notch a
+        # push rather than a kick - but ramping from *zero* meant the
+        # position did not move a whole pixel for the first fortieth of
+        # a second, and a stall followed by a run is exactly what reads
+        # as "it jumps to the next position".
+        #
+        # Measured on Home, 26 August 2026, one notch: 21 changes over
+        # 144ms in a clean ease-out - and the first of them at **43.7ms**.
+        # The travel was never the problem and is not changed here; the
+        # same impulse is simply not all deferred.
+        self._vel += impulse * self.IMMEDIATE_SHARE
+        self._pending += impulse * (1.0 - self.IMMEDIATE_SHARE)
         self._start_ticking()
+        # **And move on this frame, not on the clock's first tick.**
+        # That tick is where the notch's delay actually lived: measured
+        # on Home, 26 August 2026, the ticks after a kick run at a clean
+        # 4ms cadence on a 240Hz panel and the interpolation between
+        # them is a textbook ease-out - but the *first* one arrived
+        # **39.1ms** after the wheel event, while the shared ticker woke
+        # up. Nothing moved for two and a half frames and then the view
+        # ran, which is precisely what reads as "it jumps to the next
+        # position" rather than travelling there.
+        #
+        # So one frame's worth is integrated here, synchronously, by
+        # dating `_last` a frame into the past and letting the ordinary
+        # tick do the arithmetic - no second code path for the first
+        # step, and the ticker carries on from wherever this leaves it.
+        frame = 0.0
+        if self._frame_s is not None:
+            frame = self._frame_s() or 0.0
+        if frame <= 0.0:
+            frame = max(0.004, self._tick_ms / 1000.0)
+        self._last = time.monotonic() - frame
+        try:
+            self._tick()
+        except RuntimeError:
+            pass        # the bar went away between the wheel and here
 
     def _start_ticking(self):
         """Clock the motion: the panel's own vblank where there is one,

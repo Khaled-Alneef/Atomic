@@ -177,7 +177,19 @@ ACCENT_GRADIENT_HOVER = accent_gradient(hover=True)
 # a bright backdrop without competing with the Continue button beside
 # it. ACCENT_SOFT is that chip's body; the lip is mixed toward the
 # accent rather than toward TEXT, so the chip lights in its own hue.
-ACCENT_SOFT_GRADIENT = lit_fill(mix(ACCENT_SOFT, ACCENT, 0.22), ACCENT_SOFT)
+# **A badge has the same depth as the button, one step quieter.** The
+# owner's ask, 26 August 2026: the resting CONTINUE WATCHING chip should
+# already carry the reference's teal depth rather than looking flat and
+# only coming alive on hover. Same diagonal as the button so the two
+# read as one material, and a narrower tonal range so the chip never
+# competes with the call to action beside it - the hierarchy is
+# primary > secondary > badge, and it is the *range* that carries it.
+ACCENT_SOFT_LIP = mix(ACCENT_SOFT, ACCENT, 0.30)
+ACCENT_SOFT_FOOT = mix(ACCENT_SOFT, BG, 0.35)
+ACCENT_SOFT_GRADIENT = (
+    f"qlineargradient(x1:0, y1:0, x2:1, y2:1,"
+    f" stop:0 {ACCENT_SOFT_LIP}, stop:{ACCENT_LIP_STOP} {ACCENT_SOFT},"
+    f" stop:1 {ACCENT_SOFT_FOOT})")
 ACCENT_SOFT_TEXT = ACCENT_HOVER
 
 # **The accent splits in two** - the owner's ask, 25 August 2026, after
@@ -228,10 +240,20 @@ def accent_button_stops(hover=False):
     return ((0.0, lip), (ACCENT_LIP_STOP, body), (1.0, foot))
 
 
-def accent_button_gradient(x1=0, y1=0, x2=0, y2=1, hover=False):
-    """The fill for a *pressable* accent surface. Same three-stop shape
-    as accent_gradient - lip, body, foot - a couple of steps deeper so
-    white reads on it."""
+def accent_button_gradient(x1=0, y1=0, x2=1, y2=1, hover=False):
+    """The fill for a *pressable* accent surface.
+
+    **Diagonal, and that is the change of 26 August 2026.** It ran
+    top-to-bottom, which gives a button a lit lip and a flat body - fine
+    for a 6px pill, thin for a 46px call to action. Lighting it corner
+    to corner instead means the tone shifts across *both* axes: brighter
+    toward the top-left, the body through the middle, deeper into the
+    bottom-right. That is the depth the owner's reference has and it is
+    the same three colours doing it, so nothing else in the palette
+    moves.
+
+    The lip stays a lip - ACCENT_LIP_STOP of the way along - so this is
+    a corner highlight rather than a wash across half the button."""
     lip = ACCENT_DEEP_LIP_HOVER if hover else ACCENT_DEEP_LIP
     body = ACCENT_DEEP_HOVER if hover else ACCENT_DEEP
     foot = ACCENT_DEEP_FOOT_HOVER if hover else ACCENT_DEEP_FOOT
