@@ -207,6 +207,21 @@ def default_options() -> dict:
         # guard is the correct behaviour.
         **({"interpolation_threshold": -1}
            if app_settings.get_motion_smoothing() else {}),
+        # **How far mpv may stretch playback to keep the cadence even.**
+        # Default is 1%, and that is enough for every refresh rate that
+        # divides 23.976 closely - 120Hz needs 0.1%, 144Hz 0.1%, 240Hz
+        # 0.1%. It is not enough for 165Hz, where 165 / 23.976 = 6.882
+        # and reaching a whole 7 refreshes per frame needs 1.69%: mpv
+        # gives up, holds most frames for 7 and about three a second for
+        # 6, and that uneven hold is what reads as judder on a pan while
+        # every drop counter still says 0. Measured 27 August 2026 -
+        # see app_settings.get_cadence_lock for both runs.
+        #
+        # Off unless asked for, because the cost is real: playback runs
+        # up to 2% slow. Nothing is interpolated, duplicated or
+        # generated either way - only how long each frame is held.
+        **({"video_sync_max_video_change": 2}
+           if app_settings.get_cadence_lock() else {}),
         # Stated rather than left to mpv's probe, which is what Stremio
         # does too. d3d11 is the context d3d11va decoding hands its
         # surfaces to, so choosing anything else costs a copy per frame.

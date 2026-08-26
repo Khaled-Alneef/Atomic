@@ -35,7 +35,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import net, title_match
+from . import logs, net, title_match
 
 _UA = "Atomic/1.0"
 DEFAULT_TIMEOUT = 8

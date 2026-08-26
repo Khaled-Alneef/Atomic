@@ -197,8 +197,25 @@ WATCHED_FRACTION = 0.85
 # Step of 2, not 4 - the owner's ask, 23 August 2026: one press of 4
 # jumped past the size he wanted. The buttons print the step
 # (add_stepper's step_text), so nothing else encodes this number.
-SUB_SIZE_MIN, SUB_SIZE_MAX, SUB_SIZE_STEP = 28, 90, 2
 SUB_SIZE_DEFAULT = 55          # mpv's own default for sub-font-size
+# **The stepper moves in whole percentage points of that default**, so
+# the number on screen really changes by what the button says - the
+# owner's ask, 26 August 2026: "make the font +/- in 5% not 4% and make
+# sure that the value really increases and decreases by 5%".
+#
+# It used to be an absolute step of 2 against a default of 55, which is
+# 3.64% - displayed as "4%" because the label rounds, and never actually
+# 4: pressing + three times from 100% gave 104, 107, 111. Deriving the
+# step from the default instead makes 100 -> 105 -> 110 exact, and the
+# button's own caption (step_text, below) is computed from the same two
+# numbers so it cannot drift from what pressing it does.
+#
+# The bounds are percentages for the same reason: at 28 and 90 the ends
+# were 51% and 164%, which no number of 5% presses lands on.
+SUB_SIZE_STEP_PCT = 5
+SUB_SIZE_STEP = SUB_SIZE_DEFAULT * SUB_SIZE_STEP_PCT / 100.0
+SUB_SIZE_MIN = SUB_SIZE_DEFAULT * 0.50
+SUB_SIZE_MAX = SUB_SIZE_DEFAULT * 1.65
 SUB_DELAY_STEP = 0.1
 
 # Hold-to-repeat on the +/- steppers. See _stepper_button: a tenth of a
@@ -5001,6 +5018,7 @@ class PlayerPage(GlassPage):
             peers = 0
         return ((0.30 if peers else 0.22), "Connecting to the source...")
 
+
     def _load_into_mpv(self, stream, resume_at=None):
         # A warmed release that is neither what is about to play nor the
         # warm-up for the episode after it is now dead weight competing
@@ -5941,10 +5959,15 @@ class PlayerPage(GlassPage):
             if not trackers:
                 trackers = [f"tracker:{url}"
                             for url in streams_module.DEFAULT_TRACKERS]
+            # **own=False.** If the next episode lives in the pack that
+            # is playing right now - which is the normal case for a
+            # season or complete collection - this must not repoint it.
+            # See torrent_engine.add for the log that caught it doing so
+            # six seconds into an episode.
             added = torrent_engine.add(
                 info_hash, trackers=trackers, season=season, episode=episode,
                 file_index=candidate.get("file_index"),
-                metadata_timeout=streams_module.METADATA_TIMEOUT)
+                metadata_timeout=streams_module.METADATA_TIMEOUT, own=False)
         except Exception:
             return
         if not added:
@@ -6809,6 +6832,64 @@ class PlayerPage(GlassPage):
         text = "" if value is None else str(value).strip()
         return text or default
 
+    # How far from a whole number of refreshes still counts as locked.
+    # mpv itself absorbs up to 1% by nudging playback speed, so a ratio
+    # inside this is one it is already holding steady.
+    CADENCE_TOLERANCE = 0.02
+
+    def _cadence_text(self, live) -> str:
+        """Whether every frame is being held for the same number of
+        refreshes - the number that actually says the pacing is right.
+
+        **Dropped=0 does not mean smooth, and this is the row that says
+        so.** Measured 27 August 2026 on this machine, Attack on Titan
+        S04E01 (23.976fps) with the panel at 1920x1080 @ 165Hz:
+
+            dropped 0, decoder-dropped 0, delayed 0, mistimed 1
+            vsync-ratio  6.88 -> 7.02
+
+        Every counter reads perfect and the picture still judders on a
+        pan, because 165 / 23.976 = 6.882 is not a whole number: most
+        frames are held for 7 refreshes and roughly three a second for
+        6, a 14% jump in how long a frame stays up. Nothing is being
+        lost - it is being shown unevenly, which no drop counter can
+        report.
+
+        The same panel at 240Hz gives 10.01, and 120 or 144 give 5.005
+        and 6.006 - all inside the 1% mpv can absorb by nudging speed,
+        so those lock exactly. 165Hz is the awkward one."""
+        ratio = live.get("vsync_ratio")
+        if not ratio:
+            # video-sync=audio has no display clock, so there is no
+            # cadence to report rather than a cadence of zero.
+            return "N/A"
+        if abs(ratio - round(ratio)) <= self.CADENCE_TOLERANCE:
+            return f"even ({round(ratio)}/frame)"
+        return f"UNEVEN ({ratio:.2f}/frame)"
+
+    def _mpv_choice(self, name, default="N/A"):
+        """A property this binding hands back as an option *description*
+        rather than a value.
+
+        `gpu-context` reads as
+        `[{'name': 'd3d11', 'enabled': True, 'params': {}}]` and
+        `gpu-api` as `[]` - measured against the vendored libmpv, 27
+        August 2026. The list is the set of choices with the live one
+        flagged, so the answer is the enabled entry's name; an empty
+        list means this build will not say, which is `N/A` and not a
+        guess."""
+        try:
+            value = getattr(self.handle, name.replace("-", "_"))
+        except Exception:
+            return default
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, dict) and item.get("enabled"):
+                    return str(item.get("name") or default)
+            return default
+        text = "" if value is None else str(value).strip()
+        return text or default
+
     def _playback_stats(self) -> dict:
         """What mpv can say about the picture on screen right now.
 
@@ -6878,6 +6959,27 @@ class PlayerPage(GlassPage):
             "dropped": self._mpv_number("frame-drop-count"),
             "delayed": self._mpv_number("vo-delayed-frame-count"),
             "buffer": self._mpv_number("demuxer-cache-duration"),
+            # **The rest of what mpv will say, added 27 August 2026 on
+            # the owner's ask.** Dropped=0 does not prove the pacing is
+            # right - the number that does is `vsync-ratio`, and it had
+            # nowhere to be read from except a row labelled with its
+            # own name. Every one of these is guarded: a property this
+            # build does not carry reads "N/A" rather than a zero, which
+            # would look like a measurement.
+            "decoder_dropped": self._mpv_number("decoder-frame-drop-count"),
+            "mistimed": self._mpv_number("mistimed-frame-count"),
+            "jitter": self._mpv_number("vsync-jitter"),
+            "avsync": self._mpv_number("avsync"),
+            "video_speed": self._mpv_number("video-speed-correction"),
+            "audio_speed": self._mpv_number("audio-speed-correction"),
+            "sync_mode": self._mpv_text("video-sync", "N/A"),
+            "interpolation": self._mpv_text("interpolation", "N/A"),
+            "container_fps": self._mpv_number("container-fps"),
+            "vo": self._mpv_text("current-vo", "N/A"),
+            "gpu_api": self._mpv_choice("gpu-api"),
+            "gpu_context": self._mpv_choice("gpu-context"),
+            "vsync_ratio": vsync,
+            "display_fps": display,
         }
 
     def _open_stats_panel(self, rebuild=False):
@@ -6941,7 +7043,14 @@ class PlayerPage(GlassPage):
                       (("display", "Display"), ("vsync", "Refreshes per frame")),
                       (("video", "Video"), ("audio", "Audio")),
                       (("hwdec", "Decode"), ("bitrate", "Bitrate")),
-                      (("dropped", "Dropped"), ("buffer", "Buffer"))):
+                      (("dropped", "Dropped"), ("buffer", "Buffer")),
+                      (("cadence", "Frame cadence"), ("avsync", "A/V sync")),
+                      (("mistimed", "Mistimed"), ("jitter", "VSync jitter")),
+                      (("sync_mode", "Sync mode"),
+                       ("interpolation", "Interpolation")),
+                      (("vo", "Output"), ("gpu", "GPU")),
+                      (("speed", "Speed correction"),
+                       ("container_fps", "Container FPS"))):
             line = QHBoxLayout()
             line.setSpacing(26)
             holder = QWidget()
@@ -7023,6 +7132,32 @@ class PlayerPage(GlassPage):
             buffer_s = live["buffer"]
             setters["buffer"]("-" if buffer_s is None else f"{buffer_s:.1f} s")
 
+            def number(key, fmt, suffix=""):
+                value = live.get(key)
+                return "N/A" if value is None else format(value, fmt) + suffix
+
+            setters["cadence"](self._cadence_text(live))
+            setters["avsync"](number("avsync", "+.4f", " s"))
+            mistimed, decoder_dropped = live["mistimed"], live["decoder_dropped"]
+            # Mistimed beside the decoder's own drops: the two failures
+            # this panel could not previously tell apart. A frame the
+            # decoder never produced and a frame shown at the wrong
+            # moment both read as a stutter.
+            setters["mistimed"](
+                "N/A" if mistimed is None
+                else f"{int(mistimed)} ({'N/A' if decoder_dropped is None else int(decoder_dropped)} dec)")
+            setters["jitter"](number("jitter", ".5f"))
+            setters["sync_mode"](live["sync_mode"])
+            setters["interpolation"](live["interpolation"])
+            setters["vo"](live["vo"])
+            setters["gpu"](f"{live['gpu_api']} / {live['gpu_context']}")
+            video_speed, audio_speed = live["video_speed"], live["audio_speed"]
+            setters["speed"](
+                "N/A" if video_speed is None
+                else f"v {video_speed:.5f} / a "
+                     f"{'N/A' if audio_speed is None else format(audio_speed, '.5f')}")
+            setters["container_fps"](number("container_fps", ".3f"))
+
         refresh()
         timer = QTimer(panel)
         timer.timeout.connect(refresh)
@@ -7070,6 +7205,20 @@ class PlayerPage(GlassPage):
             ("On - 24fps blended up to your screen" if smoothing
              else "Off - play the frames the file has"),
             self._toggle_motion_smoothing, selected=smoothing)
+        locked = app_settings.get_cadence_lock()
+        panel.add_row(
+            "Lock frame cadence",
+            # The row that addresses the judder motion smoothing was
+            # being asked to fix and could not. Measured 27 August 2026
+            # on this machine at 1920x1080 @ 165Hz, Attack on Titan
+            # S04E01: 165 / 23.976 = 6.882, so mpv holds most frames for
+            # 7 refreshes and about three a second for 6 - a 14% jump in
+            # how long a frame stays up, with 0 dropped and 0 late
+            # throughout. Turning this on measured vsync-ratio 7.00000
+            # flat, at 0.98312 speed.
+            ("On - every frame held equally, playback up to 2% slower"
+             if locked else "Off - exact speed, cadence follows your refresh rate"),
+            self._toggle_cadence_lock, selected=locked)
         panel.finish()
         self._show_panel(panel)
 
@@ -7102,6 +7251,26 @@ class PlayerPage(GlassPage):
         # above already says which way it went, so the moved tick was
         # buying nothing the user could not already see, and re-opening
         # was also what dropped the panel's translucency over the video.
+        self._close_panel()
+
+    def _toggle_cadence_lock(self):
+        """Flip the cadence lock, and apply it to the running file.
+
+        Live like its neighbour, and for a stronger reason: the whole
+        difference is a pacing one, so it has to be judged on a moving
+        picture rather than remembered across a reopen."""
+        wanted = not app_settings.get_cadence_lock()
+        app_settings.set_cadence_lock(wanted)
+        if self.handle is not None:
+            try:
+                # mpv's own default is 1. Nothing else about the sync
+                # path changes - still display-resample, still no
+                # interpolation, still every frame the file contains.
+                self.handle["video-sync-max-video-change"] = 2 if wanted else 1
+            except Exception:
+                logs.exception("Could not change the cadence lock")
+        show_toast(self._toast_anchor(),
+                   "Frame Cadence Locked" if wanted else "Frame Cadence Unlocked")
         self._close_panel()
 
     def _open_streams_root(self):
@@ -8434,8 +8603,29 @@ class PlayerPage(GlassPage):
                                         episode_length=self._duration or 0.0)
             except Exception:
                 found = []
-            if found and not self._closing and run == self._run:
-                self._work.skips_ready.emit(list(found), run)
+            # **Emitted even when it found nothing, and that is the
+            # fix.** `_on_skips` is what sets `_skips_answered`, and
+            # until that flag is set the offer holds back any *chapter*
+            # opening starting inside the first five seconds - a rule
+            # that exists because a marker at zero is usually a cold
+            # open. Guarding the emit on `found` meant an episode
+            # AniSkip has nothing for never set it, so that chapter
+            # opening was suppressed for the whole episode rather than
+            # for the second or two the rule intends.
+            #
+            # Measured from the owner's log, 26 August 2026, Attack on
+            # Titan S01E03: chapters `'Opening', 'Part A', ...` - the
+            # opening is the *first* chapter, at 0.00 - and AniSkip
+            # answered with nothing at all for ep=3. Episode 2 was fine
+            # because its chapters are `'Prologue', 'Opening', ...`, so
+            # its opening starts late enough to be offered without
+            # waiting for anybody.
+            #
+            # An empty list is a real answer: it means the crowd has
+            # nothing, so the file's own chapters are all there is and
+            # they should be trusted.
+            if not self._closing and run == self._run:
+                self._work.skips_ready.emit(list(found or []), run)
 
         self._spawn(worker)
 
@@ -8526,6 +8716,9 @@ class PlayerPage(GlassPage):
         # see skiptimes._resolve_overlaps for the measured pairs.
         self._skips = skiptimes._resolve_overlaps(
             sorted(kept, key=lambda row: float(row.get("start") or 0.0)))
+        # What the crowd gave, and what survived being merged with the
+        # file's own chapters - the two halves of "why was there no Skip
+        # Intro". See skiptimes._aniskip for the raw answer.
         self._refresh_skip_button()
 
     def _current_skip(self):

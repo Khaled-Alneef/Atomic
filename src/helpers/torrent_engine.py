@@ -1840,6 +1840,8 @@ def _plausible_episode(names, season, episode, title) -> bool:
     return False
 
 
+
+
 def _pick_file(info, season=None, episode=None, file_index=None, title=None):
     """Which file in the torrent to play, or **None when that cannot be
     answered**.
@@ -1969,8 +1971,31 @@ def _pick_file(info, season=None, episode=None, file_index=None, title=None):
 
 def add(info_hash: str, *, trackers=(), season=None, episode=None,
         title=None, file_index=None, metadata_timeout: float = 45.0,
-        start_at=None, torrent_bytes=None):
+        start_at=None, torrent_bytes=None, own=True):
     """Start streaming a torrent; returns its id, or None.
+
+    **`own=False` means "warm this, but it is not yours".** A torrent
+    already in `_torrents` is *being served* through it: the stream URL
+    is `<hash>/0` and the file is resolved here from `file_index`, so
+    moving that index repoints a live stream at a different file.
+
+    The prewarm is the caller that must not do it. Measured 26 August
+    2026 from the owner's own log, playing Attack on Titan S01E02 out of
+    a Complete Collection pack:
+
+        23:16:36  pick_file route=fresh  asked=S1E2  chose=28  (correct)
+        23:16:38  loadfile  seat=151.38    duration 1451s
+        23:16:44  pick_file route=reuse   asked=S1E3  chose=29  was=28
+                  Thread-17 (_prewarm_worker)
+
+    Six seconds after episode 2 started, the prewarm asked the same pack
+    for episode 3 and this moved `file_index` 28 -> 29 underneath it, so
+    the server began handing episode 3's bytes to a player showing
+    episode 2 - a different episode *and* a different position, which is
+    exactly what he reported. His `_playing_file_complete()` guard did
+    not stop it because that file was already in the cache from an
+    earlier session; and completeness only frees bandwidth, never
+    identity.
 
     `trackers` matters more than it looks. Some indexers return a bare
     info hash with no announce list at all, and DHT alone can take
@@ -2004,6 +2029,21 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
                                  file_index=file_index, title=title)
                       if (season and episode) or file_index is not None
                       or title else existing.file_index)
+            if not own and wanted is not None and wanted != existing.file_index:
+                # Warm it without claiming it: raise that file's
+                # priority so its pieces arrive, and leave `file_index`,
+                # the other files' priorities and the read focus exactly
+                # where the stream being served needs them.
+                try:
+                    priorities = list(
+                        existing.handle.get_file_priorities()
+                        or [1] * existing.info.files().num_files())
+                    if 0 <= wanted < len(priorities):
+                        priorities[wanted] = max(priorities[wanted], 4)
+                        existing.handle.prioritize_files(priorities)
+                except Exception:
+                    pass
+                return info_hash
             if wanted is not None and wanted != existing.file_index:
                 existing.file_index = wanted
                 # A different file in the same pack starts cold: its
