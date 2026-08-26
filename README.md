@@ -15,34 +15,40 @@ cleanly.
 
 | | |
 |---|---|
-| Version | 1.10.39 (unreleased) |
-| Built | 26 August 2026, ninth build |
-| SHA-256 | `3bdc7290598d7569ffb51db0811b17e9b73393c0e43aac7b3d7e271e9ea90c3d` |
+| Version | 1.10.41 (unreleased) |
+| Built | 26 August 2026, tenth build |
+| SHA-256 | `451136266f6a0d2f9317404bff96df4a327071e597cf39e457c4b2e9a0e05911` |
 
 Extract, then run `Atomic.exe`.
 
-**New in this one:** the Harbor re-theme, and three passes of fixes on
-top of it. Navy and teal throughout, a window with no native caption
-carrying one search field, the sidebar rail on SVG icons with animated
-rows, and the top bar now above the player, the reader and the episode
-list rather than under them.
+**New in this one:** the sidebar icons move. Not just a pill fading in
+behind a brightening glyph - the compass turns, the gear turns further,
+the house lifts, the book tilts, each keyed to what the icon is. Eased
+at paint, so a reversal is smooth from wherever it currently is.
 
-The player: relative seeking lands where you pressed instead of
-compounding from a stale target - measured live on Attack on Titan
-S01E02, where +5 from 26.65s used to ask for 29.25 and now 4.23 asks
-for 9.23. A forward seek past the buffer asks the swarm for those
-pieces rather than decoding whatever it can reach, which is what put
-frames of somewhere else in the episode on screen. Motion Smoothing,
-off by default, actually engages: mpv's own interpolation-threshold was
-disabling it at an exact 10.000 vsync ratio, which is every 23.976 file
-on a 240Hz panel. The pacing itself measured clean either way - jitter
-0.0003, 0 dropped, 0 late, hwdec d3d11va.
+That work found a real trap worth recording: **QPointF was never
+imported into main.py**, so the first version killed the process on the
+first hovered frame - a NameError inside a paintEvent, which PyQt6
+answers by aborting, leaving no traceback and nothing for faulthandler
+to report either. Found by bisecting the paint in three stages behind an
+env flag. Measured after the fix: 551 pixels of a Discover row and 442
+of an Anime row differ between transform-on and transform-off at
+identical tint, against an icon of about 676 - so most of the glyph
+genuinely moves, and after three rapid sweeps the shared timer is
+stopped with no row holding state.
 
-Also: Airing Soon carries series as well as anime, artwork is re-cut
-when the window moves to a differently-scaled monitor, hero logos are
-scaled once instead of twice, and Home's hero animates through a fold
-rather than snapping at the end of it - 2 banner paints per fold
-before, 26 after.
+The player and the reader now both cover the window's own bar; the
+episode and chapter lists keep it. Every page follows the sidebar fold
+frame by frame rather than snapping when it lands - the heaviest grid
+paints 35 times at 4.5ms apart against 2 paints 190ms apart before.
+Enter in the search bar reaches Discover even before suggestions arrive.
+Disabled controls no longer offer the pointing hand. Settings' Uninstall
+row is finally the same shape as the eight above it.
+
+Earlier passes in this build: seeking that lands where you pressed
+(measured live on Attack on Titan S01E02), Motion Smoothing that
+actually engages, Airing Soon carrying series as well as anime, and the
+Harbor navy/teal re-theme throughout.
 
 ## What was ruled out when the warning started
 
