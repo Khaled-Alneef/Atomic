@@ -15,29 +15,33 @@ cleanly.
 
 | | |
 |---|---|
-| Version | 1.10.44 (unreleased) |
-| Built | 26 August 2026, twelfth build |
-| SHA-256 | `56bfe223a9b11535504f5a1e77890ded6c337564675b5a8f00867580c3d0be1c` |
+| Version | 1.10.45 (unreleased) |
+| Built | 26 August 2026, thirteenth build |
+| SHA-256 | `4ce81b5d039291e4089c51ffcb511c1f27b2c11ccb9133d183750576128941de` |
 
 Extract, then run `Atomic.exe`.
 
-**New in this one:** the window's top bar stays up in full screen, and
-its Back button is gone. Going back is still Alt+Left, mouse button 4,
-or Escape out of whatever is open - the button was one route of several
-and the only one taking space next to the search field.
+**New in this one:** Saved, Schedule and History moved out of the
+tracker page headers and into the window's own bar - one set instead of
+two, reachable from anywhere. Opening one shows a Watch/Read pair inside
+it, and pressing a section keeps whichever medium you were already in.
 
-Before that, in this build: every sidebar icon animates as itself (the
-compass finds north, sparkles sprinkle, the Atomic mark switches on
-inside the monitor, the gear turns), three hover states that could stick
-are fixed, searching from an episode or chapter list reaches Discover,
-the Settings sidebar no longer scrolls and its Uninstall row matches the
-rest, and the hero banner's picture follows the sidebar fold instead of
-resizing once at the end of it.
+The sidebar mark turns as the rail folds, and four icons were rewritten:
+the Anime star is centred now and throws sparkles to the four compass
+points, Manga lights comic panels across the book, Websites loads a page
+and becomes ready, Apps opens one tile while the rest step back, and the
+Games controller takes input without the shell moving.
 
-Earlier still: seeking that lands where you pressed (measured live on
-Attack on Titan S01E02), Motion Smoothing that actually engages, the
-player and reader covering the window's own bar, Airing Soon carrying
-series as well as anime, and the Harbor navy/teal re-theme throughout.
+Also in this build: the top bar survives full screen and lost its Back
+button, every sidebar icon has its own animation, three hover states
+that could stick are fixed, searching from an episode or chapter list
+reaches Discover, the Settings sidebar no longer scrolls, and the hero
+banner's picture follows the sidebar fold.
+
+Earlier: seeking that lands where you pressed (measured live on Attack
+on Titan S01E02), Motion Smoothing that actually engages, the player and
+reader covering the window's own bar, Airing Soon carrying series as
+well as anime, and the Harbor navy/teal re-theme throughout.
 
 ## What was ruled out when the warning started
 
