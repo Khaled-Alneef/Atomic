@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageOps
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QByteArray, Qt
 from PyQt6.QtGui import (QColor, QImage, QImageReader, QPainter,
                          QPixmap)
 
@@ -685,6 +685,52 @@ def image_size(path):
     return None
 
 
+# Tinted layers rendered from SVG *source* rather than a file, keyed
+# (key, colour, height, ratio) exactly as `_tinted` is. The sidebar's
+# semantic icon animations are built from layers that are not separate
+# files - a compass ring without its needle, one sparkle of three - and
+# they must be rasterised once each and then only blitted, never parsed
+# per frame (helpers/rail_anim).
+_tinted_svg = {}
+
+
+def tinted_svg(key: str, source: str, colour: str, height: int,
+               dpr: float = 1.0) -> QPixmap:
+    """An inline SVG rasterised at `height` logical px, tinted, cached.
+
+    Same contract as `tinted_asset` - cut at the device size, filled
+    with SourceIn so the shape and its antialiased edge survive, and
+    tagged with the ratio it was actually cut at so the draw is a 1:1
+    blit. `key` names the layer for the cache; the source is not hashed,
+    because these come from a table in the source tree and a key that
+    changes meaning is a code change, not data."""
+    cache_key = (key, str(colour), int(height), float(dpr))
+    found = _tinted_svg.get(cache_key)
+    if found is not None:
+        return found
+    if QSvgRenderer is None:
+        return QPixmap()
+    renderer = QSvgRenderer(QByteArray(source.encode("utf-8")))
+    if not renderer.isValid():
+        return QPixmap()
+    device_h = max(1, round(height * dpr))
+    default = renderer.defaultSize()
+    device_w = (max(1, round(device_h * default.width() / default.height()))
+                if default.height() > 0 else device_h)
+    image = QImage(device_w, device_h, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    renderer.render(painter)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(image.rect(), QColor(colour))
+    painter.end()
+    pixmap = QPixmap.fromImage(image)
+    pixmap.setDevicePixelRatio(device_h / float(height))
+    _tinted_svg[cache_key] = pixmap
+    return pixmap
+
+
 def clear_scaled_cache():
     """Drop every pixmap that was cut for a particular screen.
 
@@ -704,6 +750,7 @@ def clear_scaled_cache():
     _FITTED.clear()
     _PIXMAP.clear()
     _tinted.clear()
+    _tinted_svg.clear()
     _logo_cache.clear()
 
 

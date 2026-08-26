@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from helpers import (app_settings, downloads, global_search, images, layout, logs,
-                     rail_icons, window_chrome,
+                     rail_anim, rail_icons, window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
 from helpers.nav_config import (HOME_ITEM, nav_position, route_page,
@@ -1430,28 +1430,54 @@ class _RailDelegate(QStyledItemDelegate):
                   if opt.text else 0)
 
         # **The icon's own motion.** Drawn here rather than by the style
-        # so it can be rotated and scaled about its centre - the style
-        # blits a pixmap into a rect and offers no way in.
+        # so it can be transformed - and, for most icons, so it can be
+        # drawn as *layers* that move independently (helpers/rail_anim:
+        # the compass needle turns inside a ring that does not, the
+        # sparkles arrive one after another). The style blits one pixmap
+        # into a rect and offers no way in to either.
         #
         # The trick that keeps the layout honest: the style still gets an
         # icon, so it computes exactly the geometry it always did (the
         # decoration cell, the label's elide width, the folded centring
         # this file has measured three times) - it is just a transparent
-        # one, so nothing of it lands on the row. The real pixmap is then
-        # painted into the rect the style itself worked out.
-        move = _icon_motion(_icon_name(path), hover, bool(opt.text)) if path else None
+        # one, so nothing of it lands on the row. The real artwork is
+        # then painted into the rect the style itself worked out.
+        name = _icon_name(path) if path else ""
+        semantic = bool(name) and rail_anim.has_profile(name)
+        move = None
         icon_rect = None
-        if move is not None and not lit.isNull():
-            icon_rect = style.subElementRect(
-                QStyle.SubElement.SE_ItemViewItemDecoration, opt, widget)
-            opt.icon = QIcon(_blank_like(lit))
+        if path and not lit.isNull():
+            if semantic:
+                # Layered icons are painted through rail_anim at every
+                # progress including zero, so the resting picture is the
+                # same stack of layers the animation moves - drawing the
+                # flat file at rest and the layers on hover would show a
+                # seam on the first frame.
+                icon_rect = style.subElementRect(
+                    QStyle.SubElement.SE_ItemViewItemDecoration, opt, widget)
+                opt.icon = QIcon(_blank_like(lit))
+            else:
+                move = _icon_motion(name, hover, bool(opt.text))
+                if move is not None:
+                    icon_rect = style.subElementRect(
+                        QStyle.SubElement.SE_ItemViewItemDecoration,
+                        opt, widget)
+                    opt.icon = QIcon(_blank_like(lit))
 
         if offset:
             painter.save()
             painter.translate(offset, 0)
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt,
                           painter, widget)
-        if icon_rect is not None and icon_rect.isValid():
+        if icon_rect is not None and icon_rect.isValid() and semantic:
+            # Eased here, once, and handed over as a plain number:
+            # rail_anim holds no state and every value it computes is a
+            # function of it, which is what makes leaving smooth from
+            # wherever it is and why no icon can get stuck mid-pose.
+            rail_anim.paint(painter, name, icon_rect, _ease_out_cubic(hover),
+                            tint, _rail_view_icon_size(widget),
+                            _rail_dpr(widget))
+        elif icon_rect is not None and icon_rect.isValid():
             dx, dy, degrees, scale = move
             centre = QPointF(icon_rect.center()) + QPointF(0.5, 0.5)
             painter.save()

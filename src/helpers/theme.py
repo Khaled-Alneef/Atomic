@@ -740,6 +740,14 @@ QListWidget#SettingsNav::item:hover {{
 }}
 QListWidget#SettingsNav::item:selected {{
     background: {ACCENT_SOFT};
+    /* **Teal, and stated here rather than left to the palette.** With
+       no colour on this rule Qt paints a selected row in
+       QPalette.HighlightedText, which is near-black on this theme - so
+       the open page was the one row you could not read (the owner, 26
+       August 2026). The model's own colour covers every *unselected*
+       row, including Uninstall's red; this covers the selected one,
+       whichever it is. */
+    color: {ACCENT_HOVER};
     border-left: 3px solid {ACCENT};
 }}
 

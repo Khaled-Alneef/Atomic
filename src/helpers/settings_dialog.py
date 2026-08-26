@@ -528,8 +528,17 @@ class SettingsDialog(QDialog):
         rows = self.category_list.count()
         row_height = self.category_list.sizeHintForRow(0) if rows else 0
         spacing = self.category_list.spacing()
+        # **Spacing wraps every item, not the gaps between them.** Qt
+        # gives each row a margin of `spacing` on all four sides, so N
+        # rows occupy N * (height + 2 * spacing) - the old arithmetic
+        # counted spacing * (N + 1), which at nine rows is 16px short.
+        # The list has its scrollbars off, so those 16px do not scroll:
+        # they come off the bottom row, and the bottom row is Uninstall.
+        # That is the owner's report of 26 August 2026 - its highlight
+        # "not showing completely" while the eight above it were fine.
+        frame = self.category_list.frameWidth() * 2
         self.category_list.setFixedHeight(
-            rows * row_height + spacing * (rows + 1) + CATEGORY_LIST_PADDING)
+            rows * (row_height + spacing * 2) + frame + CATEGORY_LIST_PADDING)
         layout.addWidget(self.category_list)
         layout.addStretch()
 

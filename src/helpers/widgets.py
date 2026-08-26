@@ -1571,9 +1571,33 @@ class HeroBanner(QFrame):
             # The brush paints from the origin, so the same centring
             # offset has to be carried as the brush's own transform -
             # and in logical units, since the pixmap is ratio-tagged.
+            # **Stretched to the rect it is being drawn into, not just
+            # centred in it.** While a resize is in flight `_scaled_for`
+            # deliberately hands back the *last* cut rather than paying
+            # 6.9ms to re-cut per animation step - and a copy that is
+            # the wrong size only looks right if something scales it.
+            # Centring alone left the art at its old pixel size for the
+            # whole fold and let `_resmooth` snap it at the end, which
+            # is the owner's report of 26 August 2026: the banner moved
+            # with the sidebar but the picture inside it changed size
+            # only once the fold had finished.
+            #
+            # Uniform, and taken from the larger axis, because the cut
+            # is KeepAspectRatioByExpanding - the art always covers the
+            # rect and the overflow is what the centring hides. The GPU
+            # does this as part of the blit it was already doing, so it
+            # costs nothing the old centring did not.
+            grow = max(rect.width() / width if width else 1.0,
+                       rect.height() / height if height else 1.0)
+            if abs(grow - 1.0) < 0.001:
+                grow = 1.0
+            width *= grow
+            height *= grow
             transform = QTransform()
             transform.translate((rect.width() - width) / 2.0,
                                 (rect.height() - height) / 2.0)
+            if grow != 1.0:
+                transform.scale(grow, grow)
             # **No 1/ratio scale** - Qt's raster brush already applies
             # the texture pixmap's devicePixelRatio, so scaling again
             # drew the banner art at 1/ratio of its size and tiled the
