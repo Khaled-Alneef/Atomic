@@ -1,0 +1,86 @@
+# Keep the newest test build behind one permanent, fast download link.
+#
+# **Why this exists, as a measurement.** Atomic.zip on this branch is
+# what the owner installs from on his other machine, and downloading it
+# straight off the branch is a cold CDN miss *every single time*:
+# raw.githubusercontent.com has to inflate the 92MB blob out of a git
+# packfile before it can serve a byte. Measured 26 August 2026, three
+# requests for the same blob back to back:
+#
+#     run 1   first byte 4.45s   x-cache MISS
+#     run 2   first byte 0.45s   x-cache HIT
+#     run 3   first byte 0.45s   x-cache HIT
+#
+# The warm case is fine and irrelevant - `cache-control` is max-age=300,
+# five minutes, and every build is a brand-new blob, so the first person
+# to ask is always paying the miss and that person is always him. A
+# release asset is a stored file rather than a git object: 1.58s cold,
+# 0.68s after.
+#
+# The tag is `test-latest` and is moved here rather than being a new one
+# per build, for two reasons: the download URL then never changes and can
+# be bookmarked, and a 92MB asset per build would otherwise pile up
+# forever.
+#
+# **It cannot reach anyone running Atomic.** helpers/updater.py filters
+# tags through `^v?\d+\.\d+$`, so only two-part tags like `v1.10` are
+# ever offered as an update; `test-latest` does not match and is
+# invisible to every install. Verified - check_for_update() returns None
+# with this published.
+
+name: Publish test build
+
+on:
+  push:
+    branches: [remote-tests]
+    # Only when the build itself changed. Editing the README or this
+    # file should not re-upload 92MB.
+    paths: ['Atomic.zip']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Never two of these at once: they both move one tag and clobber one
+# asset, and the loser would leave the link pointing at the older build.
+concurrency:
+  group: publish-test-build
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Move test-latest to this commit
+        run: |
+          git tag -f test-latest "$GITHUB_SHA"
+          git push -f origin test-latest
+
+      - name: Publish or refresh the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          subject="$(git log -1 --pretty=%s)"
+          size="$(du -h Atomic.zip | cut -f1)"
+          notes="$(printf '%s\n\n%s\n\n%s\n' \
+            "Test build from \`remote-tests\` - **not a release**." \
+            "$subject" \
+            "Refreshed automatically on every push to the branch. Size ${size}. Published as a release asset because the same zip fetched from the branch is a cold CDN miss every time (4.45s to first byte against 1.58s here). The in-app updater ignores this tag by design - it only accepts two-part tags like \`v1.10\`.")"
+          # Upload rather than delete-and-recreate: deleting would leave
+          # the download link 404ing for as long as the upload takes.
+          if gh release view test-latest > /dev/null 2>&1; then
+            gh release upload test-latest Atomic.zip --clobber
+            gh release edit test-latest --prerelease --notes "$notes"
+          else
+            gh release create test-latest Atomic.zip \
+              --prerelease \
+              --title "Latest test build" \
+              --notes "$notes"
+          fi
+          echo "link: $(gh release view test-latest --json assets \
+            --jq '.assets[0].url')"
