@@ -763,6 +763,18 @@ QWidget#TitleBar {{
 /* Square, full-height, no radius: these are Windows' caption buttons in
    the place Windows' caption buttons go, and rounding them would put a
    gap of bar colour in the window's own top-right corner. */
+/* Saved / Schedule / History, at the left of the bar. Transparent like
+   the window buttons: window_chrome.DriftButton paints and animates the
+   fill, and a QSS background here would switch on under the fade. */
+QPushButton#BarSection {{
+    background: transparent;
+    color: {TEXT_MUTED};
+    border: none;
+    border-radius: {RADIUS_SM}px;
+    padding: 0px;
+}}
+QPushButton#BarSection:hover {{ background: transparent; color: {TEXT}; }}
+
 QPushButton#WindowButton, QPushButton#WindowClose {{
     background: transparent;
     color: {TEXT_MUTED};

@@ -64,10 +64,10 @@ import sys
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtGui import QColor, QIcon, QPainter
 from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QWidget
 
-from . import theme
+from . import images, theme
 from .widgets import SmoothTween, search_field, use_hover_cursor
 
 WINDOWS = sys.platform == "win32"
@@ -102,6 +102,18 @@ CLOSE_GLYPH = ""      # ChromeClose
 # than Windows' own 4: there is no frame drawn to aim at here, so the
 # band has to be forgiving enough to hit without hunting for it.
 RESIZE_BAND = 6
+
+# **Saved, Schedule and History live up here now** - the owner's ask, 26
+# August 2026. They used to be three pills in the header of whichever
+# tracker page was showing, which meant two copies of them (one on Watch,
+# one on Read) and neither reachable from anywhere else. One set, in the
+# window's own bar, and the Watch/Read split moves *inside* the section
+# they open (tracker._build_medium_tabs).
+SECTION_BUTTONS = (("saved", "Saved"),
+                   ("schedule", "Schedule"),
+                   ("history", "History"))
+SECTION_BUTTON_WIDTH = 44
+SECTION_ICON = 17
 
 _CORNERS = (
     (Qt.Edge.LeftEdge, Qt.Edge.TopEdge, Qt.CursorShape.SizeFDiagCursor),
@@ -340,6 +352,7 @@ class TitleBar(QWidget):
     Owns no state - `back`, `minimise`, `maximise` and `close_window`
     are signals, and the window wires them to what it already had."""
 
+    section = Signal(str)          # "saved" / "schedule" / "history"
     minimise = Signal()
     maximise = Signal()
     close_window = Signal()
@@ -364,8 +377,35 @@ class TitleBar(QWidget):
         # field in the *window* rather than in the room left beside it -
         # the balance Home's header uses, and the thing that would
         # silently drift by half the difference if it were dropped.
+        # The two side groups are the same width, which is what centres
+        # the field in the *window* rather than in the room left beside
+        # it - three section buttons on the left against three window
+        # buttons on the right.
         side = 3 * WINDOW_BUTTON_WIDTH
         left = QWidget(objectName="Bare")
+        left_row = QHBoxLayout(left)
+        left_row.setContentsMargins(0, 0, 0, 0)
+        left_row.setSpacing(2)
+        self.section_buttons = {}
+        for key, label in SECTION_BUTTONS:
+            button = DriftButton("", radius=theme.RADIUS_SM,
+                                 tint=theme.SURFACE, objectName="BarSection")
+            button.setFixedSize(QSize(SECTION_BUTTON_WIDTH, 34))
+            button.setToolTip(label)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            icon = images.tinted_asset(theme.rail_icon(key), theme.TEXT_MUTED,
+                                       SECTION_ICON,
+                                       float(self.devicePixelRatioF() or 1.0))
+            if not icon.isNull():
+                button.setIcon(QIcon(icon))
+                button.setIconSize(QSize(SECTION_ICON, SECTION_ICON))
+            else:
+                button.setText(label[0])
+            button.clicked.connect(
+                lambda _checked=False, k=key: self.section.emit(k))
+            left_row.addWidget(button)
+            self.section_buttons[key] = button
+        left_row.addStretch(1)
         left.setFixedWidth(side)
         row.addWidget(left)
 

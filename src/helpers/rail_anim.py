@@ -37,6 +37,8 @@ smooth from wherever it currently is and why nothing can get stuck in a
 transform. Selected rows do not animate - `hover` is the only input.
 """
 
+import math
+
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QPainter
 
@@ -98,16 +100,26 @@ LAYERS = {
         "mark": _svg('<path d="M10 15.2 12 9.4l2 5.8"/>'
                      '<path d="M10.9 13.4h2.2"/>'),
     },
-    # One star, and three sparkles that arrive after it.
+    # **A star at the centre of the box, and four sparkles on the
+    # compass points.** The pack's star sat high - its ink spanned y
+    # 3-14 of a 24 grid, so the icon read as top-heavy beside every
+    # other row - and its two sparkles were diagonal and unmatched. The
+    # main star is now a four-point star centred on (12, 12), and the
+    # sparkles are drawn *at* north, east, south and west; the paint
+    # function starts them nearer the middle and lets them travel out,
+    # so the layer coordinates are the resting truth rather than an
+    # offset applied later.
     "anime": {
-        "star": _svg('<path d="m12 3 1.5 4.1L18 8.5l-4.5 1.4L12 14l-1.5-4.1'
-                     'L6 8.5l4.5-1.4L12 3Z"/>'),
-        "spark1": _svg('<path d="m18.5 14 .9 2.6L22 17.5l-2.6.9-.9 2.6-.9-2.6'
-                       '-2.6-.9 2.6-.9.9-2.6Z"/>'),
-        "spark2": _svg('<path d="m5.5 14 .7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8'
-                       '-1.8-.7 1.8-.7.7-1.8Z"/>'),
-        "spark3": _svg('<path d="m12 17.6.55 1.45 1.45.55-1.45.55L12 21.6'
-                       'l-.55-1.45L10 19.6l1.45-.55L12 17.6Z"/>'),
+        "star": _svg('<path d="M12 7.4 13.2 10.8 16.6 12 13.2 13.2 12 16.6'
+                     ' 10.8 13.2 7.4 12 10.8 10.8Z"/>'),
+        "up": _svg('<path d="M12 2.5 12.5 3.9 13.9 4.4 12.5 4.9 12 6.3'
+                   ' 11.5 4.9 10.1 4.4 11.5 3.9Z"/>'),
+        "right": _svg('<path d="M19.6 10.1 20.1 11.5 21.5 12 20.1 12.5'
+                      ' 19.6 13.9 19.1 12.5 17.7 12 19.1 11.5Z"/>'),
+        "down": _svg('<path d="M12 17.7 12.5 19.1 13.9 19.6 12.5 20.1 12 21.5'
+                     ' 11.5 20.1 10.1 19.6 11.5 19.1Z"/>'),
+        "left": _svg('<path d="M4.4 10.1 4.9 11.5 6.3 12 4.9 12.5 4.4 13.9'
+                     ' 3.9 12.5 2.5 12 3.9 11.5Z"/>'),
     },
     # Set, and the signal that comes on inside it.
     "live-tv": {
@@ -144,26 +156,45 @@ LAYERS = {
                       '<path d="M8.5 21H5a2 2 0 0 1-2-2v-3.5"/>'),
         "piece": _svg('<path d="M9 9h6v6H9z"/>'),
     },
-    # Three tiles that hold, and one that pops.
+    # One tile is the app being opened; the other three step back.
     "apps": {
         "rest": _svg('<rect x="3" y="3" width="7" height="7" rx="1.5"/>'
                      '<rect x="3" y="14" width="7" height="7" rx="1.5"/>'
                      '<rect x="14" y="14" width="7" height="7" rx="1.5"/>'),
-        "pop": _svg('<rect x="14" y="3" width="7" height="7" rx="1.5"/>'),
+        "focus": _svg('<rect x="14" y="3" width="7" height="7" rx="1.5"/>'),
     },
-    # Pad, and the two buttons that are pressed in turn.
+    # **The shell never moves.** What moves is the stick and the two
+    # buttons - somebody playing, not a gamepad being waved about.
     "games": {
-        "pad": _svg('<rect x="2" y="6" width="20" height="12" rx="5"/>'
-                    '<path d="M7 10v4M5 12h4"/>'),
+        "shell": _svg('<rect x="2" y="6" width="20" height="12" rx="5"/>'),
+        "stick": _svg('<path d="M7 10v4M5 12h4"/>'),
         "a": _svg('<path d="M15.5 11h.01"/>'),
         "b": _svg('<path d="M18 13.5h.01"/>'),
     },
-    # An open book: the right page is what turns.
+    # **Comic panels, not a page turn.** The book itself barely moves;
+    # what happens is inside it - the page rules itself into panels and
+    # they light one after another, top-left to bottom-right.
     "manga": {
-        "left": _svg('<path d="M12 7C10.3 5.4 7.7 4.7 4 5v13c3.7-.3 6.3.4'
-                     ' 8 2"/>'),
-        "right": _svg('<path d="M12 7c1.7-1.6 4.3-2.3 8-2v13c-3.7-.3-6.3.4'
-                      '-8 2"/>'),
+        "book": _svg('<path d="M12 7C10.3 5.4 7.7 4.7 4 5v13c3.7-.3 6.3.4'
+                     ' 8 2"/>'
+                     '<path d="M12 7c1.7-1.6 4.3-2.3 8-2v13c-3.7-.3-6.3.4'
+                     '-8 2"/>'),
+        # Kept well inside the page: its top edge is a *curve* from
+        # (12,7) up to (20,5), so a rule drawn to the page's nominal
+        # width crosses the outline and reads as a scribble over the
+        # book rather than as panels on it.
+        # **The panels span the whole book, and the spine is the
+        # gutter.** Confining them to one page was tried twice and both
+        # times read as a smudge rather than as panels - a single page
+        # is about seven grid units wide, which at 26px is under eight
+        # device pixels to hold a two-by-two grid in. Using the book's
+        # own centre fold as the vertical divider gives each panel four
+        # times the area, and the icon already draws that line.
+        "rule": _svg('<path d="M5.6 12.6h12.8" stroke-width="1.4"/>'),
+        "panel1": _filled('<rect x="5.8" y="7.4" width="5.3" height="4.2"'
+                          ' rx="0.6"/>'),
+        "panel2": _filled('<rect x="13" y="13.6" width="5.3" height="4.0"'
+                          ' rx="0.6"/>'),
     },
     # A strip you scroll: the frame holds, the content moves up.
     "manhwa": {
@@ -177,13 +208,19 @@ LAYERS = {
         "front": _svg('<rect x="3" y="7" width="14" height="14" rx="2"/>'),
         "ink": _svg('<path d="M7 12h6M7 16h6"/>'),
     },
-    # Globe: the meridian turns inside a fixed outline.
+    # **A page loading and becoming ready**, inside an outline that
+    # never moves. The meridian is the resting state; on hover it gives
+    # way to a spinner, and the spinner resolves into content.
     "websites": {
-        "globe": _svg('<circle cx="12" cy="12" r="9"/>'
-                      '<path d="M3.5 9h17M3.5 15h17"/>'),
-        "meridian": _svg('<path d="M12 3a13.5 13.5 0 0 1 3.6 9 13.5 13.5 0 0'
+        "globe": _svg('<circle cx="12" cy="12" r="9"/>'),
+        "meridian": _svg('<path d="M3.5 9h17M3.5 15h17"/>'
+                         '<path d="M12 3a13.5 13.5 0 0 1 3.6 9 13.5 13.5 0 0'
                          ' 1-3.6 9 13.5 13.5 0 0 1-3.6-9A13.5 13.5 0 0 1 12'
                          ' 3Z"/>'),
+        "arc": _svg('<path d="M12 7.3a4.7 4.7 0 0 1 4.7 4.7"'
+                    ' stroke-width="2.6"/>'),
+        "lines": _svg('<path d="M8 11h8M8 14h5" stroke-width="1.6"/>'),
+        "cursor": _filled('<circle cx="16.4" cy="15.4" r="1.2"/>'),
     },
     # The gear is one piece and turns as one - the hub stays.
     "settings": {
@@ -294,17 +331,28 @@ def _shows(p, box, t, layer):
 
 
 def _anime(p, box, t, layer):
-    """Sparkles sprinkle outward, one after another."""
-    _draw(p, layer("star"), box, scale=_overshoot(t, 0.06))
-    for name, start, out in (("spark1", 0.00, (1.6, -1.2)),
-                             ("spark2", 0.18, (-1.6, -0.8)),
-                             ("spark3", 0.34, (0.0, 1.8))):
-        s = _stagger(t, start)
-        if s <= 0.0:
-            continue
-        _draw(p, layer(name), box, dx=out[0] * s, dy=out[1] * s,
-              scale=0.5 + 0.5 * s, opacity=s)
+    """A centred star that throws sparkles to the four compass points.
 
+    The star holds the middle and only breathes - it must not travel,
+    because it *is* the icon. The sparkles are drawn in their resting
+    places by the layers; what this does is start them a little nearer
+    the middle, so they read as having come out of the star, and let
+    them arrive one after another rather than all at once."""
+    _draw(p, layer("star"), box, scale=1.0 + 0.06 * math.sin(math.pi * t))
+    for name, start, (ux, uy) in (("up", 0.00, (0.0, -1.0)),
+                                  ("right", 0.12, (1.0, 0.0)),
+                                  ("down", 0.24, (0.0, 1.0)),
+                                  ("left", 0.36, (-1.0, 0.0))):
+        step = _stagger(t, start, 0.5)
+        if step <= 0.0:
+            continue
+        inward = 2.4 * (1.0 - step)
+        _draw(p, layer(name), box,
+              dx=-ux * inward, dy=-uy * inward,
+              scale=0.45 + 0.55 * step, opacity=step,
+              # Its own centre, not the icon's: scaling a sparkle about
+              # the middle of the box would drag it off its point.
+              pivot=(12.0 + ux * 7.6, 12.0 + uy * 7.6))
 
 def _live_tv(p, box, t, layer):
     """The screen comes on and the play mark pulses once."""
@@ -345,37 +393,49 @@ def _addons(p, box, t, layer):
 
 
 def _apps(p, box, t, layer):
-    """One tile pops forward out of the grid."""
-    _draw(p, layer("rest"), box)
-    _draw(p, layer("pop"), box, dy=-1.6 * t, scale=_overshoot(t, 0.10))
-
+    """One app opens: its tile comes forward and grows while the rest
+    of the grid steps back."""
+    _draw(p, layer("rest"), box, opacity=1.0 - 0.45 * t)
+    _draw(p, layer("focus"), box, dy=-1.6 * t,
+          scale=1.0 + 0.10 * t + 0.05 * math.sin(math.pi * t),
+          # The tile's own centre, so it grows in place rather than
+          # sliding toward the middle of the icon.
+          pivot=(17.5, 6.5))
 
 def _games(p, box, t, layer):
-    """Two buttons pressed in turn, on a pad that barely moves."""
-    _draw(p, layer("pad"), box, degrees=2.0 * t)
-    a = _stagger(t, 0.0, 0.4)
-    b = _stagger(t, 0.3, 0.4)
-    _draw(p, layer("a"), box, scale=1.0 - 0.35 * (a * (1.0 - a) * 4.0))
-    _draw(p, layer("b"), box, scale=1.0 - 0.35 * (b * (1.0 - b) * 4.0))
-
+    """Somebody using the controller: the stick goes over and comes
+    back, then two buttons go down in turn. The shell never moves - a
+    gamepad that tilts reads as being waved about rather than played."""
+    _draw(p, layer("shell"), box)
+    # Out and back inside the first six-tenths - **plus a small residue
+    # that stays.** A sequence that returns everything exactly where it
+    # started measures as zero moved pixels between rest and settled
+    # hover, which is a held hover that looks like nothing happened; the
+    # globe had the same fault and was caught the same way. So the stick
+    # keeps a fraction of its travel and the buttons stay a shade in.
+    swing = math.sin(math.pi * min(1.0, t / 0.6))
+    _draw(p, layer("stick"), box, dx=0.35 * t + 0.95 * swing,
+          pivot=(7.0, 12.0))
+    press_a = math.sin(math.pi * _stagger(t, 0.28, 0.3))
+    press_b = math.sin(math.pi * _stagger(t, 0.55, 0.3))
+    _draw(p, layer("a"), box, scale=1.0 - 0.12 * t - 0.35 * press_a,
+          pivot=(15.5, 11.0))
+    _draw(p, layer("b"), box, scale=1.0 - 0.10 * t - 0.32 * press_b,
+          pivot=(18.0, 13.5))
 
 def _manga(p, box, t, layer):
-    """A page turns: the right leaf closes toward the spine."""
-    _draw(p, layer("left"), box)
-    p.save()
-    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    unit = box.width() / 24.0
-    spine = box.left() + 12.0 * unit
-    p.translate(spine, 0.0)
-    # Half-turned, not shut: at 0.85 the leaf collapsed to a sliver and
-    # the icon read as a closed flag rather than a page in motion.
-    p.scale(max(0.08, 1.0 - 0.5 * t), 1.0)
-    p.translate(-spine, 0.0)
-    pm = layer("right")
-    if pm is not None and not pm.isNull():
-        p.drawPixmap(box.topLeft(), pm)
-    p.restore()
+    """The page rules itself into comic panels and they light in
+    reading order, top-left first.
 
+    The book stays put - only the gutter shifts, and only by a fraction
+    of a pixel's worth of grid, which is what makes the panels feel like
+    they are settling rather than the icon wobbling."""
+    _draw(p, layer("book"), box)
+    # The rule slides a fraction as it arrives, which is the "panel
+    # coming alive" nudge - the book itself never moves.
+    _draw(p, layer("rule"), box, dy=-0.5 * (1.0 - t), opacity=t)
+    _draw(p, layer("panel1"), box, opacity=0.75 * _stagger(t, 0.05, 0.35))
+    _draw(p, layer("panel2"), box, opacity=0.75 * _stagger(t, 0.38, 0.4))
 
 def _manhwa(p, box, t, layer):
     """A strip scrolls: the frame holds, the content travels up inside
@@ -397,32 +457,26 @@ def _manhua(p, box, t, layer):
 
 
 def _websites(p, box, t, layer):
-    """The meridian turns inside an outline that stays put - the globe
-    spinning, not the icon rotating."""
-    _draw(p, layer("globe"), box)
-    p.save()
-    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    unit = box.width() / 24.0
-    axis = box.left() + 12.0 * unit
-    # Narrowing the meridian and sliding it off the axis is what a
-    # sphere turning actually looks like; rotating it would read as the
-    # whole globe tipping over.
-    #
-    # **It has to *end* somewhere.** The first version drove this from a
-    # half-sine, so the meridian narrowed mid-transition and came back -
-    # rest and settled hover were pixel-identical, which measured as 0
-    # moved pixels and would have read as an icon that does nothing at
-    # all once the pointer stopped. It now travels to a pose and stays
-    # in it, with the squash dipping a little further on the way.
-    squash = 1.0 - 0.55 * t - 0.18 * (t * (1.0 - t) * 4.0)
-    p.translate(axis + 2.2 * unit * t, 0.0)
-    p.scale(max(0.10, squash), 1.0)
-    p.translate(-axis, 0.0)
-    pm = layer("meridian")
-    if pm is not None and not pm.isNull():
-        p.drawPixmap(box.topLeft(), pm)
-    p.restore()
+    """A page loads and becomes ready, inside an outline that holds
+    still.
 
+    The meridian is the resting picture and gives way immediately; a
+    spinner takes its place, sweeps once, and hands over to two lines of
+    content and a cursor arriving on the page. Nothing spins the icon
+    itself - that was the old behaviour and it read as a wheel."""
+    _draw(p, layer("globe"), box)
+    # Out of the way quickly - the middle frames read as mud while the
+    # meridian is still half there under the spinner.
+    _draw(p, layer("meridian"), box, opacity=max(0.0, 1.0 - 3.4 * t))
+    load = _stagger(t, 0.0, 0.55)
+    if 0.0 < load < 1.0:
+        _draw(p, layer("arc"), box, degrees=320.0 * load,
+              opacity=min(1.0, load * 4.0) * min(1.0, (1.0 - load) * 3.0))
+    ready = _stagger(t, 0.5, 0.5)
+    if ready > 0.0:
+        _draw(p, layer("lines"), box, opacity=ready)
+        _draw(p, layer("cursor"), box,
+              dx=-1.6 * (1.0 - ready), dy=-1.2 * (1.0 - ready), opacity=ready)
 
 def _settings(p, box, t, layer):
     """The gear turns and settles. The hub turns with it - a gear whose

@@ -2889,7 +2889,16 @@ class TrackerPage(GlassPage):
     # the page they belong to (the owner's ask, 25 August 2026: one
     # sidebar, and these had nowhere else to go). One row of pills beside
     # the heading rather than six repeated rail rows.
-    HEADER_TABS = (TAB_SAVED, TAB_SCHEDULE, TAB_HISTORY)
+    # **Empty: these three are in the window's bar now** (the owner's
+    # ask, 26 August 2026). What replaces them on the page is the
+    # Watch/Read pair below, which only appears while one of those
+    # sections is showing - the split that used to be "which page am I
+    # on" is now "which half of this section".
+    HEADER_TABS = ()
+    # Which half of the app this page is. Used by the Watch/Read pair to
+    # know which of the two it is standing in.
+    MEDIUM = "series"
+    MEDIUM_SECTIONS = (TAB_SAVED, TAB_SCHEDULE, TAB_HISTORY)
 
     def _build_header_tabs(self, header):
         """The Saved / Schedule / History pills, or nothing on a page
@@ -2905,6 +2914,7 @@ class TrackerPage(GlassPage):
         and the On state separately, and the pill's label changes colour
         between them (theme's #Ghost rules), so a single pixmap would
         leave the icon muted on the section actually showing."""
+        self._build_medium_tabs(header)
         self._header_tab_buttons = {}
         # Where a second press on the open pill returns to - see
         # _toggle_tab. None means "the page's default section".
@@ -2930,6 +2940,46 @@ class TrackerPage(GlassPage):
             button.clicked.connect(lambda _c=False, k=key: self._toggle_tab(k))
             header.addWidget(button)
             self._header_tab_buttons[key] = button
+
+    def _build_medium_tabs(self, header):
+        """Watch / Read, shown only inside Saved, Schedule or History.
+
+        Those three used to be pills on this header and the medium was
+        whichever page you happened to be on. They moved to the window's
+        bar (helpers/window_chrome), so the axis flipped: the section is
+        chosen up there and the medium is chosen here.
+
+        Switching medium is a *navigation*, not a local swap - the two
+        media are two pages backed by two files, and pretending
+        otherwise would mean this page rendering the other one's rows.
+        `series:saved` and `manga:saved` are routes the sidebar already
+        understands, so the rail's highlight follows too."""
+        self._medium_buttons = {}
+        for medium, label in (("series", "Watch"), ("manga", "Read")):
+            button = QPushButton(label, objectName="Ghost")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(
+                lambda _c=False, md=medium: self._switch_medium(md))
+            header.addWidget(button)
+            self._medium_buttons[medium] = button
+
+    def _switch_medium(self, medium):
+        if medium == self.MEDIUM:
+            self._sync_header_tabs()      # a press on the open one: no-op
+            return
+        window = self.window()
+        go = getattr(window, "navigate_to", None)
+        if callable(go):
+            go(f"{medium}:{self._active_tab}")
+
+    def _sync_medium_tabs(self):
+        """Show the pair only where it means something, and mark which
+        half is showing."""
+        wanted = self._active_tab in getattr(self, "MEDIUM_SECTIONS", ())
+        for medium, button in getattr(self, "_medium_buttons", {}).items():
+            button.setVisible(wanted)
+            button.setChecked(wanted and medium == self.MEDIUM)
 
     def _toggle_tab(self, key):
         """A pill press: open that section, or - pressed again while it
@@ -2972,6 +3022,7 @@ class TrackerPage(GlassPage):
         """Check the pill for the section showing, and uncheck the rest -
         a category or Discover leaves all three off, which is right: none
         of them is what is on screen."""
+        self._sync_medium_tabs()
         for key, button in getattr(self, "_header_tab_buttons", {}).items():
             try:
                 button.setChecked(key == self._active_tab)
@@ -7466,6 +7517,7 @@ class TrackerPage(GlassPage):
 
 class MangaPage(TrackerPage):
     DATA_FILE = "tracker.json"
+    MEDIUM = "manga"
     ENTRY_TYPES = MANGA_TYPES
     # "Read" (the owner's ask) - the sidebar's verb, like "Watch".
     TITLE = "Read"
@@ -7501,6 +7553,7 @@ class MangaPage(TrackerPage):
 
 class SeriesPage(TrackerPage):
     DATA_FILE = "series.json"
+    MEDIUM = "series"
     # Anime leads: this owner's list is anime-heavy, so it fronts each
     # status section and is what the Add form opens on.
     ENTRY_TYPES = ("Anime", "Series", "Movie")

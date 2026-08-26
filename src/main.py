@@ -153,6 +153,11 @@ ADD_ITEMS = [
 ]
 
 ANIM_DURATION_MS = 220
+# How far the sidebar's mark leans and draws in at the midpoint of a
+# fold. Small on purpose - it is the app's own mark, and a logo that
+# spins reads as a loading spinner.
+RAIL_LOGO_TURN_DEG = 14.0
+RAIL_LOGO_SQUEEZE = 0.12
 # **72, down from 120.** The logo band is decoration and the rows are
 # the furniture, so _fit_rails drops the band whole rather than squeeze
 # a row (see the note there) - and the window's new top bar took 48px
@@ -1043,6 +1048,58 @@ class _RailMotion(QObject):
             pass
 
 
+class _RailLogo(QLabel):
+    """The sidebar's mark, with a turn in it while the rail folds.
+
+    The owner's ask, 26 August 2026: the mark should animate as the
+    sidebar folds and unfolds rather than simply swapping from one
+    pixmap to the other at the end.
+
+    `phase` is 0 at rest and 1 at the midpoint of a fold - main's tween
+    feeds it a value that rises and falls again across the animation, so
+    the mark leans into the movement and comes back level whichever
+    direction the rail went. It holds no timer of its own: the fold
+    already has one, and one clock driving both is what keeps the mark
+    and the column in step.
+
+    Painted rather than swapped because a QLabel draws its pixmap
+    unrotated and there is no property for this; the pixmap it is given
+    is still the one _style_logo chose, so the matte tint and the
+    device-ratio tagging are untouched."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._phase = 0.0
+
+    def set_phase(self, value):
+        value = 0.0 if value < 0.0 else (1.0 if value > 1.0 else float(value))
+        if abs(value - self._phase) < 0.004:
+            return
+        self._phase = value
+        self.update()
+
+    def paintEvent(self, event):
+        pixmap = self.pixmap()
+        if pixmap is None or pixmap.isNull() or self._phase <= 0.004:
+            super().paintEvent(event)
+            return
+        ratio = pixmap.devicePixelRatio() or 1.0
+        width = pixmap.width() / ratio
+        height = pixmap.height() / ratio
+        centre = QPointF(self.width() / 2.0, self.height() / 2.0)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.translate(centre)
+        # Leans and draws in a little at the midpoint, level and full
+        # size at both ends - so a fold reads as the mark turning with
+        # the column rather than being replaced at the end of it.
+        painter.rotate(RAIL_LOGO_TURN_DEG * self._phase)
+        squeeze = 1.0 - RAIL_LOGO_SQUEEZE * self._phase
+        painter.scale(squeeze, squeeze)
+        painter.drawPixmap(QPointF(-width / 2.0, -height / 2.0), pixmap)
+        painter.end()
+
+
 class NavListWidget(QListWidget):
     """A QListWidget sized to fit its rows instead of stretching to fill
     the sidebar - the leftover space should go to the trailing stretch,
@@ -1624,6 +1681,7 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
 
         self.title_bar = window_chrome.TitleBar(central)
+        self.title_bar.section.connect(self.open_section)
         self.title_bar.minimise.connect(self.showMinimized)
         self.title_bar.maximise.connect(self._toggle_maximised)
         self.title_bar.close_window.connect(self.close)
@@ -2391,7 +2449,7 @@ class MainWindow(QMainWindow):
         # separate text label) - anchoring the top of the sidebar, with
         # the nav list/Add button below pushed down to make room for it
         # (see the extra spacing further down).
-        logo_label = QLabel()
+        logo_label = _RailLogo()
         # Centred on both axes, not just across: the label keeps the
         # expanded logo's full height at both widths (see below), so a
         # top-aligned rail mark would sit ~45px above where the same
@@ -3189,6 +3247,8 @@ class MainWindow(QMainWindow):
         # times. Same duration, same curve, 2.4x the steps.
         holder = self.sidebar_holder
 
+        span = float(SIDEBAR_WIDTH - SIDEBAR_COLLAPSED_WIDTH) or 1.0
+
         def apply(value):
             width = int(round(value))
             holder.setMaximumWidth(width)
@@ -3196,8 +3256,15 @@ class MainWindow(QMainWindow):
             # pins min and max together, so driving one alone does
             # nothing until the other is moved too.
             holder.setMinimumWidth(width)
+            # The mark turns with the column. Phase is 0 at either end
+            # of the travel and 1 halfway, so the lean happens *during*
+            # the fold and the mark is level whichever way it went -
+            # see _RailLogo.
+            travelled = (value - SIDEBAR_COLLAPSED_WIDTH) / span
+            self.logo_label.set_phase(1.0 - abs(2.0 * travelled - 1.0))
 
         def landed():
+            self.logo_label.set_phase(0.0)
             holder.setFixedWidth(SIDEBAR_COLLAPSED_WIDTH
                                  if self._sidebar_collapsed else SIDEBAR_WIDTH)
             self._fold_in_flight = False
@@ -4099,6 +4166,26 @@ class MainWindow(QMainWindow):
             self._search_panel.close()
             self._search_panel = None
         self._refilter_current_page()
+
+    def open_section(self, key):
+        """Saved, Schedule or History, from the window's own bar.
+
+        These were header pills on each tracker page, which meant two
+        copies of them - one on Watch, one on Read - and neither
+        reachable from Home, Games or anywhere else. One set up here
+        now, and the Watch/Read choice moved inside the section they
+        open (tracker._build_medium_tabs).
+
+        Which medium it opens on: whichever the user is already looking
+        at, so pressing Saved from Read stays in Read. Anywhere else
+        starts on Watch."""
+        for _ in range(4):
+            if self._top_overlay() is None:
+                break
+            self.navigate_back()
+        page = _page_name(self._history[self._history_index])
+        medium = "manga" if page == "manga" else "series"
+        self.navigate_to(f"{medium}:{key}")
 
     def _search_in_discover(self, query):
         """Show `query`'s full results on the Discover page.
