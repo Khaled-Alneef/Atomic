@@ -195,6 +195,20 @@ def clear_finished():
         _save()
 
 
+# **Finished videos are filed, not dumped.** The owner's ask, 27 August
+# 2026: episodes go into a folder of their own "exactly like the
+# readings". Readings have had a per-title subfolder since _run_chapter
+# was written, so videos get the same scheme with one folder above it -
+# every episode of a series together under its own title, and the whole
+# watchable library under one roof instead of loose in a download folder
+# that holds everything else too.
+#
+# Only new downloads move. Nothing renames or relocates what is already
+# on disk, for the same reason _run_chapter gives about its own folder
+# scheme: his files are not this code's to reorganise.
+WATCHABLE_DIR = "Watchable"
+
+
 def default_folder() -> str:
     """Where downloads land unless the user picks somewhere else."""
     base = os.path.join(os.path.expanduser("~"), "Downloads", "Atomic")
@@ -603,8 +617,42 @@ def _prefetch_group_siblings(job, info_hash):
         pass          # a failed prefetch costs nothing but the head start
 
 
+# **A bare "DUAL" counts too.** The pattern wanted `dual` *followed
+# by* `audio`, and scene names routinely write neither together:
+# `Attack.on.Titan.S04E01.1080p.CR.WEB-DL.DUAL.AAC2.0.H.264-VARYG` is a
+# dual-audio release whose next token is the codec, so it read as
+# Japanese-only and was raced first for a "jp" choice - measured over
+# seven real Attack on Titan season 4 names, 26 August 2026.
 _DUB_RE = re.compile(r"dual[\s._-]?audio|multi[\s._-]?audio|\bdub(?:bed)?\b"
+                     r"|\bdual\b"
                      r"|english\s*audio|\beng\b.{0,12}\baudio\b", re.I)
+
+
+def _split_by_audio(candidates, audio):
+    """`(preferred, rest)` for the asked-for audio.
+
+    **Ordering alone never decided anything, and that is the owner's
+    "when I download the ep it does not download it in JP although I
+    chose JP".** `_order_by_audio` floats the right releases to the top
+    and `prepare_fastest` then *races* what it is given - "play whichever
+    delivers data first" - so a dual-audio release in the same opening
+    batch beats a Japanese-audio fansub that merely sorted above it. The
+    choice was a tie-break on a race it could not win.
+
+    Split instead, and race the preferred group on its own. The fallback
+    is why this returns two lists rather than filtering: release names
+    lie by omission, and an empty queue because nothing said "dual
+    audio" would be worse than the wrong-order pick this replaces - so
+    the rest are still raced, but only when nothing preferred will
+    start."""
+    if audio not in ("en", "jp"):
+        return list(candidates), []
+    wants_dub = audio == "en"
+    preferred, rest = [], []
+    for stream in candidates:
+        dubbed = bool(_DUB_RE.search(stream.get("title") or ""))
+        (preferred if dubbed == wants_dub else rest).append(stream)
+    return preferred, rest
 
 
 def _order_by_audio(candidates, audio):
@@ -672,8 +720,21 @@ def _run_video(job) -> str:
             return ""
 
         _update(job_id, detail="Connecting to peers...")
-        ready = streams.prepare_fastest(candidates, season=season,
-                                        episode=episode)
+        # **The asked-for audio gets its own race first.** See
+        # _split_by_audio: handing one ordered list to prepare_fastest
+        # left the choice as a tie-break on a race decided by whichever
+        # swarm answered first, which is not the same thing at all.
+        preferred, rest = _split_by_audio(candidates, job.get("audio"))
+        ready = None
+        if preferred:
+            ready = streams.prepare_fastest(preferred, season=season,
+                                            episode=episode)
+        if (not ready or not ready.get("info_hash")) and rest:
+            # Nothing in the preferred group would start. A download in
+            # the other language beats no download at all, and the name
+            # may simply not have said.
+            ready = streams.prepare_fastest(rest, season=season,
+                                            episode=episode)
         if not ready or not ready.get("info_hash"):
             return ""
         info_hash = ready["info_hash"]
@@ -688,7 +749,12 @@ def _run_video(job) -> str:
     torrent_engine.download_whole(info_hash)
     _prefetch_group_siblings(job, info_hash)
 
-    folder = job.get("folder") or default_folder()
+    # Same shape as _run_chapter's, one level deeper - see WATCHABLE_DIR.
+    # safe_name for the title part so it matches the file inside it
+    # ("Attack_on_Titan", not "Attack on Titan (2013)").
+    folder = os.path.join(job.get("folder") or default_folder(), WATCHABLE_DIR,
+                          safe_name(entry.get("title") or "Video",
+                                    fallback="Video"))
     os.makedirs(folder, exist_ok=True)
 
     while True:
