@@ -231,6 +231,147 @@ def maximise_window(window) -> bool:
     return True
 
 
+SW_SHOWMAXIMIZED = 3
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class _WINDOWPLACEMENT(ctypes.Structure):
+    _fields_ = [("length", ctypes.c_uint), ("flags", ctypes.c_uint),
+                ("showCmd", ctypes.c_uint), ("ptMinPosition", _POINT),
+                ("ptMaxPosition", _POINT), ("rcNormalPosition", _RECT)]
+
+
+def _placement(hwnd):
+    wp = _WINDOWPLACEMENT()
+    wp.length = ctypes.sizeof(wp)
+    if not ctypes.windll.user32.GetWindowPlacement(hwnd, ctypes.byref(wp)):
+        return None
+    return wp
+
+
+def normal_rect(window):
+    """Windows' own restore rectangle for `window`, in physical pixels,
+    or None.
+
+    **Read this on the way *into* full screen, not on the way out.**
+    Going full screen overwrites `rcNormalPosition` with the full-screen
+    rect - measured 27 August 2026, the same window either side of one
+    `showFullScreen()`:
+
+        maximised     showCmd=3  rcNormalPosition=(480, 165, 1600, 1050)
+        full screen   showCmd=1  rcNormalPosition=(0, 0, 2560, 1440)
+
+    so by the time `maximise_from_fullscreen` runs there is nothing left
+    to preserve unless somebody kept a copy."""
+    if not WINDOWS:
+        return None
+    try:
+        wp = _placement(ctypes.c_void_p(int(window.winId())))
+    except Exception:
+        return None
+    if wp is None:
+        return None
+    n = wp.rcNormalPosition
+    return (n.left, n.top, n.right - n.left, n.bottom - n.top)
+
+
+def maximise_from_fullscreen(window, saved=None) -> bool:
+    """Leave full screen for maximised without the window being drawn at
+    its restored size on the way. Returns whether this route ran.
+
+    **The window really was drawn small for a frame, and it was Qt's
+    own doing.** Measured 27 August 2026 by polling the HWND's rect from
+    a second thread 2ms apart, leaving full screen from a
+    Windows-side-maximised window:
+
+        0.0ms   2560x1440              full screen
+        52.9ms  1600x1050 at 480,165   <- the restored size, 18-25ms
+        71.4ms  2560x1380              maximised
+
+    That is the owner's report of 26 August 2026 - "the window goes
+    really small and then goes to its original size". `showMaximized()`
+    from full screen makes Qt *restore first and maximise second*, and
+    the middle step is a real resize the app pays a full relayout for,
+    which is why it lasts long enough to see. A bare window skips
+    through it in under 2ms and shows nothing; this one does not.
+
+    Note what the trace rules out: at the middle step Windows'
+    `rcNormalPosition` is already the full-screen rect, so the size Qt
+    lands on is **its own** saved geometry, not Windows'. An earlier
+    attempt that lent the window a full-size restore rect through
+    `SetWindowPlacement` could therefore never have worked, and did not
+    - it left `isFullScreen()` True and lost the real restore rect.
+
+    So this does not ask Qt to change state at all:
+
+      * `setGeometry` to the maximised rect. Qt drops the full-screen
+        flag when geometry is set explicitly, and lands the window
+        exactly where it is going in one step - no restore in between.
+      * `SetWindowPlacement` with `showCmd` alone changed makes it
+        genuinely maximised (`IsZoomed`), which `setGeometry` on its own
+        does not - measured leaving `zoomed=False qtMax=False`, so the
+        maximise button read wrong and restoring afterwards did nothing.
+      * `rcNormalPosition` is put back **after** that, never in the same
+        call. Setting it alongside `showCmd` restores the window through
+        the small rect first, which is the whole bug again - measured
+        1600x1050 reappearing at 54.7ms.
+
+    `ShowWindow(SW_MAXIMIZE)` works here too but blips 60px taller for
+    ~2.3ms on two runs in three, so `SetWindowPlacement` does the
+    maximising instead. Three runs of this route step straight from
+    2560x1440 to 2560x1380 and show nothing else, and end on the same
+    state the old path did: zoomed, `isFullScreen()` False, restore rect
+    (480, 165, 1600, 1050) intact, and restoring returns there."""
+    if not WINDOWS:
+        return False
+    try:
+        screen = window.screen()
+        avail = screen.availableGeometry() if screen else None
+    except (AttributeError, RuntimeError):
+        avail = None
+    if avail is None:
+        return False
+    try:
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        user = ctypes.windll.user32
+    except Exception:
+        return False
+
+    done = []
+
+    def _go():
+        window.setGeometry(avail)
+        wp = _placement(hwnd)
+        if wp is None:
+            return
+        wp.showCmd = SW_SHOWMAXIMIZED
+        user.SetWindowPlacement(hwnd, ctypes.byref(wp))
+        if saved:
+            left, top, width, height = saved
+            wp.rcNormalPosition = _RECT(left, top, left + width, top + height)
+            user.SetWindowPlacement(hwnd, ctypes.byref(wp))
+        done.append(True)
+
+    # **The wrapper is load-bearing here, not decoration.** Without it
+    # the window still skips the restored size, but spends ~2.3ms 60px
+    # taller than the work area first - Windows' own maximize animation
+    # starting from the full-screen rect. Measured 27 August 2026: three
+    # runs in three showed it unwrapped, none of three wrapped.
+    try:
+        theme.without_window_animation(window, _go)
+    except Exception:
+        return False
+    return bool(done)
+
+
 def restore_from_maximised(window) -> bool:
     """Bring a window down out of maximised, including when Windows put
     it there rather than Qt. Returns whether the Win32 route was needed.

@@ -4410,6 +4410,9 @@ class MainWindow(QMainWindow):
         one exists for a *visible* window changing between maximized and
         full screen, and there is nothing on screen yet to animate from."""
         self._was_maximized = True
+        # No restore rectangle to keep: this window has never been shown
+        # in another state, so there is nothing for it to go back to.
+        self._fs_normal_rect = None
         self.showFullScreen()
 
     def toggle_fullscreen(self):
@@ -4420,17 +4423,36 @@ class MainWindow(QMainWindow):
         # it was found, rather than dropping a maximized window down to a
         # restored one.
         self._was_maximized = self.isMaximized()
+        # Windows overwrites its own restore rectangle with the
+        # full-screen one the moment the next line runs, so the way back
+        # to a real window has to be copied out first - see
+        # window_chrome.normal_rect for the measurement.
+        self._fs_normal_rect = window_chrome.normal_rect(self)
         theme.without_window_animation(self, self.showFullScreen)
 
     def exit_fullscreen(self):
         if not self.isFullScreen():
             return
-        # Both ways through without_window_animation: Windows' maximize
-        # animation zooms from the window's restored size, which on this
-        # trip is not where it is coming from or going to - see its
-        # docstring for what that looked like.
+        # The two ways out are not symmetrical. Going back to a
+        # maximized window is the one that showed the restored size for
+        # a frame, and it is handled below without asking Qt to change
+        # state at all. Going back to a *windowed* window still goes
+        # through without_window_animation, because Windows' maximize
+        # animation would otherwise zoom from a restored size that is
+        # neither where the window is coming from nor where it is going.
         if self._was_maximized:
-            theme.without_window_animation(self, self.showMaximized)
+            # Not showMaximized(): from full screen Qt restores
+            # first and maximises second, and this window is big enough
+            # that the restored step lasts 18-25ms - long enough to see,
+            # which is the owner's report of 26 August 2026. The whole
+            # measurement, and the two routes that were tried and were
+            # worse, are in window_chrome.maximise_from_fullscreen.
+            if not window_chrome.maximise_from_fullscreen(
+                    self, getattr(self, "_fs_normal_rect", None)):
+                # Not Windows, or the Win32 route refused - the old path
+                # still leaves full screen, it just shows the frame.
+                theme.without_window_animation(self, self.showMaximized)
+            self._apply_fullscreen_chrome()
         else:
             # Same Win32 rescue as _toggle_maximised: leaving full
             # screen into a window Windows had snapped hits exactly the
