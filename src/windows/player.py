@@ -8982,7 +8982,10 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     # The whole window, not the row under the bar - see
     # main.player_host for why the player is the one overlay that
     # covers the app's own chrome.
-    host = (window.player_host() if hasattr(window, "player_host")
+    # The whole window, the app's own bar included - see
+    # main.immersive_host. This surface is the content, not a page
+    # showing it, and it carries its own bar and its own way out.
+    host = (window.immersive_host() if hasattr(window, "immersive_host")
             else (window.centralWidget() if hasattr(window, "centralWidget")
                   else window))
     # Once per open, and cheap: the file is a couple of dozen records and

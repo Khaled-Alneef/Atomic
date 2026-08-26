@@ -3358,20 +3358,24 @@ class MainWindow(QMainWindow):
         window anyway."""
         return getattr(self, "_body", None) or self.centralWidget()
 
-    def player_host(self):
-        """What the *video player* is laid over - the whole window.
+    def immersive_host(self):
+        """What a *reading or watching* surface is laid over - the whole
+        window, the app's own bar included.
 
-        The reader, the details page and the genre browse all take
-        `overlay_host` and keep the window's bar above them, which is
-        what the owner asked for on the episode and chapter lists. The
-        player is the one surface that does not: it is a picture, and a
-        search field over a film is furniture in the way (his ask, 26
+        Two surfaces take this: the player and the reader. Both are the
+        content rather than a page showing content, both draw their own
+        top bar with the title and the way out, and on both a search
+        field over the top is furniture in the way. The owner's asks, 26
         August 2026 - "remove the upper bar in the vid player (remove
-        the one contains the search box ONLY)"). It draws its own top
-        bar with the title and the way out.
+        the one contains the search box ONLY)", then the same for the
+        reader.
 
-        The window is still movable while it is up: the player's own bar
-        starts a native drag the same way the app's does."""
+        Everything else keeps `overlay_host` and the bar above it: the
+        details page above all, because the episode and chapter lists
+        are exactly where he asked for the bar to *stay*.
+
+        The window is still movable while one is up - both surfaces'
+        own bars start a native drag the same way the app's does."""
         return self.centralWidget()
 
     def _top_overlay(self):

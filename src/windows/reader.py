@@ -5232,7 +5232,10 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
     while reading". player.py already does exactly this for the same
     reason; nothing in main.py hides or restores anything, so there is
     no state to get stuck in the hidden half."""
-    host = (window.overlay_host() if hasattr(window, "overlay_host")
+    # The whole window, the app's own bar included - see
+    # main.immersive_host. This surface is the content, not a page
+    # showing it, and it carries its own bar and its own way out.
+    host = (window.immersive_host() if hasattr(window, "immersive_host")
             else (window.centralWidget() if hasattr(window, "centralWidget")
                   else window))
     host = host if host is not None else getattr(window, "container", window)
