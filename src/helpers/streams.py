@@ -1740,6 +1740,29 @@ def _contiguous_seasons(all_stated) -> int:
     return highest
 
 
+# How far past this entry's known range a stated season may still be its
+# own season rather than somebody else's numbering.
+#
+# **Without it, "we know nothing" was read as "believe the episode
+# number".** The owner, 26 August 2026: asking for The Angel Next Door
+# Spoils Me Rotten S01E06 and being given
+# `[ToonsHub] ... S02E06 1080p BIL`. Reproduced against the real entry:
+# it lives in history.json with no `latest_available`, so
+# _max_known_season is 0; TorrentsDB's answer stated no season 1 anywhere
+# (SubsPlease-style rows write "- 06" and state none at all), so
+# _contiguous_seasons is 0 too; the bound falls back to the season asked
+# for, 1; and season 2 lands outside it, which switches the season
+# comparison *off* and leaves the row judged on its episode number alone.
+# Six equals six, so it was kept - and it was the highest-seeded row.
+#
+# 1, deliberately. Bleach: Thousand-Year Blood War is season 17 of Bleach
+# and season 1 of its own id, and that gap is what the out-of-range rule
+# exists for - 17 against a bound of 4 is plainly another numbering. Two
+# against one is not; it is the next season, and asking for episode 6 of
+# season 1 must not return episode 6 of season 2.
+NEAR_SEASON_MARGIN = 1
+
+
 def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
     """One source's whole answer, with the rows that contradict the
     request taken out.
@@ -1859,7 +1882,8 @@ def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
             # about *which* season; the rest are another numbering. Arc
             # seasons are TMDB's, i.e. this entry's own, so they are
             # always in range.
-            in_range = {s for s in (seasons | arc_seasons) if s <= bound}
+            in_range = {s for s in (seasons | arc_seasons)
+                        if s <= bound + NEAR_SEASON_MARGIN}
             if indexers.episode_conflict(name, season, episode,
                                          compare_season=bool(in_range),
                                          extra_seasons=arc_seasons):
