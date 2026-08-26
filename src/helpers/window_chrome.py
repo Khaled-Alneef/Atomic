@@ -62,10 +62,11 @@ asks more than that (13,172 calls across six sidebar folds).
 import ctypes
 import sys
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QColor, QIcon, QPainter
-from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QWidget
+from PyQt6.QtGui import QColor, QIcon, QPainter, QRegion
+from PyQt6.QtWidgets import (QHBoxLayout, QPushButton, QSizePolicy,
+                             QVBoxLayout, QWidget)
 
 from . import images, theme
 from .widgets import SmoothTween, search_field, use_hover_cursor
@@ -85,8 +86,20 @@ WINDOW_BUTTON_WIDTH = 46
 # already does this with a balancing spacer, for the same reason and
 # with the same failure when it is skipped: the field drifts left by
 # half the difference between the two sides.
-SEARCH_MAX_WIDTH = 560
-SEARCH_MIN_WIDTH = 240
+# Wider, at the owner's ask (26 August 2026, with a picture of the bar).
+# The stretch either side still centres it, so this only changes how much
+# of the room it is allowed to take before the stretches get the rest.
+SEARCH_MAX_WIDTH = 760
+# Full screen has the whole window to work with and no window
+# buttons sharing the row, so the field is allowed more of it
+# there (the owner's ask, 26 August 2026).
+SEARCH_MAX_WIDTH_FULLSCREEN = 1100
+# How much of the page's width the field takes in full screen,
+# before the cap above applies. 0.58 rather than 0.60 so folding
+# the rail makes a difference you can see: at 0.60 both widths
+# clamped to the cap and nothing moved at all.
+FULLSCREEN_SEARCH_SHARE = 0.58
+SEARCH_MIN_WIDTH = 320
 SEARCH_HEIGHT = theme.TOP_SEARCH_HEIGHT
 
 # Segoe Fluent Icons, the faces every other chrome button in this app
@@ -113,7 +126,10 @@ SECTION_BUTTONS = (("saved", "Saved"),
                    ("schedule", "Schedule"),
                    ("history", "History"))
 SECTION_BUTTON_WIDTH = 44
-SECTION_ICON = 17
+# 22, up from 17 - the owner's ask, 26 August 2026. The button is
+# 44x34, so this is the largest that still leaves a margin either
+# side of the glyph rather than butting it against the pill.
+SECTION_ICON = 22
 
 _CORNERS = (
     (Qt.Edge.LeftEdge, Qt.Edge.TopEdge, Qt.CursorShape.SizeFDiagCursor),
@@ -126,6 +142,7 @@ _CORNERS = (
 # Window styles. WS_CAPTION is deliberately absent - putting it back is
 # putting the title bar back.
 GWL_STYLE = -16
+SW_MAXIMIZE = 3
 SW_RESTORE = 9
 WS_THICKFRAME = 0x00040000
 WS_MAXIMIZEBOX = 0x00010000
@@ -183,6 +200,35 @@ def is_zoomed(window) -> bool:
         return bool(ctypes.windll.user32.IsZoomed(hwnd))
     except Exception:
         return bool(window.isMaximized())
+
+
+def maximise_window(window) -> bool:
+    """Fill the screen, including when Qt's own call will not.
+
+    **The mirror of restore_from_maximised, and needed for the same
+    reason.** Qt's idea of the window state goes stale the moment
+    Windows changes it behind Qt's back, and `showMaximized()` on a
+    window Qt already believes is maximized does nothing at all.
+    Measured 26 August 2026, driving the real button:
+
+        A normal            1100x700
+        B snapped to top    2048x1104
+        C pressed restore   1280x840     <- Win32 route, correct
+        D pressed maximise  1280x840     <- showMaximized() did nothing
+        E pressed restore   1280x840
+
+    D is the owner's "the max and min screen button is not working good
+    at all". One press worked and the button was dead from then on,
+    because C left Qt still holding the maximized flag."""
+    window.showMaximized()
+    if is_zoomed(window):
+        return False
+    try:
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        ctypes.windll.user32.ShowWindow(hwnd, SW_MAXIMIZE)
+    except Exception:
+        return False
+    return True
 
 
 def restore_from_maximised(window) -> bool:
@@ -468,8 +514,32 @@ class TitleBar(QWidget):
         left_row.addStretch(1)
         left.setFixedWidth(side)
         row.addWidget(left)
+        self._left_group = left
+        self._left_row = left_row
 
         row.addStretch(1)
+        # The field and, in full screen only, the three section buttons
+        # beside it - see set_fullscreen.
+        centre = QWidget(objectName="Bare")
+        centre_row = QHBoxLayout(centre)
+        centre_row.setContentsMargins(0, 0, 0, 0)
+        centre_row.setSpacing(8)
+        self._centre_row = centre_row
+        # Balances the section buttons that join this row in full
+        # screen, so the *field* stays centred in the window rather than
+        # the field-plus-buttons group - which would push the field left
+        # of centre by half the buttons' width.
+        # **A fixed-width holder on each side of the field, the same
+        # width.** Letting the buttons sit loose in this row and
+        # balancing them with a spacer was measured 36px out: the field
+        # hits its own maximum width, the leftover goes to the stretches
+        # rather than to the spacer, and the symmetry is lost. Two
+        # containers of identical fixed width cannot drift.
+        balance_width = 3 * SECTION_BUTTON_WIDTH + 2 * 6
+        self._centre_balance = QWidget(objectName="Bare")
+        self._centre_balance.setFixedWidth(balance_width)
+        self._centre_balance.hide()
+        centre_row.addWidget(self._centre_balance)
         self.search = search_field("Search everything...")
         self.search.setObjectName("TopSearch")
         self.search.setFixedHeight(SEARCH_HEIGHT)
@@ -477,7 +547,17 @@ class TitleBar(QWidget):
         self.search.setMaximumWidth(SEARCH_MAX_WIDTH)
         self.search.setSizePolicy(QSizePolicy.Policy.Expanding,
                                   QSizePolicy.Policy.Fixed)
-        row.addWidget(self.search, stretch=3)
+        centre_row.addWidget(self.search, stretch=3)
+        self._centre_buttons = QWidget(objectName="Bare")
+        self._centre_buttons.setFixedWidth(balance_width)
+        buttons_row = QHBoxLayout(self._centre_buttons)
+        buttons_row.setContentsMargins(0, 0, 0, 0)
+        buttons_row.setSpacing(6)
+        self._centre_buttons_row = buttons_row
+        self._centre_buttons.hide()
+        centre_row.addWidget(self._centre_buttons)
+        self._centre_group = centre
+        row.addWidget(centre, stretch=3)
         row.addStretch(1)
 
         right = QWidget(objectName="Bare")
@@ -496,6 +576,82 @@ class TitleBar(QWidget):
             right_row.addWidget(button)
         right.setMinimumWidth(side)
         row.addWidget(right)
+        self._right_group = right
+        self._row = row
+        # The two flexible gaps either side of the centred group. They
+        # are what balances the section buttons against the window
+        # buttons when the bar is a full-width strip; in full screen the
+        # bar is sized to hug its content and there is nothing left to
+        # balance, so they only take width away from the field - the
+        # centre had 3/5 of the bar and the field measured 548px of a
+        # 1100px allowance because of them.
+        self._flex = [i for i in range(row.count())
+                      if row.itemAt(i) is not None
+                      and row.itemAt(i).spacerItem() is not None]
+
+    def set_fullscreen(self, on: bool):
+        """Full screen's arrangement: the field centred with Saved,
+        Schedule and History immediately to its right, and the window's
+        own buttons gone entirely.
+
+        The owner's ask, 26 August 2026, pointing at Home's header - the
+        field sits in the gap between "Good Evening" and the clock, and
+        the three buttons follow it. Windowed keeps the design it has
+        always had; only this state rearranges.
+
+        Full screen has no use for minimise, maximise or close: there is
+        no frame to restore and Escape and F11 both leave. Hiding them
+        is what he asked for ("hide these buttons completely only while
+        in fullscreen"), and it is also what frees the width the centred
+        group needs.
+
+        The buttons are moved between two live layouts rather than being
+        duplicated - three widgets carrying tooltips, an event filter
+        and a connected signal each, and a second set would double every
+        one of those."""
+        on = bool(on)
+        if on == getattr(self, "_fullscreen", False):
+            return
+        self._fullscreen = on
+        target = self._centre_buttons_row if on else self._left_row
+        for button in self.section_buttons.values():
+            target.addWidget(button)
+            button.show()
+        self._centre_balance.setVisible(on)
+        self._centre_buttons.setVisible(on)
+        self.search.setMaximumWidth(
+            SEARCH_MAX_WIDTH_FULLSCREEN if on else SEARCH_MAX_WIDTH)
+        for index in self._flex:
+            self._row.setStretch(index, 0 if on else 1)
+        # **The empty half of the bar stops eating clicks**, and this is
+        # not a nicety - it was a bug the owner hit twice.
+        #
+        # Overlaid, the bar lies across the page's header row, and an
+        # invisible widget still hit-tests. Measured with a full-width
+        # bar: the Watch/Read tabs on Saved and the Downloads page's
+        # Clear Finished button were *0 of 3* reachable, every click
+        # landing on TitleBar - his "the watch and read tabs cannot be
+        # pressed" and "clear finished cannot be pressed", one cause,
+        # full screen only.
+        #
+        # WA_TransparentForMouseEvents on the bar itself was tried first
+        # and is wrong: it takes the bar's *own* children out of hit
+        # testing too, and measured the search field and all three
+        # section buttons unreachable. So the attribute goes only on the
+        # balance spacer, which is genuinely empty, and the real fix is
+        # that main._position_fullscreen_bar sizes the bar to hug its
+        # content instead of spanning the window.
+        if not on:
+            self.clearMask()
+        self._left_group.setVisible(not on)
+        self._right_group.setVisible(not on)
+        # Transparent over the page in full screen - it is sitting on
+        # the page's own header row there, not in a strip of its own.
+        self.setProperty("chrome", "fullscreen" if on else "windowed")
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+        self.update()
 
     def _window_button(self, glyph, tip, slot, name="WindowButton"):
         button = DriftButton(glyph, radius=0,
@@ -517,7 +673,8 @@ class TitleBar(QWidget):
 
         Presses on the field and the buttons never arrive here: those
         widgets accept their own."""
-        if event.button() == Qt.MouseButton.LeftButton:
+        if (event.button() == Qt.MouseButton.LeftButton
+                and not self.window().isFullScreen()):
             handle = self.window().windowHandle()
             if handle is not None:
                 handle.startSystemMove()
@@ -525,11 +682,91 @@ class TitleBar(QWidget):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        """What a double-click on a caption has always meant."""
-        if event.button() == Qt.MouseButton.LeftButton:
+        """What a double-click on a caption has always meant - except in
+        full screen, where it meant leaving it.
+
+        The owner's ask, 26 August 2026: "do not make the double click
+        exit the fullscreen mode". There is no caption to restore there,
+        and the maximise this emitted went on to call showMaximized,
+        which drops the window straight out of full screen."""
+        if (event.button() == Qt.MouseButton.LeftButton
+                and not self.window().isFullScreen()):
             self.maximise.emit()
             return
         super().mouseDoubleClickEvent(event)
+
+    def apply_fullscreen_mask(self):
+        """Let clicks through every part of the overlaid bar except the
+        field and the three buttons.
+
+        **A mask, because the two obvious answers both fail**, and both
+        were measured on the way here:
+
+          * Sizing the bar to hug its content is not enough once the
+            field is allowed 1100px - the bar is then 1428 wide, its
+            left edge lands on the page's own header row, and the Read
+            tab underneath it measured unreachable.
+          * WA_TransparentForMouseEvents on the bar takes its *own*
+            children out of hit testing with it - Qt does not descend
+            into a transparent widget - and measured 0 of 4 for the
+            field and the three buttons.
+
+        A mask sets the input region as well as the painted one, so the
+        gaps stop existing as far as the mouse is concerned while the
+        controls keep working normally. Re-applied on every reposition,
+        because the rects move with the window."""
+        if not getattr(self, "_fullscreen", False):
+            self.clearMask()
+            return
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        region = QRegion()
+        for widget in (self.search, self._centre_buttons):
+            if widget is None or not widget.isVisible():
+                continue
+            top_left = widget.mapTo(self, QPoint(0, 0))
+            rect = QRect(top_left, widget.size())
+            # A couple of pixels of slack, so a click on the very edge
+            # of the field is not lost to rounding.
+            region = region.united(QRegion(rect.adjusted(-2, -2, 2, 2)))
+        if region.isEmpty():
+            self.clearMask()
+        else:
+            self.setMask(region)
+
+    def set_fullscreen_search_width(self, room: int) -> int:
+        """Give the field a share of the room the page actually has.
+
+        The owner's ask, 26 August 2026: unfolding the sidebar should
+        take a little off it. The page loses 148px when the rail opens,
+        and a field pinned at its maximum ignored that entirely - it
+        stayed the same width in a narrower page. A share of the room
+        instead, floored at the windowed width so it can never come out
+        narrower there than it is when not full screen, and capped where
+        it was."""
+        wanted = max(SEARCH_MAX_WIDTH,
+                     min(SEARCH_MAX_WIDTH_FULLSCREEN,
+                         int(room * FULLSCREEN_SEARCH_SHARE)))
+        if wanted != self.search.maximumWidth():
+            self.search.setMaximumWidth(wanted)
+        return wanted
+
+    def fullscreen_width(self) -> int:
+        """How wide the bar needs to be when it is overlaying a page -
+        the centred group and nothing more, so everything either side of
+        it belongs to the page underneath.
+
+        Read off the field's *current* maximum, not the constant: it
+        follows the page width now (see set_fullscreen_search_width) and
+        a bar sized from the cap would leave a dead margin whenever the
+        field is under it."""
+        balance = self._centre_balance.width() or SECTION_BUTTON_WIDTH * 3 + 12
+        return (balance
+                + self.search.maximumWidth()
+                + self._centre_buttons.width()
+                + self._centre_row.spacing() * 2
+                + 24)
 
     def set_maximised(self, maximised: bool):
         """Swap the middle glyph. Restore and maximise are different
@@ -537,4 +774,3 @@ class TitleBar(QWidget):
         maximised window is the piece of this people notice first."""
         self._max_btn.setText(RESTORE_GLYPH if maximised else MAXIMISE_GLYPH)
         self._max_btn.setToolTip("Restore" if maximised else "Maximise")
-

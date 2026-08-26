@@ -782,6 +782,15 @@ QWidget#TitleBar {{
     background: {SIDEBAR};
     border-bottom: 1px solid {BORDER};
 }}
+/* Full screen puts the bar over the page's own header row rather than in
+   a strip of its own (window_chrome.TitleBar.set_fullscreen), so it must
+   not paint a band across the artwork behind it. Braces are doubled
+   because this whole sheet is an f-string - a single brace here is a
+   replacement field and the format call dies on it. */
+QWidget#TitleBar[chrome="fullscreen"] {{
+    background: transparent;
+    border: none;
+}}
 /* Square, full-height, no radius: these are Windows' caption buttons in
    the place Windows' caption buttons go, and rounding them would put a
    gap of bar colour in the window's own top-right corner. */

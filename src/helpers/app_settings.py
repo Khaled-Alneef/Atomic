@@ -311,6 +311,25 @@ def set_blur_episode_stills(enabled: bool):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_hide_entry_names() -> bool:
+    """Whether episode and chapter rows show only their number, with the
+    title left off (Settings > Watching > Episode List).
+
+    The owner's ask, 26 August 2026. Same reasoning as the blurred
+    stills beside it: an episode title is frequently a spoiler for the
+    episode you are about to watch, and a chapter title just as often.
+
+    **Defaults off**, because a list that hides what it knows would read
+    as broken to anyone who had not asked for it."""
+    return bool(_load().get("hide_entry_names", False))
+
+
+def set_hide_entry_names(enabled: bool):
+    data = _load()
+    data["hide_entry_names"] = bool(enabled)
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_manga_music_url() -> str:
     return _load().get("manga_music_url", "")
 

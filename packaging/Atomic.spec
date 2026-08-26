@@ -10,8 +10,9 @@ SRC_DIR = os.path.join(SPECPATH, "..", "src")
 # Everything the app ships as an image now lives under src/assets/,
 # with the nav icons in src/assets/icons/ - SVG since 25 August 2026,
 # which is also when the 1.2MB Icons.png sheet the previous PNG set was
-# cut from went away. README.txt sits beside them and is deliberately
-# not bundled: nothing reads it at runtime.
+# cut from went away. The README.txt that sat beside them is gone as of
+# 26 August 2026 - it was never bundled (nothing reads it at runtime)
+# and the owner asked for it out of the tree.
 ASSETS_DIR = os.path.join(SRC_DIR, "assets")
 ICONS_DIR = os.path.join(ASSETS_DIR, "icons")
 ICON_FILE = os.path.join(ASSETS_DIR, "app_icon.ico")

@@ -4604,80 +4604,69 @@ class TrackerPage(GlassPage):
             return
         if not found:
             return
+        # The heading and then the grid, with nothing between them - the
+        # owner's ask, 26 August 2026. The line that was here explained
+        # what "your library" meant, which the covers underneath say
+        # better than a sentence does.
         self._discover_body_layout.addWidget(
             QLabel("In Your Library", objectName="SectionTitle"))
-        self._discover_body_layout.addWidget(
-            QLabel("Games, apps, sites and saved titles you already have",
-                   objectName="Muted"))
-        strip = QWidget(objectName="Bare")
-        row = QHBoxLayout(strip)
-        row.setContentsMargins(0, 6, 0, 0)
-        row.setSpacing(12)
+        self._discover_body_layout.addWidget(self._build_owned_strip(found))
+
+    def _build_owned_strip(self, found):
+        """The library results, drawn by the same PosterStrip every other
+        Discover row uses.
+
+        **Not a row of hand-built cards any more** - the owner's ask, 26
+        August 2026: "use the same cards as the other results". They were
+        a separate widget with its own art box, its own eliding and its
+        own corners, which is why they had square corners when everything
+        around them was rounded and why the title clipped when nothing
+        else did. A second card mechanism drifts from the first; there is
+        only the first now.
+
+        The covers are local files rather than network fetches, so they
+        go straight into each record's `pixmap` and no `needs_cover` is
+        connected - that signal is how the catalogue rows ask for artwork
+        they have not got yet, and these already have theirs."""
+        strip = PosterStrip(POSTER_SIZE, ground=theme.PANEL_FILL)
+        strip.setFixedHeight(strip.sizeHint().height())
         dpr = float(self.devicePixelRatioF() or 1.0)
+        records, targets = [], []
         for title, page_name, label, entry in found:
-            row.addWidget(self._owned_card(title, page_name, label, entry, dpr))
-        row.addStretch(1)
-        self._discover_body_layout.addWidget(strip)
+            records.append({"title": title, "year": label, "rating": "",
+                            "saved": True,
+                            "pixmap": self._owned_pixmap(entry, dpr)})
+            targets.append((page_name, entry))
+        strip.set_items(records)
+        strip._targets = targets
+        strip.clicked.connect(lambda index, g=strip: self._open_owned(g, index))
+        return strip
 
-    # The owned card's art box. A poster is 2:3; a game or app icon is
-    # square and is letterboxed into the same box rather than stretched,
-    # so a row of mixed kinds still lines up.
-    OWNED_CARD_W = 132
-    OWNED_ART_H = 176
-
-    def _owned_card(self, title, page_name, label, entry, dpr):
+    def _open_owned(self, strip, index):
         from helpers import global_search
-        card = Card(matte=True)
-        card.setFixedWidth(self.OWNED_CARD_W)
-        body = QVBoxLayout(card)
-        body.setContentsMargins(0, 0, 0, 8)
-        body.setSpacing(6)
+        targets = getattr(strip, "_targets", ())
+        if 0 <= index < len(targets):
+            page_name, entry = targets[index]
+            global_search.open_entry(self.window(), page_name, entry)
 
-        art = QLabel()
-        art.setFixedSize(self.OWNED_CARD_W, self.OWNED_ART_H)
-        art.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        art.setScaledContents(False)
-        pixmap = None
+    def _owned_pixmap(self, entry, dpr):
+        """Whatever art the saved entry already carries, cut for the
+        grid. None when it has none - the grid draws the same
+        placeholder the catalogue rows start on."""
         for key in ("cover_path", "cover", "art", "image", "icon"):
             path = entry.get(key)
             if not path:
                 continue
-            candidate = QPixmap(str(path))
-            if not candidate.isNull():
-                pixmap = candidate
-                break
-        if pixmap is not None:
-            # Cut at the screen's ratio and tagged with it, or every one
-            # of these is soft on a non-100% display
-            # (.claude/rules/ui.md).
+            pixmap = QPixmap(str(path))
+            if pixmap.isNull():
+                continue
             scaled = pixmap.scaled(
-                QSize(int(self.OWNED_CARD_W * dpr), int(self.OWNED_ART_H * dpr)),
-                Qt.AspectRatioMode.KeepAspectRatio,
+                QSize(int(POSTER_SIZE[0] * dpr), int(POSTER_SIZE[1] * dpr)),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation)
             scaled.setDevicePixelRatio(dpr)
-            art.setPixmap(scaled)
-        else:
-            art.setText(label)
-            art.setStyleSheet(f"color: {theme.TEXT_DIM};")
-        body.addWidget(art)
-
-        name = QLabel()
-        name.setText(name.fontMetrics().elidedText(
-            title, Qt.TextElideMode.ElideRight, self.OWNED_CARD_W - 12))
-        name.setToolTip(title)
-        name.setStyleSheet(f"color: {theme.TEXT}; font-weight: 700;")
-        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        body.addWidget(name)
-
-        kind = QLabel(label, objectName="Muted")
-        kind.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        body.addWidget(kind)
-
-        card.clicked.connect(
-            lambda _=False, p=page_name, e=entry:
-            global_search.open_entry(self.window(), p, e))
-        use_hover_cursor(card)
-        return card
+            return scaled
+        return None
 
     def _on_discover_search(self):
         query = self._search_query().strip()

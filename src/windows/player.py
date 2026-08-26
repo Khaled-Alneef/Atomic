@@ -7094,15 +7094,15 @@ class PlayerPage(GlassPage):
                 logs.exception("Could not change motion smoothing")
         show_toast(self._toast_anchor(),
                    "Motion Smoothing On" if wanted else "Motion Smoothing Off")
-        self._open_settings_panel_rebuild()
-
-    def _open_settings_panel_rebuild(self):
-        """Re-open the settings panel so the row shows its new state.
-
-        `_new_panel` toggles a panel shut when the same kind is already
-        open, so the panel is dropped first rather than asked twice."""
-        self._panel = None
-        self._open_settings_panel()
+        # **Closes, like every other choice in here.** It used to re-open
+        # the panel so the tick could move, which left the gear's window
+        # sitting over the picture after the one thing it was opened for
+        # had been done - the owner's "when I press the motion smoothing
+        # the window does not close any more", 26 August 2026. The toast
+        # above already says which way it went, so the moved tick was
+        # buying nothing the user could not already see, and re-opening
+        # was also what dropped the panel's translucency over the video.
+        self._close_panel()
 
     def _open_streams_root(self):
         """Open the resolution panel at its top level (the pill / gear).
@@ -7201,8 +7201,31 @@ class PlayerPage(GlassPage):
         # so the two cannot disagree about what "best" means.
         if streams_module is not None:
             sources = sorted(sources, key=streams_module.list_sort_key)
+        # **One row per release.** Two addons carrying the same torrent
+        # answer with two equal dicts, and the panel listed both - the
+        # owner's screenshot, 26 August 2026, showing the same 487-seeder
+        # 561MB ToonsHub release twice, both highlighted. Keyed on the
+        # info hash where there is one, because that *is* the identity of
+        # a torrent; on title and size otherwise.
+        seen, unique = set(), []
         for stream in sources:
-            index = self._streams.index(stream)
+            digest = (stream.get("info_hash") or "").strip().lower()
+            key = digest or ((stream.get("title") or "").strip().lower(),
+                             stream.get("size_bytes"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(stream)
+        sources = unique
+        # **Identity, not equality.** self._streams.index(stream) returns
+        # the position of the first *equal* dict, so before the dedupe
+        # above both copies resolved to the same index: both drew as
+        # selected, and choosing the second switched to the first. The
+        # dedupe hides that, this fixes it - a list that ever holds two
+        # equal-but-distinct entries would bring it straight back.
+        positions = {id(entry): i for i, entry in enumerate(self._streams)}
+        for stream in sources:
+            index = positions.get(id(stream), -1)
             seeders = int(stream.get("seeders") or 0)
             meta = stream.get("reason") or ""
             if not meta:

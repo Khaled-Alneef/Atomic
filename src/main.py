@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from helpers import (app_settings, downloads, global_search, images, layout, logs,
+from helpers import (app_settings, downloads, images, layout, logs,
                      rail_anim, rail_icons, window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
@@ -49,6 +49,7 @@ from PyQt6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPalette,
                          QPixmap)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QAbstractScrollArea,
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -215,6 +216,15 @@ TITLE_BAR_ALLOWANCE = 48
 DOWNLOAD_BAR_HEIGHT = 4
 DOWNLOAD_POLL_MS = 1000
 DOWNLOAD_IDLE_POLL_MS = 2500
+
+# Where the bar sits over the page in full screen, measured rather than
+# picked: Home's greeting label lands at y=45 in container coordinates
+# and is 16 tall, so its centre is y=53, and a 48px bar centred on that
+# starts at 29. The owner's ask was for the field to sit "in the mid of
+# the time and the Good morning" - which is that row - and to be in the
+# same place on every page, so this is a constant and not read off
+# whatever header the current page happens to have.
+FULLSCREEN_BAR_TOP = 29
 
 SIDEBAR_WIDTH = 220
 # Wide enough for the nav bullets and the +/gear buttons once the text
@@ -506,7 +516,36 @@ RAIL_ICON_ROLE = Qt.ItemDataRole.UserRole + 1
 # Three durations rather than one, all inside the 120-160ms he named.
 # Press is the shortest on purpose: a press is feedback for something
 # already happening, and anything that outlives the click reads as lag.
-RAIL_HOVER_MS = 140.0
+# 170ms, up from 140 - the owner's anime spec asks for the whole
+# sprinkle to land in 150-190ms, and every icon shares this one ramp
+# rather than owning a timer (rail_anim's staggers are fractions of
+# it, so they follow automatically).
+# **340ms, up from 170.** The owner reported three separate icon
+# animations as not happening - the gear "still does not spin", the
+# downloads arrow "still not what I want" - and while the gear turned out
+# to be a genuine bug (it was never drawn), the other two were a
+# duration problem: a three-phase sequence inside 170ms gives each phase
+# about 55ms, which is below what reads as a phase rather than a blur.
+# The downloads icon's hide-then-fall in particular spent 20ms hidden.
+#
+# Still a third of rule 7's one-second budget, and the staggers in
+# rail_anim are fractions of this so they all follow.
+RAIL_HOVER_MS = 340.0
+
+# Icons whose hover wants longer than the shared ramp, as a multiple of
+# it. The owner's ask, 26 August 2026: the apps grid should pulse "much
+# slower". A per-row scale rather than a longer ramp for everyone,
+# because the rest of the rail is at the speed he settled on and only
+# this one is meant to be languid - 2.6 x 340ms is about 880ms, still
+# inside rule 7's second.
+ICON_HOVER_SCALE = {"apps": 2.6}
+
+# The longest any hover animation is allowed to run. CLAUDE.md rule 7:
+# "make all transitions in the app take at most 1 sec". Nothing here
+# gates content - these are decorations on a hover - but the rule says
+# *all* transitions and it is the owner's, so this is where they stop
+# until he says otherwise.
+ICON_HOVER_MAX_MS = 1000.0
 RAIL_ACTIVE_MS = 160.0
 RAIL_PRESS_MS = 110.0
 
@@ -841,6 +880,23 @@ class _RailMotion(QObject):
             selection.selectionChanged.connect(self._on_selection)
 
     # -- state ---------------------------------------------------------
+    def _hover_scale(self, row) -> float:
+        """How much longer than the shared ramp this row's hover takes.
+
+        Read off the row's own icon rather than held as state, so a rail
+        that is rebuilt - which happens on every visit - cannot end up
+        with a stale scale against a row that has since changed."""
+        if not ICON_HOVER_SCALE:
+            return 1.0
+        try:
+            item = self._rail.item(row)
+            if item is None:
+                return 1.0
+            token = item.data(RAIL_ICON_ROLE)
+        except (AttributeError, RuntimeError):
+            return 1.0
+        return ICON_HOVER_SCALE.get(_icon_name(token), 1.0)
+
     def _target(self, row):
         item = self._rail.item(row)
         return (1.0 if row == self._hover_row else 0.0,
@@ -1008,12 +1064,16 @@ class _RailMotion(QObject):
         for row, held in list(self._values.items()):
             target = self._target(row)
             changed = False
+            # Only the hover channel is scaled: the selected and pressed
+            # ramps are feedback on an action and have to stay prompt
+            # whatever the icon on the row is doing.
+            slow = self._hover_scale(row)
             for channel in (0, 1, 2):
                 want = target[channel]
                 have = held[channel]
                 if have == want:
                     continue
-                step = steps[channel]
+                step = steps[channel] / slow if channel == 0 else steps[channel]
                 held[channel] = (min(want, have + step) if have < want
                                  else max(want, have - step))
                 changed = True
@@ -1186,6 +1246,144 @@ def _rail_icon(path, dpr, size=RAIL_ICON_SIZE):
     if normal.isNull():
         return None
     return QIcon(normal)
+
+
+class _MotionIconButton(QPushButton):
+    """A sidebar button whose icon is drawn by rail_anim, so it can
+    animate on hover while QSS keeps painting everything else.
+
+    **Not a DriftButton.** That one paints its own accent fill, which is
+    right for a pressable teal button and wrong here: these sit in the
+    rail, where #NavButton's styling is what they are supposed to look
+    like. All this adds is a hover ramp and an icon drawn on top.
+
+    The glyph comes out of the button's *text* when one of these is
+    used - a Segoe codepoint in the label cannot be animated, and two
+    icons would be one too many."""
+
+    ICON_UNITS = 22.0
+    TEXT_INSET = 14.0
+
+    def __init__(self, profile=None, parent=None, glyph="", animated=True,
+                 icon_px=None, duration_ms=None, spin=0.0,
+                 snap_on_leave=True, **kwargs):
+        super().__init__("", parent, **kwargs)
+        self._profile = profile
+        self._icon_px = float(icon_px or self.ICON_UNITS)
+        self._duration = float(duration_ms or RAIL_HOVER_MS)
+        # Degrees the icon turns over a full hover. Only the glyph path
+        # uses it - a profile animates itself.
+        self._spin = float(spin)
+        self._snap_on_leave = bool(snap_on_leave)
+        # **A glyph instead of a profile, for an icon that must stay the
+        # one it always was.** The Settings gear is a Segoe codepoint and
+        # the owner wants that exact symbol - but drawn as button *text*
+        # it is pinned by QSS (`#NavButton { font-size: 10.5pt }`), so
+        # setFont on it is ignored outright and it renders at 10.5pt
+        # beside a 22px drawn icon. Measured: the gear's brightest pixel
+        # reached L=55 against the Downloads icon's L=164, which is what
+        # "smaller and blurred" was.
+        #
+        # Drawn here it is the same character at the same size, inset and
+        # colour as its neighbour, and nothing in the stylesheet can
+        # shrink it.
+        self._glyph = str(glyph or "")
+        self._animated = bool(animated)
+        self._hover = 0.0
+        self._collapsed = False
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._icon_tween = SmoothTween(self, self._set_hover, self._duration)
+
+    def set_collapsed(self, collapsed):
+        self._collapsed = bool(collapsed)
+        self.update()
+
+    def _set_hover(self, value):
+        self._hover = float(value)
+        self.update()
+
+    def enterEvent(self, event):
+        if self._animated:
+            self._icon_tween.start(self._hover, 1.0, self._duration)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        # **Snapped, not unwound.** Running the ramp back down replays
+        # the whole sequence in reverse as the pointer leaves - the
+        # arrow lifting back out and the old one fading in - which the
+        # owner read as the icon moving when he was not touching it.
+        # An animation that says "an arrow lands here" has nothing to
+        # say backwards, so leaving just ends it.
+        if self._snap_on_leave:
+            self._icon_tween.stop()
+            self._set_hover(0.0)
+        else:
+            # Unwound instead: a turn that snapped part-way back to
+            # its resting angle would jump.
+            self._icon_tween.start(self._hover, 0.0, self._duration)
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        # The same self-correction the rail and the poster grids carry:
+        # pressing this opens a page *over* it, which covers the button
+        # without the pointer ever crossing its edge, so the Leave that
+        # should end the hover never arrives (.claude/rules/ui.md).
+        if self._hover > 0.0 and not self.underMouse():
+            if self._snap_on_leave:
+                self._icon_tween.stop()
+                self._set_hover(0.0)
+            else:
+                self._icon_tween.start(self._hover, 0.0, self._duration)
+        super().paintEvent(event)
+        size = self._icon_px
+        rect = QRectF(0.0, 0.0, size, size)
+        if self._collapsed:
+            rect.moveCenter(QRectF(self.rect()).center())
+        else:
+            rect.moveTo(self.TEXT_INSET, (self.height() - size) / 2.0)
+        lit = max(self._hover, 1.0 if self.isChecked() else 0.0)
+        colour = QColor(theme.mix(theme.TEXT_MUTED, theme.TEXT, lit))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._glyph:
+            # **`self._hover`, not an eased read of it.** SmoothTween
+            # already runs ease_out_cubic over each transition's own
+            # progress, so easing the value again here applies the curve
+            # twice - and the second pass is on the *value*, which makes
+            # it direction-dependent. Leaving, the angle hardly moved
+            # while hover fell from 1.0 (the curve is flat there) and
+            # then accelerated, so the turn out read as slower than the
+            # turn in even though both take exactly the same 1000ms.
+            # That is the owner's report of 26 August 2026.
+            #
+            # This differs from _RailDelegate, which *does* ease here -
+            # and correctly: _RailMotion stores linear progress and has
+            # no easing of its own, so that is the only pass.
+            angle = self._spin * self._hover
+            # **Only when it is actually turning.** Qt renders text under
+            # a transform on a different path - unhinted - so leaving the
+            # rotation applied at rest would soften the glyph for the
+            # whole time nobody is hovering it, to say nothing of a
+            # 360-degree turn that is the identity anyway.
+            if abs(angle) % 360.0 > 0.05:
+                # About the icon's own centre, so it turns in place.
+                centre = rect.center()
+                painter.translate(centre)
+                painter.rotate(angle)
+                painter.translate(-centre)
+            font = theme.icon_font()
+            # Pixels, not points: points go through the screen's DPI and
+            # the whole purpose here is to match a neighbour measured in
+            # device pixels.
+            font.setPixelSize(int(size))
+            painter.setFont(font)
+            painter.setPen(colour)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._glyph)
+        else:
+            # Same reason as the spin above: the tween has already
+            # eased this, so it is handed over as it stands.
+            rail_anim.paint(painter, self._profile, rect, self._hover, colour,
+                            int(size), float(self.devicePixelRatioF() or 1.0))
 
 
 class _RailDelegate(QStyledItemDelegate):
@@ -1447,6 +1645,20 @@ class _RailDelegate(QStyledItemDelegate):
         # quantised at all.
         tint = RAIL_TINTS[int(round(max(hover, active) * RAIL_TINT_STOPS))]
         colour = QColor(tint)
+        # **The label fades with the fold** - the owner's ask, 26 August
+        # 2026: "make the transition of the text and the icons in the
+        # sidebar smooth when folding and unfolding". The label used to
+        # be there at full strength for the whole sweep and then vanish
+        # in one step at the end, so a fold read as the rail sliding
+        # shut and the words disappearing separately.
+        #
+        # Only the *text* takes the alpha. The icon is painted by
+        # rail_anim below with its own colour and has to stay solid: it
+        # is the one thing that is on screen at both widths, and fading
+        # it out and back in is the flicker this is meant to remove.
+        fade = getattr(widget.window(), "_fold_text_alpha", 1.0)
+        if fade < 0.999:
+            colour.setAlphaF(max(0.0, min(1.0, fade)))
         opt.palette.setColor(QPalette.ColorRole.Text, colour)
         opt.palette.setColor(QPalette.ColorRole.HighlightedText, colour)
         path = index.data(RAIL_ICON_ROLE)
@@ -1516,7 +1728,13 @@ class _RailDelegate(QStyledItemDelegate):
             # rail_anim holds no state and every value it computes is a
             # function of it, which is what makes leaving smooth from
             # wherever it is and why no icon can get stuck mid-pose.
-            rail_anim.paint(painter, name, icon_rect, _ease_out_cubic(hover),
+            # **hover alone, not max(hover, active).** Holding the pose
+            # on the selected row was tried at the owner's ask and taken
+            # back out the same day: a row that is permanently mid-
+            # animation reads as stuck rather than as current, and the
+            # pill and the tint already say which page you are on.
+            rail_anim.paint(painter, name, icon_rect,
+                            _ease_out_cubic(hover),
                             tint, _rail_view_icon_size(widget),
                             _rail_dpr(widget))
         elif icon_rect is not None and icon_rect.isValid():
@@ -1664,8 +1882,18 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
+        # Kept, because full screen takes the bar *out* of it and gives
+        # it back on the way home (_apply_fullscreen_chrome).
+        self._root_layout = root_layout
 
+        # **The bar is back above the body** - the owner's ask, 26
+        # August 2026, reversing the move into the sidebar he had asked
+        # for earlier the same day: "retrieve the non-full screen design
+        # (with the upper bar)". It is the windowed design that comes
+        # back; full screen gets a different arrangement entirely, laid
+        # out in _apply_fullscreen_chrome.
         self.title_bar = window_chrome.TitleBar(central)
+        self.window_buttons = self.title_bar
         self.title_bar.section.connect(self.open_section)
         self.title_bar.minimise.connect(self.showMinimized)
         self.title_bar.maximise.connect(self._toggle_maximised)
@@ -1780,6 +2008,9 @@ class MainWindow(QMainWindow):
         # Every scrolling rail column in the window (_rail_scroller), so
         # the fold can set their scrollbar policy without naming them.
         self._rail_scrollers = []
+        # 1.0 expanded, 0.0 folded, swept between by the fold - see the
+        # note in _RailDelegate.paint.
+        self._fold_text_alpha = 1.0
         # The same columns with their rails and gaps, for _fit_rails.
         self._rail_columns = []
         self._rail_bucket = None
@@ -1819,7 +2050,14 @@ class MainWindow(QMainWindow):
         a row appearing in the middle of it would be one they never put
         there. A NavButton for the same reason Settings is one: it is
         already proven to render at both sidebar widths."""
-        downloads = QPushButton(objectName="NavButton")
+        # **At the ceiling, and that is why it is not slower still.**
+        # The owner asked twice for the arrow's fall to be slower; this
+        # went 340 -> 900 -> 1000ms, and 1000 is where CLAUDE.md rule 7
+        # stops it ("make all transitions in the app take at most 1
+        # sec"). Going past it is his call to make, not one to take on
+        # his behalf against his own standing rule.
+        downloads = _MotionIconButton("downloads", duration_ms=ICON_HOVER_MAX_MS,
+                                      objectName="NavButton")
         # 40, matching Settings below and the section bar's rows: the
         # nav rows above grew to Harbor's more generous height, and a
         # 34px row under a column of 44px ones read as a different
@@ -1869,7 +2107,26 @@ class MainWindow(QMainWindow):
         bar.hide()
         layout.addWidget(bar)
 
-        settings = QPushButton(objectName="NavButton")
+        # **The Segoe gear, kept.** It was briefly swapped for a drawn,
+        # turning one so it could animate; the owner asked for the old
+        # icon back the same day. The spin goes with it - that is the
+        # trade he chose, and rail_anim's `settings` profile stays for
+        # anything that is a rail row.
+        # The 1.10 gear, drawn rather than set as text - see
+        # _MotionIconButton for why the stylesheet made that necessary.
+        # `animated=False`: he asked for the old icon back and the spin
+        # went with it.
+        # Same glyph, a shade smaller than the Downloads icon beside
+        # it, turning a whole revolution to the right on hover. It
+        # unwinds rather than snapping on leave: a turn cut off part-way
+        # would jump back to its resting angle.
+        # 1000ms - a whole revolution is a lot of travel to fit into
+        # the rail's 340, and this is the ceiling CLAUDE.md rule 7 sets
+        # for any transition in the app.
+        settings = _MotionIconButton(glyph=theme.SETTINGS_ICON, icon_px=20,
+                                     spin=360.0, snap_on_leave=False,
+                                     duration_ms=ICON_HOVER_MAX_MS,
+                                     objectName="NavButton")
         settings.setFixedHeight(40)
         use_hover_cursor(settings)
         settings.clicked.connect(self._open_settings)
@@ -3009,10 +3266,13 @@ class MainWindow(QMainWindow):
         count = f" ({self._download_count})" if self._download_count else ""
         for pair in getattr(self, "_utility_bars", ()):
             button = pair["downloads"]
-            button.setText(glyph if collapsed
-                           else f"  {glyph}   Downloads{count}")
-            button.setFont(theme.icon_font() if collapsed
-                           else theme.icon_font(10))
+            # No glyph in the text: _MotionIconButton draws the icon
+            # itself so it can animate. The spaces are the room it is
+            # drawn in - TEXT_INSET plus ICON_UNITS, in the label's own
+            # font rather than the icon one.
+            button.set_collapsed(collapsed)
+            button.setText("" if collapsed else f"        Downloads{count}")
+            button.setFont(theme.icon_font(10))
             button.setToolTip(self._download_tooltip
                               or ("Downloads" if collapsed else ""))
             button.setProperty("collapsed", collapsed)
@@ -3101,10 +3361,8 @@ class MainWindow(QMainWindow):
         # the collapsed rail's 14pt, matching the size the emoji had.
         for pair in getattr(self, "_utility_bars", ()):
             button = pair["settings"]
-            button.setText(theme.SETTINGS_ICON if collapsed
-                           else f"  {theme.SETTINGS_ICON}   Settings")
-            button.setFont(theme.icon_font() if collapsed
-                           else theme.icon_font(10))
+            button.set_collapsed(collapsed)
+            button.setText("" if collapsed else "        Settings")
             # A waiting update outranks the usual tooltip at either
             # width - the dot says something is there, this says what.
             # Expanded, the button already reads "Settings", so there is
@@ -3236,6 +3494,16 @@ class MainWindow(QMainWindow):
 
         def apply(value):
             width = int(round(value))
+            # How far along the sweep the labels are, for the delegate -
+            # squared so the text is gone well before the rail is, which
+            # is what stops it being clipped mid-word on the way down.
+            travel = (value - SIDEBAR_COLLAPSED_WIDTH) / span
+            self._fold_text_alpha = max(0.0, min(1.0, travel)) ** 2
+            for scroller in getattr(self, "_rail_scrollers", ()):
+                try:
+                    scroller.viewport().update()
+                except (AttributeError, RuntimeError):
+                    pass
             holder.setMaximumWidth(width)
             # Both, or the other one clamps the result: setFixedWidth
             # pins min and max together, so driving one alone does
@@ -3250,6 +3518,7 @@ class MainWindow(QMainWindow):
 
         def landed():
             self.logo_label.set_phase(0.0)
+            self._fold_text_alpha = 0.0 if self._sidebar_collapsed else 1.0
             holder.setFixedWidth(SIDEBAR_COLLAPSED_WIDTH
                                  if self._sidebar_collapsed else SIDEBAR_WIDTH)
             self._fold_in_flight = False
@@ -3646,54 +3915,41 @@ class MainWindow(QMainWindow):
         kind = event.type()
         if (kind == QEvent.Type.KeyPress
                 and obj is getattr(self, "top_search", None)):
-            # Up/Down/Enter drive the results panel while the caret
-            # stays in the field - which is why the panel is shown
-            # without activating it (helpers/global_search).
+            # **No suggestions any more** - the owner's ask, 26 August
+            # 2026: "remove the suggestions from the search bar
+            # entirely". The dropdown is gone, so Up and Down belong to
+            # the field again and Enter has one meaning instead of two.
+            #
+            # Nothing is lost that he was using: typing already narrows
+            # the page underneath, and Enter already took him to the
+            # full results on Discover. The panel was the third thing,
+            # and it was the one that had to be aimed at.
+            #
+            # `obj`, not self.top_search: there are two fields now - the
+            # bar's and the rail's - and this handles whichever was
+            # typed into.
             key = event.key()
-            panel = self._search_panel
-            if panel is not None:
-                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
-                    panel.move_selection(1 if key == Qt.Key.Key_Down else -1)
-                    return True
-                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                    # **Only when a suggestion is genuinely picked.**
-                    # The panel exists from the first keystroke and is
-                    # empty until the lookup answers, so this used to
-                    # swallow Enter and do nothing at all if the user
-                    # typed and pressed straight away - the owner's
-                    # report, 26 August 2026. An empty panel, or one
-                    # with no current row, falls through to Discover
-                    # below.
-                    if panel.results.count() and panel.results.currentItem():
-                        panel.open_current()
-                        self.top_search.clear()
-                        self._close_search_panel()
-                        return True
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                # **Enter with no suggestion picked goes to Discover.**
-                # The owner's ask, 26 August 2026: searching should take
-                # him to the full results rather than leave him reading
-                # a dropdown. Typing still narrows the page underneath -
-                # that is a different thing he asked for and both fit,
-                # because one is what happens *as* you type and this is
-                # what happens when you say you are done.
-                self._search_in_discover(self.top_search.text())
+                # Enter goes to Discover's full results and leaves the
+                # field - the caret should not still be blinking in the
+                # box while the answer is being read. The text stays: it
+                # is what the page below is showing.
+                self._search_in_discover(obj.text())
+                self._leave_top_search()
                 return True
             if key == Qt.Key.Key_Escape:
                 # Escape *leaves* the field, it does not merely empty
                 # it. Clearing alone left the caret blinking in a box
-                # the user had just said they were done with - reported
-                # once already, on Home's field, and this is the same
-                # ending applied to the one field that replaced it.
-                self.top_search.clear()
-                self._close_search_panel()
-                self.top_search.clearFocus()
-                if self._current_page is not None:
-                    self._current_page.setFocus()
+                # the user had just said they were done with.
+                obj.clear()
+                self._refilter_current_page()
+                self._leave_top_search()
                 return True
         if kind == QEvent.Type.Resize:
             if obj is getattr(self, "container", None):
                 self._fit_current_page()
+                # The overlaid bar spans the container, so it follows it.
+                self._position_fullscreen_bar()
         # The sidebars are hand-positioned children of their holder for
         # the same reason the pages are of the container - they slide
         # over each other - so they too follow their parent's resizes
@@ -4007,6 +4263,138 @@ class MainWindow(QMainWindow):
             logs.exception("could not close the reading music at exit")
         super().closeEvent(event)
 
+    def _apply_fullscreen_chrome(self):
+        """Move the bar between its two homes as full screen comes and
+        goes.
+
+        Windowed it is a strip above the body, the design the owner
+        asked to have back. Full screen it is a transparent overlay on
+        the page's own header row - field centred between the greeting
+        and the clock, Saved/Schedule/History to its right, and the
+        window buttons gone, because there is no frame to minimise or
+        restore there and Escape and F11 both leave.
+
+        Re-parented rather than duplicated. The warning against moving
+        widgets between layouts (see _build_utility_footer) is about
+        doing it on *every page swap*; this happens when full screen is
+        entered or left, which is rare, and one bar carrying one search
+        field is worth more than two of everything kept in sync."""
+        bar = getattr(self, "title_bar", None)
+        if bar is None:
+            return
+        on = self.isFullScreen()
+        if on == getattr(self, "_bar_overlaid", False):
+            return
+        self._bar_overlaid = on
+        bar.set_fullscreen(on)
+        if on:
+            bar.setParent(self.container)
+            bar.show()
+            self._bind_page_scroll()
+            self._position_fullscreen_bar()
+        else:
+            self._bind_page_scroll()        # drops the binding
+            self._root_layout.insertWidget(0, bar)
+            bar.show()
+
+    def _page_scroll_bar(self):
+        """The current page's main vertical scrollbar, or None.
+
+        Chosen by viewport height rather than by name: Home builds its
+        outer scroll area inline (windows/home.py) and keeps no
+        reference to it, and it also holds two sideways strips that are
+        scroll areas too. The tallest viewport is the page's own."""
+        page = self._current_page
+        if page is None:
+            return None
+        best = None
+        try:
+            areas = page.findChildren(QAbstractScrollArea)
+        except RuntimeError:
+            return None
+        for area in areas:
+            try:
+                if not area.isVisible():
+                    continue
+                bar = area.verticalScrollBar()
+                height = area.viewport().height()
+            except (AttributeError, RuntimeError):
+                continue
+            if bar is not None and (best is None or height > best[0]):
+                best = (height, bar)
+        return best[1] if best else None
+
+    def _bind_page_scroll(self):
+        """Have the overlaid bar ride Home's scroll, and only Home's.
+
+        The owner's ask, 26 August 2026: on the main page it should
+        travel up with the content and leave the screen, rather than
+        staying put. Everywhere else it stays where it is - those pages
+        are long lists, and a search field that scrolls away on one
+        would be a search field you have to scroll back for.
+
+        Re-bound on every page change because the pages are rebuilt from
+        scratch each visit, so yesterday's scrollbar is a deleted C++
+        object by the time this runs again."""
+        old = getattr(self, "_scroll_bound", None)
+        if old is not None:
+            try:
+                old.valueChanged.disconnect(self._position_fullscreen_bar)
+            except (TypeError, RuntimeError):
+                pass
+        self._scroll_bound = None
+        if not getattr(self, "_bar_overlaid", False):
+            return
+        try:
+            here = _page_name(self._history[self._history_index])
+        except (AttributeError, IndexError):
+            return
+        if here != "home":
+            return
+        bar = self._page_scroll_bar()
+        if bar is None:
+            return
+        bar.valueChanged.connect(self._position_fullscreen_bar)
+        self._scroll_bound = bar
+
+    def _position_fullscreen_bar(self):
+        """Hold the overlaid bar on the page's header row.
+
+        Raised every time: the pages are hand-positioned children of the
+        same container and a freshly shown one sits above whatever was
+        there, so a bar that was only raised once disappears behind the
+        first page change."""
+        bar = getattr(self, "title_bar", None)
+        if bar is None or not getattr(self, "_bar_overlaid", False):
+            return
+        height = bar.sizeHint().height() or theme.TITLE_BAR_HEIGHT
+        # **Only as wide as it needs to be.** A bar spanning the page
+        # was a transparent strip lying across the header row, and it
+        # swallowed every click that landed on it - see the note in
+        # TitleBar.set_fullscreen for the two controls that measured
+        # unreachable because of it.
+        available = self.container.width()
+        # The field first - the bar's width is derived from it.
+        bar.set_fullscreen_search_width(available)
+        width = min(available, bar.fullscreen_width())
+        # On Home it rides the scroll and goes off the top with the
+        # content; nowhere else is bound, so `offset` stays 0 there.
+        # Qt clips a child to its parent, so no hiding is needed once it
+        # has travelled past the edge.
+        offset = 0
+        rider = getattr(self, "_scroll_bound", None)
+        if rider is not None:
+            try:
+                offset = int(rider.value())
+            except RuntimeError:
+                self._scroll_bound = None
+        bar.setGeometry((available - width) // 2, FULLSCREEN_BAR_TOP - offset,
+                        width, height)
+        bar.raise_()
+        # Only the field and the buttons take clicks; the gaps belong to
+        # the page underneath - see TitleBar.apply_fullscreen_mask.
+        bar.apply_fullscreen_mask()
+
     def start_fullscreen(self):
         """Open straight into full screen, for a sign-in launch with
         Settings > Startup > "Fullscreen mode when launch on startup" on.
@@ -4087,7 +4475,13 @@ class MainWindow(QMainWindow):
         shows a frame of the wrong size. An ordinary maximise is the
         animation the user expects to see."""
         if not self._looks_maximised():
-            self.showMaximized()
+            # Not plain showMaximized(), for the mirror of the reason
+            # the restore below is not plain showNormal() - see
+            # window_chrome.maximise_window.
+            window_chrome.maximise_window(self)
+            bar = getattr(self, "window_buttons", None)
+            if bar is not None:
+                bar.set_maximised(self._looks_maximised())
             return
         # **Not plain showNormal().** After a drag-to-the-top snap that
         # call returns cleanly and changes nothing - Windows keeps
@@ -4098,7 +4492,7 @@ class MainWindow(QMainWindow):
         # Qt may post no WindowStateChange for a restore it did not
         # perform itself, so the bar is told directly rather than left
         # waiting for changeEvent to notice.
-        bar = getattr(self, "title_bar", None)
+        bar = getattr(self, "window_buttons", None)
         if bar is not None:
             bar.set_maximised(self._looks_maximised())
         # **And check it actually came down.** Belt and braces now that
@@ -4122,7 +4516,8 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowStateChange:
-            bar = getattr(self, "title_bar", None)
+            self._apply_fullscreen_chrome()
+            bar = getattr(self, "window_buttons", None)
             if bar is not None:
                 bar.set_maximised(self._looks_maximised())
                 # **The bar stays, full screen included** - the owner's
@@ -4142,36 +4537,24 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     # ---- The one search field -----------------------------------------
-    def _on_top_search(self, text):
-        """Results drop out of the bar's field, on every page.
+    def _leave_top_search(self):
+        """Take the caret out of the search field and give it back to
+        the page - the single ending Escape and Enter both want."""
+        self.top_search.clearFocus()
+        if self._current_page is not None:
+            self._current_page.setFocus()
 
-        The panel is a list under the field rather than a page of its
-        own, for the reason helpers/global_search records: the field
-        lands under the eye and the results grow downwards from it
-        without the panel jumping about as they arrive."""
-        if not str(text).strip():
-            self._close_search_panel()
-            return
-        if self._search_panel is None:
-            self._search_panel = global_search.GlobalSearch(
-                self, anchor=self.top_search)
-            # It closes itself when a result is chosen, and deletes
-            # itself when it does; dropping the reference then is what
-            # keeps the next keystroke off a deleted panel.
-            self._search_panel.closed.connect(self._forget_search_panel)
-            self._search_panel.show()
-        self._search_panel.set_query(text)
-        # Typing also narrows the page underneath - the owner's ask, so
-        # that losing the per-page boxes loses no filtering with them.
+    def _on_top_search(self, text):
+        """Typing narrows the page underneath, and that is now the whole
+        of what it does - see the note in eventFilter for why the
+        suggestions dropdown went."""
         self._refilter_current_page()
 
-    def _forget_search_panel(self):
-        self._search_panel = None
-
     def _close_search_panel(self):
-        if self._search_panel is not None:
-            self._search_panel.close()
-            self._search_panel = None
+        """Kept as the name several places already call, now that there
+        is no panel to close - what they actually wanted either way was
+        the page put back the way it was."""
+        self._search_panel = None
         self._refilter_current_page()
 
     def open_section(self, key):
@@ -4511,6 +4894,20 @@ class MainWindow(QMainWindow):
         if not animate or old_page is None:
             new_page.setGeometry(rect)
             new_page.show()
+            # **Back on top.** In full screen the bar is a sibling of the
+            # pages inside this container, and a widget that is shown
+            # goes above its siblings - so every page change buried the
+            # search field behind the page that had just arrived. The
+            # owner's report, 26 August 2026: "when I put FS it appears
+            # then when I search or move to another page it disappears".
+            #
+            # It was missed because the check written for it asked
+            # whether the bar was *visible* and who its parent was, and
+            # both stayed true the whole time. Stacking is a different
+            # question and needs a different measurement - see the
+            # childAt() probe.
+            self._bind_page_scroll()
+            self._position_fullscreen_bar()
             if old_page is not None:
                 old_page.deleteLater()
             return
@@ -4546,6 +4943,10 @@ class MainWindow(QMainWindow):
                 slide.deleteLater()
             page.setGeometry(self.container.rect())
             page.show()
+            # Same reason as the immediate path above - and the slide
+            # compositor is a sibling too, so this runs after it is gone.
+            self._bind_page_scroll()
+            self._position_fullscreen_bar()
             previous.deleteLater()
 
         slide = PageSlide(self.container, old_shot, new_shot,
@@ -4557,7 +4958,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         # A snap changes the size without changing the window *state*,
         # so the button's glyph follows the geometry as well.
-        bar = getattr(self, "title_bar", None)
+        bar = getattr(self, "window_buttons", None)
         if bar is not None:
             bar.set_maximised(self._looks_maximised())
         super().resizeEvent(event)

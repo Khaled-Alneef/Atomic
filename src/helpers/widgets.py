@@ -1791,9 +1791,13 @@ def bake_halo(pixmap: QPixmap, radius=HERO_LOGO_HALO_RADIUS,
     scene = QGraphicsScene()
     item = QGraphicsPixmapItem(pixmap)
     effect = QGraphicsDropShadowEffect()
-    # In device pixels, like the canvas below: the scene knows nothing
-    # about the ratio the pixmap is tagged with.
-    effect.setBlurRadius(radius * dpr)
+    # **In scene units, not device pixels.** A QGraphicsPixmapItem's
+    # bounding rect is the pixmap's *device-independent* size, so the
+    # scene is already 1/dpr the canvas and rendering scales it back up
+    # by dpr - a blur of radius*dpr here came out as radius*dpr*dpr on
+    # screen. `radius` becomes radius*dpr device pixels through that
+    # same scale, which is what `pad` reserves.
+    effect.setBlurRadius(radius)
     effect.setOffset(0, 0)
     effect.setColor(colour)
     item.setGraphicsEffect(effect)
@@ -1803,9 +1807,20 @@ def bake_halo(pixmap: QPixmap, radius=HERO_LOGO_HALO_RADIUS,
     canvas.fill(0)
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    # **The item's own bounds as the source, not the pixmap's size.**
+    # Measured 26 August 2026, and this is the owner's "the logos in the
+    # featured and continue watching banners seem blurry in the 2K
+    # monitor": QGraphicsPixmapItem reports its bounding rect in
+    # device-independent units, so a 600x200 pixmap tagged dpr=2 is a
+    # 300x100 item. Asking the scene for a 600x200 source rect therefore
+    # asked for the item plus an equal amount of empty space, and the
+    # logo was rendered at half scale into the corner of the canvas and
+    # then drawn back at full size - soft on any scaled display, and
+    # exactly right at 100%, which is why it only ever showed on the
+    # second monitor.
     scene.render(painter,
                  QRectF(pad, pad, pixmap.width(), pixmap.height()),
-                 QRectF(0, 0, pixmap.width(), pixmap.height()))
+                 item.boundingRect())
     painter.end()
     baked = QPixmap.fromImage(canvas)
     baked.setDevicePixelRatio(dpr)

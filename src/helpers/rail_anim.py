@@ -65,6 +65,97 @@ def _filled(body):
     return _FILL % body
 
 
+def _sparkle(cx, cy, r):
+    """A hollow four-point sparkle centred on (cx, cy), reaching `r`.
+
+    **Concave edges, no fill, four tips** - the owner's spec, 26 August
+    2026, which rules out a five-point star, a filled diamond and the
+    straight-edged four-point star this icon used before. The centre is
+    genuinely empty: `_svg`'s shell is `fill="none"`, so what draws is
+    the outline and nothing is painted over the middle to fake it.
+
+    Each quarter is one cubic whose two controls sit at 0.05r and 0.36r
+    from the centre line, which is what bows the edge inward and tapers
+    the tips. Written as arithmetic rather than three hand-typed paths
+    because the same shape is needed at three sizes, and hand-tuning
+    them separately is how they would drift out of family.
+    """
+    def pt(dx, dy):
+        return f"{cx + dx * r:.2f} {cy + dy * r:.2f}"
+    near, far = 0.05, 0.36
+    return ("M" + pt(0, -1)
+            + "C" + pt(near, -far) + " " + pt(far, -near) + " " + pt(1, 0)
+            + "C" + pt(far, near) + " " + pt(near, far) + " " + pt(0, 1)
+            + "C" + pt(-near, far) + " " + pt(-far, near) + " " + pt(-1, 0)
+            + "C" + pt(-far, -near) + " " + pt(-near, -far) + " " + pt(0, -1)
+            + "Z")
+
+
+# Where the star sits once a hover has settled, and how big; and how far
+# under size the face is drawn.
+#
+# **Both are the answer to one measurement, not taste.** The owner's cat
+# artwork fills its viewBox - at full size its bbox is x 2-22, y 3-23 of
+# a 26px row - so a star laid over it was drawn almost entirely on ink
+# that was already there and added *2 device pixels* between rest and a
+# settled hover. Invisible on the rail, present in the file: the same
+# trap this module has recorded twice before.
+#
+# Swept face scale against star placement and took the best that clips
+# nowhere (added pixels at 26px, which is the size that matters):
+#
+#     face 0.80  star (20.4, 4.4, 2.7)   10px
+#     face 0.80  star (20.6, 4.2, 3.1)   12px
+#     face 0.74  star (20.4, 4.4, 2.7)   13px
+#     face 0.74  star (20.6, 4.2, 3.1)   15px   <- this
+#
+# 15px of a 676px icon is a small sparkle, and it is about the ceiling
+# while the face keeps this much of the box.
+# 4.65 is the 3.1 the star used to be, half as big again (the owner's
+# ask). It had to move in as well as grow: at its old centre the larger
+# star reached x=25.25 of 24 and measured as clipping the edge at both
+# 26px and 120px. Swept for the best placement that clips nowhere -
+# 22 device pixels of change at 26px against the 15 it used to add.
+ANIME_STAR = (19.0, 5.6, 4.65)
+ANIME_FACE_SCALE = 0.78
+
+# **The artwork has to be moved inside the viewBox before it is drawn.**
+#
+# The owner, 26 August 2026: the cat's outline "on its left side seems
+# thinner than it is supposed to be". It was, and by half. His path runs
+# to x=0 exactly, so with a 2-unit stroke centred on it, one unit of
+# that stroke falls outside the 24-unit viewBox and the renderer cuts
+# it. Measured on the head layer alone at 240px:
+#
+#     y=108   leftmost run 13px    rightmost run 21px
+#     y=132   leftmost run 11px    rightmost run 21px
+#     y=156   leftmost run 11px    rightmost run 20px
+#
+# - the left edge drawn at half the weight of the right one, on every
+# row, at every size. Nudging the whole group in and down by a fraction
+# and taking 8% off gives the stroke somewhere to go. It goes on the
+# *group*, so the eyes and the lids move with the head and stay in
+# register with it; three separately-placed layers would drift.
+# **A heavier stroke than the shell's 2**, at the owner's ask, 26 August
+# 2026 ("make its outlines and eyes thicker"), and it has further to
+# travel than it looks: the group is drawn at 0.9 and the pixmap then at
+# ANIME_FACE_SCALE, so the shell's 2 arrived on the rail as 1.33 grid
+# units - thinner than every other icon, which get the full 2. 3.1 comes
+# out at 3.1 x 0.9 x 0.78 = 2.18, so the cat is now slightly heavier
+# than its neighbours rather than markedly lighter.
+#
+# It also thickens the eyes for free: they are `v.5` ticks with round
+# caps, so the stroke width *is* their size. Measured at 240px, the eye
+# layer goes from 718 to 1366 pixels of ink between 2.0 and 2.9.
+#
+# The cost, measured, is the star: a bigger, heavier face covers more of
+# where it lands, and it adds 14 device pixels at 26px against the 22 it
+# added before. Bottom-right would give 28, but that is a different
+# icon, not a thicker one - ask before moving it.
+ANIME_FIT = ('transform="translate(1.35 0.55) scale(0.9)"'
+             ' stroke-width="3.1"') 
+
+
 LAYERS = {
     # The compass, split at the one seam that matters: a ring that stays
     # put and a needle that can point somewhere.
@@ -93,10 +184,27 @@ LAYERS = {
         "lens": _svg('<circle cx="11" cy="11" r="7"/>'),
         "handle": _svg('<path d="m20 20-4-4"/>'),
     },
-    # Camera body and its head, hinged where they meet.
+    # **A clapperboard, since 26 August 2026** - the owner's ask, with
+    # a picture: the video camera and the reel beside it are both gone.
+    #
+    # The stick is its own layer so it can hinge. The geometry is set by
+    # how far it has to swing without leaving the box: pivoting an
+    # 19-unit bar about one end sweeps a long arc, and at 20 degrees the
+    # free corner came out at y=-0.7, clipped off the top. The stick was
+    # moved down to start at 6.8 and the swing held to 15 degrees, which
+    # puts that corner at y=2.0 with its stroke inside the edge.
+    #
+    # The hinged end is at 20.5 and not at 21.5 for the mirror of that
+    # reason, caught the same way: rotating about the right end swings
+    # the corner *above* the pivot outward as well as up, by 1.1 units,
+    # and at 21.5 that put ink in the last column at a 26px row (rows
+    # 7-10 of column 25, measured). Both numbers are the edge of the box
+    # rather than taste.
     "movies": {
-        "body": _svg('<rect x="2" y="7" width="14" height="11" rx="2"/>'),
-        "head": _svg('<path d="M16 10.5 22 6.5v11l-6-4Z"/>'),
+        "board": _svg('<rect x="3" y="11" width="17.5" height="9.5" rx="2"/>'),
+        "stick": _svg('<rect x="3" y="6.8" width="17.5" height="4.2" rx="1"/>'),
+        "stripes": _svg('<path d="M8 6.8 6.2 11M12.5 6.8 10.7 11'
+                        'M17 6.8 15.2 11"/>'),
     },
     # Monitor, and the Atomic mark that appears on the screen. A plain
     # stroked "A" with the app's spark - the full logo is unreadable at
@@ -116,17 +224,47 @@ LAYERS = {
     # function starts them nearer the middle and lets them travel out,
     # so the layer coordinates are the resting truth rather than an
     # offset applied later.
+    # **The owner's own artwork**, src/assets/icons/anime-icon.svg,
+    # inlined here rather than loaded as a file: rail_anim's layers are
+    # strings so each can be tinted and transformed on its own every
+    # frame, which a single flat file cannot be. Path for path as he
+    # drew it - only the eyes are split out, so they can blink.
+    #
+    # It is drawn under size (ANIME_FACE_SCALE): his path reaches x=0
+    # and y=24, so at full size the stroke falls outside the box on
+    # three sides, and there would be no corner for the star.
+    #
+    # The blink is a second pair of eyes rather than the same pair
+    # squashed, because `_draw` scales both axes together and an eye
+    # shrunk in both is a small eye, not a shut one.
     "anime": {
-        "star": _svg('<path d="M12 7.4 13.2 10.8 16.6 12 13.2 13.2 12 16.6'
-                     ' 10.8 13.2 7.4 12 10.8 10.8Z"/>'),
-        "up": _svg('<path d="M12 2.5 12.5 3.9 13.9 4.4 12.5 4.9 12 6.3'
-                   ' 11.5 4.9 10.1 4.4 11.5 3.9Z"/>'),
-        "right": _svg('<path d="M19.6 10.1 20.1 11.5 21.5 12 20.1 12.5'
-                      ' 19.6 13.9 19.1 12.5 17.7 12 19.1 11.5Z"/>'),
-        "down": _svg('<path d="M12 17.7 12.5 19.1 13.9 19.6 12.5 20.1 12 21.5'
-                     ' 11.5 20.1 10.1 19.6 11.5 19.1Z"/>'),
-        "left": _svg('<path d="M4.4 10.1 4.9 11.5 6.3 12 4.9 12.5 4.4 13.9'
-                     ' 3.9 12.5 2.5 12 3.9 11.5Z"/>'),
+        "head": _svg(f'<g {ANIME_FIT}><path d="M12 5c.67 0 1.35.09 2 .26'
+                     ' 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 7-.42 11 0'
+                     ' 5.5-2.5 10-10 10S0 19.5 0 14c0-4 1.82-10.42'
+                     ' 3.42-11 1.39-.58 4.64.26 6.42 2.26C10.65 5.09'
+                     ' 11.33 5 12 5z"/></g>'),
+        "eyes": _svg(f'<g {ANIME_FIT}><path d="M8 14v.5"/>'
+                     '<path d="M16 14v.5"/></g>'),
+        # **Thinner than the group's stroke**, at the owner's ask: a shut
+        # eye is a line, and at the 3.1 the rest of the cat is drawn with
+        # it read as a bar. The width is set on the paths, which
+        # overrides the `stroke-width` ANIME_FIT puts on the group - the
+        # open eyes are `v.5` ticks whose size *is* that stroke, so they
+        # have to keep it.
+        "blink": _svg(f'<g {ANIME_FIT}>'
+                      '<path d="M6.9 14.25h2.2" stroke-width="1.9"/>'
+                      '<path d="M14.9 14.25h2.2" stroke-width="1.9"/></g>'),
+        # Filled, not outlined: at three units across, an outline is two
+        # strokes with nothing between them and reads as a smudge on a
+        # 26px row. Tinted by paint() like every other layer, so it is
+        # the icon's own colour - the owner asked for that explicitly.
+        "star": _filled(f'<path d="{_sparkle(*ANIME_STAR)}"/>'),
+    },
+    # A tray, and an arrow that falls into it.
+    "downloads": {
+        "tray": _svg('<path d="M4 15.5v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>'),
+        "arrow": _svg('<path d="M12 3.5v11"/>'
+                      '<path d="m7.6 10.3 4.4 4.4 4.4-4.4"/>'),
     },
     # Set, and the signal that comes on inside it.
     "live-tv": {
@@ -164,11 +302,17 @@ LAYERS = {
         "piece": _svg('<path d="M9 9h6v6H9z"/>'),
     },
     # One tile is the app being opened; the other three step back.
+    # **All four tiles pop, one after another, and settle back** - the
+    # owner's ask, 26 August 2026, replacing the single tile that used
+    # to come forward while the other three dimmed. Four layers rather
+    # than one, because each has to scale about *its own* centre: a
+    # shared layer scaled about the icon's middle slides the corners
+    # toward it instead of growing them where they are.
     "apps": {
-        "rest": _svg('<rect x="3" y="3" width="7" height="7" rx="1.5"/>'
-                     '<rect x="3" y="14" width="7" height="7" rx="1.5"/>'
-                     '<rect x="14" y="14" width="7" height="7" rx="1.5"/>'),
-        "focus": _svg('<rect x="14" y="3" width="7" height="7" rx="1.5"/>'),
+        "tl": _svg('<rect x="3" y="3" width="7" height="7" rx="1.5"/>'),
+        "tr": _svg('<rect x="14" y="3" width="7" height="7" rx="1.5"/>'),
+        "bl": _svg('<rect x="3" y="14" width="7" height="7" rx="1.5"/>'),
+        "br": _svg('<rect x="14" y="14" width="7" height="7" rx="1.5"/>'),
     },
     # **The whole pad turns, since 26 August 2026** - the owner's ask:
     # the right-hand side rises to the top on hover. The stick and the
@@ -338,10 +482,21 @@ def _search(p, box, t, layer):
 
 
 def _movies(p, box, t, layer):
-    """The camera pans: the head swings on the hinge where it meets the
-    body, and the body holds still."""
-    _draw(p, layer("body"), box)
-    _draw(p, layer("head"), box, degrees=-9.0 * t, pivot=(16.0, 12.0))
+    """The clapper opens to the left: the board holds still and the
+    stick swings up off it, hinged at its right-hand end.
+
+    Positive degrees is clockwise in Qt's y-down frame, and about a
+    pivot at the *right* end that lifts the *left* one - which is the
+    way round the owner asked for. Verified by drawing it rather than by
+    reasoning about the sign, since the two are easy to swap.
+
+    The stripes travel with the stick, on the same pivot: they are
+    painted on it, and a stick that swung while its markings stayed put
+    would read as two objects."""
+    _draw(p, layer("board"), box)
+    angle = 15.0 * t + 2.0 * (t * (1.0 - t) * 4.0)
+    _draw(p, layer("stick"), box, degrees=angle, pivot=(20.5, 11.0))
+    _draw(p, layer("stripes"), box, degrees=angle, pivot=(20.5, 11.0))
 
 
 def _shows(p, box, t, layer):
@@ -351,63 +506,72 @@ def _shows(p, box, t, layer):
 
 
 def _anime(p, box, t, layer):
-    """A centred star that throws sparkles to the four compass points.
+    """The face blinks once and a star arrives over its right ear.
 
-    The star holds the middle and only breathes - it must not travel,
-    because it *is* the icon. The sparkles are drawn in their resting
-    places by the layers; what this does is start them a little nearer
-    the middle, so they read as having come out of the star, and let
-    them arrive one after another rather than all at once."""
-    # **It shrinks on hover rather than swelling.** It used to breathe
-    # up by 6%, and at rest the star's points already come within 1.1
-    # grid units of where the sparkles settle - so growing it closed
-    # that to 0.8 and the two read as touching (the owner, 26 August
-    # 2026). The arithmetic, in grid units: the top sparkle's stroked
-    # edge reaches y=7.3 (nominal 6.3 plus the 2-unit stroke's half),
-    # and the star's stroked point reaches y=6.4 (nominal 7.4 less the
-    # same half) - so at rest they already overlap by ~0.9 units, and
-    # growing the star made it worse. A settled 0.70 puts the star's
-    # point at 8.3 and opens a real gap of about 0.5 units. Anything
-    # milder does not separate them at all: 0.80 was tried first and
-    # measured as still one unbroken run of ink down the centre column.
-    # small sine is kept so the shrink has some life in it, and the
-    # settled size differs from rest by a lot, which is the "a held
-    # hover must not look like nothing happened" rule this file records
-    # elsewhere.
+    The blink is a triangular pulse rather than a sine: an eye shuts and
+    opens quickly and spends no time half closed, which a sine does for
+    most of its travel. Centred just before halfway so it reads as a
+    reaction to the star appearing rather than as a tic.
+
+    Both ends of the pulse are exactly zero, so at rest and at a settled
+    hover the eyes are open - what differs between those two is the
+    star, which stays."""
+    face = ANIME_FACE_SCALE
+    _draw(p, layer("head"), box, scale=face)
+    # **A switch, not a cross-fade.** Fading one into the other drew
+    # both at half opacity through the middle of the blink, and measured
+    # as twice the ink in the eye band - a dot with a lid ghosted over
+    # it, which is not what a blink looks like. Swapping outright at the
+    # halfway point gives a shut eye for about 34ms of the 170ms sweep,
+    # which is roughly what a real one takes.
+    # **They close and stay closed** - the owner's ask, 26 August 2026,
+    # replacing the blink that was here. A blink is a pulse and has to
+    # be timed; this is a state, so it only needs a point to change at.
+    # Reversing is free: `t` runs back down on the way out and they open
+    # again at the same point.
+    #
+    # A switch rather than a fade, for the reason the blink needed one
+    # too - drawing the dot and the lid together at half opacity ghosts
+    # rather than closes.
+    _draw(p, layer("blink" if t >= 0.30 else "eyes"), box, scale=face)
+    step = _stagger(t, 0.12, 0.55)
+    if step <= 0.0:
+        return
+    # Out of the ear it sits over, so it reads as thrown rather than
+    # faded in on the spot.
     _draw(p, layer("star"), box,
-          scale=1.0 - 0.30 * t + 0.03 * math.sin(math.pi * t))
-    for name, start, (ux, uy) in (("up", 0.00, (0.0, -1.0)),
-                                  ("right", 0.12, (1.0, 0.0)),
-                                  ("down", 0.24, (0.0, 1.0)),
-                                  ("left", 0.36, (-1.0, 0.0))):
-        step = _stagger(t, start, 0.5)
-        if step <= 0.0:
-            continue
-        # Inward at the start so they read as coming out of the star,
-        # and **0.6 units further out than their resting place once
-        # settled**. The star shrinking to 0.70 separates the two at
-        # 96px but not at the size the rail actually draws: measured
-        # 26 August 2026 at 29px, star-alone still left one unbroken
-        # run of ink down the centre column, because 0.5 grid units is
-        # 0.6px there. This pushes the settled gap to ~1.1 units, which
-        # is the ~1.3px that makes it visible on the real icon. Not
-        # more than 0.6: the top sparkle's stroked edge is then 0.9
-        # units from the viewBox, and anything further clips it.
-        travel = 2.4 * (1.0 - step) - 0.6 * step
-        _draw(p, layer(name), box,
-              dx=-ux * travel, dy=-uy * travel,
-              # Settling at 0.85 rather than full size, and that is what
-              # buys the room to move out at all: at full size the top
-              # sparkle's stroked edge already sits 1.5 grid units from
-              # the viewBox, which at 26px is 1.6px - so travelling
-              # outward from there clipped it (measured, ink in row 0).
-              # 0.85 pulls the outer edge back in by more than the 0.6
-              # it then travels, and pulls the inner edge in too, so the
-              # gap to the star widens from both sides at once.
-              scale=0.45 + 0.40 * step, opacity=step,
-              # Its own centre, not the icon's: scaling a sparkle about
-              # the middle of the box would drag it off its point.
-              pivot=(12.0 + ux * 7.6, 12.0 + uy * 7.6))
+          dx=-1.4 * (1.0 - step), dy=1.4 * (1.0 - step),
+          scale=0.35 + 0.65 * step, opacity=step,
+          pivot=ANIME_STAR[:2])
+
+
+def _downloads(p, box, t, layer):
+    """Hover, the arrow goes, a beat with none, then one falls from
+    above into the place the first one left.
+
+    The owner's sequence, given three times and finally in these words:
+    "hover -> arrow hide -> arrow comes down from up to its original
+    place -> end hover". Three phases against the 340ms ramp:
+
+        0.00-0.18   the resting arrow fades out          ~61ms
+        0.18-0.30   nothing but the tray                 ~41ms
+        0.30-1.00   the new one falls into place        ~238ms
+
+    The earlier version had the same shape inside a 170ms ramp and spent
+    twenty milliseconds on the empty beat, which is not long enough to
+    be seen - it read as one continuous slide, which is what he kept
+    reporting.
+
+    **It lands exactly home, and rest and settled are identical.** That
+    is deliberate here and against this file's usual rule: he asked for
+    "its original place", and the animation is the thing being asked
+    for, not a difference to be left behind at the end of it."""
+    _draw(p, layer("tray"), box)
+    _draw(p, layer("arrow"), box, opacity=max(0.0, 1.0 - t / 0.18))
+    fall = _stagger(t, 0.30, 0.70)
+    if fall > 0.0:
+        _draw(p, layer("arrow"), box, dy=-9.0 * (1.0 - fall), opacity=fall)
+
 
 def _live_tv(p, box, t, layer):
     """The screen comes on and the play mark pulses once."""
@@ -448,14 +612,29 @@ def _addons(p, box, t, layer):
 
 
 def _apps(p, box, t, layer):
-    """One app opens: its tile comes forward and grows while the rest
-    of the grid steps back."""
-    _draw(p, layer("rest"), box, opacity=1.0 - 0.45 * t)
-    _draw(p, layer("focus"), box, dy=-1.6 * t,
-          scale=1.0 + 0.10 * t + 0.05 * math.sin(math.pi * t),
-          # The tile's own centre, so it grows in place rather than
-          # sliding toward the middle of the icon.
-          pivot=(17.5, 6.5))
+    """The four tiles pop up in turn and come back down.
+
+    Reading order, a fifth of the sweep apart, so it runs across the
+    grid rather than all at once. Each pop is a half-sine - out and
+    fully back - with a small residue kept, because a sequence that
+    returns everything exactly where it started measures as zero moved
+    pixels between rest and a held hover, which is the fault this file
+    has been caught by twice before."""
+    # **Smooth and slow** (the owner's ask): each tile takes nearly
+    # three quarters of the sweep rather than half, the starts are
+    # closer together so the four read as one wave instead of four
+    # separate hops, and the travel is gentler. At the 340ms ramp one
+    # tile's pop is about 245ms.
+    for name, start, pivot in (("tl", 0.00, (6.5, 6.5)),
+                               ("tr", 0.08, (17.5, 6.5)),
+                               ("bl", 0.16, (6.5, 17.5)),
+                               ("br", 0.24, (17.5, 17.5))):
+        step = _stagger(t, start, 0.72)
+        pop = math.sin(math.pi * step)
+        _draw(p, layer(name), box,
+              dy=-1.4 * pop - 0.3 * t,
+              scale=1.0 + 0.16 * pop + 0.05 * t,
+              pivot=pivot)
 
 def _games(p, box, t, layer):
     """The pad turns a quarter to the left, bringing its right-hand
@@ -562,7 +741,15 @@ def _websites(p, box, t, layer):
 def _settings(p, box, t, layer):
     """The gear turns and settles. The hub turns with it - a gear whose
     centre stayed still would read as broken."""
-    angle = 28.0 * t + 3.0 * (t * (1.0 - t) * 4.0)
+    # **A spin, not a nudge** - 120 degrees at the owner's ask, 26
+    # August 2026, up from 28. Positive is clockwise in Qt's y-down
+    # frame, which is the "to the right" he asked for.
+    # **300 degrees**, up from 120 - the owner asked again for a spin,
+    # so 120 was evidently reading as a turn rather than as one. Not
+    # 360: a gear is symmetric about its teeth, so a whole turn lands on
+    # a pose identical to the one it started from and a held hover would
+    # look like nothing had happened. 300 lands well off any tooth.
+    angle = 300.0 * t + 8.0 * (t * (1.0 - t) * 4.0)
     _draw(p, layer("teeth"), box, degrees=angle)
     _draw(p, layer("hub"), box, degrees=angle)
 
@@ -598,6 +785,7 @@ PROFILES = {
     "manhua": _manhua,
     "websites": _websites,
     "settings": _settings,
+    "downloads": _downloads,
     "saved": _saved,
     "history": _history,
 }
@@ -620,7 +808,28 @@ def paint(painter, name, rect, hover, colour, height, dpr) -> bool:
             return None
         return images.tinted_svg(f"{name}:{key}", source, colour, height, dpr)
 
-    box = QRectF(rect)
+    # **A square the size of the pixmap, not the rect the view hands
+    # over.** `_draw` blits each layer at its rendered size from
+    # box.topLeft(), but works out its unit - and so every pivot and
+    # every offset - from box.width(). The view's decoration rect is the
+    # row's whole content area, so those two disagree, and the wider the
+    # row the further every transformed layer is thrown.
+    #
+    # Measured 26 August 2026 on the owner's "the cat icon moves weirdly
+    # while folding": through one fold the rect went 178x29 to 30x29
+    # with the icon size fixed at 29, so the unit swung from 7.4 down to
+    # 1.25 while the pixmap never changed size. A layer scaled about
+    # (12,12) was being scaled about a point that slid ~150px left
+    # across the fold.
+    #
+    # It shows on the cat and not on its neighbours because the cat is
+    # the only icon carrying a scale at rest (ANIME_FACE_SCALE); the
+    # others scale only on hover, so at hover=0 their transform is
+    # identity and the wrong unit multiplies nothing.
+    side = float(min(rect.width(), rect.height()))
+    if side <= 0.0:
+        return False
+    box = QRectF(float(rect.left()), float(rect.top()), side, side)
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
     try:

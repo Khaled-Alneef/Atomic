@@ -1349,6 +1349,27 @@ ARABIC_MIN_SEEDERS = 50
 _ARABIC_FLAG = "\U0001F1F8\U0001F1E6"
 _ARABIC_WORD_RE = re.compile(r"\b(arabic|ara|ar)\b", re.I)
 _MULTISUB_RE = re.compile(r"multi[\s._-]*subs?", re.I)
+# **The group's name is evidence too, and for some addons it is the only
+# evidence there is.**
+#
+# The three tiers above were measured on *Torrentio* rows, which print a
+# language line - flags or the words "Multi Subs". TorrentsDB rows print
+# neither, so on a TorrentsDB list arabic_rank found nothing anywhere,
+# every release tied at "says nothing", and the whole field fell through
+# to seeders. That is the owner's report of 26 August 2026: "the auto
+# source does not open the one that has the embedded ara translation
+# even if it has > 50 seeds" - on a list whose top row was a 487-seeder
+# [ToonsHub] release of The Angel Next Door Spoils Me Rotten.
+#
+# Which groups count is not a guess: `.claude/rules/integrations.md`
+# records the measurement that ToonsHub above all, then Erai-raws,
+# publish every language track of a release with Arabic among them -
+# the same finding subtitles._animetosho is built on, where Solo
+# Leveling S02E05 carried 19 tracks including Arabic [ara, ASS].
+#
+# Rank 1, not 0: the group is a strong prior, not a stated fact, and a
+# release that actually says Arabic should still beat it.
+_MULTISUB_GROUP_RE = re.compile(r"\[\s*(toonshub|erai[\s._-]*raws)\s*\]", re.I)
 
 
 # What `arabic_rank` returns for a release that says nothing about
@@ -1364,7 +1385,7 @@ def arabic_rank(stream) -> int:
     text = f"{stream.get('title') or ''}\n{stream.get('name') or ''}"
     if _ARABIC_FLAG in text or _ARABIC_WORD_RE.search(text):
         return 0
-    if _MULTISUB_RE.search(text):
+    if _MULTISUB_RE.search(text) or _MULTISUB_GROUP_RE.search(text):
         return 1
     return 2
 

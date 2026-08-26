@@ -2347,6 +2347,11 @@ class DetailsPage(GlassPage):
         for video in rows:
             number = int(video.get("number") or video.get("episode") or 0)
             name = str(video.get("name") or video.get("title") or "").strip()
+            # Settings > Watching > "Show episode and chapter numbers
+            # only" - an episode title is often a spoiler for the
+            # episode about to be watched, so the name can be left off.
+            if app_settings.get_hide_entry_names():
+                name = ""
             title = f"{number}. {name}" if name else f"{number}. Episode {number}"
             if wanted and wanted not in title.lower():
                 continue
@@ -2414,6 +2419,8 @@ class DetailsPage(GlassPage):
             number = chapter_number(chapter)
             name = chapter_name(chapter)
             head = f"{number:g}" if number is not None else "-"
+            if app_settings.get_hide_entry_names():
+                name = ""
             title = f"{head}. {name}" if name else f"Chapter {head}"
             if is_arabic(chapter):
                 title = f"{title}  · عربي"

@@ -211,6 +211,32 @@ def default_options() -> dict:
         # does too. d3d11 is the context d3d11va decoding hands its
         # surfaces to, so choosing anything else costs a copy per frame.
         **({"gpu_context": "d3d11"} if sys.platform == "win32" else {}),
+        # **Tag the swapchain with the video's own colorspace.**
+        #
+        # The owner, 26 August 2026: "the video player saturation seems a
+        # bit brighter than it should be". Measured through the
+        # display-config API rather than guessed at, and it corrected the
+        # first theory, which was HDR:
+        #
+        #   display 0: HDR supported=True enabled=False wideColorEnforced=True
+        #   display 1: HDR supported=True enabled=False wideColorEnforced=False
+        #
+        # HDR is off, so that was not it. What display 0 has is Windows'
+        # automatic colour management, which is exactly the case where an
+        # *untagged* swapchain gets re-interpreted into a wider gamut and
+        # BT.709 video comes back oversaturated. Hinting the colorspace
+        # ends the guessing: Windows converts from what the content
+        # actually is instead of assuming what it might be.
+        #
+        # It is also one of the options the comparison above found
+        # Stremio setting and this not - same libmpv-2.dll, which is the
+        # only reason that comparison means anything.
+        #
+        # **Not verified in motion.** Judging a colour change needs the
+        # picture on screen next to a reference, which is the owner's eye
+        # and not a harness. The setup it addresses is measured; the
+        # result of the change is not.
+        **({"target_colorspace_hint": True} if sys.platform == "win32" else {}),
         # **No scaler overrides - reverted 24 August 2026, same day they
         # went in.** spline36/deband landed as the answer to "stremio
         # has better quality" and the owner's very next report was "my

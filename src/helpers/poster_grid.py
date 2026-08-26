@@ -80,8 +80,9 @@ import time
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient,
-                         QPainter, QPen, QPixmap, QStaticText, QTextOption)
+from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
+                         QLinearGradient, QPainter, QPen, QPixmap,
+                         QStaticText, QTextOption)
 
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -829,8 +830,28 @@ class PosterGrid(QWidget):
         # underMouse(), not widgetAt(QCursor.pos()): Qt already tracks
         # this per widget, so it is a flag read rather than a hit test
         # of the whole tree, and this runs on every paint.
-        if self._hover >= 0 and not self.underMouse():
-            self._set_hover(-1)
+        if self._hover >= 0:
+            if not self.underMouse():
+                self._set_hover(-1)
+            else:
+                # **And when the pointer *is* inside, check it is inside
+                # the cell that is lit.** underMouse() only answers "is
+                # it anywhere in this grid", so closing the player or
+                # the details page over a card and coming back with the
+                # cursor still over the grid - but over a different
+                # cell, or over the gap between two - left the old
+                # card's play button lit until the mouse was moved.
+                # That is the owner's screenshot of 26 August 2026, and
+                # it is the half of this the first fix did not cover.
+                #
+                # index_at is arithmetic on the scroll position, not a
+                # hit test of the widget tree, and this only runs while
+                # something is actually lit.
+                here = self.mapFromGlobal(QCursor.pos())
+                actual = (self.index_at(here)
+                          if self.rect().contains(here) else -1)
+                if actual != self._hover:
+                    self._set_hover(actual)
         moving = self._motion.running()
         if moving:
             if not self._motion.frame_s:

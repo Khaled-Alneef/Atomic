@@ -946,6 +946,19 @@ class SettingsDialog(QDialog):
         blur_hint.setWordWrap(True)
         form.addWidget(blur_hint)
 
+        self.hide_names_check = QCheckBox("Show episode and chapter numbers only")
+        self.hide_names_check.setChecked(app_settings.get_hide_entry_names())
+        self.hide_names_check.toggled.connect(app_settings.set_hide_entry_names)
+        form.addWidget(self.hide_names_check)
+        hide_names_hint = QLabel(
+            "Leaves the title off every episode and chapter row, so a name "
+            "cannot give away what happens before you get there. The number "
+            "stays. Takes effect the next time a title's page is opened.",
+            objectName="Muted",
+        )
+        hide_names_hint.setWordWrap(True)
+        form.addWidget(hide_names_hint)
+
         form.addSpacing(24)
         # The Stremio Account sign-in that lived here (email/password,
         # Sign In/Disconnect) is removed entirely at the owner's ask -
