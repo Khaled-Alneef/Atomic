@@ -33,9 +33,15 @@ name: Publish test build
 on:
   push:
     branches: [remote-tests]
-    # Only when the build itself changed. Editing the README or this
-    # file should not re-upload 92MB.
-    paths: ['Atomic.zip']
+    # Only when the build itself changed - editing the README should
+    # not re-upload 92MB. This file is in the list on purpose though:
+    # the default branch is `main`, so workflow_dispatch cannot reach
+    # this workflow (the API answers 404), and a change to it triggering
+    # a real run is the only way to prove it still works before the next
+    # build depends on it.
+    paths:
+      - 'Atomic.zip'
+      - '.github/workflows/publish-test-build.yml'
   workflow_dispatch:
 
 permissions:
