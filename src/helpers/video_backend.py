@@ -190,6 +190,23 @@ def default_options() -> dict:
         "interpolation": app_settings.get_motion_smoothing(),
         "tscale": ("mitchell" if app_settings.get_motion_smoothing()
                    else "oversample"),
+        # **-1, and without it Motion Smoothing does nothing at all.**
+        # mpv's `interpolation-threshold` defaults to 0.01: when the
+        # video and the display are within that of an exact ratio, it
+        # *disables* interpolation on purpose, because blending frames
+        # that already line up only softens them. That guard is right
+        # for the default path and fatal for this one - measured on this
+        # machine, 26 August 2026, Attack on Titan S01E02 is 23.976 on a
+        # 240Hz panel, which is a vsync-ratio of exactly 10.000. Every
+        # frame lands on a refresh, so the threshold caught it and the
+        # setting the owner had just switched on changed nothing he
+        # could see ("the auto play smoothing is not working good").
+        #
+        # -1 means "always interpolate". Only while smoothing is on -
+        # with it off there is nothing to interpolate and the default
+        # guard is the correct behaviour.
+        **({"interpolation_threshold": -1}
+           if app_settings.get_motion_smoothing() else {}),
         # Stated rather than left to mpv's probe, which is what Stremio
         # does too. d3d11 is the context d3d11va decoding hands its
         # surfaces to, so choosing anything else costs a copy per frame.

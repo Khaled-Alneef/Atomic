@@ -19,7 +19,8 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
+from PyQt6.QtGui import (QColor, QImage, QImageReader, QPainter,
+                         QPixmap)
 
 # The rail icons are SVG now (25 August 2026), and QPixmap cannot read
 # one - it answers a null pixmap, which every caller here reads as
@@ -665,6 +666,23 @@ def to_pixmap(img: Image.Image) -> QPixmap:
 _FITTED = {}
 _PIXMAP = {}
 _CACHE_MAX = 512
+
+
+def image_size(path):
+    """`(width, height)` of an image file without decoding it, or None.
+
+    QImageReader reads the header only, which is what makes it cheap
+    enough to ask before deciding what size to decode *to* - see
+    widgets.set_hero_logo, which needs the aspect ratio to satisfy a
+    height cap and a width cap in one scale rather than two."""
+    try:
+        reader = QImageReader(str(path))
+        size = reader.size()
+        if size.isValid() and size.width() > 0 and size.height() > 0:
+            return size.width(), size.height()
+    except Exception:
+        pass
+    return None
 
 
 def clear_scaled_cache():

@@ -107,7 +107,12 @@ def _thumbnail(entry) -> QIcon:
     app = QApplication.instance()
     screen = app.primaryScreen() if app is not None else None
     ratio = float(screen.devicePixelRatio()) if screen else 1.0
-    for key in ("cover_path", "icon_path", "image_path", "thumb_path"):
+    # In the order a kind prefers its own art: a saved title's cached
+    # cover, a game's poster then its launcher icon, an app's artwork
+    # then its exe icon, a site's icon. Measured against the real files,
+    # 26 August 2026 - these are the keys the four pages actually write,
+    # and the first version guessed three that no page has ever used.
+    for key in ("cover_path", "cover", "art", "image", "icon"):
         path = entry.get(key)
         if not path:
             continue

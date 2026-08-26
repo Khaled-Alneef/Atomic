@@ -183,6 +183,11 @@ RESUME_LANDED_TOLERANCE_S = 1.0
 # on demand - but every live landing measured (three real titles,
 # 22 August 2026) came in far under it.
 SEAT_GIVE_UP_S = 45.0
+# How close to the buffered edge a forward seek may land before it is
+# treated as "into data we already have". One second of slack, because
+# demuxer-cache-time is the *demuxer's* reach and the last of it is not
+# always decodable.
+SEEK_BUFFER_MARGIN_S = 1.0
 
 # When an episode counts as watched. Credits and a next-episode teaser
 # are routinely the last ~10%, so waiting for the file to actually end
@@ -5180,6 +5185,28 @@ class PlayerPage(GlassPage):
     def _seek_absolute(self, seconds, resuming=False):
         if self.handle is None:
             return
+        target = max(0.0, float(seconds))
+        # **A forward seek past the buffer takes a seat.** It used to
+        # clear one and ask for nothing, which is the owner's report of
+        # 26 August 2026 - stepping forward in Attack on Titan S01E02
+        # "changes the video itself". It does not change anything: mpv
+        # is told to present a timestamp whose pieces have not arrived,
+        # so it decodes from whatever the demuxer can reach and puts
+        # torn frames of another part of the episode on screen until the
+        # data catches up.
+        #
+        # The seat is the machinery that already exists for exactly this
+        # - it narrates the wait, holds the loading frame over the
+        # picture, and gives up honestly after SEAT_GIVE_UP_S with
+        # "Playing From Here" rather than sitting on garbage. Backward
+        # seeks and short hops inside the buffer take none: that data is
+        # in hand, and a toast for a step the user cannot even see land
+        # is noise.
+        buffered = float(getattr(self, "_buffered_to", 0.0) or 0.0)
+        here = float(self._position or 0.0)
+        needs_seat = (not resuming and self._duration
+                      and target > here + 0.5
+                      and target > buffered - SEEK_BUFFER_MARGIN_S)
         # **Where the user asked to be, remembered until mpv agrees.**
         # `_position` only moves when mpv reports time-pos, and after a
         # seek that report lags - on a torrent, by seconds, while the
@@ -5188,7 +5215,7 @@ class PlayerPage(GlassPage):
         # place the video is not, so a second arrow press seeks from the
         # old spot and lands somewhere neither press asked for. That is
         # the "takes me randomly into the vid" the owner reported.
-        self._seek_target = max(0.0, float(seconds))
+        self._seek_target = target
         self._seek_target_at = time.monotonic()
         if not resuming:
             # A seek the user asked for cancels the seat the player
@@ -5206,34 +5233,57 @@ class PlayerPage(GlassPage):
             # on a 10s test mp4, a seek to 6.0s landed at 4.7 because
             # that was the nearest keyframe before it - which reads as
             # the seek bar ignoring where it was dropped.
-            self.handle.seek(max(0.0, float(seconds)), reference="absolute",
+            self.handle.seek(target, reference="absolute",
                              precision="exact")
         except Exception:
             logs.exception("Seek failed")
+            return
+        if needs_seat:
+            self._resume_target = target
+            self._seat_deadline = time.monotonic() + SEAT_GIVE_UP_S
+            self._seat_timer.start()
+            self._say_working(f"Skipping To {_format_time(target)}...")
+            # The picture under this is the wrong one until the pieces
+            # land, so cover it rather than letting the tearing show.
+            self.backdrop.set_stall(True)
 
-    # How long a pending seek target outranks mpv's reported position.
-    # Long enough to cover a torrent's pieces arriving, short enough
-    # that a seek which silently failed cannot pin the base forever.
-    SEEK_TARGET_TTL_S = 12.0
-    # How far mpv may land from the target before it is worth saying so
-    # in the log. Two seconds is well outside keyframe rounding on
-    # precision="exact".
-    SEEK_LANDED_TOLERANCE_S = 2.0
+    # **How long one press keeps counting toward the next.** A chain
+    # window, not a landing timeout - and the difference is the whole
+    # bug this replaces.
+    #
+    # The first version kept the target until mpv's position came within
+    # two seconds of it. That never happens: `precision="exact"` still
+    # lands on the following frame and playback carries on running while
+    # the seek completes, so the reported position passes the target and
+    # keeps going. The gap therefore *grows*, the target is never
+    # retired, and every later press compounds from a number minutes
+    # old. Measured live on Attack on Titan S01E02, 26 August 2026:
+    #
+    #     at 26.65s, +5 asked for 29.25   (should be 31.65)
+    #     at 36.70s, -5 asked for 29.25   (should be 31.70)
+    #
+    # which is exactly the owner's "it moves to a random place".
+    #
+    # What the target is actually for is chaining *rapid* presses, where
+    # mpv genuinely has not reported the last one yet. So it lives for
+    # about as long as a person keeps tapping, and any press after a
+    # pause counts from where the video really is.
+    SEEK_CHAIN_S = 0.8
 
     def _seek_base(self) -> float:
         """Where a relative seek counts from.
 
-        The pending target while one is outstanding, otherwise mpv's own
-        position. Without this, holding the arrow key advances by one
-        step in total however many times it is pressed - every press
-        after the first reads a position that has not caught up yet."""
+        The pending target only while presses are still arriving in a
+        chain; mpv's own position otherwise. Without the chain, holding
+        the arrow key advances one step in total however many times it
+        is pressed - each press reading a position that has not caught
+        up. With the chain kept too long, every press compounds from a
+        stale target instead, which is worse."""
         target = getattr(self, "_seek_target", None)
         if target is None:
             return float(self._position or 0.0)
-        landed = abs(float(self._position or 0.0) - target)
-        fresh = (time.monotonic() - getattr(self, "_seek_target_at", 0.0)
-                 < self.SEEK_TARGET_TTL_S)
-        if landed <= self.SEEK_LANDED_TOLERANCE_S or not fresh:
+        since = time.monotonic() - getattr(self, "_seek_target_at", 0.0)
+        if since > self.SEEK_CHAIN_S:
             self._seek_target = None
             return float(self._position or 0.0)
         return target
@@ -5638,6 +5688,10 @@ class PlayerPage(GlassPage):
                 self._refresh_skip_button()
                 self._load_skip_times()
         elif name == "demuxer-cache-time" and value is not None:
+            # Kept on the page as well as drawn: it is what tells a seek
+            # whether its target is data mpv already holds or data the
+            # swarm has not sent yet (see _seek_absolute).
+            self._buffered_to = float(value)
             self.seek_bar.set_buffered(float(value))
         elif name == "pause":
             self._paused = bool(value)
@@ -7001,8 +7055,54 @@ class PlayerPage(GlassPage):
         # Embedded translation is not here any more - it has its own
         # button on the bar, beside subtitles, at the owner's ask. The
         # audio pill in the top bar still opens the same panel.
+        panel.add_group("PICTURE")
+        smoothing = app_settings.get_motion_smoothing()
+        panel.add_row(
+            "Motion smoothing",
+            # The subtitle says what it *is*, because the thing it is
+            # confused with is already on and doing its job. Measured on
+            # this machine, 26 August 2026, 20s of Attack on Titan
+            # S01E02: vsync-ratio exactly 10.000, jitter 0.0003, 0
+            # dropped and 0 late, hwdec d3d11va. Nothing is being lost -
+            # the file is 23.976fps and that is what a 23.976fps release
+            # contains. This is the only control that changes it, and it
+            # changes it by inventing frames.
+            ("On - 24fps blended up to your screen" if smoothing
+             else "Off - play the frames the file has"),
+            self._toggle_motion_smoothing, selected=smoothing)
         panel.finish()
         self._show_panel(panel)
+
+    def _toggle_motion_smoothing(self):
+        """Flip motion smoothing, and apply it to the running file.
+
+        Live, not on the next open: both properties are runtime-settable
+        and the whole point of putting this on the player's own gear is
+        being able to see the difference on the picture in front of you.
+        """
+        wanted = not app_settings.get_motion_smoothing()
+        app_settings.set_motion_smoothing(wanted)
+        if self.handle is not None:
+            try:
+                self.handle["interpolation"] = wanted
+                self.handle["tscale"] = "mitchell" if wanted else "oversample"
+                # See video_backend: at an exact vsync ratio mpv skips
+                # interpolation unless the threshold is lifted, which is
+                # every 23.976 file on a 240Hz panel.
+                self.handle["interpolation-threshold"] = -1 if wanted else 0.01
+            except Exception:
+                logs.exception("Could not change motion smoothing")
+        show_toast(self._toast_anchor(),
+                   "Motion Smoothing On" if wanted else "Motion Smoothing Off")
+        self._open_settings_panel_rebuild()
+
+    def _open_settings_panel_rebuild(self):
+        """Re-open the settings panel so the row shows its new state.
+
+        `_new_panel` toggles a panel shut when the same kind is already
+        open, so the panel is dropped first rather than asked twice."""
+        self._panel = None
+        self._open_settings_panel()
 
     def _open_streams_root(self):
         """Open the resolution panel at its top level (the pill / gear).

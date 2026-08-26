@@ -3049,8 +3049,24 @@ class MainWindow(QMainWindow):
                                              on_done=landed)
         # Pin the page at the widest the container reaches during this
         # fold, before the first step - see _fit_current_page.
-        self._fold_in_flight = True
-        if self._current_page is not None:
+        # **A page may opt out of both the pin and the freeze.**
+        # Together they are what make a fold cheap - the page is held at
+        # the widest the container will reach and a single grab is
+        # blitted for the rest - and they are also why nothing on the
+        # page *moves* during one: the artwork is a photograph until the
+        # fold lands, then snaps to the new layout. On a grid of a
+        # hundred cards that trade is right and the numbers below say so.
+        # On Home it is not: there is one banner and a few rows, its
+        # paint costs 1.3ms, and the owner has now reported the snap
+        # twice (26 August 2026, "it is still not smooth while folding
+        # and unfolding (the change of size for the banner)").
+        #
+        # Measured with the freeze on: the banner painted **2 times**
+        # across a 220ms fold, with a 190ms gap between them. It was
+        # never animating.
+        live_fold = bool(getattr(self._current_page, "FOLD_LIVE", False))
+        self._fold_in_flight = not live_fold
+        if self._current_page is not None and not live_fold:
             widest = self.container.rect()
             widest.setWidth(max(widest.width(),
                                 self.width() - SIDEBAR_COLLAPSED_WIDTH))
@@ -3772,24 +3788,62 @@ class MainWindow(QMainWindow):
             theme.without_window_animation(self, self.showNormal)
 
     # ---- The window's own frame ---------------------------------------
+    def _looks_maximised(self) -> bool:
+        """Whether the window is filling the screen, however it got
+        there.
+
+        **`isMaximized()` alone is not the question.** Dragging a window
+        to the top edge is Aero Snap, and a snapped window fills the work
+        area without Qt necessarily calling it maximized - so the bar's
+        middle button read "not maximised", tried to maximise a window
+        already the size of the screen, and nothing happened. That is
+        the owner's report of 26 August 2026. Comparing geometry answers
+        for both routes in."""
+        if self.isMaximized():
+            return True
+        try:
+            screen = self.screen()
+            return screen is not None and self.geometry() == screen.availableGeometry()
+        except (AttributeError, RuntimeError):
+            return False
+
     def _toggle_maximised(self):
-        """The bar's middle button, and a double-click on the bar (which
-        Windows delivers itself, because the bar answers HTCAPTION).
+        """The bar's middle button, and a double-click on the bar.
 
         Not through theme.without_window_animation: that exists for the
         maximized <-> full screen swap, where Windows' own animation
         shows a frame of the wrong size. An ordinary maximise is the
         animation the user expects to see."""
-        if self.isMaximized():
-            self.showNormal()
-        else:
+        if not self._looks_maximised():
             self.showMaximized()
+            return
+        self.showNormal()
+        # **And check it actually came down.** A window that filled the
+        # screen by snapping rather than by maximising has no maximized
+        # state for showNormal() to leave, so it stays exactly where it
+        # was - which reads as a dead button. The saved restore rect is
+        # what it should go back to; without one, something visibly
+        # smaller than the screen will do.
+        try:
+            screen = self.screen()
+            avail = screen.availableGeometry() if screen else None
+        except (AttributeError, RuntimeError):
+            avail = None
+        if avail is None or self.geometry() != avail:
+            return
+        rect = getattr(self, "_restore_rect", None)
+        if rect is not None and rect.isValid() and rect != avail:
+            self.setGeometry(_fit_to_available_screen(rect))
+            return
+        self.resize(int(avail.width() * 0.72), int(avail.height() * 0.78))
+        self.move(avail.x() + (avail.width() - self.width()) // 2,
+                  avail.y() + (avail.height() - self.height()) // 3)
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowStateChange:
             bar = getattr(self, "title_bar", None)
             if bar is not None:
-                bar.set_maximised(self.isMaximized())
+                bar.set_maximised(self._looks_maximised())
                 # Full screen is the one state with no chrome at all -
                 # the point of it is the picture, and the player and
                 # reader draw their own bars over the top anyway.
@@ -4173,6 +4227,11 @@ class MainWindow(QMainWindow):
         slide.start()
 
     def resizeEvent(self, event):
+        # A snap changes the size without changing the window *state*,
+        # so the button's glyph follows the geometry as well.
+        bar = getattr(self, "title_bar", None)
+        if bar is not None:
+            bar.set_maximised(self._looks_maximised())
         super().resizeEvent(event)
         # The sidebar re-fits with the window: how many rows fit without
         # scrolling is a function of its height (see _fit_rails).

@@ -1764,14 +1764,35 @@ def set_hero_logo(logo_label: QLabel, title_label: QLabel, path,
     pixmap = None
     if path:
         try:
-            dpr = logo_label.devicePixelRatioF() or 1.0
-            pixmap = images.logo_pixmap(path, height, dpr)
+            # **The window's ratio, not the label's.** A hero logo
+            # arrives from a background lookup and is set on a label that
+            # may not be on a screen yet, and an unparented widget
+            # answers with the *primary* screen's factor - so on a second
+            # monitor at another scale the logo was cut for the wrong one.
+            window = logo_label.window()
+            dpr = ((window.devicePixelRatioF() if window is not None else 0)
+                   or logo_label.devicePixelRatioF() or 1.0)
+            # **Scaled once, not twice.** This used to scale to `height`
+            # and then, for anything too wide, scale the *result* again
+            # to the width cap - two resamplings of the same artwork,
+            # and the second one working from an image that had already
+            # lost detail in the first. Every one of the owner's hero
+            # logos is ~500px wide against a ~300px cap, so the second
+            # pass ran every time, and softening it is exactly what he
+            # reported ("the logo in the CONTINUE WATCHING/READING and
+            # FEATURED are blurred", 26 August 2026).
+            #
+            # The height that satisfies both caps is worked out from the
+            # source's own aspect ratio first, and the single scale is
+            # made to that.
+            size = images.image_size(path)
+            wanted = height
+            if size and size[0] > 0 and size[1] > 0:
+                by_width = max_width * size[1] / float(size[0])
+                wanted = max(1, int(round(min(height, by_width))))
+            pixmap = images.logo_pixmap(path, wanted, dpr)
             if pixmap.isNull():
                 pixmap = None
-            elif pixmap.width() / dpr > max_width:
-                pixmap = pixmap.scaledToWidth(
-                    int(max_width * dpr), Qt.TransformationMode.SmoothTransformation)
-                pixmap.setDevicePixelRatio(dpr)
         except Exception:
             pixmap = None
     if pixmap is not None:
@@ -1880,6 +1901,107 @@ def magnifier_icon(color: str = None, size: int = SEARCH_ICON_SIZE) -> QIcon:
     painter.drawLine(QPointF(edge, edge), QPointF(size - inset, size - inset))
     painter.end()
     return QIcon(pixmap)
+
+
+class DriftButton(QPushButton):
+    """A button whose hover *arrives* instead of switching on.
+
+    The owner's ask, 26 August 2026: *"add a short short animation to
+    all buttons when hover like make it smooth and drifty"*, pointing at
+    the Continue and View Episodes buttons on the hero.
+
+    **Painted, because a stylesheet cannot do this.** QSS has no
+    transitions - `:hover` is a different rule applied whole the instant
+    the pointer crosses the edge - so the only ways to fade one are to
+    rewrite the stylesheet every frame (a style recomputation per frame,
+    which is exactly what the sidebar rail was rebuilt to avoid) or to
+    paint the fill here and let QPushButton draw its label on top. This
+    does the second: its QSS background is transparent, the fill under
+    the text is ours, and both the resting and hover ramps are read from
+    theme so a drifting button and a static one are the same colour.
+
+    `kind` picks the ramp: "accent" is the pressable teal
+    (theme.accent_button_stops), "quiet" is the translucent slab the
+    secondary hero button uses over artwork.
+
+    The press deepens rather than scaling: a button that changes size
+    under the pointer moves the thing being clicked.
+    """
+
+    HOVER_MS = 140
+    PRESS_MS = 90
+
+    def __init__(self, text="", parent=None, kind="accent", radius=None,
+                 objectName="DriftAccent"):
+        super().__init__(text, parent, objectName=objectName)
+        self._kind = kind
+        self._radius = theme.RADIUS if radius is None else radius
+        self._hover = 0.0
+        self._press = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._hover_tween = SmoothTween(self, self._set_hover, self.HOVER_MS)
+        self._press_tween = SmoothTween(self, self._set_press, self.PRESS_MS)
+        use_hover_cursor(self)
+
+    def _set_hover(self, value):
+        self._hover = float(value)
+        self.update()
+
+    def _set_press(self, value):
+        self._press = float(value)
+        self.update()
+
+    def enterEvent(self, event):
+        self._hover_tween.start(self._hover, 1.0, self.HOVER_MS)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_tween.start(self._hover, 0.0, self.HOVER_MS)
+        self._press_tween.start(self._press, 0.0, self.PRESS_MS)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        self._press_tween.start(self._press, 1.0, self.PRESS_MS)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_tween.start(self._press, 0.0, self.PRESS_MS)
+        super().mouseReleaseEvent(event)
+
+    def _ramp(self, rect, hover):
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        if self._kind == "accent":
+            for at, colour in theme.accent_button_stops(hover=hover):
+                gradient.setColorAt(at, QColor(colour))
+            return gradient
+        # "quiet": the translucent slab over artwork, lit the same way.
+        top = QColor(theme.SURFACE_HOVER if hover else theme.SURFACE)
+        top.setAlpha(215 if hover else 185)
+        foot = QColor(theme.SURFACE if hover else theme.BG)
+        foot.setAlpha(215 if hover else 195)
+        gradient.setColorAt(0.0, top)
+        gradient.setColorAt(1.0, foot)
+        return gradient
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._ramp(rect, hover=False))
+        painter.drawRoundedRect(rect, self._radius, self._radius)
+        # The hover ramp faded in over the resting one, so the colour
+        # crosses rather than switching. The press deepens the same
+        # fade instead of adding a layer, which keeps the two states
+        # from stacking into something brighter than either.
+        mix = self._hover * (1.0 - 0.25 * self._press)
+        if mix > 0.001:
+            painter.setOpacity(min(1.0, max(0.0, mix)))
+            painter.setBrush(self._ramp(rect, hover=True))
+            painter.drawRoundedRect(rect, self._radius, self._radius)
+            painter.setOpacity(1.0)
+        painter.end()
+        super().paintEvent(event)
 
 
 def search_field(placeholder: str, width: int = None) -> QLineEdit:

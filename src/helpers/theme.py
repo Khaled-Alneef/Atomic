@@ -218,6 +218,16 @@ ACCENT_DEEP_ACTIVE = "#12524a"
 ON_ACCENT_DEEP = "#ffffff"
 
 
+def accent_button_stops(hover=False):
+    """The pressable accent ramp as (position, colour) pairs - the same
+    single source `accent_stops` is for the bright one, so a button that
+    paints itself (widgets.DriftButton) matches every QSS one."""
+    lip = ACCENT_DEEP_LIP_HOVER if hover else ACCENT_DEEP_LIP
+    body = ACCENT_DEEP_HOVER if hover else ACCENT_DEEP
+    foot = ACCENT_DEEP_FOOT_HOVER if hover else ACCENT_DEEP_FOOT
+    return ((0.0, lip), (ACCENT_LIP_STOP, body), (1.0, foot))
+
+
 def accent_button_gradient(x1=0, y1=0, x2=0, y2=1, hover=False):
     """The fill for a *pressable* accent surface. Same three-stop shape
     as accent_gradient - lip, body, foot - a couple of steps deeper so
@@ -667,6 +677,29 @@ QListWidget#NavList::item:selected {{
     border: 1px solid transparent;
     border-radius: {RADIUS}px;
 }}
+
+/* ---- Buttons that animate their own hover ---------------------------- */
+/* Transparent on purpose: widgets.DriftButton paints the fill *and* the
+   fade. A QSS background here would switch on instantly underneath the
+   animation and defeat the whole point of it. Only the text, the
+   padding and the weight are stated. */
+QPushButton#DriftAccent {{
+    background: transparent;
+    color: {ON_ACCENT_DEEP};
+    border: none;
+    border-radius: {RADIUS}px;
+    padding: 10px 18px;
+    font-weight: 700;
+}}
+QPushButton#DriftQuiet {{
+    background: transparent;
+    color: {TEXT};
+    border: 1px solid {rgba(TEXT_MUTED, 110)};
+    border-radius: {RADIUS}px;
+    padding: 8px 18px;
+    font-weight: 700;
+}}
+QPushButton#DriftQuiet:hover {{ border: 1px solid {ACCENT}; }}
 
 /* ---- Settings' own nav column --------------------------------------- */
 /* **Its own object name, and this is why.** It shared #NavList with the

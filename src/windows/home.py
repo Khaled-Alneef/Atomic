@@ -29,6 +29,7 @@ from helpers.widgets import (
     Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, _OpaqueGround,
     hero_logo_label,
     hero_split, inform, scroll_area, set_hero_logo, SmoothTween,
+    DriftButton,
     use_hover_cursor,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
@@ -207,6 +208,14 @@ class _HeroDash(QWidget):
 
 
 class HomePage(GlassPage):
+    # **This page folds live** - see main._toggle_sidebar. It is one
+    # banner and a few scrolling rows rather than a grid of a hundred
+    # cards, so it can be laid out on every step of the fold instead of
+    # being photographed and blitted - which is what lets the hero
+    # actually resize with the sidebar rather than snapping when the
+    # animation lands.
+    FOLD_LIVE = True
+
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
@@ -616,22 +625,17 @@ class HomePage(GlassPage):
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
         buttons.setContentsMargins(0, 8, 0, 0)
-        self._hero_continue = QPushButton("▶  Continue", objectName="Accent")
+        self._hero_continue = DriftButton("▶  Continue", kind="accent",
+                                          objectName="DriftAccent")
         self._hero_continue.setFixedHeight(46)
         use_hover_cursor(self._hero_continue)
         self._hero_continue.clicked.connect(lambda: self._hero_open(resume=True))
         buttons.addWidget(self._hero_continue)
         # Harbor's second action: an outlined pill the backdrop reads
         # through, opening the episode/chapter list (the details page).
-        self._hero_view = QPushButton("")
+        self._hero_view = DriftButton("", kind="quiet", objectName="DriftQuiet")
         self._hero_view.setFixedHeight(46)
-        self._hero_view.setStyleSheet(
-            f"QPushButton {{ background: {theme.lit_fill(theme.rgba(theme.SURFACE, 170), theme.rgba(theme.BG, 185))};"
-            f" color: {theme.TEXT}; border: 1px solid {theme.TEXT_MUTED};"
-            f" border-radius: {theme.RADIUS}px; padding: 8px 18px;"
-            f" font-weight: 700; }}"
-            f"QPushButton:hover {{ border: 1px solid {theme.ACCENT};"
-            f" color: {theme.ACCENT}; }}")
+        # Fill, border and hover all come from DriftButton/#DriftQuiet now.
         use_hover_cursor(self._hero_view)
         self._hero_view.clicked.connect(lambda: self._hero_open(resume=False))
         buttons.addWidget(self._hero_view)

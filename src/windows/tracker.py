@@ -46,7 +46,7 @@ from helpers.widgets import (
     defer_grid_rebuild, finish_toast, frameless_dialog, hero_logo_label,
     hero_split, inform, scroll_area, set_hero_logo, show_toast,
     SmoothTween,
-    show_undo_toast, use_hover_cursor,
+    show_undo_toast, use_hover_cursor, DriftButton,
 )
 
 # Soft, for the same reason reader.py soft-imports chapter_source: a
@@ -4463,12 +4463,19 @@ class TrackerPage(GlassPage):
         self._discover_layout.addWidget(scroll_area(self.discover_body, ground=theme.PANEL_FILL), stretch=1)
 
     def _add_owned_row(self, query):
-        """A row of things the user already has that match `query`.
+        """A row of things the user already has that match `query`, with
+        their own artwork.
 
-        Reuses helpers.global_search for both halves - the matching and
-        the opening - so a result found here behaves exactly as the same
-        result found in the window's own dropdown, and there is one
-        place that knows how to open each kind of thing."""
+        Reuses helpers.global_search for the matching and the opening,
+        so a result found here behaves exactly as the same result found
+        in the window's dropdown, and one place knows how to open each
+        kind of thing.
+
+        Poster cards rather than text rows (the owner's ask, 26 August
+        2026: *"show me the results ... with their images and
+        everything, including games and apps and webs"*). Each kind
+        keeps its own art - a game's poster, an app's artwork, a site's
+        icon - read off the entry the page that owns it wrote."""
         try:
             from helpers import global_search
             found = global_search.collect(query)
@@ -4484,42 +4491,73 @@ class TrackerPage(GlassPage):
                    objectName="Muted"))
         strip = QWidget(objectName="Bare")
         row = QHBoxLayout(strip)
-        row.setContentsMargins(0, 4, 0, 0)
-        row.setSpacing(10)
+        row.setContentsMargins(0, 6, 0, 0)
+        row.setSpacing(12)
+        dpr = float(self.devicePixelRatioF() or 1.0)
         for title, page_name, label, entry in found:
-            card = Card(matte=True)
-            # Both dimensions fixed: a Card is a bare QFrame until
-            # something inside it asks for room, and CardTextLabel
-            # elides rather than demanding width - so a card with only
-            # an eliding label in it collapses to nothing and the row
-            # renders as a heading over empty space (measured).
-            card.setFixedSize(190, 64)
-            body = QVBoxLayout(card)
-            body.setContentsMargins(12, 8, 12, 8)
-            body.setSpacing(2)
-            # A plain label elided by hand, not CardTextLabel: that one
-            # centres its text inside the width it is given, which on a
-            # two-line card puts the title and its kind on different
-            # left edges (measured on the real page).
-            name = QLabel()
-            name.setText(name.fontMetrics().elidedText(
-                title, Qt.TextElideMode.ElideRight, 166))
-            name.setToolTip(title)
-            name.setStyleSheet(f"color: {theme.TEXT}; font-weight: 700;")
-            name.setAlignment(Qt.AlignmentFlag.AlignLeft
-                              | Qt.AlignmentFlag.AlignVCenter)
-            body.addWidget(name)
-            kind = QLabel(label, objectName="Muted")
-            kind.setAlignment(Qt.AlignmentFlag.AlignLeft
-                              | Qt.AlignmentFlag.AlignVCenter)
-            body.addWidget(kind)
-            card.clicked.connect(
-                lambda _=False, p=page_name, e=entry:
-                global_search.open_entry(self.window(), p, e))
-            use_hover_cursor(card)
-            row.addWidget(card)
+            row.addWidget(self._owned_card(title, page_name, label, entry, dpr))
         row.addStretch(1)
         self._discover_body_layout.addWidget(strip)
+
+    # The owned card's art box. A poster is 2:3; a game or app icon is
+    # square and is letterboxed into the same box rather than stretched,
+    # so a row of mixed kinds still lines up.
+    OWNED_CARD_W = 132
+    OWNED_ART_H = 176
+
+    def _owned_card(self, title, page_name, label, entry, dpr):
+        from helpers import global_search
+        card = Card(matte=True)
+        card.setFixedWidth(self.OWNED_CARD_W)
+        body = QVBoxLayout(card)
+        body.setContentsMargins(0, 0, 0, 8)
+        body.setSpacing(6)
+
+        art = QLabel()
+        art.setFixedSize(self.OWNED_CARD_W, self.OWNED_ART_H)
+        art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        art.setScaledContents(False)
+        pixmap = None
+        for key in ("cover_path", "cover", "art", "image", "icon"):
+            path = entry.get(key)
+            if not path:
+                continue
+            candidate = QPixmap(str(path))
+            if not candidate.isNull():
+                pixmap = candidate
+                break
+        if pixmap is not None:
+            # Cut at the screen's ratio and tagged with it, or every one
+            # of these is soft on a non-100% display
+            # (.claude/rules/ui.md).
+            scaled = pixmap.scaled(
+                QSize(int(self.OWNED_CARD_W * dpr), int(self.OWNED_ART_H * dpr)),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            art.setPixmap(scaled)
+        else:
+            art.setText(label)
+            art.setStyleSheet(f"color: {theme.TEXT_DIM};")
+        body.addWidget(art)
+
+        name = QLabel()
+        name.setText(name.fontMetrics().elidedText(
+            title, Qt.TextElideMode.ElideRight, self.OWNED_CARD_W - 12))
+        name.setToolTip(title)
+        name.setStyleSheet(f"color: {theme.TEXT}; font-weight: 700;")
+        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.addWidget(name)
+
+        kind = QLabel(label, objectName="Muted")
+        kind.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.addWidget(kind)
+
+        card.clicked.connect(
+            lambda _=False, p=page_name, e=entry:
+            global_search.open_entry(self.window(), p, e))
+        use_hover_cursor(card)
+        return card
 
     def _on_discover_search(self):
         query = self._search_query().strip()
@@ -6294,7 +6332,8 @@ class TrackerPage(GlassPage):
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
         buttons.setContentsMargins(0, 8, 0, 0)
-        view_btn = QPushButton("▶  View", objectName="Accent")
+        view_btn = DriftButton("▶  View", kind="accent",
+                               objectName="DriftAccent")
         view_btn.setFixedHeight(44)
         view_btn.clicked.connect(
             lambda _checked=False, it=item, et=entry_type:
