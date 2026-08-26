@@ -93,7 +93,6 @@ SEARCH_HEIGHT = theme.TOP_SEARCH_HEIGHT
 # already uses (theme.FONT_FAMILY_ICONS). Monochrome, so they inherit
 # the button's colour - which is exactly why this app does not use emoji
 # for chrome, as theme.py and rail_icons.py both record.
-BACK_GLYPH = ""       # Back
 MINIMISE_GLYPH = ""   # ChromeMinimize
 MAXIMISE_GLYPH = ""   # ChromeMaximize
 RESTORE_GLYPH = ""    # ChromeRestore
@@ -341,7 +340,6 @@ class TitleBar(QWidget):
     Owns no state - `back`, `minimise`, `maximise` and `close_window`
     are signals, and the window wires them to what it already had."""
 
-    back = Signal()
     minimise = Signal()
     maximise = Signal()
     close_window = Signal()
@@ -355,25 +353,20 @@ class TitleBar(QWidget):
         row.setContentsMargins(8, 0, 0, 0)
         row.setSpacing(0)
 
-        self.back_btn = DriftButton(f"{BACK_GLYPH}  Back", radius=theme.RADIUS_SM,
-                                    tint=theme.SURFACE, objectName="BackButton")
-        self.back_btn.setFixedHeight(32)
-        self.back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.back_btn.clicked.connect(self.back.emit)
-        use_hover_cursor(self.back_btn)
-
-        # Both side groups get the same width, so the field lands in the
-        # middle of the window. Right is three buttons and left is one,
-        # so the right group is the wider and sets the number.
+        # **No Back button** - the owner's ask, 26 August 2026: remove it
+        # entirely, full screen included. Going back was never only this
+        # button and is not lost with it: Alt+Left, mouse button 4
+        # (main._MouseNavFilter), Escape out of an overlay, and each
+        # surface's own way out all still do it.
+        #
+        # The left group stays as empty space of the same width as the
+        # window buttons opposite, because that is what centres the
+        # field in the *window* rather than in the room left beside it -
+        # the balance Home's header uses, and the thing that would
+        # silently drift by half the difference if it were dropped.
         side = 3 * WINDOW_BUTTON_WIDTH
-
         left = QWidget(objectName="Bare")
-        left_row = QHBoxLayout(left)
-        left_row.setContentsMargins(0, 0, 0, 0)
-        left_row.setSpacing(0)
-        left_row.addWidget(self.back_btn)
-        left_row.addStretch(1)
-        left.setMinimumWidth(side)
+        left.setFixedWidth(side)
         row.addWidget(left)
 
         row.addStretch(1)
@@ -445,5 +438,3 @@ class TitleBar(QWidget):
         self._max_btn.setText(RESTORE_GLYPH if maximised else MAXIMISE_GLYPH)
         self._max_btn.setToolTip("Restore" if maximised else "Maximise")
 
-    def set_can_go_back(self, can: bool):
-        self.back_btn.setEnabled(bool(can))

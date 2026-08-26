@@ -760,24 +760,6 @@ QWidget#TitleBar {{
     background: {SIDEBAR};
     border-bottom: 1px solid {BORDER};
 }}
-QPushButton#BackButton {{
-    background: transparent;
-    color: {TEXT_MUTED};
-    border: none;
-    border-radius: {RADIUS_SM}px;
-    padding: 6px 14px;
-    font-family: {FONT_STACK_ICONS};
-    font-size: 10pt;
-    font-weight: 600;
-}}
-/* Colour only - the fill is painted and animated by
-   window_chrome.DriftButton. A QSS background here would switch on
-   instantly underneath the fade and defeat it. */
-QPushButton#BackButton:hover {{
-    background: transparent;
-    color: {TEXT};
-}}
-QPushButton#BackButton:disabled {{ color: {TEXT_DIM}; background: transparent; }}
 /* Square, full-height, no radius: these are Windows' caption buttons in
    the place Windows' caption buttons go, and rounding them would put a
    gap of bar colour in the window's own top-right corner. */

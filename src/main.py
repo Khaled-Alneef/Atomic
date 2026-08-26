@@ -1624,7 +1624,6 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
 
         self.title_bar = window_chrome.TitleBar(central)
-        self.title_bar.back.connect(self.navigate_back)
         self.title_bar.minimise.connect(self.showMinimized)
         self.title_bar.maximise.connect(self._toggle_maximised)
         self.title_bar.close_window.connect(self.close)
@@ -4052,10 +4051,20 @@ class MainWindow(QMainWindow):
             bar = getattr(self, "title_bar", None)
             if bar is not None:
                 bar.set_maximised(self._looks_maximised())
-                # Full screen is the one state with no chrome at all -
-                # the point of it is the picture, and the player and
-                # reader draw their own bars over the top anyway.
-                bar.setVisible(not self.isFullScreen())
+                # **The bar stays, full screen included** - the owner's
+                # ask, 26 August 2026: Back and the search field have to
+                # be reachable there too.
+                #
+                # It used to hide itself here, on the reasoning that
+                # full screen is about the picture. That reasoning holds
+                # for the two surfaces that *are* a picture, and they do
+                # not need this line: the player and the reader take
+                # `immersive_host` and cover the whole window, bar
+                # included, whatever state it is in. Full screen on an
+                # ordinary page is just a bigger page, and hiding the
+                # only search field in the app on it left no way to
+                # search and no way back.
+                bar.setVisible(True)
         super().changeEvent(event)
 
     # ---- The one search field -----------------------------------------
