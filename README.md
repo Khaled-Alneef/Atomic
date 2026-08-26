@@ -15,37 +15,29 @@ cleanly.
 
 | | |
 |---|---|
-| Version | 1.10.43 (unreleased) |
-| Built | 26 August 2026, eleventh build |
-| SHA-256 | `48c20bc8f5d25d8f6d40b13a9149984dceb16e31ae28890242ef485a12b494b6` |
+| Version | 1.10.44 (unreleased) |
+| Built | 26 August 2026, twelfth build |
+| SHA-256 | `56bfe223a9b11535504f5a1e77890ded6c337564675b5a8f00867580c3d0be1c` |
 
 Extract, then run `Atomic.exe`.
 
-**New in this one:** every sidebar icon has its own animation. Not one
-transform with different numbers - the compass finds north, sparkles
-sprinkle outward one after another, the Atomic mark switches on inside
-the monitor, the gear turns and settles, books rearrange, a page turns,
-a strip scrolls, a plugin snaps into its frame. Twenty icons are drawn
-as cached layers so their parts can move independently; nothing parses
-SVG while anything is animating.
+**New in this one:** the window's top bar stays up in full screen, and
+its Back button is gone. Going back is still Alt+Left, mouse button 4,
+or Escape out of whatever is open - the button was one route of several
+and the only one taking space next to the search field.
 
-Three stuck-state bugs of one family, all fixed: the continue ring stayed
-lit on a card after clicking it (the fade is what hides it, and opening
-the player over Home stops covered widgets repainting, so the fade froze
-partway); a poster strip could keep a hover with the pointer elsewhere;
-and a drifting button could stay lit. A Leave is not guaranteed when
-something opens *over* a widget.
+Before that, in this build: every sidebar icon animates as itself (the
+compass finds north, sparkles sprinkle, the Atomic mark switches on
+inside the monitor, the gear turns), three hover states that could stick
+are fixed, searching from an episode or chapter list reaches Discover,
+the Settings sidebar no longer scrolls and its Uninstall row matches the
+rest, and the hero banner's picture follows the sidebar fold instead of
+resizing once at the end of it.
 
-Searching from an episode or chapter list reaches Discover now - it used
-to navigate the page stack underneath a list that was still on top.
-Settings' sidebar does not scroll at all, and its Uninstall row finally
-matches the eight above it. The hero banner's picture follows the fold
-instead of resizing once at the end of it.
-
-Earlier in this build: seeking that lands where you pressed, Motion
-Smoothing that actually engages, the player and reader covering the
-window's own bar, Airing Soon carrying series as well as anime, and the
-Harbor navy/teal re-theme throughout.
+Earlier still: seeking that lands where you pressed (measured live on
+Attack on Titan S01E02), Motion Smoothing that actually engages, the
+player and reader covering the window's own bar, Airing Soon carrying
+series as well as anime, and the Harbor navy/teal re-theme throughout.
 
 ## What was ruled out when the warning started
 
