@@ -16,6 +16,8 @@ order on every navigation, dragging the sidebar into a new order updates
 the slide direction immediately too - nothing to keep in sync by hand.
 """
 
+import math
+import os
 import sys
 import threading
 import time
@@ -34,6 +36,7 @@ from PyQt6.QtCore import (
     QObject,
     QParallelAnimationGroup,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
     QRectF,
@@ -533,6 +536,118 @@ RAIL_TINTS = tuple(theme.mix(theme.TEXT_MUTED, theme.TEXT, i / RAIL_TINT_STOPS)
 # folded row is the tight case (36px wide holding a 29px icon), and the
 # icons' own 24-unit viewBox keeps their ink a further ~3.5px inside
 # that. Half the row tall so it reads as a marker rather than a border.
+# **What each icon *does* when the pointer arrives.** The owner's ask,
+# 26 August 2026: not just a pill fading in behind a brightening glyph,
+# but the glyph itself performing a small motion that means something -
+# the compass turning, the gear turning further, the house lifting.
+#
+# `(dx, dy, degrees, scale, overshoot_degrees)` at full hover. Values
+# are deliberately small: 1-3px, 3-10 degrees, at most 1.05x. The
+# overshoot column is a bump *during* the transition (a half-sine, zero
+# at both ends) rather than a spring, so a row that is settled under the
+# pointer is holding a still pose and only the journey there wobbles.
+#
+# dx is dropped on a folded row - the folded rail *is* its icon, and the
+# ink-centring this file has measured twice is not worth spending on a
+# sideways slide nobody asked for. Rotation and scale are about the
+# icon's own centre, so they cost that centring nothing.
+ICON_HOVER_MOTION = {
+    "home":      (0.0, -2.0,   0.0, 0.00, 0.0),
+    "search":    (1.0,  0.0,   0.0, 0.05, 0.0),
+    "discover":  (0.0,  0.0,   8.0, 0.03, 4.0),
+    "movies":    (0.0, -1.0,  -4.0, 0.00, 0.0),
+    "shows":     (0.0,  0.0,   0.0, 0.04, 0.0),
+    "anime":     (0.0,  0.0,   8.0, 0.04, 3.0),
+    "live-tv":   (0.0,  0.0,   0.0, 0.04, 0.0),
+    "calendar":  (0.0, -2.0,   0.0, 0.00, 0.0),
+    "schedule":  (0.0, -2.0,   0.0, 0.00, 0.0),
+    "library":   (1.5,  0.0,   0.0, 0.00, 0.0),
+    "addons":    (0.0,  0.0,   5.0, 0.00, 0.0),
+    "apps":      (0.0,  0.0,   0.0, 0.04, 0.0),
+    "settings":  (0.0,  0.0,  15.0, 0.00, 5.0),
+    "manga":     (0.0, -1.0,  -4.0, 0.00, 0.0),
+    "manhwa":    (0.0, -1.0,  -4.0, 0.00, 0.0),
+    "manhua":    (0.0, -1.0,  -4.0, 0.00, 0.0),
+    "games":     (0.0,  0.0,   5.0, 0.00, 0.0),
+    "websites":  (0.0,  0.0,   6.0, 0.02, 0.0),
+    "saved":     (0.0, -2.0,   0.0, 0.00, 0.0),
+    "history":   (0.0,  0.0,  -6.0, 0.00, 0.0),
+}
+# Anything without a profile still lights up; it just does not move.
+ICON_HOVER_DEFAULT = (0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+
+def _icon_name(path) -> str:
+    """The profile key for an icon path - "assets/icons/home.svg" is
+    "home"."""
+    text = str(path or "")
+    cut = text.rfind("/")
+    if cut >= 0:
+        text = text[cut + 1:]
+    dot = text.rfind(".")
+    return text[:dot] if dot > 0 else text
+
+
+_BLANKS = {}
+
+
+def _blank_like(pixmap):
+    """A transparent pixmap the same size and ratio as `pixmap`.
+
+    Handed to the style so it lays the row out exactly as it would with
+    the real icon, and paints nothing where the icon goes - the real one
+    is drawn afterwards, transformed. Cached per (size, ratio): there
+    are two rail sizes and a handful of ratios, so this is a table of
+    about four entries for the life of the process."""
+    ratio = pixmap.devicePixelRatio()
+    key = (pixmap.width(), pixmap.height(), ratio)
+    found = _BLANKS.get(key)
+    if found is None:
+        found = QPixmap(pixmap.size())
+        found.setDevicePixelRatio(ratio)
+        found.fill(Qt.GlobalColor.transparent)
+        _BLANKS[key] = found
+    return found
+
+
+def _ease_out_cubic(t: float) -> float:
+    """The curve the icon motion is read through.
+
+    Stored progress stays linear - `_RailMotion` advances it by elapsed
+    wall time and nothing about that should change - and the easing is
+    applied here, at paint. That is what makes a reversal smooth from
+    wherever it currently is: the raw value simply walks back down and
+    this reads the same curve in the other direction, with no second
+    animation to start and no state to get stuck in."""
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    return 1.0 - (1.0 - t) ** 3
+
+
+def _icon_motion(name: str, hover: float, labelled: bool):
+    """(dx, dy, degrees, scale) for `name` at `hover`, or None when the
+    icon would not move at all - which lets the caller skip the whole
+    transform and the smooth-transform hint with it."""
+    if hover <= 0.004:
+        return None
+    dx, dy, deg, grow, over = ICON_HOVER_MOTION.get(name, ICON_HOVER_DEFAULT)
+    if not labelled:
+        dx = 0.0
+    eased = _ease_out_cubic(hover)
+    if over:
+        # Zero at both ends, so the pose it settles into is the plain
+        # one and only the trip there overshoots.
+        deg = deg * eased + over * math.sin(math.pi * min(1.0, max(0.0, hover)))
+    else:
+        deg = deg * eased
+    if not (dx or dy or deg or grow):
+        return None
+    return dx * eased, dy * eased, deg, 1.0 + grow * eased
+
+
 RAIL_INDICATOR_WIDTH = 3.0
 RAIL_INDICATOR_INSET = 1.0
 RAIL_INDICATOR_HEIGHT = 0.5
@@ -1313,11 +1428,49 @@ class _RailDelegate(QStyledItemDelegate):
         # shorter every time the row lit up.
         offset = (int(round(RAIL_NUDGE_PX * max(hover, active)))
                   if opt.text else 0)
+
+        # **The icon's own motion.** Drawn here rather than by the style
+        # so it can be rotated and scaled about its centre - the style
+        # blits a pixmap into a rect and offers no way in.
+        #
+        # The trick that keeps the layout honest: the style still gets an
+        # icon, so it computes exactly the geometry it always did (the
+        # decoration cell, the label's elide width, the folded centring
+        # this file has measured three times) - it is just a transparent
+        # one, so nothing of it lands on the row. The real pixmap is then
+        # painted into the rect the style itself worked out.
+        move = _icon_motion(_icon_name(path), hover, bool(opt.text)) if path else None
+        icon_rect = None
+        if move is not None and not lit.isNull():
+            icon_rect = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemDecoration, opt, widget)
+            opt.icon = QIcon(_blank_like(lit))
+
         if offset:
             painter.save()
             painter.translate(offset, 0)
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt,
                           painter, widget)
+        if icon_rect is not None and icon_rect.isValid():
+            dx, dy, degrees, scale = move
+            centre = QPointF(icon_rect.center()) + QPointF(0.5, 0.5)
+            painter.save()
+            # Only around the transformed draw: an untransformed blit is
+            # already exact, and asking for smoothing there costs work
+            # for a result that cannot differ.
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.translate(centre.x() + dx, centre.y() + dy)
+            if degrees:
+                painter.rotate(degrees)
+            if scale != 1.0:
+                painter.scale(scale, scale)
+            # The pixmap carries its own devicePixelRatio, so its logical
+            # size is what places it - drawn from its own centre, which
+            # is now the origin.
+            size = lit.size() / lit.devicePixelRatio()
+            painter.drawPixmap(
+                QPointF(-size.width() / 2.0, -size.height() / 2.0), lit)
+            painter.restore()
         if offset:
             painter.restore()
 
@@ -3205,6 +3358,22 @@ class MainWindow(QMainWindow):
         window anyway."""
         return getattr(self, "_body", None) or self.centralWidget()
 
+    def player_host(self):
+        """What the *video player* is laid over - the whole window.
+
+        The reader, the details page and the genre browse all take
+        `overlay_host` and keep the window's bar above them, which is
+        what the owner asked for on the episode and chapter lists. The
+        player is the one surface that does not: it is a picture, and a
+        search field over a film is furniture in the way (his ask, 26
+        August 2026 - "remove the upper bar in the vid player (remove
+        the one contains the search box ONLY)"). It draws its own top
+        bar with the title and the way out.
+
+        The window is still movable while it is up: the player's own bar
+        starts a native drag the same way the app's does."""
+        return self.centralWidget()
+
     def _top_overlay(self):
         """The full-window surface currently covering the pages, if any.
 
@@ -3406,10 +3575,19 @@ class MainWindow(QMainWindow):
                     panel.move_selection(1 if key == Qt.Key.Key_Down else -1)
                     return True
                 if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                    panel.open_current()
-                    self.top_search.clear()
-                    self._close_search_panel()
-                    return True
+                    # **Only when a suggestion is genuinely picked.**
+                    # The panel exists from the first keystroke and is
+                    # empty until the lookup answers, so this used to
+                    # swallow Enter and do nothing at all if the user
+                    # typed and pressed straight away - the owner's
+                    # report, 26 August 2026. An empty panel, or one
+                    # with no current row, falls through to Discover
+                    # below.
+                    if panel.results.count() and panel.results.currentItem():
+                        panel.open_current()
+                        self.top_search.clear()
+                        self._close_search_panel()
+                        return True
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 # **Enter with no suggestion picked goes to Discover.**
                 # The owner's ask, 26 August 2026: searching should take

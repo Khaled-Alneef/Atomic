@@ -260,6 +260,24 @@ class LogoProgress(QWidget):
 
 
 class GlassPage(QWidget):
+    # **Every page follows the fold, frame by frame.** main._toggle_
+    # sidebar can hold a page at its widest and blit one screenshot for
+    # the whole animation, which is cheap and is why nothing on the page
+    # moved until the fold landed - the banners in particular snapped
+    # into their new width at the end (the owner reported it twice).
+    #
+    # Measured 26 August 2026, page paintEvent during one fold:
+    #
+    #     Read grid   frozen: 2 paints, 190ms apart
+    #     Read grid   live:  35 paints, 4.5ms apart, worst 0.06ms
+    #     Discover    live:  28 paints, 5.6ms apart, worst 0.05ms
+    #
+    # The old note that justified the freeze counted paint *events*, not
+    # their cost; the page's own paint is trivial because the cards
+    # repaint themselves. A page with a genuinely expensive paintEvent
+    # can still set this False and get the screenshot back.
+    FOLD_LIVE = True
+
     """Base for a page: one flat, uniform near-black ground behind
     whatever layout/content the subclass adds on top.
 
@@ -345,10 +363,25 @@ class _HoverCursorFilter(QObject):
     cards below have, without needing to subclass it."""
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Enter:
-            hold_hover_cursor(obj)
-        elif event.type() == QEvent.Type.Leave:
+        kind = event.type()
+        if kind == QEvent.Type.Enter:
+            # **Not while it is disabled.** A greyed-out control that
+            # still offers the pointing hand says "press me" about the
+            # one thing that cannot be pressed - the owner's report, 26
+            # August 2026, about Back on the setup wizard's first page.
+            if obj.isEnabled():
+                hold_hover_cursor(obj)
+        elif kind == QEvent.Type.Leave:
             release_hover_cursor(obj)
+        elif kind == QEvent.Type.EnabledChange:
+            # A control disabled *while* the pointer is on it has to give
+            # the cursor back there and then; there will be no Leave
+            # until the pointer moves, and by then it has been wrong for
+            # as long as the user was looking at it.
+            if not obj.isEnabled():
+                release_hover_cursor(obj)
+            elif obj.underMouse():
+                hold_hover_cursor(obj)
         return False
 
 

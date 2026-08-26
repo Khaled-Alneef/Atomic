@@ -8979,7 +8979,10 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     torn down: coming back out of the player should land exactly where
     it was entered from, and rebuilding a tracker page costs a full
     reload of its covers."""
-    host = (window.overlay_host() if hasattr(window, "overlay_host")
+    # The whole window, not the row under the bar - see
+    # main.player_host for why the player is the one overlay that
+    # covers the app's own chrome.
+    host = (window.player_host() if hasattr(window, "player_host")
             else (window.centralWidget() if hasattr(window, "centralWidget")
                   else window))
     # Once per open, and cheap: the file is a couple of dozen records and

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -499,23 +500,23 @@ class SettingsDialog(QDialog):
         self.category_list.setSpacing(2)
         for name in CATEGORIES:
             item = QListWidgetItem(f"  {name}")
+            # **Coloured through the model, not through a child widget.**
+            # The danger row used to be a QLabel dropped onto the item
+            # with setItemWidget, because a stylesheet `color` on ::item
+            # beats the model's ForegroundRole - true, and the cure was
+            # worse: an item widget brings its own geometry, so that row
+            # ignored the padding every other row gets and the selection
+            # pill was drawn behind a label that did not line up with it.
+            # The owner's screenshot, 26 August 2026: the highlight
+            # clipped, and the word sitting at a different x from the
+            # eight above it.
+            #
+            # #SettingsNav sets no `color` at all now (see theme.py), so
+            # the model wins for every row and each one is the same
+            # shape - one plain item, one padding, one pill.
+            item.setForeground(QColor(theme.DANGER if name == DANGER_CATEGORY
+                                      else theme.TEXT_MUTED))
             self.category_list.addItem(item)
-            if name == DANGER_CATEGORY:
-                # Painted by a label sitting on the row, not by the item's
-                # own foreground brush. The brush was the obvious way and
-                # it does nothing here: the nav list's QSS sets a colour
-                # on ::item, and a stylesheet colour beats the model's
-                # ForegroundRole - measured, the row still drew at
-                # #9d9db1 with theme.DANGER set on it. A child widget's
-                # own stylesheet is the one thing that wins, and a
-                # transparent background leaves the row's hover and
-                # selection painting untouched underneath.
-                label = QLabel(item.text())
-                label.setStyleSheet(
-                    f"color: {theme.DANGER}; background: transparent;")
-                item.setSizeHint(self.category_list.item(0).sizeHint())
-                item.setText("")
-                self.category_list.setItemWidget(item, label)
         self.category_list.currentRowChanged.connect(self._on_category_changed)
         # Tall enough for every row, measured rather than left to Qt.
         # QListWidget's own sizeHint is bounded however many items it

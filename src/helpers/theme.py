@@ -724,7 +724,12 @@ QListWidget#SettingsNav {{
 }}
 QListWidget#SettingsNav::item {{
     background: transparent;
-    color: {TEXT_MUTED};
+    /* **No `color` here, deliberately.** A stylesheet colour on ::item
+       beats the model's ForegroundRole, and the Uninstall row needs to
+       be red without becoming a different *shape* from the rest - which
+       is what happened when it was painted by a child widget instead
+       (settings_dialog records the measurement). Each row carries its
+       own colour now and they all share this one geometry. */
     border: none;
     border-left: 3px solid transparent;
     border-radius: {RADIUS_SM}px;
@@ -732,11 +737,9 @@ QListWidget#SettingsNav::item {{
 }}
 QListWidget#SettingsNav::item:hover {{
     background: {SURFACE};
-    color: {TEXT};
 }}
 QListWidget#SettingsNav::item:selected {{
     background: {ACCENT_SOFT};
-    color: {ACCENT_HOVER};
     border-left: 3px solid {ACCENT};
 }}
 
