@@ -4,6 +4,38 @@ Builds parked here so they can be downloaded and tried on another
 machine. **Nothing here is a release**: no tag, no version bump, and the
 in-app updater ignores this branch.
 
+## Install
+
+Download the latest build from the
+[**test-latest**](https://github.com/Khaled-Alneef/Atomic/releases/tag/test-latest)
+pre-release, or straight from the link in the table.
+
+| Platform | Format |
+|---|---|
+| **Windows** | [`Atomic.zip`](https://github.com/Khaled-Alneef/Atomic/releases/download/test-latest/Atomic.zip) - extract and run `Atomic.exe`, no installer |
+
+Windows is the only platform Atomic is built for. There is no macOS or
+Linux build and no web version.
+
+That link never changes and always serves the newest build: a push to
+this branch republishes it automatically, through
+`.github/workflows/publish-test-build.yml`.
+
+**Take it from the release, not from the file in this repository.**
+Downloading `Atomic.zip` out of the branch is a cold CDN miss every
+time - raw.githubusercontent has to inflate a 92MB blob out of a git
+packfile before it can serve a byte. Measured 26 August 2026, three
+requests for the same blob back to back:
+
+    run 1   first byte 4.45s   x-cache MISS
+    run 2   first byte 0.45s   x-cache HIT
+    run 3   first byte 0.45s   x-cache HIT
+
+The warm case never helps, because `cache-control` is `max-age=300` and
+every build is a brand-new blob, so whoever downloads first always pays
+the miss. The same file as a release asset is a stored file rather than
+a git object: **1.08s cold**.
+
 **The build ships as `Atomic.zip`, never as a bare `Atomic.exe`** -
 the owner's standing rule of 25 August 2026, now CLAUDE.md rule 8. It is
 a measurement, not a preference: the exe was refused on download as
@@ -15,36 +47,34 @@ cleanly.
 
 | | |
 |---|---|
-| Version | 1.10.46 (unreleased) |
-| Built | 26 August 2026, fourteenth build |
-| SHA-256 | `4dfc2f9008ebbd34b7873d17492f760efaf48c16dd98d838ff75cd7b7d2d6e53` |
+| Version | 1.10.74 (unreleased) |
+| Built | 26 August 2026, twelfth build on this branch |
+| Size | 92.2 MB |
+| SHA-256 | `d3e7520382e99118c800274d66ce67614bb244331758d849cddc5cb6651fb497` |
 
 Extract, then run `Atomic.exe`.
 
-**New in this one:** a wheel notch starts moving on the frame you turn
-it. The scrolling was already interpolating properly - 21 steps in a
-clean ease-out over 144ms - but the first tick arrived 39ms late while
-the shared clock woke up, and a stall followed by a run is what reads as
-a jump. The distance per notch is unchanged.
+**New in this one:** asking for an episode no longer returns the same
+episode of the *next* season. The wrong-season filter needs to know how
+many seasons an entry has and what seasons the answer states, and had
+neither for a title watched out of History - so season 2 fell outside
+the bound, was read as another index's numbering, and the row was judged
+on its episode number alone.
 
-Teal has depth in it at rest: the accent ramp runs corner to corner
-rather than top to bottom, with a soft upper-left glint, a 1.5px lift on
-hover and a 1px settle on press. Badges like CONTINUE WATCHING carry the
-same material one step quieter, so the call to action still wins.
+Before that: the Atomic Users Rating was removed. Ratings written by
+every install cannot live on GitHub - a write credential shipped inside
+the exe is extractable, auto-revoked by GitHub's own secret scanning and
+rate-limited per token rather than per user, and with the key in the
+client a login cannot mean anything, because the app can write as
+anybody.
 
-Also in this build: Saved, Schedule and History moved into the window's
-bar with a Watch/Read pair inside each, the sidebar mark turns as the
-rail folds, every sidebar icon animates as the thing it depicts, the top
-bar survives full screen and lost its Back button, three stuck hover
-states are fixed, and searching from an episode or chapter list reaches
-Discover.
+Also recently: the cat icon is the owner's own artwork with eyes that
+close on hover, the Atomic mark carries a rounded play symbol instead of
+a star, the search bar rides Home's scroll in full screen and no longer
+swallows clicks meant for the page underneath, hero logos are sharp on a
+scaled display, and the source list stopped showing one release twice.
 
-Earlier: seeking that lands where you pressed (measured live on Attack
-on Titan S01E02), Motion Smoothing that actually engages, the player and
-reader covering the window's own bar, Airing Soon carrying series as
-well as anime, and the Harbor navy/teal re-theme throughout.
-
-## What was ruled out when the warning started
+## What was ruled out when the Defender warning started
 
 Seven builds compared, extracted from this branch's own history: the
 same 193 bundled entries in every one (nothing added, ever), the same
