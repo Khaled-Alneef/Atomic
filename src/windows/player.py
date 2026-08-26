@@ -880,8 +880,23 @@ def resume_point(entry):
 
 
 def clear_resume(entry, season, episode):
-    """Drop the resume point once the episode is finished, so the next
+    """Drop the resume *point* once the episode is finished, so the next
     visit starts clean instead of offering the credits.
+
+    **The release is kept.** The owner's ask, 26 August 2026: *"make
+    when I play an ep that I already played before make it choose the
+    same source as always"* - which the record already knew how to do
+    (see _hoist_remembered_release) and then threw away the moment the
+    episode finished, because the release was stored on the same record
+    as the position and this deleted the record whole. So watching an
+    episode to the end was the one thing that guaranteed the next play
+    of it re-ran the whole race.
+
+    Position and duration go to 0, which is what "start clean" means -
+    `resume_point` and the Continue offer both read the position, and a
+    record sitting at 0 offers nothing. What survives is which release
+    it was, which is not a resume point and was never the reason this
+    function existed.
 
     Every identity, not only the best one: an episode filed under a
     title before its IMDb id resolved would otherwise survive being
@@ -890,8 +905,23 @@ def clear_resume(entry, season, episode):
     if not keys:
         return
     records = storage.load(RESUME_FILE, [])
-    kept = [r for r in records if r.get("id") not in keys]
-    if len(kept) != len(records):
+    changed = False
+    kept = []
+    for record in records:
+        if record.get("id") not in keys:
+            kept.append(record)
+            continue
+        release = record.get("release")
+        if not release:
+            changed = True
+            continue        # nothing worth keeping - drop it as before
+        trimmed = dict(record)
+        trimmed["position"] = 0.0
+        trimmed["duration"] = 0.0
+        trimmed["updated_at"] = storage.now_iso()
+        kept.append(trimmed)
+        changed = True
+    if changed:
         storage.save(RESUME_FILE, kept)
 
 
@@ -5150,6 +5180,16 @@ class PlayerPage(GlassPage):
     def _seek_absolute(self, seconds, resuming=False):
         if self.handle is None:
             return
+        # **Where the user asked to be, remembered until mpv agrees.**
+        # `_position` only moves when mpv reports time-pos, and after a
+        # seek that report lags - on a torrent, by seconds, while the
+        # pieces at the new offset are still arriving. Anything relative
+        # computed from `_position` in that window is computed from a
+        # place the video is not, so a second arrow press seeks from the
+        # old spot and lands somewhere neither press asked for. That is
+        # the "takes me randomly into the vid" the owner reported.
+        self._seek_target = max(0.0, float(seconds))
+        self._seek_target_at = time.monotonic()
         if not resuming:
             # A seek the user asked for cancels the seat the player
             # still owed. Without this, dragging the bar (or taking a
@@ -5171,8 +5211,35 @@ class PlayerPage(GlassPage):
         except Exception:
             logs.exception("Seek failed")
 
+    # How long a pending seek target outranks mpv's reported position.
+    # Long enough to cover a torrent's pieces arriving, short enough
+    # that a seek which silently failed cannot pin the base forever.
+    SEEK_TARGET_TTL_S = 12.0
+    # How far mpv may land from the target before it is worth saying so
+    # in the log. Two seconds is well outside keyframe rounding on
+    # precision="exact".
+    SEEK_LANDED_TOLERANCE_S = 2.0
+
+    def _seek_base(self) -> float:
+        """Where a relative seek counts from.
+
+        The pending target while one is outstanding, otherwise mpv's own
+        position. Without this, holding the arrow key advances by one
+        step in total however many times it is pressed - every press
+        after the first reads a position that has not caught up yet."""
+        target = getattr(self, "_seek_target", None)
+        if target is None:
+            return float(self._position or 0.0)
+        landed = abs(float(self._position or 0.0) - target)
+        fresh = (time.monotonic() - getattr(self, "_seek_target_at", 0.0)
+                 < self.SEEK_TARGET_TTL_S)
+        if landed <= self.SEEK_LANDED_TOLERANCE_S or not fresh:
+            self._seek_target = None
+            return float(self._position or 0.0)
+        return target
+
     def _seek_relative(self, delta):
-        self._seek_absolute((self._position or 0.0) + delta)
+        self._seek_absolute(self._seek_base() + delta)
 
     def toggle_pause(self):
         if self.handle is None:
@@ -8812,7 +8879,9 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     torn down: coming back out of the player should land exactly where
     it was entered from, and rebuilding a tracker page costs a full
     reload of its covers."""
-    host = window.centralWidget() if hasattr(window, "centralWidget") else window
+    host = (window.overlay_host() if hasattr(window, "overlay_host")
+            else (window.centralWidget() if hasattr(window, "centralWidget")
+                  else window))
     # Once per open, and cheap: the file is a couple of dozen records and
     # it is only rewritten when there is actually something to drop.
     forget_untethered_resume()

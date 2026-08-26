@@ -4462,6 +4462,65 @@ class TrackerPage(GlassPage):
         self._discover_body_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._discover_layout.addWidget(scroll_area(self.discover_body, ground=theme.PANEL_FILL), stretch=1)
 
+    def _add_owned_row(self, query):
+        """A row of things the user already has that match `query`.
+
+        Reuses helpers.global_search for both halves - the matching and
+        the opening - so a result found here behaves exactly as the same
+        result found in the window's own dropdown, and there is one
+        place that knows how to open each kind of thing."""
+        try:
+            from helpers import global_search
+            found = global_search.collect(query)
+        except Exception:
+            logs.exception("Could not search the library from Discover")
+            return
+        if not found:
+            return
+        self._discover_body_layout.addWidget(
+            QLabel("In Your Library", objectName="SectionTitle"))
+        self._discover_body_layout.addWidget(
+            QLabel("Games, apps, sites and saved titles you already have",
+                   objectName="Muted"))
+        strip = QWidget(objectName="Bare")
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 4, 0, 0)
+        row.setSpacing(10)
+        for title, page_name, label, entry in found:
+            card = Card(matte=True)
+            # Both dimensions fixed: a Card is a bare QFrame until
+            # something inside it asks for room, and CardTextLabel
+            # elides rather than demanding width - so a card with only
+            # an eliding label in it collapses to nothing and the row
+            # renders as a heading over empty space (measured).
+            card.setFixedSize(190, 64)
+            body = QVBoxLayout(card)
+            body.setContentsMargins(12, 8, 12, 8)
+            body.setSpacing(2)
+            # A plain label elided by hand, not CardTextLabel: that one
+            # centres its text inside the width it is given, which on a
+            # two-line card puts the title and its kind on different
+            # left edges (measured on the real page).
+            name = QLabel()
+            name.setText(name.fontMetrics().elidedText(
+                title, Qt.TextElideMode.ElideRight, 166))
+            name.setToolTip(title)
+            name.setStyleSheet(f"color: {theme.TEXT}; font-weight: 700;")
+            name.setAlignment(Qt.AlignmentFlag.AlignLeft
+                              | Qt.AlignmentFlag.AlignVCenter)
+            body.addWidget(name)
+            kind = QLabel(label, objectName="Muted")
+            kind.setAlignment(Qt.AlignmentFlag.AlignLeft
+                              | Qt.AlignmentFlag.AlignVCenter)
+            body.addWidget(kind)
+            card.clicked.connect(
+                lambda _=False, p=page_name, e=entry:
+                global_search.open_entry(self.window(), p, e))
+            use_hover_cursor(card)
+            row.addWidget(card)
+        row.addStretch(1)
+        self._discover_body_layout.addWidget(strip)
+
     def _on_discover_search(self):
         query = self._search_query().strip()
         # Against the query the current rows were built from, not against
@@ -4490,6 +4549,25 @@ class TrackerPage(GlassPage):
         self._featured_save_btn = None
         self._featured_title = ""
         _clear_layout(self._discover_body_layout)
+
+        # **What the user already owns, above what the catalogue has.**
+        # The owner's ask, 26 August 2026: searching should reach
+        # Discover *and* answer for games. Games have no catalogue to
+        # browse - there is no source that lists every game the way
+        # Cinemeta lists every series - so the honest answer for them is
+        # the ones he has, and once that row exists it costs nothing to
+        # let it answer for apps, sites and saved titles too. Owned
+        # first, because "do I already have this?" is the question a
+        # search answers before "what else is there?".
+        if query:
+            try:
+                self._add_owned_row(query)
+            except Exception:
+                # This row is an extra on a page that has to build
+                # either way: a fault here used to abort _start_discover
+                # halfway and leave Discover blank below the heading
+                # (measured, 26 August 2026).
+                logs.exception("Could not build the owned results row")
 
         if discover is None:
             # The one honest thing to say. A source that quietly answers

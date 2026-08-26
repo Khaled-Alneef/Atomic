@@ -37,15 +37,16 @@ So this uses Qt's own frameless support, which is what
 `widgets._FramelessShell` already does for every dialog in the app:
 
 - `Qt.FramelessWindowHint`, so Windows draws nothing;
-- `startSystemMove()` from the bar, which is a *native* drag - Aero
-  Snap, Win+Arrow and drag-to-maximise still work, because Windows is
-  doing the dragging rather than a mouseMoveEvent adding up deltas;
+- `startSystemMove()` from the bar, which is a *native* drag, so
+  Windows is doing the dragging rather than a mouseMoveEvent adding up
+  deltas. **That alone is not enough for snapping** - see
+  `make_frameless`, which puts back the two style bits Windows checks
+  before it will snap a window at all;
 - `startSystemResize(edges)` from the perimeter, likewise native, with
   the real resize cursors.
 
 What is genuinely lost: the Snap Layouts flyout that hovering a *native*
-maximise button pops, and the frame's drop shadow. Win+Arrow and
-drag-to-edge snapping both still work.
+maximise button pops, and the frame's drop shadow.
 
 ## Why the resize filter is application-wide
 
@@ -58,14 +59,16 @@ first line: main.py also records what an app-wide filter costs when it
 asks more than that (13,172 calls across six sidebar folds).
 """
 
+import ctypes
 import sys
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QWidget
 
 from . import theme
-from .widgets import search_field, use_hover_cursor
+from .widgets import SmoothTween, search_field, use_hover_cursor
 
 WINDOWS = sys.platform == "win32"
 
@@ -109,12 +112,49 @@ _CORNERS = (
 )
 
 
-def make_frameless(window):
-    """Take Windows' caption off `window`.
+# Window styles. WS_CAPTION is deliberately absent - putting it back is
+# putting the title bar back.
+GWL_STYLE = -16
+WS_THICKFRAME = 0x00040000
+WS_MAXIMIZEBOX = 0x00010000
+WS_MINIMIZEBOX = 0x00020000
 
-    Everything else about it is unchanged - taskbar entry, Alt-Tab,
-    minimise, and the geometry the app already saves and restores."""
+
+def make_frameless(window):
+    """Take Windows' caption off `window`, and keep its snapping.
+
+    **The style bits are not decoration, they are what Aero Snap looks
+    for.** Qt.FramelessWindowHint strips the window down to WS_POPUP,
+    and Windows decides whether a window may be snapped - dragged to the
+    top to maximise, to a side for half the screen, Win+Arrow - by
+    asking whether it has WS_THICKFRAME and WS_MAXIMIZEBOX. Without
+    them, `startSystemMove()` moves the window and nothing else happens
+    at the edges, which is the owner's report of 26 August 2026.
+
+    Adding them back does not bring the caption back: WS_CAPTION is what
+    draws that, and it stays off. What they do bring is Windows' own
+    resize border, which is why `ResizeFilter` below is now belt and
+    braces rather than the only way to resize - it costs nothing and
+    still gives the right cursor over the app's own 6px band.
+
+    Everything else is unchanged - taskbar entry, Alt-Tab, minimise, and
+    the geometry the app already saves and restores."""
     window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+    if not WINDOWS:
+        return True
+    try:
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        user = ctypes.windll.user32
+        user.GetWindowLongW.restype = ctypes.c_long
+        style = user.GetWindowLongW(hwnd, GWL_STYLE)
+        user.SetWindowLongW(hwnd, GWL_STYLE,
+                            ctypes.c_long(style | WS_THICKFRAME
+                                          | WS_MAXIMIZEBOX | WS_MINIMIZEBOX))
+    except Exception:
+        # A platform plugin with no real HWND, or a Windows build that
+        # refuses the change - the window is still frameless and still
+        # draggable, it just will not snap.
+        return True
     return True
 
 
@@ -213,6 +253,83 @@ class ResizeFilter(QObject):
             self._shaped = False
 
 
+class DriftButton(QPushButton):
+    """A button whose hover *arrives* instead of switching on.
+
+    The owner's ask, 26 August 2026: *"add a short short animation to
+    all buttons when hover like make it smooth and drifty"*.
+
+    **Painted, because a stylesheet cannot do this.** QSS has no
+    transitions - `:hover` is a different rule, applied whole the
+    instant the pointer crosses the edge - so the only ways to fade one
+    are to rewrite the stylesheet every frame (a style recomputation per
+    frame, which is what the sidebar rail was explicitly built to avoid)
+    or to paint the background here and let QPushButton draw only its
+    glyph on top. This does the second: its QSS background is
+    transparent, the fill below is ours, and `super().paintEvent` puts
+    the text over it.
+
+    The press is a deepening, not a scale: a button that jumps size
+    under the pointer moves the thing being clicked.
+    """
+
+    HOVER_MS = 140
+    PRESS_MS = 90
+
+    def __init__(self, text="", parent=None, radius=0, tint=None,
+                 objectName="WindowButton"):
+        super().__init__(text, parent, objectName=objectName)
+        self._radius = radius
+        self._tint = tint or theme.SURFACE_HOVER
+        self._hover = 0.0
+        self._press = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._hover_tween = SmoothTween(self, self._set_hover, self.HOVER_MS)
+        self._press_tween = SmoothTween(self, self._set_press, self.PRESS_MS)
+
+    def _set_hover(self, value):
+        self._hover = float(value)
+        self.update()
+
+    def _set_press(self, value):
+        self._press = float(value)
+        self.update()
+
+    def enterEvent(self, event):
+        self._hover_tween.start(self._hover, 1.0, self.HOVER_MS)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_tween.start(self._hover, 0.0, self.HOVER_MS)
+        self._press_tween.start(self._press, 0.0, self.PRESS_MS)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        self._press_tween.start(self._press, 1.0, self.PRESS_MS)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_tween.start(self._press, 0.0, self.PRESS_MS)
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        if self._hover > 0.001 or self._press > 0.001:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            fill = QColor(self._tint)
+            # Hover carries the alpha; the press deepens it rather than
+            # adding a second layer, so the two never stack into a
+            # patch brighter than either state alone.
+            alpha = self._hover * (0.78 + 0.22 * self._press)
+            fill.setAlphaF(min(1.0, max(0.0, alpha)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            rect = QRectF(self.rect())
+            painter.drawRoundedRect(rect, self._radius, self._radius)
+            painter.end()
+        super().paintEvent(event)
+
+
 class TitleBar(QWidget):
     """Back on the left, one search field in the middle, the window
     buttons on the right.
@@ -238,7 +355,8 @@ class TitleBar(QWidget):
         row.setContentsMargins(8, 0, 0, 0)
         row.setSpacing(0)
 
-        self.back_btn = QPushButton(f"{BACK_GLYPH}  Back", objectName="BackButton")
+        self.back_btn = DriftButton(f"{BACK_GLYPH}  Back", radius=theme.RADIUS_SM,
+                                    tint=theme.SURFACE, objectName="BackButton")
         self.back_btn.setFixedHeight(32)
         self.back_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.back_btn.clicked.connect(self.back.emit)
@@ -287,7 +405,10 @@ class TitleBar(QWidget):
         row.addWidget(right)
 
     def _window_button(self, glyph, tip, slot, name="WindowButton"):
-        button = QPushButton(glyph, objectName=name)
+        button = DriftButton(glyph, radius=0,
+                             tint=(theme.DANGER if name == "WindowClose"
+                                   else theme.SURFACE_HOVER),
+                             objectName=name)
         button.setFont(theme.icon_font(9))
         button.setFixedSize(QSize(WINDOW_BUTTON_WIDTH, BAR_HEIGHT))
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)

@@ -160,11 +160,40 @@ def default_options() -> dict:
         # Native source FPS stays the default either way - neither of
         # these changes how many frames the file has.
         "video_sync": "display-resample",
-        "interpolation": True,
-        # Off by default (app_settings.get_motion_smoothing), so what
-        # ships is synchronisation only.
+        # **Interpolation is off by default now, and that is the fix for
+        # the late frames.** Compared against Stremio on this machine,
+        # 26 August 2026 - it ships the *same* libmpv-2.dll, so the two
+        # are directly comparable - by reading the mpv options its shell
+        # actually sets:
+        #
+        #   Stremio: hwdec=auto, gpu-context=d3d11, d3d11-output-format,
+        #            target-colorspace-hint, tone-mapping=bt.2390,
+        #            dither-depth, deband, scale=spline36, cscale, dscale
+        #   Stremio: **no video-sync, no interpolation, no tscale**
+        #
+        # That absence is the whole difference. With no video-sync mpv
+        # times frames on the audio clock and renders one frame per
+        # *video* frame - about 24 a second. `interpolation=yes` makes
+        # mpv render one per *display refresh* instead, which on the
+        # owner's 240Hz panel is 240 a second: ten times the GPU work
+        # for the same picture. That is what fills vo-delayed-frame-count
+        # and it is the same load that made spline36+deband freeze both
+        # monitors in August (see the scaler note below - same cause,
+        # different symptom).
+        #
+        # What is kept is `video-sync=display-resample`, which is the
+        # part that actually removes judder: it still aligns every frame
+        # to the raster and holds each for a whole number of refreshes.
+        # It just does not re-render between them. Interpolation only
+        # earns its cost when frames must be *blended*, which is
+        # precisely Motion Smoothing - so that is where it lives now.
+        "interpolation": app_settings.get_motion_smoothing(),
         "tscale": ("mitchell" if app_settings.get_motion_smoothing()
                    else "oversample"),
+        # Stated rather than left to mpv's probe, which is what Stremio
+        # does too. d3d11 is the context d3d11va decoding hands its
+        # surfaces to, so choosing anything else costs a copy per frame.
+        **({"gpu_context": "d3d11"} if sys.platform == "win32" else {}),
         # **No scaler overrides - reverted 24 August 2026, same day they
         # went in.** spline36/deband landed as the answer to "stremio
         # has better quality" and the owner's very next report was "my

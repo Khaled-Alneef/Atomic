@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from helpers import (app_settings, downloads, global_search, images, layout, logs,
-                     window_chrome,
+                     rail_icons, window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
 from helpers.nav_config import (HOME_ITEM, nav_position, route_page,
@@ -1524,6 +1524,16 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._fit_rails)
         self.sidebar_holder.installEventFilter(self)
         QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+        # **Re-cut everything when the window changes screen.** Images
+        # are scaled to the device pixel ratio of the screen they were
+        # built on and tagged with it (.claude/rules/ui.md), which is
+        # what keeps them sharp - and is exactly why they go soft when
+        # the window is dragged to a panel at a different scale factor:
+        # every cached pixmap is now the wrong size and Qt rescales it
+        # on each draw. The owner's report, 26 August 2026: the page is
+        # blurry until you leave it and come back, which is a page
+        # rebuild doing by hand what this now does by itself.
+        QTimer.singleShot(0, self._watch_screen_changes)
 
     # ------------------------------------------------------------------
     def _build_sidebars(self):
@@ -3158,6 +3168,27 @@ class MainWindow(QMainWindow):
                 continue
             self._add_menu.addAction(label, lambda p=page_name, a=action: self._add_via(p, a))
 
+    def overlay_host(self):
+        """What a full-window overlay - the player, the reader, the
+        details page - should be laid over.
+
+        **The body, not the central widget.** Those three cover their
+        host whole, which used to mean covering the window's own top bar
+        with them, so the bar existed on ordinary pages and vanished the
+        moment anything was opened. The owner's ask, 26 August 2026:
+        show it everywhere, including the episode and chapter lists, and
+        let the window be dragged from anywhere - and the bar is what
+        the window is dragged by.
+
+        So the overlays get the row *under* the bar. They still cover
+        the sidebar, which is what makes it disappear while reading with
+        no state here to get stuck in (see reader.open_reader).
+
+        Full screen is the exception and needs no code: the bar hides
+        itself there (changeEvent), and the body is then the whole
+        window anyway."""
+        return getattr(self, "_body", None) or self.centralWidget()
+
     def _top_overlay(self):
         """The full-window surface currently covering the pages, if any.
 
@@ -3165,7 +3196,7 @@ class MainWindow(QMainWindow):
         are hand-placed children of the central widget rather than
         entries in the page stack, so "what is on top" cannot be read
         from the history - it is whichever of them is visible."""
-        host = self.centralWidget()
+        host = self.overlay_host()
         player = getattr(self, "_player_page", None)
         if player is not None:
             try:
@@ -3363,6 +3394,16 @@ class MainWindow(QMainWindow):
                     self.top_search.clear()
                     self._close_search_panel()
                     return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                # **Enter with no suggestion picked goes to Discover.**
+                # The owner's ask, 26 August 2026: searching should take
+                # him to the full results rather than leave him reading
+                # a dropdown. Typing still narrows the page underneath -
+                # that is a different thing he asked for and both fit,
+                # because one is what happens *as* you type and this is
+                # what happens when you say you are done.
+                self._search_in_discover(self.top_search.text())
+                return True
             if key == Qt.Key.Key_Escape:
                 # Escape *leaves* the field, it does not merely empty
                 # it. Clearing alone left the caret blinking in a box
@@ -3389,25 +3430,76 @@ class MainWindow(QMainWindow):
                 self._position_update_dot()
         return super().eventFilter(obj, event)
 
+    def _watch_screen_changes(self):
+        """Follow the window between screens, and follow a screen that
+        changes its own scale factor.
+
+        Two signals, not one: `screenChanged` covers being dragged to
+        another monitor, and `logicalDotsPerInchChanged` covers the
+        scale being changed under a window that never moved. Connected
+        after the first show, because windowHandle() is None until the
+        window is realised."""
+        handle = self.windowHandle()
+        if handle is None:
+            return
+        try:
+            handle.screenChanged.connect(self._on_screen_changed)
+        except (AttributeError, RuntimeError):
+            return
+        self._watched_ratio = float(self.devicePixelRatioF() or 1.0)
+        self._watch_screen_dpi(handle.screen())
+
+    def _watch_screen_dpi(self, screen):
+        if screen is None:
+            return
+        try:
+            screen.logicalDotsPerInchChanged.connect(
+                lambda _dpi: self._on_screen_changed(self.windowHandle().screen()
+                                                     if self.windowHandle() else None))
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _on_screen_changed(self, screen):
+        """Rebuild whatever was cut at the old ratio.
+
+        Guarded on the ratio actually differing: dragging between two
+        monitors at the same scale changes nothing about the artwork,
+        and rebuilding the page there would be a visible flicker bought
+        for nothing."""
+        ratio = float(self.devicePixelRatioF() or 1.0)
+        if abs(ratio - getattr(self, "_watched_ratio", ratio)) < 0.01:
+            self._watched_ratio = ratio
+            return
+        self._watched_ratio = ratio
+        self._watch_screen_dpi(screen)
+        # The rail's icons are cut per ratio too, and the logo with
+        # them - _fit_rails re-asks for both.
+        images.clear_scaled_cache()
+        try:
+            rail_icons.clear_cache()
+        except Exception:
+            pass
+        self._style_logo()
+        self._fit_rails()
+        # Pages hold no state (.claude/rules/ui.md), so the honest way
+        # to re-cut a page's artwork is to build it again - which is
+        # what leaving and returning already did by hand.
+        self.refresh_current_page()
+
     def _fit_current_page(self):
         if self._current_page is None:
             return
-        if self._fold_in_flight:
-            # **Not while the sidebar is folding.** Every step of that
-            # animation resizes the container, and re-fitting the page
-            # here re-lays out everything on it - on a tracker page that
-            # is a grid of a hundred-odd cards, and it was the last big
-            # cost left in a fold (measured: the tracker pages held
-            # 63-75 positions a second against Home's 111).
-            #
-            # The page is pinned to the *widest* the container will be
-            # during the fold instead (see _toggle_sidebar), so it is
-            # never narrower than the container and no strip of bare
-            # window can show through - the failure the container hook
-            # above exists to prevent. Being wider is invisible: the
-            # container clips it. The real fit happens once, when the
-            # fold lands.
-            return
+        # **The page follows the fold now, frame by frame.** It used
+        # to be pinned to the widest the container would be and clipped,
+        # so nothing on it moved during the animation and the whole
+        # layout snapped into place at the end - which is what the owner
+        # reported, 26 August 2026, about the banners and artwork.
+        #
+        # The pin was there for a measured cost, and the measurement is
+        # what says it can go: re-fitting held **63-75 positions a
+        # second on the tracker pages** (Home 111), and the budget is 60
+        # (CLAUDE.md rule 7). It was optimising past the point that
+        # matters, and buying a snap with the change.
         self._current_page.setGeometry(self.container.rect())
 
     def _drain_override_cursor(self):
@@ -3736,6 +3828,21 @@ class MainWindow(QMainWindow):
             self._search_panel.close()
             self._search_panel = None
         self._refilter_current_page()
+
+    def _search_in_discover(self, query):
+        """Show `query`'s full results on the Discover page."""
+        query = str(query or "").strip()
+        if not query:
+            return
+        self._close_search_panel()
+        self.navigate_to("discover", animate=False)
+        page = self._current_page
+        start = getattr(page, "start_search", None)
+        if callable(start):
+            try:
+                start(query)
+            except Exception:
+                logs.exception("Could not search Discover")
 
     def page_filter_text(self) -> str:
         """What the page on screen should narrow itself to.

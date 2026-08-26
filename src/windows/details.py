@@ -1830,8 +1830,9 @@ class DetailsPage(GlassPage):
         page is, so it covers the sidebar the same way and Back/Escape
         lands here again."""
         window = self.window()
-        host = (window.centralWidget() if hasattr(window, "centralWidget")
-                else window)
+        host = (window.overlay_host() if hasattr(window, "overlay_host")
+                else (window.centralWidget() if hasattr(window, "centralWidget")
+                      else window))
         host = host if host is not None else window
         page = GenreBrowsePage(genre, self._is_reading, host)
         page.open_title = self._open_browsed_title
@@ -4340,7 +4341,9 @@ def open_details(window, entry):
     """Put the details page over `window`. The one entry point - the same
     central-widget host trick reader.open_reader documents, so the
     sidebar is covered rather than hidden."""
-    host = window.centralWidget() if hasattr(window, "centralWidget") else window
+    host = (window.overlay_host() if hasattr(window, "overlay_host")
+            else (window.centralWidget() if hasattr(window, "centralWidget")
+                  else window))
     host = host if host is not None else getattr(window, "container", window)
     page = DetailsPage(entry, host)
     page.follow(host)

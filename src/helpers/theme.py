@@ -668,6 +668,45 @@ QListWidget#NavList::item:selected {{
     border-radius: {RADIUS}px;
 }}
 
+/* ---- Settings' own nav column --------------------------------------- */
+/* **Its own object name, and this is why.** It shared #NavList with the
+   sidebar rail, and the rail's rows are painted by a delegate now
+   (main._RailDelegate) - so the state rules were stripped out of
+   #NavList to stop two backgrounds fighting. Settings has no delegate,
+   so it lost its selection highlight entirely and the open page became
+   the one row you could not see (the owner's screenshot, 26 August
+   2026). One name per painter.
+
+   Selected is the accent's own soft tint with a teal bar down the left,
+   which is the app's active-row language everywhere else - the owner
+   asked for the highlight to be the theme colour, and this is what that
+   colour looks like on a row. */
+QListWidget#SettingsNav {{
+    background: transparent;
+    border: none;
+    outline: none;
+    font-family: {FONT_STACK_NAV};
+    font-size: {NAV_FONT_SIZE}pt;
+    font-weight: 700;
+}}
+QListWidget#SettingsNav::item {{
+    background: transparent;
+    color: {TEXT_MUTED};
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: {RADIUS_SM}px;
+    padding: 10px 8px;
+}}
+QListWidget#SettingsNav::item:hover {{
+    background: {SURFACE};
+    color: {TEXT};
+}}
+QListWidget#SettingsNav::item:selected {{
+    background: {ACCENT_SOFT};
+    color: {ACCENT_HOVER};
+    border-left: 3px solid {ACCENT};
+}}
+
 /* ---- The window's own title bar ------------------------------------- */
 /* SIDEBAR, not BG: the bar and the sidebar column meet at a corner, and
    two different near-blacks meeting there reads as a seam rather than as
@@ -687,8 +726,11 @@ QPushButton#BackButton {{
     font-size: 10pt;
     font-weight: 600;
 }}
+/* Colour only - the fill is painted and animated by
+   window_chrome.DriftButton. A QSS background here would switch on
+   instantly underneath the fade and defeat it. */
 QPushButton#BackButton:hover {{
-    background: {SURFACE};
+    background: transparent;
     color: {TEXT};
 }}
 QPushButton#BackButton:disabled {{ color: {TEXT_DIM}; background: transparent; }}
@@ -703,13 +745,13 @@ QPushButton#WindowButton, QPushButton#WindowClose {{
     padding: 0px;
     font-family: {FONT_STACK_ICONS};
 }}
-QPushButton#WindowButton:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; }}
-QPushButton#WindowButton:pressed {{ background: {SURFACE_ACTIVE}; }}
+QPushButton#WindowButton:hover {{ background: transparent; color: {TEXT}; }}
+QPushButton#WindowButton:pressed {{ background: transparent; }}
 /* Red on hover, which is the one caption-button convention Windows users
    read without looking - and the only place in the app DANGER is a
    hover state rather than a warning. */
-QPushButton#WindowClose:hover {{ background: {DANGER}; color: {TEXT_OVER_MEDIA}; }}
-QPushButton#WindowClose:pressed {{ background: {DANGER_HOVER}; }}
+QPushButton#WindowClose:hover {{ background: transparent; color: {TEXT_OVER_MEDIA}; }}
+QPushButton#WindowClose:pressed {{ background: transparent; }}
 /* One search field for the whole app. Fully rounded, because it is the
    only control on the bar that is not square and the pill is what tells
    the eye it is a field rather than a label. */

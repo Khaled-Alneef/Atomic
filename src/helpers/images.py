@@ -667,6 +667,28 @@ _PIXMAP = {}
 _CACHE_MAX = 512
 
 
+def clear_scaled_cache():
+    """Drop every pixmap that was cut for a particular screen.
+
+    Called when the window moves to a monitor at a different scale
+    factor (main._on_screen_changed). Everything here is scaled to a
+    device pixel ratio and tagged with it, which is what keeps it sharp
+    on the screen it was cut for - and is exactly why it goes soft on
+    a screen it was not: Qt rescales a mis-tagged pixmap on every draw.
+    The owner's report, 26 August 2026, was that the artwork stayed
+    blurry until the page was left and re-entered, which is a rebuild
+    doing this by hand.
+
+    Not the file-content caches: `_stamp` keys those by mtime and size
+    and a monitor change does not touch a file. These are the *rendered*
+    ones, and they are all cheap to rebuild from the decode that stays.
+    """
+    _FITTED.clear()
+    _PIXMAP.clear()
+    _tinted.clear()
+    _logo_cache.clear()
+
+
 def _stamp(path):
     """The file's mtime/size, so a cover that gets re-downloaded at the
     same path (see tracker's sharper-cover backfill) is re-read rather

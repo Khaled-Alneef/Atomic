@@ -151,6 +151,7 @@ a = Analysis(
            (os.path.join(ICONS_DIR, "movies.svg"), 'assets/icons'),
            (os.path.join(ICONS_DIR, "saved.svg"), 'assets/icons'),
            (os.path.join(ICONS_DIR, "search.svg"), 'assets/icons'),
+           (os.path.join(ICONS_DIR, "schedule.svg"), 'assets/icons'),
            (os.path.join(ICONS_DIR, "settings.svg"), 'assets/icons'),
            (os.path.join(ICONS_DIR, "shows.svg"), 'assets/icons'),
            (os.path.join(ICONS_DIR, "websites.svg"), 'assets/icons'),

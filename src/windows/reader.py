@@ -4316,6 +4316,10 @@ def _send_key(vk):
 # needed), so 3s is comfortable without stalling the fallback.
 _MUSIC_MEDIA_KEY_WAIT_S = 3.0
 VK_MEDIA_PLAY_PAUSE = 0xB3
+# How long the page is given to start itself before any key is pressed.
+# Stage 1's own measurement is "~2s in" (23 August 2026); 4s leaves room
+# for a cold profile without stalling the escalation noticeably.
+_MUSIC_AUTOPLAY_WAIT_S = 4.0
 
 
 def _start_music_minimized(hwnd, window):
@@ -4342,10 +4346,42 @@ def _start_music_minimized(hwnd, window):
     if _music.get("hwnd") != hwnd or _music.get("gesture_sent"):
         return
     try:
-        if _browser_is_audible():
-            _music["gesture_sent"] = True
-            logs.info("music: autoplayed while minimized")
-            return
+        # **Autoplay gets its runway before any key is pressed.** This
+        # used to read the sensor once, immediately, and send the media
+        # key the moment it found silence - but stage 1 above is
+        # measured at *~2s in*, so at the instant this runs the page has
+        # not loaded and silence is the only possible answer. The key
+        # therefore went out on every single open, and then raced the
+        # autoplay it was meant to be the fallback for: whichever landed
+        # second toggled the other off. That is the owner's report, 26
+        # August 2026 - "the music URL does not play, it always pause
+        # the music automatically" - and it is a toggle being used where
+        # "play" was meant.
+        #
+        # So: poll for the page starting by itself first, and only reach
+        # for the key once the runway has actually run out.
+        started = time.monotonic()
+
+        def after_runway():
+            if _music.get("hwnd") != hwnd or _music.get("gesture_sent"):
+                return
+            if _browser_is_audible():
+                _music["gesture_sent"] = True
+                logs.info("music: autoplayed while minimized")
+                return
+            if time.monotonic() - started < _MUSIC_AUTOPLAY_WAIT_S:
+                QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, after_runway)
+                return
+            _press_media_key(hwnd, window)
+
+        after_runway()
+    except Exception:
+        logs.exception("could not start the minimized music")
+
+
+def _press_media_key(hwnd, window):
+    """Stage 2: the media key, once autoplay has had its chance."""
+    try:
         if not _anything_is_audible():
             _send_key(VK_MEDIA_PLAY_PAUSE)
             logs.info("music: media key sent (machine was silent)")
@@ -4367,7 +4403,7 @@ def _start_music_minimized(hwnd, window):
 
         QTimer.singleShot(_MUSIC_AUDIBLE_POLL_MS, listen)
     except Exception:
-        logs.exception("could not start the minimized music")
+        logs.exception("could not press the media key")
 
 
 def _music_visible_press(hwnd, window):
@@ -5196,7 +5232,9 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
     while reading". player.py already does exactly this for the same
     reason; nothing in main.py hides or restores anything, so there is
     no state to get stuck in the hidden half."""
-    host = window.centralWidget() if hasattr(window, "centralWidget") else window
+    host = (window.overlay_host() if hasattr(window, "overlay_host")
+            else (window.centralWidget() if hasattr(window, "centralWidget")
+                  else window))
     host = host if host is not None else getattr(window, "container", window)
     # Opening is what Read History records - the owner opened chapters
     # and found the section empty, because the only writer was the

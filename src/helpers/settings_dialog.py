@@ -478,7 +478,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(14, 20, 14, 16)
         layout.setSpacing(4)
 
-        self.category_list = QListWidget(objectName="NavList")
+        self.category_list = QListWidget(objectName="SettingsNav")
         self.category_list.setFrameShape(QFrame.Shape.NoFrame)
         self.category_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.category_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

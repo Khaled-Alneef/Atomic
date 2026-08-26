@@ -10,8 +10,10 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor
+from PyQt6.QtCore import QObject, QRectF, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QLinearGradient, QPainter
+
+Signal = pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
     QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
@@ -26,7 +28,7 @@ from helpers import (app_art, cover_fetch, game_art, game_launch,
 from helpers.widgets import (
     Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, _OpaqueGround,
     hero_logo_label,
-    hero_split, inform, scroll_area, set_hero_logo,
+    hero_split, inform, scroll_area, set_hero_logo, SmoothTween,
     use_hover_cursor,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
@@ -113,6 +115,95 @@ def _clock_text() -> str:
     platform-specific for the sake of one digit."""
     now = datetime.now()
     return f"{now.hour % 12 or 12}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}"
+
+
+class _HeroDash(QWidget):
+    """One pager pill under the hero, and the movement between them.
+
+    The owner's ask, 26 August 2026: *"add an animation while
+    transitioning of the bullets"*. They were QPushButtons carrying a
+    stylesheet, resized and restyled on every slide change - which is a
+    snap, and a style recomputation per pill per change on top of it.
+
+    Painted instead, with one tween per pill carrying both the width and
+    the colour, so the active pill *grows* into place while the outgoing
+    one shrinks. Lit along its length rather than top-down for the
+    reason theme.accent_gradient records: at 6px tall the vertical lip
+    is well under a pixel and does not render at all."""
+
+    clicked = Signal()
+
+    HEIGHT = 6
+    WIDTH_REST = 18
+    WIDTH_ACTIVE = 30
+    # 200ms: long enough to read as movement, short enough to be over
+    # before the eye has finished travelling to the new slide.
+    TWEEN_MS = 200
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._t = 0.0
+        self._hover = False
+        self.setFixedHeight(self.HEIGHT)
+        self.setFixedWidth(self.WIDTH_REST)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._tween = SmoothTween(self, self._on_tween, self.TWEEN_MS)
+        use_hover_cursor(self)
+
+    def _on_tween(self, value):
+        self._t = float(value)
+        self.setFixedWidth(int(round(
+            self.WIDTH_REST + (self.WIDTH_ACTIVE - self.WIDTH_REST) * self._t)))
+        self.update()
+
+    def set_active(self, active, animate=True):
+        target = 1.0 if active else 0.0
+        if not animate:
+            self._on_tween(target)
+            return
+        self._tween.start(self._t, target, self.TWEEN_MS)
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0, 0, self.width(), self.height())
+        radius = self.height() / 2.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        if self._t <= 0.001:
+            resting = theme.TEXT_MUTED if self._hover else theme.SURFACE_ACTIVE
+            painter.setBrush(QColor(resting))
+            painter.drawRoundedRect(rect, radius, radius)
+            painter.end()
+            return
+        # The resting tone underneath, then the accent ramp faded in over
+        # it - so the colour crosses rather than switching, and a pill
+        # halfway through the tween is halfway through the colour too.
+        painter.setBrush(QColor(theme.SURFACE_ACTIVE))
+        painter.drawRoundedRect(rect, radius, radius)
+        gradient = QLinearGradient(rect.topLeft(), rect.topRight())
+        for at, colour in theme.accent_stops(hover=self._hover):
+            tint = QColor(colour)
+            tint.setAlphaF(min(1.0, max(0.0, self._t)))
+            gradient.setColorAt(at, tint)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.end()
 
 
 class HomePage(GlassPage):
@@ -559,10 +650,8 @@ class HomePage(GlassPage):
         dash_row.addStretch(1)
         self._hero_dashes = []
         for index in range(len(self._hero_entries)):
-            dash = QPushButton("")
-            dash.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            use_hover_cursor(dash)
-            dash.clicked.connect(lambda _checked=False, i=index: self._jump_hero(i))
+            dash = _HeroDash()
+            dash.clicked.connect(lambda i=index: self._jump_hero(i))
             dash_row.addWidget(dash)
             self._hero_dashes.append(dash)
         dash_row.addStretch(1)
@@ -691,25 +780,10 @@ class HomePage(GlassPage):
         self._hero_banner.set_backdrop(
             self._hero_backdrops.get(entry.get("id")), fade=fade)
         for i, dash in enumerate(self._hero_dashes):
-            active = i == index
-            # 18 rather than 14 for a resting dash: the reference's
-            # active pill is about 1.5x its neighbours, not 2.1x.
-            dash.setFixedSize(30 if active else 18, 6)
-            # **Lit left-to-right, not top-down.** Every other filled
-            # control in the app takes theme's vertical ramp, and this
-            # is the one surface that cannot: at 6px tall the lip is
-            # 0.42px and simply does not render. The reference lights
-            # this pill along its length for the same reason, so the
-            # angle is passed rather than the default taken. A resting
-            # dash stays flat - it has no shade in the reference either.
-            fill = (theme.accent_gradient(0, 0, 1, 0) if active
-                    else theme.SURFACE_ACTIVE)
-            hot = (theme.accent_gradient(0, 0, 1, 0, hover=True) if active
-                   else theme.TEXT_MUTED)
-            dash.setStyleSheet(
-                f"QPushButton {{ background: {fill};"
-                f" border: none; border-radius: 3px; padding: 0px; }}"
-                f"QPushButton:hover {{ background: {hot}; }}")
+            # animate=fade: the first draw is a state, not a change -
+            # every pill tweening in on page build would read as the
+            # pager loading rather than as the slide moving.
+            dash.set_active(i == index, animate=fade)
 
     def _hero_backdrop_worker(self, entry):
         """One slide's ground, off the UI thread: TMDB's backdrop by
