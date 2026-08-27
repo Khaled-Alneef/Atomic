@@ -739,9 +739,16 @@ def _run_video(job) -> str:
             return ""
         info_hash = ready["info_hash"]
     else:
-        # add() re-picks the file for this episode on the held torrent;
-        # metadata is already there, so this returns immediately.
-        if not torrent_engine.add(info_hash, season=season, episode=episode):
+        # **own=False: a download must never repoint a pack that is
+        # being watched.** `file_index` is what the stream server
+        # resolves `<hash>/0` through, so re-picking it here moves the
+        # picture of anyone playing another episode out of the same
+        # pack to this one - the wrong-episode report, from the download
+        # side rather than the prewarm side that torrent_engine.add
+        # already records. The file this job wants is asked for
+        # separately below and never written to the torrent.
+        if not torrent_engine.add(info_hash, season=season, episode=episode,
+                                  own=False):
             _season_packs.pop(pack_key, None)
             return _run_video(job)
     if season and episode:
@@ -752,6 +759,12 @@ def _run_video(job) -> str:
     # Same shape as _run_chapter's, one level deeper - see WATCHABLE_DIR.
     # safe_name for the title part so it matches the file inside it
     # ("Attack_on_Titan", not "Attack on Titan (2013)").
+    # Which file in the pack is this job's, asked without moving the
+    # torrent's own pointer - see torrent_engine.file_index_for.
+    wanted_index = torrent_engine.file_index_for(
+        info_hash, season=season, episode=episode,
+        title=(entry.get("title") or None))
+
     folder = os.path.join(job.get("folder") or default_folder(), WATCHABLE_DIR,
                           safe_name(entry.get("title") or "Video",
                                     fallback="Video"))
@@ -768,7 +781,7 @@ def _run_video(job) -> str:
             # here must not be read as a failure, which is why the
             # queue checks _paused before it judges the result.
             return ""
-        state = torrent_engine.file_progress(info_hash)
+        state = torrent_engine.file_progress(info_hash, index=wanted_index)
         if not state:
             return ""
         _update(job_id, progress=round(state.get("fraction") or 0.0, 4),

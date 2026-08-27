@@ -707,8 +707,9 @@ class _Torrent:
     def info(self):
         return self.handle.torrent_file()
 
-    def file_size(self) -> int:
-        return self.info.files().file_size(self.file_index)
+    def file_size(self, index=None) -> int:
+        return self.info.files().file_size(
+            self.file_index if index is None else index)
 
     def file_offset(self) -> int:
         return self.info.files().file_offset(self.file_index)
@@ -1292,9 +1293,10 @@ class _Torrent:
             time.sleep(0.1)
         return False
 
-    def file_path(self) -> str:
+    def file_path(self, index=None) -> str:
         storage_path = self.handle.status().save_path
-        return os.path.join(storage_path, self.info.files().file_path(self.file_index))
+        return os.path.join(storage_path, self.info.files().file_path(
+            self.file_index if index is None else index))
 
 
 # ------------------------------------------------- reading the Cues
@@ -2358,26 +2360,55 @@ def raise_files(info_hash: str, indexes) -> bool:
         return False
 
 
-def file_progress(info_hash: str) -> dict:
-    """How far along a download is: bytes, fraction, rate, and where the
-    finished file will be."""
+def file_index_for(info_hash: str, *, season=None, episode=None,
+                   title=None, file_index=None):
+    """Which file in an added torrent holds this episode, **without
+    moving anything**.
+
+    A download needs to know its own file; `add()` used to be the only
+    way to find out, and it answers by repointing `file_index` - which
+    is the pointer the stream server resolves `<hash>/0` through. So a
+    download starting while an episode from the same pack was playing
+    moved the picture to a different episode. See `add` for the log that
+    caught the prewarm doing exactly this."""
     torrent = _torrents.get((info_hash or "").lower())
-    if torrent is None or torrent.file_index is None:
+    if torrent is None or torrent.info is None:
+        return None
+    try:
+        return _pick_file(torrent.info, season=season, episode=episode,
+                          file_index=file_index, title=title)
+    except Exception:
+        return None
+
+
+def file_progress(info_hash: str, index=None) -> dict:
+    """How far along a download is: bytes, fraction, rate, and where the
+    finished file will be.
+
+    `index` asks about a file other than the one being served - what a
+    download needs when the torrent it shares is a season pack with an
+    episode playing out of it."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return {}
+    wanted_index = torrent.file_index if index is None else index
+    if wanted_index is None:
         return {}
     try:
         status = torrent.handle.status()
-        wanted = torrent.file_size()
+        wanted = torrent.file_size(wanted_index)
         done = 0
         try:
-            done = torrent.handle.file_progress()[torrent.file_index]
+            done = torrent.handle.file_progress()[wanted_index]
         except Exception:
             done = int(status.progress * wanted)
+        path = torrent.file_path(wanted_index)
         return {"done": int(done), "total": int(wanted),
                 "fraction": (done / wanted) if wanted else 0.0,
                 "rate": int(status.download_rate),
                 "peers": int(status.num_peers),
-                "path": torrent.file_path(),
-                "name": os.path.basename(torrent.file_path()),
+                "path": path,
+                "name": os.path.basename(path),
                 "finished": wanted > 0 and done >= wanted}
     except Exception:
         return {}
