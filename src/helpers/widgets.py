@@ -2248,7 +2248,29 @@ def screen_tick_ms(widget=None) -> int:
     Nothing is dropping frames; there are simply not enough positions.
 
     Everything the owner has called "stuttering" - the wheel, the sidebar
-    fold, the sideways rows - has been this."""
+    fold, the sideways rows - has been this.
+
+    **ATOMIC_SCROLL_HZ pins it, for A/B measurement.** The owner's ask,
+    27 August 2026, after describing the symptom as an afterimage rather
+    than a stutter: a steady 120Hz may present more evenly than an
+    irregular attempt at 240. Measured on Home the same day, one scroll:
+    the vblank clock is live (dwm, 4ms nominal = 240Hz) and yet the GUI
+    thread completed only **115 position updates a second** and the
+    screen showed about **55 distinct positions** - with 16% of the
+    visible steps more than 1.5x the median. Asking for more positions
+    than the thread can paint is what makes the steps uneven.
+
+    Nothing about the physics changes: the integrator reads real elapsed
+    time, so a slower tick moves further per tick rather than travelling
+    less."""
+    hz = os.environ.get("ATOMIC_SCROLL_HZ")
+    if hz:
+        try:
+            wanted = float(hz)
+            if wanted > 0:
+                return max(1, int(1000.0 / wanted))
+        except ValueError:
+            pass
     try:
         screen = (widget.screen() if widget is not None else None)             or QApplication.primaryScreen()
         rate = screen.refreshRate() if screen is not None else 0.0
