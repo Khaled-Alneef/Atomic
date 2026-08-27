@@ -469,7 +469,12 @@ class PosterGrid(QWidget):
     # because scroll_area's `notch_scale` still multiplies both, which
     # is what keeps Home's own 0.7 working.
     NOTCH_FRACTION = 0.0
-    # **38, half of 76 - the owner, 27 August 2026: "make each mouse
+    # **24, a further 37% off 38 - the owner, 27 August 2026, immediately
+    # after the halving below: "make it even smaller (mouse scroller steps
+    # per tick)". Two cuts the same day, so the number is 68% below the 76
+    # it started that morning at.**
+    #
+    # **38, half of 76 - the same day: "make each mouse
     # scroller tick travels 50% less".** The seventh tuning of this number
     # and the fifth in the same direction; the history above is kept because
     # two of those asks pulled the other way and the next person needs to
@@ -479,7 +484,7 @@ class PosterGrid(QWidget):
     # alone is the travel. scroll_area's `notch_scale` still multiplies it,
     # which keeps Home's 0.7 at 26px rather than flattening every surface to
     # one number.
-    NOTCH_FLOOR_PX = 38
+    NOTCH_FLOOR_PX = 24
 
     def __init__(self, cover_size, ground=None, parent=None):
         super().__init__(parent)
