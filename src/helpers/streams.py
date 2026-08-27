@@ -1884,9 +1884,31 @@ def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
             # always in range.
             in_range = {s for s in (seasons | arc_seasons)
                         if s <= bound + NEAR_SEASON_MARGIN}
+            # **A season the name states outright beats an arc guess.**
+            # The owner, 27 August 2026: The Angel Next Door S01E06
+            # played S02E06. Measured on his own entry, the arc map for
+            # tt19064770 is season 1 -> {"rotten"}, season 2 ->
+            # {"rotten2"} - season 1's token is a word out of the show's
+            # own title, so *every* release of *every* season contains
+            # it. "The Angel Next Door Spoils Me Rotten S02E06" was
+            # therefore read as season 1 as well as season 2, and that
+            # extra season cancelled its own conflict:
+            #
+            #   stated={2} arc={1}  conflict True -> False, row kept
+            #
+            # Seven S02E06 rows survived into an S01E06 list that way,
+            # and the highest-seeded of them sorted *first*, which is
+            # what auto-pick plays.
+            #
+            # Arc seasons exist for names that state no season at all -
+            # "Kimetsu no Yaiba - Hashira Geiko Hen - 01", where the arc
+            # word is the only thing that says season 5. Where the name
+            # does state one, it is the better evidence and the guess
+            # must not be allowed to argue with it.
+            extra = set() if seasons else arc_seasons
             if indexers.episode_conflict(name, season, episode,
                                          compare_season=bool(in_range),
-                                         extra_seasons=arc_seasons):
+                                         extra_seasons=extra):
                 # Before rejecting it, ask whether the name states this
                 # same episode under the series' absolute numbering. The
                 # season is *not* compared on this route: a row calling
