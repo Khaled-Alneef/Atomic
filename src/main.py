@@ -68,6 +68,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
+from helpers import widgets as widgets_module
 from helpers.widgets import (PageSlide, SmoothTween, confirm, hold_hover_cursor,
                              install_edge_wheel,
                              install_horizontal_wheel_guard,
@@ -4948,6 +4949,11 @@ class MainWindow(QMainWindow):
             logs.exception("could not open the section a nav row names")
 
     def _show_page(self, page_name, direction="down", animate=True):
+        # Reduce motion: pages land rather than slide - see
+        # widgets.set_reduce_motion. Here rather than in PageSlide so the
+        # slide is never set up at all, not started and skipped.
+        if widgets_module.REDUCE_MOTION:
+            animate = False
         if ":" not in str(page_name):
             page_name = _page_name(page_name)
         # A navigation arriving mid-fold (Ctrl+3 while the sidebar is
@@ -5308,6 +5314,8 @@ def main():
     theme.bring_window_to_front(window)
     # Off unless ATOMIC_DEBUG_FRAME_PACING is set - see helpers/frame_pacing.
     frame_pacing.start(window)
+    # Before anything the user can scroll - see app_settings.get_reduce_motion.
+    widgets_module.set_reduce_motion(app_settings.get_reduce_motion())
     # Only after the window is up and forward: this is modal, and a
     # dialog raised before its parent is showing would sit behind it -
     # the same foreground problem the relaunch already has to solve

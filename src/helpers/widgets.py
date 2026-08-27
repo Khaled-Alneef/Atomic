@@ -2235,8 +2235,52 @@ def screen_frame_s(widget=None) -> float:
     return 1.0 / rate if rate and rate > 0 else 0.0
 
 
-# The fastest the UI will try to move anything, whatever the panel is
-# capable of - see screen_tick_ms for the screen capture behind it.
+# **Reduce motion**: when on, nothing in the app animates - the view is
+# moved, not carried. See app_settings.get_reduce_motion for why this
+# exists. Kept as a module flag rather than read from disk at each call
+# because it is consulted on every wheel notch and every drag sample;
+# main() sets it at startup and the Settings toggle sets it again.
+REDUCE_MOTION = False
+
+
+def set_reduce_motion(enabled: bool):
+    global REDUCE_MOTION
+    REDUCE_MOTION = bool(enabled)
+
+
+def reduce_motion() -> bool:
+    return REDUCE_MOTION
+
+
+# The fastest a **painted** surface will try to move anything, whatever
+# the panel is capable of - see poster_grid._refresh_interval, which is
+# the only caller now.
+#
+# **It was applied to the widget clock too, and that was wrong.** The cap
+# was measured on 27 August 2026 against the painted grids, which
+# schedule their own frames off the refresh phase and genuinely cannot
+# present faster; taking it as a rule for everything put an 8ms QTimer
+# against a 4.17ms panel, and a timer that beats against the refresh is
+# how uneven steps are made. That is the owner's "Home and Discover
+# still not smooth while scrolling like Movies page or Anime page".
+#
+# Measured the same way on both surfaces - the sequence of distinct
+# integer scroll positions and the interval between them, one wheel
+# notch every 110ms, his 240Hz panel. Three runs of each, because the
+# first pass of this read 0% off a single run and that was an outlier:
+#
+#     Discover (widgets)  8ms tick   55, 55, 55 pos/s  8.0ms  judder 33/30/30%
+#                         panel rate 82, 86, 86 pos/s  4.6ms  judder 25/17/17%
+#     Movies (painted)    8ms tick   94-111 pos/s      8.5ms  judder 20%
+#                         4ms tick   61 pos/s         15.3ms  judder 25%
+#
+# The two want opposite things and now get them: the cap stays where it
+# was measured, and the widget clock below runs at the panel's own rate.
+# Discover ends up ahead of Movies on evenness (17% against 20%) and
+# produces a position every refresh instead of every other one.
+#
+# The vblank ticker was tried as the alternative and is not it: 22% with
+# it on, against 17% for simply matching the timer to the refresh.
 MOTION_MAX_HZ = 120.0
 
 
@@ -2294,7 +2338,10 @@ def screen_tick_ms(widget=None) -> int:
         rate = 0.0
     if not rate or rate <= 0:
         return MAX_TICK_MS
-    rate = min(rate, MOTION_MAX_HZ)
+    # **No MOTION_MAX_HZ here** - see the constant for the measurement.
+    # This clock drives _Momentum and SmoothTween, which move widgets that
+    # Qt paints; capping it below the panel makes the timer beat against
+    # the refresh, which is judder rather than a saving.
     # **Floor, not round - and 144Hz is the one rate where that matters.**
     # 1000/144 is 6.944ms; rounding gives 7ms, which is 142.86 positions a
     # second against a panel asking for 144. So the tick this function
@@ -2350,6 +2397,20 @@ class SmoothTween(QObject):
         return self._running
 
     def start(self, start_value, end_value, duration_ms=None):
+        if REDUCE_MOTION:
+            # Land on the end value now; no timer, no curve.
+            self._running = False
+            self._timer.stop()
+            try:
+                self._apply(float(end_value))
+            except RuntimeError:
+                return
+            if self._on_done is not None:
+                try:
+                    self._on_done()
+                except RuntimeError:
+                    pass
+            return
         if duration_ms is not None:
             self._duration = max(1, int(duration_ms))
         self._from = float(start_value)
@@ -3201,6 +3262,14 @@ class _Momentum(QObject):
     def kick(self, distance_px, direction):
         """One notch: `direction` is +1 to scroll forward (value up), -1
         back. `distance_px` is the notch's resting travel."""
+        if REDUCE_MOTION:
+            # The whole notch, on the spot - see set_reduce_motion.
+            self.cancel()
+            bar = self._bar
+            step = int(round(float(distance_px))) * (1 if direction > 0 else -1)
+            bar.setValue(max(bar.minimum(),
+                             min(bar.maximum(), bar.value() + step)))
+            return
         now = time.monotonic()
         while self._kicks and now - self._kicks[0] > self.ACCEL_WINDOW_S:
             self._kicks.popleft()
@@ -3457,6 +3526,11 @@ class _Momentum(QObject):
         drag asks for. Cancels any momentum: a hand on the thumb is the
         only thing moving the view."""
         low, high = float(self._bar.minimum()), float(self._bar.maximum())
+        if REDUCE_MOTION:
+            # Straight to the pointer, every sample - see set_reduce_motion.
+            self.cancel()
+            self._bar.setValue(int(round(max(low, min(high, float(target))))))
+            return
         if self._pos is None:
             self._pos = float(self._bar.value())
         self._vel = self._pending = 0.0

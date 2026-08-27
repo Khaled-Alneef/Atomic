@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
 from . import (
     anime_sites, app_settings, global_search, launchers, logs, lookup_pool,
     manga_sites, nav_config, startup, storage, theme, uninstall,
-    updater,
+    updater, widgets,
 )
 from .widgets import (confirm, finish_toast, frameless_dialog, inform,
                       scroll_area, show_toast, smooth_combo,
@@ -624,6 +624,17 @@ class SettingsDialog(QDialog):
         hint = QLabel("Starts Atomic automatically when you sign in to Windows.", objectName="Muted")
         hint.setWordWrap(True)
         form.addWidget(hint)
+
+        self.reduce_motion_check = QCheckBox("Reduce motion")
+        self.reduce_motion_check.setChecked(app_settings.get_reduce_motion())
+        self.reduce_motion_check.toggled.connect(self._toggle_reduce_motion)
+        form.addWidget(self.reduce_motion_check)
+        reduce_hint = QLabel(
+            "Scrolling and page changes move straight to where they are "
+            "going instead of gliding. Nothing animates.")
+        reduce_hint.setWordWrap(True)
+        reduce_hint.setObjectName("Hint")
+        form.addWidget(reduce_hint)
 
         self.fullscreen_startup_check = QCheckBox("Fullscreen mode when launch on startup")
         self.fullscreen_startup_check.setChecked(app_settings.get_fullscreen_on_startup())
@@ -1687,6 +1698,12 @@ class SettingsDialog(QDialog):
         # Whichever way that went, the fullscreen option follows the
         # checkbox's *actual* state - including the rolled-back one above.
         self._sync_fullscreen_startup_check()
+
+    def _toggle_reduce_motion(self, checked):
+        app_settings.set_reduce_motion(checked)
+        # Live, not on restart: the point of the toggle is to feel the
+        # difference immediately.
+        widgets.set_reduce_motion(checked)
 
     def _sync_fullscreen_startup_check(self):
         """"Fullscreen mode when launch on startup" only means anything

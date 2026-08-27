@@ -389,6 +389,12 @@ class FrameMotion:
 
     def kick(self, distance_px, direction):
         """One wheel notch: `direction` +1 forward (down the page)."""
+        if widgets_module.REDUCE_MOTION:
+            # The whole notch, on the spot - see widgets.set_reduce_motion.
+            self.stop()
+            self.set_position(self.pos + float(distance_px)
+                              * (1 if direction > 0 else -1))
+            return
         now = time.monotonic()
         self._kicks = [t for t in self._kicks if now - t <= self.ACCEL_WINDOW_S]
         accel = 1.0 + (self.ACCEL_MAX - 1.0) * min(
@@ -1503,6 +1509,13 @@ class PosterGrid(QWidget):
         the code this replaces, and it looked like the fix simply had no
         effect."""
         target = max(0.0, min(float(self._motion.maximum), float(target)))
+        if widgets_module.REDUCE_MOTION:
+            # No follow at all: the view sits where the thumb is.
+            self._drag_aim = target
+            self._drag_target = None
+            self._motion.set_position(target)
+            self.scrolled.emit()
+            return
         if self._drag_aim is not None and abs(target - self._drag_aim) < 1e-9:
             return          # the hand has not crossed a whole pixel yet
         now = time.monotonic()
