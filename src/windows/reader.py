@@ -80,7 +80,8 @@ from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
                              finish_toast, frameless_dialog,
                              freeze_covered, show_toast,
                              use_hover_cursor, _Momentum, screen_tick_ms,
-                             screen_frame_s)
+                             screen_frame_s, smooth_bar_drag,
+                             smooth_combo, smooth_scrolling)
 from windows.tracker import correct_progress, format_chapter_progress
 
 
@@ -382,10 +383,16 @@ BOTTOM_GAP = 16
 # **76, down 30% from 108 - the owner, 24 August 2026: "make the
 # scrolling slower by 30% in the reader mode only!"** The rest of the
 # app keeps its own notch; this constant is already the reader-only one.
-# **30 - the owner's own number, 27 August 2026: "no no 30 instead of
-# 24", correcting a first reading of "make it faster by 50%" as +50% on
-# the travel (which gave 36). He wanted the constant itself set to 30,
-# so that is what this is - not a percentage of anything.
+# **58, up a further 30% from 45 - the owner, 27 August 2026:
+# "increase it by 30% more", the second raise in a row after three cuts
+# earlier the same day. Applied to the constant, which is what his
+# correction established this number means.
+#
+# **45 was up 50% from 30: "increase the scrolling speed by 50%".
+#
+# **30 was his own number that day: "no no 30 instead of 24",
+# correcting a first reading of "make it faster by 50%" as +50% on the
+# travel (which gave 36) - the constant itself, not a percentage.
 #
 # Fourth change to this one number in a day, and the asks below pull
 # both ways; they are kept so the next person sees the whole swing
@@ -403,7 +410,7 @@ BOTTOM_GAP = 16
 # distance - `max(floor, height * 0.0)` is the floor - so this constant
 # alone is the travel. The reader keeps its own constant, as it has since
 # the 30% reader-only ask above.
-WHEEL_STEP_PX = 30
+WHEEL_STEP_PX = 58
 
 # How fast a reader notch gives its speed back - see the _Momentum built
 # in _StripView.__init__ for why this surface does not coast.
@@ -1107,6 +1114,9 @@ class _ChapterListView(QWidget):
         area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         area.setWidget(self._body)
+        # The chapter list scrolls like the rest of the app rather than
+        # like a bare QScrollArea - see widgets.ScrollBarDrag.
+        smooth_scrolling(area)
         layout.addWidget(area, stretch=1)
 
     def set_title(self, text):
@@ -1528,6 +1538,8 @@ class _ChapterCombo(QComboBox):
         # a separate top-level view with its own event stream, so a
         # contextMenuEvent on this widget never sees a press inside it.
         self.view().viewport().installEventFilter(self)
+        # Hundreds of rows on a long series - see widgets.smooth_combo.
+        smooth_combo(self)
         # Background and border repeated from the app's own QComboBox
         # rule rather than inherited from it. Measured: with only
         # `padding-right` set here the box came out **transparent** over
@@ -1771,6 +1783,15 @@ class _StripView(QScrollArea):
             ramp=READER_WHEEL_RAMP, max_speed=math.inf,
             frame_s=lambda: screen_frame_s(self))
         self.verticalScrollBar().sliderPressed.connect(self._wheel_motion.cancel)
+        # **And the thumb drag, which this surface never had.** Qt's own
+        # drag writes the bar once per mouse report - 125 a second - and
+        # the pointer only reports whole pixels, so on a chapter this
+        # tall one of them is tens of pixels of strip: the staircase
+        # widgets.ScrollBarDrag exists to remove. The strip's own
+        # _Momentum is handed over so the two never both write the bar.
+        # sliderPressed above still fires for a press on the *track*,
+        # which is a page jump and stays Qt's.
+        smooth_bar_drag(self, self._wheel_motion)
 
     # ---- state -------------------------------------------------------
     def set_zoom(self, key):
@@ -3465,7 +3486,7 @@ class ReaderPage(GlassPage):
         # its top; the rows below then append after it.
         frameless_dialog(dialog, title="Download Chapters")
 
-        scope = QComboBox()
+        scope = smooth_combo(QComboBox())
         use_hover_cursor(scope)
         scope.addItems(["This Chapter", "A Range of Chapters"])
         use_hover_cursor(scope)
@@ -3475,7 +3496,8 @@ class ReaderPage(GlassPage):
         column.addLayout(scope_row)
 
         labels = [chapter_title(self.chapters[index]) for index in candidates]
-        first_box, last_box = QComboBox(), QComboBox()
+        first_box = smooth_combo(QComboBox())
+        last_box = smooth_combo(QComboBox())
         use_hover_cursor(first_box)
         use_hover_cursor(last_box)
         for box in (first_box, last_box):

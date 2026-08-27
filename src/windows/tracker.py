@@ -40,6 +40,7 @@ from helpers import (
     tvmaze,
 )
 from helpers.widgets import (
+    smooth_combo,
     Card, CardDragReorder, CardTextLabel, GlassPage, HERO_COVER_SIZE,
     _OpaqueGround,
     HeroBanner, SideScroller, confirm,
@@ -2365,7 +2366,7 @@ class TrackerPage(GlassPage):
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
-        self.sort_box = QComboBox()
+        self.sort_box = smooth_combo(QComboBox())
         use_hover_cursor(self.sort_box)
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
@@ -7761,7 +7762,7 @@ class EntryForm(QDialog):
 
         self.title_label = QLabel()
         fields.addWidget(self.title_label)
-        self.title_combo = QComboBox()
+        self.title_combo = smooth_combo(QComboBox())
         use_hover_cursor(self.title_combo)
         self.title_combo.setEditable(True)
         self.title_combo.setCurrentText(entry["title"] if entry else "")
@@ -7778,7 +7779,7 @@ class EntryForm(QDialog):
         # Type dropdown only makes sense when a page's data file mixes
         # more than one type (Anime/Manga share tracker.json); Series has
         # nothing to switch to, so it's set silently instead.
-        self.type_box = QComboBox()
+        self.type_box = smooth_combo(QComboBox())
         use_hover_cursor(self.type_box)
         self.type_box.addItems(type_options)
         self.type_box.setCurrentText(entry["type"] if entry else default_type)
@@ -7803,7 +7804,7 @@ class EntryForm(QDialog):
 
         form.addSpacing(8)
         form.addWidget(QLabel("Status"))
-        self.status_box = QComboBox()
+        self.status_box = smooth_combo(QComboBox())
         use_hover_cursor(self.status_box)
         self._populate_status_options(entry["status"] if entry else None)
         form.addWidget(self.status_box)
@@ -7898,7 +7899,7 @@ class EntryForm(QDialog):
         site_layout.setSpacing(4)
         self.site_label = QLabel()
         site_layout.addWidget(self.site_label)
-        self.site_box = QComboBox()
+        self.site_box = smooth_combo(QComboBox())
         use_hover_cursor(self.site_box)
         self._populate_site_options(entry.get("site_id") if entry else None)
         site_layout.addWidget(self.site_box)

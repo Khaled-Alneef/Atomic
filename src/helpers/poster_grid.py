@@ -147,7 +147,98 @@ FAST_SCROLL_PX_S = 1500.0
 # any refresh rate. 12ms puts the view within a pixel of the pointer in
 # about three refreshes at 240Hz - a lag of roughly 8ms, which is under
 # one 125Hz mouse sample and cannot be felt on a drag.
-DRAG_FOLLOW_TAU_S = 0.012
+#
+# **Superseded 27 August 2026, and the 12ms is exactly what was wrong.**
+# The owner recorded his screen dragging this bar (aa.mp4) and the
+# recording was measured frame by frame rather than argued about: over
+# the 5.9s drag the content moved 1417 px while the thumb moved 35, so
+#
+#     one pointer pixel moves the view 40.5 px
+#
+# and his hand crossed about **nine** pointer pixels a second. The
+# pointer arrives as whole numbers, so the *target itself* is a
+# staircase - 40px, then nothing for 110ms, then 40px again - and no
+# time constant applied to it can be smooth. Reproduced offscreen
+# through this widget's own drag path at the same ratio (1200 records,
+# 8 columns, a 33,436px content, a 28px thumb on an 805px span):
+#
+#     px moved per frame at 120Hz, current code
+#         30.4  7.6  1.9  0.5  0.2  0  0  0  0  0  0  0   (repeating)
+#         78% of frames moved less than half a pixel
+#
+# The whole step is delivered in 42ms and the next 70ms show nothing.
+# That is the owner's "stutter", and it is the same fault this file's
+# earlier fix was written for - it just was not measured deeply enough
+# to see: the metric then was "did the position change at all", which a
+# 0.2px tail passes while the eye sees a 30px lurch.
+#
+# So the follow no longer runs on a constant. It spreads each pointer
+# step over the interval the *previous* one took to arrive, which is the
+# best estimate of when the next is due, and re-aims every frame off the
+# time actually left - so the steps come out equal by construction and
+# the view is always exactly one pointer pixel behind the hand, at any
+# drag speed. One pointer pixel of lag cannot be seen; a 30px lurch can.
+DRAG_FOLLOW_TAU_S = 0.012       # kept: the value that was measured wrong
+# Bounds on that estimate. The floor is one mouse sample at 125Hz - a
+# fast drag crosses a pixel every sample and there is nothing to spread.
+# The ceiling stops a very slow hand from stretching one step over half a
+# second: past ~180ms a 40px move is already smooth on its own, and the
+# stillness after it is honest rather than something to paper over.
+#
+# **The floor is not enough on its own, and the first cut shipped without
+# the two guards below and was worse.** The owner tried it on Discover
+# and said so; his second recording (bb.mp4) measures that page's bar at
+# a 237px thumb, so **2.5 content px per pointer pixel** against Movies'
+# 40.5 - sixteen times finer - with a hand crossing 54 pointer px a
+# second. A/B'd at those numbers:
+#
+#     one 12ms constant  8% of frames moved nothing, 3px worst jump
+#     paced, 8ms floor  36% of frames moved nothing, 6px worst jump
+#     paced, guarded     7% of frames moved nothing, 3px worst jump
+#
+# Two things were wrong and both are fixed where they are used:
+#   * a pace shorter than two frames is not a pace - the step lands in
+#     the next frame whatever it says - and a fast hand on a short page
+#     sits on that floor permanently, so the follow degenerated into
+#     "dump everything now", which is the fault this replaced;
+#   * the raw interval is noisy exactly there: a hand crossing a pixel
+#     every 12ms against an 8ms mouse crosses on one sample or the next,
+#     so the estimate alternated 8/16ms and the motion alternated with
+#     it. Hence the smoothing in _aim_drag.
+#
+# Swept over ratios 2.5/4/12/40.5 and hands from 2 to 400 pointer px/s,
+# the guarded version is better or level in every cell and the travel is
+# unchanged throughout.
+DRAG_PACE_MIN_S = 0.008
+DRAG_PACE_MAX_S = 0.50
+# **Aim to arrive a little after the next step, not exactly on it.**
+# Pacing a step over exactly the interval the last one took means
+# finishing early the moment the hand slows at all - and then standing
+# still until it crosses the next pixel. That is the freeze in the
+# owner's third recording (cc.mp4, Movies at 58 content px per pointer
+# pixel, a hand crossing 5.5 of them a second): 26% of frames showed
+# nothing new, in runs of three and four. Led by this factor the follow
+# is still moving when the next step arrives, so the motion never stops.
+# The standing lag it costs is (LEAD - 1) of one pointer pixel - a
+# quarter of one at 1.25, which is not visible; a dead stop is.
+#
+# **What a drag on a long page actually has to work with.** His hand,
+# lifted out of cc.mp4 and replayed through the real Movies page (960
+# cards, 37.3 content px per pointer pixel), crossed a whole pointer
+# pixel **67 times in 8.1 seconds** - median 116ms apart, up to 296ms.
+# Eight new positions a second is the entire input; everything between
+# them is interpolation, and the only question is how well the gap is
+# bridged. Replaying that same hand, longest stretch showing no new
+# pixel and worst single-frame jump:
+#
+#     12ms constant (was)     214ms      19px
+#     paced, no lead          89ms        7px
+#     paced + lead (this)     81ms        5px
+#
+# against a hand that went up to 296ms without producing anything to
+# show. Travel identical in all three (2464px), and no paint gap over
+# 16.7ms in any of them - the screen was never waiting on the app.
+DRAG_PACE_LEAD = 1.25
 # Below this the follow is over and the target is dropped, so a settled
 # drag stops asking for frames.
 DRAG_SETTLE_PX = 0.4
@@ -470,10 +561,16 @@ class PosterGrid(QWidget):
     # because scroll_area's `notch_scale` still multiplies both, which
     # is what keeps Home's own 0.7 working.
     NOTCH_FRACTION = 0.0
-    # **30 - the owner's own number, 27 August 2026: "no no 30 instead of
-    # 24", correcting a first reading of "make it faster by 50%" as +50% on
-    # the travel (which gave 36). He wanted the constant itself set to 30,
-    # so that is what this is - not a percentage of anything.
+    # **58, up a further 30% from 45 - the owner, 27 August 2026:
+    # "increase it by 30% more", the second raise in a row after three cuts
+    # earlier the same day. Applied to the constant, which is what his
+    # correction established this number means.
+    #
+    # **45 was up 50% from 30: "increase the scrolling speed by 50%".
+    #
+    # **30 was his own number that day: "no no 30 instead of 24",
+    # correcting a first reading of "make it faster by 50%" as +50% on the
+    # travel (which gave 36) - the constant itself, not a percentage.
     #
     # Fourth change to this one number in a day, and the asks below pull
     # both ways; they are kept so the next person sees the whole swing
@@ -492,7 +589,7 @@ class PosterGrid(QWidget):
     # alone is the travel. scroll_area's `notch_scale` still multiplies it,
     # which keeps Home's 0.7 at 26px rather than flattening every surface to
     # one number.
-    NOTCH_FLOOR_PX = 30
+    NOTCH_FLOOR_PX = 58
 
     def __init__(self, cover_size, ground=None, parent=None):
         super().__init__(parent)
@@ -512,6 +609,16 @@ class PosterGrid(QWidget):
         # closes the gap - see DRAG_FOLLOW_TAU_S. None when no drag is
         # settling.
         self._drag_target = None
+        # When that target last changed, and how long the change before
+        # it took to arrive - the pace the follow spreads a step over.
+        # See _aim_drag.
+        self._drag_target_at = None
+        self._drag_pace_s = 0.0
+        # The last position the *pointer* asked for, kept apart from
+        # `_drag_target` because the follow clears that one the moment it
+        # arrives - see _aim_drag for what reading the cleared field
+        # instead measured.
+        self._drag_aim = None
         # Whether this grid currently holds the shared vblank ticker -
         # see _hold_vblank for the measurement that put it there.
         self._vblank_on = False
@@ -892,22 +999,57 @@ class PosterGrid(QWidget):
                 self._motion.frame_s = self._refresh_interval()
             moving = self._motion.step()
         elif self._drag_target is not None:
-            # Following a dragged scrollbar - see DRAG_FOLLOW_TAU_S.
+            # Following a dragged scrollbar - see DRAG_PACE_MIN_S.
             # Inside the frame that draws it, for the same reason the
             # momentum model is: the position belongs to the frame that
             # shows it, so the steps are even by construction.
             frame_s = self._motion.frame_s or self._refresh_interval()
             if not frame_s:
                 frame_s = 1.0 / 60.0
-                self._motion.frame_s = frame_s
+            # **Written back, not just used here.** `_schedule_frame`
+            # reads `_motion.frame_s` too and treats 0.0 as "no idea when
+            # the next refresh is - repaint now"; taking the interval
+            # into a local and leaving the attribute at zero is why the
+            # anchor below did nothing the first time it was tried.
+            self._motion.frame_s = frame_s
+            # **Anchor the refresh grid, or this surface free-runs.**
+            # `_schedule_frame` reads `_motion._phase` to know when the
+            # next refresh is due and falls back to an immediate
+            # `update()` when there isn't one - and a drag never calls
+            # FrameMotion.step, which is the only thing that sets it, so
+            # there never was one. It cost little while the follow
+            # settled in three frames; once it runs for the whole drag
+            # it is the whole drag.
+            #
+            # Measured on the real Movies page replaying the owner's own
+            # hand out of cc.mp4: **394 paints a second** against a 120Hz
+            # motion clock - three of every four drawn and thrown away.
+            # And not merely wasteful: painting at a rate the panel does
+            # not share is what _schedule_frame's own docstring measured
+            # as producing 17px and 35px steps at a constant velocity.
+            if self._motion._phase is None:
+                self._motion._phase = time.perf_counter()
             gap = self._drag_target - self._motion.pos
             if abs(gap) <= DRAG_SETTLE_PX:
                 self._motion.pos = self._drag_target
                 self._drag_target = None
                 self.scrolled.emit()
             else:
-                self._motion.pos += gap * (
-                    1.0 - math.exp(-frame_s / DRAG_FOLLOW_TAU_S))
+                # **Spread this pointer step over the time the next one
+                # is due in**, re-asked every frame off the time actually
+                # left, so the frames all move the same distance rather
+                # than the whole step landing in the first three of them.
+                # The exponential this replaces put 30 of 40px into one
+                # frame and left the next eight showing nothing.
+                left = 0.0
+                if self._drag_target_at is not None:
+                    # Never a pace shorter than two frames - below that
+                    # there is nothing left to spread and the whole step
+                    # lands in the next frame anyway, which is what a
+                    # fast hand on a short page hits constantly.
+                    pace = max(self._drag_pace_s, 2.0 * frame_s)
+                    left = pace - (time.monotonic() - self._drag_target_at)
+                self._motion.pos += gap * min(1.0, frame_s / max(frame_s, left))
                 moving = True
                 self.scrolled.emit()
         # **Everything cached in device pixels is invalid the moment the
@@ -1342,6 +1484,42 @@ class PosterGrid(QWidget):
             release_hover_cursor(self)
         self.update()
 
+    def _aim_drag(self, target):
+        """Point the drag follow at `target`, and time the step.
+
+        The pointer arrives as whole pixels and on a page this long one
+        of them is forty pixels of content, so what the follow is handed
+        is a staircase rather than a track - see DRAG_PACE_MIN_S for the
+        measurement off the owner's own screen recording. How long the
+        last step took to arrive is the best estimate available of when
+        the next one is due, and that interval is what the follow then
+        spreads this step over.
+
+        **Against `_drag_aim`, never against `_drag_target`.** The follow
+        clears the target the frame it arrives, so a mouse sample from a
+        hand that has not moved finds it None and reads as a brand new
+        step - which re-dated the pace to one mouse sample, 8ms, and put
+        the whole 40px back into a single frame. Measured: identical to
+        the code this replaces, and it looked like the fix simply had no
+        effect."""
+        target = max(0.0, min(float(self._motion.maximum), float(target)))
+        if self._drag_aim is not None and abs(target - self._drag_aim) < 1e-9:
+            return          # the hand has not crossed a whole pixel yet
+        now = time.monotonic()
+        if self._drag_target_at is not None:
+            # Smoothed: where the quantum is small the hand crosses a
+            # pixel on one mouse sample or the next, so the raw interval
+            # alternates 8/16ms and an unsmoothed follow alternates with
+            # it. See DRAG_PACE_MIN_S for what that measured.
+            gap_s = now - self._drag_target_at
+            self._drag_pace_s = (gap_s if not self._drag_pace_s
+                                 else 0.5 * self._drag_pace_s + 0.5 * gap_s)
+            self._drag_pace_s = max(
+                DRAG_PACE_MIN_S,
+                min(DRAG_PACE_MAX_S, self._drag_pace_s * DRAG_PACE_LEAD))
+        self._drag_target_at = now
+        self._drag_aim = self._drag_target = target
+
     def mouseMoveEvent(self, event):
         point = event.position().toPoint()
         if self._drag_from is not None:
@@ -1358,9 +1536,15 @@ class PosterGrid(QWidget):
             thumb_h = max(BAR_MIN_THUMB,
                           track_h * self.height() / max(1.0, float(self._content_h)))
             span = max(1.0, track_h - thumb_h)
-            self._drag_target = max(0.0, min(
-                float(self._motion.maximum),
-                start_pos + (point.y() - start_y) * self._motion.maximum / span))
+            # **The pointer itself, not the rounded copy.** `point`
+            # above is toPoint()'d because it hit-tests cells; here a
+            # fraction of a pixel is forty pixels of content on a page
+            # this long (see DRAG_PACE_MIN_S), so the fraction is worth
+            # keeping wherever the platform has one. It has none at
+            # scale factor 1.0, which is the owner's screen - the pacing
+            # in the follow, not this, is what fixes his drag.
+            self._aim_drag(start_pos + (event.position().y() - start_y)
+                           * self._motion.maximum / span)
             if not self._hold_vblank():
                 self.update()
             event.accept()
@@ -1394,8 +1578,13 @@ class PosterGrid(QWidget):
                 thumb = self._thumb_rect()
                 if thumb.contains(QRectF(point.x(), point.y(), 1, 1).topLeft()):
                     self._motion.stop()
-                    self._drag_from = (point.y(), self._motion.pos)
-                    self._drag_target = self._motion.pos
+                    self._drag_from = (event.position().y(), self._motion.pos)
+                    self._drag_aim = self._drag_target = self._motion.pos
+                    # No step has arrived yet, so there is no interval to
+                    # pace the first one over: it lands at once, which is
+                    # what grabbing a thumb should feel like.
+                    self._drag_target_at = time.monotonic()
+                    self._drag_pace_s = 0.0
                 else:
                     # A press on the track jumps a screenful that way,
                     # which is what a QScrollBar does.
@@ -1422,6 +1611,19 @@ class PosterGrid(QWidget):
             # milliseconds still to run and letting it finish is what
             # makes a release land exactly where the thumb was let go,
             # rather than a pixel or two short of it.
+            #
+            # Re-dated so that last stretch is paced like the rest of the
+            # drag. Without it the follow sees a pace that expired while
+            # the button was going up and closes the whole remaining gap
+            # in one frame - a jump at the end of an even glide.
+            self._drag_target_at = time.monotonic()
+            self._drag_aim = None
+            # The follow is deliberately still moving when the button
+            # comes up (DRAG_PACE_LEAD), and the pace can be half a
+            # second on a page this long. Land that remainder quickly:
+            # spread over the full pace it would be a creep after the
+            # release, which is drift by another name.
+            self._drag_pace_s = min(self._drag_pace_s or 0.08, 0.08)
             self.update()
             event.accept()
             return
@@ -1582,8 +1784,10 @@ class PosterStrip(PosterGrid):
                 thumb = self._thumb_rect()
                 if thumb.left() <= point.x() <= thumb.right():
                     self._motion.stop()
-                    self._drag_from = (point.x(), self._motion.pos)
-                    self._drag_target = self._motion.pos
+                    self._drag_from = (event.position().x(), self._motion.pos)
+                    self._drag_aim = self._drag_target = self._motion.pos
+                    self._drag_target_at = time.monotonic()
+                    self._drag_pace_s = 0.0
                 else:
                     # A press on the track jumps a screenful that way,
                     # which is what a QScrollBar does.
@@ -1609,9 +1813,8 @@ class PosterStrip(PosterGrid):
             thumb = max(BAR_MIN_THUMB,
                         track * self.width() / max(1.0, float(self._content_w)))
             span = max(1.0, track - thumb)
-            self._drag_target = max(0.0, min(
-                float(self._motion.maximum),
-                start_pos + (point.x() - start_x) * self._motion.maximum / span))
+            self._aim_drag(start_pos + (event.position().x() - start_x)
+                           * self._motion.maximum / span)
             if not self._hold_vblank():
                 self.update()
             event.accept()

@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import discover, logs, lookup_pool, storage, theme
-from .widgets import show_toast
+from .widgets import show_toast, smooth_scrolling
 
 # The app's keyboard map. Listed in Settings under Keybinds - it lived in
 # this panel first, which put a wall of grey text under the field every
@@ -236,6 +236,7 @@ class GlobalSearch(QDialog):
         layout.setSpacing(8)
 
         self.results = QListWidget()
+        smooth_scrolling(self.results)     # see widgets.ScrollBarDrag
         self.results.setIconSize(QSize(THUMB_HEIGHT, THUMB_HEIGHT))
         self.results.itemActivated.connect(self._open)
         self.results.itemClicked.connect(self._open)

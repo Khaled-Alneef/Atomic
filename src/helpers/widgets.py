@@ -2432,6 +2432,10 @@ class PickCombo(QComboBox):
         super().__init__(parent)
         self._opened_at = QPoint()
         self._filtered_view = None
+        # From construction, not only from the first open - see
+        # smooth_combo. showPopup calls it again in case Qt has replaced
+        # the view since.
+        smooth_combo(self)
 
     def showPopup(self):
         # QCursor.pos(), not mapToGlobal - see .claude/rules/ui.md; this
@@ -2445,6 +2449,8 @@ class PickCombo(QComboBox):
             # the most recently installed filter first, which is the
             # whole mechanism here.
             view.viewport().installEventFilter(self)
+            # The popup is a list like any other - see ScrollBarDrag.
+            smooth_combo(self)
             self._filtered_view = view
 
     def eventFilter(self, obj, event):
@@ -3147,6 +3153,12 @@ class _Momentum(QObject):
         # Where a scrollbar drag wants the view, while the frame clock
         # closes the gap - see follow(). None when no drag is settling.
         self._follow = None
+        # The last position the pointer asked for, when it asked, and how
+        # long the ask before it took to arrive - kept apart from
+        # `_follow` because `_follow_step` clears that one on arrival.
+        self._follow_aim = None
+        self._follow_at = None
+        self._follow_pace_s = 0.0
         self._vel = 0.0
         self._pending = 0.0          # impulse not yet handed to the velocity
         self._last = 0.0
@@ -3403,8 +3415,42 @@ class _Momentum(QObject):
     #
     # The same 12ms constant as the grid's, so the two surfaces feel
     # alike: about 8ms of lag, under one mouse sample.
-    FOLLOW_TAU_S = 0.012
+    #
+    # **And superseded with it, 27 August 2026, for the same measured
+    # reason** - see poster_grid.DRAG_PACE_MIN_S, which carries the
+    # numbers off the owner's screen recording. In short: a mouse
+    # reports whole pixels, and one of them is tens of pixels of content
+    # on a long page, so the target the follow is handed is a staircase
+    # and no time constant applied to a staircase is smooth. A/B'd
+    # through the painted grid's own drag path at his ratio (40.5px of
+    # content per pointer pixel, 9 pointer px/s), px moved per frame at
+    # 120Hz:
+    #
+    #     12ms constant   20.3 10.1 5.1 2.5 1.3 0.6 0.3 0.3 0 0 0 0 0
+    #                     56% of frames moved under half a pixel
+    #     paced            3.1  3.1 3.1 3.1 3.1 3.1 3.1 3.1 3.1 3.1 ...
+    #                      5% of frames moved under half a pixel
+    #
+    # Same travel to the pixel (1053 against 1050 over three seconds);
+    # this changes when the distance is delivered, never how much.
+    FOLLOW_TAU_S = 0.012        # kept: the value that was measured wrong
     FOLLOW_SETTLE_PX = 0.4
+    # Bounds on the estimated interval between pointer steps - a mouse
+    # sample at the bottom, and at the top the point past which a step is
+    # already smooth on its own. poster_grid.DRAG_PACE_MIN_S is the pair
+    # of these, deliberately the same numbers so the two surfaces match.
+    FOLLOW_PACE_MIN_S = 0.008
+    FOLLOW_PACE_MAX_S = 0.50
+    # **Aim to arrive a little after the next step, not exactly on it.**
+    # Pacing a step over the interval the last one took means finishing
+    # early whenever the hand slows even slightly - and then standing
+    # still until it crosses the next pixel, which is the freeze the
+    # owner filmed third (cc.mp4: 26% of frames showing nothing new,
+    # runs of three and four). With the estimate led by this factor the
+    # follow is always still moving when the next step lands, so the
+    # motion never stops; the standing lag it costs is (LEAD - 1) of one
+    # pointer pixel, which at 1.25 is a quarter of one.
+    FOLLOW_PACE_LEAD = 1.25
 
     def follow(self, target):
         """Glide to `target` instead of jumping there - what a scrollbar
@@ -3415,9 +3461,51 @@ class _Momentum(QObject):
             self._pos = float(self._bar.value())
         self._vel = self._pending = 0.0
         self._kicks.clear()
-        self._follow = max(low, min(high, float(target)))
-        self._last = time.monotonic()
+        target = max(low, min(high, float(target)))
+        # **Timed against `_follow_aim`, not `_follow`.** `_follow_step`
+        # clears `_follow` the frame it arrives, so a sample from a hand
+        # that has not moved would read as a fresh step and re-date the
+        # pace to one mouse sample - which puts the whole staircase step
+        # back into a single frame. That is not a hypothetical: it is
+        # what the first cut of this measured, identically to the code
+        # it was replacing.
+        if self._follow_aim is None or abs(target - self._follow_aim) > 1e-9:
+            now = time.monotonic()
+            if self._follow_at is not None:
+                # Smoothed, because the estimate is noisy where it
+                # matters most: a hand crossing a pixel every 12ms
+                # against an 8ms mouse crosses on one sample or the
+                # next, so the raw interval alternates 8/16 and the
+                # follow alternates with it.
+                gap_s = now - self._follow_at
+                self._follow_pace_s = (
+                    gap_s if not self._follow_pace_s
+                    else 0.5 * self._follow_pace_s + 0.5 * gap_s)
+                self._follow_pace_s = max(
+                    self.FOLLOW_PACE_MIN_S,
+                    min(self.FOLLOW_PACE_MAX_S,
+                        self._follow_pace_s * self.FOLLOW_PACE_LEAD))
+            self._follow_at = now
+            self._follow_aim = target
+        self._follow = target
+        # **Only when the clock is not already running.** `_last` is the
+        # integrator's previous tick, and a drag calls this 125 times a
+        # second: resetting it here made every dt the time since the last
+        # *mouse event* rather than since the last frame.
+        if not self.active():
+            self._last = time.monotonic()
         self._start_ticking()
+
+    def finish_follow(self):
+        """The hand let go: land the last quarter-pixel of lead quickly.
+
+        The pace can be half a second on a long page, and the follow is
+        deliberately still moving when the button comes up (see
+        FOLLOW_PACE_LEAD). Spreading that remainder over the full pace
+        would be a slow creep after the release - drift, which is the one
+        thing the owner has asked to be rid of twice."""
+        self._follow_pace_s = min(self._follow_pace_s or 0.08, 0.08)
+        self._follow_at = time.monotonic()
 
     def following(self) -> bool:
         return self._follow is not None
@@ -3432,7 +3520,20 @@ class _Momentum(QObject):
             self._stop_ticking()
             self._pos = None
             return False
-        self._pos += gap * (1.0 - math.exp(-dt / self.FOLLOW_TAU_S))
+        # Spread this pointer step over the time the next one is due in,
+        # re-asked every frame off the time actually left, so the frames
+        # all move the same distance - see FOLLOW_TAU_S for the A/B.
+        left = 0.0
+        if self._follow_at is not None:
+            # **Never a pace shorter than two frames.** Below that there
+            # is no spreading left to do - the whole step lands in the
+            # next frame - and a fast hand on a short page hits it
+            # constantly. Measured on Discover (2.5px per pointer pixel,
+            # 81 px/s): with an 8ms floor, 36% of frames moved nothing
+            # and the rest moved up to 6px; with this floor, 4% and 2px.
+            pace = max(self._follow_pace_s, 2.0 * dt)
+            left = pace - (time.monotonic() - self._follow_at)
+        self._pos += gap * min(1.0, dt / max(dt, left, 1e-6))
         self._bar.setValue(int(round(self._pos)))
         return True
 
@@ -3462,9 +3563,188 @@ class _Momentum(QObject):
     def cancel(self):
         self._stop_ticking()
         self._vel, self._pos, self._pending = 0.0, None, 0.0
-        self._follow = None
+        self._follow = self._follow_aim = self._follow_at = None
+        self._follow_pace_s = 0.0
         self._phase = None
         self._kicks.clear()
+
+
+class ScrollBarDrag(QObject):
+    """Take over dragging a vertical scrollbar's thumb.
+
+    Split out of _SmoothWheel on 27 August 2026 so the surfaces that do
+    **not** go through `scroll_area()` can have it as well - the reader's
+    strip above all, which was still on Qt's raw drag and therefore had
+    the whole staircase this was written to remove. `smooth_bar_drag`
+    is the way to attach one.
+
+    `motion` is the _Momentum that owns this bar's position. A surface
+    that already has one passes it, so the two are never both writing;
+    anything else gets one of its own, used for nothing but this.
+    """
+
+    _DRAG_EVENTS = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove,
+                    QEvent.Type.MouseButtonRelease,
+                    QEvent.Type.MouseButtonDblClick)
+
+    def __init__(self, area, motion):
+        super().__init__(area)
+        self._area = area
+        self._motion = motion
+        # Set before the filter goes on, not after: an event arriving in
+        # between reaches eventFilter with the attribute missing, and an
+        # exception raised inside a Qt event filter takes the process
+        # down rather than propagating.
+        self._drag_from = None
+        # Held by identity rather than asked of the area on every event.
+        # **That question was fatal**: `area.verticalScrollBar()` reaches
+        # into C++, and these pages rebuild constantly - once the area is
+        # deleted the call raises RuntimeError, inside an event filter,
+        # which killed the whole app while building a page.
+        self._bar_widget = area.verticalScrollBar()
+        self._bar_widget.installEventFilter(self)
+
+    def _cancel(self):
+        self._motion.cancel()
+
+    def _thumb_rect(self, bar):
+        """The slider handle's rectangle, asked of the style rather than
+        computed: a scrollbar's groove is inset by the arrow buttons on
+        some styles and not on others, and guessing that is how a drag
+        ends up a few pixels out from the first frame."""
+        option = QStyleOptionSlider()
+        option.initFrom(bar)
+        option.orientation = bar.orientation()
+        option.minimum, option.maximum = bar.minimum(), bar.maximum()
+        option.sliderPosition = option.sliderValue = bar.value()
+        option.pageStep, option.singleStep = bar.pageStep(), bar.singleStep()
+        return bar.style().subControlRect(
+            QStyle.ComplexControl.CC_ScrollBar, option,
+            QStyle.SubControl.SC_ScrollBarSlider, bar)
+
+    def _groove_span(self, bar, thumb):
+        """How far the handle may travel, in pixels."""
+        option = QStyleOptionSlider()
+        option.initFrom(bar)
+        option.orientation = bar.orientation()
+        groove = bar.style().subControlRect(
+            QStyle.ComplexControl.CC_ScrollBar, option,
+            QStyle.SubControl.SC_ScrollBarGroove, bar)
+        return max(1, groove.height() - thumb.height()), groove
+
+    def _bar_drag(self, bar, event):
+        """Take over a drag of the scrollbar thumb.
+
+        **Why take it over at all.** Qt writes the bar's value on every
+        mouse-move event, and an ordinary mouse reports 125 of those a
+        second against a 240Hz panel - so half the refreshes repeat the
+        frame before and the content moves in double-size steps. That is
+        the owner's "while dragging the scrollbar in low-mid speed it
+        shows that all items on the screen are moving in steps", 25
+        August 2026, and it is the same fault the painted grid had until
+        `poster_grid.DRAG_FOLLOW_TAU_S` was written.
+
+        So the pointer sets a *target* and `_Momentum.follow` closes the
+        gap on the frame clock. The event is consumed, which is what
+        keeps Qt from writing the value underneath the follow - two
+        writers on one value would fight every frame.
+
+        Only the thumb: a press on the track is a page jump and belongs
+        to Qt, and letting it through keeps that behaviour exactly as it
+        was."""
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            point = event.position().toPoint()
+            if not self._thumb_rect(bar).contains(point):
+                self._cancel()      # a track jump; let Qt do it
+                return False
+            self._drag_from = (event.position().y(), float(bar.value()))
+            self._motion.cancel()
+            return True
+        if kind == QEvent.Type.MouseMove and self._drag_from is not None:
+            start_y, start_value = self._drag_from
+            thumb = self._thumb_rect(bar)
+            span, _groove = self._groove_span(bar, thumb)
+            reach = float(bar.maximum() - bar.minimum())
+            moved = event.position().y() - start_y
+            self._motion.follow(start_value + moved * reach / span)
+            return True
+        if kind in (QEvent.Type.MouseButtonRelease,
+                    QEvent.Type.MouseButtonDblClick):
+            if self._drag_from is None:
+                return False
+            # The target stands: the follow has a few milliseconds still
+            # to run and letting it finish is what makes the release land
+            # exactly where the thumb was let go.
+            self._drag_from = None
+            self._motion.finish_follow()
+            return True
+        return False
+
+    def eventFilter(self, obj, event):
+        if event.type() in self._DRAG_EVENTS and obj is self._bar_widget:
+            # Never let anything out of here: a filter that raises kills
+            # the process (see __init__).
+            try:
+                if self._bar_drag(obj, event):
+                    return True
+            except Exception:
+                logs.exception("scrollbar drag failed")
+        return False
+
+
+def smooth_scrolling(area, notch_scale: float = 1.0):
+    """Give any scrolling widget the app's wheel *and* its paced thumb
+    drag - what `scroll_area()` builds in, for the surfaces built some
+    other way: the lists in Settings and the global search, the reader's
+    chapter panel, a combo's popup.
+
+    Not for a surface that already has its own motion model: the reader's
+    strip has one, and two writing one scrollbar fight every frame. That
+    one takes `smooth_bar_drag` instead.
+    """
+    area.notch_scale = float(notch_scale or 1.0)
+    return _SmoothWheel(area)
+
+
+def smooth_combo(box):
+    """Give a drop-down's popup the app's scrolling.
+
+    A combo popup is a scrolling list like any other and some of them are
+    long - the reader's chapter jump list runs to hundreds of rows - so
+    without this they keep Qt's raw thumb drag, which moves the whole
+    step in one frame and shows nothing in the frames between.
+
+    `box.view()` exists from construction and QComboBox keeps it unless
+    the model or the delegate is replaced, so this attaches once here
+    rather than on every open. Flagged on the view because PickCombo
+    calls it again from showPopup, where a replaced view would need it.
+    """
+    view = box.view()
+    if view is not None and not getattr(view, "_atomic_smooth", False):
+        view._atomic_smooth = True
+        smooth_scrolling(view)
+    return box
+
+
+def smooth_bar_drag(area, motion=None):
+    """Give any scrolling widget's vertical scrollbar the paced drag.
+
+    For `scroll_area()` pages this comes with _SmoothWheel; this is for
+    everything else - the reader's strip, the plain lists in Settings and
+    the search, the chapter jump list. Returns the ScrollBarDrag, which
+    is parented to `area` and needs no keeping.
+
+    A surface with its own _Momentum must pass it: two models writing one
+    scrollbar fight every frame.
+    """
+    if motion is None:
+        motion = _Momentum(area.verticalScrollBar(),
+                           lambda: screen_tick_ms(area), area,
+                           frame_s=lambda: screen_frame_s(area))
+    return ScrollBarDrag(area, motion)
 
 
 class _SmoothWheel(QObject):
@@ -3562,10 +3842,16 @@ class _SmoothWheel(QObject):
     # because scroll_area's `notch_scale` still multiplies both, which
     # is what keeps Home's own 0.7 working.
     NOTCH_FRACTION = 0.0
-    # **30 - the owner's own number, 27 August 2026: "no no 30 instead of
-    # 24", correcting a first reading of "make it faster by 50%" as +50% on
-    # the travel (which gave 36). He wanted the constant itself set to 30,
-    # so that is what this is - not a percentage of anything.
+    # **58, up a further 30% from 45 - the owner, 27 August 2026:
+    # "increase it by 30% more", the second raise in a row after three cuts
+    # earlier the same day. Applied to the constant, which is what his
+    # correction established this number means.
+    #
+    # **45 was up 50% from 30: "increase the scrolling speed by 50%".
+    #
+    # **30 was his own number that day: "no no 30 instead of 24",
+    # correcting a first reading of "make it faster by 50%" as +50% on the
+    # travel (which gave 36) - the constant itself, not a percentage.
     #
     # Fourth change to this one number in a day, and the asks below pull
     # both ways; they are kept so the next person sees the whole swing
@@ -3584,7 +3870,7 @@ class _SmoothWheel(QObject):
     # alone is the travel. scroll_area's `notch_scale` still multiplies it,
     # which keeps Home's 0.7 at 26px rather than flattening every surface to
     # one number.
-    NOTCH_FLOOR_PX = 30
+    NOTCH_FLOOR_PX = 58
     # Never slower than this, whatever the screen claims. A refresh rate
     # of 0 is what a headless/offscreen platform reports.
     MAX_TICK_MS = 16
@@ -3592,139 +3878,22 @@ class _SmoothWheel(QObject):
     def __init__(self, area: QScrollArea):
         super().__init__(area)
         self._area = area
-        self._target = None
         self._from = 0.0
         self._started_at = 0.0
         # The motion itself lives in _Momentum (see its docstring for the
         # measurement that retired the per-notch curve this used to run).
         self._motion = _Momentum(area.verticalScrollBar(), self._tick_ms, self,
                                  frame_s=lambda: screen_frame_s(self._area))
-        # Grabbing the scrollbar mid-glide must win instantly - an
-        # animation still writing values under a held slider fights the
-        # hand holding it.
-        # Where a thumb drag started: (pointer y, bar value). None when
-        # no drag is in progress - see _bar_drag.
-        #
-        # **Set before the filters go on, not after.** An event arriving
-        # in between reaches `eventFilter` with this attribute missing,
-        # and an exception raised inside a Qt event filter takes the
-        # process down rather than propagating - which is exactly what
-        # it did: the harness exited 127 with nothing printed at all.
-        self._drag_from = None
-        # The bar itself, held so the filter can recognise it by identity
-        # rather than by asking the area for it on every event.
-        #
-        # **That question was fatal.** `self._area.verticalScrollBar()`
-        # at the top of `eventFilter` reaches into C++, and these pages
-        # rebuild constantly - once the area has been deleted the call
-        # raises RuntimeError, and an exception raised inside a Qt event
-        # filter takes the process down rather than propagating. It did:
-        # the whole app died building a page, exit 127 with no traceback.
-        self._bar_widget = area.verticalScrollBar()
-        # Not sliderPressed: the drag is taken over below, so Qt never
-        # moves the slider and never emits it. A press on the *track*
-        # (a page jump) still reaches Qt and still wants the glide
-        # cancelled, which _cancel does from the filter.
+        # The thumb drag is its own object now, shared with the
+        # surfaces that have no _SmoothWheel - see ScrollBarDrag.
+        self._bar_drag_filter = ScrollBarDrag(area, self._motion)
         area.viewport().installEventFilter(self)
-        self._bar_widget.installEventFilter(self)
 
     def _tick_ms(self) -> int:
         return screen_tick_ms(self._area)
 
-    def _cancel(self):
-        self._motion.cancel()
-        self._target = None
-
-    def _thumb_rect(self, bar):
-        """The slider handle's rectangle, asked of the style rather than
-        computed: a scrollbar's groove is inset by the arrow buttons on
-        some styles and not on others, and guessing that is how a drag
-        ends up a few pixels out from the first frame."""
-        option = QStyleOptionSlider()
-        option.initFrom(bar)
-        option.orientation = bar.orientation()
-        option.minimum, option.maximum = bar.minimum(), bar.maximum()
-        option.sliderPosition = option.sliderValue = bar.value()
-        option.pageStep, option.singleStep = bar.pageStep(), bar.singleStep()
-        return bar.style().subControlRect(
-            QStyle.ComplexControl.CC_ScrollBar, option,
-            QStyle.SubControl.SC_ScrollBarSlider, bar)
-
-    def _groove_span(self, bar, thumb):
-        """How far the handle may travel, in pixels."""
-        option = QStyleOptionSlider()
-        option.initFrom(bar)
-        option.orientation = bar.orientation()
-        groove = bar.style().subControlRect(
-            QStyle.ComplexControl.CC_ScrollBar, option,
-            QStyle.SubControl.SC_ScrollBarGroove, bar)
-        return max(1, groove.height() - thumb.height()), groove
-
-    def _bar_drag(self, bar, event):
-        """Take over a drag of the scrollbar thumb.
-
-        **Why take it over at all.** Qt writes the bar's value on every
-        mouse-move event, and an ordinary mouse reports 125 of those a
-        second against a 240Hz panel - so half the refreshes repeat the
-        frame before and the content moves in double-size steps. That is
-        the owner's "while dragging the scrollbar in low-mid speed it
-        shows that all items on the screen are moving in steps", 25
-        August 2026, and it is the same fault the painted grid had until
-        `poster_grid.DRAG_FOLLOW_TAU_S` was written.
-
-        So the pointer sets a *target* and `_Momentum.follow` closes the
-        gap on the frame clock. The event is consumed, which is what
-        keeps Qt from writing the value underneath the follow - two
-        writers on one value would fight every frame.
-
-        Only the thumb: a press on the track is a page jump and belongs
-        to Qt, and letting it through keeps that behaviour exactly as it
-        was."""
-        kind = event.type()
-        if kind == QEvent.Type.MouseButtonPress:
-            if event.button() != Qt.MouseButton.LeftButton:
-                return False
-            point = event.position().toPoint()
-            if not self._thumb_rect(bar).contains(point):
-                self._cancel()      # a track jump; let Qt do it
-                return False
-            self._drag_from = (point.y(), float(bar.value()))
-            self._motion.cancel()
-            return True
-        if kind == QEvent.Type.MouseMove and self._drag_from is not None:
-            start_y, start_value = self._drag_from
-            thumb = self._thumb_rect(bar)
-            span, _groove = self._groove_span(bar, thumb)
-            reach = float(bar.maximum() - bar.minimum())
-            moved = event.position().toPoint().y() - start_y
-            self._motion.follow(start_value + moved * reach / span)
-            return True
-        if kind in (QEvent.Type.MouseButtonRelease,
-                    QEvent.Type.MouseButtonDblClick):
-            if self._drag_from is None:
-                return False
-            # The target stands: the follow has a few milliseconds still
-            # to run and letting it finish is what makes the release land
-            # exactly where the thumb was let go.
-            self._drag_from = None
-            return True
-        return False
-
-    _DRAG_EVENTS = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove,
-                    QEvent.Type.MouseButtonRelease,
-                    QEvent.Type.MouseButtonDblClick)
-
     def eventFilter(self, obj, event):
         kind = event.type()
-        if kind in self._DRAG_EVENTS and obj is self._bar_widget:
-            # Never let anything out of here: a filter that raises kills
-            # the process (see __init__).
-            try:
-                if self._bar_drag(obj, event):
-                    return True
-            except Exception:
-                logs.exception("scrollbar drag failed")
-            return False
         if kind != QEvent.Type.Wheel:
             return False
         if not event.pixelDelta().isNull():

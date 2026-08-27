@@ -26,6 +26,7 @@ from helpers.widgets import (
     CardTextLabel,  # noqa: F401
     Card, CardDragReorder, GlassPage, GridSelection, confirm,
     defer_grid_rebuild, frameless_dialog, inform, scroll_area, search_field,
+    smooth_combo,
     show_toast, show_undo_toast, use_hover_cursor,
 )
 # One poster number for the whole app: the Games/Apps tiles are sized
@@ -310,7 +311,7 @@ class LinkGridPage(GridSelection, GlassPage):
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
-        self.sort_box = QComboBox()
+        self.sort_box = smooth_combo(QComboBox())
         use_hover_cursor(self.sort_box)
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)

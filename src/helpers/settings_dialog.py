@@ -39,7 +39,8 @@ from . import (
     updater,
 )
 from .widgets import (confirm, finish_toast, frameless_dialog, inform,
-                      scroll_area, show_toast)
+                      scroll_area, show_toast, smooth_combo,
+                      smooth_scrolling)
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
 # and the page's settings serve all three media. The
@@ -866,7 +867,7 @@ class SettingsDialog(QDialog):
         form.addWidget(QLabel("Playback", objectName="SectionTitle"))
         resolution_row = QHBoxLayout()
         resolution_row.addWidget(QLabel("Default resolution"))
-        self.resolution_combo = QComboBox()
+        self.resolution_combo = smooth_combo(QComboBox())
         for value in app_settings.RESOLUTION_CHOICES:
             self.resolution_combo.addItem(RESOLUTION_LABELS.get(value, value), value)
         current = app_settings.get_preferred_resolution()
@@ -988,6 +989,10 @@ class SettingsDialog(QDialog):
         form.addWidget(sites_hint)
 
         self.sites_list = QListWidget()
+        # A list is a scroll area like any other: without this it has
+        # Qt's raw thumb drag and Qt's three-lines wheel, neither of
+        # which is what the rest of the app does - see ScrollBarDrag.
+        smooth_scrolling(self.sites_list)
         self.sites_list.setMinimumHeight(160)
         self.sites_list.itemDoubleClicked.connect(self._edit_site)
         form.addWidget(self.sites_list, stretch=1)

@@ -33,6 +33,18 @@ For animation/window-geometry questions, read the screen directly -
 sampling pixels is fast enough, grabbing a bitmap isn't. Take a
 baseline of the settled state first, compare against it.
 
+**"Did it change?" is not the same question as "was it smooth?"** The
+scrollbar drag was fixed once on the metric *dead refreshes* - refreshes
+whose position was identical to the one before - which went from 47.9%
+to 1.5% and the fix was called done. It was not: the follow was
+delivering 20px in one frame and then a 0.3px tail across the next
+seven, and a 0.3px tail counts as "moved" while the eye sees a lurch and
+a stall. The owner's screen recording, measured frame by frame nine
+months of tuning later, still showed 35% of frames pixel-identical
+during a drag. For motion, measure the **distribution of the step
+sizes** (and count a frame dead below half a pixel, which is what
+int(round()) actually shows) - never just whether a number changed.
+
 **A classifier you haven't validated is not a measurement.** This app's
 surfaces are near-black, close enough to a dark desktop that "is the
 window covering this point" can't be answered from a raw pixel - the

@@ -23,7 +23,8 @@ from helpers import (app_settings, game_art, game_launch, images, launchers,
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, GridSelection, confirm,
     defer_grid_rebuild, finish_toast, frameless_dialog, inform, scroll_area,
-    search_field, show_toast, show_undo_toast, use_hover_cursor,
+    search_field, show_toast, show_undo_toast, smooth_combo,
+    use_hover_cursor,
 )
 from windows.link_grid import (
     CARD_MARGINS, POSTER_ART_SIZE, POSTER_CARD_WIDTH, CardTextLabel,
@@ -100,7 +101,7 @@ class GamesPage(GridSelection, GlassPage):
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
-        self.sort_box = QComboBox()
+        self.sort_box = smooth_combo(QComboBox())
         use_hover_cursor(self.sort_box)
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)

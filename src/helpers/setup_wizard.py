@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
 )
 
 from . import app_settings, logs, startup, storage, theme
-from .widgets import frameless_dialog, scroll_area, use_hover_cursor
+from .widgets import (frameless_dialog, scroll_area, smooth_combo,
+                      use_hover_cursor)
 
 # How long after main() the offer fires: enough for the window to have
 # actually painted, so the dialog opens over a visible app rather than
@@ -420,7 +421,7 @@ class SetupWizard(QDialog):
         form.addWidget(QLabel("Playback", objectName="SectionTitle"))
         resolution_row = QHBoxLayout()
         resolution_row.addWidget(QLabel("Default resolution"))
-        self.resolution_combo = QComboBox()
+        self.resolution_combo = smooth_combo(QComboBox())
         labels = _resolution_labels()
         for value in app_settings.RESOLUTION_CHOICES:
             self.resolution_combo.addItem(labels.get(value, value), value)
