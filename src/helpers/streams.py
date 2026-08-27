@@ -48,7 +48,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import app_settings, net, storage
+from . import app_settings, logs, net, storage
 
 # Imported defensively for the same reason chapter_source is in
 # reader.py: a lookup with no indexers is a shorter list, not a
@@ -2300,6 +2300,26 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
     _flag_instant(results, deadline)
 
     ranked = _rank(results)
+    # **What each source actually returned, in one line.** The owner
+    # sent a log on 27 August 2026 asking whether a short source list
+    # for Attack on Titan S01E02 was his connection. It could not be
+    # answered from it: the log recorded every host that *failed* and
+    # nothing at all about a lookup that succeeded, so "four sources"
+    # and "four sources because three hosts answered empty" looked
+    # identical. The per-source counts are the difference, and they cost
+    # one line per lookup.
+    try:
+        per_source = {}
+        for row in ranked:
+            name = str(row.get("source") or "?")
+            per_source[name] = per_source.get(name, 0) + 1
+        logs.info("streams %s S%sE%s: %d rows%s",
+                  (entry or {}).get("title") or "?", season, episode,
+                  len(ranked),
+                  "".join(f" | {k} {v}" for k, v in sorted(per_source.items()))
+                  or " | nothing answered")
+    except Exception:
+        pass                # a diagnostic must never fail a lookup
     _cache_put(cache_key, ranked)
     return ranked
 

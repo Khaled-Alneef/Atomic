@@ -1843,6 +1843,33 @@ def _plausible_episode(names, season, episode, title) -> bool:
 
 
 def _pick_file(info, season=None, episode=None, file_index=None, title=None):
+    """`_pick_file_chosen` with one line of evidence written down.
+
+    **Because the wrong episode keeps being reported and the log has
+    never once said which file was served.** The owner, 27 August 2026:
+    Silo S01E01 "plays the wrong ep from another season". The row list
+    for that ask is clean - every top row states season 1, measured live
+    - and `_pick_file` overrides even a wrong addon `fileIdx` on every
+    pack shape that could be modelled here, so the release that actually
+    misbehaved cannot be guessed at from this end.
+
+    What settles it is what the pack held and which file was chosen, and
+    that is one line per playback start rather than the temporary traces
+    that were added and removed twice for this same class of bug."""
+    chosen = _pick_file_chosen(info, season, episode, file_index, title)
+    try:
+        path = ""
+        if chosen is not None:
+            path = str(info.files().file_path(chosen))
+        logs.info("pick_file %s S%sE%s: fileIdx=%s chose=%s of %s | %s",
+                  title or "?", season, episode, file_index, chosen,
+                  info.num_files(), path[-90:] or "(refused)")
+    except Exception:
+        pass                # a diagnostic must never fail playback
+    return chosen
+
+
+def _pick_file_chosen(info, season=None, episode=None, file_index=None, title=None):
     """Which file in the torrent to play, or **None when that cannot be
     answered**.
 

@@ -4296,6 +4296,28 @@ class MainWindow(QMainWindow):
             self._bind_page_scroll()        # drops the binding
             self._root_layout.insertWidget(0, bar)
             bar.show()
+            # **The bits Windows wants back before it will snap again.**
+            # Qt clears WS_THICKFRAME for a full-screen window and only
+            # restores it through its own setWindowState, which
+            # window_chrome.maximise_from_fullscreen deliberately does
+            # not use. Measured leaving full screen from a maximised
+            # window: style 0x970F0000 going in, 0x97080000 coming back
+            # - WS_THICKFRAME gone, and with it every edge snap, on
+            # every page, until restart. Here rather than in
+            # exit_fullscreen because changeEvent reaches this on routes
+            # that never call it.
+            window_chrome.ensure_snap_styles(self)
+            # **And the bar must not land on top of a player.** The
+            # player and the reader take `immersive_host` and cover the
+            # whole window, the bar included; re-inserting the bar into
+            # the layout makes it the newest child of that same parent,
+            # which on Qt puts it above them. Measured with an episode
+            # playing: the bar is covered before full screen and showing
+            # over the video after coming back - the owner's report that
+            # the search bar "do not hide inside the player".
+            overlay = self._top_overlay()
+            if overlay is not None and overlay.parent() is self.immersive_host():
+                overlay.raise_()
 
     def _page_scroll_bar(self):
         """The current page's main vertical scrollbar, or None.

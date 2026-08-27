@@ -187,6 +187,48 @@ def make_frameless(window):
     return True
 
 
+def ensure_snap_styles(window) -> bool:
+    """Put back the style bits Windows checks before it will snap a
+    window. Returns whether any were missing.
+
+    **Going full screen takes them, and not every way back puts them
+    on.** Qt clears WS_THICKFRAME for a full-screen window and restores
+    the style it saved when its own `setWindowState` brings the window
+    back - so any route that reaches the same end state without going
+    through that call leaves them off. `maximise_from_fullscreen` is
+    exactly such a route: bypassing Qt's state machinery is what makes
+    it skip the restored-size frame.
+
+    Measured 27 August 2026 on a window maximised before it went full
+    screen, which is how the owner runs it:
+
+        maximised          style 0x970F0000  WS_THICKFRAME set
+        full screen        style 0x96080000  cleared by Qt
+        back to maximised  style 0x97080000  still cleared
+
+    and a window without WS_THICKFRAME cannot be snapped to an edge at
+    all (see make_frameless, where the same bits are put on for the same
+    reason). That is the owner's report: after leaving full screen in the
+    player, dragging to the top no longer fills the screen.
+
+    Idempotent, so it is safe on every transition rather than only the
+    ones known to need it."""
+    if not WINDOWS:
+        return False
+    wanted = WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX
+    try:
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        user = ctypes.windll.user32
+        user.GetWindowLongW.restype = ctypes.c_long
+        style = user.GetWindowLongW(hwnd, GWL_STYLE)
+        if style & wanted == wanted:
+            return False
+        user.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(style | wanted))
+    except Exception:
+        return False
+    return True
+
+
 def is_zoomed(window) -> bool:
     """Whether Windows itself considers the window maximised.
 

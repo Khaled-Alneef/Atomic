@@ -3615,16 +3615,30 @@ class _EdgeWheelRelay(QObject):
 
     @staticmethod
     def _scrolls_vertically(area) -> bool:
+        # **A surface that answers this at all answers it here.** The
+        # flag is three-valued on purpose: absent means an ordinary
+        # QAbstractScrollArea, True means a surface that scrolls itself
+        # (helpers.poster_grid) and False means one that has decided the
+        # wheel must not move it.
+        #
+        # Only the True case used to be read, so a PosterStrip - which
+        # sets it False deliberately, because no horizontal row moves on
+        # the wheel - fell through to `verticalScrollBar()`, and a
+        # PosterGrid is a plain QWidget with no such method. Measured in
+        # the owner's log, 27 August 2026: one wheel gesture over a
+        # Discover row raised `AttributeError: 'PosterStrip' object has
+        # no attribute 'verticalScrollBar'` **180 times in 50ms**, every
+        # one of them unhandled, because the guard below catches only
+        # RuntimeError.
+        relayed = getattr(area, "accepts_relayed_wheel", None)
         try:
-            if getattr(area, "accepts_relayed_wheel", False):
-                # A surface that scrolls itself rather than through a
-                # QScrollArea (helpers.poster_grid). Without this branch
-                # a notch over the page's margins reached nothing at all
-                # on the category pages, which is the very complaint
-                # _EdgeWheelRelay exists to answer.
-                return area.isVisible() and area.max_offset() > 0
+            if relayed is not None:
+                return bool(relayed) and area.isVisible() and area.max_offset() > 0
             bar = area.verticalScrollBar()
-        except RuntimeError:
+        except (RuntimeError, AttributeError):
+            # AttributeError as well: anything reached here that is
+            # neither a scroll area nor a poster surface simply does not
+            # scroll, and must not take the wheel handler down with it.
             return False
         return (bar is not None and area.isVisible()
                 and bar.maximum() > bar.minimum())
