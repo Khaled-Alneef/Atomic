@@ -1488,6 +1488,25 @@ class HeroBanner(QFrame):
         self._backdrop = incoming
         self._scaled = {}
         if fade and (self._previous is not None or incoming is not None):
+            # **Set the mix before arming the tween, not after.**
+            # SmoothTween.start only arms its timer - it does not call
+            # back - so `_mix` kept the finished value of the *last*
+            # fade, which is 1.0, until the first tick a frame later.
+            # Any paint in that window drew the incoming art at full
+            # opacity and the outgoing at none.
+            #
+            # Measured 27 August 2026, recording the opacity every frame
+            # of a real transition drew with:
+            #
+            #     1.0, 0.052, 0.148, 0.183, 0.258, ...
+            #
+            # so the banner hard-cut to the new picture, snapped back to
+            # the old one, and only then crossfaded. That is the owner's
+            # "the banner bg glitches in a really fast way in
+            # transition", and it happened on every slide change - which
+            # is why removing the decode stall from the same transition
+            # did not touch it.
+            self._mix = 0.0
             self._fade.start(0.0, 1.0, self.FADE_MS)
         else:
             self._mix = 1.0
