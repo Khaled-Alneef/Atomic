@@ -85,82 +85,12 @@ def set_hide_sections_from_home(enabled: bool):
     storage.save(SETTINGS_FILE, data)
 
 
-_SMOOTHING_RESET_KEY = "motion_smoothing_cleared_2026_08_27"
 
 
-def get_cadence_lock() -> bool:
-    """Whether mpv may stretch playback far enough to hold every frame
-    for the *same* number of refreshes.
-
-    **Off by default, because it is a trade and not a free win.**
-    mpv already nudges playback speed by up to 1% to line frames up with
-    the panel; this raises that allowance to 2%. It changes nothing on a
-    refresh rate that already divides well - 240Hz needs 0.1%, 120 and
-    144 need 0.1% - and everything on one that does not.
-
-    Measured 27 August 2026, Attack on Titan S04E01 (23.976fps) at
-    1920x1080 @ 165Hz, where 165 / 23.976 = 6.882:
-
-        default (1%)   vsync-ratio 6.88 -> 7.02, speed 1.00000
-        2%             vsync-ratio 7.00000, speed 0.98312
-
-    So it does exactly what it says: every frame held for seven
-    refreshes instead of most for seven and about three a second for
-    six. The cost is in that speed figure - playback runs 1.69% slow, so
-    a 24-minute episode takes about 24m25s, and the audio is resampled
-    to match (mpv corrects pitch by default, so it does not go flat).
-
-    Not frame generation, and not an FPS change: every frame the file
-    contains is shown exactly once, in order. Only how long each is held
-    changes."""
-    return bool(_load().get("cadence_lock", False))
 
 
-def set_cadence_lock(enabled: bool):
-    data = _load()
-    data["cadence_lock"] = bool(enabled)
-    storage.save(SETTINGS_FILE, data)
 
 
-def get_motion_smoothing() -> bool:
-    """Whether the player blends frames to make 24fps content *look*
-    smoother than it was shot.
-
-    **Off, and off is the honest default.** It is not the same thing as
-    the display synchronisation the player always does, and the two get
-    confused constantly - see helpers/video_backend.default_options,
-    which spells the difference out. Display sync aligns each frame the
-    file actually contains to the panel's raster; this invents in-between
-    ones. A 23.976fps master is not a performance problem to be fixed,
-    it is what the release contains, and blending it is a look some
-    people want and most call the soap-opera effect.
-
-    **Turned off once, for anyone who had it on.** The owner, 27 August
-    2026: it "makes playback WORSE, especially with anime". Measured the
-    same day and he is right that it does not fix anything - with
-    interpolation on, `vsync-ratio` was **6.88 to 7.02**, exactly what
-    it reads with interpolation off. It cannot fix the pacing, because
-    the pacing is set by the panel's refresh rate against the file's
-    frame rate; all it changes is that frames get blended on the way
-    out, which is what puts ghosting on anime line art.
-
-    So the stored value is cleared once rather than only defaulted off -
-    a default is no help to an install where it is already saved as
-    True. Once, under its own key, so re-enabling it deliberately
-    sticks."""
-    data = _load()
-    if not data.get(_SMOOTHING_RESET_KEY) and data.get("motion_smoothing"):
-        data["motion_smoothing"] = False
-        data[_SMOOTHING_RESET_KEY] = True
-        storage.save(SETTINGS_FILE, data)
-        return False
-    return bool(data.get("motion_smoothing", False))
-
-
-def set_motion_smoothing(enabled: bool):
-    data = _load()
-    data["motion_smoothing"] = bool(enabled)
-    storage.save(SETTINGS_FILE, data)
 
 
 def get_fullscreen_on_startup() -> bool:

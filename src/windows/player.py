@@ -1337,6 +1337,28 @@ class VideoSurface(QWidget):
         self.setPalette(palette)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+    # **A strip along the top edge that drags the window.** The owner,
+    # 27 August 2026: "sometimes while in the vid player when I drag the
+    # screen it does not respond when I drag to top to make it
+    # full-size". Sometimes, because the thing he was reaching for is
+    # not always there - _hide_controls takes the top bar away after
+    # 500ms of stillness, and with it the only surface in the player
+    # that moves the window. What is left under the pointer is this one.
+    #
+    # A press on the bare video does nothing else (pause is the space
+    # bar and the button, never a click on the picture), so this steals
+    # no behaviour. Height is set by the player from the bar's own, so
+    # the band is exactly where the bar would have been; full screen is
+    # refused inside begin_window_drag, where there is no frame to move.
+    drag_band = 0
+
+    def mousePressEvent(self, event):
+        if (self.drag_band > 0
+                and event.position().y() <= self.drag_band
+                and window_chrome.begin_window_drag(self, event)):
+            return
+        super().mousePressEvent(event)
+
     def native_handle(self) -> int:
         """The HWND to hand mpv. Read after the attributes above, never
         before - see this module's docstring."""
@@ -2167,6 +2189,9 @@ class PlayerPage(GlassPage):
         # AttributeError on mpv's own thread - where it kills the event
         # thread silently and the UI then waits forever.
         self._awaiting_first_frame = False
+        # A seek asked for before the picture existed, held until it
+        # does - see _seek_absolute.
+        self._pending_start_seek = None
         self._buffering_percent = 0
         # Sources already proven dead this session, so _try_next_source
         # cannot loop back onto one it has just rejected.
@@ -3636,6 +3661,9 @@ class PlayerPage(GlassPage):
         # it arrived yet" across the whole lookup as well (see
         # _show_loading_soon).
         self._awaiting_first_frame = True
+        # A new wait starts with no seek owed - a target left
+        # over from the last episode must never land on this one.
+        self._pending_start_seek = None
         self.seek_bar.set_duration(0)
         self.seek_bar.set_position(0)
         self.seek_bar.set_buffered(0)
@@ -5070,6 +5098,9 @@ class PlayerPage(GlassPage):
         # play is protected inside _release_prewarmed.)
         self._release_prewarmed(keep=(self._prewarm_hash,))
         self._awaiting_first_frame = True
+        # A new wait starts with no seek owed - a target left
+        # over from the last episode must never land on this one.
+        self._pending_start_seek = None
         self._buffering_percent = 0
         # A fresh file gets a fresh audio pick - see _apply_audio_default.
         self._audio_default_done = False
@@ -5246,6 +5277,32 @@ class PlayerPage(GlassPage):
         if self.handle is None:
             return
         target = max(0.0, float(seconds))
+        # **Nothing has played yet, so this is a start position, not a
+        # seek.** The owner, 27 August 2026: "when I use the arrow +/-
+        # 10 sec, while it is just started the ep (still loading), it
+        # start lagging badly".
+        #
+        # Every seek moves the torrent engine's read head, and it drops
+        # what it was fetching to go and fetch the new offset. During
+        # startup the thing it is fetching is the head of the file that
+        # mpv's open is waiting on, so each arrow press throws away the
+        # progress the last one cost and the episode takes longer to
+        # start with every press - which is the lag, and it compounds.
+        # `needs_seat` could not catch it either: `self._duration` is
+        # still 0 before the file is open, so the branch that would have
+        # narrated the wait was skipped and mpv was handed a timestamp
+        # whose pieces were never coming.
+        #
+        # So presses before the first frame accumulate into one target
+        # and are applied once, when playback actually begins. The chain
+        # arithmetic in _seek_base already sums them; this only stops
+        # them reaching mpv and the engine one at a time.
+        if not resuming and self._awaiting_first_frame:
+            self._seek_target = target
+            self._seek_target_at = time.monotonic()
+            self._pending_start_seek = target
+            self._say_working(f"Starting At {_format_time(target)}...")
+            return
         # **A forward seek past the buffer takes a seat.** It used to
         # clear one and ask for nothing, which is the owner's report of
         # 26 August 2026 - stepping forward in Attack on Titan S01E02
@@ -5499,6 +5556,9 @@ class PlayerPage(GlassPage):
         it reads self._position, which the stop's time-pos=None events
         cannot clobber (None is dropped in _on_property)."""
         self._awaiting_first_frame = True
+        # A new wait starts with no seek owed - a target left
+        # over from the last episode must never land on this one.
+        self._pending_start_seek = None
         self._startup_fraction = 0.0
         self._show_loading(message)
         # Hand the old episode's bandwidth over. Switching away does
@@ -5689,6 +5749,13 @@ class PlayerPage(GlassPage):
                 # and "broken" look identical.
                 self._awaiting_first_frame = False
                 self._hide_status()
+                # The arrow presses made while this was still loading,
+                # as one seek rather than the several that were asked
+                # for - see _seek_absolute.
+                pending = getattr(self, "_pending_start_seek", None)
+                if pending is not None:
+                    self._pending_start_seek = None
+                    self._seek_absolute(pending)
                 # A switch that was announced is now finished - unless
                 # it still owes a seat, in which case the toast keeps
                 # saying so until the picture is there.
@@ -7246,88 +7313,10 @@ class PlayerPage(GlassPage):
         # Embedded translation is not here any more - it has its own
         # button on the bar, beside subtitles, at the owner's ask. The
         # audio pill in the top bar still opens the same panel.
-        panel.add_group("PICTURE")
-        smoothing = app_settings.get_motion_smoothing()
-        panel.add_row(
-            "Motion smoothing",
-            # The subtitle says what it *is*, because the thing it is
-            # confused with is already on and doing its job. Measured on
-            # this machine, 26 August 2026, 20s of Attack on Titan
-            # S01E02: vsync-ratio exactly 10.000, jitter 0.0003, 0
-            # dropped and 0 late, hwdec d3d11va. Nothing is being lost -
-            # the file is 23.976fps and that is what a 23.976fps release
-            # contains. This is the only control that changes it, and it
-            # changes it by inventing frames.
-            ("On - 24fps blended up to your screen" if smoothing
-             else "Off - play the frames the file has"),
-            self._toggle_motion_smoothing, selected=smoothing)
-        locked = app_settings.get_cadence_lock()
-        panel.add_row(
-            "Lock frame cadence",
-            # The row that addresses the judder motion smoothing was
-            # being asked to fix and could not. Measured 27 August 2026
-            # on this machine at 1920x1080 @ 165Hz, Attack on Titan
-            # S04E01: 165 / 23.976 = 6.882, so mpv holds most frames for
-            # 7 refreshes and about three a second for 6 - a 14% jump in
-            # how long a frame stays up, with 0 dropped and 0 late
-            # throughout. Turning this on measured vsync-ratio 7.00000
-            # flat, at 0.98312 speed.
-            ("On - every frame held equally, playback up to 2% slower"
-             if locked else "Off - exact speed, cadence follows your refresh rate"),
-            self._toggle_cadence_lock, selected=locked)
         panel.finish()
         self._show_panel(panel)
 
-    def _toggle_motion_smoothing(self):
-        """Flip motion smoothing, and apply it to the running file.
 
-        Live, not on the next open: both properties are runtime-settable
-        and the whole point of putting this on the player's own gear is
-        being able to see the difference on the picture in front of you.
-        """
-        wanted = not app_settings.get_motion_smoothing()
-        app_settings.set_motion_smoothing(wanted)
-        if self.handle is not None:
-            try:
-                self.handle["interpolation"] = wanted
-                self.handle["tscale"] = "mitchell" if wanted else "oversample"
-                # See video_backend: at an exact vsync ratio mpv skips
-                # interpolation unless the threshold is lifted, which is
-                # every 23.976 file on a 240Hz panel.
-                self.handle["interpolation-threshold"] = -1 if wanted else 0.01
-            except Exception:
-                logs.exception("Could not change motion smoothing")
-        show_toast(self._toast_anchor(),
-                   "Motion Smoothing On" if wanted else "Motion Smoothing Off")
-        # **Closes, like every other choice in here.** It used to re-open
-        # the panel so the tick could move, which left the gear's window
-        # sitting over the picture after the one thing it was opened for
-        # had been done - the owner's "when I press the motion smoothing
-        # the window does not close any more", 26 August 2026. The toast
-        # above already says which way it went, so the moved tick was
-        # buying nothing the user could not already see, and re-opening
-        # was also what dropped the panel's translucency over the video.
-        self._close_panel()
-
-    def _toggle_cadence_lock(self):
-        """Flip the cadence lock, and apply it to the running file.
-
-        Live like its neighbour, and for a stronger reason: the whole
-        difference is a pacing one, so it has to be judged on a moving
-        picture rather than remembered across a reopen."""
-        wanted = not app_settings.get_cadence_lock()
-        app_settings.set_cadence_lock(wanted)
-        if self.handle is not None:
-            try:
-                # mpv's own default is 1. Nothing else about the sync
-                # path changes - still display-resample, still no
-                # interpolation, still every frame the file contains.
-                self.handle["video-sync-max-video-change"] = 2 if wanted else 1
-            except Exception:
-                logs.exception("Could not change the cadence lock")
-        show_toast(self._toast_anchor(),
-                   "Frame Cadence Locked" if wanted else "Frame Cadence Unlocked")
-        self._close_panel()
 
     def _open_streams_root(self):
         """Open the resolution panel at its top level (the pill / gear).
@@ -7760,6 +7749,9 @@ class PlayerPage(GlassPage):
         #     that was in fact playing. A stop drives `path` to None
         #     first, so the reload is always a change.
         self._awaiting_first_frame = True
+        # A new wait starts with no seek owed - a target left
+        # over from the last episode must never land on this one.
+        self._pending_start_seek = None
         self._startup_fraction = 0.0
         self._show_loading(
             f"Loading Source{f' ({quality})' if quality else ''}...")
@@ -8926,6 +8918,9 @@ class PlayerPage(GlassPage):
         rect = self.rect()
         self.surface.setGeometry(rect)
         self.top_bar.setGeometry(0, 0, rect.width(), TOPBAR_HEIGHT)
+        # The video's own drag strip matches the bar it stands in for
+        # while the bar is hidden - see VideoSurface.drag_band.
+        self.surface.drag_band = TOPBAR_HEIGHT
         self.controls.setGeometry(0, rect.height() - CONTROLS_HEIGHT,
                                   rect.width(), CONTROLS_HEIGHT)
         self._place_skip_button()

@@ -912,11 +912,6 @@ class SettingsDialog(QDialog):
 
         form.addSpacing(20)
         form.addWidget(QLabel("Picture", objectName="SectionTitle"))
-        self.motion_smoothing_check = QCheckBox("Motion smoothing")
-        self.motion_smoothing_check.setChecked(app_settings.get_motion_smoothing())
-        self.motion_smoothing_check.toggled.connect(
-            app_settings.set_motion_smoothing)
-        form.addWidget(self.motion_smoothing_check)
         motion_hint = QLabel(
             "Off by default, and off is what most people want. The player "
             "already locks every frame to your screen's refresh rate, which "

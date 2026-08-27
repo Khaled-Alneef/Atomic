@@ -30,7 +30,6 @@ import os
 import sys
 import threading
 
-from . import app_settings
 
 # Resolved once, at import: python-mpv finds the library through ctypes
 # at *its* import time, so the search path has to be in place before
@@ -160,68 +159,27 @@ def default_options() -> dict:
         # Native source FPS stays the default either way - neither of
         # these changes how many frames the file has.
         "video_sync": "display-resample",
-        # **Interpolation is off by default now, and that is the fix for
-        # the late frames.** Compared against Stremio on this machine,
-        # 26 August 2026 - it ships the *same* libmpv-2.dll, so the two
-        # are directly comparable - by reading the mpv options its shell
-        # actually sets:
+        # **No interpolation, and no control that turns it on.** The
+        # owner, 27 August 2026: "remove the smoothing in the vid player
+        # and the cadence lock entirely from the app, they are useless!"
+        # Both were measured before being taken out, and he is right on
+        # the evidence:
         #
-        #   Stremio: hwdec=auto, gpu-context=d3d11, d3d11-output-format,
-        #            target-colorspace-hint, tone-mapping=bt.2390,
-        #            dither-depth, deband, scale=spline36, cscale, dscale
-        #   Stremio: **no video-sync, no interpolation, no tscale**
+        #   * Motion smoothing (interpolation + tscale=mitchell) could
+        #     not fix pacing at all - with it on, vsync-ratio read the
+        #     same 6.88 to 7.02 as with it off. All it changed was that
+        #     frames got blended, which is the ghosting on anime line
+        #     art. It also made mpv render one frame per *display*
+        #     refresh - 240 a second here - for the same picture.
+        #   * Cadence lock (video-sync-max-video-change=2) did lock the
+        #     cadence on a 165Hz panel (7.00000 flat against 6.88-7.02)
+        #     but at the cost of 1.69% slower playback, and on his 240Hz
+        #     panel it does nothing whatever: 240 / 23.976 = 10.01,
+        #     which mpv already absorbs inside its default 1%.
         #
-        # That absence is the whole difference. With no video-sync mpv
-        # times frames on the audio clock and renders one frame per
-        # *video* frame - about 24 a second. `interpolation=yes` makes
-        # mpv render one per *display refresh* instead, which on the
-        # owner's 240Hz panel is 240 a second: ten times the GPU work
-        # for the same picture. That is what fills vo-delayed-frame-count
-        # and it is the same load that made spline36+deband freeze both
-        # monitors in August (see the scaler note below - same cause,
-        # different symptom).
-        #
-        # What is kept is `video-sync=display-resample`, which is the
-        # part that actually removes judder: it still aligns every frame
-        # to the raster and holds each for a whole number of refreshes.
-        # It just does not re-render between them. Interpolation only
-        # earns its cost when frames must be *blended*, which is
-        # precisely Motion Smoothing - so that is where it lives now.
-        "interpolation": app_settings.get_motion_smoothing(),
-        "tscale": ("mitchell" if app_settings.get_motion_smoothing()
-                   else "oversample"),
-        # **-1, and without it Motion Smoothing does nothing at all.**
-        # mpv's `interpolation-threshold` defaults to 0.01: when the
-        # video and the display are within that of an exact ratio, it
-        # *disables* interpolation on purpose, because blending frames
-        # that already line up only softens them. That guard is right
-        # for the default path and fatal for this one - measured on this
-        # machine, 26 August 2026, Attack on Titan S01E02 is 23.976 on a
-        # 240Hz panel, which is a vsync-ratio of exactly 10.000. Every
-        # frame lands on a refresh, so the threshold caught it and the
-        # setting the owner had just switched on changed nothing he
-        # could see ("the auto play smoothing is not working good").
-        #
-        # -1 means "always interpolate". Only while smoothing is on -
-        # with it off there is nothing to interpolate and the default
-        # guard is the correct behaviour.
-        **({"interpolation_threshold": -1}
-           if app_settings.get_motion_smoothing() else {}),
-        # **How far mpv may stretch playback to keep the cadence even.**
-        # Default is 1%, and that is enough for every refresh rate that
-        # divides 23.976 closely - 120Hz needs 0.1%, 144Hz 0.1%, 240Hz
-        # 0.1%. It is not enough for 165Hz, where 165 / 23.976 = 6.882
-        # and reaching a whole 7 refreshes per frame needs 1.69%: mpv
-        # gives up, holds most frames for 7 and about three a second for
-        # 6, and that uneven hold is what reads as judder on a pan while
-        # every drop counter still says 0. Measured 27 August 2026 -
-        # see app_settings.get_cadence_lock for both runs.
-        #
-        # Off unless asked for, because the cost is real: playback runs
-        # up to 2% slow. Nothing is interpolated, duplicated or
-        # generated either way - only how long each frame is held.
-        **({"video_sync_max_video_change": 2}
-           if app_settings.get_cadence_lock() else {}),
+        # Stated rather than left implicit, because "off" is the claim
+        # being made and mpv's default is not this file's to assume.
+        "interpolation": False,
         # Stated rather than left to mpv's probe, which is what Stremio
         # does too. d3d11 is the context d3d11va decoding hands its
         # surfaces to, so choosing anything else costs a copy per frame.
