@@ -2235,6 +2235,11 @@ def screen_frame_s(widget=None) -> float:
     return 1.0 / rate if rate and rate > 0 else 0.0
 
 
+# The fastest the UI will try to move anything, whatever the panel is
+# capable of - see screen_tick_ms for the screen capture behind it.
+MOTION_MAX_HZ = 120.0
+
+
 def screen_tick_ms(widget=None) -> int:
     """One display refresh, in whole milliseconds.
 
@@ -2263,6 +2268,17 @@ def screen_tick_ms(widget=None) -> int:
     Nothing about the physics changes: the integrator reads real elapsed
     time, so a slower tick moves further per tick rather than travelling
     less."""
+    # **Capped at 120Hz, because that is all the app can present.**
+    # Measured 27 August 2026 by capturing the *screen* at 241fps during
+    # a fling and correlating each frame against the last, so this is
+    # what the panel actually showed rather than what the app intended:
+    # a new position arrived every ~8.3ms whatever the clock was set to,
+    # while the vblank ticker was generating one every 4.2ms. Half of
+    # every position computed was discarded before it could be seen.
+    #
+    # Asking for positions that cannot be presented is not free - it is
+    # what makes the sizes of the ones that *are* presented uneven, and
+    # uneven step sizes are what the owner sees as an afterimage.
     hz = os.environ.get("ATOMIC_SCROLL_HZ")
     if hz:
         try:
@@ -2278,6 +2294,7 @@ def screen_tick_ms(widget=None) -> int:
         rate = 0.0
     if not rate or rate <= 0:
         return MAX_TICK_MS
+    rate = min(rate, MOTION_MAX_HZ)
     # **Floor, not round - and 144Hz is the one rate where that matters.**
     # 1000/144 is 6.944ms; rounding gives 7ms, which is 142.86 positions a
     # second against a panel asking for 144. So the tick this function
@@ -2846,10 +2863,33 @@ _vblank_ticker = None
 
 
 def _vblank_ticker_for_use():
-    """The shared ticker, or None when there is no vblank to wait on (no
-    DXGI, or ATOMIC_NO_VBLANK=1 for A/B measurement)."""
+    """The shared ticker, or None - which is now the default.
+
+    **Off unless ATOMIC_VBLANK=1 asks for it.** This reverses the choice
+    recorded in _Momentum._start_ticking, and it does so on a different
+    measurement rather than a better argument: that A/B was judged from
+    inside the app, on a 144Hz panel, by how evenly the *scrollbar value*
+    advanced. This one captures the screen at 241fps on the owner's
+    240Hz panel and correlates consecutive frames, so it measures what
+    was actually presented.
+
+    Three flings each, counting the artefact that reads as a double
+    image - a presented step *larger* than the one before it, during a
+    decay where every step should be smaller:
+
+        vblank ticker, 240Hz    1, 1, 4 hitches
+        plain timer, 120Hz      1, 0, 0 hitches
+
+    with the same 8.3ms presented cadence and the same interval spread
+    either way. The ticker was generating a position every 4.2ms and the
+    screen was showing one every 8.3ms, so half of them were discarded -
+    and discarding half the positions unevenly is what made the surviving
+    steps uneven.
+
+    Kept rather than deleted: ATOMIC_VBLANK=1 puts it back, which is how
+    the comparison above can be repeated on another panel."""
     global _vblank_ticker
-    if os.environ.get("ATOMIC_NO_VBLANK") == "1":
+    if os.environ.get("ATOMIC_VBLANK") != "1":
         return None
     if _vblank_ticker is None:
         _vblank_ticker = _VBlankTicker()
