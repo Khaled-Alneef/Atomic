@@ -382,10 +382,17 @@ BOTTOM_GAP = 16
 # **76, down 30% from 108 - the owner, 24 August 2026: "make the
 # scrolling slower by 30% in the reader mode only!"** The rest of the
 # app keeps its own notch; this constant is already the reader-only one.
-# **24, a further 37% off 38 - the owner, 27 August 2026, immediately
-# after the halving below: "make it even smaller (mouse scroller steps
-# per tick)". Two cuts the same day, so the number is 68% below the 76
-# it started that morning at.**
+# **30 - the owner's own number, 27 August 2026: "no no 30 instead of
+# 24", correcting a first reading of "make it faster by 50%" as +50% on
+# the travel (which gave 36). He wanted the constant itself set to 30,
+# so that is what this is - not a percentage of anything.
+#
+# Fourth change to this one number in a day, and the asks below pull
+# both ways; they are kept so the next person sees the whole swing
+# rather than the last step of it.**
+#
+# **24 was a further 37% off 38, from "make it even smaller (mouse
+# scroller steps per tick)".**
 #
 # **38, half of 76 - the same day: "make each mouse
 # scroller tick travels 50% less".** The seventh tuning of this number
@@ -396,7 +403,7 @@ BOTTOM_GAP = 16
 # distance - `max(floor, height * 0.0)` is the floor - so this constant
 # alone is the travel. The reader keeps its own constant, as it has since
 # the 30% reader-only ask above.
-WHEEL_STEP_PX = 24
+WHEEL_STEP_PX = 30
 
 # How fast a reader notch gives its speed back - see the _Momentum built
 # in _StripView.__init__ for why this surface does not coast.

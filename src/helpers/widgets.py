@@ -3500,10 +3500,17 @@ class _SmoothWheel(QObject):
     # because scroll_area's `notch_scale` still multiplies both, which
     # is what keeps Home's own 0.7 working.
     NOTCH_FRACTION = 0.0
-    # **24, a further 37% off 38 - the owner, 27 August 2026, immediately
-    # after the halving below: "make it even smaller (mouse scroller steps
-    # per tick)". Two cuts the same day, so the number is 68% below the 76
-    # it started that morning at.**
+    # **30 - the owner's own number, 27 August 2026: "no no 30 instead of
+    # 24", correcting a first reading of "make it faster by 50%" as +50% on
+    # the travel (which gave 36). He wanted the constant itself set to 30,
+    # so that is what this is - not a percentage of anything.
+    #
+    # Fourth change to this one number in a day, and the asks below pull
+    # both ways; they are kept so the next person sees the whole swing
+    # rather than the last step of it.**
+    #
+    # **24 was a further 37% off 38, from "make it even smaller (mouse
+    # scroller steps per tick)".**
     #
     # **38, half of 76 - the same day: "make each mouse
     # scroller tick travels 50% less".** The seventh tuning of this number
@@ -3515,7 +3522,7 @@ class _SmoothWheel(QObject):
     # alone is the travel. scroll_area's `notch_scale` still multiplies it,
     # which keeps Home's 0.7 at 26px rather than flattening every surface to
     # one number.
-    NOTCH_FLOOR_PX = 24
+    NOTCH_FLOOR_PX = 30
     # Never slower than this, whatever the screen claims. A refresh rate
     # of 0 is what a headless/offscreen platform reports.
     MAX_TICK_MS = 16
