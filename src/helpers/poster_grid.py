@@ -87,6 +87,7 @@ from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import theme
+from . import widgets as widgets_module
 from .widgets import (_vblank_ticker_for_use, hold_hover_cursor,
                       release_hover_cursor)
 
@@ -651,7 +652,18 @@ class PosterGrid(QWidget):
             rate = screen.refreshRate() if screen is not None else 0.0
         except Exception:
             rate = 0.0
-        return 1.0 / rate if rate and rate > 0 else 0.0
+        if not rate or rate <= 0:
+            return 0.0
+        # **Capped like every other surface.** This read the panel rate
+        # straight, so when widgets.screen_tick_ms was capped at 120Hz on
+        # 27 August 2026 these grids kept asking for 240 frames a second
+        # - and they are Home's shelves, Discover's rows and the category
+        # grids, which is most of the scrolling in the app. Measured by
+        # capturing the screen: the panel presents a new position every
+        # ~8.3ms whatever is asked of it, so the frames above that rate
+        # are drawn and thrown away, which is the cost this module's own
+        # _schedule_frame docstring already measured from the other side.
+        return 1.0 / min(rate, widgets_module.MOTION_MAX_HZ)
 
     # ---- scrolling -------------------------------------------------------
     def scroll_offset(self) -> int:
