@@ -582,6 +582,79 @@ class DriftButton(QPushButton):
         super().paintEvent(event)
 
 
+def begin_window_drag(widget, event) -> bool:
+    """Hand a left-press to Windows as a window move. Returns whether it
+    started one.
+
+    **Native, not a mouseMoveEvent adding up deltas**, because Aero Snap,
+    Win+Arrow and drag-to-maximise are things Windows does during *its*
+    move loop - a hand-rolled drag moves the window and nothing happens
+    at the edges, which is the report of 26 August 2026 that
+    `make_frameless` exists to answer.
+
+    Shared rather than written twice: the window's own bar is not the
+    only surface that should move the window. The player covers the
+    whole window (player.immersive_host), so while it is up there is no
+    bar on screen at all and a drag has nothing to land on - the owner's
+    ask, 27 August 2026, "make the window draggable while playing and
+    not in fullscreen mode".
+
+    Full screen is excluded on purpose in both places: there is no frame
+    to move there, and dragging one would only smear the picture."""
+    if event.button() != Qt.MouseButton.LeftButton:
+        return False
+    window = widget.window()
+    if window is None or _really_fullscreen(window):
+        return False
+    handle = window.windowHandle()
+    if handle is None:
+        return False
+    handle.startSystemMove()
+    return True
+
+
+def _really_fullscreen(window) -> bool:
+    """Full screen as the *screen* shows it, not only as Qt remembers it.
+
+    **Qt's window state goes stale when Windows changes it behind Qt's
+    back**, which is not a theory here - it is the measured cause of the
+    dead maximise button (see restore_from_maximised, where Qt held the
+    maximized flag over a window Windows had already restored).
+
+    A stale full-screen flag is worse than a stale maximized one,
+    because this gate reads it: Qt says full screen, the drag is
+    refused, and the window then cannot be moved or snapped **on any
+    page** until the app is restarted - which is the owner's report of
+    27 August 2026, "it do not go full size or half the monitor even if
+    I go back to the other pages".
+
+    So the flag has to agree with the geometry. A window that really is
+    full screen covers its screen; one that Qt merely believes is full
+    screen does not, and that one is safe to drag."""
+    if not window.isFullScreen():
+        return False
+    try:
+        screen = window.screen()
+        full = screen.geometry() if screen else None
+    except (AttributeError, RuntimeError):
+        full = None
+    if full is None:
+        return True         # cannot check - trust Qt rather than guess
+    return window.geometry().contains(full)
+
+
+class DragStrip(QWidget):
+    """A bare strip whose empty parts move the window.
+
+    Presses that land on a child - a button, a field - never reach here,
+    so the controls keep working and only the gaps between them drag."""
+
+    def mousePressEvent(self, event):
+        if begin_window_drag(self, event):
+            return
+        super().mousePressEvent(event)
+
+
 class TitleBar(QWidget):
     """Back on the left, one search field in the middle, the window
     buttons on the right.
@@ -814,12 +887,8 @@ class TitleBar(QWidget):
 
         Presses on the field and the buttons never arrive here: those
         widgets accept their own."""
-        if (event.button() == Qt.MouseButton.LeftButton
-                and not self.window().isFullScreen()):
-            handle = self.window().windowHandle()
-            if handle is not None:
-                handle.startSystemMove()
-                return
+        if begin_window_drag(self, event):
+            return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):

@@ -69,7 +69,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (skiptimes, app_settings, artwork, downloads, logs, net, storage,
-                     theme, video_backend)
+                     theme, video_backend, window_chrome)
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
                              PickCombo,
                              confirm, finish_toast, freeze_covered,
@@ -501,6 +501,13 @@ BUFFER_FRAME_GUARD_MS = 700
 # them, and the headroom is what stops it promising a finish the swarm
 # has not delivered.
 STARTUP_TICK_MS = 250
+# How long the startup gauge may stand still before the loading frame
+# starts saying why in words as well. Long enough that an ordinary cold
+# start - measured at 14.7s end to end, 9.1s of it in one stretch
+# between handing mpv the URL and its first buffering report - never
+# trips it, short enough that a stalled swarm does not leave a silent
+# poster on screen. See PlayerPage._update_startup_status.
+STARTUP_SILENT_LIMIT_S = 12.0
 STARTUP_CREEP = 0.005
 STARTUP_HEADROOM = 0.08
 
@@ -2453,6 +2460,11 @@ class PlayerPage(GlassPage):
         # readings, because those were measured to arrive twice in 14.7s.
         self._startup_fraction = 0.0
         self._startup_text = ""
+        # See _update_startup_status: how long the measured target has
+        # been standing still, which is what decides whether the silent
+        # logo is still an honest answer.
+        self._startup_last_target = 0.0
+        self._startup_last_move = time.monotonic()
         self._startup_ticker = QTimer(self)
         self._startup_ticker.setInterval(STARTUP_TICK_MS)
         self._startup_ticker.timeout.connect(self._startup_tick)
@@ -2545,7 +2557,18 @@ class PlayerPage(GlassPage):
         return stored_season or 1, 1
 
     def _build_top_bar(self):
-        self.top_bar = QWidget(self)
+        # **A DragStrip, not a plain QWidget** - the owner's ask, 27
+        # August 2026: "make the window draggable while playing and not
+        # in fullscreen mode". The player takes `immersive_host` and
+        # covers the whole window, the app's own bar included, so while
+        # an episode is up there is nothing on screen left to drag the
+        # window by - a press anywhere just hit the player. This bar is
+        # the one strip that is always there and is mostly empty, so its
+        # gaps move the window; the title and the buttons in it take
+        # their own presses and are unaffected. Full screen is excluded
+        # inside begin_window_drag, where the same rule already governs
+        # the app's bar.
+        self.top_bar = window_chrome.DragStrip(self)
         _make_native(self.top_bar)
         # The same faint near-black veil the control bar wears, blended
         # by DWM alpha (_wake_controls). The colour-keyed bare-text
@@ -4925,10 +4948,29 @@ class PlayerPage(GlassPage):
 
         frame_up = (self.backdrop.isVisible()
                     or self._loading_delay.isActive())
-        # No words with the logo up - the pulse and the fill are the
-        # whole message (the owner's ask). The text survives only as
-        # the fallback for a title with no logo art.
-        if self.logo.has_logo():
+        # **Unless the wait has stopped moving, in which case the logo
+        # is no longer telling the truth.** The owner, 27 August 2026,
+        # over a House of the Dragon screenshot: "the statistics seems
+        # good but the vid is not playing". The stats in that shot said
+        # exactly why - Speed "-", Buffer 0.0s, 8.88% complete off 21
+        # peers - but the screen itself was a full-window poster with
+        # nothing on it at all. Measured in a real player against a
+        # source that never delivered: at 6s the text read "Looking for
+        # a source...", and by 16s the frame was still up with the
+        # status box hidden and no words anywhere.
+        #
+        # A silent logo is the right answer while the wait is *working*,
+        # which is the ask this honours below. It is the wrong answer
+        # once nothing is arriving, because then the fill has frozen and
+        # the silence is all there is. So the words come back when the
+        # measured target - not the creeping fraction, which always
+        # inches - has not moved for STARTUP_SILENT_LIMIT_S.
+        if target > self._startup_last_target + 0.001:
+            self._startup_last_target = target
+            self._startup_last_move = time.monotonic()
+        stalled = (time.monotonic() - self._startup_last_move
+                   > STARTUP_SILENT_LIMIT_S)
+        if self.logo.has_logo() and not stalled:
             self.logo.set_fraction(fraction)
             # Drop the words the moment the logo can carry the message;
             # otherwise only put the frame up when it is not already -
@@ -6863,6 +6905,20 @@ class PlayerPage(GlassPage):
             # video-sync=audio has no display clock, so there is no
             # cadence to report rather than a cadence of zero.
             return "N/A"
+        # **A starved stream is not a cadence fault, and saying so
+        # matters.** The owner, 27 August 2026, over a House of the
+        # Dragon screenshot: "the statistics seems good but the vid is
+        # not playing". This row read UNEVEN (10.07/frame) and looked
+        # like the pacing problem it had just been added to diagnose -
+        # but the same panel said Speed "-", Buffer 0.0s and 8.88%
+        # complete off 21 peers. With nothing arriving mpv holds the
+        # frame it has, which lifts the average refreshes-per-frame
+        # above the ratio the display and the file would otherwise give
+        # (240 / 23.976 = 10.01). Blaming the refresh rate for an empty
+        # cache sends the next investigation to the wrong place.
+        buffer_s = live.get("buffer")
+        if buffer_s is not None and float(buffer_s) <= 0.05:
+            return f"stream starved ({ratio:.2f}/frame)"
         if abs(ratio - round(ratio)) <= self.CADENCE_TOLERANCE:
             return f"even ({round(ratio)}/frame)"
         return f"UNEVEN ({ratio:.2f}/frame)"

@@ -4757,7 +4757,43 @@ class MainWindow(QMainWindow):
         A route naming a section of the page already showing does not
         rebuild it: switching from Movies to Anime is the same page
         changing what it lists, and tearing it down would throw away its
-        covers and its scroll position to draw the same widget again."""
+        covers and its scroll position to draw the same widget again.
+
+        **Whatever is covering the pages is left first.** The player,
+        the reader and the details page are hand-placed children over
+        the page stack rather than entries in it, so navigating while
+        one is up swapped a page nobody could see and left the overlay
+        on top. `_search_in_discover` has carried this same loop since
+        26 August 2026 for exactly that reason; it belonged here, where
+        every route goes through, and not at two call sites.
+
+        On Windows it is worse than a stale picture, which is the
+        owner's report of 27 August 2026 - the window stopped snapping
+        to the screen edges, "even if I go back to the other pages".
+        Measured on his own entry, leaving the player by the sidebar:
+
+            player open            6 native children, 3 over the bar row
+            after navigate_to      6 native children, 3 over the bar row
+            after close_player     0 over the bar row
+
+        mpv's video surface and the player's own bars are *native* child
+        windows, and on Windows a native child paints above every
+        non-native sibling whatever the z-order says (see
+        player.StartupBackdrop for the same rule biting from the other
+        side). So they went on covering the app's title bar on every
+        page afterwards, and a press meant for the bar never reached it
+        - no drag, and therefore no Aero Snap - until the app was
+        restarted.
+
+        Bounded rather than `while`: the genre browse can sit over the
+        details page, which sits over the stack, and a surface that
+        refuses to leave must not spin here. Before the same-route early
+        return below, because pressing the nav item for the page already
+        underneath an overlay still has to dismiss it."""
+        for _ in range(4):
+            if self._top_overlay() is None:
+                break
+            self.navigate_back()
         route = page_name if ":" in str(page_name) else _page_name(page_name)
         current = self._history[self._history_index]
         if current == route:
