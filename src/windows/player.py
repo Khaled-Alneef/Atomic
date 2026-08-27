@@ -1074,6 +1074,22 @@ def _left_button_down() -> bool:
         return False
 
 
+# **A diagnostic that leaves nothing over the video but mpv.** The
+# owner's ask, 27 August 2026: prove whether Atomic's native layered
+# overlays are what the remaining pan judder is made of, before anyone
+# rewrites a renderer that has already been shown to be correct.
+#
+# `ATOMIC_MPV_ONLY=1` in the environment. Every other surface in the
+# player is a *native child window* blended by DWM (see _set_window_alpha
+# for why they have to be), so making them transparent proves nothing -
+# a layered window at alpha 0 is still composited every frame. They are
+# hidden outright here, which is what takes them out of composition.
+#
+# Temporary, and deliberately environment-driven rather than a setting:
+# it must leave no UI behind when the question is answered.
+MPV_ONLY = bool(os.environ.get("ATOMIC_MPV_ONLY"))
+
+
 def _make_native(widget):
     """Turn `widget` into a real native window so Windows composites it
     above the video's own native window.
@@ -7846,6 +7862,8 @@ class PlayerPage(GlassPage):
             pass
 
     def _show_panel(self, panel):
+        if self._mpv_only_strip():
+            return
         self._guard_click()
         # Geometry first - see _show_status.
         self._layout_overlays()
@@ -7871,6 +7889,8 @@ class PlayerPage(GlassPage):
         "window flashing open and closed" - it is not a window of its
         own, and every overlay here now gets its geometry before it is
         allowed on screen."""
+        if self._mpv_only_strip():
+            return
         # A message on screen outranks a loading frame still waiting on
         # its delay - firing after this would paint the frame over the
         # words (see _show_loading_soon).
@@ -7910,6 +7930,8 @@ class PlayerPage(GlassPage):
         loses 350ms of spinner nobody needed. The first episode of a
         page skips the delay: nothing is on screen yet, and a blank
         page saying nothing reads as hung."""
+        if self._mpv_only_strip():
+            return
         if not self._streams_started:
             # A fresh episode's wait starts the gauge over. Not on the
             # "Connecting..." a retry or a source switch raises:
@@ -7940,6 +7962,8 @@ class PlayerPage(GlassPage):
         key is set): there the words were the only thing on screen
         saying "working, not hung", so `text` is shown for exactly that
         case and dropped the moment a logo exists."""
+        if self._mpv_only_strip():
+            return
         # While a switch's grace timer runs, every caller lands here
         # eventually - _update_startup_status included, which mpv's
         # buffering callbacks fire straight away on a load. Deferring
@@ -7966,6 +7990,8 @@ class PlayerPage(GlassPage):
         self._startup_ticker.start()
 
     def _show_backdrop(self, force=False):
+        if self._mpv_only_strip():
+            return
         """Put the loading frame up behind whatever the status box says.
 
         Raised over the video surface and then left there while the
@@ -8149,6 +8175,8 @@ class PlayerPage(GlassPage):
             self._veiled[id(widget)] = (hwnd, alpha)
 
     def _wake_controls(self):
+        if self._mpv_only_strip():
+            return
         was_hidden = not self.controls.isVisible()
         if was_hidden:
             # Same order as _show_status, for the same reason: a native
@@ -8844,6 +8872,12 @@ class PlayerPage(GlassPage):
         if offer == self._skip_offer:
             return
         self._skip_offer = offer
+        if self._mpv_only_strip():
+            # The skip offer is the one surface that shows itself with
+            # the bars already down, so it survived the strip until it
+            # was stopped here too - measured, 210x55 and layered, the
+            # only non-video window left composed over the picture.
+            return
         try:
             # Re-asserted at every offer change, not only in
             # _wake_controls: the button shows itself with the bars
@@ -8914,7 +8948,35 @@ class PlayerPage(GlassPage):
             self._seek_absolute(float(target))
 
     # ---- layout ------------------------------------------------------
+    def _mpv_only_strip(self) -> bool:
+        """Hide every native surface except the video. Returns whether
+        the diagnostic is on, so callers can stop early.
+
+        Hidden, not made transparent: these are native children composed
+        by DWM in their own right, and alpha 0 leaves them in the frame.
+        """
+        if not MPV_ONLY:
+            return False
+        for name in ("top_bar", "controls", "status", "backdrop", "logo",
+                     "skip_btn", "seek_bar", "_episode_bar", "_panel"):
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            try:
+                widget.hide()
+            except RuntimeError:
+                pass            # already gone
+        return True
+
     def _layout_overlays(self):
+        if self._mpv_only_strip():
+            # The surface still has to be placed - it is the one thing
+            # this mode keeps.
+            try:
+                self.surface.setGeometry(self.rect())
+            except RuntimeError:
+                pass
+            return
         rect = self.rect()
         self.surface.setGeometry(rect)
         self.top_bar.setGeometry(0, 0, rect.width(), TOPBAR_HEIGHT)

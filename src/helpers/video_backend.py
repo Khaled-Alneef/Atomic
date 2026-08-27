@@ -116,49 +116,25 @@ def default_options() -> dict:
     return {
         "vo": "gpu",
         "hwdec": "auto-safe",
-        # Lock frame presentation to the display's own raster instead of
-        # the audio clock. Measured 22 August 2026 on the owner's 144Hz
-        # panel (GTX 1660 SUPER, 1080p H.264 via d3d11va): with the
-        # default `video-sync=audio` mpv times frames on the audio clock
-        # and never aligns them to a vsync - the display-sync counters
-        # (vsync-ratio, vsync-jitter, mistimed-frame-count) do not even
-        # exist in that mode - so 24fps content lands a half-vsync off
-        # and pans micro-judder. With display-resample the same clip
-        # locked at vsync-ratio exactly 6.000 (144/23.976), jitter
-        # 0.000, 0 dropped / 0 delayed / 0 mistimed over 9s, and mpv
-        # measured the real raster itself (estimated-display-fps
-        # 144.003) - no refresh rate is hardcoded anywhere and none
-        # should be. Note what this does *not* do: a 23.976fps master
-        # still presents 23.976 distinct frames a second (measured; a
-        # 60fps clip presents 60.05) - nothing invents frames, each just
-        # holds for exactly 6 refreshes instead of roughly 6.
-        # interpolation+oversample costs nothing at an integer ratio and
-        # is what keeps non-integer ones (25fps content, a 60Hz second
-        # monitor) from beating: oversample repeats frames aligned to
-        # vsync rather than blending them, so anime line art stays sharp.
-        # **Display synchronisation and frame generation are two
-        # different things, and this is the line between them.** They
-        # get conflated in every discussion of "smooth playback", and
-        # conflating them here once already produced a bug report
-        # ("make them at least 144!!!!" - see player._live_video_stats,
-        # where the same confusion is recorded from the other side).
+        # **No video-sync override: mpv's own default.** The owner's
+        # instruction, 27 August 2026, and the honest state of the
+        # evidence - "that conclusion is no longer established because
+        # the user STILL sees the problem".
         #
-        #   video-sync + interpolation + tscale=oversample
-        #       = *synchronisation*. Every frame the file contains is
-        #         presented, aligned to the panel's raster, each held
-        #         for a whole number of refreshes. Nothing is invented:
-        #         a 23.976fps master still presents 23.976 distinct
-        #         frames a second (measured). oversample repeats, it
-        #         does not blend, so line art stays sharp.
+        # What the old note here claimed, and what it actually showed,
+        # had drifted apart. It was measured on a 144Hz panel where
+        # 144 / 23.976 = 6.006 and display-resample locked at exactly
+        # 6.000 - which is real, and is not the machine this is running
+        # on any more, nor a demonstration that pans look right. The
+        # judder was reported again on 240Hz with vsync-ratio reading a
+        # healthy 10.01, so whatever remains is not something this
+        # setting was shown to fix. Presenting it as the fix made it the
+        # thing nobody re-examined.
         #
-        #   tscale=mitchell (Motion Smoothing, below)
-        #       = *frame generation*. Blends adjacent frames to
-        #         synthesise motion the master never had. This is the
-        #         soap-opera effect, and it is a preference, not a fix.
-        #
-        # Native source FPS stays the default either way - neither of
-        # these changes how many frames the file has.
-        "video_sync": "display-resample",
+        # So the baseline is now what standalone mpv does with no
+        # options: mpv picks the sync mode, nothing here overrides it,
+        # and any future change has to beat that on a measurement rather
+        # than inherit its place from an older one.
         # **No interpolation, and no control that turns it on.** The
         # owner, 27 August 2026: "remove the smoothing in the vid player
         # and the cadence lock entirely from the app, they are useless!"
