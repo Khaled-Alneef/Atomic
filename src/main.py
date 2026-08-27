@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from helpers import (app_settings, downloads, images, layout, logs,
+from helpers import (app_settings, downloads, frame_pacing, images, layout, logs,
                      rail_anim, rail_icons, window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
@@ -5306,6 +5306,8 @@ def main():
     # not, and the window would otherwise sit behind everything blinking
     # in the taskbar (see theme.bring_window_to_front).
     theme.bring_window_to_front(window)
+    # Off unless ATOMIC_DEBUG_FRAME_PACING is set - see helpers/frame_pacing.
+    frame_pacing.start(window)
     # Only after the window is up and forward: this is modal, and a
     # dialog raised before its parent is showing would sit behind it -
     # the same foreground problem the relaunch already has to solve

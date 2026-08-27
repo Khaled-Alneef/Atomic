@@ -1863,9 +1863,9 @@ def _pick_file(info, season=None, episode=None, file_index=None, title=None):
         path = ""
         if chosen is not None:
             path = str(info.files().file_path(chosen))
-        logs.info("pick_file %s S%sE%s: fileIdx=%s chose=%s of %s | %s",
-                  title or "?", season, episode, file_index, chosen,
-                  info.num_files(), path[-90:] or "(refused)")
+        logs.info(f"pick_file {title or '?'} S{season}E{episode}: "
+                  f"fileIdx={file_index} chose={chosen} "
+                  f"of {info.num_files()} | {path[-90:] or '(refused)'}")
     except Exception:
         pass                # a diagnostic must never fail playback
     return chosen

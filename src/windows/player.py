@@ -9071,13 +9071,11 @@ class PlayerPage(GlassPage):
         if gap < 25.0:
             return
         band = 40.0 if gap >= 40.0 else 25.0
-        logs.info("[ATOMIC FRAME DEBUG] GUI stall %.1fms (>%.0f) | "
-                  "delayed=%s mistimed=%s jitter=%s avsync=%s",
-                  gap, band,
-                  self._mpv_text("vo-delayed-frame-count", "N/A"),
-                  self._mpv_text("mistimed-frame-count", "N/A"),
-                  self._mpv_text("vsync-jitter", "N/A"),
-                  self._mpv_text("avsync", "N/A"))
+        logs.info(f"[ATOMIC FRAME DEBUG] GUI stall {gap:.1f}ms (>{band:.0f}) | "
+                  f"delayed={self._mpv_text('vo-delayed-frame-count', 'N/A')} "
+                  f"mistimed={self._mpv_text('mistimed-frame-count', 'N/A')} "
+                  f"jitter={self._mpv_text('vsync-jitter', 'N/A')} "
+                  f"avsync={self._mpv_text('avsync', 'N/A')}")
 
     def _log_bare_player_state(self):
         """Everything the bare-player report asks for, once, from the
@@ -9097,8 +9095,8 @@ class PlayerPage(GlassPage):
                  "mistimed-frame-count", "avsync", "video-speed-correction",
                  "audio-speed-correction")
         state = " ".join(f"{n}={self._mpv_choice(n, 'N/A')}" for n in names)
-        logs.info("[ATOMIC BARE] surfaceHWND=%s timersStopped=%s", hwnd, stopped)
-        logs.info("[ATOMIC BARE] %s", state)
+        logs.info(f"[ATOMIC BARE] surfaceHWND={hwnd} timersStopped={stopped}")
+        logs.info(f"[ATOMIC BARE] {state}")
         # HWND again after ten seconds - the report asks whether it moves.
         QTimer.singleShot(10_000, self._log_bare_player_hwnd)
 
@@ -9109,8 +9107,8 @@ class PlayerPage(GlassPage):
             hwnd = int(self.surface.winId())
         except (RuntimeError, AttributeError):
             hwnd = 0
-        logs.info("[ATOMIC BARE] surfaceHWND after 10s=%s worstGuiStall=%.1fms",
-                  hwnd, getattr(self, "_stall_worst", 0.0))
+        logs.info(f"[ATOMIC BARE] surfaceHWND after 10s={hwnd} "
+                  f"worstGuiStall={getattr(self, '_stall_worst', 0.0):.1f}ms")
 
     def _mpv_only_strip(self, *, only=None) -> bool:
         """Hide the native surfaces this run suppresses.

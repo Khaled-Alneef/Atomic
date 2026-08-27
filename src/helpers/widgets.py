@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QToolTip, QVBoxLayout, QWidget,
 )
 
-from . import logs, theme
+from . import frame_pacing, logs, theme
 
 
 def _alpha_region(image, cut: int):
@@ -2814,6 +2814,7 @@ class _VBlankTicker(QObject):
             if not self._awake.is_set():
                 continue        # the last surface stopped mid-wait
             try:
+                frame_pacing.note_vblank()
                 self.tick.emit()
             except RuntimeError:
                 return          # the app is shutting down under us

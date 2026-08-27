@@ -2313,11 +2313,11 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
         for row in ranked:
             name = str(row.get("source") or "?")
             per_source[name] = per_source.get(name, 0) + 1
-        logs.info("streams %s S%sE%s: %d rows%s",
-                  (entry or {}).get("title") or "?", season, episode,
-                  len(ranked),
-                  "".join(f" | {k} {v}" for k, v in sorted(per_source.items()))
-                  or " | nothing answered")
+        logs.info(f"streams {(entry or {}).get('title') or '?'} "
+                  f"S{season}E{episode}: {len(ranked)} rows"
+                  + ("".join(f" | {k} {v}"
+                             for k, v in sorted(per_source.items()))
+                     or " | nothing answered"))
     except Exception:
         pass                # a diagnostic must never fail a lookup
     _cache_put(cache_key, ranked)
