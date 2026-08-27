@@ -28,7 +28,7 @@ from helpers import (app_art, cover_fetch, game_art, game_launch,
 from helpers.widgets import (
     Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, _OpaqueGround,
     hero_logo_label,
-    hero_split, inform, scroll_area, set_hero_logo, SmoothTween,
+    hero_split, inform, scroll_area, set_hero_logo, SmoothTween, warm_backdrop,
     DriftButton,
     use_hover_cursor,
 )
@@ -74,6 +74,9 @@ QUICK_LIST_LIMIT = 5
 # enough that a 1000px window still shows a usable field.
 
 HERO_SLIDE_LIMIT = 4
+# How long after the hero is built before its covers are warmed, and
+# the gap between each - see _warm_next_hero_cover.
+HERO_COVER_WARM_MS = 120
 HERO_SLIDE_INTERVAL_MS = 6000
 
 # The hero's logo treatment (widgets.hero_logo_label) went with the
@@ -691,7 +694,40 @@ class HomePage(GlassPage):
             threading.Thread(target=self._hero_backdrop_worker,
                              args=(dict(entry),), daemon=True).start()
         self._show_hero_slide(0, fade=False)
+        # **Every other slide's cover, decoded before a slide needs it.**
+        # Measured 27 August 2026 on the real page, timing each step of a
+        # slide change: `thumbnail_or_avatar` was **21-26ms** on the GUI
+        # thread, and it is what the owner saw as the banner background
+        # "glitching in a really fast way" - one 29-42ms stall at the
+        # instant the transition starts, which is two dropped frames of
+        # a 260ms fade. The same slide shown a second time costs 0.2ms,
+        # so the cost is the first decode and nothing else.
+        #
+        # One per timer tick rather than a loop: four covers in a row is
+        # the same stall moved somewhere else, where a tick apiece lands
+        # each one in its own idle frame.
+        self._hero_warm_queue = [dict(e) for e in self._hero_entries]
+        QTimer.singleShot(HERO_COVER_WARM_MS, self._warm_next_hero_cover)
         return banner
+
+    def _warm_next_hero_cover(self):
+        """One hero cover into the image cache, then re-arm for the next.
+
+        Guarded on the page still existing: this outlives a page rebuild
+        by design (pages are rebuilt on every visit) and a dead widget
+        must not take the timer's thread with it."""
+        queue = getattr(self, "_hero_warm_queue", None)
+        if not queue:
+            return
+        entry = queue.pop(0)
+        try:
+            images.thumbnail_or_avatar(entry.get("cover_path"),
+                                       entry.get("title") or "",
+                                       HERO_COVER_SIZE)
+        except (RuntimeError, OSError, ValueError):
+            pass                # a missing cover is the flat avatar, not a stall
+        if queue:
+            QTimer.singleShot(HERO_COVER_WARM_MS, self._warm_next_hero_cover)
 
     def _hero_entry(self):
         return self._hero_entries[self._hero_index % len(self._hero_entries)]
@@ -814,6 +850,10 @@ class HomePage(GlassPage):
                     cover_path=entry.get("cover_path"),
                     cover_url=str(entry.get("cover_url") or ""))
                 if found:
+                    # Decoded here, on this thread, so the slide change does
+                    # not pay a JPEG on the GUI thread - see
+                    # widgets.warm_backdrop for the 31-43ms it cost.
+                    warm_backdrop(found)
                     self._hero_signals.backdrop.emit(entry_id, str(found))
                 # A reading title's logo: only when the same franchise is
                 # an anime/series TMDB has a title treatment for - Kingdom,
@@ -838,9 +878,17 @@ class HomePage(GlassPage):
             # immediately and the original replaces it when it lands.
             quick = artwork.backdrop_fast_path(entry)
             if quick:
+                # Decoded here, on this thread, so the slide change does
+                # not pay a JPEG on the GUI thread - see
+                # widgets.warm_backdrop for the 31-43ms it cost.
+                warm_backdrop(quick)
                 self._hero_signals.backdrop.emit(entry_id, str(quick))
             full = artwork.backdrop_path(entry)
             if full:
+                # Decoded here, on this thread, so the slide change does
+                # not pay a JPEG on the GUI thread - see
+                # widgets.warm_backdrop for the 31-43ms it cost.
+                warm_backdrop(full)
                 self._hero_signals.backdrop.emit(entry_id, str(full))
             # The video logo (TMDB title treatment): shown in place of the
             # typed title. Fails soft to text when the title has none.

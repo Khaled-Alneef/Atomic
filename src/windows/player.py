@@ -1087,7 +1087,21 @@ def _left_button_down() -> bool:
 #
 # Temporary, and deliberately environment-driven rather than a setting:
 # it must leave no UI behind when the question is answered.
-MPV_ONLY = bool(os.environ.get("ATOMIC_MPV_ONLY"))
+# **A harder floor than MPV_ONLY.** The owner's ask, 27 August 2026,
+# after MPV-only still stuttered with nothing composed over the video:
+# take Atomic out of the picture entirely and see whether mpv alone is
+# smooth. ATOMIC_BARE_PLAYER=1 implies everything MPV_ONLY does - no
+# overlay is composed - and additionally stops every timer the player
+# owns that mpv does not need: the 40ms mouse poll, the 180ms pointer
+# poll, the control auto-hide, the position save, the seat watchdog, the
+# startup gauge, the loading and buffer guards, the episode search
+# debounce and the stats refresh. Nothing of mpv's own is touched.
+#
+# It also turns on the GUI-stall watchdog below, because the question it
+# exists to answer is whether Atomic's thread is blocking at the moment
+# the picture hitches.
+BARE_PLAYER = bool(os.environ.get("ATOMIC_BARE_PLAYER"))
+MPV_ONLY = BARE_PLAYER or bool(os.environ.get("ATOMIC_MPV_ONLY"))
 
 # **And which layers may come back, one at a time.** The owner's ask, 27
 # August 2026: with nothing over the video as the floor, add the top bar,
@@ -1113,8 +1127,16 @@ MPV_ONLY_LAYERS = {
 }
 _ASKED = {n.strip().lower()
           for n in os.environ.get("ATOMIC_LAYERS", "").split(",") if n.strip()}
-MPV_ONLY_ALLOWED = (set(MPV_ONLY_LAYERS) if "all" in _ASKED
+MPV_ONLY_ALLOWED = (set() if BARE_PLAYER
+                    else set(MPV_ONLY_LAYERS) if "all" in _ASKED
                     else _ASKED & set(MPV_ONLY_LAYERS))
+
+# The timers the player owns that playback does not need. Named rather
+# than discovered, so stopping them is a decision that can be read.
+BARE_PLAYER_TIMERS = ("_idle_timer", "_pointer_timer", "_mouse_timer",
+                      "_save_timer", "_seat_timer", "_startup_ticker",
+                      "_loading_delay", "_buffer_delay",
+                      "_episode_search_timer")
 
 
 def _make_native(widget):
@@ -5801,6 +5823,10 @@ class PlayerPage(GlassPage):
                 # and "broken" look identical.
                 self._awaiting_first_frame = False
                 self._hide_status()
+                if BARE_PLAYER:
+                    # Now, not at build: the startup gauge and the
+                    # loading guards have work to do until this moment.
+                    self._log_bare_player_state()
                 # The arrow presses made while this was still loading,
                 # as one seek rather than the several that were asked
                 # for - see _seek_absolute.
@@ -8990,6 +9016,102 @@ class PlayerPage(GlassPage):
             self._seek_absolute(float(target))
 
     # ---- layout ------------------------------------------------------
+    def _bare_player_quiet(self):
+        """Stop every player timer mpv does not need, and start the
+        stall watchdog. Returns what it stopped, for the log.
+
+        Called once playback is under way rather than at build time: the
+        startup gauge and the loading guards have a job to do until the
+        first frame lands, and killing them earlier would leave the
+        diagnostic sitting on a black screen with nothing saying why."""
+        stopped = []
+        for name in BARE_PLAYER_TIMERS:
+            timer = getattr(self, name, None)
+            if timer is None:
+                continue
+            try:
+                if timer.isActive():
+                    stopped.append(name)
+                timer.stop()
+            except RuntimeError:
+                pass
+        panel = getattr(self, "_panel", None)
+        panel_timer = getattr(panel, "stats_timer", None)
+        if panel_timer is not None:
+            try:
+                panel_timer.stop()
+                stopped.append("stats_timer")
+            except RuntimeError:
+                pass
+        return stopped
+
+    def _start_stall_watchdog(self):
+        """Log Qt event-loop stalls while the video plays.
+
+        A 16ms timer whose own work is one subtraction: if the loop is
+        healthy it fires on time, and if Atomic blocks the gap is the
+        block. Only stalls past the thresholds are written, so the log
+        cannot become the thing that causes them."""
+        self._stall_last = time.monotonic()
+        self._stall_worst = 0.0
+        timer = QTimer(self)
+        timer.setTimerType(Qt.TimerType.PreciseTimer)
+        timer.setInterval(16)
+        timer.timeout.connect(self._stall_tick)
+        timer.start()
+        self._stall_timer = timer
+
+    def _stall_tick(self):
+        now = time.monotonic()
+        gap = (now - self._stall_last) * 1000.0
+        self._stall_last = now
+        if gap > self._stall_worst:
+            self._stall_worst = gap
+        # 16ms is the tick itself; anything past 25 is a real stall.
+        if gap < 25.0:
+            return
+        band = 40.0 if gap >= 40.0 else 25.0
+        logs.info("[ATOMIC FRAME DEBUG] GUI stall %.1fms (>%.0f) | "
+                  "delayed=%s mistimed=%s jitter=%s avsync=%s",
+                  gap, band,
+                  self._mpv_text("vo-delayed-frame-count", "N/A"),
+                  self._mpv_text("mistimed-frame-count", "N/A"),
+                  self._mpv_text("vsync-jitter", "N/A"),
+                  self._mpv_text("avsync", "N/A"))
+
+    def _log_bare_player_state(self):
+        """Everything the bare-player report asks for, once, from the
+        live handle - and nothing invented: a property this build does
+        not carry is written as N/A."""
+        stopped = self._bare_player_quiet()
+        self._start_stall_watchdog()
+        try:
+            hwnd = int(self.surface.winId())
+        except (RuntimeError, AttributeError):
+            hwnd = 0
+        names = ("mpv-version", "current-vo", "hwdec", "hwdec-current",
+                 "gpu-api", "gpu-context", "video-sync", "interpolation",
+                 "estimated-vf-fps", "container-fps", "estimated-display-fps",
+                 "vsync-ratio", "vsync-jitter", "frame-drop-count",
+                 "decoder-frame-drop-count", "vo-delayed-frame-count",
+                 "mistimed-frame-count", "avsync", "video-speed-correction",
+                 "audio-speed-correction")
+        state = " ".join(f"{n}={self._mpv_choice(n, 'N/A')}" for n in names)
+        logs.info("[ATOMIC BARE] surfaceHWND=%s timersStopped=%s", hwnd, stopped)
+        logs.info("[ATOMIC BARE] %s", state)
+        # HWND again after ten seconds - the report asks whether it moves.
+        QTimer.singleShot(10_000, self._log_bare_player_hwnd)
+
+    def _log_bare_player_hwnd(self):
+        if self._closing:
+            return
+        try:
+            hwnd = int(self.surface.winId())
+        except (RuntimeError, AttributeError):
+            hwnd = 0
+        logs.info("[ATOMIC BARE] surfaceHWND after 10s=%s worstGuiStall=%.1fms",
+                  hwnd, getattr(self, "_stall_worst", 0.0))
+
     def _mpv_only_strip(self, *, only=None) -> bool:
         """Hide the native surfaces this run suppresses.
 
