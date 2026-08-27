@@ -1415,7 +1415,11 @@ class _ChapterListView(QWidget):
         # Elided, not wrapped - see _ElidedLabel: a name that wraps makes
         # its row taller than the 500 around it, and one that does not
         # elide widens every row to the longest name in the list.
-        name = _ElidedLabel(chapter_name(chapter), objectName="CardTitle")
+        # The same setting the episode rows honour - it says "episode
+        # and chapter numbers only", and the chapter half of that had
+        # never been wired up anywhere but the title page.
+        label = "" if app_settings.get_hide_entry_names() else chapter_name(chapter)
+        name = _ElidedLabel(label, objectName="CardTitle")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(name, stretch=1)
 

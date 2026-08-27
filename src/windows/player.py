@@ -1089,6 +1089,33 @@ def _left_button_down() -> bool:
 # it must leave no UI behind when the question is answered.
 MPV_ONLY = bool(os.environ.get("ATOMIC_MPV_ONLY"))
 
+# **And which layers may come back, one at a time.** The owner's ask, 27
+# August 2026: with nothing over the video as the floor, add the top bar,
+# then the controls, then the backdrop, then the rest, testing each -
+# "find the exact layer or combination that introduces the stutter. DO
+# NOT guess."
+#
+#   ATOMIC_MPV_ONLY=1                                nothing but mpv
+#   ATOMIC_MPV_ONLY=1 ATOMIC_LAYERS=topbar           + the top bar
+#   ATOMIC_MPV_ONLY=1 ATOMIC_LAYERS=topbar,controls
+#   ATOMIC_MPV_ONLY=1 ATOMIC_LAYERS=topbar,controls,backdrop
+#   ATOMIC_MPV_ONLY=1 ATOMIC_LAYERS=all              everything
+#
+# Grouped by the surface a viewer would name rather than by widget: the
+# seek bar is part of the controls, the logo is part of the backdrop.
+MPV_ONLY_LAYERS = {
+    "topbar": ("top_bar",),
+    "controls": ("controls", "seek_bar"),
+    "backdrop": ("backdrop", "logo"),
+    "status": ("status",),
+    "skip": ("skip_btn",),
+    "panels": ("_panel", "_episode_bar"),
+}
+_ASKED = {n.strip().lower()
+          for n in os.environ.get("ATOMIC_LAYERS", "").split(",") if n.strip()}
+MPV_ONLY_ALLOWED = (set(MPV_ONLY_LAYERS) if "all" in _ASKED
+                    else _ASKED & set(MPV_ONLY_LAYERS))
+
 
 def _make_native(widget):
     """Turn `widget` into a real native window so Windows composites it
@@ -3252,6 +3279,15 @@ class PlayerPage(GlassPage):
                                                                  watched_episode)
         name = str((video or {}).get("name") or (video or {}).get("title")
                    or "").strip()
+        # Settings > Watching > "Show episode and chapter numbers only".
+        # The title page's list has honoured this since it was added
+        # (details._episode_rows); this panel is the same list moved
+        # inside the player and never checked it, so the names it exists
+        # to hide were printed here anyway - the owner's report, 27
+        # August 2026. An episode title is a spoiler for the episode
+        # about to be watched, and the player is where that matters most.
+        if app_settings.get_hide_entry_names():
+            name = ""
         title = f"{number}. {name}" if name else f"Episode {number}"
         stamp = str((video or {}).get("firstAired")
                     or (video or {}).get("released") or "")
@@ -7862,7 +7898,7 @@ class PlayerPage(GlassPage):
             pass
 
     def _show_panel(self, panel):
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=("panels",)):
             return
         self._guard_click()
         # Geometry first - see _show_status.
@@ -7889,7 +7925,7 @@ class PlayerPage(GlassPage):
         "window flashing open and closed" - it is not a window of its
         own, and every overlay here now gets its geometry before it is
         allowed on screen."""
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=("status", "backdrop")):
             return
         # A message on screen outranks a loading frame still waiting on
         # its delay - firing after this would paint the frame over the
@@ -7930,7 +7966,7 @@ class PlayerPage(GlassPage):
         loses 350ms of spinner nobody needed. The first episode of a
         page skips the delay: nothing is on screen yet, and a blank
         page saying nothing reads as hung."""
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=("status", "backdrop")):
             return
         if not self._streams_started:
             # A fresh episode's wait starts the gauge over. Not on the
@@ -7962,7 +7998,7 @@ class PlayerPage(GlassPage):
         key is set): there the words were the only thing on screen
         saying "working, not hung", so `text` is shown for exactly that
         case and dropped the moment a logo exists."""
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=("status", "backdrop")):
             return
         # While a switch's grace timer runs, every caller lands here
         # eventually - _update_startup_status included, which mpv's
@@ -7990,7 +8026,7 @@ class PlayerPage(GlassPage):
         self._startup_ticker.start()
 
     def _show_backdrop(self, force=False):
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=("backdrop",)):
             return
         """Put the loading frame up behind whatever the status box says.
 
@@ -8175,7 +8211,7 @@ class PlayerPage(GlassPage):
             self._veiled[id(widget)] = (hwnd, alpha)
 
     def _wake_controls(self):
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=("topbar", "controls")):
             return
         was_hidden = not self.controls.isVisible()
         if was_hidden:
@@ -8187,6 +8223,12 @@ class PlayerPage(GlassPage):
             self._layout_overlays()
         self.controls.show()
         self.top_bar.show()
+        # One of these two may be suppressed while the other is not -
+        # the bisection asks for the top bar alone before it asks for
+        # the controls - and this is the one place that shows both. The
+        # entry guard can only stop when *both* are suppressed, so the
+        # odd one out is taken back down here.
+        self._mpv_only_strip()
         if was_hidden:
             # Same reasoning as the veil above: a raise_ is a
             # SetWindowPos on a native window sitting over the video, and
@@ -8872,7 +8914,7 @@ class PlayerPage(GlassPage):
         if offer == self._skip_offer:
             return
         self._skip_offer = offer
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=("skip",)):
             # The skip offer is the one surface that shows itself with
             # the bars already down, so it survived the strip until it
             # was stopped here too - measured, 210x55 and layered, the
@@ -8948,28 +8990,35 @@ class PlayerPage(GlassPage):
             self._seek_absolute(float(target))
 
     # ---- layout ------------------------------------------------------
-    def _mpv_only_strip(self) -> bool:
-        """Hide every native surface except the video. Returns whether
-        the diagnostic is on, so callers can stop early.
+    def _mpv_only_strip(self, *, only=None) -> bool:
+        """Hide the native surfaces this run suppresses.
+
+        `only` names the layers the caller is about, and the answer is
+        whether *all* of them are suppressed, so it can stop early. With
+        no `only` the answer is simply whether the diagnostic is on.
 
         Hidden, not made transparent: these are native children composed
         by DWM in their own right, and alpha 0 leaves them in the frame.
         """
         if not MPV_ONLY:
             return False
-        for name in ("top_bar", "controls", "status", "backdrop", "logo",
-                     "skip_btn", "seek_bar", "_episode_bar", "_panel"):
-            widget = getattr(self, name, None)
-            if widget is None:
-                continue
-            try:
-                widget.hide()
-            except RuntimeError:
-                pass            # already gone
-        return True
+        for layer, names in MPV_ONLY_LAYERS.items():
+            if layer in MPV_ONLY_ALLOWED:
+                continue                # asked for by name this run
+            for name in names:
+                widget = getattr(self, name, None)
+                if widget is None:
+                    continue
+                try:
+                    widget.hide()
+                except RuntimeError:
+                    pass                # already gone
+        if only is None:
+            return True
+        return all(layer not in MPV_ONLY_ALLOWED for layer in only)
 
     def _layout_overlays(self):
-        if self._mpv_only_strip():
+        if self._mpv_only_strip(only=tuple(MPV_ONLY_LAYERS)):
             # The surface still has to be placed - it is the one thing
             # this mode keeps.
             try:
