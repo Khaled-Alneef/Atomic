@@ -2866,6 +2866,24 @@ def warm_display_clock():
     return clock
 
 
+# How many surfaces are mid-glide right now. **The frame-pacing
+# profiler asked _Momentum for a `_live` list that has never existed**,
+# so every stall it logged from the owner's machine on 27 August 2026
+# said `scrolling=no` - including a 67ms one on the Series page while he
+# was browsing it. A field that cannot say yes is worse than no field:
+# it reads as evidence that scrolling was innocent.
+#
+# A counter rather than a list: the question is only "is anything
+# gliding", the answer is read once per stall, and a list of live
+# QObjects here would be one more thing to leak.
+_GLIDING = 0
+
+
+def momentum_active() -> bool:
+    """Whether any surface is mid-glide - see _GLIDING."""
+    return _GLIDING > 0
+
+
 class _Momentum(QObject):
     """Wheel scrolling as velocity and friction, not as a curve restarted
     on every notch.
@@ -3180,6 +3198,10 @@ class _Momentum(QObject):
             vblank ticker    home 12.9 / 12.1%    series 15.0 / 10.0%
 
         Roughly half the judder, on every run. The ticker stays."""
+        global _GLIDING
+        if not getattr(self, "_counted", False):
+            self._counted = True
+            _GLIDING += 1
         ticker = _vblank_ticker_for_use()
         if ticker is not None:
             if not self._vblank_on:
@@ -3192,6 +3214,10 @@ class _Momentum(QObject):
             self._timer.start()
 
     def _stop_ticking(self):
+        global _GLIDING
+        if getattr(self, "_counted", False):
+            self._counted = False
+            _GLIDING = max(0, _GLIDING - 1)
         if self._vblank_on:
             # **Disconnect first, flag second.** The other order leaks:
             # if the disconnect raises, the flag is already False and

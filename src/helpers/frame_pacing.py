@@ -81,8 +81,8 @@ class _Monitor(QObject):
             pass
         scrolling = "?"
         try:
-            from .widgets import _Momentum
-            scrolling = "yes" if getattr(_Momentum, "_live", None) else "no"
+            from .widgets import momentum_active
+            scrolling = "yes" if momentum_active() else "no"
         except Exception:
             pass
         return f"page={page} scrolling={scrolling} player={player}"
@@ -102,8 +102,13 @@ class _Monitor(QObject):
         if gap > worst["ms"]:
             worst["ms"] = gap
             worst["where"] = self._context()
-        logs.info(f"[FRAME PACING] stall={gap:.1f}ms (>={band:.0f}) "
-                  f"{self._context()}")
+        # **Lateness, not only the gap.** The tick is 8ms, so a 12.4ms
+        # gap is 4.4ms late - and a log full of "stall=12.4ms" reads as
+        # far worse than it is. The band is still the raw gap, which is
+        # what the owner asked for; `late` is what the frame actually
+        # lost.
+        logs.info(f"[FRAME PACING] stall={gap:.1f}ms late={gap - TICK_MS:.1f}ms "
+                  f"(>={band:.0f}) {self._context()}")
 
 
 _monitor = None
