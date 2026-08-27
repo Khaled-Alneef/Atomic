@@ -114,7 +114,23 @@ def default_options() -> dict:
     mpv spends a timeout shelling out to something that is not there
     before it fails a URL it was never going to play."""
     return {
-        "vo": "gpu",
+        # **No `vo` override either.** Atomic forced `vo=gpu`, and this
+        # libmpv's own default is `gpu-next` - a different presentation
+        # renderer, not a synonym. Measured 27 August 2026 by starting a
+        # bare libmpv with no options at all beside this one and diffing
+        # every presentation property:
+        #
+        #   current-vo   bare gpu-next   Atomic gpu
+        #
+        # The owner had by then run the MPV-only diagnostic, which puts
+        # nothing over the video at all, and it still stuttered - so the
+        # overlays are ruled out and what is left is where Atomic's mpv
+        # differs from a standalone one. This was the largest of the
+        # eight differences and the only one in the renderer itself.
+        #
+        # No note ever justified it; it predates gpu-next becoming the
+        # default. Removed rather than swapped, so the renderer is
+        # whatever this build of mpv would have chosen on its own.
         "hwdec": "auto-safe",
         # **No video-sync override: mpv's own default.** The owner's
         # instruction, 27 August 2026, and the honest state of the
