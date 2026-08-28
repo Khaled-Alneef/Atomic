@@ -79,6 +79,13 @@ from . import source_coverage_patch as _source_coverage_patch
 
 _source_coverage_patch.install()
 
+# A non-empty read result can still be incomplete (for example a site's newest
+# forty chapters). Fill those holes from the other configured read sources and
+# MangaDex instead of treating "some chapters" as "all chapters".
+from . import read_coverage_patch as _read_coverage_patch
+
+_read_coverage_patch.install()
+
 # Do not install poster_grid_quick_patch: Discover should stay on the same
 # original painted PosterGrid path as the perfect Movies page.
 # Do not install the old Home/Discover hero/interaction interception patches;
