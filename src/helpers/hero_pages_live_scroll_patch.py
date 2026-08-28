@@ -11,6 +11,13 @@ repeat the same detach after every section switch as well. The existing
 _Momentum implementation then falls back to its normal native-refresh live
 QWidget path automatically.
 
+The important part of "detach" is that the native Qt Quick child window is
+actually destroyed, not merely hidden. A hidden createWindowContainer still
+owns a native QQuickWindow/D3D surface; if it was created on the 2K/DPR>1
+monitor Windows has to migrate that larger native child when the top-level
+window crosses screens. That is wasted work on these pages because their Quick
+path is permanently disabled.
+
 This is intentionally page-local. Other scroll_area() users keep the GPU path,
 and the confirmed startup-DPR fix remains independent.
 """
@@ -24,6 +31,37 @@ import sys
 _TARGETS = {"windows.home", "windows.tracker"}
 _INSTALLED = False
 _PATCHED = set()
+
+
+def _destroy_surface(surface):
+    """Dispose the unused native Quick child owned by a detached scroll area."""
+    try:
+        viewport = getattr(surface, "viewport", None)
+        if viewport is not None:
+            viewport.removeEventFilter(surface)
+    except (RuntimeError, AttributeError):
+        pass
+
+    try:
+        quick = getattr(surface, "quick", None)
+        if quick is not None:
+            try:
+                quick.frameSwapped.disconnect(surface._frame_swapped)
+            except (TypeError, RuntimeError):
+                pass
+    except (RuntimeError, AttributeError):
+        pass
+
+    # QWidget.createWindowContainer owns the QWindow once embedded. Deleting
+    # the container therefore releases both the native child HWND and the
+    # QQuickWindow/D3D resources. Do not separately delete the QQuickWindow.
+    try:
+        container = getattr(surface, "container", None)
+        if container is not None:
+            container.hide()
+            container.deleteLater()
+    except (RuntimeError, AttributeError):
+        pass
 
 
 def _disable_page_compositors(page):
@@ -65,11 +103,8 @@ def _disable_page_compositors(page):
                 except (AttributeError, RuntimeError):
                     bar._atomic_motion_surface = None
 
-            try:
-                surface.container.hide()
-            except (RuntimeError, AttributeError):
-                pass
             area._atomic_compositor = None
+            _destroy_surface(surface)
         except RuntimeError:
             continue
 
