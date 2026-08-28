@@ -14,7 +14,7 @@ import importlib.machinery
 import sys
 import threading
 
-from PyQt6.QtCore import QObject, QPoint, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
@@ -28,9 +28,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-_TARGET = "helpers.global_search"
+_SEARCH_TARGET = "helpers.global_search"
+_CHROME_TARGET = "helpers.window_chrome"
 _INSTALLED = False
-_PATCHED = False
+_SEARCH_PATCHED = False
+_CHROME_PATCHED = False
 
 THUMB_W = 56
 THUMB_H = 82
@@ -48,6 +50,103 @@ class _VisualSignals(QObject):
 
 
 _visual_signals = _VisualSignals()
+
+
+class _AnchorFilter(QObject):
+    """Close the overlay before MainWindow consumes Enter/Escape.
+
+    MainWindow owns the actual key meaning.  This filter returns False so its
+    eventFilter still receives the key; it only makes sure the Harbor surface
+    is gone before Discover opens or Escape leaves the field.
+    """
+
+    def __init__(self, panel, anchor):
+        super().__init__(panel)
+        self._panel = panel
+        self._anchor = anchor
+
+    def eventFilter(self, obj, event):
+        if obj is self._anchor and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (
+                Qt.Key.Key_Return,
+                Qt.Key.Key_Enter,
+                Qt.Key.Key_Escape,
+            ):
+                try:
+                    self._panel.close()
+                except RuntimeError:
+                    pass
+        return False
+
+
+def _clear_panel_ref(window, panel):
+    try:
+        if getattr(window, "_search_panel", None) is panel:
+            window._search_panel = None
+    except RuntimeError:
+        pass
+
+
+def _close_window_panel(window):
+    panel = getattr(window, "_search_panel", None)
+    if panel is None:
+        return
+    try:
+        panel.close()
+    except RuntimeError:
+        window._search_panel = None
+
+
+def _show_from_titlebar(bar, text):
+    """Open/update the Harbor surface from the persistent top field.
+
+    main.py intentionally stopped constructing GlobalSearch in the older
+    no-suggestions design.  TitleBar exists before MainWindow connects the
+    field, so patching it here restores suggestions without creating a second
+    query field or changing MainWindow's page-filter/Enter behavior.
+    """
+    query = str(text or "")
+    try:
+        window = bar.window()
+    except RuntimeError:
+        return
+    if window is None or not hasattr(window, "_search_panel"):
+        return
+
+    if not query.strip():
+        _close_window_panel(window)
+        return
+
+    panel = getattr(window, "_search_panel", None)
+    if panel is not None:
+        try:
+            panel.set_query(query)
+            panel.show()
+            panel.raise_()
+            panel.place()
+            return
+        except RuntimeError:
+            window._search_panel = None
+
+    try:
+        from helpers import global_search
+
+        panel = global_search.GlobalSearch(window, anchor=bar.search)
+        window._search_panel = panel
+        panel.closed.connect(
+            lambda w=window, p=panel: _clear_panel_ref(w, p)
+        )
+        panel.set_query(query)
+        panel.show()
+        panel.raise_()
+        panel.place()
+    except Exception:
+        try:
+            from helpers import logs
+
+            logs.exception("Could not open Harbor global search suggestions")
+        except Exception:
+            pass
 
 
 def _local_art_path(entry):
@@ -234,11 +333,11 @@ def _set_row_art(module, widget, path):
         module.logs.exception("Global search: could not paint Harbor artwork")
 
 
-def _patch(module):
-    global _PATCHED
-    if _PATCHED:
+def _patch_search(module):
+    global _SEARCH_PATCHED
+    if _SEARCH_PATCHED:
         return
-    _PATCHED = True
+    _SEARCH_PATCHED = True
 
     Search = module.GlobalSearch
     old_init = Search.__init__
@@ -324,6 +423,10 @@ def _patch(module):
         self._harbor_seen = {"movie": set(), "series": set()}
         self._harbor_query_active = False
         _visual_signals.ready.connect(self._on_visual_thumb_ready)
+        self._anchor_filter = None
+        if self._anchor is not None:
+            self._anchor_filter = _AnchorFilter(self, self._anchor)
+            self._anchor.installEventFilter(self._anchor_filter)
 
     def add_item(self, kind, item, title, meta, path=""):
         section = self._harbor_sections[kind]
@@ -515,6 +618,11 @@ def _patch(module):
             _visual_signals.ready.disconnect(self._on_visual_thumb_ready)
         except (TypeError, RuntimeError):
             pass
+        try:
+            if self._anchor is not None and self._anchor_filter is not None:
+                self._anchor.removeEventFilter(self._anchor_filter)
+        except RuntimeError:
+            pass
         old_close(self, event)
 
     Search.__init__ = init
@@ -529,9 +637,30 @@ def _patch(module):
     Search.closeEvent = close_event
 
 
+def _patch_chrome(module):
+    global _CHROME_PATCHED
+    if _CHROME_PATCHED:
+        return
+    _CHROME_PATCHED = True
+
+    TitleBar = module.TitleBar
+    old_init = TitleBar.__init__
+
+    def init(self, parent=None):
+        old_init(self, parent)
+        # textChanged rather than textEdited: Escape clears the field
+        # programmatically in MainWindow, and that must close this surface too.
+        self.search.textChanged.connect(
+            lambda text, bar=self: _show_from_titlebar(bar, text)
+        )
+
+    TitleBar.__init__ = init
+
+
 class _Loader(importlib.abc.Loader):
-    def __init__(self, wrapped):
+    def __init__(self, wrapped, fullname):
         self._wrapped = wrapped
+        self._fullname = fullname
 
     def create_module(self, spec):
         creator = getattr(self._wrapped, "create_module", None)
@@ -539,17 +668,20 @@ class _Loader(importlib.abc.Loader):
 
     def exec_module(self, module):
         self._wrapped.exec_module(module)
-        _patch(module)
+        if self._fullname == _SEARCH_TARGET:
+            _patch_search(module)
+        elif self._fullname == _CHROME_TARGET:
+            _patch_chrome(module)
 
 
 class _Finder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
-        if fullname != _TARGET:
+        if fullname not in (_SEARCH_TARGET, _CHROME_TARGET):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:
             return spec
-        spec.loader = _Loader(spec.loader)
+        spec.loader = _Loader(spec.loader, fullname)
         return spec
 
 
@@ -558,8 +690,19 @@ def install():
     if _INSTALLED:
         return
     _INSTALLED = True
-    module = sys.modules.get(_TARGET)
-    if module is not None:
-        _patch(module)
-        return
-    sys.meta_path.insert(0, _Finder())
+
+    pending = False
+    search_module = sys.modules.get(_SEARCH_TARGET)
+    if search_module is not None:
+        _patch_search(search_module)
+    else:
+        pending = True
+
+    chrome_module = sys.modules.get(_CHROME_TARGET)
+    if chrome_module is not None:
+        _patch_chrome(chrome_module)
+    else:
+        pending = True
+
+    if pending:
+        sys.meta_path.insert(0, _Finder())
