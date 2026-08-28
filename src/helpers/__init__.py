@@ -3,27 +3,25 @@
 # PyQt6 exposes QRegion from QtGui, not QtCore. motion_patch is installed
 # before helpers.widgets is imported, so provide the correct QtGui class on
 # QtCore as a narrow compatibility alias for the patch's deferred import.
-# This keeps startup working in both source runs and the PyInstaller build.
 from PyQt6 import QtCore
 from PyQt6.QtGui import QRegion
 
 QtCore.QRegion = QRegion
 
-# Establish the real first-page DPR as soon as the finished main window reports
-# it. The patch also keeps a harmless early bootstrap for image work performed
-# while MainWindow is still being constructed.
+# Keep the authoritative first-page DPR rebuild: this is the fix that made
+# first-launch card artwork sharp on the 1080p monitor.
 from . import startup_dpr_patch as _startup_dpr_patch
 
 _startup_dpr_patch.install()
 
-# Install the scroll-rendering patches before their target modules are imported
-# by any page. highhz_visual_patch deliberately installs after motion_patch: its
-# loader applies the base Quick compositor first, then aligns only the >=200 Hz
-# raster transform to physical device pixels.
+# The native-refresh Qt Quick compositor remains the base motion path.
 from . import motion_patch as _motion_patch
-from . import highhz_visual_patch as _highhz_visual_patch
-from . import poster_grid_motion_patch as _poster_grid_motion_patch
 
 _motion_patch.install()
-_highhz_visual_patch.install()
-_poster_grid_motion_patch.install()
+
+# 240 Hz needs presentation pacing that does not turn callback jitter into
+# uneven movement. This patch is inert below 200 Hz, so the proven 165 Hz path
+# stays byte-for-byte equivalent at runtime.
+from . import highhz_pacing_patch as _highhz_pacing_patch
+
+_highhz_pacing_patch.install()
