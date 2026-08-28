@@ -16,6 +16,12 @@ elapsed animation time shifted forward on resume so nothing jumps or
 fast-forwards. Scroll motion always wins the frame budget; decoration continues
 exactly where it left off afterward.
 
+On 200+ Hz displays only, Home/Discover's vertical wheel motion also gets a very
+small amount of extra tail: friction 46 instead of the app-wide 50. The wheel
+still travels exactly the same distance per notch because _Momentum scales the
+impulse by friction; the lower value only spreads that distance over a slightly
+longer glide. The confirmed-smooth 160 Hz path and every other page remain on 50.
+
 SideScroller also has a _Momentum object but its horizontal scrollbar drag was
 still raw Qt mouse-sample stepping. Attach a horizontal version of the existing
 paced thumb-drag idea: Qt keeps press/release ownership, while mouse moves feed
@@ -35,6 +41,9 @@ from . import motion_patch as _motion_patch
 _TARGET = "helpers.widgets"
 _INSTALLED = False
 _PATCHED = False
+_HIGH_REFRESH_HZ = 200.0
+_DEFAULT_WHEEL_FRICTION = 50.0
+_HIGH_REFRESH_WHEEL_FRICTION = 46.0
 
 
 def _is_native_live_page(widget) -> bool:
@@ -73,6 +82,9 @@ def _patch_widgets(w):
     # global pacing override back to live QWidget surfaces.
     _motion_patch._patch_widgets(w)
 
+    from PyQt6.QtCore import QEvent, QObject, Qt
+    from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
+
     def live_present_frame_s(widget=None) -> float:
         frame = w.screen_frame_s(widget)
         if frame <= 0.0:
@@ -102,6 +114,30 @@ def _patch_widgets(w):
     # Lambdas already stored by _Momentum resolve this module global at call
     # time, so existing/future live surfaces pick this up without rebuilding.
     w.present_frame_s = live_present_frame_s
+
+    # Tiny, high-refresh-only wheel tail for the two live pages. Do this at kick
+    # time rather than construction time so dragging the same window between the
+    # 160 Hz and 240 Hz monitors immediately adopts the correct profile. Keep
+    # horizontal SideScroller motion untouched; the request is for vertical
+    # page-wheel drift only.
+    old_momentum_kick = w._Momentum.kick
+
+    def live_page_momentum_kick(self, distance_px, direction):
+        try:
+            bar = getattr(self, "_bar", None)
+            if (bar is not None
+                    and bar.orientation() == Qt.Orientation.Vertical
+                    and _is_native_live_page(bar)):
+                screen = bar.screen()
+                rate = float(screen.refreshRate()) if screen is not None else 0.0
+                self.FRICTION = (_HIGH_REFRESH_WHEEL_FRICTION
+                                 if rate >= _HIGH_REFRESH_HZ
+                                 else _DEFAULT_WHEEL_FRICTION)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
+        return old_momentum_kick(self, distance_px, direction)
+
+    w._Momentum.kick = live_page_momentum_kick
 
     # Decorative tweens are useful, but not while the same GUI thread is trying
     # to feed a live high-refresh scroll. Pause only tweens whose QObject owner
@@ -137,9 +173,6 @@ def _patch_widgets(w):
 
     w.SmoothTween.start = quiet_tween_start
     w.SmoothTween._tick = quiet_tween_tick
-
-    from PyQt6.QtCore import QEvent, QObject, Qt
-    from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
 
     class _HorizontalBarDrag(QObject):
         _EVENTS = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove,
