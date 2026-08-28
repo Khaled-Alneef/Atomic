@@ -6,27 +6,24 @@ There are two separate mixed-DPI hazards in Atomic:
   main.py historically called images.set_device_ratio(window.devicePixelRatioF())
   before window.winId(); on a 125% primary + 100% secondary setup that early
   QWidget value can still describe the primary screen. Consuming the one startup
-  rebuild there leaves the first 1080p page permanently cut at the wrong DPR.
-* MainWindow._on_screen_changed historically cleared image caches and rebuilt
-  the whole current page synchronously from QWindow.screenChanged. Windows emits
-  that signal while the native window is physically crossing monitors, so the
-  rebuild blocks the GUI in the middle of the drag.
+  rebuild there leaves the first page cut at the wrong DPR.
+* Rebuilding the current page directly from QWindow.screenChanged blocks the
+  GUI while Windows is physically moving the native window between monitors.
 
-This patch keeps the cheap early DPR bootstrap, but only consumes the one startup
-page rebuild after the native window has a real screen. The rebuild itself is
-posted to the next event-loop turn, after winId()/windowHandle()/screen setup has
-fully settled, and scaled image caches are cleared immediately before it so the
-first 1080p page cannot reuse anything cut during the earlier 2K bootstrap.
-
-It also replaces the screen-change handler before main.py's deferred signal
-hookup: monitor crossing updates the global DPR immediately, but never rebuilds
-the page in that callback. The next normal page rebuild uses the new DPR.
+Startup therefore rebuilds once only after the realised QWindow has an
+authoritative screen. Monitor crossing adopts the new DPR immediately but does
+not rebuild synchronously. Instead, a pending image refresh is debounced by
+MainWindow moveEvent: every move restarts a short timer, and only after the
+window has stopped moving is the current page rebuilt at the new DPR. That keeps
+the drag nonblocking while preventing old-monitor pixmaps from remaining soft
+on the destination monitor.
 """
 
 from __future__ import annotations
 
 
 _PATCHED_WINDOW_CLASSES = set()
+_MOVE_SETTLE_MS = 220
 
 
 def install():
@@ -65,14 +62,68 @@ def install():
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return None
 
+    def _refresh_scaled_page(window):
+        """Re-cut the visible page for its current screen, outside a drag."""
+        try:
+            pending = getattr(window, "_atomic_pending_move_dpr", None)
+            if pending is None:
+                return
+
+            native = _native_ratio(window)
+            final_ratio = float(native if native is not None else pending)
+            window._atomic_pending_move_dpr = None
+            original_set_device_ratio(final_ratio)
+            window._atomic_verified_page_dpr = final_ratio
+
+            # The old-monitor variants are harmless on disk because their keys
+            # include size/DPR, but process-local pixmaps and tinted assets must
+            # not remain the visual source for the current page after crossing.
+            try:
+                images.clear_scaled_cache()
+            except Exception:
+                pass
+
+            if getattr(window, "_atomic_dpr_refresh_in_progress", False):
+                return
+            window._atomic_dpr_refresh_in_progress = True
+            try:
+                window.refresh_current_page()
+            finally:
+                window._atomic_dpr_refresh_in_progress = False
+        except RuntimeError:
+            pass
+        except Exception:
+            try:
+                window._atomic_dpr_refresh_in_progress = False
+            except Exception:
+                pass
+
+    def _schedule_post_move_refresh(window, ratio):
+        """Refresh only after the window stops moving across the DPI boundary."""
+        try:
+            from PyQt6.QtCore import QTimer
+
+            window._atomic_pending_move_dpr = float(ratio)
+            timer = getattr(window, "_atomic_move_dpr_timer", None)
+            if timer is None:
+                timer = QTimer(window)
+                timer.setSingleShot(True)
+                timer.timeout.connect(lambda w=window: _refresh_scaled_page(w))
+                window._atomic_move_dpr_timer = timer
+            timer.start(_MOVE_SETTLE_MS)
+        except (RuntimeError, TypeError, ValueError):
+            pass
+
     def _patch_window_class(window):
-        """Remove the synchronous page rebuild from monitor crossing."""
+        """Make screen changes cheap, then refresh once the drag is idle."""
         cls = type(window)
         if cls in _PATCHED_WINDOW_CLASSES:
             return
         old_handler = getattr(cls, "_on_screen_changed", None)
         if not callable(old_handler):
             return
+
+        old_move = getattr(cls, "moveEvent", None)
 
         def nonblocking_screen_changed(self, screen):
             try:
@@ -91,14 +142,28 @@ def install():
             if abs(ratio - previous) < 0.01:
                 return
 
-            # Cheap only: future image work immediately uses the new DPR.
-            # Deliberately do NOT clear caches, restyle rails, or rebuild the
-            # current page here. Those operations used to run synchronously
-            # inside screenChanged and caused the ~0.5s mid-drag freeze.
+            # Cheap work only while Windows owns the move loop.
             original_set_device_ratio(ratio)
             self._atomic_verified_page_dpr = ratio
+            _schedule_post_move_refresh(self, ratio)
+
+        def paced_move_event(self, event):
+            # Preserve MainWindow/QWidget's normal move handling first.
+            if callable(old_move):
+                old_move(self, event)
+            # If a monitor crossing is waiting for its sharp-image refresh,
+            # every move postpones that work. It can therefore never rebuild
+            # the page in the middle of a continuous drag.
+            try:
+                if getattr(self, "_atomic_pending_move_dpr", None) is not None:
+                    timer = getattr(self, "_atomic_move_dpr_timer", None)
+                    if timer is not None:
+                        timer.start(_MOVE_SETTLE_MS)
+            except RuntimeError:
+                pass
 
         cls._on_screen_changed = nonblocking_screen_changed
+        cls.moveEvent = paced_move_event
         _PATCHED_WINDOW_CLASSES.add(cls)
 
     def _queue_authoritative_startup(window):
@@ -135,18 +200,10 @@ def install():
             def rebuild():
                 window._atomic_dpr_final_rebuild_queued = False
                 try:
-                    # Re-read the native screen at execution time. Windows may
-                    # finish assigning the restored window between posting and
-                    # running this callback.
                     native = _native_ratio(window)
                     final_ratio = float(native if native is not None else ratio)
                     original_set_device_ratio(final_ratio)
                     window._atomic_verified_page_dpr = final_ratio
-
-                    # Startup only. This is deliberately NOT done from the
-                    # screenChanged path, so dragging between monitors stays
-                    # nonblocking. Clearing here prevents a 1.25 bootstrap tile
-                    # from surviving into the first 1.0 page on the 1080p screen.
                     try:
                         images.clear_scaled_cache()
                     except Exception:
@@ -160,7 +217,6 @@ def install():
                 except RuntimeError:
                     pass
                 except Exception:
-                    # Startup sharpness must never make launch fail.
                     window._atomic_dpr_refresh_in_progress = False
 
             QTimer.singleShot(0, rebuild)
@@ -168,8 +224,8 @@ def install():
             window._atomic_dpr_final_rebuild_queued = False
 
     def authoritative_set_device_ratio(value) -> float:
-        # Adopt the requested value immediately for any background/image work.
-        # It may be only a bootstrap value before the native QWindow exists.
+        # Adopt the requested value immediately for background/image work. It
+        # can still be only a bootstrap value before the native window exists.
         ratio = original_set_device_ratio(value)
 
         for window in _main_windows():
@@ -184,20 +240,12 @@ def install():
 
             native = _native_ratio(window)
             if native is None:
-                # Critical: do not mark the startup rebuild as consumed from
-                # main.py's pre-winId() QWidget DPR. Wait for a real QWindow.
                 _queue_authoritative_startup(window)
                 continue
 
-            # The QWindow is authoritative. Ignore an early caller-provided
-            # ratio if it disagrees with the screen Windows actually chose.
             ratio = original_set_device_ratio(native)
             window._atomic_startup_dpr_rebuilt = True
             window._atomic_verified_page_dpr = float(ratio)
-
-            # Do not rebuild inline in the startup call stack. main.py still
-            # has native-window setup to finish; posting this one turn later
-            # makes the chosen screen/DPR stable before any image is re-cut.
             _queue_final_rebuild(window, ratio)
         return ratio
 
@@ -216,8 +264,6 @@ def install():
                 screen = app.primaryScreen()
             if screen is None:
                 return 1.0
-            # Bootstrap only. The completed MainWindow is rebuilt later from
-            # its realised QWindow.screen(), never from this cursor prediction.
             return authoritative_set_device_ratio(screen.devicePixelRatio())
         except Exception:
             return original_device_ratio()
