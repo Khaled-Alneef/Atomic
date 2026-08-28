@@ -8,20 +8,15 @@ from PyQt6.QtGui import QRegion
 
 QtCore.QRegion = QRegion
 
-# Keep the authoritative first-page DPR rebuild: this is the fix that made
-# first-launch card artwork sharp on the 1080p monitor.
+# Keep the authoritative first-page DPR rebuild: this is the fix confirmed to
+# make first-launch card artwork sharp on the 1080p monitor.
 from . import startup_dpr_patch as _startup_dpr_patch
 
 _startup_dpr_patch.install()
 
-# The native-refresh Qt Quick compositor remains the base motion path.
+# Keep the last compositor configuration that was explicitly measured by the
+# owner as fully clean on the 165 Hz display.  Do not layer timing/alignment
+# experiments over it; 240 Hz work must be isolated from this baseline.
 from . import motion_patch as _motion_patch
 
 _motion_patch.install()
-
-# 240 Hz needs presentation pacing that does not turn callback jitter into
-# uneven movement. This patch is inert below 200 Hz, so the proven 165 Hz path
-# stays byte-for-byte equivalent at runtime.
-from . import highhz_pacing_patch as _highhz_pacing_patch
-
-_highhz_pacing_patch.install()
