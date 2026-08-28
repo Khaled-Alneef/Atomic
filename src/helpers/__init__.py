@@ -14,5 +14,7 @@ QtCore.QRegion = QRegion
 # finished, so package import itself stays lightweight and non-GUI tools do
 # not eagerly construct Qt widgets.
 from . import motion_patch as _motion_patch
+from . import poster_grid_motion_patch as _poster_grid_motion_patch
 
 _motion_patch.install()
+_poster_grid_motion_patch.install()
