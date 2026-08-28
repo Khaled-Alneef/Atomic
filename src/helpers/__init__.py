@@ -42,13 +42,19 @@ from . import high_refresh_live_pacing_patch as _high_refresh_live_pacing_patch
 _high_refresh_live_pacing_patch.install()
 
 # Movies is the known-perfect reference. Home and Discover contain a HeroBanner
-# plus nested horizontal scrollers, so a page-wide snapshot is the wrong owner
-# for their motion: it can cover the live rows and makes the first wheel event
-# pay for a large synchronous page render. Detach only those two pages from the
-# compositor after construction; every other page keeps the GPU path.
+# plus nested horizontal scrollers, so their own page-wide Quick windows remain
+# detached. The render-thread compositor installed below is one shared overlay
+# and therefore does not restore those old per-page/native-child problems.
 from . import hero_pages_live_scroll_patch as _hero_pages_live_scroll_patch
 
 _hero_pages_live_scroll_patch.install()
+
+# Browser-like wheel presentation: one shared Qt Quick overlay whose Y movement
+# is driven by QML YAnimator on the scene-graph render thread.  The existing
+# QWidget/Quick implementations remain underneath as automatic fallback paths.
+from . import render_thread_scroll_patch as _render_thread_scroll_patch
+
+_render_thread_scroll_patch.install()
 
 # Do not install poster_grid_quick_patch: Discover should stay on the same
 # original painted PosterGrid path as the perfect Movies page.
