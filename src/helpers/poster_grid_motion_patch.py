@@ -33,18 +33,27 @@ def _patch(module):
     from PyQt6.QtCore import QRectF
 
     def stable_cell_viewport_rect(self, index, offset):
-        visual = float(offset)
-        try:
-            screen = self.screen()
-            rate = float(screen.refreshRate()) if screen is not None else 0.0
-        except Exception:
-            rate = 0.0
-        if rate >= 200.0:
+        # Every visible card in one paint receives the same offset.  Resolve
+        # the screen/DPR and quantize it once for that frame rather than doing
+        # a QScreen lookup for every cell in a 4.17 ms 240 Hz budget.
+        source = float(offset)
+        if getattr(self, "_atomic_visual_source_offset", None) == source:
+            visual = self._atomic_visual_offset
+        else:
+            visual = source
             try:
-                dpr = float(self.devicePixelRatioF() or 1.0)
+                screen = self.screen()
+                rate = float(screen.refreshRate()) if screen is not None else 0.0
             except Exception:
-                dpr = 1.0
-            visual = round(visual * dpr) / dpr
+                rate = 0.0
+            if rate >= 200.0:
+                try:
+                    dpr = float(self.devicePixelRatioF() or 1.0)
+                except Exception:
+                    dpr = 1.0
+                visual = round(source * dpr) / dpr
+            self._atomic_visual_source_offset = source
+            self._atomic_visual_offset = visual
         rect = QRectF(self.cell_rect(index))
         rect.moveTop(rect.top() - visual)
         return rect
