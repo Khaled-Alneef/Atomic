@@ -41,9 +41,10 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# Global search suggestions use large thumbnail-left rows. Remote Discover
-# posters are filled asynchronously through the existing cover queue/cache so
-# typing stays immediate.
+# Global search matches the Harbor reference: a dimmed wide overlay under the
+# persistent field, Movies and Series in side-by-side poster rows. The patch
+# restores suggestions from the title-bar field itself while leaving MainWindow's
+# existing Enter behavior intact: Enter runs the full query on Discover.
 from . import global_search_visual_patch as _global_search_visual_patch
 
 _global_search_visual_patch.install()
