@@ -2,93 +2,67 @@
 
 import os
 
-# Qt Quick's requestUpdate path is normally allowed to idle for about 5ms on
-# desktop platforms. That is already longer than one 240 Hz refresh (4.17ms),
-# so a scene-graph surface can miss the monitor cadence even when its render
-# work is cheap. Set this before QApplication/QPA is created; the Quick render
-# loop/vsync still throttles presentation, this only removes the extra GUI-side
-# idle delay. Respect an explicit diagnostic/user override.
+# Keep the pre-QApplication platform setup used by the current branch. It does
+# not alter the 0825ee3 raster scrolling method and is retained for later fixes.
 os.environ.setdefault("QT_QPA_UPDATE_IDLE_TIME", "0")
 
-# PyQt6 exposes QRegion from QtGui, not QtCore. motion_patch is installed
-# before helpers.widgets is imported, so provide the correct QtGui class on
-# QtCore as a narrow compatibility alias for the patch's deferred import.
+# PyQt6 exposes QRegion from QtGui, not QtCore. The 0825ee3 motion patch imports
+# QRegion from QtCore, so retain this compatibility alias before widgets loads.
 from PyQt6 import QtCore
 from PyQt6.QtGui import QRegion
 
 QtCore.QRegion = QRegion
 
-# Keep the authoritative first-page DPR rebuild: this is the fix confirmed to
-# make first-launch card artwork sharp on the 1080p monitor.
+# Keep the authoritative first-page DPR rebuild: later fix, independent of the
+# scrolling compositor restored below.
 from . import startup_dpr_patch as _startup_dpr_patch
 
-# The post-monitor-drag refresh is already protected by moveEvent: every move
-# restarts its one-shot timer, so shortening this only changes how quickly the
-# sharp-DPR rebuild starts *after* the hand stops. 80ms is fast enough to feel
-# immediate while still leaving a small quiet window after the last move event.
 _startup_dpr_patch._MOVE_SETTLE_MS = 80
 _startup_dpr_patch.install()
 
-# Native-refresh Qt Quick compositor for ordinary QScrollArea pages.
+# Scrolling method restored from commit 0825ee369243802147ead89b7c51cc27027261ea:
+# cached DPR-correct QPixmap raster layer translated over the viewport while the
+# real QWidget body is frozen. Do not layer the later Quick/live-page detach or
+# requestUpdate scheduler over this; the owner identified this exact method as
+# the best measured result.
 from . import motion_patch as _motion_patch
 
 _motion_patch.install()
 
-# The old shared presentation helper deliberately converted 240 Hz to 120 Hz,
-# so half of the physical refreshes repeated the previous motion position. The
-# owner's native-refresh A/B on the 240 Hz monitor was dramatically clearer.
-# Keep the explicit ATOMIC_PRESENT_HZ override for diagnostics, but make normal
-# production motion adapt to each monitor's actual refresh rate.
+# This is cadence-equivalent to the historical patch's native screen interval
+# and retains the explicit ATOMIC_PRESENT_HZ diagnostic override.
 from . import native_refresh_motion_patch as _native_refresh_motion_patch
 
 _native_refresh_motion_patch.install()
 
-# Use the Windows variable UI face for moving text and ask DirectWrite/Qt for
-# vertical-only hinting. Icon and emoji faces keep their own families.
+# Later typography fix, unrelated to scroll mechanics.
 from . import typography_motion_patch as _typography_motion_patch
 
 _typography_motion_patch.install()
 
-# Keep expensive live QWidget motion phase-locked on 200+ Hz displays and give
-# SideScroller horizontal thumbs the same paced drag model as vertical bars.
-# The Quick compositor's decoupled 240 Hz path remains native-refresh.
+# Retain later non-destructive live-UI improvements: decorative tween deferral
+# during motion and paced horizontal thumb dragging. Its monitor-specific wheel
+# friction branch was removed in 1.10.120, so it no longer changes vertical
+# wheel physics or replaces the restored raster compositor.
 from . import high_refresh_live_pacing_patch as _high_refresh_live_pacing_patch
 
 _high_refresh_live_pacing_patch.install()
 
-# Movies is the known-perfect reference. Home and Discover contain a HeroBanner
-# plus nested horizontal scrollers, so a page-wide snapshot is the wrong owner
-# for their motion: it can cover the live rows and makes the first wheel event
-# pay for a large synchronous page render. Detach only those two pages from the
-# compositor after construction; every other page keeps the GPU path.
-from . import hero_pages_live_scroll_patch as _hero_pages_live_scroll_patch
+# IMPORTANT: do not install hero_pages_live_scroll_patch. That later experiment
+# deliberately detached Home/Tracker from _atomic_motion_surface and would turn
+# off the 0825ee3 compositor exactly where it is needed.
+# IMPORTANT: do not install ultimate_scroll_patch. It was a later alternative
+# QWindow.requestUpdate scheduler and is intentionally superseded here.
 
-_hero_pages_live_scroll_patch.install()
-
-# Restore Harbor-style source coverage without requiring Stremio Desktop: the
-# signed-in account's stream-capable addon collection joins Atomic's own sources
-# only while resolving playback, with a wider concurrent fan-out for slow
-# configured providers.
+# Later Watch/Read source fixes remain intact.
 from . import source_coverage_patch as _source_coverage_patch
 
 _source_coverage_patch.install()
 
-# A non-empty read result can still be incomplete (for example a site's newest
-# forty chapters). Fill those holes from the other configured read sources and
-# MangaDex instead of treating "some chapters" as "all chapters".
 from . import read_coverage_patch as _read_coverage_patch
 
 _read_coverage_patch.install()
 
-# Final motion layer: live QWidget scrolling is clocked by QWindow UpdateRequest
-# (vsync-synchronized where Qt/the platform support it) rather than by a
-# millisecond timer. It also unwraps the remaining 200+ Hz friction override so
-# wheel physics are identical on every monitor. Quick surfaces keep frameSwapped.
-from . import ultimate_scroll_patch as _ultimate_scroll_patch
-
-_ultimate_scroll_patch.install()
-
-# Do not install poster_grid_quick_patch: Discover should stay on the same
-# original painted PosterGrid path as the perfect Movies page.
-# Do not install the old Home/Discover hero/interaction interception patches;
-# they were compensating for a page-wide snapshot that these pages no longer use.
+# Do not install poster_grid_quick_patch or the old interaction interception
+# experiments. The restored raster compositor is the single vertical scroll
+# rendering path for ordinary Atomic scroll_area() pages.
