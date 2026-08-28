@@ -18,6 +18,8 @@ import importlib.abc
 import importlib.machinery
 import sys
 
+from . import hero_scroll_patch as _hero_scroll_patch
+
 _TARGET = "windows.home"
 _INSTALLED = False
 _PATCHED = False
@@ -29,6 +31,12 @@ def _patch(module):
         return
     _PATCHED = True
 
+    # This finder is installed after hero_scroll_patch and therefore wins the
+    # meta-path lookup for windows.home. Apply the older hero patch explicitly
+    # so its backdrop/fade deferral is preserved before adding the interaction
+    # fixes below.
+    _hero_scroll_patch._patch_home(module)
+
     widgets = sys.modules.get("helpers.widgets")
     if widgets is None:
         return
@@ -37,8 +45,6 @@ def _patch(module):
     from PyQt6.QtGui import QWheelEvent
     from PyQt6.QtWidgets import QApplication, QAbstractScrollArea, QScrollBar, QWidget
 
-    # Installed after hero_scroll_patch, so this is the final PageSlide wheel
-    # handoff used by Home/Discover navigation.
     old_slide_wheel = getattr(widgets.PageSlide, "wheelEvent", None)
 
     def _vertical_scroll_owner(slide, global_pos):
@@ -60,9 +66,6 @@ def _patch(module):
                 local = viewport.mapFromGlobal(global_pos)
                 if not viewport.rect().contains(local):
                     continue
-                # Prefer Atomic's outer page scroller over a nested horizontal
-                # row. The latter normally has no useful vertical range anyway,
-                # but the explicit priority keeps the ownership deterministic.
                 priority = 0 if getattr(area, "_atomic_compositor", None) is not None else 1
                 area_size = viewport.width() * viewport.height()
                 candidates.append((priority, -area_size, area))
@@ -108,17 +111,12 @@ def _patch(module):
             QApplication.sendEvent(viewport, clone)
             event.setAccepted(clone.isAccepted())
         except (RuntimeError, TypeError):
-            # If a platform-specific QWheelEvent signature differs, do not eat
-            # the original notch silently; let the previous handoff try it.
             if old_slide_wheel is not None:
                 return old_slide_wheel(self, event)
             event.ignore()
 
     widgets.PageSlide.wheelEvent = page_slide_wheel
 
-    # A horizontal scrollbar can live several QWidget levels inside the body of
-    # an outer NativeQuickScrollArea. Find that outer compositor before the
-    # scrollbar starts dragging.
     old_bar_press = QScrollBar.mousePressEvent
 
     def _outer_surface(bar):
@@ -145,9 +143,6 @@ def _patch(module):
         pos = float(getattr(surface, "_visual", 0.0))
         try:
             if motion is not None:
-                # Stop only the vertical glide. patched _stop_ticking performs
-                # the high-refresh decoupled body commit before the compositor
-                # begins its normal handoff.
                 if hasattr(motion, "_vel"):
                     motion._vel = 0.0
                 if hasattr(motion, "_pending"):
@@ -160,8 +155,6 @@ def _patch(module):
         except (RuntimeError, AttributeError):
             pass
 
-        # A horizontal drag is direct manipulation; do not leave the old Quick
-        # picture covering the live row for one more frame after mouse-down.
         try:
             if getattr(surface, "_active", False):
                 surface._finish_end()
