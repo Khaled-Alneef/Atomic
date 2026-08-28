@@ -29,6 +29,13 @@ from . import motion_patch as _motion_patch
 
 _motion_patch.install()
 
+# Keep expensive live QWidget motion phase-locked on 200+ Hz displays and give
+# SideScroller horizontal thumbs the same paced drag model as vertical bars.
+# The Quick compositor's decoupled 240 Hz path remains native-refresh.
+from . import high_refresh_live_pacing_patch as _high_refresh_live_pacing_patch
+
+_high_refresh_live_pacing_patch.install()
+
 # Movies is the known-perfect reference. Home and Discover contain a HeroBanner
 # plus nested horizontal scrollers, so a page-wide snapshot is the wrong owner
 # for their motion: it can cover the live rows and makes the first wheel event
