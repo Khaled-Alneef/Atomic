@@ -2,7 +2,7 @@
 
 The browser A/B proved that the remaining motion trace is not scroll distance
 or easing: the same artwork is dramatically clearer when a compositor moves
-one texture at the display refresh rate.  This module gives ordinary QWidget
+one texture at the display refresh rate. This module gives ordinary QWidget
 scroll pages that same shape while they are moving:
 
     QWidget tree -> one DPR-correct QImage -> QQuickPaintedItem texture
@@ -52,9 +52,6 @@ def _patch_widgets(w):
         def __init__(self, parent=None):
             super().__init__(parent)
             self._image = QImage()
-            # QQuickPaintedItem uploads the painted result to the scene graph.
-            # Once uploaded, changing y does not repaint this item; it only
-            # changes the scene-graph transform, which is the browser-like part.
             self.setAntialiasing(False)
             self.setMipmap(False)
             self.setOpaquePainting(True)
@@ -94,10 +91,6 @@ def _patch_widgets(w):
             self._visual = float(area.verticalScrollBar().value())
             self._motion = None
 
-            # QQuickWindow uses Qt Quick's hardware scene graph (D3D on normal
-            # Windows Qt builds).  createWindowContainer embeds that native
-            # scene directly over the QWidget viewport without converting the
-            # whole Atomic window or the mpv surface to OpenGL.
             self.quick = QQuickWindow()
             self.quick.setColor(self._ground)
             try:
@@ -111,9 +104,6 @@ def _patch_widgets(w):
             self.container.setGeometry(self.viewport.rect())
             self.container.hide()
 
-            # frameSwapped is the rAF-equivalent boundary available to this
-            # embedded scene.  The next physics position is computed only after
-            # the previous scene-graph frame was actually swapped.
             self.quick.frameSwapped.connect(self._frame_swapped)
             self.viewport.installEventFilter(self)
             area.verticalScrollBar()._atomic_motion_surface = self
@@ -210,9 +200,6 @@ def _patch_widgets(w):
         def _draw(self, pos):
             if self._cache_height <= 0:
                 return
-            # Deliberately NO int(), round(), DPR snapping or scrollbar-value
-            # conversion here.  This is the continuous transform that the HTML
-            # test had and QWidget scrolling did not.
             self.texture.setY(-(float(pos) - self._cache_top))
 
         def _frame_swapped(self):
@@ -250,6 +237,7 @@ def _patch_widgets(w):
             self._atomic_compositor = _QuickCompositor(
                 self, body, self._atomic_ground)
 
+    old_active = w._Momentum.active
     old_start = w._Momentum._start_ticking
     old_stop = w._Momentum._stop_ticking
     old_tick = w._Momentum._tick
@@ -257,13 +245,24 @@ def _patch_widgets(w):
     def _surface_for(motion):
         return getattr(motion._bar, "_atomic_motion_surface", None)
 
+    def patched_active(self):
+        """A Quick frameSwapped clock is a real active motion clock too.
+
+        The first GPU implementation disabled _Momentum's QTimer but left
+        active() unchanged. Every following wheel notch therefore saw the
+        motion as inactive and reset _pos/_vel/_pending before applying its
+        impulse, creating a pulse/hitch at every notch. Keep momentum alive
+        for the full compositor glide instead.
+        """
+        surface = _surface_for(self)
+        if surface is not None and surface._active:
+            return True
+        return old_active(self)
+
     def patched_start(self):
         surface = _surface_for(self)
         if surface is None:
             return old_start(self)
-        # Do not start the millisecond timer for a Quick-composited surface.
-        # frameSwapped owns the cadence.  Keep profiler state equivalent to
-        # the normal _start_ticking path.
         if not getattr(self, "_counted", False):
             self._counted = True
             w._GLIDING += 1
@@ -277,7 +276,6 @@ def _patch_widgets(w):
         if getattr(self, "_counted", False):
             self._counted = False
             w._GLIDING = max(0, w._GLIDING - 1)
-        # Defensive cleanup in case this motion previously used another clock.
         self._timer.stop()
         if getattr(self, "_vblank_on", False):
             try:
@@ -299,6 +297,7 @@ def _patch_widgets(w):
             surface.present(pos)
         return result
 
+    w._Momentum.active = patched_active
     w._Momentum._start_ticking = patched_start
     w._Momentum._stop_ticking = patched_stop
     w._Momentum._tick = patched_tick
