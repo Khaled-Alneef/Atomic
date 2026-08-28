@@ -13,10 +13,14 @@ There are two separate mixed-DPI hazards in Atomic:
   rebuild blocks the GUI in the middle of the drag.
 
 This patch keeps the cheap early DPR bootstrap, but only consumes the one startup
-page rebuild after the native window has a real screen. It also replaces the
-screen-change handler before main.py's deferred signal hookup: monitor crossing
-updates the global DPR immediately, but never rebuilds the page in that callback.
-The next normal page rebuild uses the new DPR.
+page rebuild after the native window has a real screen. The rebuild itself is
+posted to the next event-loop turn, after winId()/windowHandle()/screen setup has
+fully settled, and scaled image caches are cleared immediately before it so the
+first 1080p page cannot reuse anything cut during the earlier 2K bootstrap.
+
+It also replaces the screen-change handler before main.py's deferred signal
+hookup: monitor crossing updates the global DPR immediately, but never rebuilds
+the page in that callback. The next normal page rebuild uses the new DPR.
 """
 
 from __future__ import annotations
@@ -71,9 +75,6 @@ def install():
             return
 
         def nonblocking_screen_changed(self, screen):
-            # Use the signal's screen directly. self.devicePixelRatioF() can
-            # lag one event behind while the native window is crossing the DPI
-            # boundary, which is exactly when this callback runs.
             try:
                 ratio = float(screen.devicePixelRatio() if screen is not None
                               else self.devicePixelRatioF() or 1.0)
@@ -113,8 +114,6 @@ def install():
                 try:
                     ratio = _native_ratio(window)
                     if ratio is None:
-                        # show()/winId() may still be one event behind. Retry
-                        # without consuming the startup rebuild flag.
                         _queue_authoritative_startup(window)
                         return
                     authoritative_set_device_ratio(ratio)
@@ -124,6 +123,49 @@ def install():
             QTimer.singleShot(0, adopt)
         except Exception:
             window._atomic_dpr_authoritative_queued = False
+
+    def _queue_final_rebuild(window, ratio):
+        """Rebuild once after native screen adoption and startup settles."""
+        if getattr(window, "_atomic_dpr_final_rebuild_queued", False):
+            return
+        window._atomic_dpr_final_rebuild_queued = True
+        try:
+            from PyQt6.QtCore import QTimer
+
+            def rebuild():
+                window._atomic_dpr_final_rebuild_queued = False
+                try:
+                    # Re-read the native screen at execution time. Windows may
+                    # finish assigning the restored window between posting and
+                    # running this callback.
+                    native = _native_ratio(window)
+                    final_ratio = float(native if native is not None else ratio)
+                    original_set_device_ratio(final_ratio)
+                    window._atomic_verified_page_dpr = final_ratio
+
+                    # Startup only. This is deliberately NOT done from the
+                    # screenChanged path, so dragging between monitors stays
+                    # nonblocking. Clearing here prevents a 1.25 bootstrap tile
+                    # from surviving into the first 1.0 page on the 1080p screen.
+                    try:
+                        images.clear_scaled_cache()
+                    except Exception:
+                        pass
+
+                    window._atomic_dpr_refresh_in_progress = True
+                    try:
+                        window.refresh_current_page()
+                    finally:
+                        window._atomic_dpr_refresh_in_progress = False
+                except RuntimeError:
+                    pass
+                except Exception:
+                    # Startup sharpness must never make launch fail.
+                    window._atomic_dpr_refresh_in_progress = False
+
+            QTimer.singleShot(0, rebuild)
+        except Exception:
+            window._atomic_dpr_final_rebuild_queued = False
 
     def authoritative_set_device_ratio(value) -> float:
         # Adopt the requested value immediately for any background/image work.
@@ -152,15 +194,11 @@ def install():
             ratio = original_set_device_ratio(native)
             window._atomic_startup_dpr_rebuilt = True
             window._atomic_verified_page_dpr = float(ratio)
-            window._atomic_dpr_refresh_in_progress = True
-            try:
-                window.refresh_current_page()
-            except Exception:
-                # DPI adoption must never make startup fail. A normal page
-                # navigation still rebuilds with the now-correct ratio later.
-                pass
-            finally:
-                window._atomic_dpr_refresh_in_progress = False
+
+            # Do not rebuild inline in the startup call stack. main.py still
+            # has native-window setup to finish; posting this one turn later
+            # makes the chosen screen/DPR stable before any image is re-cut.
+            _queue_final_rebuild(window, ratio)
         return ratio
 
     def launch_device_ratio() -> float:
