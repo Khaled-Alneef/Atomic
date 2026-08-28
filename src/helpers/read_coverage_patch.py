@@ -81,7 +81,7 @@ def install():
 
     chapter_source.list_chapters = list_chapters_complete
 
-    updater.APP_VERSION = "1.10.119"
+    updater.APP_VERSION = "1.10.121"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
