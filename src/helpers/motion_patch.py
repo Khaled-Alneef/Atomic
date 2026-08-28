@@ -10,6 +10,15 @@ scroll pages that same shape while they are moving:
 
 The live QWidget tree is restored as soon as motion stops, so controls remain
 normal widgets and stationary text is never left texture-filtered.
+
+At very high refresh rates the hidden QWidget scroll itself matters too.  A
+240 Hz frame is only 4.17 ms; scrolling/repositioning the real QScrollArea body
+behind the Quick texture on every frame can consume that budget even though the
+user cannot see it.  For wheel glides at >=200 Hz the visible scrollbar value
+is therefore advanced with its signals blocked while only the Quick texture
+moves.  The real QScrollArea is synchronized once, under the Quick layer, at
+the end of the glide.  Scrollbar-thumb dragging is deliberately NOT decoupled:
+it stays live and native for the entire drag.
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ import importlib.abc
 import importlib.machinery
 import os
 import sys
+import time
 
 
 _TARGET = "helpers.widgets"
@@ -31,7 +41,8 @@ def _patch_widgets(w):
         return
     _PATCHED = True
 
-    from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt
+    from PyQt6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect,
+                              QSignalBlocker, QSize, Qt)
     from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
     from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
     from PyQt6.QtWidgets import QFrame, QScrollArea, QWidget
@@ -76,18 +87,10 @@ def _patch_widgets(w):
     class _QuickCompositor(QObject):
         """One hidden QQuickWindow per scroll viewport, shown only in motion."""
 
-        # Three viewports was enough for short glides but occasionally crossed
-        # an edge during a longer wheel burst. Re-rendering the QWidget tree and
-        # uploading a replacement texture in the middle of motion produced the
-        # rare hitch that remained after the release-handoff fix.
         CACHE_VIEWS = 8.0
         EDGE_SLOP = 192.0
-        # Prefer one full-page texture whenever it is comfortably below normal
-        # scene-graph texture limits. This removes cache-edge work entirely on
-        # Home/Discover-sized pages while keeping very long reader/list pages
-        # bounded. The limit is in physical pixels because that is what the GPU
-        # actually receives.
         FULL_CACHE_MAX_PHYSICAL_H = 8192
+        HIGH_REFRESH_HZ = 200.0
 
         def __init__(self, area, body, ground):
             super().__init__(area)
@@ -101,6 +104,8 @@ def _patch_widgets(w):
             self._visual = float(area.verticalScrollBar().value())
             self._motion = None
             self._ending_after_swap = False
+            self._decoupled_wheel = False
+            self._committed_bar_value = int(area.verticalScrollBar().value())
 
             self.quick = QQuickWindow()
             self.quick.setColor(self._ground)
@@ -127,6 +132,14 @@ def _patch_widgets(w):
                     self._draw(self._visual)
             return False
 
+        def high_refresh(self) -> bool:
+            try:
+                screen = self.viewport.screen()
+                return (screen is not None
+                        and float(screen.refreshRate()) >= self.HIGH_REFRESH_HZ)
+            except Exception:
+                return False
+
         def _body_extent(self):
             return max(self.viewport.height(), self.body.height())
 
@@ -135,15 +148,10 @@ def _patch_widgets(w):
             body_h = max(view_h, self._body_extent())
             dpr = self.viewport.devicePixelRatioF() or 1.0
 
-            # Whole-page cache when safe: no cache edge can ever be crossed, so
-            # wheel motion after the initial upload is transform-only.
             if body_h * dpr <= self.FULL_CACHE_MAX_PHYSICAL_H:
                 return 0, body_h
 
             wanted = min(body_h, max(view_h, int(round(view_h * self.CACHE_VIEWS))))
-            # Put more runway in the likely direction by centering the current
-            # position in the larger window instead of placing it one viewport
-            # from the top as the old 3-view cache did.
             top = int(round(float(pos) - 0.5 * (wanted - view_h)))
             top = max(0, min(top, max(0, body_h - wanted)))
             return top, wanted
@@ -206,6 +214,9 @@ def _patch_widgets(w):
             self._ending_after_swap = False
             self._motion = motion
             self._visual = float(pos)
+            self._committed_bar_value = int(self.area.verticalScrollBar().value())
+            self._decoupled_wheel = bool(
+                self.high_refresh() and getattr(motion, "_follow", None) is None)
             self._build_cache(self._visual)
             self.body.setUpdatesEnabled(False)
             self.container.setGeometry(self.viewport.rect())
@@ -214,19 +225,49 @@ def _patch_widgets(w):
             self._draw(self._visual)
             self.quick.update()
 
-        def present(self, pos):
+        def present(self, pos, request_frame=True):
             if not self._active:
                 return
             self._visual = float(pos)
             if not self._contains(self._visual):
                 self._build_cache(self._visual)
             self._draw(self._visual)
-            self.quick.update()
+            if request_frame:
+                self.quick.update()
 
         def _draw(self, pos):
             if self._cache_height <= 0:
                 return
             self.texture.setY(-(float(pos) - self._cache_top))
+
+        def shadow_bar_value(self, value):
+            """Move only the visible thumb; do not scroll QScrollArea's body."""
+            value = int(value)
+            bar = self.area.verticalScrollBar()
+            blocker = QSignalBlocker(bar)
+            bar.setValue(value)
+            blocker.unblock()
+
+        def commit_decoupled(self, pos):
+            """Synchronize the real QScrollArea once while Quick still covers it."""
+            if not self._decoupled_wheel:
+                return
+            bar = self.area.verticalScrollBar()
+            final_value = int(round(float(pos)))
+            start_value = int(self._committed_bar_value)
+
+            # The bar's visible value was advanced with signals blocked. Put it
+            # back to the value the real QWidget body still represents, also
+            # silently, then make one ordinary setValue() to the final value.
+            # QScrollArea therefore performs exactly one real scroll behind the
+            # Quick texture instead of one every 4.17 ms.
+            blocker = QSignalBlocker(bar)
+            bar.setValue(start_value)
+            blocker.unblock()
+            if final_value != start_value:
+                bar.setValue(final_value)
+            self._committed_bar_value = final_value
+            self._decoupled_wheel = False
 
         def _finish_end(self):
             if not self._active:
@@ -234,6 +275,7 @@ def _patch_widgets(w):
             self._ending_after_swap = False
             self._active = False
             self._motion = None
+            self._decoupled_wheel = False
             self.body.setUpdatesEnabled(True)
             self.container.hide()
             self.texture.clear_image()
@@ -254,7 +296,11 @@ def _patch_widgets(w):
             except RuntimeError:
                 self._finish_end()
                 return
-            if self._active:
+            if self._active and not self._ending_after_swap:
+                # Exactly one request for the next frame. On the high-refresh
+                # wheel path present(..., request_frame=False) only changes the
+                # scene-graph transform; this is the one place that schedules
+                # the next presentation.
                 self.quick.update()
 
         def end(self, pos=None):
@@ -307,6 +353,15 @@ def _patch_widgets(w):
         surface = _surface_for(self)
         if surface is None:
             return old_stop(self)
+
+        pos = self._pos if self._pos is not None else self._bar.value()
+        if surface._decoupled_wheel:
+            # This runs from inside old_tick while _pos still contains the exact
+            # floating-point landing position. Commit the hidden QWidget body
+            # before end() starts the one-frame GPU->live handoff.
+            surface.commit_decoupled(pos)
+            self._last_value = int(round(float(pos)))
+
         if getattr(self, "_counted", False):
             self._counted = False
             w._GLIDING = max(0, w._GLIDING - 1)
@@ -320,16 +375,66 @@ def _patch_widgets(w):
             except Exception:
                 pass
             self._vblank_on = False
-        pos = self._pos if self._pos is not None else self._bar.value()
         surface.end(pos)
 
     def patched_tick(self):
-        result = old_tick(self)
         surface = _surface_for(self)
-        if (surface is not None and surface._active
-                and not surface._ending_after_swap):
+        decoupled = bool(
+            surface is not None
+            and surface._active
+            and not surface._ending_after_swap
+            and surface._decoupled_wheel
+            and getattr(self, "_follow", None) is None)
+
+        if not decoupled:
+            result = old_tick(self)
+            if (surface is not None and surface._active
+                    and not surface._ending_after_swap):
+                pos = self._pos if self._pos is not None else self._bar.value()
+                surface.present(pos)
+            return result
+
+        # One physics interval per presented 240 Hz frame. A late Python signal
+        # must not turn into a double-distance catch-up step; removing the hidden
+        # QWidget work above is what should keep those late frames rare in the
+        # first place.
+        try:
+            frame_s = float(w.screen_frame_s(surface.viewport) or 0.0)
+        except Exception:
+            frame_s = 0.0
+        if 0.0 < frame_s <= 0.0055:
+            stamp = time.monotonic()
+            self._phase = stamp
+            self._last = stamp - frame_s
+
+        # old_tick contains the already-tuned momentum model. Replace only its
+        # per-frame scrollbar write: the thumb changes, but QScrollArea's
+        # valueChanged connection is blocked so the hidden QWidget body stays
+        # still. Restore the method immediately after this one tick.
+        had_override = "_set_value" in self.__dict__
+        previous_override = self.__dict__.get("_set_value")
+
+        def shadow_set_value(value):
+            value = int(value)
+            if value != self._last_value:
+                self._last_value = value
+                surface.shadow_bar_value(value)
+
+        self._set_value = shadow_set_value
+        try:
+            result = old_tick(self)
+        finally:
+            if had_override:
+                self._set_value = previous_override
+            else:
+                try:
+                    del self._set_value
+                except AttributeError:
+                    pass
+
+        if surface._active and not surface._ending_after_swap:
             pos = self._pos if self._pos is not None else self._bar.value()
-            surface.present(pos)
+            surface.present(pos, request_frame=False)
         return result
 
     w._Momentum.active = patched_active
