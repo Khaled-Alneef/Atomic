@@ -64,5 +64,11 @@ from . import read_coverage_patch as _read_coverage_patch
 
 _read_coverage_patch.install()
 
+# Final identity must run after all runtime patches because some older patch
+# modules also set APP_VERSION.
+from . import development_version_patch as _development_version_patch
+
+_development_version_patch.install()
+
 # Do not install poster_grid_quick_patch or the old interaction interception
 # experiments. Raster motion remains the authoritative vertical scrolling path.
