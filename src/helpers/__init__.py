@@ -19,6 +19,14 @@ from . import native_refresh_motion_patch as _native_refresh_motion_patch
 
 _native_refresh_motion_patch.install()
 
+# Keep that exact native-refresh method, but do not let an ordinary QScrollArea
+# compute several integer positions before Qt has painted the previous one. This
+# is a presentation acknowledgement only; it does not add a compositor, change
+# wheel physics, or replace the normal QWidget/PosterGrid render paths.
+from . import scroll_presentation_patch as _scroll_presentation_patch
+
+_scroll_presentation_patch.install()
+
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
