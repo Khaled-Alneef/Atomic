@@ -2372,6 +2372,60 @@ def screen_frame_s(widget=None) -> float:
 MOTION_MAX_HZ = 120.0
 
 
+def present_frame_s(widget=None) -> float:
+    """The interval between two positions this app will COMMIT, in
+    seconds. Always a whole number of display refreshes, or 0.0 if the
+    refresh rate is unknown.
+
+    **A rate that is not an exact divisor of the panel's is judder, not
+    a saving - measured 28 August 2026 on a 1920x1080 165Hz panel**, the
+    machine this repository is on today (the 240Hz panel the earlier
+    notes in this file were taken on is not attached). The painted
+    grids asked `min(rate, MOTION_MAX_HZ)` for their frames, which is
+    120 against 165: a ratio of 1.375, so a new position lands on one
+    refresh, then two, then one. Screen captured out of process at the
+    panel's own rate, thirteen wheel notches at 55ms on the Anime page:
+
+        frames asked for      positions the app made   refreshes showing
+                                                       nothing new
+        120Hz (as shipped)    95.7/s                   32.8%
+        165Hz (panel rate)    162.3/s                  13.3%
+
+    and the median step the eye had to integrate fell from 11px to 8px
+    with it. 120 was measured on a 240Hz panel, where it happens to be
+    exactly half the refresh; the mistake was writing it down as a rate
+    rather than as a divider.
+
+    So MOTION_MAX_HZ is now a *target* and this is what is actually
+    used: the number of refreshes per committed position, rounded to a
+    whole number. 240Hz -> every 2nd refresh (120, exactly, phase
+    locked); 165 -> every refresh; 144 -> every refresh; 360 -> every
+    3rd (120). A slower exact divider was tried and is much worse -
+    82.5Hz (every 2nd refresh here) measured 50.0% of refreshes showing
+    nothing and 17px steps, and 55Hz gave 65.6% and 29px.
+
+    ATOMIC_PRESENT_HZ overrides the target, so the A/B above can be
+    repeated on another panel without a rebuild."""
+    frame = screen_frame_s(widget)
+    if frame <= 0.0:
+        return 0.0
+    target = MOTION_MAX_HZ
+    override = os.environ.get("ATOMIC_PRESENT_HZ")
+    if override:
+        try:
+            wanted = float(override)
+            if wanted > 0:
+                target = wanted
+        except ValueError:
+            pass
+    rate = 1.0 / frame
+    # round(), not floor(): on a 144Hz panel 144/120 is 1.2, and taking
+    # the floor of that is the only sane answer - but on a 200Hz panel
+    # 200/120 is 1.67 and the nearer divider is 2 (100Hz), not 1.
+    divider = max(1, int(round(rate / target)))
+    return frame * divider
+
+
 def screen_tick_ms(widget=None) -> int:
     """One display refresh, in whole milliseconds.
 
@@ -3294,6 +3348,9 @@ class _Momentum(QObject):
         self._follow_aim = None
         self._follow_at = None
         self._follow_pace_s = 0.0
+        # Frames in a row the follow wrote the same integer - see
+        # _follow_step's stall guard.
+        self._follow_still = 0
         self._vel = 0.0
         self._pending = 0.0          # impulse not yet handed to the velocity
         self._last = 0.0
@@ -3418,9 +3475,22 @@ class _Momentum(QObject):
                 ticker.acquire()
                 self._vblank_on = True
             return
-        self._timer.setInterval(self._tick_ms())
+        # **setInterval restarts a running QTimer**, and that turned the
+        # frame clock into a clock driven by whatever called this.
+        # ScrollBarDrag calls follow() on every pointer sample and
+        # follow() calls this, so during a drag the 6ms timer was
+        # re-armed ~115 times a second and fired at the *mouse's* rate
+        # instead of the panel's - which is the staircase the pacing
+        # exists to remove, reintroduced underneath it. Measured on
+        # Discover, 28 August 2026: 114.6 committed positions a second
+        # against a 165Hz panel, with the presented steps back to a
+        # 7px-then-1px sawtooth however the pacing was tuned.
+        interval = self._tick_ms()
         if not self._timer.isActive():
+            self._timer.setInterval(interval)
             self._timer.start()
+        elif self._timer.interval() != interval:
+            self._timer.setInterval(interval)
 
     def _stop_ticking(self):
         global _GLIDING
@@ -3505,7 +3575,18 @@ class _Momentum(QObject):
             # A drag owns the view while it lasts; the momentum model
             # below is what a *wheel* does and the two must not both be
             # writing the same value.
-            self._follow_step(dt)
+            #
+            # **A tick inside a slot already served does nothing.** The
+            # timer wakes at the panel's rate and the grid above is the
+            # *presentation* rate, which on a 240Hz panel is every
+            # second refresh - so half the wakeups snap to the slot just
+            # served and carry dt = 0. Committing on one of those is the
+            # whole thing present_frame_s exists to stop, and in the
+            # follow below it would be worse than a no-op: the
+            # one-pixel floor there would move the view a pixel on a
+            # frame that owns no time at all.
+            if dt > 0.0:
+                self._follow_step(dt)
             return
         if self._pending:
             handed = self._pending * (1.0 - math.exp(-self.RAMP * dt))
@@ -3575,7 +3656,23 @@ class _Momentum(QObject):
     # already smooth on its own. poster_grid.DRAG_PACE_MIN_S is the pair
     # of these, deliberately the same numbers so the two surfaces match.
     FOLLOW_PACE_MIN_S = 0.008
-    FOLLOW_PACE_MAX_S = 0.50
+    # **0.05, down from 0.50, and that ceiling is what made pacing
+    # dangerous.** The follow moves `gap * dt / pace` each frame, so a
+    # pace of half a second against a 6ms frame advances the position by
+    # a hundredth of the gap - and on a surface where the gap is one
+    # pixel, `int(round())` then does not change for a hundred frames.
+    # That is the Home freeze this mechanism was removed for (value
+    # frozen 46% of the drag, longest plateau 136ms). No real mouse
+    # reports more than 50ms apart while it is being dragged; anything
+    # longer is a hand that has stopped, which the settle branch handles.
+    FOLLOW_PACE_MAX_S = 0.05
+    # How much of the newly measured interval to believe. Windows
+    # coalesces mouse moves, so consecutive samples arrive 4, 16, 8, 12ms
+    # apart on a mouse reporting every 8 - and feeding that straight in
+    # made the follow alternate 1px and 8px frames (measured on Discover,
+    # 28 August 2026). Smoothed, the same drag moves the same distance
+    # every frame.
+    FOLLOW_PACE_BLEND = 0.25
     # **Aim to arrive a little after the next step, not exactly on it.**
     # Pacing a step over the interval the last one took means finishing
     # early whenever the hand slows even slightly - and then standing
@@ -3588,60 +3685,88 @@ class _Momentum(QObject):
     FOLLOW_PACE_LEAD = 1.25
 
     def follow(self, target):
-        """Track a dragged scrollbar thumb: write the value, now.
+        """Where the dragged thumb wants the view. Not written here - the
+        frame clock closes the gap, at one committed position per
+        presentation slot.
 
-        **This used to pace the step, and pacing is what froze Home and
-        Discover.** The idea was sound where it came from - a mouse
-        reports 125 positions a second against a 240Hz panel, so on the
-        painted grids one pointer step is forty pixels of content and
-        landing it in one frame reads as a jump. Spreading it over the
-        estimated interval to the next step fixed that *there*, and
-        poster_grid still does it, untouched.
+        **Writing the pointer's value straight through is the drag half
+        of the owner's "afterimage", and it is now measured rather than
+        argued.** Captured off the screen at the panel's own 165Hz, out
+        of process (in-process capture halves the app - see the harness),
+        one thumb dragged 200 pointer pixels at 125 reports a second:
 
-        On a QScrollArea page it is the opposite of a fix. The value is
-        an integer, and Home's range is 441 against ~380px of thumb
-        travel - about 1.19 content pixels per pointer pixel - so a step
-        *is* a pixel. Spreading one pixel over the 90-450ms the estimate
-        had grown to advances `_pos` by thousandths, `int(round())`
-        never changes, and the view sits still until the arithmetic
-        finally crosses 1. The owner reported it for days as "the whole
-        app freezing while scrolling", and the tell he eventually gave -
-        that the scrollbar handle flickers between teal and the dark
-        colour while he holds it - is the same fact seen from outside:
-        theme.py tints a handle teal on :hover only, so a flickering
-        handle is a handle that is not staying under the pointer.
-        
-        Measured on his own Home page, dragging the real thumb, before
-        and after (a plateau is a stretch where the value did not change
-        at all):
+            surface     content px per   presented steps      refreshes
+                        pointer px                            showing
+                                                              nothing
+            Discover        3.07         3 6 3 6 3 6 3 6 ...    48.9%
+            reader strip   37.6         38 76 38 76 38 76 ...   49.2%
 
-            paced      value frozen 46% of the drag, longest 136ms
-            direct     value frozen  1%,              longest   8ms
+        Both are the same fact: a mouse reports far slower than the panel
+        refreshes, so half the refreshes repeat the frame before and the
+        other half move a double step. An exact 2:1 alternation at ~80Hz
+        is what a second image looks like. 41% of the presented steps
+        were more than 1.5x their local median on both surfaces.
 
-        and the paced path cost about 7ms of work per tick on top, which
-        is why the drag felt heavy as well as stuck.
+        **Why the previous attempt at this froze Home, and why this one
+        cannot.** That version spread a pointer step over the estimated
+        time to the next one and nothing else. On Home a pointer pixel is
+        1.19 content pixels, so it was spreading *one pixel* over 90-450
+        ms: `_pos` advanced by thousandths, `int(round())` never changed,
+        and the value sat frozen for 46% of the drag (longest plateau
+        136ms) - the owner's "the whole app freezing while scrolling".
+        FOLLOW_PACE_MAX_S is the answer to exactly that: the pace is now
+        the interval between two pointer samples, bounded at 50ms, so a
+        frame always moves a useful fraction of the gap and the value
+        can never sit still for a hundred of them.
 
-        `_Momentum` still owns the wheel, its momentum and its friction;
-        this is only the thumb, which is the one gesture where the user
-        is already telling the view exactly where to be. Nothing needs
-        smoothing between a hand and the pixel it is pointing at."""
+        The thumb itself is not paced and never lags: ScrollBarDrag
+        leaves Qt's mouse grab and slider-down state alone, and the
+        handle is drawn from the same value this writes."""
         low, high = float(self._bar.minimum()), float(self._bar.maximum())
-        # A hand on the thumb is the only thing moving the view.
-        self._vel = self._pending = 0.0
-        self._kicks.clear()
-        self._stop_ticking()
-        self._pos = None
+        target = max(low, min(high, float(target)))
+        now = time.monotonic()
+        if self._follow is None:
+            # A hand on the thumb is the only thing moving the view.
+            self._vel = self._pending = 0.0
+            self._kicks.clear()
+            self._pos = float(self._bar.value())
+            # **Only a *new* drag re-anchors the clock.** `_follow_step`
+            # clears `_follow` the moment it lands on a step, which on a
+            # near-1:1 surface is nearly every frame; re-anchoring there
+            # would set `_last` to now and hand the next tick dt = 0, so
+            # the follow would commit on every second frame instead of
+            # every one. `_follow_at` is None only after finish_follow.
+            if self._follow_at is None:
+                self._last = now
+                self._phase = None
+        if self._follow_at is not None:
+            # How long the last pointer step took to arrive is the best
+            # estimate of how long the next one has - led, so the follow
+            # is still moving when it lands. See FOLLOW_PACE_LEAD.
+            gap_s = min(max(now - self._follow_at, self.FOLLOW_PACE_MIN_S),
+                        self.FOLLOW_PACE_MAX_S) * self.FOLLOW_PACE_LEAD
+            if not self._follow_pace_s:
+                self._follow_pace_s = gap_s
+            else:
+                self._follow_pace_s += (self.FOLLOW_PACE_BLEND
+                                        * (gap_s - self._follow_pace_s))
+        self._follow_at = now
+        self._follow = self._follow_aim = target
+        self._start_ticking()
+
+    def finish_follow(self):
+        """The hand let go: land on the last thing it asked for, exactly,
+        and stop. No coast - a frame skipped during the drag must not
+        become distance delivered after it."""
+        if self._follow is not None:
+            low, high = float(self._bar.minimum()), float(self._bar.maximum())
+            self._set_value(int(round(max(low, min(high, self._follow)))))
         self._follow = self._follow_aim = None
         self._follow_at = None
         self._follow_pace_s = 0.0
-        self._set_value(int(round(max(low, min(high, float(target))))))
-
-    def finish_follow(self):
-        """The hand let go. Nothing to land: `follow` writes the value on
-        the sample it is given, so the view is already where the thumb
-        is. Kept because ScrollBarDrag calls it on release."""
-        self._follow_at = None
-        self._follow_pace_s = 0.0
+        self._stop_ticking()
+        self._pos = None
+        self._phase = None
 
     def following(self) -> bool:
         return self._follow is not None
@@ -3651,26 +3776,57 @@ class _Momentum(QObject):
         gap = self._follow - self._pos
         if abs(gap) <= self.FOLLOW_SETTLE_PX:
             self._pos = self._follow
-            self._bar.setValue(int(round(self._pos)))
+            self._set_value(int(round(self._pos)))
+            if self._follow_at is not None:
+                # The hand is still down; it has simply not moved since
+                # the last frame. Keep the clock running rather than
+                # stopping and restarting it per pointer sample - a
+                # restarted timer re-phases against the refresh and adds
+                # up to a whole frame of latency to the next step.
+                return True
             self._follow = None
             self._stop_ticking()
             self._pos = None
             return False
-        # Spread this pointer step over the time the next one is due in,
-        # re-asked every frame off the time actually left, so the frames
-        # all move the same distance - see FOLLOW_TAU_S for the A/B.
-        left = 0.0
-        if self._follow_at is not None:
-            # **Never a pace shorter than two frames.** Below that there
-            # is no spreading left to do - the whole step lands in the
-            # next frame - and a fast hand on a short page hits it
-            # constantly. Measured on Discover (2.5px per pointer pixel,
-            # 81 px/s): with an 8ms floor, 36% of frames moved nothing
-            # and the rest moved up to 6px; with this floor, 4% and 2px.
-            pace = max(self._follow_pace_s, 2.0 * dt)
-            left = pace - (time.monotonic() - self._follow_at)
-        self._pos += gap * min(1.0, dt / max(dt, left, 1e-6))
-        self._bar.setValue(int(round(self._pos)))
+        # **Move at the rate the pointer is arriving, not at the time
+        # left before it arrives.** Spreading a step over the time
+        # remaining until the next sample was the first cut and it only
+        # half worked: once the next sample is due sooner than one frame
+        # - which at 8ms samples against a 6.06ms refresh is most of the
+        # time - `left` falls below `dt`, the fraction saturates at 1,
+        # and the whole step lands in one frame with nothing in the
+        # next. Measured on Discover, 3.07 content px per pointer px:
+        # the exact 3 6 3 6 alternation was broken up but 28.9% of
+        # refreshes still showed nothing.
+        #
+        # Dividing by the sample *interval* instead makes the follow run
+        # at the pointer's own velocity: it settles about one sample
+        # behind the hand (~10ms, under one frame of the eye's notice)
+        # and every frame then moves the same distance. The lag is not a
+        # backlog - finish_follow lands exactly on the last thing the
+        # hand asked for, so nothing is delivered after the release.
+        pace = max(self._follow_pace_s, dt)
+        self._pos += gap * min(1.0, dt / pace)
+        before = self._last_value
+        self._set_value(int(round(self._pos)))
+        # **The stall guard, and it is the only thing left of the floor
+        # this used to carry.** A flat one-pixel-per-frame floor was
+        # tried on 28 August 2026 and measured worse than no pacing at
+        # all on the evenness that matters: it forced a pixel whenever
+        # the arithmetic asked for less, so Discover's drag alternated
+        # 1px and 8px frames. What the floor was really guarding against
+        # is the Home freeze (see FOLLOW_PACE_MAX_S), and a bounded pace
+        # already makes that impossible - this only catches the case
+        # where it somehow is not: three frames written with the same
+        # integer while a whole pixel is owed.
+        if self._last_value == before and abs(gap) >= 1.0:
+            self._follow_still += 1
+            if self._follow_still >= 3:
+                self._follow_still = 0
+                self._pos += math.copysign(1.0, gap)
+                self._set_value(int(round(self._pos)))
+        else:
+            self._follow_still = 0
         return True
 
     def shift(self, delta):
@@ -3769,34 +3925,64 @@ class ScrollBarDrag(QObject):
         return max(1, groove.height() - thumb.height()), groove
 
     def _bar_drag(self, bar, event):
-        """Stop any wheel glide when a hand lands on the bar, and let Qt
-        drag the thumb itself.
+        """The pointer sets a target; the frame clock closes the gap.
 
-        **This used to take the drag over completely, and that is no
-        longer worth anything.** The takeover existed so the pointer set
-        a *target* and `_Momentum.follow` closed the gap on the frame
-        clock, instead of Qt writing the value on all 125 mouse samples a
-        second. Now that `follow` writes the value on the sample it is
-        given - see the note there, and the measurement that forced it -
-        the takeover computes precisely what Qt's own slider drag
-        computes, from the same numbers.
+        **The press and the release are left to Qt, and only the moves
+        are taken.** That split is the whole of what the previous two
+        versions each got half right.
 
-        What it still cost was the *state*. Consuming the press means Qt
-        never enters slider-drag mode: `bar.isSliderDown()` measured
-        False for 100% of a drag, with no mouse grabber, so nothing kept
-        the handle under the pointer. theme.py tints a handle teal on
-        `:hover` only, so the handle kept dropping out of teal and back
-        as the pointer crossed off it - the owner's "the teal color
-        stutters while I am holding and dragging", 28 August 2026. A
-        native drag cannot do that: Qt grabs the mouse and the handle
-        follows the pointer exactly.
+        Taking the *press* was what broke the handle: Qt then never
+        enters slider-drag mode, `bar.isSliderDown()` measured False for
+        100% of a drag with no mouse grabber, and theme.py tints a handle
+        teal on `:hover` only - so the handle dropped out of teal
+        whenever the pointer crossed off it. The owner's "the teal color
+        stutters while I am holding and dragging", 28 August 2026. Not
+        taking the press keeps the grab, the slider-down state and the
+        teal.
 
-        The press is still watched, for the one thing Qt does not do:
-        a wheel glide still running has to stop, or it and the hand
-        would both be writing the value."""
-        if event.type() == QEvent.Type.MouseButtonPress:
+        Leaving the *moves* to Qt is the other half, and it is the drag
+        half of the afterimage. Qt writes the value on every mouse
+        sample, which is ~85-125 a second against a 165Hz panel, so the
+        content moves in an exact 2:1 alternation with half the
+        refreshes showing nothing new - measured off the screen at 165Hz
+        (see `_Momentum.follow`): Discover 3 6 3 6..., 48.9% dead; the
+        reader strip 38 76 38 76..., 49.2% dead.
+
+        So the move is consumed and turned into a target. The thumb does
+        not lag for it: Qt draws the handle from the bar's value, which
+        is what the follow writes, so handle and content stay one
+        object.
+
+        A press on the *track* rather than the handle is a page jump and
+        stays entirely Qt's - `_drag_from` is None and nothing here
+        touches it."""
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress:
+            self._drag_from = None
             if event.button() == Qt.MouseButton.LeftButton:
+                # A wheel glide still running has to stop, or it and the
+                # hand would both be writing the value.
                 self._cancel()
+                thumb = self._thumb_rect(bar)
+                where = event.position()
+                if thumb.contains(int(where.x()), int(where.y())):
+                    span, groove = self._groove_span(bar, thumb)
+                    # Where inside the handle the hand landed, so the
+                    # handle does not jump under it on the first move.
+                    self._drag_from = (where.y() - thumb.y(),
+                                       groove.y(), span)
+            return False
+        if kind == QEvent.Type.MouseButtonRelease:
+            if self._drag_from is not None:
+                self._drag_from = None
+                self._motion.finish_follow()
+            return False
+        if kind == QEvent.Type.MouseMove and self._drag_from is not None:
+            grab, groove_top, span = self._drag_from
+            top = event.position().y() - grab - groove_top
+            low, high = bar.minimum(), bar.maximum()
+            self._motion.follow(low + (high - low) * (top / float(span)))
+            return True
         return False
 
     def eventFilter(self, obj, event):
@@ -3859,7 +4045,7 @@ def smooth_bar_drag(area, motion=None):
     if motion is None:
         motion = _Momentum(area.verticalScrollBar(),
                            lambda: screen_tick_ms(area), area,
-                           frame_s=lambda: screen_frame_s(area))
+                           frame_s=lambda: present_frame_s(area))
     return ScrollBarDrag(area, motion)
 
 
@@ -3999,7 +4185,7 @@ class _SmoothWheel(QObject):
         # The motion itself lives in _Momentum (see its docstring for the
         # measurement that retired the per-notch curve this used to run).
         self._motion = _Momentum(area.verticalScrollBar(), self._tick_ms, self,
-                                 frame_s=lambda: screen_frame_s(self._area))
+                                 frame_s=lambda: present_frame_s(self._area))
         # The thumb drag is its own object now, shared with the
         # surfaces that have no _SmoothWheel - see ScrollBarDrag.
         self._bar_drag_filter = ScrollBarDrag(area, self._motion)
@@ -4581,7 +4767,7 @@ class SideScroller(QWidget):
         # mid-glide adds to it instead of fighting it - which is what
         # the old code needed `_wheel_target = None` to paper over.
         self._motion = _Momentum(self._bar, lambda: screen_tick_ms(self), self,
-                                 frame_s=lambda: screen_frame_s(self))
+                                 frame_s=lambda: present_frame_s(self))
 
         area.viewport().installEventFilter(self)
         # maximumHeight, not height(): the caller pins the area's height

@@ -754,23 +754,16 @@ class PosterGrid(QWidget):
         24 August 2026, and a motion model that assumes one while the
         panel does the other is wrong on every frame. Cached, and thrown
         away on resize because that is when a window changes screens."""
-        try:
-            screen = self.screen()
-            rate = screen.refreshRate() if screen is not None else 0.0
-        except Exception:
-            rate = 0.0
-        if not rate or rate <= 0:
-            return 0.0
-        # **Capped like every other surface.** This read the panel rate
-        # straight, so when widgets.screen_tick_ms was capped at 120Hz on
-        # 27 August 2026 these grids kept asking for 240 frames a second
-        # - and they are Home's shelves, Discover's rows and the category
-        # grids, which is most of the scrolling in the app. Measured by
-        # capturing the screen: the panel presents a new position every
-        # ~8.3ms whatever is asked of it, so the frames above that rate
-        # are drawn and thrown away, which is the cost this module's own
-        # _schedule_frame docstring already measured from the other side.
-        return 1.0 / min(rate, widgets_module.MOTION_MAX_HZ)
+        # **A whole number of refreshes, never a flat rate cap** - see
+        # widgets.present_frame_s for the measurement. `min(rate, 120)`
+        # was right on the 240Hz panel it was taken on, where 120 is
+        # exactly half the refresh, and wrong on every panel where it is
+        # not: on this machine's 165Hz it asked for a position every
+        # 8.33ms against a 6.06ms refresh, so a third of all refreshes
+        # showed nothing new (32.8%, against 13.3% at the panel's own
+        # rate) and the steps between the ones that did were half as
+        # many and twice as big.
+        return widgets_module.present_frame_s(self)
 
     # ---- scrolling -------------------------------------------------------
     def scroll_offset(self) -> int:

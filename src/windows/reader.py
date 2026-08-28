@@ -81,7 +81,7 @@ from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
                              finish_toast, frameless_dialog,
                              freeze_covered, show_toast,
                              use_hover_cursor, _Momentum, screen_tick_ms,
-                             screen_frame_s, smooth_bar_drag,
+                             present_frame_s, smooth_bar_drag,
                              smooth_combo, smooth_scrolling)
 from windows.tracker import correct_progress, format_chapter_progress
 
@@ -1785,7 +1785,7 @@ class _StripView(QScrollArea):
             self.verticalScrollBar(), lambda: screen_tick_ms(self), self,
             friction=READER_WHEEL_FRICTION, accel_max=1.0,
             ramp=READER_WHEEL_RAMP, max_speed=math.inf,
-            frame_s=lambda: screen_frame_s(self))
+            frame_s=lambda: present_frame_s(self))
         self.verticalScrollBar().sliderPressed.connect(self._wheel_motion.cancel)
         # **And the thumb drag, which this surface never had.** Qt's own
         # drag writes the bar once per mouse report - 125 a second - and
