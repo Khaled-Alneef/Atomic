@@ -29,17 +29,19 @@ from . import motion_patch as _motion_patch
 
 _motion_patch.install()
 
-# Small vertical PosterGrid surfaces (not the large virtualized libraries and
-# not horizontal PosterStrip shelves) use the same scene-graph strategy while
-# wheel momentum is active on >=200 Hz displays.
-from . import poster_grid_quick_patch as _poster_grid_quick_patch
+# IMPORTANT: do not install poster_grid_quick_patch here. Movies currently use
+# PosterGrid's original painted motion path and are the owner's perfect control.
+# Discover must use that exact same path rather than a special small-grid Quick
+# compositor that made its card motion differ from Movies.
 
-_poster_grid_quick_patch.install()
-
-# Home/Discover hero work is deliberately installed last.  Its import hook is
-# only for windows.home, so it cannot bypass motion_patch's helpers.widgets
-# finder; once Home has finished importing, helpers.widgets already exists and
-# the patch can safely make PageSlide wheel-aware and defer hero repaint work.
+# Keep hero artwork/fade work out of active wheel frames.
 from . import hero_scroll_patch as _hero_scroll_patch
 
 _hero_scroll_patch.install()
+
+# Installed after hero_scroll_patch so its PageSlide handoff is authoritative:
+# first-wheel routing goes straight to the visible vertical scroll owner, and a
+# horizontal scrollbar press reveals the live nested row before dragging it.
+from . import home_discover_interaction_patch as _home_discover_interaction_patch
+
+_home_discover_interaction_patch.install()
