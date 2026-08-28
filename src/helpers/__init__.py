@@ -27,6 +27,13 @@ from . import scroll_presentation_patch as _scroll_presentation_patch
 
 _scroll_presentation_patch.install()
 
+# Episode-list spoiler art follows the real watched state, and single
+# out-of-order watched marks stay exact instead of manufacturing contiguous
+# progress for the episode before them.
+from . import episode_watch_state_patch as _episode_watch_state_patch
+
+_episode_watch_state_patch.install()
+
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
