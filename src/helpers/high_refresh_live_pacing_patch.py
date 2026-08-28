@@ -2,14 +2,18 @@
 
 The Qt Quick compositor has its own 200+ Hz presentation loop, but
 motion_patch also replaced helpers.widgets.present_frame_s globally with the
-raw screen refresh. That made *live QWidget* surfaces try to repaint at every
-240 Hz refresh too. On a 2K/125% panel that is much more work than the same
-logical UI at 1080p and missed frames become uneven steps.
+raw screen refresh. Heavy generic live QWidget surfaces use the exact-divider
+policy below: 240 Hz uses 120 Hz (every second refresh), while lower rates keep
+their natural cadence.
 
-Restore the original exact-divider policy for live QWidget motion: 240 Hz uses
-120 Hz (every second refresh), 165/144 Hz use every refresh, and lower rates are
-unchanged. The decoupled Quick wheel path remains 240 Hz because motion_patch
-explicitly drives it from screen_frame_s().
+Home and Discover are the deliberate exception. They are permanently detached
+from the page-wide Quick compositor because their hero + nested horizontal rows
+must stay interactive while the page moves. Capping those two pages to 120 Hz
+therefore made them the only primary pages visibly updating every second refresh
+on the owner's 240 Hz panel. Their opaque-ground scroll path has already been
+measured sustaining ~200+ body paints/s, so let those two live pages use the
+screen cadence directly. This changes only presentation pacing; their scroll
+physics, nested input, compositor detach and DPR lifecycle stay untouched.
 
 SideScroller also had a _Momentum object but its horizontal scrollbar drag was
 still raw Qt mouse-sample stepping. Attach a horizontal version of the existing
@@ -31,6 +35,32 @@ _INSTALLED = False
 _PATCHED = False
 
 
+def _is_native_live_page(widget) -> bool:
+    """Whether `widget` belongs to Home or Discover.
+
+    Use class/module names rather than importing windows.home/tracker here: this
+    patch is installed while those modules may still be importing, and pulling
+    either one in from helpers would create a circular-import startup hazard.
+    Parent walking is cheap (a handful of QWidget ancestors) and runs only when
+    a motion tick asks for its presentation interval.
+    """
+    node = widget
+    for _ in range(16):
+        if node is None:
+            break
+        try:
+            cls = type(node)
+            name = cls.__name__
+            module = cls.__module__
+            if ((module == "windows.home" and name == "HomePage")
+                    or (module == "windows.tracker" and name == "DiscoverPage")):
+                return True
+            node = node.parentWidget()
+        except (AttributeError, RuntimeError):
+            break
+    return False
+
+
 def _patch_widgets(w):
     global _PATCHED
     if _PATCHED:
@@ -45,6 +75,15 @@ def _patch_widgets(w):
         frame = w.screen_frame_s(widget)
         if frame <= 0.0:
             return 0.0
+
+        # Home and Discover are intentionally live-widget pages. On the 240 Hz
+        # display, making them obey the generic 120 Hz live cap was visibly the
+        # remaining difference from Movies/Quick pages. Their scroll-body
+        # opaque/blit path has already proved it can run near native refresh, so
+        # give only these two pages one motion position per physical refresh.
+        if widget is not None and _is_native_live_page(widget):
+            return frame
+
         target = float(getattr(w, "MOTION_MAX_HZ", 120.0) or 120.0)
         override = os.environ.get("ATOMIC_PRESENT_HZ")
         if override:
