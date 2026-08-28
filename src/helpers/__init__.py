@@ -71,6 +71,14 @@ from . import hero_pages_live_scroll_patch as _hero_pages_live_scroll_patch
 
 _hero_pages_live_scroll_patch.install()
 
+# Restore Harbor-style source coverage without requiring Stremio Desktop: the
+# signed-in account's stream-capable addon collection joins Atomic's own sources
+# only while resolving playback, with a wider concurrent fan-out for slow
+# configured providers.
+from . import source_coverage_patch as _source_coverage_patch
+
+_source_coverage_patch.install()
+
 # Do not install poster_grid_quick_patch: Discover should stay on the same
 # original painted PosterGrid path as the perfect Movies page.
 # Do not install the old Home/Discover hero/interaction interception patches;
