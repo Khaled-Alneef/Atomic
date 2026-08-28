@@ -35,3 +35,11 @@ _motion_patch.install()
 from . import poster_grid_quick_patch as _poster_grid_quick_patch
 
 _poster_grid_quick_patch.install()
+
+# Home/Discover hero work is deliberately installed last.  Its import hook is
+# only for windows.home, so it cannot bypass motion_patch's helpers.widgets
+# finder; once Home has finished importing, helpers.widgets already exists and
+# the patch can safely make PageSlide wheel-aware and defer hero repaint work.
+from . import hero_scroll_patch as _hero_scroll_patch
+
+_hero_scroll_patch.install()
