@@ -2,6 +2,12 @@
 
 import os
 
+# The shared high-refresh scroll surface depends on Qt Quick's threaded scene
+# graph. Qt documents this as the smoother/vsync-driven render loop when there is
+# one visible QQuickWindow. Set it before importing PyQt/creating QApplication;
+# an explicit diagnostic/user override still wins.
+os.environ.setdefault("QSG_RENDER_LOOP", "threaded")
+
 # Qt Quick's requestUpdate path is normally allowed to idle for about 5ms on
 # desktop platforms. That is already longer than one 240 Hz refresh (4.17ms),
 # so a scene-graph surface can miss the monitor cadence even when its render
@@ -29,29 +35,30 @@ from . import startup_dpr_patch as _startup_dpr_patch
 _startup_dpr_patch._MOVE_SETTLE_MS = 80
 _startup_dpr_patch.install()
 
-# Native-refresh Qt Quick compositor for ordinary QScrollArea pages.
+# motion_patch still supplies the proven QWidget motion model and scrollbar
+# integration. Its per-area Quick child is discarded by the shared native
+# Flickable path for opaque main-page scrollers, leaving the live QWidget model
+# as the fallback rather than another native Quick swapchain.
 from . import motion_patch as _motion_patch
 
 _motion_patch.install()
 
-# Keep expensive live QWidget motion phase-locked on 200+ Hz displays and give
-# SideScroller horizontal thumbs the same paced drag model as vertical bars.
-# The Quick compositor's decoupled 240 Hz path remains native-refresh.
+# Keep the horizontal scrollbar drag pacing and the fallback live-widget cadence
+# rules. The shared vertical Flickable intercepts wheel motion before this path.
 from . import high_refresh_live_pacing_patch as _high_refresh_live_pacing_patch
 
 _high_refresh_live_pacing_patch.install()
 
-# Movies is the known-perfect reference. Home and Discover contain a HeroBanner
-# plus nested horizontal scrollers, so their own page-wide Quick windows remain
-# detached. The render-thread compositor installed below is one shared overlay
-# and therefore does not restore those old per-page/native-child problems.
+# Movies is the known-perfect reference. Home and Discover keep their old
+# page-owned compositor surfaces detached; they can use the one shared Flickable
+# without bringing those per-page native children back.
 from . import hero_pages_live_scroll_patch as _hero_pages_live_scroll_patch
 
 _hero_pages_live_scroll_patch.install()
 
-# Browser-like wheel presentation: one shared Qt Quick overlay whose Y movement
-# is driven by QML YAnimator on the scene-graph render thread.  The existing
-# QWidget/Quick implementations remain underneath as automatic fallback paths.
+# One shared Qt Quick Flickable owns high-refresh vertical wheel motion. Python
+# only handles input arrivals/final commit; Flickable owns the intermediate
+# sub-pixel positions in Qt/C++.
 from . import render_thread_scroll_patch as _render_thread_scroll_patch
 
 _render_thread_scroll_patch.install()
