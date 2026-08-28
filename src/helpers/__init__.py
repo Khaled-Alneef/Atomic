@@ -34,6 +34,15 @@ from . import motion_patch as _motion_patch
 
 _motion_patch.install()
 
+# The old shared presentation helper deliberately converted 240 Hz to 120 Hz,
+# so half of the physical refreshes repeated the previous motion position. The
+# owner's native-refresh A/B on the 240 Hz monitor was dramatically clearer.
+# Keep the explicit ATOMIC_PRESENT_HZ override for diagnostics, but make normal
+# production motion adapt to each monitor's actual refresh rate.
+from . import native_refresh_motion_patch as _native_refresh_motion_patch
+
+_native_refresh_motion_patch.install()
+
 # Keep expensive live QWidget motion phase-locked on 200+ Hz displays and give
 # SideScroller horizontal thumbs the same paced drag model as vertical bars.
 # The Quick compositor's decoupled 240 Hz path remains native-refresh.
