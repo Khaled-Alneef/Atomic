@@ -41,6 +41,13 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
+# Global search suggestions use large thumbnail-left rows. Remote Discover
+# posters are filled asynchronously through the existing cover queue/cache so
+# typing stays immediate.
+from . import global_search_visual_patch as _global_search_visual_patch
+
+_global_search_visual_patch.install()
+
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
