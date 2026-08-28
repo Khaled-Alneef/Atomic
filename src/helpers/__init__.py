@@ -63,6 +63,12 @@ from . import render_thread_scroll_patch as _render_thread_scroll_patch
 
 _render_thread_scroll_patch.install()
 
+# Keep the same compositor but soften how physical wheel notches are handed to
+# it, and remove the periodic QWidget thumb wakeup during a render-thread glide.
+from . import flick_input_refinement_patch as _flick_input_refinement_patch
+
+_flick_input_refinement_patch.install()
+
 # Do not install poster_grid_quick_patch: Discover should stay on the same
 # original painted PosterGrid path as the perfect Movies page.
 # Do not install the old Home/Discover hero/interaction interception patches;
