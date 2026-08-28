@@ -1,10 +1,10 @@
-"""Harbor-style visual overlay for Atomic's global search.
+"""One mixed, scrollable visual list for Atomic's global search.
 
-The base search owns the query plumbing and the "open this entry" behavior.
-This patch changes the suggestion surface to match the Harbor reference:
-a dimmed, wide overlay under the persistent search field, two media columns,
-poster-left rows, and Enter meaning "run this query in Discover" rather than
-"open whichever suggestion happens to be highlighted".
+The persistent title-bar search keeps its existing Enter behavior: Enter runs the
+full query on Discover.  Typing additionally opens this Harbor-like dimmed
+suggestion surface.  Watch and Read matches share one list, each row carries its
+artwork, and clicking a row navigates to the matching Watch/Read page and opens
+the title's normal episode/chapter details list.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import threading
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -37,11 +36,12 @@ _CHROME_PATCHED = False
 THUMB_W = 56
 THUMB_H = 82
 ROW_HEIGHT = 94
-MAX_PER_SECTION = 6
-CONTENT_MAX_W = 980
-CONTENT_MIN_W = 720
-CONTENT_SIDE_MARGIN = 48
-COLUMN_GAP = 42
+VISIBLE_ROWS = 7
+MAX_REMOTE_RESULTS = 24
+SEARCH_EACH = 10
+CONTENT_MAX_W = 820
+CONTENT_MIN_W = 620
+CONTENT_SIDE_MARGIN = 40
 _TOKEN_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
@@ -53,11 +53,11 @@ _visual_signals = _VisualSignals()
 
 
 class _AnchorFilter(QObject):
-    """Close the overlay before MainWindow consumes Enter/Escape.
+    """Keep the field focused while allowing keyboard list navigation.
 
-    MainWindow owns the actual key meaning.  This filter returns False so its
-    eventFilter still receives the key; it only makes sure the Harbor surface
-    is gone before Discover opens or Escape leaves the field.
+    Up/Down moves the highlighted suggestion.  Enter/Escape only close the
+    surface and then fall through to MainWindow, where Enter already means
+    "full Discover search" and Escape already means "leave search".
     """
 
     def __init__(self, panel, anchor):
@@ -66,16 +66,20 @@ class _AnchorFilter(QObject):
         self._anchor = anchor
 
     def eventFilter(self, obj, event):
-        if obj is self._anchor and event.type() == QEvent.Type.KeyPress:
-            if event.key() in (
-                Qt.Key.Key_Return,
-                Qt.Key.Key_Enter,
-                Qt.Key.Key_Escape,
-            ):
-                try:
-                    self._panel.close()
-                except RuntimeError:
-                    pass
+        if obj is not self._anchor or event.type() != QEvent.Type.KeyPress:
+            return False
+        key = event.key()
+        if key == Qt.Key.Key_Down:
+            self._panel.move_selection(1)
+            return True
+        if key == Qt.Key.Key_Up:
+            self._panel.move_selection(-1)
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+            try:
+                self._panel.close()
+            except RuntimeError:
+                pass
         return False
 
 
@@ -98,13 +102,6 @@ def _close_window_panel(window):
 
 
 def _show_from_titlebar(bar, text):
-    """Open/update the Harbor surface from the persistent top field.
-
-    main.py intentionally stopped constructing GlobalSearch in the older
-    no-suggestions design.  TitleBar exists before MainWindow connects the
-    field, so patching it here restores suggestions without creating a second
-    query field or changing MainWindow's page-filter/Enter behavior.
-    """
     query = str(text or "")
     try:
         window = bar.window()
@@ -133,9 +130,7 @@ def _show_from_titlebar(bar, text):
 
         panel = global_search.GlobalSearch(window, anchor=bar.search)
         window._search_panel = panel
-        panel.closed.connect(
-            lambda w=window, p=panel: _clear_panel_ref(w, p)
-        )
+        panel.closed.connect(lambda w=window, p=panel: _clear_panel_ref(w, p))
         panel.set_query(query)
         panel.show()
         panel.raise_()
@@ -144,7 +139,7 @@ def _show_from_titlebar(bar, text):
         try:
             from helpers import logs
 
-            logs.exception("Could not open Harbor global search suggestions")
+            logs.exception("Could not open global search suggestions")
         except Exception:
             pass
 
@@ -157,19 +152,26 @@ def _local_art_path(entry):
     return ""
 
 
-def _kind_for_saved(entry):
-    return "movie" if str(entry.get("type") or "").strip().lower() == "movie" else "series"
+def _route_for_entry_type(entry_type):
+    return "manga" if str(entry_type or "").strip().lower() in (
+        "manga", "manhwa", "manhua"
+    ) else "series"
 
 
-def _meta_text(year="", rating="", suffix=""):
-    bits = []
+def _display_kind(entry_type):
+    route = _route_for_entry_type(entry_type)
+    return "Read" if route == "manga" else "Watch"
+
+
+def _meta_text(entry_type, year="", rating="", suffix=""):
+    bits = [_display_kind(entry_type), str(entry_type or "").strip()]
     if year:
-        bits.append(str(year))
+        bits.append(str(year).strip())
     if rating:
-        bits.append(f"★ {rating}")
+        bits.append(f"★ {str(rating).strip()}")
     if suffix:
         bits.append(str(suffix))
-    return "   •   ".join(bits)
+    return "  •  ".join(bit for bit in bits if bit)
 
 
 def _cover_worker(module, query, token, url):
@@ -181,89 +183,93 @@ def _cover_worker(module, query, token, url):
         if found:
             path = str(found)
     except Exception:
-        module.logs.exception("Global search: Harbor suggestion artwork failed")
+        module.logs.exception("Global search: suggestion artwork failed")
     finally:
         _visual_signals.ready.emit(query, token, path)
 
 
-def _harbor_worker(module, query):
-    """Fetch Movies and Series concurrently without blocking app shutdown.
-
-    lookup_pool's latest worker is already daemonized.  These two children are
-    daemon threads too (not ThreadPoolExecutor workers), so a slow catalog can
-    never become an interpreter-exit join.  Parallel lookup also prevents a
-    slow Series request from holding Movies off-screen, or vice versa.
-    """
-    found = {"movie": [], "series": []}
+def _search_worker(module, query):
+    """Fetch Watch + Read suggestions in parallel, then emit one mixed list."""
+    found = {"series": [], "movie": [], "reading": []}
     lock = threading.Lock()
     done = threading.Event()
-    remaining = 2
+    remaining = 3
 
-    def one(kind):
+    def finish(kind, rows):
         nonlocal remaining
-        rows = []
-        try:
-            rows = module.discover.discover_video(
-                kind, query, limit=MAX_PER_SECTION
-            ) or []
-        except Exception:
-            module.logs.exception(f"Global search: {kind} suggestions failed")
         with lock:
-            found[kind] = list(rows)
+            found[kind] = list(rows or [])
             remaining -= 1
             if remaining <= 0:
                 done.set()
 
-    for kind in ("movie", "series"):
-        threading.Thread(
-            target=one,
-            args=(kind,),
-            name=f"global-search-{kind}",
-            daemon=True,
-        ).start()
+    def video(kind):
+        rows = []
+        try:
+            rows = module.discover.discover_video(kind, query, limit=SEARCH_EACH) or []
+        except Exception:
+            module.logs.exception(f"Global search: {kind} suggestions failed")
+        finish(kind, rows)
 
-    # discover.py already bounds each request.  This outer wait is only a guard
-    # against a provider path violating its own timeout.
+    def reading():
+        rows = []
+        try:
+            # Prefer the same site-aware reading search used by Tracker when it
+            # exists, because its URL makes the chapter list open immediately.
+            search = getattr(module.discover, "discover_reading_sites", None)
+            if callable(search):
+                rows = search(query=query, limit=SEARCH_EACH) or []
+            else:
+                rows = module.discover.discover_reading(query, limit=SEARCH_EACH) or []
+        except Exception:
+            module.logs.exception("Global search: reading suggestions failed")
+        finish("reading", rows)
+
+    threading.Thread(target=video, args=("series",), daemon=True,
+                     name="global-search-series").start()
+    threading.Thread(target=video, args=("movie",), daemon=True,
+                     name="global-search-movie").start()
+    threading.Thread(target=reading, daemon=True,
+                     name="global-search-reading").start()
+
+    # Each provider already has its own bounded request timeout.  The outer
+    # guard only prevents a broken provider from holding this latest-query job.
     done.wait(22.0)
-    rows = list(found["movie"]) + list(found["series"])
-    module._signals.ready.emit(query, rows)
 
+    rows = []
+    for source in ("series", "movie", "reading"):
+        for original in found[source]:
+            row = dict(original)
+            if source == "reading":
+                entry_type = str(row.get("type") or "").strip()
+                if entry_type.lower() not in ("manga", "manhwa", "manhua"):
+                    entry_type = "Manga"
+            elif source == "movie":
+                entry_type = "Movie"
+            else:
+                entry_type = str(row.get("type") or "Series").strip() or "Series"
+                if entry_type.lower() not in ("anime", "series"):
+                    entry_type = "Series"
+            row["_atomic_entry_type"] = entry_type
+            rows.append(row)
 
-def _make_header(module, text):
-    label = QLabel(text)
-    label.setStyleSheet(
-        f"color:{module.theme.TEXT_DIM}; background:transparent; "
-        "font-size:10px; font-weight:600;"
-    )
-    font = QFont(label.font())
-    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2.0)
-    label.setFont(font)
-    return label
-
-
-def _make_list(owner):
-    view = QListWidget()
-    view.setObjectName("HarborSearchList")
-    view.setFrameShape(QFrame.Shape.NoFrame)
-    view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-    view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    view.setSpacing(2)
-    view.itemActivated.connect(owner._open)
-    view.itemClicked.connect(owner._open)
-    return view
+    needle = query.strip().lower()
+    rows.sort(key=lambda row: (
+        not str(row.get("title") or "").lower().startswith(needle),
+        str(row.get("title") or "").lower(),
+        0 if _route_for_entry_type(row.get("_atomic_entry_type")) == "series" else 1,
+    ))
+    module._signals.ready.emit(query, rows[:MAX_REMOTE_RESULTS])
 
 
 def _make_row(module, title, meta, path=""):
-    """Poster-left row matching Harbor's search result density."""
     from helpers import images
 
     row = QWidget()
     row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
     outer = QHBoxLayout(row)
-    outer.setContentsMargins(0, 5, 8, 5)
-    outer.setSpacing(12)
+    outer.setContentsMargins(8, 5, 12, 5)
+    outer.setSpacing(13)
 
     thumb = QLabel()
     thumb.setFixedSize(THUMB_W, THUMB_H)
@@ -300,8 +306,7 @@ def _make_row(module, title, meta, path=""):
 
     meta_label = QLabel(meta)
     meta_label.setStyleSheet(
-        f"color:{module.theme.TEXT_MUTED}; background:transparent; "
-        "font-size:11px;"
+        f"color:{module.theme.TEXT_MUTED}; background:transparent; font-size:11px;"
     )
     texts.addWidget(meta_label)
     texts.addStretch(1)
@@ -319,9 +324,7 @@ def _set_row_art(module, widget, path):
         from helpers import images
 
         pix = images.thumbnail_or_avatar(
-            path,
-            getattr(widget, "_atomic_search_title", ""),
-            (THUMB_W, THUMB_H),
+            path, getattr(widget, "_atomic_search_title", ""), (THUMB_W, THUMB_H)
         )
         label = getattr(widget, "_atomic_search_thumb", None)
         if label is not None and not pix.isNull():
@@ -330,7 +333,7 @@ def _set_row_art(module, widget, path):
     except (RuntimeError, AttributeError):
         pass
     except Exception:
-        module.logs.exception("Global search: could not paint Harbor artwork")
+        module.logs.exception("Global search: could not paint suggestion artwork")
 
 
 def _patch_search(module):
@@ -345,10 +348,6 @@ def _patch_search(module):
 
     def init(self, window, anchor=None):
         old_init(self, window, anchor=anchor)
-
-        # The old compact list still owns nothing we need visually; keep it
-        # hidden so its base wiring/data helpers remain available without
-        # painting a second suggestion surface behind this one.
         self.results.hide()
         self.empty.hide()
 
@@ -356,169 +355,141 @@ def _patch_search(module):
         base.setContentsMargins(0, 0, 0, 0)
         base.setSpacing(0)
 
-        self.setObjectName("HarborSearchOverlay")
+        self.setObjectName("UnifiedSearchOverlay")
         self.setStyleSheet(
-            "QDialog#HarborSearchOverlay {"
+            "QDialog#UnifiedSearchOverlay {"
             " background-color: rgba(5, 7, 12, 222);"
             " border: none; border-radius: 0px;"
             "}"
-            "QListWidget#HarborSearchList {"
+            "QListWidget#UnifiedSearchList {"
             " background: transparent; border: none; outline: 0;"
             "}"
-            "QListWidget#HarborSearchList::item {"
+            "QListWidget#UnifiedSearchList::item {"
             " background: transparent; border: none; padding: 0px;"
+            " border-radius: 8px;"
             "}"
-            "QListWidget#HarborSearchList::item:selected,"
-            "QListWidget#HarborSearchList::item:hover {"
-            " background: transparent; border: none;"
+            f"QListWidget#UnifiedSearchList::item:selected,"
+            f"QListWidget#UnifiedSearchList::item:hover {{"
+            f" background: {module.theme.SURFACE_HOVER}; border: none;"
             "}"
         )
 
-        self._harbor_content = QWidget()
-        self._harbor_content.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, False
+        self._visual_content = QWidget()
+        content = QVBoxLayout(self._visual_content)
+        content.setContentsMargins(0, 14, 0, 12)
+        content.setSpacing(8)
+
+        self._visual_list = QListWidget()
+        self._visual_list.setObjectName("UnifiedSearchList")
+        self._visual_list.setFrameShape(QFrame.Shape.NoFrame)
+        self._visual_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._visual_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._visual_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._visual_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._visual_list.setSpacing(2)
+        module.smooth_scrolling(self._visual_list)
+        self._visual_list.itemActivated.connect(self._open)
+        self._visual_list.itemClicked.connect(self._open)
+        content.addWidget(self._visual_list)
+
+        self._visual_status = QLabel("")
+        self._visual_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._visual_status.setStyleSheet(
+            f"color:{module.theme.TEXT_MUTED}; background:transparent; font-size:12px;"
         )
-        content = QVBoxLayout(self._harbor_content)
-        content.setContentsMargins(0, 14, 0, 0)
-        content.setSpacing(10)
-
-        columns_widget = QWidget()
-        columns = QHBoxLayout(columns_widget)
-        columns.setContentsMargins(0, 0, 0, 0)
-        columns.setSpacing(COLUMN_GAP)
-
-        self._harbor_sections = {}
-        for kind, heading in (("movie", "MOVIES"), ("series", "SERIES")):
-            column = QWidget()
-            layout = QVBoxLayout(column)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            header = _make_header(module, heading)
-            view = _make_list(self)
-            layout.addWidget(header)
-            layout.addWidget(view)
-            columns.addWidget(column, 1)
-            self._harbor_sections[kind] = {
-                "column": column,
-                "header": header,
-                "view": view,
-            }
-
-        content.addWidget(columns_widget)
-
-        self._harbor_status = QLabel("")
-        self._harbor_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._harbor_status.setStyleSheet(
-            f"color:{module.theme.TEXT_MUTED}; background:transparent; "
-            "font-size:12px;"
-        )
-        content.addWidget(self._harbor_status)
+        content.addWidget(self._visual_status)
 
         base.addWidget(
-            self._harbor_content,
+            self._visual_content,
             0,
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
         )
 
-        self._harbor_seen = {"movie": set(), "series": set()}
-        self._harbor_query_active = False
+        self._seen = set()
         _visual_signals.ready.connect(self._on_visual_thumb_ready)
         self._anchor_filter = None
         if self._anchor is not None:
             self._anchor_filter = _AnchorFilter(self, self._anchor)
             self._anchor.installEventFilter(self._anchor_filter)
 
-    def add_item(self, kind, item, title, meta, path=""):
-        section = self._harbor_sections[kind]
-        view = section["view"]
-        if view.count() >= MAX_PER_SECTION:
-            return False
+    def add_item(self, item, title, meta, path=""):
         item.setSizeHint(QSize(0, ROW_HEIGHT))
-        view.addItem(item)
-        view.setItemWidget(item, _make_row(module, title, meta, path))
-        return True
+        self._visual_list.addItem(item)
+        self._visual_list.setItemWidget(item, _make_row(module, title, meta, path))
 
-    def add_saved_matches(self, query):
-        # Keep media the user already owns at the head of the matching Harbor
-        # column.  Non-media entries deliberately stay out of this surface:
-        # Enter now means Discover, and this overlay is the Discover preview.
+    def add_saved(self, query):
         for title, page, _label, entry in module.collect(query):
-            if page != "series":
+            if page not in ("series", "manga"):
                 continue
-            kind = _kind_for_saved(entry)
-            key = str(title).strip().lower()
-            if not key or key in self._harbor_seen[kind]:
+            entry_type = str(entry.get("type") or ("Manga" if page == "manga" else "Series"))
+            route = "manga" if page == "manga" else "series"
+            key = (route, title.strip().lower())
+            if not title.strip() or key in self._seen:
                 continue
-            year = entry.get("year") or entry.get("release_year") or ""
-            meta = _meta_text(year, "", "Saved")
+            meta = _meta_text(
+                entry_type,
+                entry.get("year") or entry.get("release_year") or "",
+                "",
+                "Saved",
+            )
             item = QListWidgetItem(title)
-            item.setData(Qt.ItemDataRole.UserRole, (page, entry))
-            if add_item(self, kind, item, title, meta, _local_art_path(entry)):
-                self._harbor_seen[kind].add(key)
+            item.setData(Qt.ItemDataRole.UserRole, ("saved", page, entry))
+            add_item(self, item, title, meta, _local_art_path(entry))
+            self._seen.add(key)
 
     def set_query(self, query: str):
         query = str(query or "")
         self._query = query
         self._rows = []
         self._discover_rows = []
-        self._harbor_seen = {"movie": set(), "series": set()}
-        self._harbor_query_active = bool(query.strip())
-
-        for section in self._harbor_sections.values():
-            section["view"].clear()
+        self._seen = set()
+        self._visual_list.clear()
 
         if not query.strip():
-            self._harbor_status.setText("")
+            self._visual_status.setText("")
             self._relayout(searching=False)
             return False
 
-        add_saved_matches(self, query)
-        have_local = any(
-            section["view"].count() for section in self._harbor_sections.values()
-        )
-        self._harbor_status.setText("" if have_local else "Searching…")
-
-        # Same latest-query discipline as the base implementation, but the
-        # worker itself now asks Movies and Series in parallel.
-        module.lookup_pool.submit_latest(
-            "global-search", _harbor_worker, module, query
-        )
+        add_saved(self, query)
+        self._visual_status.setText("Searching…")
+        module.lookup_pool.submit_latest("global-search", _search_worker, module, query)
         self._relayout(searching=True)
+        if self._visual_list.count():
+            self._visual_list.setCurrentRow(0)
         return True
 
     def on_discover_ready(self, query, rows):
         if query != self._query:
             return
-
         self._discover_rows = list(rows or [])
         from helpers import images
 
         for row in self._discover_rows:
-            row_type = str(row.get("type") or "").strip().lower()
-            if row_type == "movie":
-                kind = "movie"
-            elif row_type in ("series", "anime"):
-                kind = "series"
-            else:
-                continue
-
             title = str(row.get("title") or "").strip()
-            key = title.lower()
-            if not title or key in self._harbor_seen[kind]:
+            entry_type = str(row.get("_atomic_entry_type") or row.get("type") or "Series")
+            route = _route_for_entry_type(entry_type)
+            key = (route, title.lower())
+            if not title or key in self._seen:
                 continue
 
-            year = str(row.get("year") or "").strip()
-            rating = str(row.get("imdbRating") or "").strip()
-            meta = _meta_text(year, rating, "")
+            meta = _meta_text(
+                entry_type,
+                row.get("year") or "",
+                row.get("imdbRating") or "",
+                "",
+            )
             item = QListWidgetItem(title)
-            item.setData(Qt.ItemDataRole.UserRole, (module._DISCOVER, row))
+            item.setData(Qt.ItemDataRole.UserRole, ("discover", entry_type, row))
 
-            poster = str(row.get("poster") or "")
-            token = f"{query}\x1f{kind}\x1f{title}\x1f{poster}"
+            poster = str(row.get("poster") or row.get("cover_url") or "")
+            token = f"{query}\x1f{route}\x1f{title}\x1f{poster}"
             item.setData(_TOKEN_ROLE, token)
 
             path = ""
-            if poster:
+            existing = row.get("cover_path")
+            if existing:
+                path = str(existing)
+            elif poster:
                 try:
                     cached = images.cache_path_for_url(poster)
                     if cached.is_file():
@@ -526,50 +497,43 @@ def _patch_search(module):
                 except Exception:
                     path = ""
 
-            if not add_item(self, kind, item, title, meta, path):
-                continue
-
-            self._harbor_seen[kind].add(key)
+            add_item(self, item, title, meta, path)
+            self._seen.add(key)
             if poster and not path:
-                module.lookup_pool.submit_cover(
-                    _cover_worker, module, query, token, poster
-                )
+                module.lookup_pool.submit_cover(_cover_worker, module, query, token, poster)
 
-        total = sum(
-            section["view"].count() for section in self._harbor_sections.values()
+        count = self._visual_list.count()
+        self._visual_status.setText(
+            "" if count else "No suggestions — press Enter to search Discover."
         )
-        self._harbor_status.setText(
-            "" if total else "No suggestions — press Enter to search Discover."
-        )
+        if count and self._visual_list.currentRow() < 0:
+            self._visual_list.setCurrentRow(0)
         self._relayout(searching=False)
 
     def on_visual_thumb_ready(self, query, token, path):
         if query != self._query or not path:
             return
-        for section in self._harbor_sections.values():
-            view = section["view"]
-            for index in range(view.count()):
-                item = view.item(index)
-                if item.data(_TOKEN_ROLE) == token:
-                    _set_row_art(module, view.itemWidget(item), path)
-                    return
+        for index in range(self._visual_list.count()):
+            item = self._visual_list.item(index)
+            if item.data(_TOKEN_ROLE) == token:
+                _set_row_art(module, self._visual_list.itemWidget(item), path)
+                return
 
     def relayout(self, searching):
-        movie_count = self._harbor_sections["movie"]["view"].count()
-        series_count = self._harbor_sections["series"]["view"].count()
-        visible_rows = max(1, min(MAX_PER_SECTION, max(movie_count, series_count)))
-        list_h = visible_rows * ROW_HEIGHT + 4
-        for section in self._harbor_sections.values():
-            section["view"].setFixedHeight(list_h)
+        count = self._visual_list.count()
+        visible_rows = max(1, min(VISIBLE_ROWS, count or 1))
+        list_h = visible_rows * ROW_HEIGHT + 6
+        self._visual_list.setFixedHeight(list_h)
+        self._visual_list.setVisible(count > 0)
 
-        status_h = 24 if self._harbor_status.text() else 0
-        self._harbor_status.setVisible(status_h > 0)
-        self._harbor_content.setFixedHeight(14 + 24 + 8 + list_h + status_h + 12)
+        status_text = self._visual_status.text()
+        self._visual_status.setVisible(bool(status_text))
+        status_h = 26 if status_text else 0
+        self._visual_content.setFixedHeight(14 + list_h + status_h + 12)
         self.place()
 
     def place(self):
         frame = self._window.geometry()
-
         if self._anchor is not None and self._anchor.isVisible():
             point = self._anchor.mapTo(self._window, QPoint(0, 0))
             top = frame.y() + point.y() + self._anchor.height() + 6
@@ -577,41 +541,56 @@ def _patch_search(module):
             top = frame.y() + int(frame.height() * 0.14)
 
         bottom = frame.y() + frame.height()
-        height = max(1, bottom - top)
-        self.setGeometry(frame.x(), top, frame.width(), height)
+        self.setGeometry(frame.x(), top, frame.width(), max(1, bottom - top))
 
         usable = max(320, frame.width() - CONTENT_SIDE_MARGIN * 2)
-        width = min(CONTENT_MAX_W, max(CONTENT_MIN_W, int(frame.width() * 0.68)))
-        width = min(width, usable)
-        self._harbor_content.setFixedWidth(width)
+        width = min(CONTENT_MAX_W, max(CONTENT_MIN_W, int(frame.width() * 0.56)))
+        self._visual_content.setFixedWidth(min(width, usable))
 
     def move_selection(self, delta):
-        # Up/down remains useful for visual orientation, but Enter is *not*
-        # selection activation anymore (see open_current below).
-        views = [
-            self._harbor_sections["movie"]["view"],
-            self._harbor_sections["series"]["view"],
-        ]
-        active = next((v for v in views if v.currentRow() >= 0), None)
-        if active is None:
-            active = next((v for v in views if v.count()), None)
-            if active is not None:
-                active.setCurrentRow(0)
+        count = self._visual_list.count()
+        if count <= 0:
             return
-        if not active.count():
-            return
-        row = max(0, min(active.currentRow() + delta, active.count() - 1))
-        active.setCurrentRow(row)
-        active.scrollToItem(active.item(row))
+        current = self._visual_list.currentRow()
+        if current < 0:
+            current = 0
+        row = max(0, min(current + int(delta), count - 1))
+        self._visual_list.setCurrentRow(row)
+        self._visual_list.scrollToItem(self._visual_list.item(row))
 
-    def open_current(self):
-        # Harbor behavior requested by the owner: typing a query and pressing
-        # Enter is a full search, not an implicit click on row zero.
-        query = str(self._query or "").strip()
-        if not query:
+    def open_item(self, item):
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, tuple) or not payload:
             return
         self.close()
-        module.open_discover(self._window, query, {})
+        try:
+            from windows import tracker
+
+            if payload[0] == "saved":
+                _kind, page_name, entry = payload
+                route = "manga" if page_name == "manga" else "series"
+            elif payload[0] == "discover":
+                _kind, entry_type, row = payload
+                route = _route_for_entry_type(entry_type)
+                entry = tracker.discover_entry(row, entry_type)
+            else:
+                return
+
+            # Put the correct tracker page underneath the details overlay first,
+            # so closing the episode/chapter list lands on Watch or Read rather
+            # than on whichever unrelated page happened to own the search box.
+            self._window.navigate_to(route, animate=False)
+            parent = getattr(self._window, "_current_page", None) or self._window
+            tracker.open_tracker_entry(parent, entry, resume=False)
+        except Exception:
+            module.logs.exception("Global search: could not open suggestion details")
+            module.show_toast(self._window, "Could Not Open That Result")
+
+    def open_current(self):
+        # Enter belongs to MainWindow and intentionally goes to the normal
+        # Discover search page.  Clicking a row is the direct episode/chapter
+        # path above; these two actions must stay different.
+        return
 
     def close_event(self, event):
         try:
@@ -626,13 +605,14 @@ def _patch_search(module):
         old_close(self, event)
 
     Search.__init__ = init
-    Search._atomic_add_harbor_item = add_item
+    Search._atomic_add_visual_item = add_item
     Search.set_query = set_query
     Search._on_discover_ready = on_discover_ready
     Search._on_visual_thumb_ready = on_visual_thumb_ready
     Search._relayout = relayout
     Search.place = place
     Search.move_selection = move_selection
+    Search._open = open_item
     Search.open_current = open_current
     Search.closeEvent = close_event
 
@@ -648,11 +628,9 @@ def _patch_chrome(module):
 
     def init(self, parent=None):
         old_init(self, parent)
-        # textChanged rather than textEdited: Escape clears the field
-        # programmatically in MainWindow, and that must close this surface too.
-        self.search.textChanged.connect(
-            lambda text, bar=self: _show_from_titlebar(bar, text)
-        )
+        # Programmatic clearing on Escape must close the overlay too, hence
+        # textChanged rather than textEdited.
+        self.search.textChanged.connect(lambda text, bar=self: _show_from_titlebar(bar, text))
 
     TitleBar.__init__ = init
 
