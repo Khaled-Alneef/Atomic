@@ -18,6 +18,12 @@ monitor Windows has to migrate that larger native child when the top-level
 window crosses screens. That is wasted work on these pages because their Quick
 path is permanently disabled.
 
+Home/Discover are also the two live pages that receive artwork asynchronously
+while the user may already be scrolling. Keep that visual work off the active
+scroll frame: Home's expensive hero-cover prewarm runs through images.warm on a
+worker, and hero/poster swaps that arrive during a glide are coalesced until the
+glide is idle. The data still arrives immediately; only the repaint waits.
+
 This is intentionally page-local. Other scroll_area() users keep the GPU path,
 and the confirmed startup-DPR fix remains independent.
 """
@@ -31,6 +37,56 @@ import sys
 _TARGETS = {"windows.home", "windows.tracker"}
 _INSTALLED = False
 _PATCHED = set()
+_VISUAL_IDLE_RETRY_MS = 48
+
+
+def _live_motion_active() -> bool:
+    try:
+        from . import widgets
+        return bool(widgets.momentum_active())
+    except Exception:
+        return False
+
+
+def _defer_visual_until_idle(owner, key, callback):
+    """Coalesce one visual update while a live page is scrolling.
+
+    A 48ms retry is deliberately much slower than the frame clock: waiting for
+    idle must not become another timer competing with a 240Hz glide. Repeated
+    updates for the same logical visual replace one another, so a burst of cover
+    arrivals becomes one final paint when motion stops.
+    """
+    try:
+        pending = getattr(owner, "_atomic_deferred_scroll_visuals", None)
+        if pending is None:
+            pending = {}
+            owner._atomic_deferred_scroll_visuals = pending
+        pending[key] = callback
+        if getattr(owner, "_atomic_deferred_scroll_visuals_queued", False):
+            return
+        owner._atomic_deferred_scroll_visuals_queued = True
+
+        from PyQt6.QtCore import QTimer
+
+        def flush():
+            try:
+                if _live_motion_active():
+                    QTimer.singleShot(_VISUAL_IDLE_RETRY_MS, flush)
+                    return
+                queued = dict(getattr(owner, "_atomic_deferred_scroll_visuals", {}))
+                owner._atomic_deferred_scroll_visuals = {}
+                owner._atomic_deferred_scroll_visuals_queued = False
+                for work in queued.values():
+                    try:
+                        work()
+                    except RuntimeError:
+                        pass
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(_VISUAL_IDLE_RETRY_MS, flush)
+    except RuntimeError:
+        pass
 
 
 def _destroy_surface(surface):
@@ -118,12 +174,66 @@ def _patch_home(module):
     if cls is None:
         return
     old_init = cls.__init__
+    old_backdrop = getattr(cls, "_on_hero_backdrop", None)
+    old_overlay = getattr(cls, "_on_hero_overlay", None)
 
     def init(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
         _disable_page_compositors(self)
 
     cls.__init__ = init
+
+    # The source method intentionally warms one hero cover every 120ms, but it
+    # used thumbnail_or_avatar on the GUI thread and its own measurement records
+    # a first decode at 21-26ms. images.warm is the thread-safe Pillow half of
+    # exactly that operation; after it lands, the later GUI request only has the
+    # cheap QPixmap conversion left.
+    if hasattr(cls, "_warm_next_hero_cover"):
+        def warm_next_hero_cover(self):
+            queue = getattr(self, "_hero_warm_queue", None)
+            if not queue:
+                return
+            entry = queue.pop(0)
+            path = entry.get("cover_path")
+            if path:
+                try:
+                    module.threading.Thread(
+                        target=module.images.warm,
+                        args=(path, tuple(module.HERO_COVER_SIZE)),
+                        daemon=True).start()
+                except Exception:
+                    pass
+            if queue:
+                try:
+                    module.QTimer.singleShot(module.HERO_COVER_WARM_MS,
+                                             self._warm_next_hero_cover)
+                except RuntimeError:
+                    pass
+
+        cls._warm_next_hero_cover = warm_next_hero_cover
+
+    if callable(old_backdrop):
+        def hero_backdrop(self, entry_id, path):
+            if _live_motion_active():
+                _defer_visual_until_idle(
+                    self, ("hero-backdrop", entry_id),
+                    lambda s=self, i=entry_id, p=path: old_backdrop(s, i, p))
+                return
+            return old_backdrop(self, entry_id, path)
+
+        cls._on_hero_backdrop = hero_backdrop
+
+    if callable(old_overlay):
+        def hero_overlay(self, entry_id, logo_path, hide_title):
+            if _live_motion_active():
+                _defer_visual_until_idle(
+                    self, ("hero-overlay", entry_id),
+                    lambda s=self, i=entry_id, p=logo_path, h=hide_title:
+                    old_overlay(s, i, p, h))
+                return
+            return old_overlay(self, entry_id, logo_path, hide_title)
+
+        cls._on_hero_overlay = hero_overlay
 
 
 def _patch_tracker(module):
@@ -142,6 +252,7 @@ def _patch_tracker(module):
 
     old_init = cls.__init__
     old_set_tab = cls._set_tab
+    old_poster = getattr(cls, "_on_discover_poster", None)
 
     def init(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
@@ -157,6 +268,25 @@ def _patch_tracker(module):
 
     cls.__init__ = init
     cls._set_tab = set_tab
+
+    # Discover already decodes/cuts poster art on workers. The last ~0.1ms
+    # conversion and setPixmap are cheap individually, but dozens can land while
+    # the vertical page is gliding and each invalidates a painted PosterStrip.
+    # Coalesce those visible swaps until the glide is idle; saved/category tabs
+    # keep their existing behavior.
+    if callable(old_poster):
+        def discover_poster(self, kind, index, path, resolved_url, stamp):
+            if (getattr(self, "_active_tab", None) == "discover"
+                    and _live_motion_active()):
+                _defer_visual_until_idle(
+                    self, ("discover-poster", kind, index),
+                    lambda s=self, k=kind, i=index, p=path,
+                           r=resolved_url, st=stamp:
+                    old_poster(s, k, i, p, r, st))
+                return
+            return old_poster(self, kind, index, path, resolved_url, stamp)
+
+        cls._on_discover_poster = discover_poster
 
 
 def _patch(module):
