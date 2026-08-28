@@ -93,32 +93,6 @@ def set_hide_sections_from_home(enabled: bool):
 
 
 
-def get_reduce_motion() -> bool:
-    """Whether the app moves the view instead of animating it there.
-
-    **The owner's ask, 27 August 2026, after a day of chasing a shake in
-    scrolling that turned out not to be Atomic's.** A plain Qt window
-    with none of this app's code - Qt's own scrolling, Qt's own
-    scrollbar, no animation at all - reproduced it exactly, on the
-    software rasteriser and on Direct3D alike, framed and frameless,
-    windowed and maximized. So the artifact is below anything this
-    codebase writes, and the one lever left on this side is to stop
-    producing motion for the eye to fail to track.
-
-    On: the wheel and the scrollbar move the view straight to where they
-    point, page transitions land instead of sliding, and every tween
-    jumps to its end. Off by default - it overrides the notch distance
-    and friction values tuned over several days, and that is a choice to
-    make deliberately rather than to inherit from an update."""
-    return bool(_load().get("reduce_motion", False))
-
-
-def set_reduce_motion(enabled: bool):
-    data = _load()
-    data["reduce_motion"] = bool(enabled)
-    storage.save(SETTINGS_FILE, data)
-
-
 def get_fullscreen_on_startup() -> bool:
     """Whether an Atomic started by Windows' own startup entry opens full
     screen instead of maximized.
@@ -459,9 +433,16 @@ AI_KEYS = ("openai", "deepseek", "gemini", "anthropic")
 # The heading each key sits under in Settings, in this order. A key with
 # no group here would simply not be drawn, so a new one has to be filed.
 API_KEY_GROUPS = (
-    # **No GitHub row.** There used to be one, for sending a community
-    # rating; the whole Atomic Users Rating feature was removed on
-    # 26 August 2026 and nothing here needs a GitHub token any more.
+    # **No SteamGridDB row** - added and removed on 28 August 2026, the
+    # owner: "remove the SteamGridDB key from the settings ... even in
+    # another device than this one (for all users)". A key-gated cover
+    # source can only answer on the machine its key was pasted into,
+    # which is the wrong shape for artwork; game_art's keyless
+    # appdetails rung is what rescues a brand-new title's header on
+    # every install instead (see helpers/game_art.DETAILS_URL).
+    # `get_api_key("steamgriddb")` still reads settings.json, so a key
+    # somebody pasted is not destroyed - it is simply never asked for
+    # and never shown, the same treatment the debrid key got.
     ("Artwork", ("tmdb",)),
     ("Subtitle Sources", ("subdl", "subsource")),
     ("AI Subtitle Translation", AI_KEYS),

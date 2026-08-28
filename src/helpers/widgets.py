@@ -1063,8 +1063,7 @@ class GridSelection:
         self.select_all_check = QCheckBox("Select All")
         self.select_all_check.toggled.connect(self._on_select_all_toggled)
         row.addWidget(self.select_all_check)
-        self.bulk_delete_btn = QPushButton("Delete", objectName="Danger")
-        self.bulk_delete_btn.clicked.connect(self._delete_selected)
+        self.bulk_delete_btn = trash_button(self._delete_selected)
         row.addWidget(self.bulk_delete_btn)
         bar.setVisible(False)
         self.selection_bar = bar
@@ -1192,17 +1191,38 @@ class GridSelection:
         way round because an accent border is exactly what theme.py's
         #Card:hover rule already draws, so the card under the pointer
         looks bordered whether or not it is picked - the badge is what
-        tells them apart. No glyph in it: a filled accent disc needs no
-        font, and this app has already had a missing-glyph box render as a
-        sliver on a button.
+        tells them apart.
 
         Border stays 1px in both states - QSS border width comes out of
         the widget's content rect, so a thicker one would shift the icon
-        and label inside the card the moment it was picked."""
+        and label inside the card the moment it was picked.
+
+        **A tick inside the disc**, 28 August 2026, the owner: "make the
+        circles on the cards when selected also contain a check mark
+        (Correct) on all pages related". The note this replaces said "no
+        glyph in it", and the reason it gave was sound and is still
+        respected: the missing-glyph box that rendered as a sliver on
+        the filter button came from asking a *font* for a symbol. This
+        asks no font for anything - it is the same drawn asset the
+        checkboxes use (theme.checkmark_pixmap), scaled down with a
+        smooth transform and tagged with the screen's ratio, so it
+        cannot go missing and cannot go soft.
+
+        Cleared rather than left in place when unpicked: a QLabel holding
+        a pixmap keeps drawing it under whatever background the
+        stylesheet sets, so the disc would still carry a tick in
+        ON_ACCENT on a BG-filled circle.
+        """
         badge.setStyleSheet(
             f"background: {theme.ACCENT if selected else theme.BG}; "
             f"border: 2px solid {theme.TEXT if selected else theme.TEXT_MUTED}; "
             f"border-radius: 8px;")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tick = theme.checkmark_pixmap(9) if selected else None
+        if tick is not None:
+            badge.setPixmap(tick)
+        else:
+            badge.clear()
         # Scoped to QFrame#Card so it cannot reach the labels inside the
         # card, and naming only `border` so the app stylesheet's fill
         # still paints - a widget stylesheet is merged with the
@@ -1996,6 +2016,91 @@ class GlyphButton(QPushButton):
         painter.end()
 
 
+# Segoe Fluent's waste bin ("Delete", U+E74D). The one destructive
+# action in this app has one picture, defined once - the details page's
+# Remove From My List, and every page's bulk Delete.
+TRASH_GLYPH = ""
+TRASH_ICON_SIZE = 16
+
+
+def glyph_icon(glyph: str, color: str = None, size: int = TRASH_ICON_SIZE,
+               disabled_color: str = None) -> QIcon:
+    """One icon-font codepoint as a QIcon.
+
+    A QPushButton draws its text in one font, so a button that has to
+    read "Remove From My List" *and* carry a Fluent glyph cannot do it
+    with text - the app font has no U+E74D and would draw a hollow box.
+    An icon can sit beside the label in whatever font it likes.
+
+    The device pixel ratio is taken from the **screen**, not the widget:
+    a widget's own devicePixelRatioF is 1.0 until it has been shown, and
+    an icon built at 1.0 is upscaled by a 125% display and looks soft.
+    Same trap magnifier_icon above records, same fix."""
+    screen = QApplication.primaryScreen()
+    dpr = screen.devicePixelRatio() if screen is not None else 1.0
+    pixmap = QPixmap(int(size * dpr), int(size * dpr))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    # In points, and the glyph is drawn to fill the box: Segoe's icons
+    # sit inside their em, so a pt size equal to the pixel size renders
+    # noticeably smaller than the box asked for.
+    painter.setFont(theme.icon_font(int(size * 0.75)))
+    painter.setPen(QColor(color or theme.TEXT))
+    painter.drawText(QRect(0, 0, size, size),
+                     Qt.AlignmentFlag.AlignCenter, glyph)
+    painter.end()
+    icon = QIcon(pixmap)
+    if disabled_color:
+        # **Drawn again in the dim colour, not left to Qt.** A stylesheet
+        # cannot reach inside an icon, so a disabled button's QSS fade
+        # leaves the glyph at full strength on top of it - which on the
+        # trash button is the whole control, and read as still live. Qt
+        # does synthesise a disabled pixmap, but it is a generic fade of
+        # whatever it was given and lands nowhere near TEXT_DIM against
+        # this ground; painting it is one more drawText and is exact.
+        dim = QPixmap(pixmap.size())
+        dim.setDevicePixelRatio(dpr)
+        dim.fill(Qt.GlobalColor.transparent)
+        p2 = QPainter(dim)
+        p2.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p2.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p2.setFont(theme.icon_font(int(size * 0.75)))
+        p2.setPen(QColor(disabled_color))
+        p2.drawText(QRect(0, 0, size, size),
+                    Qt.AlignmentFlag.AlignCenter, glyph)
+        p2.end()
+        icon.addPixmap(dim, QIcon.Mode.Disabled)
+    return icon
+
+
+def trash_button(on_click, tooltip="Delete", size=40) -> QPushButton:
+    """The bulk-delete control: the bin alone, no word beside it.
+
+    The owner's ask, 28 August 2026 - "in all pages that contains Select
+    button then when pressed it will show delete button, make it only
+    trash symbol button instead of the delete button". Every page's
+    selection bar builds its delete through here, so the two that used
+    to spell out "Delete" independently (this module's SelectMixin and
+    tracker's own copy of the bar) cannot drift apart again.
+
+    Still #Danger, and still last in its row: shrinking the control does
+    not make it less destructive, and the red is most of what says so
+    once the word is gone. The tooltip carries the word for anyone who
+    wants it."""
+    button = QPushButton(objectName="Danger")
+    button.setIcon(glyph_icon(TRASH_GLYPH, theme.ON_ACCENT,
+                              disabled_color=theme.TEXT_DIM))
+    button.setIconSize(QSize(TRASH_ICON_SIZE, TRASH_ICON_SIZE))
+    button.setFixedSize(size, size)
+    button.setToolTip(tooltip)
+    button.clicked.connect(on_click)
+    use_hover_cursor(button)
+    return button
+
+
 SEARCH_ICON_SIZE = 16
 
 
@@ -2235,23 +2340,6 @@ def screen_frame_s(widget=None) -> float:
     return 1.0 / rate if rate and rate > 0 else 0.0
 
 
-# **Reduce motion**: when on, nothing in the app animates - the view is
-# moved, not carried. See app_settings.get_reduce_motion for why this
-# exists. Kept as a module flag rather than read from disk at each call
-# because it is consulted on every wheel notch and every drag sample;
-# main() sets it at startup and the Settings toggle sets it again.
-REDUCE_MOTION = False
-
-
-def set_reduce_motion(enabled: bool):
-    global REDUCE_MOTION
-    REDUCE_MOTION = bool(enabled)
-
-
-def reduce_motion() -> bool:
-    return REDUCE_MOTION
-
-
 # The fastest a **painted** surface will try to move anything, whatever
 # the panel is capable of - see poster_grid._refresh_interval, which is
 # the only caller now.
@@ -2397,20 +2485,6 @@ class SmoothTween(QObject):
         return self._running
 
     def start(self, start_value, end_value, duration_ms=None):
-        if REDUCE_MOTION:
-            # Land on the end value now; no timer, no curve.
-            self._running = False
-            self._timer.stop()
-            try:
-                self._apply(float(end_value))
-            except RuntimeError:
-                return
-            if self._on_done is not None:
-                try:
-                    self._on_done()
-                except RuntimeError:
-                    pass
-            return
         if duration_ms is not None:
             self._duration = max(1, int(duration_ms))
         self._from = float(start_value)
@@ -3262,14 +3336,6 @@ class _Momentum(QObject):
     def kick(self, distance_px, direction):
         """One notch: `direction` is +1 to scroll forward (value up), -1
         back. `distance_px` is the notch's resting travel."""
-        if REDUCE_MOTION:
-            # The whole notch, on the spot - see set_reduce_motion.
-            self.cancel()
-            bar = self._bar
-            step = int(round(float(distance_px))) * (1 if direction > 0 else -1)
-            bar.setValue(max(bar.minimum(),
-                             min(bar.maximum(), bar.value() + step)))
-            return
         now = time.monotonic()
         while self._kicks and now - self._kicks[0] > self.ACCEL_WINDOW_S:
             self._kicks.popleft()
@@ -3522,64 +3588,60 @@ class _Momentum(QObject):
     FOLLOW_PACE_LEAD = 1.25
 
     def follow(self, target):
-        """Glide to `target` instead of jumping there - what a scrollbar
-        drag asks for. Cancels any momentum: a hand on the thumb is the
-        only thing moving the view."""
+        """Track a dragged scrollbar thumb: write the value, now.
+
+        **This used to pace the step, and pacing is what froze Home and
+        Discover.** The idea was sound where it came from - a mouse
+        reports 125 positions a second against a 240Hz panel, so on the
+        painted grids one pointer step is forty pixels of content and
+        landing it in one frame reads as a jump. Spreading it over the
+        estimated interval to the next step fixed that *there*, and
+        poster_grid still does it, untouched.
+
+        On a QScrollArea page it is the opposite of a fix. The value is
+        an integer, and Home's range is 441 against ~380px of thumb
+        travel - about 1.19 content pixels per pointer pixel - so a step
+        *is* a pixel. Spreading one pixel over the 90-450ms the estimate
+        had grown to advances `_pos` by thousandths, `int(round())`
+        never changes, and the view sits still until the arithmetic
+        finally crosses 1. The owner reported it for days as "the whole
+        app freezing while scrolling", and the tell he eventually gave -
+        that the scrollbar handle flickers between teal and the dark
+        colour while he holds it - is the same fact seen from outside:
+        theme.py tints a handle teal on :hover only, so a flickering
+        handle is a handle that is not staying under the pointer.
+        
+        Measured on his own Home page, dragging the real thumb, before
+        and after (a plateau is a stretch where the value did not change
+        at all):
+
+            paced      value frozen 46% of the drag, longest 136ms
+            direct     value frozen  1%,              longest   8ms
+
+        and the paced path cost about 7ms of work per tick on top, which
+        is why the drag felt heavy as well as stuck.
+
+        `_Momentum` still owns the wheel, its momentum and its friction;
+        this is only the thumb, which is the one gesture where the user
+        is already telling the view exactly where to be. Nothing needs
+        smoothing between a hand and the pixel it is pointing at."""
         low, high = float(self._bar.minimum()), float(self._bar.maximum())
-        if REDUCE_MOTION:
-            # Straight to the pointer, every sample - see set_reduce_motion.
-            self.cancel()
-            self._bar.setValue(int(round(max(low, min(high, float(target))))))
-            return
-        if self._pos is None:
-            self._pos = float(self._bar.value())
+        # A hand on the thumb is the only thing moving the view.
         self._vel = self._pending = 0.0
         self._kicks.clear()
-        target = max(low, min(high, float(target)))
-        # **Timed against `_follow_aim`, not `_follow`.** `_follow_step`
-        # clears `_follow` the frame it arrives, so a sample from a hand
-        # that has not moved would read as a fresh step and re-date the
-        # pace to one mouse sample - which puts the whole staircase step
-        # back into a single frame. That is not a hypothetical: it is
-        # what the first cut of this measured, identically to the code
-        # it was replacing.
-        if self._follow_aim is None or abs(target - self._follow_aim) > 1e-9:
-            now = time.monotonic()
-            if self._follow_at is not None:
-                # Smoothed, because the estimate is noisy where it
-                # matters most: a hand crossing a pixel every 12ms
-                # against an 8ms mouse crosses on one sample or the
-                # next, so the raw interval alternates 8/16 and the
-                # follow alternates with it.
-                gap_s = now - self._follow_at
-                self._follow_pace_s = (
-                    gap_s if not self._follow_pace_s
-                    else 0.5 * self._follow_pace_s + 0.5 * gap_s)
-                self._follow_pace_s = max(
-                    self.FOLLOW_PACE_MIN_S,
-                    min(self.FOLLOW_PACE_MAX_S,
-                        self._follow_pace_s * self.FOLLOW_PACE_LEAD))
-            self._follow_at = now
-            self._follow_aim = target
-        self._follow = target
-        # **Only when the clock is not already running.** `_last` is the
-        # integrator's previous tick, and a drag calls this 125 times a
-        # second: resetting it here made every dt the time since the last
-        # *mouse event* rather than since the last frame.
-        if not self.active():
-            self._last = time.monotonic()
-        self._start_ticking()
+        self._stop_ticking()
+        self._pos = None
+        self._follow = self._follow_aim = None
+        self._follow_at = None
+        self._follow_pace_s = 0.0
+        self._set_value(int(round(max(low, min(high, float(target))))))
 
     def finish_follow(self):
-        """The hand let go: land the last quarter-pixel of lead quickly.
-
-        The pace can be half a second on a long page, and the follow is
-        deliberately still moving when the button comes up (see
-        FOLLOW_PACE_LEAD). Spreading that remainder over the full pace
-        would be a slow creep after the release - drift, which is the one
-        thing the owner has asked to be rid of twice."""
-        self._follow_pace_s = min(self._follow_pace_s or 0.08, 0.08)
-        self._follow_at = time.monotonic()
+        """The hand let go. Nothing to land: `follow` writes the value on
+        the sample it is given, so the view is already where the thumb
+        is. Kept because ScrollBarDrag calls it on release."""
+        self._follow_at = None
+        self._follow_pace_s = 0.0
 
     def following(self) -> bool:
         return self._follow is not None
@@ -3707,54 +3769,34 @@ class ScrollBarDrag(QObject):
         return max(1, groove.height() - thumb.height()), groove
 
     def _bar_drag(self, bar, event):
-        """Take over a drag of the scrollbar thumb.
+        """Stop any wheel glide when a hand lands on the bar, and let Qt
+        drag the thumb itself.
 
-        **Why take it over at all.** Qt writes the bar's value on every
-        mouse-move event, and an ordinary mouse reports 125 of those a
-        second against a 240Hz panel - so half the refreshes repeat the
-        frame before and the content moves in double-size steps. That is
-        the owner's "while dragging the scrollbar in low-mid speed it
-        shows that all items on the screen are moving in steps", 25
-        August 2026, and it is the same fault the painted grid had until
-        `poster_grid.DRAG_FOLLOW_TAU_S` was written.
+        **This used to take the drag over completely, and that is no
+        longer worth anything.** The takeover existed so the pointer set
+        a *target* and `_Momentum.follow` closed the gap on the frame
+        clock, instead of Qt writing the value on all 125 mouse samples a
+        second. Now that `follow` writes the value on the sample it is
+        given - see the note there, and the measurement that forced it -
+        the takeover computes precisely what Qt's own slider drag
+        computes, from the same numbers.
 
-        So the pointer sets a *target* and `_Momentum.follow` closes the
-        gap on the frame clock. The event is consumed, which is what
-        keeps Qt from writing the value underneath the follow - two
-        writers on one value would fight every frame.
+        What it still cost was the *state*. Consuming the press means Qt
+        never enters slider-drag mode: `bar.isSliderDown()` measured
+        False for 100% of a drag, with no mouse grabber, so nothing kept
+        the handle under the pointer. theme.py tints a handle teal on
+        `:hover` only, so the handle kept dropping out of teal and back
+        as the pointer crossed off it - the owner's "the teal color
+        stutters while I am holding and dragging", 28 August 2026. A
+        native drag cannot do that: Qt grabs the mouse and the handle
+        follows the pointer exactly.
 
-        Only the thumb: a press on the track is a page jump and belongs
-        to Qt, and letting it through keeps that behaviour exactly as it
-        was."""
-        kind = event.type()
-        if kind == QEvent.Type.MouseButtonPress:
-            if event.button() != Qt.MouseButton.LeftButton:
-                return False
-            point = event.position().toPoint()
-            if not self._thumb_rect(bar).contains(point):
-                self._cancel()      # a track jump; let Qt do it
-                return False
-            self._drag_from = (event.position().y(), float(bar.value()))
-            self._motion.cancel()
-            return True
-        if kind == QEvent.Type.MouseMove and self._drag_from is not None:
-            start_y, start_value = self._drag_from
-            thumb = self._thumb_rect(bar)
-            span, _groove = self._groove_span(bar, thumb)
-            reach = float(bar.maximum() - bar.minimum())
-            moved = event.position().y() - start_y
-            self._motion.follow(start_value + moved * reach / span)
-            return True
-        if kind in (QEvent.Type.MouseButtonRelease,
-                    QEvent.Type.MouseButtonDblClick):
-            if self._drag_from is None:
-                return False
-            # The target stands: the follow has a few milliseconds still
-            # to run and letting it finish is what makes the release land
-            # exactly where the thumb was let go.
-            self._drag_from = None
-            self._motion.finish_follow()
-            return True
+        The press is still watched, for the one thing Qt does not do:
+        a wheel glide still running has to stop, or it and the hand
+        would both be writing the value."""
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._cancel()
         return False
 
     def eventFilter(self, obj, event):
@@ -4065,14 +4107,28 @@ class _EdgeWheelRelay(QObject):
         nearest one among the widget's ancestors' children, searching
         outward. Outward rather than from the window down, so a notch in
         a dialog's margin scrolls that dialog's list and not the page
-        behind it."""
+        behind it.
+
+        **And it stops at that window**, 28 August 2026 - the owner:
+        "while the mouse is in the settings window (positioned), do not
+        able to scroll the app main window". It did not stop: a QDialog's
+        `parentWidget()` is the main window, so the walk climbed straight
+        out of the dialog and found the page's scroll area behind it. The
+        wheel then moved the page under a *modal* dialog, which Qt's own
+        modality would never have allowed - this filter sits on the
+        application and posts the event to its target directly, so it
+        goes around modality rather than through it. The old docstring's
+        promise was right; the loop was one line short of keeping it."""
         from .poster_grid import PosterGrid
+        top = widget.window()
         node = widget
         depth = 0
         while node is not None and depth < 12:
             for area in node.findChildren((QAbstractScrollArea, PosterGrid)):
                 if self._scrolls_vertically(area):
                     return area
+            if node is top:
+                break           # never past the window the pointer is in
             node = node.parentWidget()
             depth += 1
         return None
@@ -4091,6 +4147,7 @@ class _EdgeWheelRelay(QObject):
         if widget is None:
             return False
         node = widget
+        top = widget.window()
         while node is not None:
             if isinstance(node, (QComboBox, QAbstractSpinBox, QSlider)):
                 return False    # these answer the wheel themselves
@@ -4100,6 +4157,8 @@ class _EdgeWheelRelay(QObject):
                 # A scroll area with nothing to scroll (a short list) is
                 # not a reason to stop looking - the page behind it may
                 # still have somewhere to go.
+            if node is top:
+                break           # same boundary _target_for keeps
             node = node.parentWidget()
         area = self._target_for(widget)
         if area is None:
@@ -4397,13 +4456,88 @@ def scroll_area(body: QWidget, always_show_vbar: bool = False,
     return area
 
 
-# The round arrow buttons over a sideways-scrolling row, and the soft
 # **The sideways rows have no arrow buttons** - the owner's ask, 24
 # August 2026: "remove the arrows buttons from all horizontal rows
 # scrolling, make it just the scrollbar". The wheel over the row and the
-# row's own scrollbar are what move it. The edge fades went with them:
-# a fade existed only so a card would dissolve rather than be cut in
-# half by the disc sitting on top of it, and there is no disc now.
+# row's own scrollbar are what move it.
+#
+# **The edge fades came back on 28 August 2026, for a different reason
+# than they left.** They went with the arrows because a fade existed
+# only so a card would dissolve rather than be cut in half by the disc
+# sitting on top of it - no disc, no need. The owner asked for them
+# again that day - "ALL horizontal scrolls make them have a fade effect
+# on the right most, and the left most if scrolled to the right" - and
+# what they say now is *where the row continues*: solid at an end means
+# that is the end, a fade means there is more that way. With the arrows
+# gone there is otherwise nothing on a full row to say it scrolls at
+# all.
+#
+# So the fade is state-driven, not decoration: each side is drawn only
+# when the bar has somewhere to go on that side, and both are absent on
+# a row short enough to need no scrolling.
+
+# How wide each fade is, and where it stops being drawn. FADE_PX is
+# about a third of a poster, wide enough to read as a soft edge rather
+# than a hard vignette; FADE_SLACK_PX keeps a fade off the last few
+# pixels of travel, where a hairline of gradient over a card that is
+# already fully on screen just looks like dirt.
+FADE_PX = 56
+FADE_SLACK_PX = 6
+
+
+class _EdgeFade(QWidget):
+    """The two gradients over a horizontal row's ends.
+
+    A child painted on top rather than something SideScroller draws
+    itself: a QWidget paints *before* its children, and the row is a
+    child, so anything the scroller painted would land underneath the
+    cards it is supposed to be fading out.
+
+    Mouse-transparent, so it changes nothing about clicking, dragging a
+    card out of the row, or the wheel."""
+
+    def __init__(self, parent, ground):
+        super().__init__(parent)
+        self._ground = QColor(ground)
+        self._left = False
+        self._right = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+    def set_ends(self, left, right):
+        if (left, right) == (self._left, self._right):
+            return          # nothing to repaint - this is called per scroll frame
+        self._left, self._right = left, right
+        self.update()
+
+    def paintEvent(self, event):
+        if not (self._left or self._right):
+            return
+        painter = QPainter(self)
+        height = self.height()
+        for side, wanted in (("left", self._left), ("right", self._right)):
+            if not wanted:
+                continue
+            if side == "left":
+                gradient = QLinearGradient(0, 0, FADE_PX, 0)
+                gradient.setColorAt(0.0, self._ground)
+                gradient.setColorAt(1.0, rgba_color(self._ground, 0))
+                painter.fillRect(QRect(0, 0, FADE_PX, height), gradient)
+            else:
+                start = max(0, self.width() - FADE_PX)
+                gradient = QLinearGradient(start, 0, self.width(), 0)
+                gradient.setColorAt(0.0, rgba_color(self._ground, 0))
+                gradient.setColorAt(1.0, self._ground)
+                painter.fillRect(QRect(start, 0, FADE_PX, height), gradient)
+        painter.end()
+
+
+def rgba_color(colour, alpha):
+    """`colour` at `alpha`. A QColor copy, because setAlpha mutates and
+    these are held on the widget."""
+    out = QColor(colour)
+    out.setAlpha(int(alpha))
+    return out
 
 
 class SideScroller(QWidget):
@@ -4416,11 +4550,20 @@ class SideScroller(QWidget):
     now they are gone: the geometry is one line and a layout would only
     add a solver to it."""
 
-    def __init__(self, area: QScrollArea, parent=None):
+    def __init__(self, area: QScrollArea, ground=None, parent=None):
         super().__init__(parent)
         self._area = area
         area.setParent(self)
         self._bar = area.horizontalScrollBar()
+
+        # `ground` is what the fades dissolve into, so it has to be the
+        # colour the row is actually sitting on - PANEL_FILL for the
+        # tracker's strips, BG for Home's. Defaulted rather than
+        # required: every caller passes one today, and a future one that
+        # forgets gets the common case instead of a black band.
+        self._fade = _EdgeFade(self, ground or theme.PANEL_FILL)
+        self._bar.valueChanged.connect(self._sync_fade)
+        self._bar.rangeChanged.connect(lambda *_a: self._sync_fade())
 
         # **The arrows use the same momentum the wheel does** - the
         # owner's ask, 24 August 2026, that the horizontal rows be made
@@ -4511,6 +4654,28 @@ class SideScroller(QWidget):
 
     def _layout_children(self):
         self._area.setGeometry(self.rect())
+        # _row_height, not height(): the scrollbar's strip along the
+        # bottom is not somewhere the fade should paint - see that
+        # method, which records the 11px this got wrong before.
+        self._fade.setGeometry(0, 0, self.width(), self._row_height())
+        self._fade.raise_()
+        self._sync_fade()
+
+    def _sync_fade(self, *_args):
+        """Fade the ends the row continues past, and only those.
+
+        FADE_SLACK_PX of dead zone at each end: a bar one pixel off its
+        minimum is at the start for every purpose a reader has, and a
+        hairline of gradient there reads as grime on the artwork rather
+        than as "there is more this way"."""
+        try:
+            low, high = self._bar.minimum(), self._bar.maximum()
+            value = self._bar.value()
+        except RuntimeError:
+            return
+        scrollable = high > low
+        self._fade.set_ends(scrollable and value > low + FADE_SLACK_PX,
+                            scrollable and value < high - FADE_SLACK_PX)
 
 
 # ---- Frameless dialogs ---------------------------------------------------

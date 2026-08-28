@@ -28,6 +28,7 @@ the cover resumes.** Before this page existed the two did nearly the
 same thing for video and the owner rightly called that broken.
 """
 
+import copy
 import datetime
 import re
 import threading
@@ -38,8 +39,8 @@ from pathlib import Path
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt,
                           QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QBrush, QColor, QCursor, QLinearGradient, QPainter,
-                         QPainterPath, QPixmap, QTransform)
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QIcon, QLinearGradient,
+                         QPainter, QPainterPath, QPixmap, QTransform)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QVBoxLayout, QWidget,
@@ -49,9 +50,10 @@ from helpers import (anime_identity, app_settings, artwork, hero_art, history,
                      images,
                      logs, lookup_pool, net, storage, theme)
 from helpers.poster_grid import PosterGrid
-from helpers.widgets import (Card, GlassPage, GlyphButton, PickCombo, confirm,
-                             frameless_dialog, freeze_covered,
-                             scroll_area, show_toast,
+from helpers.widgets import (TRASH_GLYPH, TRASH_ICON_SIZE, Card, GlassPage,
+                             GlyphButton, PickCombo, confirm,
+                             frameless_dialog, freeze_covered, glyph_icon,
+                             scroll_area, show_toast, show_undo_toast,
                              use_hover_cursor)
 
 try:
@@ -1210,11 +1212,20 @@ class DetailsPage(GlassPage):
         # A Discover title arrives here unsaved - no id (see
         # tracker._discover_entry) - and this list is where deciding to
         # keep it happens, so Save lives at the top of it (the owner's
-        # ask). An entry opened from Saved never shows it.
-        self._save_btn = QPushButton("+  Save to My List", objectName="Accent")
+        # ask).
+        #
+        # **It is a toggle now, and it never hides**, 28 August 2026, the
+        # owner: "when the read/watch is saved do not hide this btn, make
+        # it says Remove From My List". It used to disappear entirely for
+        # an entry opened from Saved and go dead reading "Saved to My
+        # List" the moment one was saved, so this list could add a title
+        # to the library but never take one out of it - the only way back
+        # was to find the card on Saved. `_sync_save_button` owns both
+        # faces; `_toggle_saved` is the one handler.
+        self._save_btn = QPushButton()
         self._save_btn.setFixedHeight(44)
         use_hover_cursor(self._save_btn)
-        self._save_btn.clicked.connect(self._save_entry)
+        self._save_btn.clicked.connect(self._toggle_saved)
         # **Into the layout first, and only then made visible.** The
         # owner, 25 August 2026, with a screenshot: "a small window
         # (white) appears then closes in a moment". This is it - a
@@ -1222,7 +1233,7 @@ class DetailsPage(GlassPage):
         # and all, until something reparents it a frame later. Every
         # unsaved title opened from Discover flashed one.
         column.addWidget(self._save_btn)
-        self._save_btn.setVisible(not self.entry.get("id"))
+        self._sync_save_button()
 
         self._search = QLineEdit()
         self._search.setPlaceholderText(
@@ -3177,24 +3188,52 @@ class DetailsPage(GlassPage):
                 box.addItems([f"Episode {n}" for n in range(1, last + 1)])
                 box.setCurrentIndex(current - 1)
                 use_hover_cursor(box)
+            # **One picker when only one thing is being picked**, 28
+            # August 2026, the owner: "while the selected is One
+            # Episode, do not show From ep/ch to ep/ch, make it only one
+            # selection button". "From" and "To" over two identical
+            # drop-downs describe a range; with the scope set to a single
+            # episode, the second one was disabled and the first was still
+            # captioned "From:", which reads as half a range somebody
+            # forgot to finish. The caption becomes the plain "Episode:"
+            # and the second half of the row goes away entirely.
+            from_label = QLabel("From:")
+            to_label = QLabel("To:")
             range_row = QHBoxLayout()
-            range_row.addWidget(QLabel("From:"))
+            range_row.addWidget(from_label)
             range_row.addWidget(first_box, stretch=1)
-            range_row.addWidget(QLabel("To:"))
+            range_row.addWidget(to_label)
             range_row.addWidget(last_box, stretch=1)
             column.addLayout(range_row)
 
         # Which audio the picked release should carry. A preference over
         # release names (dual-audio/dub tags), not a track switch - see
         # downloads._order_by_audio for what it can and cannot promise.
+        #
+        # **Anime only**, 28 August 2026, the owner: "only show the Audio
+        # selection option while download page while in Anime, and
+        # completely remove this button selection from series and
+        # movies". It used to offer "Japanese (original)" against
+        # "English dub" for everything, which for a live-action series
+        # was steering the release pick with a language nothing in it
+        # speaks - and there is no second audio to choose between for a
+        # title watched in the language it was made in. A row with one
+        # real answer is not a choice, so it is not drawn.
+        #
+        # The value still travels with the job: "orig" means "prefer the
+        # ordinary release, not a dub-tagged one", which is the right
+        # request for every non-anime title and is what anime's old "jp"
+        # always meant (downloads._split_by_audio treats them alike).
+        from helpers import stremio as _stremio
         audio_box = PickCombo()
-        audio_box.addItem("Japanese (original)", "jp")
-        audio_box.addItem("English dub (when a release has one)", "en")
-        use_hover_cursor(audio_box)
-        audio_row = QHBoxLayout()
-        audio_row.addWidget(QLabel("Audio:"))
-        audio_row.addWidget(audio_box, stretch=1)
-        column.addLayout(audio_row)
+        audio_box.addItem("Japanese (original)", "orig")
+        if _stremio.is_anime_entry(self.entry):
+            audio_box.addItem("English dub (when a release has one)", "en")
+            use_hover_cursor(audio_box)
+            audio_row = QHBoxLayout()
+            audio_row.addWidget(QLabel("Audio:"))
+            audio_row.addWidget(audio_box, stretch=1)
+            column.addLayout(audio_row)
 
         count_label = QLabel("", objectName="Muted")
         count_label.setWordWrap(True)
@@ -3217,9 +3256,18 @@ class DetailsPage(GlassPage):
             if is_movie:
                 count_label.setText("The film will be queued for download.")
                 return
+            whole = scope.currentIndex() == 2
             ranged = scope.currentIndex() == 1
-            first_box.setEnabled(scope.currentIndex() != 2)
             last_box.setEnabled(ranged)
+            # Hidden rather than merely disabled: a greyed-out "To:" is
+            # still a caption saying a range is being chosen, and a
+            # greyed-out "Episode: 4" under "The Whole Season" is a
+            # number that has nothing to do with what will be queued.
+            from_label.setText("From:" if ranged else "Episode:")
+            from_label.setVisible(not whole)
+            first_box.setVisible(not whole)
+            to_label.setVisible(ranged)
+            last_box.setVisible(ranged)
             count = len(picked_numbers())
             count_label.setText(
                 f"{count} episode{'s' if count != 1 else ''} of season "
@@ -3300,10 +3348,21 @@ class DetailsPage(GlassPage):
             use_hover_cursor(box)
             box.view().setMinimumWidth(420)
             box.view().setFont(box.font())
+        # **One picker when only one thing is being picked**, 28
+        # August 2026, the owner: "while the selected is One
+        # Episode, do not show From ep/ch to ep/ch, make it only one
+        # selection button". "From" and "To" over two identical
+        # drop-downs describe a range; with the scope set to a single
+        # chapter, the second one was disabled and the first was still
+        # captioned "From:", which reads as half a range somebody
+        # forgot to finish. The caption becomes the plain "Chapter:"
+        # and the second half of the row goes away entirely.
+        from_label = QLabel("From:")
+        to_label = QLabel("To:")
         range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("From:"))
+        range_row.addWidget(from_label)
         range_row.addWidget(first_box, stretch=1)
-        range_row.addWidget(QLabel("To:"))
+        range_row.addWidget(to_label)
         range_row.addWidget(last_box, stretch=1)
         column.addLayout(range_row)
 
@@ -3322,7 +3381,11 @@ class DetailsPage(GlassPage):
             return list(reversed(candidates[low:high + 1]))
 
         def sync(*_args):
-            last_box.setEnabled(scope.currentIndex() == 1)
+            ranged = scope.currentIndex() == 1
+            last_box.setEnabled(ranged)
+            from_label.setText("From:" if ranged else "Chapter:")
+            to_label.setVisible(ranged)
+            last_box.setVisible(ranged)
             count = len(picked())
             count_label.setText(
                 f"{count} chapter{'s' if count != 1 else ''} will be saved "
@@ -3352,13 +3415,118 @@ class DetailsPage(GlassPage):
         self._dialog_buttons(dialog, column, start)
         dialog.exec()
 
-    # ---- saving an unsaved (Discover-opened) title --------------------
+    # ---- saving and unsaving --------------------------------------
+    def _sync_save_button(self):
+        """Put the one button into the face this entry calls for.
+
+        Saved entries get the destructive face, and it is deliberately
+        *not* #Accent: this is the largest button on the page and the
+        first thing a thumb lands on, and dressing "delete a tracked
+        title" in the same green as the page's primary action is how a
+        mis-tap loses somebody's progress. Nothing else about it moves -
+        same place, same height - so it still reads as the same control
+        having changed its mind."""
+        saved = bool(self.entry.get("id"))
+        self._save_btn.setText("Remove From My List" if saved
+                               else "+  Save to My List")
+        # A QIcon, not a glyph in the label: a QPushButton paints its
+        # text in one font, and the app font has no U+E74D - the bin
+        # would be a hollow box beside the words. widgets.glyph_icon
+        # renders it in the Fluent font at the screen's own ratio.
+        if saved:
+            self._save_btn.setIcon(glyph_icon(TRASH_GLYPH, theme.TEXT))
+            self._save_btn.setIconSize(QSize(TRASH_ICON_SIZE, TRASH_ICON_SIZE))
+        else:
+            self._save_btn.setIcon(QIcon())
+        self._save_btn.setObjectName("" if saved else "Accent")
+        # A QSS objectName change is not re-applied on its own - the
+        # style has already been computed for the old name. Measured the
+        # hard way once on the sidebar: unpolish/polish is what makes it
+        # take, and the repaint after it is what makes it show.
+        self._save_btn.style().unpolish(self._save_btn)
+        self._save_btn.style().polish(self._save_btn)
+        self._save_btn.update()
+
+    def _toggle_saved(self):
+        """The button's one handler: keep it, or stop keeping it."""
+        if self.entry.get("id"):
+            self._unsave_entry()
+        else:
+            self._save_entry()
+
+    def _unsave_entry(self):
+        """Take this title back out of its tracker file.
+
+        The whole record is copied before it goes and offered back on an
+        undo toast, rather than guarded by a confirm dialog. That is the
+        house pattern for a removal from a list (tracker._delete_entry,
+        games._remove), and it is the right one here for a reason of its
+        own: this is a *toggle*, and a modal question in the middle of a
+        toggle is worse than an offer to put it back - an entry carries
+        far more than its title (progress, cover, the cached schedule and
+        its checked-at stamp, resolved site ids), so "just save it again"
+        is not the same thing as undoing.
+
+        The page behind the overlay drops the row when this one closes -
+        see tracker._on_inapp_closed, which had no "it is gone from disk"
+        branch until this button could make one happen."""
+        entry_id = self.entry.get("id")
+        if not entry_id:
+            return
+        try:
+            from windows.tracker import _progress_data_file
+            data_file = _progress_data_file(self.entry)
+            entries = storage.load(data_file, [])
+            index = next((i for i, e in enumerate(entries)
+                          if e.get("id") == entry_id), None)
+            if index is None:
+                # Already gone - another surface deleted it while this
+                # overlay sat open. The button is simply wrong, not the
+                # file, so re-face it and say nothing.
+                self.entry.pop("id", None)
+                self._sync_save_button()
+                return
+            removed = copy.deepcopy(entries.pop(index))
+            storage.save(data_file, entries)
+        except Exception:
+            logs.exception("details page could not remove the entry")
+            show_toast(self, "Could Not Remove That")
+            return
+        self.entry.pop("id", None)
+        # link_entry writes `entry.get("id") or None`, so calling it with
+        # the id gone is what unlinks the History row - History and the
+        # tracker stay one story in both directions.
+        history.link_entry(self.entry)
+        self._sync_save_button()
+        title = removed.get("title") or "that"
+        show_undo_toast(
+            self, f"Removed '{title}' From Saved - Click to Undo",
+            lambda rec=removed, at=index, f=data_file:
+                self._restore_entry(rec, at, f))
+
+    def _restore_entry(self, record, index, data_file):
+        """Put an unsaved record back where it was, with everything it
+        carried. Clamped, because another surface can have shortened the
+        list while the toast was up."""
+        try:
+            entries = storage.load(data_file, [])
+            if not any(e.get("id") == record.get("id") for e in entries):
+                entries.insert(min(index, len(entries)), record)
+                storage.save(data_file, entries)
+            self.entry["id"] = record.get("id")
+            history.link_entry(self.entry)
+            self._sync_save_button()
+        except Exception:
+            logs.exception("details page could not restore the entry")
+            return "Could Not Restore That"
+        return f"Restored '{record.get('title') or 'that'}'"
+
     def _save_entry(self):
         """Write this title into its tracker file.
 
         The id stamped here is what flips every "is it saved" check in
-        the app, this button's own visibility rule included; the page
-        that opened this one adopts the new row when the overlay closes.
+        the app, this button's own face included; the page that opened
+        this one adopts the new row when the overlay closes.
 
         **This docstring used to claim the id reaches the caller's own
         dict because it is "written in place rather than onto a copy".
@@ -3400,8 +3568,9 @@ class DetailsPage(GlassPage):
         # a row already in History gains the new entry's id rather than
         # sitting there looking unsaved forever.
         history.link_entry(self.entry)
-        self._save_btn.setText("Saved to My List")
-        self._save_btn.setEnabled(False)
+        # Not "Saved to My List" and disabled any more - the button
+        # stays live and turns into the way back out (_sync_save_button).
+        self._sync_save_button()
         show_toast(self, f"'{self.entry.get('title')}' Added to Saved")
         # A reading title picked off Discover can arrive with no
         # cover_url at all (the Madara search shape names none) - its
@@ -3734,6 +3903,15 @@ class DetailsPage(GlassPage):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.leave()
+            return
+        # **R re-asks for the list**, 28 August 2026, the owner's ask -
+        # the same thing the header's refresh button does, which is the
+        # key the reader has always used for the same idea. Safe beside
+        # the search field without a focus check: Qt hands a key to the
+        # focused widget first and a QLineEdit consumes its own letters,
+        # so this is only ever reached when the list itself has focus.
+        if event.key() == Qt.Key.Key_R and not event.modifiers():
+            self._refresh_list()
             return
         super().keyPressEvent(event)
 

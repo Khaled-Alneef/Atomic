@@ -14,6 +14,7 @@ listed there.
 
 import os
 import copy
+import random
 import re
 import threading
 import time
@@ -47,7 +48,8 @@ from helpers.widgets import (
     defer_grid_rebuild, finish_toast, frameless_dialog, hero_logo_label,
     hero_split, inform, scroll_area, set_hero_logo, show_toast,
     SmoothTween,
-    show_undo_toast, use_hover_cursor, DriftButton,
+    show_undo_toast, trash_button, use_hover_cursor, DriftButton,
+    TRASH_GLYPH, TRASH_ICON_SIZE, glyph_icon,
 )
 
 # Soft, for the same reason reader.py soft-imports chapter_source: a
@@ -1861,7 +1863,27 @@ class ContinueCover(QLabel):
             # the pointer will actually reach.
             self._frosted = frosted_cover(self._sharp)
         target = 1.0 if (hovered and self._frosted is not None) else 0.0
-        if abs(target - self._mix) < 1e-3:
+        # **"Already there" is only true if nothing is still on its way
+        # somewhere else.** This read `abs(target - self._mix) < 1e-3`
+        # alone, and that is the owner's stuck card of 28 August 2026 -
+        # a poster left frosted with its play button showing while the
+        # pointer was three cards away.
+        #
+        # The sequence is a *quick flick* across a card, and it needs no
+        # unusual timing at all: Enter starts the fade-in, the Leave
+        # arrives while `_mix` is still 0.000, this guard reads "already
+        # at 0, nothing to do" and returns - leaving the fade-in running.
+        # It then climbs all the way to 1.0 with nobody watching, because
+        # _CardHoverRelay has already unhovered and stopped its poll.
+        # Reproduced in two calls with no waiting between them:
+        # set_hovered(True); set_hovered(False) leaves mix=0.0000 and the
+        # tween running, and one second later mix=1.0000 with the button
+        # visible.
+        #
+        # Asking the tween too is the whole fix: a running fade is
+        # retargeted by the start() below (SmoothTween re-aims rather
+        # than queueing), or stopped outright by the settle branch.
+        if abs(target - self._mix) < 1e-3 and not self._fade.running:
             return
         if target == 0.0 and not self.isVisible():
             # Nothing will tick a fade on a widget that is not being
@@ -1881,6 +1903,22 @@ class ContinueCover(QLabel):
         self._fade.start(self._mix, target,
                          COVER_FADE_IN_MS if target > self._mix
                          else COVER_FADE_OUT_MS)
+
+    @property
+    def is_lit(self) -> bool:
+        """Whether any frost is on screen. What tells a watcher there is
+        still something to settle."""
+        return self._mix > 0.0
+
+    @property
+    def fading(self) -> bool:
+        """Whether a fade is still in flight - which can be true with
+        `_mix` at exactly 0.0, and that combination is the defect
+        set_hovered's guard records."""
+        try:
+            return bool(self._fade.running)
+        except Exception:
+            return False
 
     def hideEvent(self, event):
         """**A fade that is interrupted never finishes, and the ring it
@@ -2008,13 +2046,25 @@ class _CardHoverRelay(QObject):
         try:
             if not self._pointer_on_card():
                 self._unhover()
+            elif not self._cover.is_lit and not self._cover.fading:
+                self._poll.stop()   # settled and the pointer left; nothing to watch
         except RuntimeError:
             self._poll.stop()
 
     def _unhover(self):
-        self._poll.stop()
         self._leaving = False
         self._cover.set_hovered(False)
+        # **The poll stops when the cover is actually dark, not when the
+        # pointer leaves.** It used to stop here unconditionally, which
+        # is what left nobody watching a fade that had been told to go
+        # to 0 and did not - see ContinueCover.set_hovered for the flick
+        # that produced one. The guard above is the fix; this is the
+        # second pair of eyes, and it costs a widgetAt every 250ms only
+        # while a cover is still lit.
+        if self._cover.is_lit or self._cover.fading:
+            self._poll.start()
+        else:
+            self._poll.stop()
 
 
 def attach_continue_cover(card, cover):
@@ -3293,13 +3343,19 @@ class TrackerPage(GlassPage):
             self._bulk_status_menu.addAction(
                 status, lambda checked=False, s=status: self._apply_bulk_status(s))
         self.bulk_status_btn.setMenu(self._bulk_status_menu)
+        # The pointing hand, like the bin beside it - the owner's ask, 28
+        # August 2026. `use_hover_cursor` is already the right thing to
+        # reach for and not a permanent setCursor: it holds the hand only
+        # while the pointer is genuinely inside, and drops it the moment
+        # the button is disabled, which is exactly the "when it is
+        # active" half of the ask (see _HoverCursorFilter).
+        use_hover_cursor(self.bulk_status_btn)
         row.addWidget(self.bulk_status_btn)
         # Last in the row and the only "Danger" thing on the page, so the
         # button that destroys data is not the one nearest the pointer
         # after picking a card, and doesn't read as another neutral
         # toolbar action beside Select All and Clear.
-        self.bulk_delete_btn = QPushButton("Delete", objectName="Danger")
-        self.bulk_delete_btn.clicked.connect(self._delete_selected)
+        self.bulk_delete_btn = trash_button(self._delete_selected)
         row.addWidget(self.bulk_delete_btn)
         bar.setVisible(False)
         self.selection_bar = bar
@@ -3321,6 +3377,7 @@ class TrackerPage(GlassPage):
                       else "Click cards to pick them")
         self.bulk_status_btn.setEnabled(count > 0)
         self.bulk_delete_btn.setEnabled(count > 0)
+        self._sync_section_buttons()
         # Blocked, because this is the tick catching up with the
         # selection - not the user asking for one. Unblocked it would
         # re-enter _on_select_all_toggled and re-apply what it is only
@@ -3396,18 +3453,38 @@ class TrackerPage(GlassPage):
         from across the page. Measured, and the reason round that way: an
         accent border is exactly what theme.py's #Card:hover rule already
         draws, so the card under the pointer looks bordered whether or
-        not it is picked - the badge is what tells them apart. No glyph
-        in it, because the filter button's "▽" rendered as a sliver of a
-        missing-glyph box (see the comment on filter_btn) and a filled
-        accent disc needs no font at all.
+        not it is picked - the badge is what tells them apart.
 
         Border stays 1px in both states: QSS border width comes out of
         the widget's content rect, so a thicker one would shift every
-        label inside the card by a pixel the moment it was picked."""
+        label inside the card by a pixel the moment it was picked.
+
+        **A tick inside the disc**, 28 August 2026, the owner: "make the
+        circles on the cards when selected also contain a check mark
+        (Correct) on all pages related". The note this replaces said "no
+        glyph in it", and the reason it gave was sound and is still
+        respected: the missing-glyph box that rendered as a sliver on
+        the filter button came from asking a *font* for a symbol. This
+        asks no font for anything - it is the same drawn asset the
+        checkboxes use (theme.checkmark_pixmap), scaled down with a
+        smooth transform and tagged with the screen's ratio, so it
+        cannot go missing and cannot go soft.
+
+        Cleared rather than left in place when unpicked: a QLabel holding
+        a pixmap keeps drawing it under whatever background the
+        stylesheet sets, so the disc would still carry a tick in
+        ON_ACCENT on a BG-filled circle.
+        """
         badge.setStyleSheet(
             f"background: {theme.ACCENT if selected else theme.BG}; "
             f"border: 2px solid {theme.TEXT if selected else theme.TEXT_MUTED}; "
             f"border-radius: 11px;")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tick = theme.checkmark_pixmap(12) if selected else None
+        if tick is not None:
+            badge.setPixmap(tick)
+        else:
+            badge.clear()
         # Scoped to QFrame#Card so it cannot reach the labels inside the
         # card, and naming only `border` so the app stylesheet's gradient
         # fill still paints - a widget stylesheet is merged with the
@@ -3716,12 +3793,37 @@ class TrackerPage(GlassPage):
             item = self.grid_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                # **hide() before deleteLater(), and that is the owner's
+                # "when I scroll in the saved pages the select/deselect
+                # btn get missed up".** Taking a widget out of a layout
+                # does not hide it, and `deleteLater` does not run until
+                # the event loop gets a turn - so between the two, the
+                # old row is still a *visible child of the scrolling
+                # body*, sitting at the geometry the layout last gave it
+                # and scrolling along with everything else. Measured on
+                # the real page: straight after a rebuild there were 8
+                # section buttons where 4 were correct, and one turn of
+                # the event loop later **all 8 were visible** - the four
+                # dead ones painting over the four live ones.
+                #
+                # It has been true of every card and strip this loop
+                # tears down since the page was written, and it went
+                # unseen because two identical posters overlaid at
+                # nearly the same place look like one poster. A button
+                # with a border and a word in it does not: the word is
+                # drawn twice, a few pixels apart, which is exactly the
+                # screenshot.
+                widget.hide()
                 widget.deleteLater()
         # Emptied here, before the cards it names are deleted: every
         # entry in it points at a widget this loop has just taken out of
         # the layout, and repainting one of those afterwards is a call
         # into a C++ object that is on its way out.
         self._selection_cards = {}
+        # Same lifetime as the cards above and emptied in the same
+        # breath: these buttons are children of the heads this loop has
+        # just deleted.
+        self._section_buttons = []
 
         self._card_providers = anime_sites.streaming_provider_map()
 
@@ -3759,8 +3861,7 @@ class TrackerPage(GlassPage):
             return
 
         for status, group in sections:
-            self.grid_layout.addWidget(
-                QLabel(f"{status} ({len(group)})", objectName="SectionTitle"))
+            self.grid_layout.addWidget(self._build_section_head(status, group))
             self.grid_layout.addWidget(self._build_section_strip(group))
         # Somewhere for the leftover height to go. The page's scroll area
         # resizes this widget to the viewport, and with nothing elastic in
@@ -3769,6 +3870,145 @@ class TrackerPage(GlassPage):
         # header from 23px to 272px, leaving the row stranded mid-page.
         # Two sections hid it, because there was no spare height left.
         self.grid_layout.addStretch()
+
+    def _build_section_head(self, status, group):
+        """A section's heading, and - while picking is on - a Select
+        that takes the whole section in one press.
+
+        The owner's ask, 28 August 2026: "in the saved page for watch add
+        a select button that select all same category ... make the button
+        at the right of each like Watching . Series (X) [Select]", and
+        then "make the select button appear after clicking the select btn
+        in the top right". So it is not a second way *into* picking - the
+        toolbar's Select is still the only door - it is a shortcut once
+        you are already in there, for the case the bar's own Select All
+        cannot serve: taking one status/type block out of several.
+
+        Beside the heading rather than out at the right margin: it acts
+        on that heading's own rows, and a control floated to the far edge
+        of a wide window reads as belonging to the page.
+
+        Adds to the selection rather than replacing it, so two sections
+        can be taken in two presses - and gives the section back when it
+        is already whole ("make it toggle to unselect when selected all
+        under the same category", the same day). Which of the two it will
+        do is written on it rather than left to be discovered: a button
+        that silently does the opposite of what it says is worse than no
+        button.
+
+        The label is worked out here, at build time, and that is sound
+        because the grid is rebuilt on every selection change (see
+        _set_select_mode and _select_section) - so this button is created
+        and thrown away with the mode and with each pick, and there is no
+        state in it to get stuck."""
+        head = QWidget(objectName="Bare")
+        row = QHBoxLayout(head)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        row.addWidget(QLabel(f"{status} ({len(group)})",
+                             objectName="SectionTitle"))
+        if self._select_mode:
+            ids = tuple(entry.get("id") for entry in group if entry.get("id"))
+            # **A tick, not a button** - the owner's ask, 28 August 2026:
+            # "instead of the button like now (Select) make it exactly
+            # like the check box (Select All), but instead make it says
+            # Select not Select All, and add the check box to its left".
+            # It is the same reasoning the selection bar's own Select All
+            # carries: taking a whole section is a *state*, and a tick
+            # can show that the section is already whole where a button
+            # could only ever say so - which is what the Select/Deselect
+            # label was doing by hand, and what this now does for free.
+            box = QCheckBox("Select")
+            box.toggled.connect(
+                lambda checked, picked=ids: self._select_section(picked, checked))
+            use_hover_cursor(box)
+            row.addWidget(box)
+            # Kept so the tick can follow a selection made *by hand* -
+            # picking cards one at a time never rebuilds this widget
+            # (see _toggle_selected, which repaints one card on purpose),
+            # so a state decided only here would sit unticked on a
+            # section the user had just finished picking card by card.
+            self._section_buttons.append((box, ids))
+            self._face_section_button(box, ids)
+        row.addStretch()
+        return head
+
+    def _face_section_button(self, box, ids):
+        """Put a section's tick where the selection says it should be.
+
+        Blocked, for the same reason the bar's Select All is blocked in
+        _update_selection_bar: this is the tick catching up with the
+        selection, not the user asking for one, and unblocked it would
+        re-enter _select_section and re-apply what it is only
+        reporting."""
+        whole = bool(ids) and set(ids) <= self._selected_ids
+        box.setToolTip(f"Drop all {len(ids)} in this section" if whole
+                       else f"Pick all {len(ids)} in this section")
+        box.blockSignals(True)
+        box.setChecked(whole)
+        box.blockSignals(False)
+
+    def _sync_section_buttons(self):
+        """Re-face every section button. Called from
+        _update_selection_bar, which is the one thing every selection
+        change - a card, Select All, a section press, a grid rebuild -
+        already goes through."""
+        live = []
+        for box, ids in getattr(self, "_section_buttons", ()):
+            try:
+                self._face_section_button(box, ids)
+            except RuntimeError:
+                continue        # the grid rebuilt and took it with it
+            live.append((box, ids))
+        self._section_buttons = live
+
+    def _select_section(self, ids, take=True):
+        """Take one section, or give it back - `take` is the tick.
+
+        Adds to the selection rather than replacing it, so two sections
+        can be held at once; unticking removes only that section's own
+        rows and leaves the rest alone.
+
+        Written out rather than routed through `_set_select_mode`, which
+        *replaces* the selection with at most one id - the opposite of
+        what this needs, and the reason holding a second section could
+        not have been built on it."""
+        wanted = {entry_id for entry_id in ids if entry_id}
+        if not wanted:
+            return
+        if not self._select_mode:
+            # Not reachable from the button, which only exists while the
+            # mode is on - but a caller is a caller, and half a mode
+            # (marked cards, no selection bar) is the kind of state that
+            # only shows up later.
+            self._select_mode = True
+            self.select_btn.setText("Done")
+            self.selection_bar.setVisible(True)
+        if take:
+            self._selected_ids |= wanted
+        else:
+            self._selected_ids -= wanted
+        # **Repaint the cards, do not rebuild the grid** - the owner, 28
+        # August 2026: "when I press select on the watching . anime it
+        # takes me to the saved page bottom!!". _refresh_grid throws the
+        # whole page away and builds it again, and the scroll position
+        # does not survive that: the bar keeps its value while the new
+        # content is still being laid out, so the view lands wherever
+        # that number points once everything exists - which from a
+        # section near the top is the bottom of the page.
+        #
+        # Nothing needed rebuilding anyway. A pick changes one thing per
+        # card - its badge - and _toggle_selected has repainted exactly
+        # that, one card at a time, since the mode was written; this is
+        # the same call in a loop. `_update_selection_bar` then re-faces
+        # this section's own button (see _sync_section_buttons), so the
+        # Select/Deselect label still follows.
+        picked = self._selected_ids
+        for entry_id in wanted:
+            drawn = self._selection_cards.get(entry_id)
+            if drawn:
+                self._paint_selection(*drawn, entry_id in picked)
+        self._update_selection_bar()
 
     def _build_section_strip(self, group):
         """One section's cards on a single line that scrolls sideways.
@@ -3831,6 +4071,17 @@ class TrackerPage(GlassPage):
         strip_layout = QHBoxLayout(strip)
         strip_layout.setContentsMargins(0, 0, 0, 0)
         strip_layout.setSpacing(14)
+        # **One trailing stretch, so the row starts at the left edge.**
+        # A leading stretch was added on 28 August 2026 to centre a short
+        # section the way the Movies/Series/Anime PosterGrid centres its
+        # rows (poster_grid._left_margin), and removed the same day on
+        # sight: the owner, "make the saved grid for watch and read
+        # starts from the left (like prev versions)". A wrapping grid
+        # centred is a block of cards under its heading; one *row* of
+        # cards centred is a row floating away from the heading that
+        # names it, with the section title alone on the left of a wide
+        # window. The two surfaces look alike in a screenshot and do not
+        # behave alike, which is why the borrowed idea did not carry.
         for card in cards:
             strip_layout.addWidget(card)
         strip_layout.addStretch()
@@ -3884,7 +4135,7 @@ class TrackerPage(GlassPage):
                             + area.horizontalScrollBar().sizeHint().height())
         # Wrapped, not replaced: the arrows and their fades are drawn over
         # this same area, which keeps scrolling exactly as it did.
-        scroller = SideScroller(area)
+        scroller = SideScroller(area, ground=theme.PANEL_FILL)
         # The row a later chunk appends to (see _fill_row_rest). Hung off
         # the returned widget rather than looked up through
         # area.widget().layout(), which is three hops through objects
@@ -4091,6 +4342,22 @@ class TrackerPage(GlassPage):
         object."""
         fresh = next((e for e in storage.load(self.DATA_FILE, [])
                       if e.get("id") == entry_id), None)
+        if entry_id and fresh is None:
+            # **The overlay removed it.** The details page's Save button
+            # is a toggle since 28 August 2026, so an id this page holds
+            # can now be gone from disk by the time the overlay closes -
+            # before that, "no row on disk" only ever meant an unsaved
+            # Discover title, which this page never held either. Dropping
+            # it here is what takes the card off Saved without a page
+            # rebuild; leaving it would also let the next _save_entries
+            # write the entry straight back, since a row this page holds
+            # and disk does not is otherwise carried over.
+            before = len(self.entries)
+            self.entries[:] = [e for e in self.entries
+                               if e.get("id") != entry_id]
+            if len(self.entries) != before:
+                self._forget_saved_titles()
+                self._sync_discover_saved()
         if fresh:
             entry = next((e for e in self.entries
                           if e.get("id") == entry_id), None)
@@ -4102,6 +4369,11 @@ class TrackerPage(GlassPage):
                 # never held it. Adopting it here is what makes it appear
                 # in Saved (and earn its chip) without a page rebuild.
                 self.entries.append(fresh)
+                # Before the sync, not after: _sync_discover_saved reads
+                # _saved_titles(), and this append did not go through
+                # _save_entries - so without this the chip is decided
+                # from the set as it stood before the save.
+                self._forget_saved_titles()
                 self._refresh_schedules()
                 self._sync_discover_saved()
         self._refresh_grid()
@@ -4139,6 +4411,7 @@ class TrackerPage(GlassPage):
                     changed = True
             elif row.get("type") in self.ENTRY_TYPES:
                 self.entries.append(row)
+                self._forget_saved_titles()
                 held[row_id] = row
                 changed = added = True
         if added:
@@ -4378,6 +4651,17 @@ class TrackerPage(GlassPage):
         remains the right call for a single field on a single entry (see
         .claude/rules/ui.md); this is for the paths that genuinely
         rewrite the list, like reordering."""
+        self._forget_saved_titles()
+        # **Every write invalidates the saved-titles set.** It is keyed
+        # on `self.entries`' *identity*, which is sound only while the
+        # list is replaced wholesale - and `_delete_ids`, `_restore_entries`
+        # and the Discover hero's unsave all mutate it in place with
+        # `entries[:] = ...`, leaving the cache reporting a title as
+        # saved after it had been removed. Harmless until 28 August 2026,
+        # when the hero's button became a toggle and a title could
+        # finally become unsaved with the Discover tab still up; dropping
+        # it here rather than at each of those call sites is one line at
+        # the choke point every one of them already goes through.
         on_disk = storage.load(self.DATA_FILE, [])
         fresh = {e.get("id"): e for e in on_disk if e.get("id")}
         merged = []
@@ -4651,22 +4935,30 @@ class TrackerPage(GlassPage):
             global_search.open_entry(self.window(), page_name, entry)
 
     def _owned_pixmap(self, entry, dpr):
-        """Whatever art the saved entry already carries, cut for the
-        grid. None when it has none - the grid draws the same
-        placeholder the catalogue rows start on."""
+        """Whatever art the saved entry already carries, cut for the grid.
+        None when it has none - the grid draws the same placeholder the
+        catalogue rows start on.
+
+        **Through `images.thumbnail_or_avatar`, like every other card.**
+        This used to scale the file itself with KeepAspectRatioByExpanding
+        and never crop, so a 764x1200 cover came back 164x257 for a
+        164x221 box and the overflow was drawn straight over the title
+        underneath it. The shared helper cuts to exactly the size asked
+        for, rounds the corners the same way the catalogue covers are
+        rounded, and caches the result - so a library row and a result
+        row for the same title are now the same picture, which is what
+        "use the same cards as the other results" asked for in the first
+        place. `dpr` is no longer needed: the helper cuts at
+        images.device_ratio() and tags the pixmap with it."""
         for key in ("cover_path", "cover", "art", "image", "icon"):
             path = entry.get(key)
             if not path:
                 continue
-            pixmap = QPixmap(str(path))
-            if pixmap.isNull():
-                continue
-            scaled = pixmap.scaled(
-                QSize(int(POSTER_SIZE[0] * dpr), int(POSTER_SIZE[1] * dpr)),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation)
-            scaled.setDevicePixelRatio(dpr)
-            return scaled
+            pixmap = images.thumbnail_or_avatar(
+                path, entry.get("title") or entry.get("name") or "",
+                POSTER_SIZE)
+            if pixmap is not None and not pixmap.isNull():
+                return pixmap
         return None
 
     def _on_discover_search(self):
@@ -5743,11 +6035,26 @@ class TrackerPage(GlassPage):
             self._discover_shown = {}
         self._discover_shown[kind] = [(row.get("title") or "").strip().lower()
                                       for row in rows]
-        # The top of the first row is drawn large instead of being
-        # repeated behind itself in the strip below.
-        if rows and kind == self.DISCOVER_ROWS[0][0]:
-            self._fill_featured(rows[0], entry_type, run)
-            rows = rows[1:]
+        # One title is drawn large instead of being repeated behind
+        # itself in the strip below - and which one is not always the
+        # same row of the same list any more.
+        #
+        # **Browsing gets a random pick, across the media types.** The
+        # owner, 28 August 2026: "the FEATURED in the discover is always
+        # the same (RE:ZERO) make it random a movis or series or anime".
+        # It was literally `rows[0]` of `DISCOVER_ROWS[0]` - the first
+        # title of the first row - and those rows come out of a cache in
+        # a stable order (_stable_discover_order), so the banner was the
+        # same title every launch until the catalogue itself moved.
+        #
+        # **A search still gets its best match**, and that is not an
+        # oversight: the banner says TOP RESULT there rather than
+        # FEATURED, and a random one of the results would be a wrong
+        # answer to a question the user actually asked.
+        featured_index = self._featured_index_for(kind, rows, run)
+        if featured_index is not None:
+            self._fill_featured(rows[featured_index], entry_type, run)
+            rows = rows[:featured_index] + rows[featured_index + 1:]
         if rows:
             # **The first screenful now, the rest on the event loop.**
             # These rows come out of a cache, so all three of Watch's
@@ -5968,11 +6275,28 @@ class TrackerPage(GlassPage):
         cached = getattr(self, "_saved_titles_cache", None)
         if cached is not None and cached[0] is self.entries:
             return cached[1]
+        # (Identity alone is not enough - see _forget_saved_titles, which
+        # every path that mutates the list in place has to call.)
         titles = {(entry.get("title") or "").strip().lower()
                   for entry in self.entries
                   if entry.get("type") in self.ENTRY_TYPES}
         self._saved_titles_cache = (self.entries, titles)
         return titles
+
+    def _forget_saved_titles(self):
+        """Drop the "which titles are saved" set.
+
+        It is keyed on `self.entries`' *identity*, which is only sound
+        while the list is replaced wholesale - and several paths mutate
+        it in place: `_save_entries`' callers, `_on_inapp_closed` (which
+        appends a row the details page wrote straight to disk) and
+        `_adopt_disk_rows`. A stale set is not a small wrongness: it is
+        exactly what `_sync_discover_saved` asks, so the Saved chip on a
+        Discover card was decided from a list that did not yet contain
+        the title just saved - the owner, 28 August 2026, "when I save a
+        watch/read the icon saved in the top left in the card does not
+        show immediately"."""
+        self._saved_titles_cache = None
 
     def _chip(self, parent, text, accent=True):
         """A little label drawn *on* the artwork - Harbor's shape, this
@@ -6013,6 +6337,23 @@ class TrackerPage(GlassPage):
             chip.move(8, 8)
         record["badge"] = chip
         return chip
+
+    def _remove_saved_badge(self, record):
+        """The exact inverse of _place_saved_badge, and it has to know the
+        same two shapes: a painted grid cell carries `badge` as the flag
+        `True` and its chip is drawn by the grid, while a widget card
+        carries the QLabel itself. Calling deleteLater on the flag is an
+        AttributeError, which is why this is not one line at the call
+        site."""
+        grid = record.get("grid")
+        if grid is not None:
+            grid.mark_saved(record["index"], False)
+            record["badge"] = None
+            return
+        badge = record.get("badge")
+        record["badge"] = None
+        if badge is not None and badge is not True:
+            badge.deleteLater()
 
     @staticmethod
     def _rating_text(item) -> str:
@@ -6312,6 +6653,109 @@ class TrackerPage(GlassPage):
         self._request_poster(kind, index, item, run)
         return card
 
+    # **How often each medium gets the banner** - the owner's numbers, 28
+    # August 2026: Series 30, Movies 30, Anime 25, Manga 5, Manhwa 5,
+    # Manhua 5.
+    #
+    # Keyed by the entry *type* a row yields, not by the row key, because
+    # the same type is reached by different rows on different pages -
+    # and because that is the unit the numbers were given in.
+    #
+    # **The three reading types share one bucket, and that is a mapping
+    # decision worth stating.** This app has no Manhwa row and no Manhua
+    # row: both reading rows on the Discover page declare their type as
+    # "Manga" and return whatever the catalogue holds, so nothing here
+    # can tell a manhwa from a manga *before* picking it. Weighting the
+    # rows by "Manga" alone would have given reading 5% where the ask
+    # plainly means 15% - three fifteenths of the wheel, not one. So the
+    # three are summed into one reading share and split across whichever
+    # reading rows the page has (see _featured_weight).
+    FEATURED_WEIGHTS = {"Series": 30, "Movie": 30, "Anime": 25,
+                        "Manga": 5, "Manhwa": 5, "Manhua": 5}
+    # The types that no row can distinguish between, and are therefore
+    # weighted together.
+    FEATURED_SHARED = ("Manga", "Manhwa", "Manhua")
+
+    def _featured_weight(self, kind) -> float:
+        """How much of the wheel one Discover row gets.
+
+        Zero for a row whose type is not in the table, which is how a
+        page with a row nobody weighted still works: it simply never
+        leads. A page whose rows are *all* unweighted falls back to an
+        even draw in the caller, rather than dividing by zero."""
+        row_type = next((t for k, _label, t in self.DISCOVER_ROWS if k == kind),
+                        None)
+        if row_type is None:
+            return 0.0
+        if row_type in self.FEATURED_SHARED:
+            share = sum(self.FEATURED_WEIGHTS.get(name, 0)
+                        for name in self.FEATURED_SHARED)
+            rows = sum(1 for _k, _l, t in self.DISCOVER_ROWS
+                       if t in self.FEATURED_SHARED)
+            return share / float(rows or 1)
+        return float(self.FEATURED_WEIGHTS.get(row_type, 0))
+
+    def _pick_featured_kind(self):
+        """Draw a row for the banner, by the weights above.
+
+        Normalised over the rows this page actually has, so the ratios
+        hold on every page rather than only on the one that carries all
+        of them: Watch has no reading row, so its three split 25/30/30
+        between themselves and the reading share is simply not in the
+        draw."""
+        kinds = [row[0] for row in self.DISCOVER_ROWS]
+        if not kinds:
+            return None
+        weights = [self._featured_weight(kind) for kind in kinds]
+        if sum(weights) <= 0:
+            return random.choice(kinds)
+        return random.choices(kinds, weights=weights, k=1)[0]
+
+    def _featured_index_for(self, kind, rows, run):
+        """Which row of `kind` becomes the banner, or None if this row is
+        not the one carrying it.
+
+        Decided **once per discover run** and remembered, because this
+        is called again every time a row re-answers (a cache refresh
+        behind a stale answer, the second half of a chunked fill) - a
+        fresh roll each time would swap the banner under the user.
+
+        The *kind* is drawn first, before any row has answered, so every
+        media type has an equal chance rather than whichever list came
+        back first. A kind that then turns out to be empty hands the
+        banner to the first row that does have something, so the page is
+        never left without one."""
+        if not rows:
+            return None
+        # A typed search: the top result is the answer, not a lottery.
+        if self._discover_query:
+            return 0 if kind == self.DISCOVER_ROWS[0][0] else None
+        state = getattr(self, "_featured_choice", None)
+        if state is None or state.get("run") != run:
+            state = {"run": run, "kind": self._pick_featured_kind(),
+                     "taken": False}
+            self._featured_choice = state
+        if state["taken"]:
+            return None
+        if kind != state["kind"]:
+            # **Not this row's turn, and waiting is the point.** Rows
+            # answer in whatever order their catalogues come back, so a
+            # chooser that let the first answer take the banner would
+            # hand it to the fastest row every time - which is the same
+            # fixed pick this replaces, just chosen by the network
+            # instead of by the code. Measured with the fallback written
+            # that way: 40 rolls, all forty landed on the first row.
+            #
+            # The only takeover is when the chosen row has *answered and
+            # was empty* - a real possibility for a catalogue that is
+            # down, and the difference between "later" and "never".
+            answered = self._discover_shown.get(state["kind"])
+            if answered is None or answered:
+                return None
+        state["taken"] = True
+        state["kind"] = kind
+        return random.randrange(len(rows))
+
     def _fill_featured(self, item, entry_type, run):
         holder = getattr(self, "_discover_featured", None)
         if holder is None:
@@ -6452,9 +6896,15 @@ class TrackerPage(GlassPage):
         buttons.addWidget(view_btn)
         # Harbor's "Add to Watchlist": an outlined pill on the artwork,
         # translucent so the backdrop reads through it.
-        save_btn = QPushButton("In Saved" if saved else "+  Add to Saved")
+        # **A toggle, not a dead label**, 28 August 2026, the owner: "in
+        # the discover when saved make it says (Remove from Saved)". It
+        # read "In Saved" and disabled itself, so the banner could put a
+        # title into Saved and then had nothing to say about it - taking
+        # it back out meant leaving Discover, finding the card on Saved
+        # and deleting it there. Same shape as the details page's Save /
+        # Remove From My List button, and the same reasoning behind it.
+        save_btn = QPushButton()
         save_btn.setFixedHeight(44)
-        save_btn.setEnabled(not saved)
         save_btn.setStyleSheet(
             f"QPushButton {{ background: {theme.rgba(theme.BG, 160)}; color: {theme.TEXT};"
             f" border: 1px solid {theme.TEXT_MUTED}; border-radius: {theme.RADIUS}px;"
@@ -6464,13 +6914,18 @@ class TrackerPage(GlassPage):
             f"QPushButton:disabled {{ color: {theme.TEXT_MUTED};"
             f" border: 1px solid {theme.BORDER}; }}")
         use_hover_cursor(save_btn)
+        self._face_featured_save(save_btn, saved)
 
-        def save_featured(_checked=False, it=item, et=entry_type, btn=save_btn):
+        def toggle_featured(_checked=False, it=item, et=entry_type, btn=save_btn):
+            title = (it.get("title") or "").strip()
+            if self._find_saved(title):
+                if self._unsave_discover_item(title):
+                    self._face_featured_save(btn, False)
+                return
             if self._save_discover_item(it, et):
-                btn.setText("In Saved")
-                btn.setEnabled(False)
+                self._face_featured_save(btn, True)
 
-        save_btn.clicked.connect(save_featured)
+        save_btn.clicked.connect(toggle_featured)
         buttons.addWidget(save_btn)
         buttons.addStretch(1)
         column.addLayout(buttons)
@@ -6635,31 +7090,75 @@ class TrackerPage(GlassPage):
         return True
 
     def _sync_discover_saved(self):
-        """Put a Saved chip on any Discover card whose title has since
-        been added. Only ever adds one: a card cannot become unsaved
-        while this tab is up (deleting happens on Saved, which rebuilds
-        the whole page's grid anyway)."""
+        """Put a Saved chip on any Discover card whose title has been
+        added, and take it off any whose title has gone.
+
+        **Both directions since 28 August 2026.** It used to only ever
+        add one, on the stated grounds that "a card cannot become unsaved
+        while this tab is up" - true until the hero's button became a
+        toggle, which is exactly a title becoming unsaved with this tab
+        on screen. A chip left behind would then be the page saying a
+        title is saved while the button beside it offers to save it."""
         saved = self._saved_titles()
         for record in self._discover_cards.values():
-            if record.get("badge") is not None:
-                continue
-            if record["title"].lower() not in saved:
+            wanted = record["title"].lower() in saved
+            badge = record.get("badge")
+            if wanted == (badge is not None):
                 continue
             try:
-                self._place_saved_badge(record)
+                if wanted:
+                    self._place_saved_badge(record)
+                else:
+                    self._remove_saved_badge(record)
             except RuntimeError:
                 pass    # the row went away under it
-        # The hero's watchlist button follows too - a title saved from
-        # its own row, or from the details page, must not leave the
-        # banner still offering to add it.
+        # The hero's button follows too - a title saved (or deleted) from
+        # its own row, from the Saved grid or from the details page must
+        # not leave the banner offering the opposite of the truth.
         button = getattr(self, "_featured_save_btn", None)
-        if (button is not None
-                and getattr(self, "_featured_title", "").lower() in saved):
+        title = getattr(self, "_featured_title", "")
+        if button is not None and title:
             try:
-                button.setText("In Saved")
-                button.setEnabled(False)
+                self._face_featured_save(button, title.lower() in saved)
             except RuntimeError:
                 pass    # the tab rebuilt under it
+
+    @staticmethod
+    def _face_featured_save(button, saved):
+        """The hero button's two faces. One place, because it is set from
+        three (the build, the click, and _sync_discover_saved) and the
+        two of them that used to do it by hand had already drifted into
+        also disabling it."""
+        button.setText("Remove from Saved" if saved else "+  Add to Saved")
+        # The bin to the left of the words, the same drawn asset the
+        # details page's Remove and every bulk delete carry (the owner's
+        # ask, 28 August 2026). An icon rather than a glyph in the label:
+        # a QPushButton paints its text in one font and the app font has
+        # no U+E74D, so the bin would be a hollow box beside the words.
+        # White here rather than ON_ACCENT - this button is an outlined
+        # pill on artwork, not an accent fill.
+        if saved:
+            button.setIcon(glyph_icon(TRASH_GLYPH, theme.TEXT))
+            button.setIconSize(QSize(TRASH_ICON_SIZE, TRASH_ICON_SIZE))
+        else:
+            button.setIcon(QIcon())
+        button.setEnabled(True)
+
+    def _unsave_discover_item(self, title) -> bool:
+        """Take a title back out of Saved from the Discover banner.
+
+        Through `_delete_ids`, which is the page's own bulk delete: it
+        drops the row, writes the file with `_save_entries` (so another
+        page's entries survive - see its note) and raises the standard
+        undo offer. Nothing here re-implements any of that; the only
+        thing this adds is refreshing the Discover surface afterwards,
+        which the Saved grid's own delete has never needed."""
+        entry = self._find_saved(title)
+        if entry is None or not entry.get("id"):
+            return False
+        self._delete_ids([entry.get("id")])
+        self._sync_discover_saved()
+        return True
 
     # ------------------------------------------------------------------
     # Schedule: the page's own entries first, then the catalogue.

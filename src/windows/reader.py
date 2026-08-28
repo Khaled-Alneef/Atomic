@@ -74,6 +74,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from helpers import window_chrome
 from helpers import (app_settings, child_process, downloads, history, images,
                      logs, lookup_pool, net, storage, theme)
 from helpers.widgets import (Card, GlassPage, GlyphButton, confirm,
@@ -329,7 +330,10 @@ BAR_REVEAL_PX = 72      # pointer this close to the top brings it back
 # there slightly early is better than having to hunt for them.
 END_OF_CHAPTER_PX = 260
 BOTTOM_REVEAL_PX = 110  # ...and this close to the bottom, for that one
-SCROLL_HIDE_DELTA = 12  # px of travel before a scroll counts as intent
+# **No SCROLL_HIDE_DELTA any more.** It was the travel a scroll had to
+# cover before it counted as "hide the top bar" / "bring it back", and
+# the top bar stopped answering the scroll at all on 28 August 2026 -
+# see _on_scroll_value. Nothing else ever read it.
 
 # The three floating bottom controls: previous/next pinned to the window's
 # two edges with the chapter list centred between them. Sized here rather
@@ -2245,6 +2249,16 @@ class ReaderPage(GlassPage):
         # row named a chapter, and opening anything else is a wrong
         # answer, not a convenience.
         self._open_number = chapter_number
+        # **One-shot: is this open on its way to a chapter?** True for a
+        # Continue and for a details-page row, false for "browse the
+        # list". It decides what is on screen during the cold fetch (see
+        # _load_chapters) and is cleared the first time the list lands,
+        # because `resume_on_open` never clears - reading it directly
+        # would suppress the chapter list for the rest of the session,
+        # a Refresh press included.
+        self._opening_chapter = bool(resume) or chapter_number is not None
+        # Set by open_chapter; read (and reset) around a list landing.
+        self._opened_a_chapter = False
         # Which page of the app the reader was opened from, so the door
         # button puts him back there rather than on whatever happens to
         # be underneath. None when the caller couldn't say - see
@@ -2270,7 +2284,6 @@ class ReaderPage(GlassPage):
         # Reset per chapter in _show_chapter; see _on_page_shape.
         self._chapter_is_strip = False
         self._closed = False
-        self._last_scroll = 0
         # The chapter controls are hover-only, so this is the one thing
         # that decides whether they are on screen - never the scroll.
         self._bottom_shown = False
@@ -2395,6 +2408,12 @@ class ReaderPage(GlassPage):
         view.viewport().setMouseTracking(True)
         view.viewport().installEventFilter(self)
         view.verticalScrollBar().valueChanged.connect(self._on_scroll_value)
+        # And the bar itself, for the same reason each floating control
+        # below carries one: the pointer moving from the reading surface
+        # *onto* the bar is a Leave on the viewport, and without the
+        # bar's own Leave to answer it nothing would ever take the bar
+        # away again once it had been reached.
+        self._bar.installEventFilter(self)
 
         # Before the first chapter, not after it: the strip is born at
         # 1.0 and rebuild() reads that value, so a manga would decode its
@@ -2652,14 +2671,16 @@ class ReaderPage(GlassPage):
         # their first row isn't hidden behind it.
         self._stack.setContentsMargins(
             *((0, 0, 0, 0) if reading else (16, BAR_HEIGHT + 10, 16, 12)))
-        self._reveal_bar()
-        # The chapter controls belong to a chapter. On the list and on an
-        # error there is nothing for them to step through, and the list
-        # has its own rows to click.
+        # **The bar follows the same rule as the floor controls now**: on
+        # a chapter it waits to be asked for, everywhere else it is the
+        # only way back out and stays put. It used to be revealed here
+        # unconditionally, so every chapter opened with it over the art.
         if reading:
             self._place_bottom()
+            self._hide_bar()
         else:
             self._hide_bottom()
+            self._reveal_bar()
 
     def _set_message(self, text, browser=True):
         self._message_label.setText(text)
@@ -2681,33 +2702,53 @@ class ReaderPage(GlassPage):
             return          # the jump list is open over it - don't yank it
         self._bar.hide()
 
-    def _on_scroll_value(self, value):
-        """Hide on the way down, come back on the way up.
+    def _pointer_wants_bar(self) -> bool:
+        """Whether the pointer is up where the top bar lives.
 
-        Thresholded rather than sign-only, and `_last_scroll` is only
-        moved when the threshold is crossed, so a slow drag accumulates
-        into one decision instead of flickering the bar on the jitter of
-        a trackpad."""
-        # The end of the chapter is the one place the chapter controls
-        # are wanted without being asked for: finishing a chapter *is*
-        # the request to go to the next one. Checked before the movement
-        # threshold below, because the last scroll into the end can be a
-        # small one and would otherwise be swallowed.
-        self._update_end_of_chapter()
+        The top half of what _pointer_wants_bottom answers, and for the
+        same reason: a Leave on the reading surface is also what the
+        pointer arriving *on the bar* looks like from here, so hiding
+        unconditionally would make the bar impossible to click. Read off
+        the window geometry, never mapToGlobal, which is wrong across two
+        monitors at different scale factors (.claude/rules/ui.md)."""
+        try:
+            cursor = QCursor.pos()
+            frame = self.window().geometry()
+        except RuntimeError:
+            return False
+        return (frame.contains(cursor)
+                and cursor.y() <= frame.top() + BAR_HEIGHT + BAR_REVEAL_PX)
 
-        delta = value - self._last_scroll
-        if abs(delta) < SCROLL_HIDE_DELTA:
-            return
-        self._last_scroll = value
-        if delta > 0:
+    def _hide_bar_unless_aimed_at(self):
+        # Same wrapping as _hide_bottom_unless_aimed_at: this is reached
+        # from a zero-timer and the reader can be gone by the time it
+        # fires - an exception escaping a Qt slot is an immediate abort
+        # in PyQt6, not a traceback.
+        try:
+            if self._closed or self._pointer_wants_bar():
+                return
             self._hide_bar()
-        else:
-            self._reveal_bar()
-        # The chapter controls are otherwise hover-only: scrolling up
-        # mid-chapter to re-read a panel is not a request to jump
-        # chapters, and having them appear over the artwork every time
-        # the strip went backwards is what made them worth pinning to
-        # the floor in the first place.
+        except RuntimeError:
+            pass
+
+    def _on_scroll_value(self, value):
+        """**Scrolling no longer moves the top bar at all.**
+
+        The owner ask, 28 August 2026: "the upper bar in the reading
+        mode, make it exactly like the lower buttons, make it appear only
+        on top of the ch and when hover, not when scroll up". It used to
+        hide on the way down and come back on the way up - a different
+        rule from the one the floor controls follow, and the reason those
+        became hover-only is the same one here: scrolling back up
+        mid-chapter to re-read a panel is not a request for the chrome,
+        and having it slide over the artwork every time the strip went
+        backwards is exactly what made it worth getting out of the way.
+
+        What is left is the end-of-chapter check, which belongs to the
+        *floor* controls and not to this bar: reaching the end of a
+        chapter is a genuine request for "next chapter" (see
+        _update_end_of_chapter)."""
+        self._update_end_of_chapter()
 
     def _update_end_of_chapter(self):
         """Show the chapter controls once the strip reaches its end, and
@@ -2867,16 +2908,39 @@ class ReaderPage(GlassPage):
 
                 QTimer.singleShot(0, deliver)
                 return
-            # Nothing cached: the skeleton, on screen inside this frame.
-            # The fetch behind it takes 1-13s to its first partial page
-            # and up to CHAPTER_LIST_TIMEOUT in full - a bare "Loading
-            # chapters..." sitting through that is exactly the owner's
-            # "the ch list takes a while to show" (22 August 2026).
-            self._list_view.set_notice(
-                "Fetching the chapter list from the source - the first "
-                "look at a series can take a few seconds.")
-            self._list_view.show_skeleton()
-            self._show_only(self._list_view)
+            # **Nothing cached, and where the reader is *going* decides
+            # what it shows while it waits.**
+            #
+            # Continue (and a details-page row, which names one chapter)
+            # is not a request for the list at all - the list is only the
+            # route to the chapter. Showing a wall of skeleton rows under
+            # "Fetching the chapter list from the source" therefore
+            # announced a destination the user had not asked for and was
+            # about to be taken away from ~1.5s later: the owner, 28
+            # August 2026, "sometimes when I click continue on the
+            # reading it takes me to this strange page, then shows the ch
+            # after ~1.5 sec". The wait is real either way - the list has
+            # to arrive before the chapter can be found in it - so this
+            # changes only what the wait is called, which is the whole of
+            # the complaint.
+            #
+            # "Loading chapter..." is the very message open_chapter puts
+            # up for the second half of the same journey, so a resume now
+            # reads as one wait rather than two unrelated screens.
+            if self._opening_chapter:
+                self._set_message("Loading chapter...", browser=True)
+            else:
+                # Browsing the list *is* the destination here, so the
+                # skeleton is honest: the fetch takes 1-13s to its first
+                # partial page and up to CHAPTER_LIST_TIMEOUT in full,
+                # and a bare "Loading chapters..." sitting through that
+                # is the owner's "the ch list takes a while to show"
+                # (22 August 2026).
+                self._list_view.set_notice(
+                    "Fetching the chapter list from the source - the first "
+                    "look at a series can take a few seconds.")
+                self._list_view.show_skeleton()
+                self._show_only(self._list_view)
         # **submit_watched, not submit.** This is the one lookup the user
         # is sitting in front of - they pressed a title and are looking
         # at an empty reader - and the shared queue is drained by three
@@ -2964,7 +3028,17 @@ class ReaderPage(GlassPage):
         # Not while a chapter is open: the partial list above may have
         # been read from already, and the rest of the list arriving is
         # no reason to take the reader out of it.
-        if not self._in_chapter():
+        #
+        # And not on the way *into* one either: a resume or a named
+        # chapter opens one a few lines below, so showing the list here
+        # would flash it for exactly one frame between "Loading
+        # chapter..." and the chapter - which is the same thing the
+        # skeleton was doing more slowly.
+        opening = (self._opening_chapter or self._pending_resume is not None
+                   or self._open_number is not None)
+        self._opening_chapter = False
+        self._opened_a_chapter = False
+        if not self._in_chapter() and not opening:
             self._show_only(self._list_view)
         self._sync_controls()
         self._finish_refresh("Refreshed")
@@ -2984,6 +3058,27 @@ class ReaderPage(GlassPage):
         # would be the one thing that click is not for.
         if self.resume_on_open:
             self._offer_resume()
+            # **Consumed, not standing.** It never cleared, so every
+            # later landing re-resumed - press Refresh while looking at
+            # the chapter list and the reader would throw the list away
+            # and reopen the chapter you had just stepped out of. Caught
+            # by test rather than by reading; the resume is a thing this
+            # open does once, not a mode it stays in.
+            self.resume_on_open = False
+        # **The fallback for a resume that resolved to nothing.** Neither
+        # a saved position nor a last-read number has to name a chapter
+        # this source still has (see _offer_resume, which stays silent
+        # rather than opening the wrong one) - and the list was skipped
+        # above on the promise that a chapter was coming. Without this
+        # the reader would sit on "Loading chapter..." forever.
+        #
+        # `_opened_a_chapter`, not `_in_chapter()`: open_chapter puts up
+        # its own "Loading chapter..." and the pages land a moment
+        # later, so between the two the reader is legitimately in
+        # neither state - and testing for the strip here flashed the
+        # list over a chapter that was already on its way.
+        if opening and not self._opened_a_chapter and not self._in_chapter():
+            self._show_only(self._list_view)
 
     def _reading_index(self):
         """Which row of the chapter list is "the one being read".
@@ -3052,6 +3147,35 @@ class ReaderPage(GlassPage):
         if 0 <= index < len(self.chapters):
             self.open_chapter(index, start_page=page)
 
+    def _after(self, index):
+        """The index of the chapter *after* `index` in reading order, or
+        `index` itself when nothing has been released past it.
+
+        The owner ask, 28 August 2026: "when pressed continue on the
+        readings make it start the next ch if it is released, otherwise
+        the last readed ch". Continue is "keep reading", and the chapter
+        already read is not the one to keep reading.
+
+        Reading order, not index order: chapter_source.list_chapters
+        hands chapters back newest first, so the next chapter to read is
+        at index **- 1**. step_chapter carries the same inversion and the
+        note explaining why it shipped backwards once; this is that
+        walk without the opening, because the caller has its own reason
+        to open (a saved page, a fallback) and must not be second-guessed.
+
+        Language-aware for the same reason step_chapter is: chapters
+        arrive Arabic-first rather than in one flat order, so the plain
+        neighbour can be the English copy of the very chapter just read -
+        which would read as Continue doing nothing at all."""
+        if not (0 <= index < len(self.chapters)):
+            return index
+        current = str(self.chapters[index].get("lang") or "").lower()
+        for candidate in range(index - 1, -1, -1):
+            if str(self.chapters[candidate].get("lang") or "").lower() == current:
+                return candidate
+        nearby = index - 1
+        return nearby if nearby >= 0 else index
+
     def _offer_resume(self):
         """Reopen where reading stopped.
 
@@ -3100,7 +3224,20 @@ class ReaderPage(GlassPage):
             # points at knows its own.
             saved_number = float(chapter_number(self.chapters[saved_index]) or 0)
         if saved_index >= 0 and saved_number >= last_watched:
-            self.open_chapter(saved_index, start_page=int(saved.get("page") or 0))
+            # **The next one when there is one.** Note what this gives up
+            # and why it is still right: the saved page is only kept when
+            # nothing newer exists, so stopping half way through a
+            # chapter and pressing Continue now opens the *next* chapter
+            # rather than the page you stopped on. That is what was
+            # asked for, and it is what Continue means on a card whose
+            # caption reads "Ch 412" - the caption is the chapter you
+            # have read, not the one you are about to.
+            following = self._after(saved_index)
+            if following != saved_index:
+                self.open_chapter(following)
+            else:
+                self.open_chapter(saved_index,
+                                  start_page=int(saved.get("page") or 0))
             return
         # No stored position, a stale one, or one this source no longer
         # lists. The last-watched *number* answers instead. Looked up
@@ -3110,15 +3247,20 @@ class ReaderPage(GlassPage):
         if last_watched:
             index = self._row_for_number(last_watched)
             if index >= 0:
-                self.open_chapter(index)
+                self.open_chapter(self._after(index))
                 return
         index = self._reading_index()
         if index >= 0:
-            self.open_chapter(index)
+            self.open_chapter(self._after(index))
 
     def open_chapter(self, index, start_page=0):
         if not (0 <= index < len(self.chapters)):
             return
+        # The one door into a chapter, so it is where "something is
+        # actually opening" is recorded - see _on_chapters_listed's
+        # fallback, which must not mistake the gap between this and the
+        # pages arriving for a resume that found nothing.
+        self._opened_a_chapter = True
         self.chapter_index = index
         self._pending_start_page = max(0, start_page)
         self._run += 1
@@ -3161,7 +3303,6 @@ class ReaderPage(GlassPage):
         self._show_chapter(start_page=self._pending_start_page)
 
     def _show_chapter(self, start_page=0):
-        self._last_scroll = 0
         # The gap verdict belongs to one chapter and is re-earned by the
         # next one - see _on_page_shape. The gap itself is left where it
         # is until a page says otherwise, so a run of strip chapters
@@ -3174,7 +3315,6 @@ class ReaderPage(GlassPage):
         # that jump is a scroll of hundreds of px and would otherwise
         # read as "scrolling down", hiding the bar the instant a chapter
         # opened.
-        self._last_scroll = self._strip_view.verticalScrollBar().value()
         self._reveal_bar()
         self._sync_controls()
 
@@ -3509,10 +3649,21 @@ class ReaderPage(GlassPage):
             # chapter names are long enough to need the width.
             box.view().setMinimumWidth(460)
             box.view().setFont(box.font())
+        # **One picker when only one thing is being picked**, 28
+        # August 2026, the owner: "while the selected is One
+        # Episode, do not show From ep/ch to ep/ch, make it only one
+        # selection button". "From" and "To" over two identical
+        # drop-downs describe a range; with the scope set to a single
+        # chapter, the second one was disabled and the first was still
+        # captioned "From:", which reads as half a range somebody
+        # forgot to finish. The caption becomes the plain "Chapter:"
+        # and the second half of the row goes away entirely.
+        from_label = QLabel("From:")
+        to_label = QLabel("To:")
         range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("From:"))
+        range_row.addWidget(from_label)
         range_row.addWidget(first_box, stretch=1)
-        range_row.addWidget(QLabel("To:"))
+        range_row.addWidget(to_label)
         range_row.addWidget(last_box, stretch=1)
         column.addLayout(range_row)
 
@@ -3553,6 +3704,9 @@ class ReaderPage(GlassPage):
         def sync(*_args):
             ranged = scope.currentIndex() == 1
             last_box.setEnabled(ranged)
+            from_label.setText("From:" if ranged else "Chapter:")
+            to_label.setVisible(ranged)
+            last_box.setVisible(ranged)
             count = len(picked_indexes())
             count_label.setText(
                 f"{count} chapter{'s' if count != 1 else ''} will be saved as "
@@ -3929,8 +4083,13 @@ class ReaderPage(GlassPage):
                 # needs no coordinate mapping - and mapToGlobal is
                 # wrong on mixed-DPI displays anyway.
                 y = event.position().y()
+                # Reveal near the top, take it away below - the mirror of
+                # the floor controls band below, and the whole of "make it
+                # exactly like the lower buttons".
                 if y <= BAR_REVEAL_PX:
                     self._reveal_bar()
+                else:
+                    self._hide_bar()
                 # Hover is the *only* way the chapter controls come back
                 # (the owner's ask: scrolling must never summon them),
                 # so this is also the only place that shows them.
@@ -3945,9 +4104,15 @@ class ReaderPage(GlassPage):
                 # _pointer_wants_bottom: hiding unconditionally is what
                 # made the bar impossible to click.
                 self._hide_bottom_unless_aimed_at()
+                self._hide_bar_unless_aimed_at()
         elif (obj in (self._bottom_widgets or ())
                 and event.type() == QEvent.Type.Leave):
             QTimer.singleShot(0, self._hide_bottom_unless_aimed_at)
+        elif obj is self._bar and event.type() == QEvent.Type.Leave:
+            # Off the bar itself: deferred a turn so the Enter on
+            # whatever the pointer moved onto lands first, the same shape
+            # as the floor controls own Leave above.
+            QTimer.singleShot(0, self._hide_bar_unless_aimed_at)
         return super().eventFilter(obj, event)
 
     def showEvent(self, event):
@@ -3996,6 +4161,7 @@ class ReaderPage(GlassPage):
         if self._closed:
             return
         self._closed = True
+        _release_edge_reach(self.window())
         # Leaving the reader is leaving the manga - this lands on Home,
         # not back on the chapter list - so the music goes with it. The
         # grace period is what keeps it playing while the *details*
@@ -5260,6 +5426,58 @@ def _force_close_music(hwnd, attempt=0):
         pass        # a window that died in the meantime is not a problem
 
 
+def _hold_edge_reach(window):
+    """Let the reader's right edge be scrolled at the very edge of the
+    screen.
+
+    **Measured, 28 August 2026** - the owner: "the scrolling in the
+    reading is still do not move while the mouse is right next to the
+    scrollbar". Driving a real OS wheel through SendInput over the real
+    reader with real pages, a window's own outermost pixel column
+    receives **nothing**, in every window state, on the scrollbar and
+    beside it alike; one column in, every notch lands. Reaching four
+    pixels past the edge puts that dead column off the side of the
+    screen, and the same physical pixel then scrolls.
+
+    Held only while the reader is up, because it is not free: it clears
+    Qt's maximised flag and its restore rect (see
+    window_chrome.apply_edge_reach), so both are remembered here and put
+    back on the way out. Confining it to the reader is what keeps every
+    other window gesture - snap, restore, double-click the bar -
+    untouched, and the reader covers the window whole anyway, so nothing
+    of the chrome it borrows is visible while it is borrowed."""
+    try:
+        if window is None or getattr(window, "_edge_reach_on", False):
+            return
+        window._edge_reach_was_maximised = window.isMaximized()
+        window._edge_reach_restore = (window.normalGeometry()
+                                      if window.isMaximized()
+                                      else window.geometry())
+        window._edge_reach_on = window_chrome.apply_edge_reach(window, True)
+    except Exception:
+        logs.exception("Could not widen the reader's edge")
+
+
+def _release_edge_reach(window):
+    """Put the window back exactly as it was before the reader took it."""
+    try:
+        if window is None or not getattr(window, "_edge_reach_on", False):
+            return
+        window._edge_reach_on = False
+        restore = getattr(window, "_edge_reach_restore", None)
+        if getattr(window, "_edge_reach_was_maximised", False):
+            # setGeometry cleared the flag, so the window has to be told
+            # again - and its restore rect handed back first, or
+            # un-maximising later would land on the reader's own size.
+            if restore is not None:
+                window.setGeometry(restore)
+            window.showMaximized()
+        elif restore is not None:
+            window.setGeometry(restore)
+    except Exception:
+        logs.exception("Could not restore the window after the reader")
+
+
 def open_reader(window, entry, data_file="tracker.json", resume=True,
                 chapter_number=None):
     """Open the reader over `window`, covering the sidebar as well.
@@ -5279,6 +5497,7 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
     while reading". player.py already does exactly this for the same
     reason; nothing in main.py hides or restores anything, so there is
     no state to get stuck in the hidden half."""
+    _hold_edge_reach(window)
     # The whole window, the app's own bar included - see
     # main.immersive_host. This surface is the content, not a page
     # showing it, and it carries its own bar and its own way out.

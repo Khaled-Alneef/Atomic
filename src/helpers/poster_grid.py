@@ -389,12 +389,6 @@ class FrameMotion:
 
     def kick(self, distance_px, direction):
         """One wheel notch: `direction` +1 forward (down the page)."""
-        if widgets_module.REDUCE_MOTION:
-            # The whole notch, on the spot - see widgets.set_reduce_motion.
-            self.stop()
-            self.set_position(self.pos + float(distance_px)
-                              * (1 if direction > 0 else -1))
-            return
         now = time.monotonic()
         self._kicks = [t for t in self._kicks if now - t <= self.ACCEL_WINDOW_S]
         accel = 1.0 + (self.ACCEL_MAX - 1.0) * min(
@@ -1069,8 +1063,28 @@ class PosterGrid(QWidget):
         # cut for the old screen by images.thumbnail_or_avatar, and the
         # ratio it cuts for has just been repointed at the new one
         # (images.set_device_ratio follows the window).
+        #
+        # **The first paint is not a change**, and treating it as one is
+        # what emptied the Discover page's "In Your Library" strip. The
+        # test was `getattr(self, "_cache_ratio", None) != ratio_now`,
+        # and on the first paint there is no attribute yet - so None !=
+        # 1.25 and every record's cover was wiped before it had ever been
+        # drawn. The catalogue rows never noticed because they re-ask for
+        # art through `needs_cover`; that strip deliberately does not
+        # connect it (tracker._build_owned_strip: the covers are local
+        # files, already loaded, "these already have theirs"), so once
+        # wiped they were gone and the row showed placeholders for good.
+        # The owner, 28 August 2026: "the In Library when searching do
+        # not show images".
+        #
+        # Nothing is stale on the first sight of a ratio: the caches are
+        # empty and any pixmap a caller supplied was cut for the screen
+        # the widget is on. So record the ratio and wipe nothing.
         ratio_now = self.devicePixelRatioF() or 1.0
-        if getattr(self, "_cache_ratio", None) != ratio_now:
+        previous = getattr(self, "_cache_ratio", None)
+        if previous is None:
+            self._cache_ratio = ratio_now
+        elif previous != ratio_now:
             self._cache_ratio = ratio_now
             self._metrics = None
             self._cells.clear()
@@ -1125,6 +1139,10 @@ class PosterGrid(QWidget):
         else:
             missing = []
             ahead = []
+        # Over the cards, under the bar: the fade is about the *cards*
+        # running off the edge, and dimming the scrollbar's own thumb
+        # under it would only make the control harder to find.
+        self._paint_edge_fades(painter)
         self._paint_scrollbar(painter)
         painter.end()
         if missing:
@@ -1243,6 +1261,14 @@ class PosterGrid(QWidget):
             if 0 <= index < len(self._records) \
                     and self._records[index].get("pixmap") is None:
                 self.needs_cover.emit(index)
+
+    def _paint_edge_fades(self, painter):
+        """Nothing, on the vertical grid.
+
+        The fades answer "the row continues this way", which is a
+        question a *sideways* row raises and a wrapping grid does not -
+        a grid's overflow runs off the bottom, where the page's own
+        scroll already says so. PosterStrip overrides this."""
 
     def _paint_scrollbar(self, painter):
         """The grid's own bar, since it is not inside a QScrollArea.
@@ -1509,13 +1535,6 @@ class PosterGrid(QWidget):
         the code this replaces, and it looked like the fix simply had no
         effect."""
         target = max(0.0, min(float(self._motion.maximum), float(target)))
-        if widgets_module.REDUCE_MOTION:
-            # No follow at all: the view sits where the thumb is.
-            self._drag_aim = target
-            self._drag_target = None
-            self._motion.set_position(target)
-            self.scrolled.emit()
-            return
         if self._drag_aim is not None and abs(target - self._drag_aim) < 1e-9:
             return          # the hand has not crossed a whole pixel yet
         now = time.monotonic()
@@ -1774,6 +1793,49 @@ class PosterStrip(PosterGrid):
                   if self._motion.maximum > 0 else 0.0)
         left = BAR_MARGIN + span * max(0.0, min(1.0, travel))
         return QRectF(left, self.height() - BAR_WIDTH, thumb, BAR_WIDTH)
+
+    def _paint_edge_fades(self, painter):
+        """Dissolve whichever ends the row continues past.
+
+        The owner ask, 28 August 2026 - the same fades widgets.SideScroller
+        paints for the *widget* rows, on the painted ones. Discover's rows
+        are this class rather than a QScrollArea full of Cards, so they
+        never went through that wrapper and were the one place left
+        cutting a card in half at the edge with nothing to say why.
+
+        Painted here rather than by an overlay child, unlike
+        SideScroller's: this surface has no children at all - the whole
+        point of it is that 149 Card widgets became one painted viewport -
+        and adding one back for decoration would be the wrong trade. The
+        base calls this after the cells and before the bar.
+
+        Same rule as the widget rows: state, not decoration. An end that
+        is solid *is* the end. FADE_SLACK_PX of dead zone keeps a
+        hairline of gradient off the last few pixels of travel, where it
+        reads as grime on the artwork rather than as "there is more".
+        """
+        if not self._overflowing():
+            return
+        from .widgets import FADE_PX, FADE_SLACK_PX
+        offset = self._motion.pos
+        maximum = self._motion.maximum
+        # Above the bar, for the reason the base's call site gives.
+        height = max(0, self.height() - BAR_WIDTH)
+        if height <= 0:
+            return
+        clear = QColor(self._ground)
+        clear.setAlpha(0)
+        if offset > FADE_SLACK_PX:
+            left = QLinearGradient(0, 0, FADE_PX, 0)
+            left.setColorAt(0.0, self._ground)
+            left.setColorAt(1.0, clear)
+            painter.fillRect(QRect(0, 0, FADE_PX, height), left)
+        if offset < maximum - FADE_SLACK_PX:
+            start = max(0, self.width() - FADE_PX)
+            right = QLinearGradient(start, 0, self.width(), 0)
+            right.setColorAt(0.0, clear)
+            right.setColorAt(1.0, self._ground)
+            painter.fillRect(QRect(start, 0, FADE_PX, height), right)
 
     def _paint_scrollbar(self, painter):
         if not self._overflowing():

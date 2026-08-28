@@ -24,11 +24,12 @@ import time
 from pathlib import Path
 
 from helpers import (app_settings, downloads, frame_pacing, images, layout, logs,
-                     rail_anim, rail_icons, window_chrome,
+                     rail_anim, rail_icons, splash, window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
-from helpers.nav_config import (HOME_ITEM, nav_position, route_page,
+from helpers.nav_config import (nav_position, route_page,
                                 route_section, visible_nav_groups,
+                                visible_pinned_items,
                                 visible_nav_items)
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -68,7 +69,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers import widgets as widgets_module
 from helpers.widgets import (PageSlide, SmoothTween, confirm, hold_hover_cursor,
                              install_edge_wheel,
                              install_horizontal_wheel_guard,
@@ -2747,21 +2747,19 @@ class MainWindow(QMainWindow):
         # padding as a QListWidgetItem, so it never quite lined up).
         # Kept as a separate list rather than folded into nav_list itself
         # so it stays put above the user's drag-to-reorder order instead
-        # of becoming a reorderable/draggable row.
-        home_name, home_page = HOME_ITEM
+        # of becoming a reorderable/draggable row. Discover joined it on
+        # 28 August 2026 for that same reason - see
+        # nav_config.PINNED_EXTRA.
         self.home_list = self._make_rail_list(draggable=False)
-        home_item = QListWidgetItem()
-        self.home_list.addItem(home_item)
-        self._style_nav_item(home_item, home_name, home_page)
-        self.home_list.itemClicked.connect(lambda: self.navigate_to("home"))
-        # NavListWidget.sizeHint() pads in a generous +12 "safety margin"
-        # below the last row (see its docstring) - fine for a nav list's
-        # multi-row case, but on a single-item list that margin is just
-        # dead space, widening the visible gap before the next item well
-        # past the ~spacing()px gap between every other pair of items.
-        # A minimal explicit height (one row + its own top/bottom inset)
-        # keeps that gap consistent instead.
-        self._sync_home_list_height()
+        self._fill_home_list()
+        # The row's own route, not a hardcoded "home": this list carries
+        # Discover as well since 28 August 2026 (nav_config.PINNED_EXTRA),
+        # and a lambda that always navigated home would make the second
+        # row a very confusing button.
+        self.home_list.itemClicked.connect(self._on_nav_item_clicked)
+        # (_fill_home_list has already pinned the height - see
+        # _sync_home_list_height for why this list is not left to its own
+        # sizeHint.)
         # Everything from Home down to the last block scrolls together -
         # see _rail_scroller for the window height that made that
         # necessary.
@@ -3231,12 +3229,34 @@ class MainWindow(QMainWindow):
             item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             item.setToolTip("")
 
+    def _fill_home_list(self):
+        """(Re)build the pinned rows - Home, and Discover unless it is
+        hidden in Settings. Rebuilt rather than restyled because the
+        *number* of rows can change, which is the whole reason Settings
+        has to be able to call this (see _refresh_nav_list)."""
+        self.home_list.blockSignals(True)
+        self.home_list.clear()
+        for name, page_name in visible_pinned_items():
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, page_name)
+            self.home_list.addItem(item)
+            self._style_nav_item(item, name, page_name)
+        self.home_list.blockSignals(False)
+        self._sync_home_list_height()
+
     def _sync_home_list_height(self):
-        """The single-row Home list is pinned to its row height, which
-        changes when that row swaps between the nav and icon fonts - so
-        it has to be re-measured whenever the sidebar folds."""
-        self.home_list.setFixedHeight(
-            self.home_list.sizeHintForRow(0) + self.home_list.spacing() * 2)
+        """The pinned list is held at exactly its rows' height, which
+        changes when they swap between the nav and icon fonts - so it is
+        re-measured whenever the sidebar folds.
+
+        Per row rather than for the list: NavListWidget.sizeHint() pads
+        in a generous +12 "safety margin" below the last row (see its
+        docstring), which on a list this short is dead space that widens
+        the gap to the block below well past the spacing between any
+        other pair of rows."""
+        rows = max(1, self.home_list.count())
+        pitch = self.home_list.sizeHintForRow(0) + self.home_list.spacing() * 2
+        self.home_list.setFixedHeight(pitch * rows)
 
     def _style_logo(self):
         """The brand mark at whichever size the current width wants.
@@ -3462,8 +3482,10 @@ class MainWindow(QMainWindow):
 
         # Restyled in place rather than rebuilt, so the user's drag order
         # and the current selection both survive the fold.
-        home_name, home_page = HOME_ITEM
-        self._style_nav_item(self.home_list.item(0), home_name, home_page)
+        for row, (name, page_name) in enumerate(visible_pinned_items()):
+            item = self.home_list.item(row)
+            if item is not None:
+                self._style_nav_item(item, name, page_name)
         self._sync_home_list_height()
         for rail, rows in zip(self.nav_lists, visible_nav_groups()):
             for row, (name, page_name) in enumerate(rows):
@@ -3645,6 +3667,10 @@ class MainWindow(QMainWindow):
         sidebar updates immediately instead of needing a restart."""
         for rail in self.nav_lists:
             rail.blockSignals(True)
+        # Discover is a pinned row now, so hiding it in Settings has to
+        # reach this list too - it used to be block 0's first row and
+        # was covered by _populate_nav_list alone.
+        self._fill_home_list()
         self._populate_nav_list()
         for rail in self.nav_lists:
             rail.blockSignals(False)
@@ -3740,6 +3766,32 @@ class MainWindow(QMainWindow):
                     return player
             except RuntimeError:
                 pass
+        # **Both hosts, and the immersive one first.** The reader and the
+        # player are laid over `immersive_host()` - the central widget,
+        # the app's own bar included - while the details page and the
+        # genre browse take `overlay_host()`, which is the body *inside*
+        # it. This only ever walked the body, so a reader was never
+        # found here at all: the player was only ever answered for by the
+        # `_player_page` special case above it.
+        #
+        # That is the owner's "the 4th button did not work in reading
+        # mode", 28 August 2026. With no overlay found, navigate_back
+        # fell through to page history - which walked the pages hidden
+        # underneath the reader and looked like nothing happening.
+        #
+        # Immersive first because it covers more: a reader is over the
+        # body, so if one is up it is what "back" means.
+        immersive = (self.immersive_host()
+                     if hasattr(self, "immersive_host") else None)
+        for candidate in (immersive, host):
+            found = self._overlay_in(candidate)
+            if found is not None:
+                return found
+        return None
+
+    @staticmethod
+    def _overlay_in(host):
+        """The last visible overlay directly under `host`, or None."""
         if host is None:
             return None
         newest = None
@@ -3764,12 +3816,21 @@ class MainWindow(QMainWindow):
         Over an overlay it leaves that surface - the player, the reader,
         the details page - because the thing on screen is what "back"
         plainly means there. Over an ordinary page it is history back,
-        exactly as Alt+Left has always been."""
+        exactly as Alt+Left has always been.
+
+        **An overlay's own `go_back` wins**, 28 August 2026. The reader
+        and the player each unwind one layer at a time (chapter to
+        chapter list to out; panel to full screen to out), and this used
+        to reach past that straight to `leave`/`close_player` - so
+        pressing button 4 inside a chapter closed the whole reader,
+        which is the "does not work in reader mode" half of the owner's
+        report. Escape has always taken the layered route; this now
+        takes the same one."""
         overlay = self._top_overlay()
         if overlay is None:
             self.go_back()
             return
-        for name in ("close_player", "leave"):
+        for name in ("go_back", "close_player", "leave"):
             action = getattr(overlay, name, None)
             if callable(action):
                 try:
@@ -3780,10 +3841,24 @@ class MainWindow(QMainWindow):
         self.go_back()
 
     def navigate_forward(self):
-        """Mouse button 5. An overlay has nothing to go forward *to*, so
-        this is history forward and only that."""
-        if self._top_overlay() is None:
-            self.go_forward()
+        """Mouse button 5.
+
+        An overlay that has a forward of its own gets it - the reader
+        goes back into the chapter its list was opened from, the player
+        puts back the layer button 4 just took away. One that has none
+        does nothing, rather than walking the page history underneath
+        itself, which would leave the overlay sitting over a page that
+        had silently changed."""
+        overlay = self._top_overlay()
+        if overlay is not None:
+            action = getattr(overlay, "go_forward", None)
+            if callable(action):
+                try:
+                    action()
+                except Exception:
+                    logs.exception("Could not go forward in the overlay")
+            return
+        self.go_forward()
 
     def _open_add_menu(self):
         """Pop the Add menu without a button to hang it on.
@@ -4380,6 +4455,15 @@ class MainWindow(QMainWindow):
         bar.valueChanged.connect(self._position_fullscreen_bar)
         self._scroll_bound = bar
 
+    # **No corner close in full screen** - added and removed on 28
+    # August 2026. It was built for "when I put my mouse in the top
+    # right corner I have a hoover and can press the X button in the
+    # red", which turned out to be about the *maximised* window, not
+    # this one: "the X in the corner I mean the max window not the
+    # fullscreen ... remove the X in the fullscreen". Full screen hides
+    # minimise, maximise and close on purpose (there is no frame to
+    # restore, and Escape and F11 both leave) and that stands.
+
     def _position_fullscreen_bar(self):
         """Hold the overlaid bar on the page's header row.
 
@@ -4742,13 +4826,13 @@ class MainWindow(QMainWindow):
                 if index < len(pages):
                     self.navigate_to(pages[index])
                 return
-        if (event.modifiers() == Qt.KeyboardModifier.ControlModifier
-                and event.key() == Qt.Key.Key_K):
-            # Ctrl+K rather than Ctrl+F: F belongs to the page's own
-            # search box (see item #17), and K is what every app with a
-            # "search everything" panel binds it to.
-            self.open_global_search()
-            return
+        # **Ctrl+K does nothing**, 28 August 2026, the owner's ask:
+        # "remove the Ctrl+K and make it does nothing". It used to open
+        # the global search - but the search box moved into the window's
+        # own bar and Ctrl+F focuses it, so K had become a second key
+        # doing one thing. `open_global_search` is left in place: the
+        # search icon and the Discover page both call it, and it is what
+        # the Keybinds page's Ctrl+F row describes.
         if event.key() == Qt.Key.Key_Escape:
             # A search box is the thing most worth escaping from, so it
             # wins over leaving full screen.
@@ -4878,7 +4962,12 @@ class MainWindow(QMainWindow):
         return None
 
     def open_global_search(self, initial=""):
-        """Ctrl+K, from any page.
+        """Focus the window's search bar - what Ctrl+F, the search icon
+        and Discover's "search everything" all call.
+
+        Named for the shortcut that used to open it; Ctrl+K was unbound
+        on 28 August 2026 (see keyPressEvent) and the name is left alone
+        rather than renaming a method four callers use.
 
         It used to navigate to Home and land in the field there, because
         that was where the one search box lived. The box is in the
@@ -4912,10 +5001,16 @@ class MainWindow(QMainWindow):
     def _sync_nav_highlight(self, page_name):
         for pair in getattr(self, "_utility_bars", ()):
             pair["downloads"].setChecked(page_name == "downloads")
-        if page_name == "home":
-            self.home_list.setCurrentRow(0)
-        else:
+        pinned = None
+        for index in range(self.home_list.count()):
+            item = self.home_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == page_name:
+                pinned = index
+                break
+        if pinned is None:
             self.home_list.clearSelection()
+        else:
+            self.home_list.setCurrentRow(pinned)
         for rail in self.nav_lists:
             match = None
             for i in range(rail.count()):
@@ -4949,11 +5044,6 @@ class MainWindow(QMainWindow):
             logs.exception("could not open the section a nav row names")
 
     def _show_page(self, page_name, direction="down", animate=True):
-        # Reduce motion: pages land rather than slide - see
-        # widgets.set_reduce_motion. Here rather than in PageSlide so the
-        # slide is never set up at all, not started and skipped.
-        if widgets_module.REDUCE_MOTION:
-            animate = False
         if ":" not in str(page_name):
             page_name = _page_name(page_name)
         # A navigation arriving mid-fold (Ctrl+3 while the sidebar is
@@ -5211,6 +5301,14 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     theme.apply_theme(app)
+    # **The mark, before anything else is built.** The owner's ask, 28
+    # August 2026, pointing at Stremio's launch screen. It goes here and
+    # not later because everything below is the 1.29-1.57s the frozen
+    # build takes to a usable window, and until now the whole of that was
+    # spent showing nothing - see helpers/splash for why this costs none
+    # of it. After apply_theme, because the splash paints in the app's
+    # own accent.
+    launch_splash = splash.show(APP_DIR / "assets" / "atomic_icon.png")
     # And how big a card is on this screen, before the first page is
     # built out of that number (helpers/layout - the owner's "the cards
     # sorting per row must be diff from 2K to 4K to 1080P monitors,
@@ -5312,10 +5410,12 @@ def main():
     # not, and the window would otherwise sit behind everything blinking
     # in the taskbar (see theme.bring_window_to_front).
     theme.bring_window_to_front(window)
+    # The window is up and forward, so the mark has done its job - faded
+    # out rather than snapped away, and never before it has been on
+    # screen long enough to have been read (see splash.dismiss).
+    splash.dismiss(launch_splash)
     # Off unless ATOMIC_DEBUG_FRAME_PACING is set - see helpers/frame_pacing.
     frame_pacing.start(window)
-    # Before anything the user can scroll - see app_settings.get_reduce_motion.
-    widgets_module.set_reduce_motion(app_settings.get_reduce_motion())
     # Only after the window is up and forward: this is modal, and a
     # dialog raised before its parent is showing would sit behind it -
     # the same foreground problem the relaunch already has to solve

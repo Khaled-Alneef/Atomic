@@ -469,6 +469,11 @@ _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
 _LWA_ALPHA = 0x00000002
 _VK_LBUTTON = 0x01
+# The two side buttons. Polled with the left one and for the same reason:
+# mpv owns the video's own child window, so a press over the picture is
+# never delivered to Qt at all (see _poll_mouse and VideoSurface).
+_VK_XBUTTON1 = 0x05     # mouse 4 - "back"
+_VK_XBUTTON2 = 0x06     # mouse 5 - "forward"
 
 # How long an episode *switch* may wait before the loading frame is
 # shown at all - see _show_loading_soon. Under this, a season pack
@@ -598,6 +603,11 @@ ICON_SETTINGS_GLOBE = "\ue774"
 # rather than the bare character, for the reason every glyph in this
 # file is one: a re-encoding tool turns them into mojibake.
 ICON_STATS = "\ue701"
+ICON_RELOAD = "\ue72c"      # Refresh - the circular arrow, the same
+                            # picture every other reload in this app
+                            # uses. Not ICON_SYNC (\ue895), which is the
+                            # two-arrow "sync with a service" glyph and
+                            # would read as talking to a server.
 
 # Two buttons came off the control bar at the owner's request and their
 # glyphs went with them: the globe (E774), which opened a little menu of
@@ -797,6 +807,74 @@ def _put_record(key, fields):
     records = storage.load(RESUME_FILE, [])
     records.append({"id": key, **fields})
     storage.save(RESUME_FILE, records)
+
+
+# The three subtitle levers that are remembered per *episode* - delay,
+# size and vertical offset. The owner's ask, 28 August 2026: "make the
+# last delay value and font size used in the same ep autoload when play
+# the same ep also the vertical position".
+#
+# Per episode rather than per title, deliberately: a delay corrects one
+# *release's* muxing, and the next episode is very often a different
+# release with a different offset - carrying yesterday's correction onto
+# it would be worse than starting from zero. Size and position are more
+# personal than that and would arguably travel, but they ride in the
+# same record because splitting them would mean two stores answering the
+# same question at two scopes, and one of them being wrong.
+#
+# Filed in the resume record, which is already keyed by exactly this
+# (entry, season, episode) and already has a single writer on the UI
+# thread. That is also why this can write without the position guard
+# `_save_position` applies: a lever moved five seconds into an episode
+# is a real preference even though the position is not yet worth
+# resuming to.
+SUB_PREF_FIELD = "sub_prefs"
+
+
+def save_sub_prefs(entry, season, episode, delay, size, pos_offset,
+                   choice=None):
+    """Remember the levers for one episode, and optionally which
+    subtitle was showing. Never raises.
+
+    `choice` is the same recipe `save_subtitle_choice` files per title -
+    language, source, provider, label - and it is stored here as well,
+    per episode, at the owner's ask of 28 August 2026 ("make the used
+    subtitle stored with the font size, delay and others"). The two are
+    not in competition: see `_restore_sub_prefs` for which wins.
+
+    Merged rather than overwritten, so a delay nudge does not erase the
+    subtitle this episode was watched with and picking a subtitle does
+    not reset the delay."""
+    try:
+        keys = _resume_keys(entry, season, episode)
+        if not keys:
+            return
+        stored = dict(load_sub_prefs(entry, season, episode) or {})
+        stored.update({"delay": round(float(delay or 0.0), 2),
+                       "size": int(size or 0),
+                       "pos_offset": int(pos_offset or 0)})
+        if choice:
+            stored["choice"] = dict(choice)
+        _put_record(keys[0], {
+            "entry_id": entry_identities(entry)[0],
+            "season": season, "episode": episode,
+            SUB_PREF_FIELD: stored,
+            "updated_at": storage.now_iso()})
+    except Exception:
+        logs.exception("Could not save the subtitle preferences")
+
+
+def load_sub_prefs(entry, season, episode):
+    """The three levers for one episode, or None when it has none.
+
+    Read defensively - a record written by an older build has no such
+    field, and a hand-edited one can hold anything."""
+    try:
+        record = load_resume(entry, season, episode) or {}
+        found = record.get(SUB_PREF_FIELD)
+        return found if isinstance(found, dict) else None
+    except Exception:
+        return None
 
 
 def _subtitle_pref_keys(entry) -> list:
@@ -2323,8 +2401,17 @@ class PlayerPage(GlassPage):
         # answer the *player* opens on, from the same function, so the
         # download and the playback cannot disagree about a title.
         self._anime_hint = None       # Cinemeta's verdict, once it answers
-        self._dl_audio = ("jp" if "jpn" in self._audio_language_preference()
-                          else "en")
+        # **"orig" for everything, 28 August 2026** - it used to be "jp"
+        # for anime and "en" for everything else, and that second half
+        # was wrong in a way that only showed once the label stopped
+        # saying "Japanese": "en" asks the ranker to *prefer a
+        # dub-tagged release*, which for an English-original series
+        # floats the handful of releases that announce a dub above the
+        # ordinary ones. "orig" is the same preference anime always had
+        # (prefer the untagged release) and is what "the original audio"
+        # means for every language. See downloads._split_by_audio, which
+        # treats "orig" and the old "jp" identically.
+        self._dl_audio = "orig"
         self._dl_folder = None
         self._temp_dir = None
         # Where the seat playback still owes is, from the moment a file
@@ -2388,6 +2475,12 @@ class PlayerPage(GlassPage):
         self._mouse_down = False
         self._press_pos = None
         self._press_on_video = False
+        # Mouse buttons 4 and 5 (28 August 2026). `_side_down` is the
+        # held/not-held edge for each, since GetAsyncKeyState is polled;
+        # `_side_back` is the one step go_back last took, which is the
+        # only thing go_forward can put back - see both methods.
+        self._side_down = {}
+        self._side_back = None
         # Double-click-to-fullscreen state. The pause state at the first
         # click is remembered so the second click can put it back exactly
         # (toggling it a second time would race mpv's still-in-flight
@@ -2870,6 +2963,19 @@ class PlayerPage(GlassPage):
         self.speed_btn = _text_button("1x", "Playback speed")
         self.speed_btn.clicked.connect(self._open_speed_panel)
         row.addWidget(self.speed_btn)
+
+        # **Between the speed button and Subtitles**, at the owner's ask,
+        # 28 August 2026. Same action the R key has had since that
+        # morning (see reload_source): play this episode again from the
+        # *same* release, landing back where it was. It is here rather
+        # than in the settings panel because what it is for is a stream
+        # that has died mid-episode - peers gone, host dropped - and at
+        # that moment the user is looking at a stalled picture, not
+        # hunting through panels.
+        self.reload_btn = _icon_button(ICON_RELOAD, "Reload this source (R)",
+                                       size=40, font_pt=14)
+        self.reload_btn.clicked.connect(self.reload_source)
+        row.addWidget(self.reload_btn)
 
         self.subs_btn = _icon_button(ICON_SUBTITLES, "Arabic subtitles", size=40, font_pt=14)
         self.subs_btn.clicked.connect(self._open_subtitle_panel)
@@ -3553,6 +3659,11 @@ class PlayerPage(GlassPage):
                      "paused-for-cache", "cache-buffering-state", "path"):
             self.handle.observe_property(name, self._mpv_property)
         self.handle.register_event_callback(self._mpv_event)
+        # **Whatever this episode was left set to, before any of the
+        # three are pushed at mpv** - the owner's ask, 28 August 2026.
+        # Read here rather than in __init__ because the season and
+        # episode are settled by now and the record is keyed by them.
+        self._restore_sub_prefs()
         # Both levers, and the delay too - an .ass needs sub-scale
         # rather than sub-font-size (see _apply_sub_style), and the
         # delay used not to be applied at all until the first nudge.
@@ -4175,7 +4286,19 @@ class PlayerPage(GlassPage):
         if self._sub_auto_done or self._closing or not self._subtitles:
             return
         try:
-            stored = load_subtitle_choice(self.entry)
+            # **This episode's own choice first, the title's second.**
+            # The title-level record is deliberately broad - picking
+            # Arabic once carries into every later episode - but it is
+            # also whatever was picked *most recently anywhere in the
+            # series*, which is the wrong answer for re-opening an
+            # episode that was watched with something else. The episode's
+            # own record answers that exactly; the title's is the
+            # fallback for an episode that has none, which is every
+            # episode the first time it is played.
+            stored = (load_sub_prefs(self.entry, self.season,
+                                     self.episode) or {}).get("choice")
+            if not stored:
+                stored = load_subtitle_choice(self.entry)
         except Exception:
             logs.exception("Could not read the remembered subtitle")
             return
@@ -4288,11 +4411,19 @@ class PlayerPage(GlassPage):
             return
         result, provider, label = choice
         try:
-            save_subtitle_choice(
-                self.entry,
-                lang=str((result or {}).get("lang") or "").lower(),
-                source=str((result or {}).get("source") or ""),
-                provider=provider, label=label)
+            recipe = {"lang": str((result or {}).get("lang") or "").lower(),
+                      "source": str((result or {}).get("source") or ""),
+                      "provider": provider, "label": label}
+            save_subtitle_choice(self.entry, **recipe)
+            # **And against this episode**, beside its delay, size and
+            # position. The title-level record above is what carries a
+            # choice *forward* to the next episode; this one is what
+            # brings back exactly what was watched when the same episode
+            # is opened again - a different question, and the one the
+            # owner asked on 28 August 2026.
+            save_sub_prefs(self.entry, self.season, self.episode,
+                           self._sub_delay, self._sub_size,
+                           self._sub_pos_offset, choice=recipe)
         except Exception:
             # Never fatal: the subtitle is loaded and playing either way.
             logs.exception("Could not remember the subtitle choice")
@@ -6685,11 +6816,47 @@ class PlayerPage(GlassPage):
         self._sub_delay = round(self._sub_delay + delta, 2)
         self._apply_sub_delay()
         self._update_stepper("set_delay_text", self._delay_text())
+        self._remember_sub_prefs()
 
     def _nudge_size(self, delta):
         self._sub_size = max(SUB_SIZE_MIN, min(SUB_SIZE_MAX, self._sub_size + delta))
         self._apply_sub_style()
         self._update_stepper("set_size_text", self._sub_size_text())
+        self._remember_sub_prefs()
+
+    def _restore_sub_prefs(self):
+        """Load this episode's remembered delay, size and position.
+
+        Clamped to the same bounds the steppers enforce - the file is
+        editable and a size of 4000 would put one word on the screen.
+        Silent when there is nothing stored, which leaves every value at
+        the default it already had."""
+        stored = load_sub_prefs(self.entry, self.season, self.episode)
+        if not stored:
+            return
+        try:
+            self._sub_delay = round(float(stored.get("delay") or 0.0), 2)
+            size = int(stored.get("size") or SUB_SIZE_DEFAULT)
+            self._sub_size = max(SUB_SIZE_MIN, min(SUB_SIZE_MAX, size))
+            offset = int(stored.get("pos_offset") or 0)
+            self._sub_pos_offset = max(SUB_POS_OFFSET_MIN,
+                                       min(SUB_POS_OFFSET_MAX, offset))
+        except (TypeError, ValueError):
+            logs.exception("Stored subtitle preferences were unreadable")
+
+    def _remember_sub_prefs(self):
+        """Write the three levers onto this episode's record.
+
+        On every nudge rather than on close: the player can be killed,
+        the machine can sleep, and a preference that only survives a
+        clean exit is one the user will find missing exactly when they
+        notice it. One `storage.update_entry` per press is a re-read and
+        a write of one small file, which is what the resume position
+        already pays every five seconds."""
+        if self._closing:
+            return
+        save_sub_prefs(self.entry, self.season, self.episode,
+                       self._sub_delay, self._sub_size, self._sub_pos_offset)
 
     def _apply_sub_delay(self):
         """Push the delay onto every subtitle mpv is showing.
@@ -7218,22 +7385,51 @@ class PlayerPage(GlassPage):
         # having, because it names *which* step is slow.
         panel.add_group("Startup")
         setters["startup"] = panel.add_stat("Doing", "-")
+        # **The swarm rows are always drawn, and the hash is re-read on
+        # every tick.** The owner's ask, 28 August 2026: "make sure to
+        # show the speed in the statistics in the vid player even before
+        # the vid starts (while sourcing and before if possible)".
+        #
+        # They used to be built only if a release had already been
+        # chosen when the panel was opened - which during sourcing is
+        # exactly when it has not - so opening Statistics while the
+        # loading screen was up got the flat "not streaming from a
+        # torrent" message and then kept it for the rest of the episode,
+        # however the release turned out. Reading `_playing_info_hash`
+        # inside `refresh` instead means the numbers fill themselves in
+        # the moment the engine has a handle, which is the moment the
+        # download actually starts and the one worth watching.
+        #
+        # A title that really is a direct URL or a debrid link says so
+        # in the rows rather than in a paragraph - the rows have to exist
+        # either way, and a sentence that cannot be updated is what got
+        # this wrong the first time.
         panel.add_group("Source")
-        if info_hash:
-            row = QHBoxLayout()
-            row.setSpacing(26)
-            columns = QWidget()
-            columns.setStyleSheet("background: transparent; border: none;")
-            columns.setLayout(row)
-            setters["peers"] = panel.add_stat("Peers", "-", into=row)
-            setters["speed"] = panel.add_stat("Speed", "-", into=row)
-            setters["done"] = panel.add_stat("Completed", "-", into=row)
-            row.addStretch(1)
-            panel.body_layout.addWidget(columns)
-        else:
-            panel.add_message(
-                "This episode is not streaming from a torrent, so there "
-                "are no peers to report.")
+        row = QHBoxLayout()
+        row.setSpacing(26)
+        columns = QWidget()
+        columns.setStyleSheet("background: transparent; border: none;")
+        columns.setLayout(row)
+        setters["peers"] = panel.add_stat("Peers", "-", into=row)
+        # **"swarm_speed", not "speed"** - and that one word is why the
+        # Speed row had never once shown a number. The Playback group
+        # below carries a stat of its own keyed "speed" (mpv's
+        # "Speed correction"), it is built *after* this one, and
+        # `setters` is a plain dict - so the later row silently took the
+        # name and every tick wrote the download rate into
+        # "Speed correction" while this row sat on the "-" it was created
+        # with. The owner's screenshot of 28 August 2026 is exactly that:
+        # Peers 139, Completed 60.28%, Speed "-", all three read from the
+        # same dict in the same breath.
+        #
+        # Two stats had the same key and nothing said so, which is what
+        # `_assert_unique_stat_keys` below now refuses to let happen
+        # again.
+        setters["swarm_speed"] = panel.add_stat("Speed", "-", into=row)
+        setters["done"] = panel.add_stat("Completed", "-", into=row)
+        row.addStretch(1)
+        panel.body_layout.addWidget(columns)
+        setters["source_note"] = panel.add_stat("Source", "Looking...")
 
         panel.add_group("Playback")
         # Two stats to a line rather than six across one: the panel is a
@@ -7258,6 +7454,14 @@ class PlayerPage(GlassPage):
             holder.setStyleSheet("background: transparent; border: none;")
             holder.setLayout(line)
             for key, label in pairs:
+                if key in setters:
+                    # A second stat under a name already taken would
+                    # quietly steal it, which is the defect above. Loud
+                    # here rather than silent on screen: this is a
+                    # programming mistake with a fix, not a runtime
+                    # condition to survive, and the last one cost a stat
+                    # that never worked.
+                    logs.warning(f"statistics: duplicate stat key {key!r}")
                 setters[key] = panel.add_stat(label, "-", into=line)
             line.addStretch(1)
             panel.body_layout.addWidget(holder)
@@ -7274,25 +7478,37 @@ class PlayerPage(GlassPage):
                 setters["startup"](text.splitlines()[0] if text else "Starting...")
             else:
                 setters["startup"]("Playing")
-            if info_hash:
+            # Asked every tick, not captured when the panel opened - see
+            # the note where these rows are built.
+            live_hash = self._playing_info_hash()
+            found = {}
+            if live_hash:
                 try:
                     from helpers import torrent_engine
-                    found = torrent_engine.stats(info_hash) or {}
+                    found = torrent_engine.stats(live_hash) or {}
                 except Exception:
                     found = {}
-                if not found:
-                    # The handle was released (the episode moved on, or
-                    # the engine reaped it) - say nothing rather than
-                    # freezing the last numbers as though they were
-                    # current.
-                    setters["peers"]("-")
-                    setters["speed"]("-")
-                    setters["done"]("-")
+            if found:
+                setters["source_note"]("Torrent")
+                setters["peers"](str(int(found.get("peers") or 0)))
+                setters["swarm_speed"](
+                    self._rate_text(found.get("download_rate")))
+                setters["done"](
+                    f"{float(found.get('progress') or 0.0) * 100:.2f} %")
+            else:
+                # Three states share these dashes, and the note is what
+                # tells them apart: no release picked yet, a release
+                # picked whose handle the engine has not opened (or has
+                # reaped), and a title that is not a torrent at all.
+                if not live_hash:
+                    setters["source_note"](
+                        "Looking..." if self._awaiting_first_frame
+                        else "Not a torrent")
                 else:
-                    setters["peers"](str(int(found.get("peers") or 0)))
-                    setters["speed"](self._rate_text(found.get("download_rate")))
-                    setters["done"](
-                        f"{float(found.get('progress') or 0.0) * 100:.2f} %")
+                    setters["source_note"]("Connecting...")
+                setters["peers"]("-")
+                setters["swarm_speed"]("-")
+                setters["done"]("-")
             live = self._playback_stats()
             setters["resolution"](live["resolution"])
             setters["fps"](live["fps"])
@@ -7630,21 +7846,25 @@ class PlayerPage(GlassPage):
             panel.add_message("Sources are still being looked up - "
                               "best available is what will be saved.")
 
-        # Which of the two is "the original" depends on the title, and
-        # calling English a dub for a live-action series read as a bug
-        # even once the default was right (see _dl_audio's note).
-        japanese_first = "jpn" in self._audio_language_preference()
-        panel.add_group("AUDIO")
-        panel.add_row("Japanese" + (" (original)" if japanese_first else " dub"),
-                      "The ordinary fansub releases" if japanese_first
-                      else "Prefers dual-audio releases when one exists",
-                      lambda: self._dl_set("audio", "jp"),
-                      selected=self._dl_audio == "jp")
-        panel.add_row("English" + (" dub" if japanese_first else " (original)"),
-                      "Prefers dual-audio releases when one exists"
-                      if japanese_first else "The ordinary releases",
-                      lambda: self._dl_set("audio", "en"),
-                      selected=self._dl_audio == "en")
+        # **The audio group is drawn for anime and for nothing else** -
+        # 28 August 2026, the same ask that took it out of the details
+        # page's download dialog, and the same reasoning: for a series or
+        # a film there is no second audio worth choosing between, and the
+        # two rows here named languages ("Japanese", "English") that a
+        # Spanish drama has nothing to do with. Non-anime keeps the
+        # "orig" preference _dl_audio is initialised to; it simply is not
+        # asked about.
+        from helpers import stremio as _stremio
+        if _stremio.is_anime_entry(self.entry or {}):
+            panel.add_group("AUDIO")
+            panel.add_row("Japanese (original)",
+                          "The ordinary fansub releases",
+                          lambda: self._dl_set("audio", "orig"),
+                          selected=self._dl_audio != "en")
+            panel.add_row("English dub",
+                          "Prefers dual-audio releases when one exists",
+                          lambda: self._dl_set("audio", "en"),
+                          selected=self._dl_audio == "en")
 
         panel.add_group("SUBTITLE TO SAVE ALONGSIDE")
         panel.add_row("None", "Video only",
@@ -8330,6 +8550,7 @@ class PlayerPage(GlassPage):
                                        self._sub_pos_offset + delta))
         self._apply_sub_position()
         self._update_stepper("set_pos_text", self._sub_pos_text())
+        self._remember_sub_prefs()
 
     def _sub_pos_text(self):
         """Said as height off the bottom rather than as mpv's number:
@@ -8481,6 +8702,7 @@ class PlayerPage(GlassPage):
         down = bool(state & 0x8000)
         pressed_since = bool(state & 0x0001)
         position = QCursor.pos()
+        self._poll_side_buttons(position)
 
         if down and not self._mouse_down:
             self._mouse_down = True
@@ -9321,7 +9543,7 @@ class PlayerPage(GlassPage):
         Qt.Key.Key_MediaPause, Qt.Key.Key_MediaStop, Qt.Key.Key_MediaNext,
         Qt.Key.Key_MediaPrevious, Qt.Key.Key_N, Qt.Key.Key_P,
         Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
-        Qt.Key.Key_F, Qt.Key.Key_F11, Qt.Key.Key_M,
+        Qt.Key.Key_F, Qt.Key.Key_F11, Qt.Key.Key_M, Qt.Key.Key_R,
     })
 
     def keyPressEvent(self, event):
@@ -9352,21 +9574,118 @@ class PlayerPage(GlassPage):
             self.toggle_fullscreen()
         elif key == Qt.Key.Key_M:
             self.toggle_mute()
+        elif key == Qt.Key.Key_R and not event.modifiers():
+            self.reload_source()
         elif key == Qt.Key.Key_Escape:
-            # One thing at a time, innermost first: a panel, then full
-            # screen, then the player. Closing the whole page because a
-            # subtitle list was open is the kind of Escape that makes
-            # people stop using it.
-            if self._panel is not None:
-                self._close_panel()
-            elif self._episode_bar is not None and self._episode_bar.isVisible():
-                self.toggle_episode_bar()
-            elif self._window is not None and self._window.isFullScreen():
-                self.toggle_fullscreen()
-            else:
-                self.close_player()
+            # One thing at a time, innermost first - see go_back, which
+            # Escape and mouse button 4 now share so the two cannot
+            # drift into unwinding by different rules.
+            self.go_back()
         else:
             super().keyPressEvent(event)
+
+    def reload_source(self):
+        """R: play this episode again from the *same* source, landing
+        back where it was.
+
+        The owner's ask, 28 August 2026, paired with R in the episode
+        list - same key, same idea ("ask for this again"), on the two
+        surfaces that can be stuck showing a stale answer. What it is
+        for is a stream that has died mid-episode: a torrent whose peers
+        have gone, a host that has dropped the connection. Picking the
+        source again by hand from the panel is what people do instead,
+        and it is three presses and a scroll to arrive at the row that
+        is already selected.
+
+        The same source, deliberately, not the next best one - "reload"
+        answering with a different release would be a different feature
+        and a surprising one. `_play_stream` on the held index is
+        exactly what the Sources panel does when that row is chosen, so
+        this reuses the whole path (including `_needs_preparing`, which
+        re-hands a torrent to the engine rather than trusting a url that
+        has already proved it can go stale).
+
+        The resume point is read the way `_resume_target` reads it -
+        only while a picture is actually up, since mid-startup
+        `_position` is a leftover from the last thing played."""
+        if self.handle is None or not self._streams:
+            return
+        if not (0 <= self._stream_index < len(self._streams)):
+            return
+        at = (None if self._awaiting_first_frame
+              else float(self._position or 0.0) or None)
+        self._show_loading_soon("Reloading the source...")
+        self._play_stream(self._stream_index, resume_at=at)
+
+    # ---- back / forward ----------------------------------------------
+    # The two side buttons of the mouse, in the player. They already
+    # worked over the player's own bars - main._MouseNavFilter is
+    # installed on the application - but not over the picture itself,
+    # which is the great majority of the surface: mpv renders into a
+    # native child window and Qt is never told about a press there. So
+    # the buttons are polled alongside the left one (see _poll_mouse),
+    # and only over the video, so a press on a Qt surface is handled
+    # once by the filter rather than twice.
+    def go_back(self):
+        """One layer out, innermost first: a panel, then the episode
+        bar, then full screen, then the player itself.
+
+        Closing the whole page because a subtitle list was open is the
+        kind of Back that makes people stop pressing it. Escape does
+        exactly this too."""
+        if self._panel is not None:
+            self._close_panel()
+            # A sources/subtitles panel is built by the button that owns
+            # it, from state that button holds; nothing here could put
+            # one back, so forward is deliberately given nothing rather
+            # than something approximate.
+            self._side_back = None
+            return
+        if self._episode_bar is not None and self._episode_bar.isVisible():
+            self.toggle_episode_bar()
+            self._side_back = "episodes"
+            return
+        if self._window is not None and self._window.isFullScreen():
+            self.toggle_fullscreen()
+            self._side_back = "fullscreen"
+            return
+        self.close_player()
+
+    def go_forward(self):
+        """Undo the last go_back step, where that step can be undone.
+
+        Only ever the step immediately before it, and only once - a
+        player has no history to walk, so anything more would be
+        inventing a destination. With nothing to put back it does
+        nothing, which is the honest answer and not a missed press."""
+        step, self._side_back = self._side_back, None
+        if step == "episodes":
+            if self._episode_bar is not None and not self._episode_bar.isVisible():
+                self.toggle_episode_bar()
+        elif step == "fullscreen":
+            if self._window is not None and not self._window.isFullScreen():
+                self.toggle_fullscreen()
+
+    def _poll_side_buttons(self, position):
+        """Act on a press of mouse 4 or 5 that landed on the video.
+
+        Edge-detected off GetAsyncKeyState's held bit, exactly like the
+        left button above. The 0x0001 "pressed since last asked" bit is
+        deliberately *not* read here: unlike a play/pause toggle, a
+        missed sub-40ms side click costs one press, while a doubled one
+        would close the player - and that bit is also set by a press
+        Qt has already handled on a bar, which would be the double."""
+        for vk, action in ((_VK_XBUTTON1, self.go_back),
+                           (_VK_XBUTTON2, self.go_forward)):
+            try:
+                down = bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+            except Exception:
+                return
+            was_down = self._side_down.get(vk, False)
+            self._side_down[vk] = down
+            if down and not was_down and self._is_active() and self._over_video(position):
+                action()
+                return
 
     # ---- teardown ----------------------------------------------------
     def close_player(self):

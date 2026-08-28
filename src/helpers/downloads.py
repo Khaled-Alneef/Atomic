@@ -645,7 +645,15 @@ def _split_by_audio(candidates, audio):
     audio" would be worse than the wrong-order pick this replaces - so
     the rest are still raced, but only when nothing preferred will
     start."""
-    if audio not in ("en", "jp"):
+    # **"orig" is "jp" for every title that is not Japanese**, 28 August
+    # 2026. The split only ever knew two states - prefer a dub-tagged
+    # release, or prefer one without - and "jp" was the name for the
+    # second because anime was the only case that had one. A Spanish
+    # series has an original audio too, so the dialog now sends "orig"
+    # for it and "jp" stays accepted: jobs queued by an older build are
+    # still sitting in the queue file, and a value this stopped
+    # recognising would silently downgrade them to no preference at all.
+    if audio not in ("en", "jp", "orig"):
         return list(candidates), []
     wants_dub = audio == "en"
     preferred, rest = [], []
@@ -663,7 +671,7 @@ def _order_by_audio(candidates, audio):
     filtered: release names lie by omission all the time, and an empty
     queue because no name said "dual audio" would be worse than the
     wrong-order fallback these are."""
-    if audio not in ("en", "jp"):
+    if audio not in ("en", "jp", "orig"):
         return candidates
     wants_dub = audio == "en"
     return sorted(candidates,

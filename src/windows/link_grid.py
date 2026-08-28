@@ -337,7 +337,18 @@ class LinkGridPage(GridSelection, GlassPage):
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
         self.grid_layout.setSpacing(10)
-        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # **Centred, not left-hugging - the same thing poster_grid does.**
+        # The owner's ask, 28 August 2026: "make the games and apps and
+        # webs grid in the mid like the movies". The column count here is
+        # a fixed 8 or 9 (link_grid.poster_grid_columns), so on a wide
+        # window the row is narrower than the area it sits in and every
+        # pixel of the difference used to land on the right, which reads
+        # as the page leaning left. poster_grid._left_margin solves the
+        # same problem by halving the slack; a QGridLayout does it with
+        # the alignment, and the last partial row still fills from the
+        # left inside the centred block exactly as the poster grids' does.
+        self.grid_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         panel_layout.addWidget(scroll_area(self.grid_body, ground=theme.PANEL_FILL), stretch=1)
 
         self._drag_reorder = CardDragReorder(

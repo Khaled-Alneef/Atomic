@@ -1579,6 +1579,33 @@ def _drm_stream(entry):
 _ABSOLUTE_CACHE = {}
 
 
+def season_counts(entry):
+    """How many episodes Cinemeta lists in each season, or {} when there
+    is no metadata to say.
+
+    Split out of `absolute_episode` because `episode_fallbacks` needs the
+    same numbers for a different question - not "which episode is this
+    overall" but "could season 1 have an episode with this number of its
+    own". Same cache, same one fetch per title per session."""
+    try:
+        imdb_id = (entry or {}).get("imdb_id")
+        if not imdb_id or stremio is None:
+            return {}
+        key = str(imdb_id)
+        counts = _ABSOLUTE_CACHE.get(key)
+        if counts is None:
+            meta = stremio.fetch_meta_cached(imdb_id, "series")
+            counts = {}
+            for video in ((meta or {}).get("videos") or []):
+                number = video.get("season")
+                if number:
+                    counts[int(number)] = counts.get(int(number), 0) + 1
+            _ABSOLUTE_CACHE[key] = counts
+        return counts
+    except Exception:
+        return {}
+
+
 def absolute_episode(entry, season, episode):
     """Which episode of the whole series `season`x`episode` is, or None.
 
@@ -1603,16 +1630,7 @@ def absolute_episode(entry, season, episode):
         season, episode = int(season or 0), int(episode or 0)
         if not imdb_id or season < 1 or episode < 1 or stremio is None:
             return None
-        key = str(imdb_id)
-        counts = _ABSOLUTE_CACHE.get(key)
-        if counts is None:
-            meta = stremio.fetch_meta_cached(imdb_id, "series")
-            counts = {}
-            for video in ((meta or {}).get("videos") or []):
-                number = video.get("season")
-                if number:
-                    counts[int(number)] = counts.get(int(number), 0) + 1
-            _ABSOLUTE_CACHE[key] = counts
+        counts = season_counts(entry)
         if season not in counts or episode > counts[season]:
             return None
         return sum(count for number, count in counts.items()
@@ -1658,10 +1676,32 @@ def episode_fallbacks(season, episode, entry=None):
 
     add(season, episode)
     if season > 1:
-        # Same episode number under season 1 - what an absolutely-numbered
-        # index looks like for a continuing show. Only ever the *same*
-        # episode number: a different one is a different episode.
-        add(1, episode)
+        # **The absolute index first, and it is not a guess** - it is
+        # this episode counted from the start of the series
+        # (`absolute_episode`, arithmetic over Cinemeta's own list). An
+        # absolutely-numbered index files a later season's episode under
+        # season 1 at *that* number, not at its per-season one.
+        absolute = absolute_episode(entry, season, episode)
+        if absolute and absolute != episode:
+            add(1, absolute)
+        # **And the bare episode number only when season 1 cannot own
+        # it.** This is the owner's report of 28 August 2026: "in Kingdom
+        # anime when I played the last ep last s it played an ep from
+        # s1". Kingdom's season 1 has 38 episodes, so asking for S05E13
+        # and falling through to S01E13 does not find the same episode
+        # written another way - it finds a genuine, different, five-year
+        # old episode, and every check downstream passes it because it
+        # really is S01E13.
+        #
+        # The rung was written for absolutely-numbered shows and is
+        # right for them; what it lacked was any test of whether the
+        # number it was about to reuse is already taken. Season 1's own
+        # length is that test. With no metadata at all nothing is known
+        # and the old behaviour stands - this can only ever remove a
+        # wrong answer, never add one.
+        first_season = season_counts(entry).get(1)
+        if first_season is None or episode > first_season:
+            add(1, episode)
     return order
 
 

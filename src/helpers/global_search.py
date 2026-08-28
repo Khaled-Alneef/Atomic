@@ -1,4 +1,4 @@
-"""One search across every page, opened with Ctrl+K.
+"""One search across every page, opened from the window's search bar.
 
 Where it sits, and why, since the owner asked for that specifically:
 every application that has this - VS Code's Quick Open, Spotlight,
@@ -37,21 +37,97 @@ from PyQt6.QtWidgets import (
 from . import discover, logs, lookup_pool, storage, theme
 from .widgets import show_toast, smooth_scrolling
 
-# The app's keyboard map. Listed in Settings under Keybinds - it lived in
-# this panel first, which put a wall of grey text under the field every
-# time the panel opened, in front of someone who had just proved they
-# knew the shortcut. Kept here because this is where the keys are
+# The app's keyboard map, as Settings lists it under Keybinds. It lives
+# here rather than in that dialog because this is where the keys are
 # defined-adjacent, and Settings imports it rather than repeating it.
-# Alt+Left/Right and F11 predate this and sit where a browser puts them.
+#
+# **Read against the code, 28 August 2026, because it had drifted.** The
+# owner's ask was "make them match the real app", and three things were
+# wrong: Ctrl+F was described as "Search this page", which stopped being
+# true when the per-page boxes were removed on 25 August (there is one
+# field now, and Ctrl+F focuses it - see main.MainWindow.keyPressEvent);
+# Alt+Left/Right and F11 were left out deliberately as "browser
+# conventions", which is a reason not to explain them, not a reason to
+# hide them from the one screen that answers "what does the keyboard
+# do"; and neither the player nor the reader appeared at all, though
+# between them they bind most of the keys anyone actually uses.
+#
+# Every row below was taken from the handler that implements it -
+# MainWindow.keyPressEvent, player.PlayerPage.keyPressEvent and
+# reader.ReaderPage.keyPressEvent - rather than from memory.
 SHORTCUTS = (
-    ("Ctrl+K", "Search everything"),
-    ("Ctrl+F", "Search this page"),
-    ("Ctrl+N", "Add something"),
-    ("Ctrl+Z", "Undo the last action"),
-    ("Ctrl+Y", "Redo the last action"),
-    ("Ctrl+1-9", "Jump to a sidebar page"),
-    ("Ctrl+,", "Settings"),
-    ("Esc", "Exit search"),
+    ("Anywhere", (
+        # **No Ctrl+K row** - the owner's ask, 28 August 2026: "remove
+        # the Ctrl+K and make it does nothing". It opened the same
+        # window search bar Ctrl+F does, so it was a second key for one
+        # action, and the window no longer answers it at all (see
+        # main.AtomicWindow.keyPressEvent).
+        ("Ctrl+F", "Jump to the search bar"),
+        ("Ctrl+N", "Add something"),
+        ("Ctrl+Z", "Undo the last action"),
+        ("Ctrl+Y", "Redo the last action"),
+        ("Ctrl+1-9", "Jump to a sidebar page"),
+        ("Ctrl+,", "Settings"),
+        # Two rows, not one "Alt+Left / Alt+Right": measured at 247px of
+        # caps against a 124px column, which would have been clipped in
+        # half, and widening the column for one row would leave every
+        # other row with a hand's width of gap before its description.
+        ("Alt+Left", "Back"),
+        ("Alt+Right", "Forward"),
+        ("F11", "Full screen"),
+        ("Esc", "Leave the search bar, then full screen"),
+        # The owner's ask, 28 August 2026 - listed here as well as under
+        # the two overlays, because main._MouseNavFilter is installed on
+        # the *application*: these work on every page, and the Watching
+        # and Reading rows below say what "back" means once one of those
+        # is on screen, not that the buttons only work there.
+        ("Mouse 4", "Back"),
+        ("Mouse 5", "Forward"),
+    )),
+    ("Watching", (
+        ("Space", "Play / pause"),
+        ("Left / Right", "Seek back / forward"),
+        ("Up / Down", "Volume"),
+        ("M", "Mute"),
+        ("N / P", "Next / previous episode"),
+        ("F", "Full screen"),
+        # Same key, same idea, on all three surfaces that can be showing
+        # a stale answer - the reader reloads its chapter, the episode
+        # list re-asks its source, and this replays the current release
+        # from where it is (player.reload_source).
+        ("R", "Reload the source, from where you are"),
+        # The player unwinds one layer at a time on purpose - see its
+        # keyPressEvent - so saying only "close the player" would be a
+        # lie about the first two presses.
+        ("Esc", "Close the panel, then full screen, then the player"),
+        # The two side buttons, listed because they are now bound here
+        # rather than only over ordinary pages - the owner's ask, 28
+        # August 2026. Over the bare picture mpv owns the click and Qt
+        # never sees it, so the player polls them; see player._poll_mouse.
+        ("Mouse 4", "Back, one layer at a time"),
+        ("Mouse 5", "Undo the last Mouse 4 step"),
+    )),
+    ("Episode & Chapter Lists", (
+        ("R", "Ask the source for the list again"),
+        ("Esc", "Close the list"),
+    )),
+    ("Reading", (
+        # Deliberately the opposite of the on-screen buttons, which sit
+        # right-to-left with the content; reader.keyPressEvent carries
+        # the note asking that this not be "fixed" to match them.
+        ("Right / Left", "Next / previous chapter"),
+        ("Space / PageDown", "Next page"),
+        ("Backspace / PageUp", "Previous page"),
+        ("Up / Down", "Scroll"),
+        ("Home / End", "First / last page"),
+        ("+ / -", "Zoom in / out"),
+        ("0", "Reset zoom"),
+        ("F", "Full screen"),
+        ("R", "Reload the chapter"),
+        ("Esc", "Close the reader"),
+        ("Mouse 4", "Back to the chapter list, then out"),
+        ("Mouse 5", "Back into the chapter"),
+    )),
 )
 
 PANEL_WIDTH = 620

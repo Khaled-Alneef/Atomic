@@ -63,8 +63,11 @@ ROW_ICON_SIZE = (28, 28)
 # itself while the click was still being let go of.
 RESORT_DELAY_MS = 2500
 
-# No preview limits for the tracker rows any more - see _recent_entries.
-GAMES_PREVIEW_LIMIT = 6
+# No preview limits for the tracker rows any more - see _recent_entries,
+# and none for Games either since 28 August 2026 (_recent_games). Quick
+# Apps and Quick Websites keep theirs: they are vertical lists in a
+# fixed box, not a strip that scrolls, so an uncapped one would push
+# everything below it off the page.
 QUICK_LIST_LIMIT = 5
 
 # The search field's width here. Wider than a page's own 220px filter box
@@ -468,10 +471,24 @@ class HomePage(GlassPage):
                       reverse=True)
 
     def _recent_games(self):
+        """Every game, most recently played first, then the ones never
+        played in saved order.
+
+        **No preview cap**, 28 August 2026, the owner: "make the main
+        page shows all games just like the readings and watchings in the
+        main page!". It used to stop at six, which is the one thing that
+        made this row different from Reading and Watching - those have
+        carried every entry since `_recent_entries` dropped its own cap,
+        and the row was already built to hold them: `_build_games_grid`
+        is a sideways strip behind SideScroller's arrows, so a long
+        library scrolls rather than being cut off. Each card asks for its
+        own cover through `cover_fetch`, which queues on the bounded
+        covers pool, so a large library is more queued lookups and not
+        more simultaneous ones."""
         played = [g for g in self.games if g.get("last_played")]
         played = sorted(played, key=lambda g: g["last_played"], reverse=True)
         rest = [g for g in self.games if not g.get("last_played")]
-        return (played + rest)[:GAMES_PREVIEW_LIMIT]
+        return played + rest
 
     def _recent_links(self, entries):
         """Same "sort by latest used" rule as Anime/Manga/Series'
@@ -1182,7 +1199,7 @@ class HomePage(GlassPage):
         strip.adjustSize()
         area.setFixedHeight(strip.sizeHint().height()
                             + area.horizontalScrollBar().sizeHint().height())
-        outer.addWidget(SideScroller(area))
+        outer.addWidget(SideScroller(area, ground=theme.BG))
         return box
 
     def _build_games_grid(self, games):
@@ -1261,7 +1278,7 @@ class HomePage(GlassPage):
         strip.adjustSize()
         area.setFixedHeight(strip.sizeHint().height()
                             + area.horizontalScrollBar().sizeHint().height())
-        outer.addWidget(SideScroller(area))
+        outer.addWidget(SideScroller(area, ground=theme.BG))
         return box
 
     def _launch_game(self, game):

@@ -293,6 +293,79 @@ def import_scanned_games(found):
     return len(new_games)
 
 
+def prune_uninstalled_games(launcher_dirs=None):
+    """Drop saved games whose executable is no longer on disk. Returns
+    the names removed, in saved order.
+
+    The owner's ask, 28 August 2026: "make the games when I refresh
+    removes the uninstalled games". Refresh already adds what a launcher
+    has gained; a library that only ever grows means an uninstalled game
+    keeps its tile forever and launching it does nothing.
+
+    Two guards, both there because the failure mode is deleting somebody's
+    library rather than one stale row:
+
+    * **The game's own root has to still be there.** A path on an
+      external drive that is simply not plugged in, or under a launcher
+      directory that has been renamed, is missing for a reason that has
+      nothing to do with the game being uninstalled - `os.path.exists`
+      cannot tell those apart, but the parent directory can. A game is
+      only dropped when the folder its .exe lived in is gone *and* that
+      folder's own drive is still mounted.
+    * **A game with no path is never touched.** Nothing on disk was ever
+      claimed for it, so there is nothing to have gone away.
+
+    `launcher_dirs` is accepted and unused for now: pruning is decided
+    per game off its own path, which covers hand-added games too. It is
+    in the signature because a caller that has the dirs to hand should
+    not have to know that.
+    """
+    games = storage.load(GAMES_FILE, [])
+    kept, removed = [], []
+    for game in games:
+        path = (game.get("path") or "").strip()
+        if not path or _still_installed(path):
+            kept.append(game)
+        else:
+            removed.append(game.get("name") or path)
+    if removed:
+        storage.save(GAMES_FILE, kept)
+    return removed
+
+
+def _still_installed(path: str) -> bool:
+    """Whether `path` counts as an installed game right now.
+
+    True whenever the file is there, and also true whenever the answer
+    cannot be trusted - an unmounted drive answers False to
+    `os.path.exists` for every file on it, and treating that as "these
+    games were uninstalled" would empty the list on the day somebody
+    unplugged a disk."""
+    try:
+        if os.path.exists(path):
+            return True
+        drive = os.path.splitdrive(os.path.abspath(path))[0]
+        # No drive letter (a UNC share, or a relative path that should
+        # not be here): not enough to conclude anything from.
+        if not drive:
+            return True
+        if not os.path.exists(drive + os.sep):
+            return True         # the disk is gone, not the game
+    except OSError:
+        return True
+    return False
+
+
+def prune_result_message(removed: list) -> str:
+    """The removal half of a refresh, in one clause, worded to sit after
+    `import_result_message`'s sentence."""
+    if not removed:
+        return ""
+    if len(removed) == 1:
+        return "1 Uninstalled Game Was Removed"
+    return f"{len(removed)} Uninstalled Games Were Removed"
+
+
 def import_result_message(added: int) -> str:
     """How an import went, in one sentence. Here rather than at either
     call site because both the Games page's Import button and Settings'

@@ -132,7 +132,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import images, net, storage, title_match
+from . import app_settings, images, net, storage, title_match
 
 SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&cc=us&l=en"
 CDN = "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/{shape}"
@@ -142,6 +142,41 @@ CDN = "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/{shape}"
 # header.jpg is landscape, so it is here to be better than a letter
 # avatar rather than because it fits the tile.
 ART_SHAPES = ("library_600x900_2x.jpg", "library_600x900.jpg", "header.jpg")
+# The two portrait shapes, tried before anything else, and the landscape
+# one, tried after the portrait sources below have had their turn - see
+# _art_url for why that order changed.
+PORTRAIT_SHAPES = ART_SHAPES[:2]
+HEADER_SHAPE = ART_SHAPES[2]
+
+# **Where a brand-new title's art actually lives.** Measured 28 August
+# 2026 on the owner's own library: "How to Fish" (appid 4001890, released
+# eight days earlier) 404s on *every* guessed shape, on both the legacy
+# `cdn.cloudflare` host and the newer `shared.cloudflare` one - six
+# probes, six 404s - while Palworld and Sons Of The Forest answer 200 on
+# all three. The guessable path is not wrong, it is just not where Steam
+# puts a new game's files any more: appdetails hands back
+#
+#   .../store_item_assets/steam/apps/4001890/45c4ddff…/header.jpg
+#
+# with a content hash in it that nothing can guess. So when the ladder
+# runs out, ask Steam where the art is instead of guessing again. Still
+# keyless, still two requests, and it is the difference between a blank
+# tile and a cover for anything released recently.
+DETAILS_URL = ("https://store.steampowered.com/api/appdetails"
+               "?appids={appid}&cc=us&l=en")
+
+# **No SteamGridDB rung, deliberately - removed 28 August 2026.** It was
+# added that morning for exactly the case below and taken out the same
+# day at the owner's ask ("remove the SteamGridDB key from the settings
+# ... even in another device than this one, for all users"). It is
+# key-gated by its own API, so it could only ever answer on the one
+# machine a key had been pasted into - which is the opposite of what a
+# cover resolver has to be. What rescues a brand-new title on *every*
+# install is the keyless appdetails rung above: measured on "How to
+# Fish" (appid 4001890), all six guessable portrait/header shapes 404
+# and appdetails hands back its real header.jpg, so the tile gets the
+# landscape header cropped to poster shape rather than nothing. A crop
+# on every device beats a portrait on one.
 
 DEFAULT_TIMEOUT = 8.0
 # 2x the per-request timeout, the same budget rule anime_sites uses: a
@@ -426,6 +461,34 @@ def _probe(url: str, deadline):
     return None
 
 
+def _details_header(appid: int, deadline=None):
+    """Steam's own answer to "where is this game's art", or None.
+
+    Keyless, one request. `header_image` carries the content hash the
+    CDN path needs and nothing can guess - see DETAILS_URL. Landscape
+    (460x215), so it is tried after the portrait sources; a cropped real
+    cover still beats a blank tile.
+
+    None on any failure, which the caller treats as "could not tell"
+    rather than "no art": caching a miss because the network hiccuped is
+    how a title gets a permanent blank."""
+    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+    if timeout is None:
+        return None
+    try:
+        payload = _get_json(DETAILS_URL.format(appid=appid), timeout)
+    except Exception:
+        return None
+    entry = (payload or {}).get(str(appid)) or {}
+    if not entry.get("success"):
+        return None
+    url = ((entry.get("data") or {}).get("header_image") or "").strip()
+    # The query string is a cache-buster Steam appends; harmless, but the
+    # cache key is the URL and a changing suffix would re-download art
+    # that has not changed.
+    return url.split("?", 1)[0] or None
+
+
 def _art_url(appid: int, deadline=None):
     """(best art URL that exists for `appid` or None, whether that is a
     real answer).
@@ -451,13 +514,26 @@ def _art_url(appid: int, deadline=None):
 
     A title with no art at all is a real state, not a bug: *RV There
     Yet?* (3949040) 404s on all three shapes."""
-    for shape in ART_SHAPES:
+    for shape in PORTRAIT_SHAPES:
         url = CDN.format(appid=appid, shape=shape)
         exists = _probe(url, deadline)
         if exists is None:
             return None, False      # could not tell - do not settle for less
         if exists:
             return url, True
+
+    url = CDN.format(appid=appid, shape=HEADER_SHAPE)
+    exists = _probe(url, deadline)
+    if exists is None:
+        return None, False
+    if exists:
+        return url, True
+
+    # Nothing at any guessable path: this is a recent title, so ask Steam
+    # where it keeps the files rather than guessing a seventh time.
+    header = _details_header(appid, deadline)
+    if header:
+        return header, True
     return None, True               # asked properly; Steam has no art
 
 
@@ -476,6 +552,16 @@ def _cache_files(name: str):
 
     Keyed on the normalized name rather than the raw one so a rename
     that changes only punctuation reuses what was already resolved."""
+    # "v4|" is the appdetails rung, 28 August 2026 (v3 was appdetails
+    # plus a key-gated SteamGridDB rung that was removed the same day -
+    # see the note by DETAILS_URL). Same reasoning as v2 below, and the
+    # same title proves it twice: the owner's "How to Fish" had already
+    # been asked about and answered "no art" by the build before it, so
+    # without the bump it would keep its blank tile for the seven days
+    # of NEGATIVE_TTL while a source that can answer sat there unasked.
+    # A resolver that gains a source retires its misses - and the bump
+    # past v3 costs nothing, since v3 only ever existed for one day.
+    #
     # "v2|" is the Wikipedia fallback, 24 August 2026 - and it is why
     # VALORANT stayed blank on the owner's machine *after* the fallback
     # shipped: the pre-fallback build had already written an
@@ -485,7 +571,7 @@ def _cache_files(name: str):
     # the misses recorded when it had fewer; versioning the key is what
     # does that without touching the hits.
     digest = hashlib.sha1(
-        ("v2|" + _squash(name)).encode("utf-8", "replace")).hexdigest()
+        ("v4|" + _squash(name)).encode("utf-8", "replace")).hexdigest()
     return _cache_dir() / f"{digest}.url", _cache_dir() / f"{digest}.none"
 
 

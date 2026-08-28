@@ -206,6 +206,28 @@ def looks_anime(meta) -> bool:
     return "japan" in country
 
 
+def is_anime_entry(entry) -> bool:
+    """Whether a tracked entry is anime - its own type when it says so,
+    else Cinemeta's verdict from the genres and country the details page
+    carries on it.
+
+    Here rather than at the two call sites because both of them are
+    asking the same question about the same entry: the download dialog
+    and the player's download panel decide whether to offer an audio
+    choice at all (the owner, 28 August 2026: "only show the Audio
+    selection option while download page while in Anime, and completely
+    remove this button selection from series and movies").
+
+    Never raises and never asks the network."""
+    try:
+        data = entry if isinstance(entry, dict) else {}
+        if str(data.get("type") or "").strip().lower() == "anime":
+            return True
+        return bool(looks_anime(data))
+    except Exception:
+        return False
+
+
 def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: int = 6):
     """Season/episode of the most recently aired episode, from Cinemeta's
     full episode list for this title (the catalog search used elsewhere

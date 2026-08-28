@@ -467,34 +467,109 @@ def nav_row_font():
                 fallbacks=(FONT_FAMILY_ICONS, *FONT_FAMILY_NAV_FALLBACKS))
 
 
+# How large the tick is actually drawn, against the 16px box it ends up
+# in. Nothing here is a 16px picture any more - see _ensure_checkmark_asset.
+CHECKMARK_DRAW_PX = 96
+CHECKMARK_BOX_PX = 16
+
+
 def _ensure_checkmark_asset() -> str:
-    """A small checkmark PNG for QCheckBox::indicator:checked.
+    """The checkmark PNG for QCheckBox::indicator:checked (and QMenu's).
 
     Once any QSS is applied to ::indicator, Qt stops drawing the native
     checkmark glyph on top of it - without this, "checked" only shows as
     a subtle color swap (easy to miss). QSS url() needs forward slashes
     even on Windows, hence as_posix().
 
+    **Drawn six times larger than it is shown**, 28 August 2026, the
+    owner: "change the check (correct) sign in the whole app because it
+    seems blurry and not smooth". It was a 16x16 image built with
+    `ImageDraw.line`, which has no antialiasing at all - so the diagonal
+    was a staircase before anything else happened to it, and then the
+    display scaled that staircase up (this machine runs at 1.25, so a
+    16px asset is drawn into 20 physical pixels and every edge is
+    resampled). Two hard edges, one on top of the other.
+
+    Qt scales a `image:` down into the subcontrol's own width/height, so
+    handing it a 96px drawing costs nothing at the call site and lets
+    the *downscale* do the antialiasing - and downscaling is the
+    direction that looks good, at any scale factor, without this having
+    to know what the factor is. Measured by eye against three
+    candidates at 5x zoom; the round caps are what stop the short arm
+    reading as a blunt wedge.
+
     Drawn in ON_ACCENT rather than white, because the checked indicator
     is filled with the teal accent and a white tick on it is the same
     unreadable pairing ON_ACCENT exists to avoid. Written under a new
-    filename ("...teal") on purpose, the third rename for the same
-    reason as the first two ("...dark", "...gold"): this only creates
-    what is missing, so a recolored asset under the old name would never
-    be drawn - every existing install would keep its gold-era tick
-    forever.
+    filename ("...smooth") on purpose, the fourth rename for the same
+    reason as the first three ("...dark", "...gold", "...teal"): this
+    only creates what is missing, so a redrawn asset under the old name
+    would never be drawn - every existing install would keep its jagged
+    tick forever.
     """
-    path = storage.DATA_DIR / "ui_assets" / "checkmark_teal.png"
+    path = storage.DATA_DIR / "ui_assets" / "checkmark_teal_smooth.png"
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+        size = CHECKMARK_DRAW_PX
+        scale = size / float(CHECKMARK_BOX_PX)
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-        draw.line([(3, 8), (6, 12), (13, 4)], fill=ON_ACCENT, width=2, joint="curve")
+        # In 16px units, so the shape can be read against the box it
+        # lands in; scaled up on the way to the canvas.
+        points = [(3.2, 8.4), (6.4, 11.7), (12.8, 4.6)]
+        scaled = [(x * scale, y * scale) for x, y in points]
+        width = max(1, int(round(2.1 * scale)))
+        draw.line(scaled, fill=ON_ACCENT, width=width, joint="curve")
+        # Round caps. PIL's joint="curve" rounds the elbow and nothing
+        # else, so both ends were cut square across the stroke - which
+        # at this weight reads as a wedge rather than a tick.
+        radius = width / 2.0
+        for x, y in (scaled[0], scaled[-1]):
+            draw.ellipse([x - radius, y - radius, x + radius, y + radius],
+                         fill=ON_ACCENT)
         img.save(path)
     return path.as_posix()
 
 
 CHECKMARK_PATH = _ensure_checkmark_asset()
+
+# The rendered tick, once per size, because a selection badge asks for
+# one every time a card is picked or unpicked - and a page full of cards
+# does that in a loop.
+_CHECK_PIXMAPS = {}
+
+
+def checkmark_pixmap(size: int):
+    """The tick as a QPixmap `size` px across, ready to sit inside a
+    selection badge.
+
+    Same asset the checkboxes use, scaled *down* with a smooth
+    transform - see _ensure_checkmark_asset for why it is stored six
+    times larger than anything draws it. Scaled for the screen's own
+    device pixel ratio and tagged with it, or it goes soft on any
+    non-100% display (.claude/rules/ui.md).
+
+    Returns None rather than raising if the asset cannot be read: a
+    badge with no tick in it is the mark this app has always drawn, so
+    the failure is invisible rather than fatal."""
+    from PyQt6.QtCore import Qt as _Qt
+    from PyQt6.QtGui import QPixmap
+    from PyQt6.QtWidgets import QApplication
+    screen = QApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen is not None else 1.0
+    key = (int(size), round(float(ratio), 3))
+    if key in _CHECK_PIXMAPS:
+        return _CHECK_PIXMAPS[key]
+    source = QPixmap(CHECKMARK_PATH)
+    if source.isNull():
+        _CHECK_PIXMAPS[key] = None
+        return None
+    pixels = max(1, int(round(size * ratio)))
+    scaled = source.scaled(pixels, pixels, _Qt.AspectRatioMode.KeepAspectRatio,
+                           _Qt.TransformationMode.SmoothTransformation)
+    scaled.setDevicePixelRatio(ratio)
+    _CHECK_PIXMAPS[key] = scaled
+    return scaled
 
 
 def _ensure_chevron_asset() -> str:
@@ -877,17 +952,29 @@ QLabel#Muted {{
     color: {TEXT_MUTED};
     background: transparent;
 }}
-/* One frame per key, so "Ctrl+K" reads as two keys and not as a string
-   with a plus in it. The darker bottom border is the whole illusion -
-   a flat rectangle reads as a badge, an edge under it reads as a cap
-   with a side. */
+/* One frame per key, so "Ctrl+F" reads as two keys and not as a string
+   with a plus in it.
+
+   **Fully rounded, 28 August 2026** - the owner's ask: "make it a full
+   shape rounded corners frame for each btn". It was a {RADIUS_SM}px
+   rectangle with a darker 2px bottom edge, imitating the side of a
+   physical keycap; the pill is a flatter object and the fake edge read
+   as a misaligned border on it, so the border is uniform again and the
+   shape carries it instead. 12px is exactly half a cap: measured, a
+   #KeyCap's sizeHint is 24px tall with the padding and border below,
+   so this is the largest radius that is still a semicircle and not a
+   clipped one. It is a measured number and not 999px because Qt
+   silently ignores an over-large border-radius rather than clamping it
+   - the first attempt used 999px and rendered the old rectangle, which
+   only a screenshot caught. min-height is what fixes that 24 in place,
+   so a one-glyph cap ("M", "0", "F") keeps the same ends as "Ctrl". */
 QLabel#KeyCap {{
     color: {TEXT};
     background: {SURFACE_HOVER};
     border: 1px solid {BORDER};
-    border-bottom: 2px solid {BG};
-    border-radius: {RADIUS_SM}px;
-    padding: 2px 8px;
+    border-radius: 12px;
+    padding: 3px 11px;
+    min-height: 16px;
     font-weight: 600;
 }}
 QLabel#KeyPlus {{
@@ -1061,6 +1148,33 @@ QPushButton#Danger {{
 }}
 QPushButton#Danger:hover {{ background: {lit_fill(mix(DANGER_HOVER, TEXT, 0.18), DANGER_HOVER)}; }}
 
+/* **A disabled filled button has to look disabled**, 28 August 2026, the
+   owner: "the set status and the trash btn after select button is
+   pressed, make them clearly shaded while not a single item selected".
+   They already *were* disabled - the selection bar calls setEnabled(0)
+   on both the moment nothing is picked - and it was invisible: the only
+   disabled rule in this sheet is QPushButton:disabled setting a text
+   colour - and an ID selector (#Accent, #Danger) beats
+   it on specificity anyway. So a dead Set Status was full teal, and the
+   trash button, which has no text at all, could not have shown a text
+   colour even if the rule had won.
+
+   Faded 72% toward the page ground rather than swapped for a neutral
+   slab: the control keeps enough of its own colour to still read as
+   *that* button, and the contrast against its live state is what says
+   it cannot be pressed. The icon on it dims too - see
+   widgets.glyph_icon's disabled pixmap, which is a separate mechanism
+   because a QIcon carries its own colour and no stylesheet reaches it. */
+QPushButton#Accent:disabled,
+QPushButton#AccentIcon:disabled {{
+    background: {mix(ACCENT_DEEP, BG, 0.72)};
+    color: {TEXT_DIM};
+}}
+QPushButton#Danger:disabled {{
+    background: {mix(DANGER, BG, 0.72)};
+    color: {TEXT_DIM};
+}}
+
 QPushButton#Icon {{
     background: {lit_fill(SURFACE_HOVER, SURFACE)};
     color: {TEXT_MUTED};
@@ -1229,7 +1343,7 @@ QScrollBar::handle:vertical {{
     min-height: 28px;
     border-radius: 5px;
 }}
-QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {{ background: {ACCENT}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
 QScrollBar:horizontal {{
@@ -1242,8 +1356,14 @@ QScrollBar::handle:horizontal {{
     min-width: 28px;
     border-radius: 5px;
 }}
-QScrollBar::handle:horizontal:hover {{ background: {ACCENT}; }}
+QScrollBar::handle:horizontal:hover, QScrollBar::handle:horizontal:pressed {{ background: {ACCENT}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+/* `:pressed` as well as `:hover` - the handle has to stay lit while it is
+   being dragged, not only while the pointer happens to be over it. Without
+   it a drag that strays a pixel off an 11px bar drops the highlight, which
+   is what the owner saw as the teal "stuttering" while he held the thumb.
+   Qt only reports the pressed state while it owns the drag, which is why
+   ScrollBarDrag stopped consuming the press. */
 /* Without this Qt paints the groove either side of the handle with the
    native style's checkerboard dither, which on this near-black theme
    reads as a strip of white dots (the owner's screenshot). The vertical

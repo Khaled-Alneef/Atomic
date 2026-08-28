@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import app_settings, logs, startup, storage, theme
+from . import app_settings, logs, nav_config, settings_dialog, startup, storage, theme
 from .widgets import (frameless_dialog, scroll_area, smooth_combo,
                       use_hover_cursor)
 
@@ -507,8 +507,66 @@ class SetupWizard(QDialog):
         form.addWidget(self.startup_status)
         self._sync_fullscreen_check()
 
+        # **The Preferences page's own two blocks, 28 August 2026** (the
+        # owner: "make sure to show the preferences page in the set up
+        # configuration"). Settings > Preferences is Sections plus the
+        # spoiler pair, and both are first-run decisions - which parts of
+        # the app exist at all, and whether an episode row is allowed to
+        # give anything away - so meeting them after the first spoiler
+        # rather than before it is meeting them too late.
+        #
+        # The spoiler pair comes from settings_dialog.add_spoiler_controls
+        # rather than being written out again here, so the wording and
+        # the wiring cannot drift between the two places that draw it.
+        form.addSpacing(18)
+        form.addWidget(QLabel("Sections", objectName="SectionTitle"))
+        sections_hint = QLabel(
+            "Which sections show in the sidebar. Hidden ones keep their "
+            "entries, and this can be changed later in Settings.",
+            objectName="Muted")
+        sections_hint.setWordWrap(True)
+        form.addWidget(sections_hint)
+
+        hidden = set(app_settings.get_hidden_sections())
+        self.section_checks = {}
+        for name, page_name in nav_config.ordered_nav_items():
+            # "&&": QCheckBox eats a single ampersand as a mnemonic
+            # marker - same note as Settings' copy of this loop.
+            check = QCheckBox(name.replace("&", "&&"))
+            check.setChecked(page_name not in hidden)
+            check.toggled.connect(
+                lambda checked, page=page_name:
+                self._toggle_section_visibility(page, checked))
+            form.addWidget(check)
+            self.section_checks[page_name] = check
+
+        form.addSpacing(18)
+        settings_dialog.add_spoiler_controls(form, self)
+
         form.addStretch()
         return page
+
+    def _toggle_section_visibility(self, page_name, visible):
+        """Hide or show one section, live.
+
+        The window behind the wizard is already built, so the sidebar is
+        rebuilt here for the same reason Settings does it: a tick that
+        changes nothing until the next launch reads as a tick that did
+        not work."""
+        hidden = set(app_settings.get_hidden_sections())
+        if visible:
+            hidden.discard(page_name)
+        else:
+            hidden.add(page_name)
+        app_settings.set_hidden_sections(hidden)
+        window = self.parent()
+        for name in ("_refresh_nav_list", "refresh_current_page"):
+            action = getattr(window, name, None)
+            if callable(action):
+                try:
+                    action()
+                except Exception:
+                    logs.exception("Could not redraw after a section toggle")
 
     def _browse_download_folder(self):
         if self._downloads_module is None:

@@ -18,6 +18,7 @@ restore one again, wipe one content category's saved entries at a time,
 or uninstall the app entirely (every saved file plus the app itself).
 """
 
+import copy
 import json
 import threading
 import zipfile
@@ -36,11 +37,11 @@ from PyQt6.QtWidgets import (
 from . import (
     anime_sites, app_settings, global_search, launchers, logs, lookup_pool,
     manga_sites, nav_config, startup, storage, theme, uninstall,
-    updater, widgets,
+    updater,
 )
 from .widgets import (confirm, finish_toast, frameless_dialog, inform,
                       scroll_area, show_toast, smooth_combo,
-                      smooth_scrolling)
+                      smooth_scrolling, use_hover_cursor)
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
 # and the page's settings serve all three media. The
@@ -62,12 +63,34 @@ DANGER_CATEGORY = "Uninstall"
 
 # Width of the key-combination column under Keybinds, so every
 # description starts at the same x rather than stepping with the
-# combination's length. Measured, not guessed: with each key in its own
-# frame the longest ("Ctrl+1-9") wants 111px against the 92 this was
-# when the keys were one plain string, and a fixed width narrower than
-# its content clips rather than wraps. 124 leaves margin for a wider
-# font or scale factor.
-KEYBIND_COLUMN_WIDTH = 124
+# combination's length. Measured, not guessed, and re-measured whenever
+# a row is added - a fixed width narrower than its content clips rather
+# than wraps.
+#
+#   92   the keys as one plain string
+#   124  each key in its own frame; longest was "Ctrl+1-9" at 111px
+#   184  the player and reader rows, 28 August 2026; longest is
+#        "Backspace / PageUp" at 180px
+#   308  the same row, re-measured properly the same day
+#
+# **The 184 and the 180 in it were measured wrong, and the row was
+# clipped on screen because of it.** They were taken from a `_key_caps`
+# holder built in a QApplication that had never been given
+# theme.apply_theme, so the caps carried no #KeyCap padding, border or
+# 600 weight at all - the number was the bare text. Under the real
+# stylesheet that same row is 296px, and 308px once the caps became
+# pills (the owner's fully-rounded frame, +3px of padding a side, over
+# two caps and two sides). Caught by a screenshot: "Backspace" and
+# "PageDown" were being cut off square at the column edge.
+#
+# Re-measure with `theme.apply_theme(app)` called first, or the number
+# will be wrong again in the same direction.
+#
+# Every row was measured by building _key_caps for it and reading the
+# sizeHint, which is also what caught "Alt+Left / Alt+Right" at 247px -
+# now two rows, because widening the column to fit one entry leaves
+# every other row with a hand's width of gap before its description.
+KEYBIND_COLUMN_WIDTH = 308
 
 # The API-key page's two fixed columns, so every field starts and ends at
 # the same x rather than stepping with the service's name. Sized off the
@@ -302,23 +325,95 @@ def _key_caps(keys: str) -> QWidget:
     """"Ctrl+K" as two framed keys with a plus between them.
 
     Split on "+" rather than parsed: every combination in SHORTCUTS is
-    plus-separated and no key in it is itself a plus, so a parser would
-    be code with nothing to decide. "Ctrl+," survives it - the comma is
-    the second half - and "Ctrl+1-9" keeps its range on one cap, which
-    is what it is: one key, any of nine.
+    plus-separated, so a parser would be code with nothing to decide.
+    "Ctrl+," survives it - the comma is the second half - and "Ctrl+1-9"
+    keeps its range on one cap, which is what it is: one key, any of
+    nine. A lone "+" is guarded below, because the reader binds one.
+
+    **" / " separates alternatives**, added 28 August 2026 with the
+    player and reader rows: "Left / Right" and "Space / PageDown" are two
+    keys that do related things, and giving each its own row would say
+    the list is twice as long as the thing it describes. The slash is
+    drawn between the two runs of caps, so each side still reads as
+    keys. Split on " / " with the spaces, so the reader's "+ / -" zoom
+    row survives - a bare "/" would cut "Ctrl+/" in half if one is ever
+    added.
     """
     holder = QWidget()
     row = QHBoxLayout(holder)
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(4)
-    for index, key in enumerate(keys.split("+")):
-        if index:
-            row.addWidget(QLabel("+", objectName="KeyPlus"))
-        row.addWidget(QLabel(key, objectName="KeyCap"))
+    for alt_index, alternative in enumerate(keys.split(" / ")):
+        if alt_index:
+            row.addWidget(QLabel("/", objectName="KeyPlus"))
+        # **A lone "+" is a key, not a separator.** The reader's zoom row
+        # is "+ / -", and splitting that on "+" gave two empty caps with a
+        # plus between them - visible in the very first render of this
+        # page. The old docstring's "no key in it is itself a plus" was
+        # true until the reader rows were added.
+        parts = [alternative] if alternative == "+" else alternative.split("+")
+        for index, key in enumerate(parts):
+            if index:
+                row.addWidget(QLabel("+", objectName="KeyPlus"))
+            row.addWidget(QLabel(key, objectName="KeyCap"))
     # Left-aligned in a fixed-width column: without this the caps spread
     # across the whole column and stop lining up with the row above.
     row.addStretch()
     return holder
+
+
+def add_spoiler_controls(form, owner=None):
+    """The two spoiler controls, appended to `form`.
+
+    One function rather than two copies because they are drawn in two
+    places now - Settings > Preferences and the first-run wizard's
+    Preferences step (the owner's ask, 28 August 2026: "make sure to
+    show the preferences page in the set up configuration"). A second
+    hand-written copy is a second thing to forget when the wording
+    changes.
+
+    `owner` is only used to keep the checkboxes reachable by name, which
+    is what the existing tests drive them through; passing None is fine
+    for a caller that has no need of them.
+
+    Both write straight through on toggle, like every other control in
+    Settings. Nothing here is undone by Cancel except through the
+    snapshot SettingsDialog.reject restores."""
+    form.addWidget(QLabel("Spoilers", objectName="SectionTitle"))
+    spoilers_hint = QLabel(
+        "What episode and chapter rows are allowed to give away before "
+        "you get there.", objectName="Muted")
+    spoilers_hint.setWordWrap(True)
+    form.addWidget(spoilers_hint)
+
+    blur_check = QCheckBox("Blur episode images")
+    blur_check.setChecked(app_settings.get_blur_episode_stills())
+    blur_check.toggled.connect(app_settings.set_blur_episode_stills)
+    form.addWidget(blur_check)
+    blur_hint = QLabel(
+        "Episode rows show a picture of the episode. Turn this on to "
+        "soften them, so a still cannot give away what happens. Takes "
+        "effect the next time a title's page is opened.",
+        objectName="Muted")
+    blur_hint.setWordWrap(True)
+    form.addWidget(blur_hint)
+
+    names_check = QCheckBox("Show episode and chapter numbers only")
+    names_check.setChecked(app_settings.get_hide_entry_names())
+    names_check.toggled.connect(app_settings.set_hide_entry_names)
+    form.addWidget(names_check)
+    names_hint = QLabel(
+        "Leaves the title off every episode and chapter row, so a name "
+        "cannot give away what happens before you get there. The number "
+        "stays. Takes effect the next time a title's page is opened.",
+        objectName="Muted")
+    names_hint.setWordWrap(True)
+    form.addWidget(names_hint)
+
+    if owner is not None:
+        owner.blur_stills_check = blur_check
+        owner.hide_names_check = names_check
+    return blur_check, names_check
 
 
 def _verdict_legend(kind: str) -> QLabel:
@@ -371,6 +466,15 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.resize(920, 640)
         self.setMinimumSize(760, 560)
+
+        # Taken before a single page is built, so it is what the user
+        # walked in with - see the Cancel button below. copy.deepcopy
+        # rather than the dict itself: nested values (nav_order, the
+        # launcher dirs) would otherwise be the very lists a setter
+        # mutates in place.
+        self._settings_snapshot = copy.deepcopy(
+            storage.load(app_settings.SETTINGS_FILE, {}))
+        self._startup_snapshot = self._read_startup_state()
 
         outer = QVBoxLayout(self)
         # 1px, not 0: the dialog is a frameless rounded panel now and
@@ -467,9 +571,30 @@ class SettingsDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
+        # **Cancel and Save, not Close** (the owner's ask, 28 August
+        # 2026). Every control on every page still writes the moment it
+        # is touched - that is what makes a toggle land on the sidebar
+        # behind the dialog while it is open, and unpicking it into a
+        # staged model would touch all nine pages. So Cancel is an
+        # *undo*: `_settings_snapshot` is the whole of settings.json as
+        # it stood when the dialog opened, and Cancel writes it back and
+        # redraws. Save is simply "keep what is there", which is why it
+        # does nothing but close.
+        #
+        # What Cancel does **not** undo, deliberately, is an action
+        # rather than a setting: a data restore, a launcher import, a
+        # cleared category, an installed update. Those are their own
+        # confirmed operations and pretending a dialog button could roll
+        # them back would be the dangerous kind of wrong.
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        save_btn = QPushButton("Save", objectName="Accent")
+        save_btn.clicked.connect(self.accept)
+        save_btn.setDefault(True)
+        btn_row.addWidget(save_btn)
+        for button in (cancel_btn, save_btn):
+            use_hover_cursor(button)
         content_col.addLayout(btn_row)
 
         # Bare, or the app stylesheet's opaque QWidget fill paints this
@@ -489,6 +614,37 @@ class SettingsDialog(QDialog):
         self.exec()
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _read_startup_state():
+        """Whether "Launch on Windows startup" is on, or None when that
+        could not be read. None means Cancel leaves it alone rather than
+        guessing - the setting lives in the Windows registry, not in
+        settings.json, so a failed read is not a value."""
+        try:
+            return bool(startup.is_enabled())
+        except Exception:
+            return None
+
+    def reject(self):
+        """Cancel: put settings.json back the way it was, then close.
+
+        The redraw afterwards is not cosmetic - section visibility, the
+        sidebar order and Home's contents are all read from this file by
+        the window behind the dialog, and they were re-applied live as
+        the user toggled them."""
+        try:
+            storage.save(app_settings.SETTINGS_FILE, self._settings_snapshot)
+            if self._startup_snapshot is not None:
+                if self._read_startup_state() != self._startup_snapshot:
+                    startup.set_enabled(self._startup_snapshot)
+        except Exception:
+            logs.exception("Could not undo the settings changes")
+        try:
+            self._apply_section_visibility()
+        except Exception:
+            logs.exception("Could not redraw after cancelling settings")
+        super().reject()
+
     def _build_category_sidebar(self):
         sidebar = QWidget(objectName="Sidebar")
         sidebar.setFixedWidth(210)
@@ -625,17 +781,6 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         form.addWidget(hint)
 
-        self.reduce_motion_check = QCheckBox("Reduce motion")
-        self.reduce_motion_check.setChecked(app_settings.get_reduce_motion())
-        self.reduce_motion_check.toggled.connect(self._toggle_reduce_motion)
-        form.addWidget(self.reduce_motion_check)
-        reduce_hint = QLabel(
-            "Scrolling and page changes move straight to where they are "
-            "going instead of gliding. Nothing animates.")
-        reduce_hint.setWordWrap(True)
-        reduce_hint.setObjectName("Hint")
-        form.addWidget(reduce_hint)
-
         self.fullscreen_startup_check = QCheckBox("Fullscreen mode when launch on startup")
         self.fullscreen_startup_check.setChecked(app_settings.get_fullscreen_on_startup())
         self.fullscreen_startup_check.toggled.connect(self._toggle_fullscreen_on_startup)
@@ -695,6 +840,9 @@ class SettingsDialog(QDialog):
         home_hint.setWordWrap(True)
         form.addWidget(home_hint)
 
+        form.addSpacing(24)
+        add_spoiler_controls(form, self)
+
         form.addStretch()
         return page
 
@@ -711,17 +859,24 @@ class SettingsDialog(QDialog):
                            objectName="Muted")
         keys_hint.setWordWrap(True)
         form.addWidget(keys_hint)
-        for keys, what in global_search.SHORTCUTS:
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            # Fixed width so the descriptions line up in a column
-            # instead of stepping in and out with the length of each
-            # combination.
-            caps = _key_caps(keys)
-            caps.setFixedWidth(KEYBIND_COLUMN_WIDTH)
-            row.addWidget(caps)
-            row.addWidget(QLabel(what, objectName="Muted"), stretch=1)
-            form.addLayout(row)
+        # Grouped by where the keys apply - see global_search.SHORTCUTS.
+        # A flat list said "these are the shortcuts" while describing only
+        # the window's, which is how Ctrl+F came to be documented as
+        # something it had stopped doing.
+        for heading, rows in global_search.SHORTCUTS:
+            form.addSpacing(14)
+            form.addWidget(QLabel(heading, objectName="SectionTitle"))
+            for keys, what in rows:
+                row = QHBoxLayout()
+                row.setSpacing(8)
+                # Fixed width so the descriptions line up in a column
+                # instead of stepping in and out with the length of each
+                # combination.
+                caps = _key_caps(keys)
+                caps.setFixedWidth(KEYBIND_COLUMN_WIDTH)
+                row.addWidget(caps)
+                row.addWidget(QLabel(what, objectName="Muted"), stretch=1)
+                form.addLayout(row)
 
         form.addStretch()
         return page
@@ -937,34 +1092,14 @@ class SettingsDialog(QDialog):
         motion_hint.setWordWrap(True)
         form.addWidget(motion_hint)
 
-        form.addSpacing(20)
-        form.addWidget(QLabel("Episode List", objectName="SectionTitle"))
-        self.blur_stills_check = QCheckBox("Blur episode images")
-        self.blur_stills_check.setChecked(app_settings.get_blur_episode_stills())
-        self.blur_stills_check.toggled.connect(
-            app_settings.set_blur_episode_stills)
-        form.addWidget(self.blur_stills_check)
-        blur_hint = QLabel(
-            "Episode rows show a picture of the episode. Turn this on to "
-            "soften them, so a still cannot give away what happens. Takes "
-            "effect the next time a title's page is opened.",
-            objectName="Muted",
-        )
-        blur_hint.setWordWrap(True)
-        form.addWidget(blur_hint)
-
-        self.hide_names_check = QCheckBox("Show episode and chapter numbers only")
-        self.hide_names_check.setChecked(app_settings.get_hide_entry_names())
-        self.hide_names_check.toggled.connect(app_settings.set_hide_entry_names)
-        form.addWidget(self.hide_names_check)
-        hide_names_hint = QLabel(
-            "Leaves the title off every episode and chapter row, so a name "
-            "cannot give away what happens before you get there. The number "
-            "stays. Takes effect the next time a title's page is opened.",
-            objectName="Muted",
-        )
-        hide_names_hint.setWordWrap(True)
-        form.addWidget(hide_names_hint)
+        # The "Episode List" block that used to sit here - "Blur episode
+        # images" and "Show episode and chapter numbers only" - moved to
+        # the Preferences page on 28 August 2026, at the owner's ask.
+        # Both are spoiler controls and both already applied to chapter
+        # rows as well as episode ones, so filing them under Watching
+        # was describing half of what they do. They are one block,
+        # built by `_spoiler_controls`, so the wizard shows the same
+        # pair rather than a second copy that can drift.
 
         form.addSpacing(24)
         # The Stremio Account sign-in that lived here (email/password,
@@ -1698,12 +1833,6 @@ class SettingsDialog(QDialog):
         # Whichever way that went, the fullscreen option follows the
         # checkbox's *actual* state - including the rolled-back one above.
         self._sync_fullscreen_startup_check()
-
-    def _toggle_reduce_motion(self, checked):
-        app_settings.set_reduce_motion(checked)
-        # Live, not on restart: the point of the toggle is to feel the
-        # difference immediately.
-        widgets.set_reduce_motion(checked)
 
     def _sync_fullscreen_startup_check(self):
         """"Fullscreen mode when launch on startup" only means anything

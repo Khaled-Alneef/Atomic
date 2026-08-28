@@ -7,6 +7,7 @@ Custom Order as the drag begins).
 """
 
 import copy
+import os
 import threading
 import uuid
 from pathlib import Path
@@ -19,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (app_settings, game_art, game_launch, images, launchers,
-                     lookup_pool, storage, theme)
+                     lookup_pool, media_grid, storage, theme)
 from helpers.widgets import (
     Card, CardDragReorder, GlassPage, GridSelection, confirm,
     defer_grid_rebuild, finish_toast, frameless_dialog, inform, scroll_area,
@@ -30,6 +31,14 @@ from windows.link_grid import (
     CARD_MARGINS, POSTER_ART_SIZE, POSTER_CARD_WIDTH, CardTextLabel,
     poster_grid_columns,
 )
+
+# **Development A/B switch, 27 August 2026 - not a shipping feature.**
+# ATOMIC_VIRTUAL_GRID=1 swaps this page's QGridLayout-of-Card-widgets for
+# the virtualized model/view grid in helpers/media_grid, on the same data,
+# in the same panel, so the two can be compared on one machine without a
+# rebuild. Unset (the default) is the untouched widget grid, byte for byte.
+# See helpers/media_grid's docstring for what the comparison measured.
+VIRTUAL_GRID = os.environ.get("ATOMIC_VIRTUAL_GRID") == "1"
 
 DATA_FILE = "games.json"
 # Poster tiles now, the Movies & Series card's own size (the owner's
@@ -127,8 +136,36 @@ class GamesPage(GridSelection, GlassPage):
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
         self.grid_layout.setSpacing(14)
-        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(scroll_area(self.grid_body, ground=theme.PANEL_FILL), stretch=1)
+        # **Centred, not left-hugging - the same thing poster_grid does.**
+        # The owner's ask, 28 August 2026: "make the games and apps and
+        # webs grid in the mid like the movies". The column count here is
+        # a fixed 8 or 9 (link_grid.poster_grid_columns), so on a wide
+        # window the row is narrower than the area it sits in and every
+        # pixel of the difference used to land on the right, which reads
+        # as the page leaning left. poster_grid._left_margin solves the
+        # same problem by halving the slack; a QGridLayout does it with
+        # the alignment, and the last partial row still fills from the
+        # left inside the centred block exactly as the poster grids' does.
+        self.grid_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self._virtual = None
+        if VIRTUAL_GRID:
+            # The grid_body/grid_layout above are still built and still
+            # own the drag-reorder helper - they are simply not shown.
+            # Keeping them means every other method on this page
+            # (_refresh_grid's teardown, the selection map, the cover
+            # labels) stays valid without a second code path.
+            self._virtual = media_grid.VirtualMediaGrid(
+                CARD_COVER_SIZE, POSTER_CARD_WIDTH, ground=theme.PANEL_FILL)
+            self._virtual.setModel(media_grid.MediaGridModel(
+                media_grid.MediaFields(id="id", title="name", cover="cover")))
+            self._virtual.card_clicked.connect(self._on_virtual_clicked)
+            self._virtual.card_right_clicked.connect(self._on_virtual_menu)
+            self._virtual.needs_cover.connect(self._on_virtual_needs_cover)
+            layout.addWidget(self._virtual, stretch=1)
+        else:
+            layout.addWidget(scroll_area(self.grid_body, ground=theme.PANEL_FILL),
+                             stretch=1)
 
         self._drag_reorder = CardDragReorder(
             self.grid_body, self._begin_custom_order, self._drop_reorder)
@@ -247,6 +284,17 @@ class GamesPage(GridSelection, GlassPage):
         apply_change(self.games)
         storage.save(DATA_FILE, self.games)
         self._refresh_grid()
+        # **A game added now gets its cover now**, 28 August 2026 (the
+        # owner: "make the image of the games appear immediately when
+        # its added, not when I change the page then go back"). The
+        # backfill used to run only from __init__, so a game added to a
+        # page already open had nothing looking for its poster until
+        # that page was rebuilt - leaving the .exe icon on the tile and
+        # making a page change look like the thing that fetched it.
+        # Every game already holding a cover file is skipped in a stat,
+        # so re-running this per mutation costs one loop over ten
+        # entries, not ten lookups.
+        self._backfill_covers()
 
     @staticmethod
     def _index_of(games, game):
@@ -309,10 +357,27 @@ class GamesPage(GridSelection, GlassPage):
 
     # ------------------------------------------------------------------
     def _refresh_grid(self, *_args):
+        if self._virtual is not None:
+            games = self._visible_games()
+            self._prune_selection({g.get("id") for g in games})
+            # set_items is the one legitimate model reset - a new search
+            # or a new sort really is a different list. An arriving cover
+            # goes through set_pixmap instead and touches one row.
+            self._virtual.set_items(games)
+            return
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                # hide() first - the same trap link_grid, downloads_page
+                # and the tracker's own grid each record: a deleteLater'd
+                # widget is still a *visible* child at its old geometry
+                # until the event loop gets to it, so the outgoing tiles
+                # paint over the incoming ones. Invisible here, where two
+                # copies of the same poster overlay each other; on the
+                # tracker, where a bordered button sits in the row, the
+                # label was drawn twice.
+                widget.hide()
                 widget.deleteLater()
         self._clear_selection_cards()
         # Emptied with the cards it names, same reason as the selection
@@ -384,6 +449,57 @@ class GamesPage(GridSelection, GlassPage):
             self._drag_reorder.attach(card, game.get("id"))
         return card
 
+    # -- virtual-grid callbacks (development A/B, see VIRTUAL_GRID) --------
+    def _on_virtual_clicked(self, game):
+        if self._select_mode:
+            self._toggle_selected(game.get("id"))
+        else:
+            self._launch(game)
+
+    def _on_virtual_menu(self, game, global_pos):
+        """The delegate hands back a screen position, not a QMouseEvent.
+
+        _show_context_menu only ever wanted `event.globalPosition()`, so a
+        shim with that one method keeps the existing menu code unchanged
+        rather than forking it - the business logic must not learn which
+        renderer it is being called from."""
+        class _Where:
+            def __init__(self, point):
+                self._point = point
+
+            def globalPosition(self):
+                return self
+
+            def toPoint(self):
+                return self._point
+
+        self._show_context_menu(_Where(global_pos), game)
+
+    def _on_virtual_needs_cover(self, row, game):
+        """A visible card has no poster yet.
+
+        Deferred to an idle turn by the view (COVER_ASK_PER_TURN) and
+        answered here on the UI thread, because a QPixmap cannot be
+        constructed off it - the pool below is used by the widget grid
+        only to *find* a cover file, never to build the pixmap.
+
+        Still a clear improvement on the widget grid, which calls the
+        same function synchronously for **every** entry while building
+        the page, on screen or not: at 1000 games that is 1000 decodes
+        inside `_refresh_grid`, and it is most of the 465ms that path
+        measured. Here it is one decode per card that is actually looked
+        at, off the paint path.
+        """
+        path = game.get("cover")
+        if not path or self._virtual is None:
+            return
+        pixmap = images.thumbnail_or_avatar(
+            path, game.get("name") or "", CARD_COVER_SIZE)
+        # By id, not by row: a re-sort while this was queued would leave
+        # the row number naming a different game, and the poster would be
+        # painted onto the wrong card.
+        self._virtual.set_pixmap_for_id(game.get("id"), pixmap)
+
     def _show_context_menu(self, event, game):
         menu = QMenu(self)
         menu.addAction("Launch", lambda: self._launch(game))
@@ -436,12 +552,29 @@ class GamesPage(GridSelection, GlassPage):
         self._scan_signals.done.emit(found)
 
     def _on_scan_done(self, found):
+        # Refresh is both directions, 28 August 2026 ("make the games
+        # when I refresh removes the uninstalled games"): what the
+        # launchers have gained is added, and what is no longer on disk
+        # stops taking up a tile that cannot be launched. Pruning runs
+        # after the import so a game that has merely *moved* is added
+        # back at its new path in the same pass, rather than
+        # disappearing until the next refresh.
         added = launchers.import_scanned_games(found)
-        if added:
+        removed = launchers.prune_uninstalled_games()
+        if added or removed:
             self.games = storage.load(DATA_FILE, [])
             self._refresh_grid()
+            # Imported games arrive with a .exe icon and no poster; ask
+            # for one straight away rather than on the next page build.
+            self._backfill_covers()
         toast, self._scan_toast = self._scan_toast, None
-        finish_toast(toast, self, launchers.import_result_message(added))
+        message = launchers.import_result_message(added)
+        pruned = launchers.prune_result_message(removed)
+        if pruned:
+            # "No New Games Found" plus a removal reads as a contradiction;
+            # when something was removed that is the news.
+            message = f"{message}, {pruned}" if added else pruned
+        finish_toast(toast, self, message)
 
     def _launch(self, game):
         try:
