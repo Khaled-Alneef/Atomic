@@ -16,11 +16,11 @@ elapsed animation time shifted forward on resume so nothing jumps or
 fast-forwards. Scroll motion always wins the frame budget; decoration continues
 exactly where it left off afterward.
 
-On 200+ Hz displays only, Home/Discover's vertical wheel motion also gets a very
-small amount of extra tail: friction 46 instead of the app-wide 50. The wheel
-still travels exactly the same distance per notch because _Momentum scales the
-impulse by friction; the lower value only spreads that distance over a slightly
-longer glide. The confirmed-smooth 160 Hz path and every other page remain on 50.
+On 200+ Hz displays only, Home/Discover's vertical wheel motion also gets a small
+amount of extra tail: friction 43 instead of the app-wide 50. The wheel still
+travels exactly the same distance per notch because _Momentum scales the impulse
+by friction; the lower value only spreads that distance over a slightly longer
+glide. The confirmed-smooth 160 Hz path and every other page remain on 50.
 
 SideScroller also has a _Momentum object but its horizontal scrollbar drag was
 still raw Qt mouse-sample stepping. Attach a horizontal version of the existing
@@ -43,7 +43,7 @@ _INSTALLED = False
 _PATCHED = False
 _HIGH_REFRESH_HZ = 200.0
 _DEFAULT_WHEEL_FRICTION = 50.0
-_HIGH_REFRESH_WHEEL_FRICTION = 46.0
+_HIGH_REFRESH_WHEEL_FRICTION = 43.0
 
 
 def _is_native_live_page(widget) -> bool:
@@ -115,11 +115,11 @@ def _patch_widgets(w):
     # time, so existing/future live surfaces pick this up without rebuilding.
     w.present_frame_s = live_present_frame_s
 
-    # Tiny, high-refresh-only wheel tail for the two live pages. Do this at kick
-    # time rather than construction time so dragging the same window between the
-    # 160 Hz and 240 Hz monitors immediately adopts the correct profile. Keep
-    # horizontal SideScroller motion untouched; the request is for vertical
-    # page-wheel drift only.
+    # Small, high-refresh-only wheel tail for the two live pages. Do this at
+    # kick time rather than construction time so dragging the same window
+    # between the 160 Hz and 240 Hz monitors immediately adopts the correct
+    # profile. Keep horizontal SideScroller motion untouched; the request is
+    # for vertical page-wheel drift only.
     old_momentum_kick = w._Momentum.kick
 
     def live_page_momentum_kick(self, distance_px, direction):
