@@ -17,6 +17,11 @@ MainWindow moveEvent: every move restarts a short timer, and only after the
 window has stopped moving is the current page rebuilt at the new DPR. That keeps
 the drag nonblocking while preventing old-monitor pixmaps from remaining soft
 on the destination monitor.
+
+A DPR refresh rebuilds the current page from scratch, so it also snapshots every
+scroll area's horizontal/vertical position and restores them around that rebuild.
+Crossing monitors therefore changes image resolution only; it never navigates the
+user back to the top of the page or resets a sideways shelf.
 """
 
 from __future__ import annotations
@@ -62,6 +67,76 @@ def install():
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return None
 
+    def _capture_scroll_state(window):
+        """All scroll positions on the visible page, in stable child order."""
+        try:
+            from PyQt6.QtWidgets import QAbstractScrollArea
+
+            page = getattr(window, "_current_page", None)
+            if page is None:
+                return ()
+            states = []
+            for area in page.findChildren(QAbstractScrollArea):
+                try:
+                    vbar = area.verticalScrollBar()
+                    hbar = area.horizontalScrollBar()
+                    states.append((
+                        int(vbar.value()), int(vbar.minimum()), int(vbar.maximum()),
+                        int(hbar.value()), int(hbar.minimum()), int(hbar.maximum()),
+                    ))
+                except RuntimeError:
+                    states.append(None)
+            return tuple(states)
+        except (AttributeError, RuntimeError):
+            return ()
+
+    def _restore_scroll_state(window, states):
+        """Restore a same-page rebuild without assuming its ranges are identical."""
+        if not states:
+            return
+        try:
+            from PyQt6.QtWidgets import QAbstractScrollArea
+
+            page = getattr(window, "_current_page", None)
+            if page is None:
+                return
+            areas = page.findChildren(QAbstractScrollArea)
+            for area, state in zip(areas, states):
+                if state is None:
+                    continue
+                try:
+                    v_value, v_old_min, v_old_max, h_value, h_old_min, h_old_max = state
+                    vbar = area.verticalScrollBar()
+                    hbar = area.horizontalScrollBar()
+
+                    # Logical layout sizes normally make the ranges identical
+                    # across DPR changes. If one does change, preserve the same
+                    # relative position rather than clamping a formerly-valid
+                    # value to an unrelated end of the new range.
+                    if v_old_max > v_old_min and vbar.maximum() > vbar.minimum():
+                        fraction = ((v_value - v_old_min)
+                                    / float(v_old_max - v_old_min))
+                        v_target = (vbar.minimum()
+                                    + fraction * (vbar.maximum() - vbar.minimum()))
+                    else:
+                        v_target = v_value
+                    if h_old_max > h_old_min and hbar.maximum() > hbar.minimum():
+                        fraction = ((h_value - h_old_min)
+                                    / float(h_old_max - h_old_min))
+                        h_target = (hbar.minimum()
+                                    + fraction * (hbar.maximum() - hbar.minimum()))
+                    else:
+                        h_target = h_value
+
+                    vbar.setValue(max(vbar.minimum(),
+                                      min(vbar.maximum(), int(round(v_target)))))
+                    hbar.setValue(max(hbar.minimum(),
+                                      min(hbar.maximum(), int(round(h_target)))))
+                except RuntimeError:
+                    continue
+        except (AttributeError, RuntimeError):
+            pass
+
     def _refresh_scaled_page(window):
         """Re-cut the visible page for its current screen, outside a drag."""
         try:
@@ -85,9 +160,23 @@ def install():
 
             if getattr(window, "_atomic_dpr_refresh_in_progress", False):
                 return
+
+            scroll_state = _capture_scroll_state(window)
             window._atomic_dpr_refresh_in_progress = True
             try:
                 window.refresh_current_page()
+                # The same page is constructed synchronously, so restoring here
+                # prevents a visible one-frame jump to zero. Re-assert once on
+                # the next event-loop turn because lazy layout/range updates may
+                # finish after refresh_current_page() returns.
+                _restore_scroll_state(window, scroll_state)
+                try:
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(
+                        0, lambda w=window, s=scroll_state:
+                        _restore_scroll_state(w, s))
+                except Exception:
+                    pass
             finally:
                 window._atomic_dpr_refresh_in_progress = False
         except RuntimeError:
