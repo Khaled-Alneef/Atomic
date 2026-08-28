@@ -1,24 +1,21 @@
-"""Keep live QWidget motion phase-locked on very high refresh displays.
-
-The Qt Quick compositor has its own 200+ Hz presentation loop, but
-motion_patch also replaced helpers.widgets.present_frame_s globally with the
-raw screen refresh. Heavy live QWidget surfaces cannot reliably repaint a deep
-widget tree inside a 4.17ms 240 Hz budget. Missing those slots is worse than a
-lower exact cadence because the presented motion alternates between short and
-long steps.
+"""Keep Home/Discover high-refresh pacing local to those two live pages.
 
 Home and Discover are intentionally detached from the page-wide Quick compositor
 because their hero + nested horizontal rows must remain live and interactive.
 They therefore use the real QWidget path. Up to 199 Hz they keep the monitor's
-native cadence (the owner's 1080p/160 Hz display is the confirmed perfect case).
-At 200 Hz and above they use an exact /2 refresh divider: 240 Hz -> 120 Hz.
-That keeps every visible step phase-locked to the panel instead of asking the
-GUI thread for unsustainable 4.17ms full-tree paints. Scroll physics still use
-elapsed time, so this changes presentation cadence, not distance or duration.
+native cadence. At 200 Hz and above they use an exact /2 refresh divider:
+240 Hz -> 120 Hz, avoiding irregular missed 4.17 ms full-tree paint deadlines.
 
-Those same pages also contain decorative SmoothTween animations. A tween callback
-can resize/repaint widgets on the GUI thread while a wheel glide is active.
-During an active Home/Discover glide those decorative callbacks are therefore
+That divider must not leak into the rest of Atomic. Reader and ordinary live
+scroll surfaces have their own cheaper/custom paint paths and should follow the
+monitor cadence directly. Applying the generic 120 Hz target to them made a
+240 Hz display hold each motion position for two physical refreshes, producing
+the repeated-frame/double-image slice visible in the Reader recording while the
+same path looked smooth on the 160 Hz monitor.
+
+Those same Home/Discover pages also contain decorative SmoothTween animations.
+A tween callback can resize/repaint widgets on the GUI thread while a wheel glide
+is active. During an active Home/Discover glide those decorative callbacks are
 paused, with elapsed animation time shifted forward on resume so nothing jumps
 or fast-forwards. Scroll motion always wins the frame budget; the decoration
 continues exactly where it left off afterward.
@@ -90,25 +87,28 @@ def _patch_widgets(w):
 
         if widget is not None and _is_native_live_page(widget):
             # The 160 Hz monitor is a confirmed smooth native QWidget path.
-            # At 240 Hz, however, the same deep tree has only 4.17ms and misses
-            # deadlines irregularly. Use an exact /2 panel cadence there: every
-            # visible position still lands on a real refresh, with no 3:2 beat
-            # pattern or timer-derived fractional cadence.
+            # At 240 Hz the deep Home/Discover tree has only 4.17 ms and misses
+            # deadlines irregularly, so use an exact /2 panel cadence there.
             if rate >= _HIGH_REFRESH_HZ:
                 return frame * 2.0
             return frame
 
-        target = float(getattr(w, "MOTION_MAX_HZ", 120.0) or 120.0)
+        # Reader and every other ordinary live surface must not inherit the
+        # Home/Discover 120 Hz budget. On a 240 Hz panel that global divider
+        # held every motion position for two physical refreshes; the recording
+        # shows the resulting repeated-frame/double-image horizontal slice.
+        # Follow the screen natively unless an explicit diagnostic override was
+        # requested. This changes timing only, never wheel distance or physics.
         override = os.environ.get("ATOMIC_PRESENT_HZ")
         if override:
             try:
                 wanted = float(override)
                 if wanted > 0.0:
-                    target = wanted
+                    divider = max(1, int(round(rate / wanted)))
+                    return frame * divider
             except ValueError:
                 pass
-        divider = max(1, int(round(rate / target)))
-        return frame * divider
+        return frame
 
     # Lambdas already stored by _Momentum resolve this module global at call
     # time, so existing/future live surfaces pick this up without rebuilding.
