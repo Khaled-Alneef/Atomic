@@ -3,7 +3,7 @@
 
 def install():
     from . import updater
-    updater.APP_VERSION = "1.10.129"
+    updater.APP_VERSION = "1.10.130"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
