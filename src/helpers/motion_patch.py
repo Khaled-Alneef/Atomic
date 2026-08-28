@@ -36,12 +36,7 @@ def _patch_widgets(w):
     original_present_frame_s = w.present_frame_s
 
     def native_present_frame_s(widget=None) -> float:
-        """Commit one visual position per refresh of the active screen.
-
-        ATOMIC_PRESENT_HZ remains an explicit A/B override. Without it,
-        there is no 120-Hz divider: 60/75/120/144/165/240/360-Hz screens
-        all use their own frame interval.
-        """
+        """Commit one visual position per refresh of the active screen."""
         if os.environ.get("ATOMIC_PRESENT_HZ"):
             return original_present_frame_s(widget)
         return w.screen_frame_s(widget)
@@ -49,7 +44,7 @@ def _patch_widgets(w):
     w.present_frame_s = native_present_frame_s
 
     class _RasterLayer(QWidget):
-        """Viewport-sized layer that displays a cached slice of the body."""
+        """Viewport-sized layer that displays one cached page raster."""
 
         def __init__(self, viewport, ground):
             super().__init__(viewport)
@@ -82,10 +77,19 @@ def _patch_widgets(w):
             painter.end()
 
     class _RasterCompositor(QObject):
-        """Cache 2.5 viewports and translate that cache at native refresh."""
+        """Move one rasterized page surface during wheel motion.
 
-        CACHE_VIEWS = 2.5
-        EDGE_SLOP = 96.0
+        This restores the successful one-surface idea from the earlier motion
+        work: cache the complete page when practical, otherwise cache a large
+        eight-viewport runway. The old 2.5-view window could cross a cache edge
+        during a normal glide and synchronously render the whole child tree in
+        the middle of motion, which is exactly the hitch this compositor exists
+        to avoid.
+        """
+
+        CACHE_VIEWS = 8.0
+        EDGE_SLOP = 192.0
+        FULL_CACHE_MAX_PHYSICAL_H = 8192
 
         def __init__(self, area, body, ground):
             super().__init__(area)
@@ -116,8 +120,16 @@ def _patch_widgets(w):
         def _cache_bounds_for(self, pos):
             view_h = max(1, self.viewport.height())
             body_h = max(view_h, self._body_extent())
+            dpr = self.viewport.devicePixelRatioF() or 1.0
+
+            # Home/Main, Discover, and many History/Schedule instances fit here.
+            # In that case every card/label is rasterized into one page surface
+            # before movement begins and no child widget is repainted mid-glide.
+            if body_h * dpr <= self.FULL_CACHE_MAX_PHYSICAL_H:
+                return 0, body_h
+
             wanted = min(body_h, max(view_h, int(round(view_h * self.CACHE_VIEWS))))
-            top = int(round(float(pos) - 0.75 * view_h))
+            top = int(round(float(pos) - 0.5 * (wanted - view_h)))
             top = max(0, min(top, max(0, body_h - wanted)))
             return top, wanted
 
