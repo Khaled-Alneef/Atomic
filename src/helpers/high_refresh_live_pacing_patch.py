@@ -1,26 +1,22 @@
-"""Keep Home/Discover high-refresh pacing local to those two live pages.
+"""Keep high-refresh live-widget pacing local and non-invasive.
 
 Home and Discover are intentionally detached from the page-wide Quick compositor
 because their hero + nested horizontal rows must remain live and interactive.
-They therefore use the real QWidget path. Up to 199 Hz they keep the monitor's
-native cadence. At 200 Hz and above they use an exact /2 refresh divider:
-240 Hz -> 120 Hz, avoiding irregular missed 4.17 ms full-tree paint deadlines.
+They therefore use the real QWidget path. Their motion follows the active
+monitor's native cadence, including 240 Hz; holding each position for two
+physical refreshes on a 240 Hz panel produced an obvious repeated-frame cadence.
 
-That divider must not leak into the rest of Atomic. Reader and ordinary live
-scroll surfaces have their own cheaper/custom paint paths and should follow the
-monitor cadence directly. Applying the generic 120 Hz target to them made a
-240 Hz display hold each motion position for two physical refreshes, producing
-the repeated-frame/double-image slice visible in the Reader recording while the
-same path looked smooth on the 160 Hz monitor.
+Reader and every other live surface also follow the monitor cadence directly.
+An explicit ATOMIC_PRESENT_HZ override remains available for diagnostics only.
 
-Those same Home/Discover pages also contain decorative SmoothTween animations.
-A tween callback can resize/repaint widgets on the GUI thread while a wheel glide
-is active. During an active Home/Discover glide those decorative callbacks are
-paused, with elapsed animation time shifted forward on resume so nothing jumps
-or fast-forwards. Scroll motion always wins the frame budget; the decoration
-continues exactly where it left off afterward.
+Home/Discover also contain decorative SmoothTween animations. A tween callback
+can resize/repaint widgets on the GUI thread while a wheel glide is active.
+During an active Home/Discover glide those decorative callbacks are paused, with
+elapsed animation time shifted forward on resume so nothing jumps or
+fast-forwards. Scroll motion always wins the frame budget; decoration continues
+exactly where it left off afterward.
 
-SideScroller also had a _Momentum object but its horizontal scrollbar drag was
+SideScroller also has a _Momentum object but its horizontal scrollbar drag was
 still raw Qt mouse-sample stepping. Attach a horizontal version of the existing
 paced thumb-drag idea: Qt keeps press/release ownership, while mouse moves feed
 targets into the row's existing _Momentum.follow().
@@ -39,7 +35,6 @@ from . import motion_patch as _motion_patch
 _TARGET = "helpers.widgets"
 _INSTALLED = False
 _PATCHED = False
-_HIGH_REFRESH_HZ = 200.0
 
 
 def _is_native_live_page(widget) -> bool:
@@ -82,23 +77,17 @@ def _patch_widgets(w):
         frame = w.screen_frame_s(widget)
         if frame <= 0.0:
             return 0.0
-
         rate = 1.0 / frame
 
+        # Home/Discover used to be forced to an exact /2 divider on 200+ Hz
+        # panels. On a 240 Hz display that guarantees a repeated A,A,B,B motion
+        # cadence. The later background-work reductions make the native path
+        # cheaper now, so let these pages present at the monitor cadence again.
         if widget is not None and _is_native_live_page(widget):
-            # The 160 Hz monitor is a confirmed smooth native QWidget path.
-            # At 240 Hz the deep Home/Discover tree has only 4.17 ms and misses
-            # deadlines irregularly, so use an exact /2 panel cadence there.
-            if rate >= _HIGH_REFRESH_HZ:
-                return frame * 2.0
             return frame
 
-        # Reader and every other ordinary live surface must not inherit the
-        # Home/Discover 120 Hz budget. On a 240 Hz panel that global divider
-        # held every motion position for two physical refreshes; the recording
-        # shows the resulting repeated-frame/double-image horizontal slice.
-        # Follow the screen natively unless an explicit diagnostic override was
-        # requested. This changes timing only, never wheel distance or physics.
+        # Reader and every other ordinary live surface also follow the screen
+        # natively unless an explicit diagnostic override was requested.
         override = os.environ.get("ATOMIC_PRESENT_HZ")
         if override:
             try:
@@ -121,8 +110,6 @@ def _patch_widgets(w):
     old_tween_start = w.SmoothTween.start
 
     def quiet_tween_start(self, *args, **kwargs):
-        # A tween can be stopped/restarted while a glide is active. Never carry
-        # a pause timestamp from the previous run into the new animation.
         self._atomic_scroll_pause_at = None
         return old_tween_start(self, *args, **kwargs)
 
@@ -203,7 +190,6 @@ def _patch_widgets(w):
                             span, groove = self._groove_span(obj, thumb)
                             self._drag_from = (where.x() - thumb.x(),
                                                groove.x(), span)
-                    # Qt must see the press so it keeps sliderDown/mouse grab.
                     return False
 
                 if kind == QEvent.Type.MouseButtonRelease:
@@ -220,8 +206,6 @@ def _patch_widgets(w):
                     self._motion.follow(target)
                     return True
             except Exception:
-                # Event-filter exceptions are fatal in PyQt; horizontal drag
-                # smoothness is never allowed to become a crash path.
                 try:
                     w.logs.exception("horizontal scrollbar drag failed")
                 except Exception:
@@ -236,7 +220,6 @@ def _patch_widgets(w):
             self._atomic_horizontal_drag = _HorizontalBarDrag(
                 self, self._bar, self._motion)
         except Exception:
-            # Leave the row on Qt's native drag if setup ever fails.
             self._atomic_horizontal_drag = None
 
     w.SideScroller.__init__ = side_init
