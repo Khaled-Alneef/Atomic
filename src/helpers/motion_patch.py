@@ -1,12 +1,15 @@
-"""Experimental native-refresh scroll compositor for Atomic.
+"""Native-refresh GPU scroll compositor for Atomic.
 
-Installed as a post-import patch for helpers.widgets so ordinary QWidget
-scroll areas can present motion from one cached raster surface instead of
-repainting/moving the whole child tree on every refresh.
+The browser A/B proved that the remaining motion trace is not scroll distance
+or easing: the same artwork is dramatically clearer when a compositor moves
+one texture at the display refresh rate.  This module gives ordinary QWidget
+scroll pages that same shape while they are moving:
 
-This is deliberately raster-only. Do not replace it with QOpenGLWidget:
-Atomic's libmpv player owns a native child window and the repository has
-already measured that combination as unsafe.
+    QWidget tree -> one DPR-correct QImage -> QQuickPaintedItem texture
+                 -> fractional scene-graph Y transform -> display present
+
+The live QWidget tree is restored as soon as motion stops, so controls remain
+normal widgets and stationary text is never left texture-filtered.
 """
 
 from __future__ import annotations
@@ -23,88 +26,101 @@ _PATCHED = False
 
 
 def _patch_widgets(w):
-    """Patch helpers.widgets once, after its normal module body ran."""
     global _PATCHED
     if _PATCHED:
         return
     _PATCHED = True
 
-    from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRegion, QSize, Qt
-    from PyQt6.QtGui import QColor, QPainter, QPixmap
+    from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt
+    from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
+    from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
     from PyQt6.QtWidgets import QFrame, QScrollArea, QWidget
 
     original_present_frame_s = w.present_frame_s
 
     def native_present_frame_s(widget=None) -> float:
-        """Commit one visual position per refresh of the active screen.
-
-        ATOMIC_PRESENT_HZ remains an explicit A/B override. Without it,
-        there is no 120-Hz divider: 60/75/120/144/165/240/360-Hz screens
-        all use their own frame interval.
-        """
+        """One committed motion position per refresh of the active screen."""
         if os.environ.get("ATOMIC_PRESENT_HZ"):
             return original_present_frame_s(widget)
         return w.screen_frame_s(widget)
 
     w.present_frame_s = native_present_frame_s
 
-    class _RasterLayer(QWidget):
-        """Viewport-sized layer that displays a cached slice of the body."""
+    class _ScrollTexture(QQuickPaintedItem):
+        """Paint once when the cache changes; movement itself is a GPU transform."""
 
-        def __init__(self, viewport, ground):
-            super().__init__(viewport)
-            self._pixmap = None
-            self._offset = 0.0
-            self._ground = QColor(ground)
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
-            self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-            self.hide()
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._image = QImage()
+            # QQuickPaintedItem uploads the painted result to the scene graph.
+            # Once uploaded, changing y does not repaint this item; it only
+            # changes the scene-graph transform, which is the browser-like part.
+            self.setAntialiasing(False)
+            self.setMipmap(False)
+            self.setOpaquePainting(True)
+            self.setSmooth(True)
 
-        def set_frame(self, pixmap, offset):
-            self._pixmap = pixmap
-            self._offset = float(offset)
-            if not self.isVisible():
-                self.show()
-                self.raise_()
+        def set_image(self, image, logical_width, logical_height):
+            self._image = image
+            self.setWidth(float(logical_width))
+            self.setHeight(float(logical_height))
             self.update()
 
-        def clear_frame(self):
-            self._pixmap = None
-            self.hide()
+        def clear_image(self):
+            self._image = QImage()
+            self.update()
 
-        def paintEvent(self, event):
-            painter = QPainter(self)
-            painter.fillRect(event.rect(), self._ground)
-            pixmap = self._pixmap
-            if pixmap is not None and not pixmap.isNull():
-                painter.drawPixmap(QPointF(0.0, -self._offset), pixmap)
-            painter.end()
+        def paint(self, painter):
+            if self._image.isNull():
+                return
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawImage(QPointF(0.0, 0.0), self._image)
 
-    class _RasterCompositor(QObject):
-        """Cache 2.5 viewports and translate that cache at native refresh."""
+    class _QuickCompositor(QObject):
+        """One hidden QQuickWindow per scroll viewport, shown only in motion."""
 
-        CACHE_VIEWS = 2.5
-        EDGE_SLOP = 96.0
+        CACHE_VIEWS = 3.0
+        EDGE_SLOP = 128.0
 
         def __init__(self, area, body, ground):
             super().__init__(area)
             self.area = area
             self.body = body
             self.viewport = area.viewport()
-            self.layer = _RasterLayer(self.viewport, ground)
-            self._cache = None
+            self._ground = QColor(ground)
             self._cache_top = 0.0
             self._cache_height = 0
             self._active = False
             self._visual = float(area.verticalScrollBar().value())
+            self._motion = None
+
+            # QQuickWindow uses Qt Quick's hardware scene graph (D3D on normal
+            # Windows Qt builds).  createWindowContainer embeds that native
+            # scene directly over the QWidget viewport without converting the
+            # whole Atomic window or the mpv surface to OpenGL.
+            self.quick = QQuickWindow()
+            self.quick.setColor(self._ground)
+            try:
+                self.quick.setFlag(Qt.WindowType.WindowTransparentForInput, True)
+            except Exception:
+                pass
+            self.texture = _ScrollTexture(self.quick.contentItem())
+            self.container = QWidget.createWindowContainer(self.quick, self.viewport)
+            self.container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.container.setGeometry(self.viewport.rect())
+            self.container.hide()
+
+            # frameSwapped is the rAF-equivalent boundary available to this
+            # embedded scene.  The next physics position is computed only after
+            # the previous scene-graph frame was actually swapped.
+            self.quick.frameSwapped.connect(self._frame_swapped)
             self.viewport.installEventFilter(self)
             area.verticalScrollBar()._atomic_motion_surface = self
 
         def eventFilter(self, obj, event):
             if obj is self.viewport and event.type() == QEvent.Type.Resize:
-                self.layer.setGeometry(self.viewport.rect())
-                self._cache = None
+                self.container.setGeometry(self.viewport.rect())
                 if self._active:
                     self._build_cache(self._visual)
                     self._draw(self._visual)
@@ -117,43 +133,44 @@ def _patch_widgets(w):
             view_h = max(1, self.viewport.height())
             body_h = max(view_h, self._body_extent())
             wanted = min(body_h, max(view_h, int(round(view_h * self.CACHE_VIEWS))))
-            top = int(round(float(pos) - 0.75 * view_h))
+            top = int(round(float(pos) - view_h))
             top = max(0, min(top, max(0, body_h - wanted)))
             return top, wanted
 
         def _build_cache(self, pos):
             if self.viewport.width() <= 0 or self.viewport.height() <= 0:
-                self._cache = None
+                self.texture.clear_image()
+                self._cache_height = 0
                 return
+
             top, height = self._cache_bounds_for(pos)
             width = max(1, self.body.width(), self.viewport.width())
             dpr = self.viewport.devicePixelRatioF() or 1.0
-            physical = QSize(max(1, int(round(width * dpr))),
-                             max(1, int(round(height * dpr))))
-            pixmap = QPixmap(physical)
-            pixmap.setDevicePixelRatio(dpr)
-            pixmap.fill(Qt.GlobalColor.transparent)
+            physical_w = max(1, int(round(width * dpr)))
+            physical_h = max(1, int(round(height * dpr)))
+            image = QImage(physical_w, physical_h,
+                           QImage.Format.Format_ARGB32_Premultiplied)
+            image.setDevicePixelRatio(dpr)
+            image.fill(self._ground)
 
             was_enabled = self.body.updatesEnabled()
             if not was_enabled:
                 self.body.setUpdatesEnabled(True)
-            painter = QPainter(pixmap)
+            painter = QPainter(image)
             region = QRegion(QRect(0, top, width, height))
-            flags = QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren
+            flags = (QWidget.RenderFlag.DrawWindowBackground
+                     | QWidget.RenderFlag.DrawChildren)
             self.body.render(painter, QPoint(0, -top), region, flags)
             painter.end()
-            if self._active:
-                self.body.setUpdatesEnabled(False)
-            elif not was_enabled:
+            if self._active or not was_enabled:
                 self.body.setUpdatesEnabled(False)
 
-            self._cache = pixmap
             self._cache_top = float(top)
             self._cache_height = height
-            self.layer.setGeometry(self.viewport.rect())
+            self.texture.set_image(image, width, height)
 
         def _contains(self, pos):
-            if self._cache is None or self._cache.isNull():
+            if self._cache_height <= 0:
                 return False
             view_h = self.viewport.height()
             start = float(pos)
@@ -166,14 +183,20 @@ def _patch_widgets(w):
                 hi = self._cache_top + self._cache_height
             return start >= lo and end <= hi
 
-        def begin(self, pos):
+        def begin(self, pos, motion):
             if self._active:
+                self._motion = motion
                 return
             self._active = True
+            self._motion = motion
             self._visual = float(pos)
             self._build_cache(self._visual)
             self.body.setUpdatesEnabled(False)
+            self.container.setGeometry(self.viewport.rect())
+            self.container.show()
+            self.container.raise_()
             self._draw(self._visual)
+            self.quick.update()
 
         def present(self, pos):
             if not self._active:
@@ -182,35 +205,49 @@ def _patch_widgets(w):
             if not self._contains(self._visual):
                 self._build_cache(self._visual)
             self._draw(self._visual)
+            self.quick.update()
 
         def _draw(self, pos):
-            if self._cache is None or self._cache.isNull():
+            if self._cache_height <= 0:
                 return
-            dpr = self.viewport.devicePixelRatioF() or 1.0
-            visual = round(float(pos) * dpr) / dpr
-            self.layer.set_frame(self._cache, visual - self._cache_top)
+            # Deliberately NO int(), round(), DPR snapping or scrollbar-value
+            # conversion here.  This is the continuous transform that the HTML
+            # test had and QWidget scrolling did not.
+            self.texture.setY(-(float(pos) - self._cache_top))
+
+        def _frame_swapped(self):
+            motion = self._motion
+            if not self._active or motion is None:
+                return
+            try:
+                motion._tick()
+            except RuntimeError:
+                self.end()
+                return
+            if self._active:
+                self.quick.update()
 
         def end(self, pos=None):
             if not self._active:
                 return
             self._active = False
+            self._motion = None
             if pos is not None:
                 self._visual = float(pos)
             self.body.setUpdatesEnabled(True)
-            self.layer.clear_frame()
+            self.container.hide()
+            self.texture.clear_image()
             self.viewport.update()
-            self._cache = None
+            self._cache_height = 0
 
-    class NativeRasterScrollArea(QScrollArea):
-        """QScrollArea with a raster presentation layer during motion."""
-
+    class NativeQuickScrollArea(QScrollArea):
         def __init__(self, ground, parent=None):
             super().__init__(parent)
             self._atomic_ground = ground
             self._atomic_compositor = None
 
         def set_atomic_body(self, body):
-            self._atomic_compositor = _RasterCompositor(
+            self._atomic_compositor = _QuickCompositor(
                 self, body, self._atomic_ground)
 
     old_start = w._Momentum._start_ticking
@@ -222,18 +259,37 @@ def _patch_widgets(w):
 
     def patched_start(self):
         surface = _surface_for(self)
-        if surface is not None and not surface._active:
-            pos = self._pos if self._pos is not None else self._bar.value()
-            surface.begin(pos)
-        return old_start(self)
+        if surface is None:
+            return old_start(self)
+        # Do not start the millisecond timer for a Quick-composited surface.
+        # frameSwapped owns the cadence.  Keep profiler state equivalent to
+        # the normal _start_ticking path.
+        if not getattr(self, "_counted", False):
+            self._counted = True
+            w._GLIDING += 1
+        pos = self._pos if self._pos is not None else self._bar.value()
+        surface.begin(pos, self)
 
     def patched_stop(self):
         surface = _surface_for(self)
-        result = old_stop(self)
-        if surface is not None:
-            pos = self._pos if self._pos is not None else self._bar.value()
-            surface.end(pos)
-        return result
+        if surface is None:
+            return old_stop(self)
+        if getattr(self, "_counted", False):
+            self._counted = False
+            w._GLIDING = max(0, w._GLIDING - 1)
+        # Defensive cleanup in case this motion previously used another clock.
+        self._timer.stop()
+        if getattr(self, "_vblank_on", False):
+            try:
+                ticker = w._vblank_ticker_for_use()
+                if ticker is not None:
+                    ticker.tick.disconnect(self._tick)
+                    ticker.release()
+            except Exception:
+                pass
+            self._vblank_on = False
+        pos = self._pos if self._pos is not None else self._bar.value()
+        surface.end(pos)
 
     def patched_tick(self):
         result = old_tick(self)
@@ -249,8 +305,7 @@ def _patch_widgets(w):
 
     def native_scroll_area(body: QWidget, always_show_vbar: bool = False,
                            ground: str = None, notch_scale: float = 1.0):
-        """The normal Atomic scroll area, with native-refresh raster motion."""
-        area = NativeRasterScrollArea(ground or w.theme.BG)
+        area = NativeQuickScrollArea(ground or w.theme.BG)
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -292,7 +347,6 @@ class _WidgetsPatchFinder(importlib.abc.MetaPathFinder):
 
 
 def install():
-    """Install the post-import patch without eagerly importing PyQt widgets."""
     global _INSTALLED
     if _INSTALLED:
         return
