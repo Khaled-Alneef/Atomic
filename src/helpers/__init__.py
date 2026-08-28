@@ -22,6 +22,11 @@ QtCore.QRegion = QRegion
 # make first-launch card artwork sharp on the 1080p monitor.
 from . import startup_dpr_patch as _startup_dpr_patch
 
+# The post-monitor-drag refresh is already protected by moveEvent: every move
+# restarts its one-shot timer, so shortening this only changes how quickly the
+# sharp-DPR rebuild starts *after* the hand stops. 80ms is fast enough to feel
+# immediate while still leaving a small quiet window after the last move event.
+_startup_dpr_patch._MOVE_SETTLE_MS = 80
 _startup_dpr_patch.install()
 
 # Native-refresh Qt Quick compositor for ordinary QScrollArea pages.
