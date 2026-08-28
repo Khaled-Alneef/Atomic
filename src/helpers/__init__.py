@@ -80,6 +80,14 @@ from . import read_coverage_patch as _read_coverage_patch
 
 _read_coverage_patch.install()
 
+# Final motion layer: live QWidget scrolling is clocked by QWindow UpdateRequest
+# (vsync-synchronized where Qt/the platform support it) rather than by a
+# millisecond timer. It also unwraps the remaining 200+ Hz friction override so
+# wheel physics are identical on every monitor. Quick surfaces keep frameSwapped.
+from . import ultimate_scroll_patch as _ultimate_scroll_patch
+
+_ultimate_scroll_patch.install()
+
 # Do not install poster_grid_quick_patch: Discover should stay on the same
 # original painted PosterGrid path as the perfect Movies page.
 # Do not install the old Home/Discover hero/interaction interception patches;
