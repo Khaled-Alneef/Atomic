@@ -90,6 +90,13 @@ def _patch_widgets(w):
             self._active = False
             self._visual = float(area.verticalScrollBar().value())
             self._motion = None
+            # Handoff state.  The old implementation hid the Quick surface in
+            # the same mouse-release event that snapped the real scrollbar to
+            # its final target.  The last Quick frame could therefore still be
+            # one paced-drag step behind the live QWidget page, producing the
+            # visible release hitch.  We now keep Quick on top until a frame at
+            # the exact final position has actually swapped.
+            self._ending_after_swap = False
 
             self.quick = QQuickWindow()
             self.quick.setColor(self._ground)
@@ -175,9 +182,17 @@ def _patch_widgets(w):
 
         def begin(self, pos, motion):
             if self._active:
+                # A new wheel/drag input can arrive during the one-frame
+                # handoff. Cancel that pending hide and continue from the
+                # texture that is already on screen.
+                self._ending_after_swap = False
                 self._motion = motion
+                self._visual = float(pos)
+                self._draw(self._visual)
+                self.quick.update()
                 return
             self._active = True
+            self._ending_after_swap = False
             self._motion = motion
             self._visual = float(pos)
             self._build_cache(self._visual)
@@ -202,14 +217,36 @@ def _patch_widgets(w):
                 return
             self.texture.setY(-(float(pos) - self._cache_top))
 
+        def _finish_end(self):
+            """Reveal the live QWidget page only after the final GPU frame."""
+            if not self._active:
+                return
+            self._ending_after_swap = False
+            self._active = False
+            self._motion = None
+            self.body.setUpdatesEnabled(True)
+            self.container.hide()
+            self.texture.clear_image()
+            self.viewport.update()
+            self._cache_height = 0
+
         def _frame_swapped(self):
+            if not self._active:
+                return
+            # end() has already placed the texture at the exact final
+            # scrollbar position and requested this frame.  Now that it is
+            # actually on screen, revealing the synchronized live page cannot
+            # produce a position jump.
+            if self._ending_after_swap:
+                self._finish_end()
+                return
             motion = self._motion
-            if not self._active or motion is None:
+            if motion is None:
                 return
             try:
                 motion._tick()
             except RuntimeError:
-                self.end()
+                self._finish_end()
                 return
             if self._active:
                 self.quick.update()
@@ -217,15 +254,20 @@ def _patch_widgets(w):
         def end(self, pos=None):
             if not self._active:
                 return
-            self._active = False
-            self._motion = None
             if pos is not None:
                 self._visual = float(pos)
+            # Do not hide in the release/stop event.  First put the GPU layer
+            # at the same final position as the real scrollbar underneath,
+            # then wait for frameSwapped to retire the layer.
+            self._motion = None
+            self._ending_after_swap = True
+            self._draw(self._visual)
+            # The QWidget tree may repaint underneath while Quick still covers
+            # it; this makes the eventual reveal ready rather than triggering a
+            # repaint on the handoff frame itself.
             self.body.setUpdatesEnabled(True)
-            self.container.hide()
-            self.texture.clear_image()
             self.viewport.update()
-            self._cache_height = 0
+            self.quick.update()
 
     class NativeQuickScrollArea(QScrollArea):
         def __init__(self, ground, parent=None):
@@ -255,7 +297,7 @@ def _patch_widgets(w):
         for the full compositor glide instead.
         """
         surface = _surface_for(self)
-        if surface is not None and surface._active:
+        if surface is not None and surface._active and not surface._ending_after_swap:
             return True
         return old_active(self)
 
@@ -292,7 +334,8 @@ def _patch_widgets(w):
     def patched_tick(self):
         result = old_tick(self)
         surface = _surface_for(self)
-        if surface is not None and surface._active:
+        if (surface is not None and surface._active
+                and not surface._ending_after_swap):
             pos = self._pos if self._pos is not None else self._bar.value()
             surface.present(pos)
         return result
