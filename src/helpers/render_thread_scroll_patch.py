@@ -1,51 +1,27 @@
 """Render-thread wheel presentation for Atomic's main-window scroll surfaces.
 
-Why this exists
----------------
-The remaining high-refresh judder is architectural, not another easing constant.
-A QWidget scrollbar value is a GUI-thread property, so producing one value per
-240 Hz refresh still asks Python + Qt Widgets to meet a 4.17 ms deadline.  The
-browser reference does not do that: once a scroll layer exists, its compositor
-moves the layer independently of the main/UI thread.
+The remaining high-refresh judder is architectural: QWidget scrollbar values
+live on the GUI thread, so asking Python + Qt Widgets to produce every 240 Hz
+position still means meeting a 4.17 ms deadline. Browsers instead move an
+already-rasterized layer in their compositor.
 
-Atomic already proved the same idea with its temporary Qt Quick snapshots, but
-that implementation still called Python `_Momentum._tick()` from
-QQuickWindow.frameSwapped.  The texture was on the GPU; the *position producer*
-was not.
+This patch keeps the existing QWidget pages and their current motion code as the
+fallback, but adds one reusable Qt Quick overlay for opaque main-window vertical
+scroll surfaces. A wheel gesture snapshots the content once, freezes the real
+body, then a QML YAnimator moves the texture on Qt Quick's scene-graph render
+thread. Python handles input/retargeting and the final scrollbar commit, not the
+presented frames themselves.
 
-This patch keeps every working QWidget page intact and adds one reusable Quick
-surface over the active main-window viewport.  On an angle-wheel gesture:
-
-    QWidget body --paint once--> DPR-correct QImage
-                              -> QQuickPaintedItem
-                              -> QML YAnimator (render thread)
-                              -> vsync
-
-The real scrollbar/body is committed once at the end.  A tiny 60 Hz shadow
-update keeps the visible scrollbar thumb near the compositor without moving the
-real body (signals are blocked).  There is no Python callback per presented
-content frame.
-
-Safety / scope
---------------
-* Only opaque main-window vertical surfaces opt in.  Dialogs/translucent areas
-  keep the existing path.
-* Home and Discover keep their page-owned Quick compositors detached; this is a
-  single shared overlay, so the nested-row bugs that page-wide ownership caused
-  do not return.
-* Reader opts in explicitly after construction; its loading/slot/zoom logic is
-  untouched.
-* If QML/YAnimator or the snapshot setup fails for any reason, `kick()` falls
-  straight through to the already-working motion implementation.
-* The monitor/DPR patches are independent.  Every snapshot is cut at the
-  viewport's current DPR when the gesture starts.
+Home/Discover keep their page-owned Quick compositors detached, Reader keeps its
+existing loading/painting model, Movies is untouched, and monitor/DPR handling
+stays in its existing patches. If the QML/Quick path cannot initialize, the
+wheel event falls straight through to the proven current implementation.
 """
 
 from __future__ import annotations
 
 import importlib.abc
 import importlib.machinery
-import math
 import sys
 import time
 
@@ -54,9 +30,9 @@ _READER_PATCHED = False
 _TARGET_READER = "windows.reader"
 
 
-def _ease_out_cubic(t: float) -> float:
-    t = max(0.0, min(1.0, float(t)))
-    return 1.0 - (1.0 - t) ** 3
+def _ease_out_cubic(value: float) -> float:
+    value = max(0.0, min(1.0, float(value)))
+    return 1.0 - (1.0 - value) ** 3
 
 
 def _patch_widgets(w):
@@ -64,15 +40,15 @@ def _patch_widgets(w):
         return
     w._atomic_render_thread_scroll_patched = True
 
-    from PyQt6.QtCore import (QByteArray, QEvent, QObject, QPoint, QRect,
-                              QSignalBlocker, QTimer, QUrl, Qt)
+    from PyQt6.QtCore import (QByteArray, QEvent, QObject, QPoint, QPointF,
+                              QRect, QSignalBlocker, QTimer, QUrl, Qt)
     from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
     from PyQt6.QtQml import QQmlComponent, QQmlEngine
     from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
-    from PyQt6.QtWidgets import QWidget
+    from PyQt6.QtWidgets import QApplication, QWidget
 
     class _Texture(QQuickPaintedItem):
-        """One image upload; YAnimator moves the scene-graph node afterward."""
+        """Upload once; movement after that is a scene-graph transform."""
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -80,9 +56,6 @@ def _patch_widgets(w):
             self.setAntialiasing(False)
             self.setMipmap(False)
             self.setOpaquePainting(True)
-            # Fractional movement is intentional.  Smooth sampling avoids the
-            # one-physical-pixel shimmer nearest-neighbour movement produced in
-            # the earlier clarity experiment.
             self.setSmooth(True)
 
         def set_image(self, image, logical_width, logical_height):
@@ -99,32 +72,47 @@ def _patch_widgets(w):
             if self._image.isNull():
                 return
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.drawImage(0.0, 0.0, self._image)
+            painter.drawImage(QPointF(0.0, 0.0), self._image)
 
-    # One QML engine/component for every scroll surface.  Creating an engine per
-    # page would add exactly the kind of hidden per-page machinery this patch is
-    # removing.
-    engine = QQmlEngine()
-    component = QQmlComponent(engine)
-    component.setData(
-        QByteArray(
-            b"import QtQuick\n"
-            b"YAnimator { easing.type: Easing.OutCubic }\n"
-        ),
-        QUrl("atomic:render-thread-scroll"),
-    )
-    # Keep these alive for the process lifetime.  If component creation later
-    # fails, the individual gesture simply falls back to the existing path.
-    w._atomic_scroll_qml_engine = engine
-    w._atomic_scroll_animator_component = component
+    qml_state = {"engine": None, "component": None, "failed": False}
+
+    def _animator_component():
+        """Create the QML runtime only after QApplication actually exists."""
+        if qml_state["failed"]:
+            return None
+        if qml_state["component"] is not None:
+            return qml_state["component"]
+        if QApplication.instance() is None:
+            return None
+        try:
+            engine = QQmlEngine()
+            component = QQmlComponent(engine)
+            component.setData(
+                QByteArray(
+                    b"import QtQuick\n"
+                    b"YAnimator { easing.type: Easing.OutCubic }\n"
+                ),
+                QUrl("atomic:render-thread-scroll"),
+            )
+            # Creating one instance is the most reliable readiness check and
+            # avoids depending on enum names that vary slightly across bindings.
+            probe = component.create()
+            if probe is None:
+                qml_state["failed"] = True
+                return None
+            probe.deleteLater()
+            qml_state["engine"] = engine
+            qml_state["component"] = component
+            w._atomic_scroll_qml_engine = engine
+            w._atomic_scroll_animator_component = component
+            return component
+        except Exception:
+            qml_state["failed"] = True
+            return None
 
     class _RenderThreadOverlay(QObject):
-        """The single visible Quick scroll layer for the main window."""
+        """Exactly one visible Quick scroll layer for the main window."""
 
-        # About two viewports: enough headroom for a normal wheel burst without
-        # making a 2560x1440@125% snapshot enormous.  The cache is asymmetric in
-        # the gesture direction, so most of those pixels are where the hand is
-        # actually travelling.
         CACHE_VIEWS = 2.15
         BACK_VIEWS = 0.28
         EDGE_SLOP = 96
@@ -157,12 +145,25 @@ def _patch_widgets(w):
             self._thumb.setInterval(self.THUMB_MS)
             self._thumb.timeout.connect(self._shadow_thumb)
 
+        @staticmethod
+        def _top_for(area):
+            try:
+                top = area.window()
+                if top is None or not top.inherits("QMainWindow"):
+                    return None
+                return top
+            except RuntimeError:
+                return None
+
         def _ensure_quick(self, top) -> bool:
             try:
                 if self.quick is not None:
-                    # Atomic has one main QMainWindow.  Do not reparent a native
-                    # child into a dialog: those keep the proven QWidget path.
+                    # Never reparent a native Quick child into dialogs/tools.
                     return self.top is top
+
+                component = _animator_component()
+                if component is None:
+                    return False
 
                 quick = QQuickWindow()
                 quick.setColor(self.ground)
@@ -181,10 +182,6 @@ def _patch_widgets(w):
                 if animator is None:
                     container.hide()
                     container.deleteLater()
-                    try:
-                        quick.deleteLater()
-                    except Exception:
-                        pass
                     return False
                 animator.setParent(self)
                 if not animator.setProperty("target", texture):
@@ -199,9 +196,6 @@ def _patch_widgets(w):
                 self.container = container
                 self.animator = animator
                 self.top = top
-                # A window move while content is in flight should never carry a
-                # DPR-specific snapshot across monitors.  Commit where it is and
-                # reveal live widgets before Windows begins the migration.
                 top.installEventFilter(self)
                 return True
             except Exception:
@@ -237,20 +231,10 @@ def _patch_widgets(w):
             except RuntimeError:
                 pass
             self.area = self.body = self.bar = self.motion = None
+            self.cache_height = 0
 
         @staticmethod
-        def _top_for(area):
-            try:
-                top = area.window()
-                # This compositor is deliberately the application's main-window
-                # path.  Modal/tool windows retain the old behavior.
-                if top is None or not top.inherits("QMainWindow"):
-                    return None
-                return top
-            except RuntimeError:
-                return None
-
-        def _geometry_for(self, area, top):
+        def _geometry_for(area, top):
             viewport = area.viewport()
             point = viewport.mapTo(top, QPoint(0, 0))
             return QRect(point, viewport.size())
@@ -262,10 +246,8 @@ def _patch_widgets(w):
             view_h = max(1, viewport.height())
             body_h = max(view_h, body.height())
             width = max(1, body.width(), viewport.width())
-
-            # Keep a little history behind the current position and put the rest
-            # ahead.  For an upward gesture the shape is mirrored.
-            total_h = min(body_h, max(view_h, int(round(view_h * self.CACHE_VIEWS))))
+            total_h = min(body_h,
+                          max(view_h, int(round(view_h * self.CACHE_VIEWS))))
             back = int(round(view_h * self.BACK_VIEWS))
             if direction >= 0:
                 top = int(round(current)) - back
@@ -275,13 +257,13 @@ def _patch_widgets(w):
             height = min(total_h, body_h - top)
 
             dpr = float(viewport.devicePixelRatioF() or 1.0)
-            physical_w = max(1, int(round(width * dpr)))
-            physical_h = max(1, int(round(height * dpr)))
-            image = QImage(physical_w, physical_h,
-                           QImage.Format.Format_ARGB32_Premultiplied)
+            image = QImage(
+                max(1, int(round(width * dpr))),
+                max(1, int(round(height * dpr))),
+                QImage.Format.Format_ARGB32_Premultiplied,
+            )
             image.setDevicePixelRatio(dpr)
             image.fill(QColor(ground))
-
             painter = QPainter(image)
             region = QRegion(QRect(0, top, width, height))
             flags = (QWidget.RenderFlag.DrawWindowBackground
@@ -301,39 +283,32 @@ def _patch_widgets(w):
                 return False
             try:
                 view_h = self.area.viewport().height()
+                body_h = max(view_h, self.body.height())
             except RuntimeError:
                 return False
             lo = self.cache_top
             hi = self.cache_top + self.cache_height
-            start = float(position)
-            end = start + view_h
-            # Slop is only needed away from a real content edge.
             if lo > 0.0:
                 lo += self.EDGE_SLOP
-            try:
-                body_h = max(view_h, self.body.height())
-            except RuntimeError:
-                body_h = int(hi)
             if hi < body_h:
                 hi -= self.EDGE_SLOP
-            return start >= lo and end <= hi
+            start = float(position)
+            return start >= lo and start + view_h <= hi
 
         def _current(self) -> float:
             if not self.running or self.duration_s <= 0.0:
                 return float(self.target_value)
             elapsed = max(0.0, time.monotonic() - self.started_at)
             t = min(1.0, elapsed / self.duration_s)
-            eased = _ease_out_cubic(t)
-            return self.start_value + (self.target_value - self.start_value) * eased
+            return self.start_value + (self.target_value - self.start_value) * _ease_out_cubic(t)
 
         def _shadow_value(self, value):
-            bar = self.bar
-            if bar is None:
+            if self.bar is None:
                 return
-            low, high = bar.minimum(), bar.maximum()
+            low, high = self.bar.minimum(), self.bar.maximum()
             value = int(round(max(low, min(high, float(value)))))
-            blocker = QSignalBlocker(bar)
-            bar.setValue(value)
+            blocker = QSignalBlocker(self.bar)
+            self.bar.setValue(value)
             blocker.unblock()
 
         def _shadow_thumb(self):
@@ -345,17 +320,24 @@ def _patch_widgets(w):
             except RuntimeError:
                 self._hard_hide()
 
-        def _motion_started(self, motion):
-            if not getattr(motion, "_counted", False):
-                motion._counted = True
-                w._GLIDING += 1
-            # This path owns the wheel now.  Clear leftovers from an earlier
-            # fallback glide so cancel/next-input cannot revive old velocity.
+        @staticmethod
+        def _duration_ms(current, target) -> int:
+            distance = abs(float(target) - float(current))
+            return int(max(105.0, min(220.0, 108.0 + distance * 0.38)))
+
+        @staticmethod
+        def _clear_motion_state(motion):
             motion._vel = 0.0
             motion._pending = 0.0
             motion._pos = None
             motion._phase = None
             motion._kicks.clear()
+
+        def _motion_started(self, motion):
+            if not getattr(motion, "_counted", False):
+                motion._counted = True
+                w._GLIDING += 1
+            self._clear_motion_state(motion)
 
         def _motion_finished(self, motion, final_value):
             if motion is None:
@@ -363,57 +345,36 @@ def _patch_widgets(w):
             if getattr(motion, "_counted", False):
                 motion._counted = False
                 w._GLIDING = max(0, w._GLIDING - 1)
-            motion._vel = 0.0
-            motion._pending = 0.0
-            motion._pos = None
-            motion._phase = None
-            motion._last_value = int(round(final_value))
-            motion._kicks.clear()
+            self._clear_motion_state(motion)
+            motion._last_value = int(round(float(final_value)))
+            motion._atomic_rt_active = False
 
         def _commit(self, value):
-            bar = self.bar
-            body = self.body
-            if bar is None:
-                return
-            low, high = bar.minimum(), bar.maximum()
+            if self.bar is None:
+                return value
+            low, high = self.bar.minimum(), self.bar.maximum()
             final_value = int(round(max(low, min(high, float(value)))))
-            # The visible thumb has been shadow-updated with signals blocked.
-            # Restore the real body's old value silently, then perform one normal
-            # final write so QScrollArea/Reader synchronize exactly once.
-            blocker = QSignalBlocker(bar)
-            bar.setValue(int(self.committed))
+            blocker = QSignalBlocker(self.bar)
+            self.bar.setValue(int(self.committed))
             blocker.unblock()
             try:
-                if body is not None:
-                    body.setUpdatesEnabled(True)
+                if self.body is not None:
+                    self.body.setUpdatesEnabled(True)
             except RuntimeError:
                 pass
-            if bar.value() != final_value:
-                bar.setValue(final_value)
+            if self.bar.value() != final_value:
+                self.bar.setValue(final_value)
             return final_value
-
-        def _duration_ms(self, current, target) -> int:
-            # Retargeting adds distance, not queued animations.  A normal notch
-            # lands in ~130 ms; a hard burst gets a little longer rather than a
-            # much higher per-frame speed.  The render thread supplies all
-            # intermediate positions at the panel cadence.
-            distance = abs(float(target) - float(current))
-            return int(max(105.0, min(220.0, 108.0 + distance * 0.38)))
 
         def kick(self, area, body, ground, motion, distance, direction) -> bool:
             try:
                 top = self._top_for(area)
-                if top is None:
+                if top is None or not self._ensure_quick(top):
                     return False
-                if not self._ensure_quick(top):
-                    return False
-
                 bar = area.verticalScrollBar()
                 if bar.maximum() <= bar.minimum():
                     return False
 
-                # One overlay at a time.  A wheel gesture on another surface
-                # commits the old one where the eye currently sees it first.
                 if self.running and self.area is not area:
                     self.cancel(commit_current=True)
 
@@ -430,8 +391,6 @@ def _patch_widgets(w):
                 if self.running and old_delta * direction > 0.0:
                     target = previous_target + direction * float(distance)
                 else:
-                    # Reversal answers from what is actually on screen now, not
-                    # from the destination of the animation being abandoned.
                     target = current + direction * float(distance)
                 target = max(float(bar.minimum()), min(float(bar.maximum()), target))
                 if abs(target - current) < 0.01:
@@ -445,9 +404,6 @@ def _patch_widgets(w):
                 self.quick.setColor(self.ground)
                 self.container.setGeometry(self._geometry_for(area, top))
 
-                # Stop the old render-thread animation before changing its image
-                # or origin.  `finished` from a stop/retarget is ignored by the
-                # guard; only the final uninterrupted run commits the QWidget.
                 self.retargeting = True
                 if self.running:
                     self.animator.setProperty("running", False)
@@ -470,7 +426,6 @@ def _patch_widgets(w):
                 duration_ms = self._duration_ms(current, target)
                 self.duration_s = duration_ms / 1000.0
                 self.started_at = time.monotonic()
-
                 start_y = -(self.start_value - self.cache_top)
                 target_y = -(self.target_value - self.cache_top)
                 self.texture.setY(float(start_y))
@@ -487,7 +442,6 @@ def _patch_widgets(w):
                 self._thumb.start()
                 return True
             except Exception:
-                # Restore anything frozen before letting the caller fall back.
                 self.retargeting = False
                 try:
                     if self.body is not None:
@@ -505,19 +459,14 @@ def _patch_widgets(w):
             motion = self.motion
             try:
                 final_value = self._commit(self.target_value)
-                if final_value is None:
-                    final_value = self.target_value
                 self._motion_finished(motion, final_value)
-                if motion is not None:
-                    motion._atomic_rt_active = False
-                # Keep the texture at the exact final position until the live
-                # viewport has been invalidated, then drop the overlay on the
-                # next event-loop turn.  No blank handoff frame.
                 try:
                     self.texture.setY(-(float(final_value) - self.cache_top))
                     self.area.viewport().update()
                 except RuntimeError:
                     pass
+
+                area = self.area
 
                 def reveal():
                     try:
@@ -525,6 +474,8 @@ def _patch_widgets(w):
                             self.container.hide()
                         if self.texture is not None:
                             self.texture.clear_image()
+                        if area is not None:
+                            area.viewport().update()
                     except RuntimeError:
                         pass
                     self.area = self.body = self.bar = self.motion = None
@@ -532,9 +483,7 @@ def _patch_widgets(w):
 
                 QTimer.singleShot(0, reveal)
             except RuntimeError:
-                if motion is not None:
-                    motion._atomic_rt_active = False
-                    self._motion_finished(motion, self.target_value)
+                self._motion_finished(motion, self.target_value)
                 self._hard_hide()
 
         def cancel(self, commit_current=True):
@@ -562,8 +511,6 @@ def _patch_widgets(w):
                 except RuntimeError:
                     pass
             self._motion_finished(motion, final_value)
-            if motion is not None:
-                motion._atomic_rt_active = False
             try:
                 if self.container is not None:
                     self.container.hide()
@@ -581,9 +528,6 @@ def _patch_widgets(w):
     overlay = _RenderThreadOverlay()
     w._atomic_render_thread_overlay = overlay
 
-    # Mark scroll_area() surfaces without changing how they are built.  Their
-    # existing per-area compositor remains available for scrollbar dragging and
-    # as the fallback; wheel glides below use the one shared overlay instead.
     old_scroll_area = w.scroll_area
 
     def render_thread_scroll_area(body, always_show_vbar=False, ground=None,
@@ -634,7 +578,6 @@ def _patch_widgets(w):
     w._Momentum.kick = rt_kick
     w._Momentum.cancel = rt_cancel
 
-    # Exposed narrowly for the reader patch below; no page imports this symbol.
     def mark_surface(area, body, ground):
         try:
             bar = area.verticalScrollBar()
@@ -666,7 +609,6 @@ def _patch_reader(module):
             if marker is not None:
                 marker(self, self._body, module.theme.BG)
         except Exception:
-            # Reader remains on its already-working self-painted path.
             pass
 
     cls.__init__ = init
@@ -702,9 +644,9 @@ def install():
         return
     _INSTALLED = True
 
-    # Loading widgets here is intentional.  All lower-level patches have already
-    # installed their import hooks, so this resolves the final shared motion API
-    # once and lets us wrap it without adding another competing widgets finder.
+    # All lower-level widgets patches are already registered at this point.
+    # Importing the submodule resolves that final shared API once, without
+    # adding another competing helpers.widgets meta-path finder.
     import importlib
     widgets = importlib.import_module("helpers.widgets")
     _patch_widgets(widgets)
