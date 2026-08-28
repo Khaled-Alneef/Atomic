@@ -76,8 +76,18 @@ def _patch_widgets(w):
     class _QuickCompositor(QObject):
         """One hidden QQuickWindow per scroll viewport, shown only in motion."""
 
-        CACHE_VIEWS = 3.0
-        EDGE_SLOP = 128.0
+        # Three viewports was enough for short glides but occasionally crossed
+        # an edge during a longer wheel burst. Re-rendering the QWidget tree and
+        # uploading a replacement texture in the middle of motion produced the
+        # rare hitch that remained after the release-handoff fix.
+        CACHE_VIEWS = 8.0
+        EDGE_SLOP = 192.0
+        # Prefer one full-page texture whenever it is comfortably below normal
+        # scene-graph texture limits. This removes cache-edge work entirely on
+        # Home/Discover-sized pages while keeping very long reader/list pages
+        # bounded. The limit is in physical pixels because that is what the GPU
+        # actually receives.
+        FULL_CACHE_MAX_PHYSICAL_H = 8192
 
         def __init__(self, area, body, ground):
             super().__init__(area)
@@ -90,12 +100,6 @@ def _patch_widgets(w):
             self._active = False
             self._visual = float(area.verticalScrollBar().value())
             self._motion = None
-            # Handoff state.  The old implementation hid the Quick surface in
-            # the same mouse-release event that snapped the real scrollbar to
-            # its final target.  The last Quick frame could therefore still be
-            # one paced-drag step behind the live QWidget page, producing the
-            # visible release hitch.  We now keep Quick on top until a frame at
-            # the exact final position has actually swapped.
             self._ending_after_swap = False
 
             self.quick = QQuickWindow()
@@ -129,8 +133,18 @@ def _patch_widgets(w):
         def _cache_bounds_for(self, pos):
             view_h = max(1, self.viewport.height())
             body_h = max(view_h, self._body_extent())
+            dpr = self.viewport.devicePixelRatioF() or 1.0
+
+            # Whole-page cache when safe: no cache edge can ever be crossed, so
+            # wheel motion after the initial upload is transform-only.
+            if body_h * dpr <= self.FULL_CACHE_MAX_PHYSICAL_H:
+                return 0, body_h
+
             wanted = min(body_h, max(view_h, int(round(view_h * self.CACHE_VIEWS))))
-            top = int(round(float(pos) - view_h))
+            # Put more runway in the likely direction by centering the current
+            # position in the larger window instead of placing it one viewport
+            # from the top as the old 3-view cache did.
+            top = int(round(float(pos) - 0.5 * (wanted - view_h)))
             top = max(0, min(top, max(0, body_h - wanted)))
             return top, wanted
 
@@ -182,9 +196,6 @@ def _patch_widgets(w):
 
         def begin(self, pos, motion):
             if self._active:
-                # A new wheel/drag input can arrive during the one-frame
-                # handoff. Cancel that pending hide and continue from the
-                # texture that is already on screen.
                 self._ending_after_swap = False
                 self._motion = motion
                 self._visual = float(pos)
@@ -218,7 +229,6 @@ def _patch_widgets(w):
             self.texture.setY(-(float(pos) - self._cache_top))
 
         def _finish_end(self):
-            """Reveal the live QWidget page only after the final GPU frame."""
             if not self._active:
                 return
             self._ending_after_swap = False
@@ -233,10 +243,6 @@ def _patch_widgets(w):
         def _frame_swapped(self):
             if not self._active:
                 return
-            # end() has already placed the texture at the exact final
-            # scrollbar position and requested this frame.  Now that it is
-            # actually on screen, revealing the synchronized live page cannot
-            # produce a position jump.
             if self._ending_after_swap:
                 self._finish_end()
                 return
@@ -256,15 +262,9 @@ def _patch_widgets(w):
                 return
             if pos is not None:
                 self._visual = float(pos)
-            # Do not hide in the release/stop event.  First put the GPU layer
-            # at the same final position as the real scrollbar underneath,
-            # then wait for frameSwapped to retire the layer.
             self._motion = None
             self._ending_after_swap = True
             self._draw(self._visual)
-            # The QWidget tree may repaint underneath while Quick still covers
-            # it; this makes the eventual reveal ready rather than triggering a
-            # repaint on the handoff frame itself.
             self.body.setUpdatesEnabled(True)
             self.viewport.update()
             self.quick.update()
@@ -288,14 +288,6 @@ def _patch_widgets(w):
         return getattr(motion._bar, "_atomic_motion_surface", None)
 
     def patched_active(self):
-        """A Quick frameSwapped clock is a real active motion clock too.
-
-        The first GPU implementation disabled _Momentum's QTimer but left
-        active() unchanged. Every following wheel notch therefore saw the
-        motion as inactive and reset _pos/_vel/_pending before applying its
-        impulse, creating a pulse/hitch at every notch. Keep momentum alive
-        for the full compositor glide instead.
-        """
         surface = _surface_for(self)
         if surface is not None and surface._active and not surface._ending_after_swap:
             return True
