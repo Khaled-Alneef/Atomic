@@ -41,13 +41,19 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# Global search matches the Harbor reference: a dimmed wide overlay under the
-# persistent field, Movies and Series in side-by-side poster rows. The patch
-# restores suggestions from the title-bar field itself while leaving MainWindow's
-# existing Enter behavior intact: Enter runs the full query on Discover.
+# Global search is one mixed, scrollable Watch + Read suggestion list under the
+# persistent field. Clicking a suggestion opens that title's episode/chapter
+# list; Enter keeps running the full query on Discover.
 from . import global_search_visual_patch as _global_search_visual_patch
 
 _global_search_visual_patch.install()
+
+# Polish ONLY that suggestion QListWidget: per-pixel/slower mouse wheel,
+# app-theme frame, Movies-style animated accent hover, and pointing-hand cursor.
+# No other page/list receives these scroll or hover overrides.
+from . import global_search_list_polish_patch as _global_search_list_polish_patch
+
+_global_search_list_polish_patch.install()
 
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
