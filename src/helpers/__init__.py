@@ -29,19 +29,16 @@ from . import motion_patch as _motion_patch
 
 _motion_patch.install()
 
-# IMPORTANT: do not install poster_grid_quick_patch here. Movies currently use
-# PosterGrid's original painted motion path and are the owner's perfect control.
-# Discover must use that exact same path rather than a special small-grid Quick
-# compositor that made its card motion differ from Movies.
+# Movies is the known-perfect reference. Home and Discover contain a HeroBanner
+# plus nested horizontal scrollers, so a page-wide snapshot is the wrong owner
+# for their motion: it can cover the live rows and makes the first wheel event
+# pay for a large synchronous page render. Detach only those two pages from the
+# compositor after construction; every other page keeps the GPU path.
+from . import hero_pages_live_scroll_patch as _hero_pages_live_scroll_patch
 
-# Keep hero artwork/fade work out of active wheel frames.
-from . import hero_scroll_patch as _hero_scroll_patch
+_hero_pages_live_scroll_patch.install()
 
-_hero_scroll_patch.install()
-
-# Installed after hero_scroll_patch so its PageSlide handoff is authoritative:
-# first-wheel routing goes straight to the visible vertical scroll owner, and a
-# horizontal scrollbar press reveals the live nested row before dragging it.
-from . import home_discover_interaction_patch as _home_discover_interaction_patch
-
-_home_discover_interaction_patch.install()
+# Do not install poster_grid_quick_patch: Discover should stay on the same
+# original painted PosterGrid path as the perfect Movies page.
+# Do not install the old Home/Discover hero/interaction interception patches;
+# they were compensating for a page-wide snapshot that these pages no longer use.
