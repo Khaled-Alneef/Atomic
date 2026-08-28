@@ -1,34 +1,17 @@
-"""Make startup DPR authoritative without blocking monitor moves.
+"""Keep image DPR correct across mixed-DPI monitors without blocking moves.
 
-There are two separate mixed-DPI hazards in Atomic:
-
-* MainWindow is constructed before its native QWindow is guaranteed to exist.
-  main.py historically called images.set_device_ratio(window.devicePixelRatioF())
-  before window.winId(); on a 125% primary + 100% secondary setup that early
-  QWidget value can still describe the primary screen. Consuming the one startup
-  rebuild there leaves the first page cut at the wrong DPR.
-* Rebuilding the current page directly from QWindow.screenChanged blocks the
-  GUI while Windows is physically moving the native window between monitors.
-
-Startup therefore rebuilds once only after the realised QWindow has an
-authoritative screen. Monitor crossing adopts the new DPR immediately but does
-not rebuild synchronously. Instead, a pending image refresh is debounced by
-MainWindow moveEvent: every move restarts a short timer, and only after the
-window has stopped moving is the current page rebuilt at the new DPR. That keeps
-the drag nonblocking while preventing old-monitor pixmaps from remaining soft
-on the destination monitor.
-
-A DPR refresh rebuilds the current page from scratch, so it also snapshots every
-scroll area's horizontal/vertical position and restores them around that rebuild.
-Crossing monitors therefore changes image resolution only; it never navigates the
-user back to the top of the page or resets a sideways shelf.
+Startup adopts the realised QWindow screen before rebuilding the first page.
+During monitor crossing the DPR itself is updated immediately, but the expensive
+page/image refresh is deferred until the window has stopped moving.  The refresh
+also preserves the page's primary vertical scroll position so changing monitors
+never navigates the user back to the top.
 """
 
 from __future__ import annotations
 
 
 _PATCHED_WINDOW_CLASSES = set()
-_MOVE_SETTLE_MS = 220
+_MOVE_SETTLE_MS = 80
 
 
 def install():
@@ -54,7 +37,6 @@ def install():
             return ()
 
     def _native_ratio(window):
-        """The realised QWindow's screen ratio, or None until authoritative."""
         try:
             handle = window.windowHandle()
             if handle is None:
@@ -67,78 +49,89 @@ def install():
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return None
 
-    def _capture_scroll_state(window):
-        """All scroll positions on the visible page, in stable child order."""
+    def _primary_vertical_area(page):
+        """The page-level vertical scroller, not a nested shelf/list."""
         try:
             from PyQt6.QtWidgets import QAbstractScrollArea
 
-            page = getattr(window, "_current_page", None)
-            if page is None:
-                return ()
-            states = []
+            candidates = []
             for area in page.findChildren(QAbstractScrollArea):
                 try:
-                    vbar = area.verticalScrollBar()
-                    hbar = area.horizontalScrollBar()
-                    states.append((
-                        int(vbar.value()), int(vbar.minimum()), int(vbar.maximum()),
-                        int(hbar.value()), int(hbar.minimum()), int(hbar.maximum()),
-                    ))
-                except RuntimeError:
-                    states.append(None)
-            return tuple(states)
+                    bar = area.verticalScrollBar()
+                    span = int(bar.maximum()) - int(bar.minimum())
+                    if span <= 0 or not area.isVisible():
+                        continue
+                    viewport = area.viewport()
+                    # The page scroller owns the largest visible viewport.
+                    # Nested horizontal shelves normally have no vertical
+                    # range at all; list-like children are smaller.
+                    score = int(viewport.width()) * int(viewport.height())
+                    candidates.append((score, span, area))
+                except (AttributeError, RuntimeError):
+                    continue
+            if not candidates:
+                return None
+            candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+            return candidates[0][2]
         except (AttributeError, RuntimeError):
-            return ()
+            return None
 
-    def _restore_scroll_state(window, states):
-        """Restore a same-page rebuild without assuming its ranges are identical."""
-        if not states:
-            return
+    def _capture_page_position(window):
         try:
-            from PyQt6.QtWidgets import QAbstractScrollArea
-
             page = getattr(window, "_current_page", None)
             if page is None:
-                return
-            areas = page.findChildren(QAbstractScrollArea)
-            for area, state in zip(areas, states):
-                if state is None:
-                    continue
-                try:
-                    v_value, v_old_min, v_old_max, h_value, h_old_min, h_old_max = state
-                    vbar = area.verticalScrollBar()
-                    hbar = area.horizontalScrollBar()
-
-                    # Logical layout sizes normally make the ranges identical
-                    # across DPR changes. If one does change, preserve the same
-                    # relative position rather than clamping a formerly-valid
-                    # value to an unrelated end of the new range.
-                    if v_old_max > v_old_min and vbar.maximum() > vbar.minimum():
-                        fraction = ((v_value - v_old_min)
-                                    / float(v_old_max - v_old_min))
-                        v_target = (vbar.minimum()
-                                    + fraction * (vbar.maximum() - vbar.minimum()))
-                    else:
-                        v_target = v_value
-                    if h_old_max > h_old_min and hbar.maximum() > hbar.minimum():
-                        fraction = ((h_value - h_old_min)
-                                    / float(h_old_max - h_old_min))
-                        h_target = (hbar.minimum()
-                                    + fraction * (hbar.maximum() - hbar.minimum()))
-                    else:
-                        h_target = h_value
-
-                    vbar.setValue(max(vbar.minimum(),
-                                      min(vbar.maximum(), int(round(v_target)))))
-                    hbar.setValue(max(hbar.minimum(),
-                                      min(hbar.maximum(), int(round(h_target)))))
-                except RuntimeError:
-                    continue
+                return None
+            area = _primary_vertical_area(page)
+            if area is None:
+                return (type(page).__module__, type(page).__name__, None)
+            bar = area.verticalScrollBar()
+            return (
+                type(page).__module__, type(page).__name__,
+                (int(bar.value()), int(bar.minimum()), int(bar.maximum())),
+            )
         except (AttributeError, RuntimeError):
+            return None
+
+    def _restore_page_position(window, state):
+        if not state:
+            return
+        try:
+            module, name, saved = state
+            page = getattr(window, "_current_page", None)
+            if page is None or type(page).__module__ != module or type(page).__name__ != name:
+                return
+            if saved is None:
+                return
+            area = _primary_vertical_area(page)
+            if area is None:
+                return
+            bar = area.verticalScrollBar()
+            old_value, old_min, old_max = saved
+            new_min, new_max = int(bar.minimum()), int(bar.maximum())
+            if old_max > old_min and new_max > new_min:
+                fraction = (old_value - old_min) / float(old_max - old_min)
+                target = new_min + fraction * (new_max - new_min)
+            else:
+                target = old_value
+            bar.setValue(max(new_min, min(new_max, int(round(target)))))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
             pass
 
+    def _restore_page_position_later(window, state):
+        """Re-assert after immediate and lazy layout/range updates."""
+        try:
+            from PyQt6.QtCore import QTimer
+
+            _restore_page_position(window, state)
+            for delay in (0, 40, 120):
+                QTimer.singleShot(
+                    delay,
+                    lambda w=window, s=state: _restore_page_position(w, s),
+                )
+        except Exception:
+            _restore_page_position(window, state)
+
     def _refresh_scaled_page(window):
-        """Re-cut the visible page for its current screen, outside a drag."""
         try:
             pending = getattr(window, "_atomic_pending_move_dpr", None)
             if pending is None:
@@ -150,9 +143,6 @@ def install():
             original_set_device_ratio(final_ratio)
             window._atomic_verified_page_dpr = final_ratio
 
-            # The old-monitor variants are harmless on disk because their keys
-            # include size/DPR, but process-local pixmaps and tinted assets must
-            # not remain the visual source for the current page after crossing.
             try:
                 images.clear_scaled_cache()
             except Exception:
@@ -161,22 +151,11 @@ def install():
             if getattr(window, "_atomic_dpr_refresh_in_progress", False):
                 return
 
-            scroll_state = _capture_scroll_state(window)
+            position = _capture_page_position(window)
             window._atomic_dpr_refresh_in_progress = True
             try:
                 window.refresh_current_page()
-                # The same page is constructed synchronously, so restoring here
-                # prevents a visible one-frame jump to zero. Re-assert once on
-                # the next event-loop turn because lazy layout/range updates may
-                # finish after refresh_current_page() returns.
-                _restore_scroll_state(window, scroll_state)
-                try:
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(
-                        0, lambda w=window, s=scroll_state:
-                        _restore_scroll_state(w, s))
-                except Exception:
-                    pass
+                _restore_page_position_later(window, position)
             finally:
                 window._atomic_dpr_refresh_in_progress = False
         except RuntimeError:
@@ -188,7 +167,6 @@ def install():
                 pass
 
     def _schedule_post_move_refresh(window, ratio):
-        """Refresh only after the window stops moving across the DPI boundary."""
         try:
             from PyQt6.QtCore import QTimer
 
@@ -204,14 +182,12 @@ def install():
             pass
 
     def _patch_window_class(window):
-        """Make screen changes cheap, then refresh once the drag is idle."""
         cls = type(window)
         if cls in _PATCHED_WINDOW_CLASSES:
             return
         old_handler = getattr(cls, "_on_screen_changed", None)
         if not callable(old_handler):
             return
-
         old_move = getattr(cls, "moveEvent", None)
 
         def nonblocking_screen_changed(self, screen):
@@ -231,18 +207,14 @@ def install():
             if abs(ratio - previous) < 0.01:
                 return
 
-            # Cheap work only while Windows owns the move loop.
+            # Cheap only while Windows owns the move loop.
             original_set_device_ratio(ratio)
             self._atomic_verified_page_dpr = ratio
             _schedule_post_move_refresh(self, ratio)
 
         def paced_move_event(self, event):
-            # Preserve MainWindow/QWidget's normal move handling first.
             if callable(old_move):
                 old_move(self, event)
-            # If a monitor crossing is waiting for its sharp-image refresh,
-            # every move postpones that work. It can therefore never rebuild
-            # the page in the middle of a continuous drag.
             try:
                 if getattr(self, "_atomic_pending_move_dpr", None) is not None:
                     timer = getattr(self, "_atomic_move_dpr_timer", None)
@@ -256,7 +228,6 @@ def install():
         _PATCHED_WINDOW_CLASSES.add(cls)
 
     def _queue_authoritative_startup(window):
-        """Retry once the native window/screen exists, without duplicate jobs."""
         if getattr(window, "_atomic_dpr_authoritative_queued", False):
             return
         window._atomic_dpr_authoritative_queued = True
@@ -279,7 +250,6 @@ def install():
             window._atomic_dpr_authoritative_queued = False
 
     def _queue_final_rebuild(window, ratio):
-        """Rebuild once after native screen adoption and startup settles."""
         if getattr(window, "_atomic_dpr_final_rebuild_queued", False):
             return
         window._atomic_dpr_final_rebuild_queued = True
@@ -313,8 +283,6 @@ def install():
             window._atomic_dpr_final_rebuild_queued = False
 
     def authoritative_set_device_ratio(value) -> float:
-        # Adopt the requested value immediately for background/image work. It
-        # can still be only a bootstrap value before the native window exists.
         ratio = original_set_device_ratio(value)
 
         for window in _main_windows():
