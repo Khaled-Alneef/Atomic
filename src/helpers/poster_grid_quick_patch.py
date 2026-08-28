@@ -1,18 +1,11 @@
-"""Qt Quick motion layer for small high-refresh PosterGrid surfaces.
+"""Qt Quick wheel compositor for small vertical PosterGrid surfaces.
 
-PosterGrid is deliberately a virtualized QWidget painter for large libraries.
-That remains the right shape for hundreds of records, but its own measurements
-show the remaining 240 Hz failure mode: a paint that misses its 4.17 ms budget
-becomes an exact 2x movement step on the next frame.  Discover grids are small,
-so while their wheel glide is active we can cache the whole already-composited
-grid once and move that raster as one Qt Quick scene-graph texture instead.
-
-This is intentionally narrow:
-* only the vertical PosterGrid class (never PosterStrip),
-* only screens at >=200 Hz,
-* only small/full-cache-safe grids,
-* only wheel momentum.  Its custom scrollbar dragging stays on the existing
-  live QWidget path.
+Large libraries keep PosterGrid's virtualized QWidget painter.  On >=200 Hz
+screens, small grids such as Discover can instead cache their already-composed
+cards once and move that cache as one Qt Quick scene-graph texture during wheel
+momentum.  PosterStrip and scrollbar dragging remain on their existing paths.
+The Quick window is created lazily on the first qualifying wheel event, so the
+proven 165 Hz path does not even construct an extra scene-graph surface.
 """
 
 from __future__ import annotations
@@ -21,7 +14,6 @@ import importlib.abc
 import importlib.machinery
 import sys
 import time
-
 
 _TARGET = "helpers.poster_grid"
 _INSTALLED = False
@@ -34,7 +26,7 @@ def _patch(module):
         return
     _PATCHED = True
 
-    from PyQt6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
+    from PyQt6.QtCore import QObject, QPointF, QRectF, Qt
     from PyQt6.QtGui import QColor, QImage, QPainter
     from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
     from PyQt6.QtWidgets import QWidget
@@ -68,7 +60,6 @@ def _patch(module):
             self.grid = grid
             self._pos = 0.0
             self.setAntialiasing(True)
-            self.setWidth(float(module.BAR_WIDTH))
 
         def sync_geometry(self):
             self.setX(float(max(0, self.grid.width() - module.BAR_WIDTH)))
@@ -114,8 +105,6 @@ def _patch(module):
             self._active = False
             self._ending_after_swap = False
             self._dirty = True
-            self._image_w = 0
-            self._image_h = 0
 
             self.quick = QQuickWindow()
             self.quick.setColor(grid._ground)
@@ -170,17 +159,14 @@ def _patch(module):
             width = max(1, grid.width())
             height = max(1, grid._content_h)
             dpr = float(grid.devicePixelRatioF() or 1.0)
-            pw = max(1, int(round(width * dpr)))
-            ph = max(1, int(round(height * dpr)))
-            image = QImage(pw, ph, QImage.Format.Format_ARGB32_Premultiplied)
+            image = QImage(max(1, int(round(width * dpr))),
+                           max(1, int(round(height * dpr))),
+                           QImage.Format.Format_ARGB32_Premultiplied)
             image.setDevicePixelRatio(dpr)
             image.fill(grid._ground)
 
             painter = QPainter(image)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            # A hover highlight belongs to the pointer, not to the scrolling
-            # cache. Do not bake whichever card happened to be under the mouse
-            # at the instant the glide started into every frame of the glide.
             hover = grid._hover
             grid._hover = -1
             try:
@@ -191,8 +177,6 @@ def _patch(module):
                 grid._hover = hover
                 painter.end()
 
-            self._image_w = width
-            self._image_h = height
             self.texture.set_image(image, width, height)
             self.bar.sync_geometry()
             self._dirty = False
@@ -241,10 +225,6 @@ def _patch(module):
             if frame_s <= 0.0:
                 frame_s = 1.0 / 240.0
             motion.frame_s = frame_s
-            # Advance by exactly one display interval per frame the Quick scene
-            # graph actually presents. A late GUI callback therefore cannot
-            # become a 2x movement step; and unlike the old raster painter this
-            # path has no per-card work inside the 4.17 ms motion frame.
             if motion._last is None:
                 motion._last = time.perf_counter()
             moving = motion.step(motion._last + frame_s)
@@ -259,8 +239,6 @@ def _patch(module):
         def _finish(self):
             if not self._active:
                 return
-            # Paint the live QWidget at exactly the same final model position
-            # while Quick still covers it, then reveal it. No release snap.
             self._active = False
             self._ending_after_swap = False
             try:
@@ -268,10 +246,6 @@ def _patch(module):
             except RuntimeError:
                 pass
             self.container.hide()
-            if self._dirty:
-                # Covers/data that landed while moving are intentionally shown
-                # by the live grid now and folded into the next motion cache.
-                pass
 
         def abort_to_live(self, stop_motion=True):
             if not self._active:
@@ -306,22 +280,32 @@ def _patch(module):
 
     def patched_init(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
-        self._atomic_grid_quick = (
-            _GridQuickSurface(self) if type(self) is PosterGrid else None)
+        self._atomic_grid_quick = None
+
+    def _qualifies_for_quick(self):
+        if type(self) is not PosterGrid:
+            return False
+        try:
+            screen = self.screen()
+            return screen is not None and float(screen.refreshRate()) >= 200.0
+        except Exception:
+            return False
 
     def patched_wheel(self, event):
-        surface = getattr(self, "_atomic_grid_quick", None)
         old_wheel(self, event)
-        if (surface is not None and event.isAccepted()
-                and self._motion.running() and self._drag_from is None):
+        if not event.isAccepted() or not self._motion.running() \
+                or self._drag_from is not None:
+            return
+        surface = getattr(self, "_atomic_grid_quick", None)
+        if surface is None and _qualifies_for_quick(self):
+            surface = _GridQuickSurface(self)
+            self._atomic_grid_quick = surface
+        if surface is not None:
             surface.begin()
 
     def patched_paint(self, event):
         surface = getattr(self, "_atomic_grid_quick", None)
         if surface is not None and surface._active:
-            # The Quick child covers the entire grid. Most importantly, do not
-            # call FrameMotion.step here too: the scene-graph presentation owns
-            # the wheel clock while the overlay is active.
             return
         return old_paint(self, event)
 
@@ -363,9 +347,6 @@ def _patch(module):
     def patched_mouse_press(self, event):
         surface = getattr(self, "_atomic_grid_quick", None)
         if surface is not None and surface._active:
-            # Clicking a card or grabbing the custom scrollbar is an explicit
-            # interaction with the live surface. Stop the wheel and reveal the
-            # QWidget at the same model position before handing the event over.
             surface.abort_to_live(stop_motion=True)
         return old_mouse_press(self, event)
 
