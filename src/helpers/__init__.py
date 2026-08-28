@@ -34,6 +34,13 @@ from . import episode_watch_state_patch as _episode_watch_state_patch
 
 _episode_watch_state_patch.install()
 
+# Opening an episode records History but does not mark it watched. The automatic
+# watched mark is written only after the playhead reaches 85% of the duration;
+# end-file/source-switch events cannot force an early mark.
+from . import player_watch_threshold_patch as _player_watch_threshold_patch
+
+_player_watch_threshold_patch.install()
+
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
