@@ -1,15 +1,14 @@
 """High-refresh precision fixes for Atomic's painted poster grid.
 
-The 165 Hz monitor is already clean.  The remaining 240 Hz grid shake has two
-causes that only become obvious at a ~4.17 ms frame budget:
+The 165 Hz monitor is already clean.  On the 240 Hz / 125% monitor the motion
+model can be perfectly smooth while cached poster rasters still *look* like they
+shake: drawing a card at an arbitrary logical fraction places it between real
+physical pixels, so its edge is resampled differently on consecutive frames.
 
-* PosterGrid discarded the fractional scroll offset before drawing cards.
-* Its fallback scheduler is a millisecond timer.  At 240 Hz that means a 4 ms
-  timer against a 4.1667 ms display, so the two clocks beat against each other.
-
-Keep every existing grid behaviour at lower refresh rates.  At 200 Hz and up on
-Windows, use the repository's already-tested DwmFlush-backed _VBlankTicker for
-this painted surface only, and keep fractional card placement for every rate.
+Keep the motion position itself floating-point.  Below 200 Hz retain the exact
+fractional path that is already proven.  At 200 Hz and up, align only the drawn
+card positions to the nearest physical pixel.  The existing high-refresh clock
+support remains in place as a separate safeguard against millisecond-timer beat.
 """
 
 from __future__ import annotations
@@ -33,12 +32,24 @@ def _patch(module):
 
     from PyQt6.QtCore import QRectF
 
-    def fractional_cell_viewport_rect(self, index, offset):
+    def stable_cell_viewport_rect(self, index, offset):
+        visual = float(offset)
+        try:
+            screen = self.screen()
+            rate = float(screen.refreshRate()) if screen is not None else 0.0
+        except Exception:
+            rate = 0.0
+        if rate >= 200.0:
+            try:
+                dpr = float(self.devicePixelRatioF() or 1.0)
+            except Exception:
+                dpr = 1.0
+            visual = round(visual * dpr) / dpr
         rect = QRectF(self.cell_rect(index))
-        rect.moveTop(rect.top() - float(offset))
+        rect.moveTop(rect.top() - visual)
         return rect
 
-    module.PosterGrid._cell_viewport_rect = fractional_cell_viewport_rect
+    module.PosterGrid._cell_viewport_rect = stable_cell_viewport_rect
 
     old_hold = module.PosterGrid._hold_vblank
     old_release = module.PosterGrid._release_vblank
@@ -58,9 +69,6 @@ def _patch(module):
         return ticker
 
     def hold_vblank(self):
-        # Preserve the proven 165 Hz path exactly.  The special clock only
-        # exists for the >=200 Hz case where a whole-millisecond QTimer cannot
-        # represent one display frame accurately (240 Hz = 4.1667 ms).
         try:
             screen = self.screen()
             rate = float(screen.refreshRate()) if screen is not None else 0.0
@@ -73,9 +81,6 @@ def _patch(module):
         ticker = high_hz_ticker()
         if ticker is None:
             return old_hold(self)
-        # The ticker chooses/times DwmFlush on its worker.  If that decision
-        # is not ready on the very first frame, do not block the UI; the next
-        # paint will try again and the normal scheduler covers this frame.
         if getattr(ticker, "clock", None) is None:
             return old_hold(self)
         try:
