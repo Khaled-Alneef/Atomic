@@ -12,8 +12,14 @@ must stay interactive while the page moves. Capping those two pages to 120 Hz
 therefore made them the only primary pages visibly updating every second refresh
 on the owner's 240 Hz panel. Their opaque-ground scroll path has already been
 measured sustaining ~200+ body paints/s, so let those two live pages use the
-screen cadence directly. This changes only presentation pacing; their scroll
-physics, nested input, compositor detach and DPR lifecycle stay untouched.
+screen cadence directly.
+
+Those same pages also contain decorative SmoothTween animations. A tween callback
+can resize/repaint widgets on the GUI thread while a 240 Hz wheel glide has only
+4.17ms to produce its next position. During an active Home/Discover glide those
+decorative callbacks are therefore paused, with elapsed animation time shifted
+forward on resume so nothing jumps or fast-forwards. Scroll motion always wins
+the frame budget; the decoration continues exactly where it left off afterward.
 
 SideScroller also had a _Momentum object but its horizontal scrollbar drag was
 still raw Qt mouse-sample stepping. Attach a horizontal version of the existing
@@ -27,6 +33,7 @@ import importlib.abc
 import importlib.machinery
 import os
 import sys
+import time
 
 from . import motion_patch as _motion_patch
 
@@ -42,7 +49,7 @@ def _is_native_live_page(widget) -> bool:
     patch is installed while those modules may still be importing, and pulling
     either one in from helpers would create a circular-import startup hazard.
     Parent walking is cheap (a handful of QWidget ancestors) and runs only when
-    a motion tick asks for its presentation interval.
+    a motion/tween tick asks whether it belongs to one of these two pages.
     """
     node = widget
     for _ in range(16):
@@ -100,6 +107,45 @@ def _patch_widgets(w):
     # Lambdas already stored by _Momentum resolve this module global at call
     # time, so existing/future live surfaces pick this up without rebuilding.
     w.present_frame_s = live_present_frame_s
+
+    # Decorative tweens are useful, but not while the same GUI thread is trying
+    # to feed a live 240 Hz scroll. Pause only tweens whose QObject owner lives
+    # under Home/Discover, and shift their elapsed-time origin on resume. The
+    # tween timer may still wake; it returns before the user callback/layout/
+    # repaint work that competes with scrolling.
+    old_tween_tick = w.SmoothTween._tick
+    old_tween_start = w.SmoothTween.start
+
+    def quiet_tween_start(self, *args, **kwargs):
+        # A tween can be stopped/restarted while a glide is active. Never carry
+        # a pause timestamp from the previous run into the new animation.
+        self._atomic_scroll_pause_at = None
+        return old_tween_start(self, *args, **kwargs)
+
+    def quiet_tween_tick(self):
+        try:
+            owner = self.parent()
+            gliding = bool(w.momentum_active() and _is_native_live_page(owner))
+        except (AttributeError, RuntimeError):
+            gliding = False
+
+        if gliding:
+            if getattr(self, "_atomic_scroll_pause_at", None) is None:
+                self._atomic_scroll_pause_at = time.monotonic()
+            return
+
+        paused_at = getattr(self, "_atomic_scroll_pause_at", None)
+        if paused_at is not None:
+            try:
+                self._started_at += max(0.0, time.monotonic() - paused_at)
+            except (AttributeError, TypeError):
+                pass
+            self._atomic_scroll_pause_at = None
+
+        return old_tween_tick(self)
+
+    w.SmoothTween.start = quiet_tween_start
+    w.SmoothTween._tick = quiet_tween_tick
 
     from PyQt6.QtCore import QEvent, QObject, Qt
     from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
