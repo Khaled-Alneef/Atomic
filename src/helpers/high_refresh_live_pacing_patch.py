@@ -2,24 +2,26 @@
 
 The Qt Quick compositor has its own 200+ Hz presentation loop, but
 motion_patch also replaced helpers.widgets.present_frame_s globally with the
-raw screen refresh. Heavy generic live QWidget surfaces use the exact-divider
-policy below: 240 Hz uses 120 Hz (every second refresh), while lower rates keep
-their natural cadence.
+raw screen refresh. Heavy live QWidget surfaces cannot reliably repaint a deep
+widget tree inside a 4.17ms 240 Hz budget. Missing those slots is worse than a
+lower exact cadence because the presented motion alternates between short and
+long steps.
 
-Home and Discover are the deliberate exception. They are permanently detached
-from the page-wide Quick compositor because their hero + nested horizontal rows
-must stay interactive while the page moves. Capping those two pages to 120 Hz
-therefore made them the only primary pages visibly updating every second refresh
-on the owner's 240 Hz panel. Their opaque-ground scroll path has already been
-measured sustaining ~200+ body paints/s, so let those two live pages use the
-screen cadence directly.
+Home and Discover are intentionally detached from the page-wide Quick compositor
+because their hero + nested horizontal rows must remain live and interactive.
+They therefore use the real QWidget path. Up to 199 Hz they keep the monitor's
+native cadence (the owner's 1080p/160 Hz display is the confirmed perfect case).
+At 200 Hz and above they use an exact /2 refresh divider: 240 Hz -> 120 Hz.
+That keeps every visible step phase-locked to the panel instead of asking the
+GUI thread for unsustainable 4.17ms full-tree paints. Scroll physics still use
+elapsed time, so this changes presentation cadence, not distance or duration.
 
 Those same pages also contain decorative SmoothTween animations. A tween callback
-can resize/repaint widgets on the GUI thread while a 240 Hz wheel glide has only
-4.17ms to produce its next position. During an active Home/Discover glide those
-decorative callbacks are therefore paused, with elapsed animation time shifted
-forward on resume so nothing jumps or fast-forwards. Scroll motion always wins
-the frame budget; the decoration continues exactly where it left off afterward.
+can resize/repaint widgets on the GUI thread while a wheel glide is active.
+During an active Home/Discover glide those decorative callbacks are therefore
+paused, with elapsed animation time shifted forward on resume so nothing jumps
+or fast-forwards. Scroll motion always wins the frame budget; the decoration
+continues exactly where it left off afterward.
 
 SideScroller also had a _Momentum object but its horizontal scrollbar drag was
 still raw Qt mouse-sample stepping. Attach a horizontal version of the existing
@@ -40,6 +42,7 @@ from . import motion_patch as _motion_patch
 _TARGET = "helpers.widgets"
 _INSTALLED = False
 _PATCHED = False
+_HIGH_REFRESH_HZ = 200.0
 
 
 def _is_native_live_page(widget) -> bool:
@@ -83,12 +86,16 @@ def _patch_widgets(w):
         if frame <= 0.0:
             return 0.0
 
-        # Home and Discover are intentionally live-widget pages. On the 240 Hz
-        # display, making them obey the generic 120 Hz live cap was visibly the
-        # remaining difference from Movies/Quick pages. Their scroll-body
-        # opaque/blit path has already proved it can run near native refresh, so
-        # give only these two pages one motion position per physical refresh.
+        rate = 1.0 / frame
+
         if widget is not None and _is_native_live_page(widget):
+            # The 160 Hz monitor is a confirmed smooth native QWidget path.
+            # At 240 Hz, however, the same deep tree has only 4.17ms and misses
+            # deadlines irregularly. Use an exact /2 panel cadence there: every
+            # visible position still lands on a real refresh, with no 3:2 beat
+            # pattern or timer-derived fractional cadence.
+            if rate >= _HIGH_REFRESH_HZ:
+                return frame * 2.0
             return frame
 
         target = float(getattr(w, "MOTION_MAX_HZ", 120.0) or 120.0)
@@ -100,7 +107,6 @@ def _patch_widgets(w):
                     target = wanted
             except ValueError:
                 pass
-        rate = 1.0 / frame
         divider = max(1, int(round(rate / target)))
         return frame * divider
 
@@ -109,10 +115,8 @@ def _patch_widgets(w):
     w.present_frame_s = live_present_frame_s
 
     # Decorative tweens are useful, but not while the same GUI thread is trying
-    # to feed a live 240 Hz scroll. Pause only tweens whose QObject owner lives
-    # under Home/Discover, and shift their elapsed-time origin on resume. The
-    # tween timer may still wake; it returns before the user callback/layout/
-    # repaint work that competes with scrolling.
+    # to feed a live high-refresh scroll. Pause only tweens whose QObject owner
+    # lives under Home/Discover, and shift their elapsed-time origin on resume.
     old_tween_tick = w.SmoothTween._tick
     old_tween_start = w.SmoothTween.start
 
