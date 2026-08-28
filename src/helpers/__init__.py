@@ -43,6 +43,12 @@ from . import native_refresh_motion_patch as _native_refresh_motion_patch
 
 _native_refresh_motion_patch.install()
 
+# Use the Windows variable UI face for moving text and ask DirectWrite/Qt for
+# vertical-only hinting. Icon and emoji faces keep their own families.
+from . import typography_motion_patch as _typography_motion_patch
+
+_typography_motion_patch.install()
+
 # Keep expensive live QWidget motion phase-locked on 200+ Hz displays and give
 # SideScroller horizontal thumbs the same paced drag model as vertical bars.
 # The Quick compositor's decoupled 240 Hz path remains native-refresh.
