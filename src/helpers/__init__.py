@@ -41,6 +41,12 @@ from . import high_refresh_live_pacing_patch as _high_refresh_live_pacing_patch
 
 _high_refresh_live_pacing_patch.install()
 
+# Apply the requested short 240Hz tail through _SmoothWheel's actual QScrollArea
+# owner. QScrollBar's internal parent chain is not a reliable page identifier.
+from . import home_discover_wheel_drift_patch as _home_discover_wheel_drift_patch
+
+_home_discover_wheel_drift_patch.install()
+
 # Movies is the known-perfect reference. Home and Discover contain a HeroBanner
 # plus nested horizontal scrollers, so a page-wide snapshot is the wrong owner
 # for their motion: it can cover the live rows and makes the first wheel event
