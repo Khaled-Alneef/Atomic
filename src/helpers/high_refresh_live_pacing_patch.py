@@ -1,10 +1,10 @@
-"""Keep high-refresh live-widget pacing local and non-invasive.
+"""Keep live-widget pacing local and non-invasive.
 
 Home and Discover are intentionally detached from the page-wide Quick compositor
 because their hero + nested horizontal rows must remain live and interactive.
 They therefore use the real QWidget path. Their motion follows the active
-monitor's native cadence, including 240 Hz; holding each position for two
-physical refreshes on a 240 Hz panel produced an obvious repeated-frame cadence.
+monitor's native cadence; holding each position for multiple physical refreshes
+produces an obvious repeated-frame cadence.
 
 Reader and every other live surface also follow the monitor cadence directly.
 An explicit ATOMIC_PRESENT_HZ override remains available for diagnostics only.
@@ -16,12 +16,9 @@ elapsed animation time shifted forward on resume so nothing jumps or
 fast-forwards. Scroll motion always wins the frame budget; decoration continues
 exactly where it left off afterward.
 
-On 200+ Hz displays only, Home/Discover's vertical wheel motion gets a short,
-controlled tail: friction 32 instead of the app-wide 50. _Momentum scales the
-notch impulse by the same friction value, so the resting travel per notch stays
-the same; lowering friction only spreads that travel over a longer decay. The
-previous 46/43 values changed the settle time by too little to be perceptible.
-The confirmed-smooth 160 Hz path and every other page remain on 50.
+Wheel physics are deliberately not changed here. Every monitor uses the same
+base _Momentum profile; presentation cadence is handled separately by the final
+presentation-driven scroll clock.
 
 SideScroller also has a _Momentum object but its horizontal scrollbar drag was
 still raw Qt mouse-sample stepping. Attach a horizontal version of the existing
@@ -42,20 +39,10 @@ from . import motion_patch as _motion_patch
 _TARGET = "helpers.widgets"
 _INSTALLED = False
 _PATCHED = False
-_HIGH_REFRESH_HZ = 200.0
-_DEFAULT_WHEEL_FRICTION = 50.0
-_HIGH_REFRESH_WHEEL_FRICTION = 32.0
 
 
 def _is_native_live_page(widget) -> bool:
-    """Whether `widget` belongs to Home or Discover.
-
-    Use class/module names rather than importing windows.home/tracker here: this
-    patch is installed while those modules may still be importing, and pulling
-    either one in from helpers would create a circular-import startup hazard.
-    Parent walking is cheap (a handful of QWidget ancestors) and runs only when
-    a motion/tween tick asks whether it belongs to one of these two pages.
-    """
+    """Whether `widget` belongs to Home or Discover."""
     node = widget
     for _ in range(16):
         if node is None:
@@ -92,15 +79,9 @@ def _patch_widgets(w):
             return 0.0
         rate = 1.0 / frame
 
-        # Home/Discover used to be forced to an exact /2 divider on 200+ Hz
-        # panels. On a 240 Hz display that guarantees a repeated A,A,B,B motion
-        # cadence. The later background-work reductions make the native path
-        # cheaper now, so let these pages present at the monitor cadence again.
         if widget is not None and _is_native_live_page(widget):
             return frame
 
-        # Reader and every other ordinary live surface also follow the screen
-        # natively unless an explicit diagnostic override was requested.
         override = os.environ.get("ATOMIC_PRESENT_HZ")
         if override:
             try:
@@ -112,33 +93,8 @@ def _patch_widgets(w):
                 pass
         return frame
 
-    # Lambdas already stored by _Momentum resolve this module global at call
-    # time, so existing/future live surfaces pick this up without rebuilding.
+    # Existing/future live surfaces resolve this helper at call time.
     w.present_frame_s = live_present_frame_s
-
-    # High-refresh-only wheel tail for the two live pages. Do this at kick time
-    # rather than construction time so dragging the same window between the
-    # 160 Hz and 240 Hz monitors immediately adopts the correct profile. Keep
-    # horizontal SideScroller motion untouched; the request is for vertical
-    # page-wheel drift only.
-    old_momentum_kick = w._Momentum.kick
-
-    def live_page_momentum_kick(self, distance_px, direction):
-        try:
-            bar = getattr(self, "_bar", None)
-            if (bar is not None
-                    and bar.orientation() == Qt.Orientation.Vertical
-                    and _is_native_live_page(bar)):
-                screen = bar.screen()
-                rate = float(screen.refreshRate()) if screen is not None else 0.0
-                self.FRICTION = (_HIGH_REFRESH_WHEEL_FRICTION
-                                 if rate >= _HIGH_REFRESH_HZ
-                                 else _DEFAULT_WHEEL_FRICTION)
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            pass
-        return old_momentum_kick(self, distance_px, direction)
-
-    w._Momentum.kick = live_page_momentum_kick
 
     # Decorative tweens are useful, but not while the same GUI thread is trying
     # to feed a live high-refresh scroll. Pause only tweens whose QObject owner
