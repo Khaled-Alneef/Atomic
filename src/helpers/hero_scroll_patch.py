@@ -1,19 +1,14 @@
 """Keep hero/banner work and page transitions out of wheel-scroll frames.
 
-Two remaining stalls were measured in the real page code:
+This patch handles two interaction boundaries that are easy to miss:
 
-* PageSlide hides both live pages for the 220 ms navigation animation.  A wheel
-  event delivered to that opaque snapshot had nowhere to scroll, so the first
-  few notches after choosing Home/Discover could simply disappear.
-* Home's hero prewarmer deliberately fires 120 ms after page creation, but it
-  called thumbnail_or_avatar on the GUI thread.  The source's own profiling
-  records 21-26 ms for a first hero-cover cut -- several frames at 165 Hz and
-  five or six frames at 240 Hz.
-
-The hero also has a 260 ms backdrop fade and a settled-size SmoothTransformation
-re-cut.  Those are useful while idle but pure contention while the scroll is
-already being shown from a frozen Qt Quick texture.  Defer them until momentum
-stops instead of spending a 4.17 ms 240 Hz frame on hidden QWidget work.
+* PageSlide hides the real incoming page while its snapshot transition is
+  running.  A wheel event must end that transition and then be routed to the
+  actual scroll owner, not merely to whichever QLabel/button happened to be
+  under the pointer.
+* Hero/banner work must stay off the GUI thread while *any* Atomic scroll
+  surface is moving.  That includes ordinary _Momentum/QScrollArea motion and
+  PosterGrid's independent FrameMotion/Qt Quick path used by Discover.
 """
 
 from __future__ import annotations
@@ -36,15 +31,77 @@ def _patch_widgets(w):
     _WIDGETS_PATCHED = True
 
     from PyQt6.QtCore import QTimer
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QAbstractScrollArea, QWidget
+
+    def scroll_busy() -> bool:
+        """True for either ordinary page momentum or PosterGrid motion."""
+        try:
+            if w.momentum_active():
+                return True
+        except Exception:
+            pass
+
+        app = QApplication.instance()
+        if app is None:
+            return False
+        # Banner work reaches this helper only a handful of times per second,
+        # so a widget walk here is far cheaper than letting one 20ms decode or
+        # fade repaint steal several 240Hz frames.
+        try:
+            widgets = app.allWidgets()
+        except Exception:
+            return False
+        for widget in widgets:
+            try:
+                surface = getattr(widget, "_atomic_grid_quick", None)
+                if surface is not None and getattr(surface, "_active", False):
+                    return True
+                motion = getattr(widget, "_motion", None)
+                if (motion is not None
+                        and widget.__class__.__name__ == "PosterGrid"
+                        and motion.running()):
+                    return True
+            except (RuntimeError, AttributeError):
+                continue
+        return False
+
+    # Export this so Home's import-side patch and any future banner callback
+    # can ask the same question instead of reimplementing the two scroll paths.
+    w.atomic_scroll_busy = scroll_busy
 
     # ---- Wheel input during a page-slide ---------------------------------
-    # The real incoming page is intentionally hidden while PageSlide paints
-    # the two snapshots.  If a user starts scrolling before the 220 ms slide
-    # has landed, finish the visual transition immediately and deliver that
-    # same notch to the now-live widget under the pointer.  Sidebar slides use
-    # axis="x" and are left alone.
     old_slide_wheel = getattr(w.PageSlide, "wheelEvent", None)
+
+    def _deliver_to_scroll_owner(event, target):
+        """Route a wheel event as Qt's normal parent propagation would.
+
+        QApplication.sendEvent(target, event) to an arbitrary child is not
+        enough: direct sendEvent does not walk parents when that QLabel/button
+        ignores the wheel, which is why the first notches after navigation were
+        still disappearing. Walk upward ourselves and stop at the real scroll
+        surface.
+        """
+        node = target
+        seen = set()
+        while isinstance(node, QWidget) and id(node) not in seen:
+            seen.add(id(node))
+            try:
+                if getattr(node, "accepts_relayed_wheel", False):
+                    event.setAccepted(False)
+                    QApplication.sendEvent(node, event)
+                    return event.isAccepted()
+                if isinstance(node, QAbstractScrollArea):
+                    viewport = node.viewport()
+                    event.setAccepted(False)
+                    QApplication.sendEvent(viewport, event)
+                    return event.isAccepted()
+            except RuntimeError:
+                return False
+            try:
+                node = node.parentWidget()
+            except RuntimeError:
+                return False
+        return False
 
     def page_slide_wheel(self, event):
         if getattr(self, "_axis", "y") != "y":
@@ -53,8 +110,11 @@ def _patch_widgets(w):
             event.ignore()
             return
 
+        # Make the real incoming page live immediately. PageSlide.stop() calls
+        # its on_done synchronously, so widgetAt below sees the page rather than
+        # the transition snapshot.
         try:
-            self.stop()  # on_done shows MainWindow._current_page synchronously
+            self.stop()
         except RuntimeError:
             event.ignore()
             return
@@ -64,12 +124,27 @@ def _patch_widgets(w):
         except Exception:
             target = None
         if target is not None and target is not self:
-            try:
-                event.setAccepted(False)
-                QApplication.sendEvent(target, event)
+            if _deliver_to_scroll_owner(event, target):
                 return
-            except RuntimeError:
-                pass
+
+        # Last fallback: find the first visible scroll surface in the page under
+        # the pointer's top-level window. This is only reached for decorative
+        # margins whose widget ancestry does not include the viewport.
+        try:
+            window = self.window()
+            candidates = window.findChildren(QAbstractScrollArea)
+            for area in candidates:
+                if not area.isVisible():
+                    continue
+                global_pos = event.globalPosition().toPoint()
+                local = area.viewport().mapFromGlobal(global_pos)
+                if area.viewport().rect().contains(local):
+                    event.setAccepted(False)
+                    QApplication.sendEvent(area.viewport(), event)
+                    if event.isAccepted():
+                        return
+        except RuntimeError:
+            pass
         event.accept()
 
     w.PageSlide.wheelEvent = page_slide_wheel
@@ -89,7 +164,7 @@ def _patch_widgets(w):
 
         def flush():
             try:
-                if w.momentum_active():
+                if scroll_busy():
                     timer.start()
                     return
                 pending = getattr(banner, "_atomic_pending_backdrop", None)
@@ -107,27 +182,23 @@ def _patch_widgets(w):
         return timer
 
     def quiet_set_backdrop(self, path, fade=True):
-        if w.momentum_active():
-            # Latest answer wins.  A quick-path backdrop followed by its sharp
-            # original can arrive during one glide; there is no value in
-            # painting the intermediate one underneath the Quick snapshot.
+        if scroll_busy():
             self._atomic_pending_backdrop = (path, bool(fade))
             _pending_timer(self).start()
             return self._backdrop is not None
         return old_set_backdrop(self, path, fade=fade)
 
     def quiet_resmooth(self):
-        if w.momentum_active():
+        if scroll_busy():
             self._atomic_pending_resmooth = True
             _pending_timer(self).start()
             return
         return old_resmooth(self)
 
     def quiet_fade_tick(self, value):
-        if w.momentum_active():
-            # The visible page is already a Qt Quick snapshot while wheel
-            # momentum runs.  Stop spending a high-rate SmoothTween repaint on
-            # a hidden banner.  Land the fade before the QWidget is revealed.
+        if scroll_busy():
+            # No hidden banner animation is worth a missed presentation. Land
+            # the fade state and let the live widget repaint once after motion.
             try:
                 self._fade.stop()
             except Exception:
@@ -154,14 +225,26 @@ def _patch_home(module):
 
     HomePage = module.HomePage
 
-    # The old method did thumbnail_or_avatar() here on the GUI thread.  The
-    # images module already has a worker-safe warm() whose whole purpose is to
-    # do that decode/cut away from Qt's event loop.  Keep the 120 ms spacing so
-    # the cover pool is not flooded; each timer tick now only submits work.
+    # The original Home code measured 21-26ms for the first hero-cover cut.
+    # Submit it to the existing worker pool and, crucially, do not even submit
+    # new warm work while a scroll is active. A queued decode can otherwise
+    # finish and contend for the GIL/Qt image cache during the first glide.
     def background_hero_cover_warm(self):
         queue = getattr(self, "_hero_warm_queue", None)
         if not queue:
             return
+
+        widgets_now = sys.modules.get("helpers.widgets")
+        busy = False
+        if widgets_now is not None:
+            try:
+                busy = bool(widgets_now.atomic_scroll_busy())
+            except Exception:
+                busy = False
+        if busy:
+            module.QTimer.singleShot(120, self._warm_next_hero_cover)
+            return
+
         entry = queue.pop(0)
         path = entry.get("cover_path")
         if path:
@@ -173,8 +256,6 @@ def _patch_home(module):
             try:
                 module.lookup_pool.submit_cover(warm_one)
             except Exception:
-                # A failed prewarm is harmless: the normal draw path can still
-                # decode it later.  Never move the fallback back to the UI.
                 pass
         if queue:
             module.QTimer.singleShot(
@@ -182,16 +263,13 @@ def _patch_home(module):
 
     HomePage._warm_next_hero_cover = background_hero_cover_warm
 
-    # Never rotate/rebuild the Home hero while a wheel glide is active.  The
-    # timer remains armed and simply tries again on its next ordinary interval;
-    # no animation or content semantics change while the page is idle.
     old_hero_holds = HomePage._hero_holds
 
     def scroll_holds_hero(self):
         widgets_now = sys.modules.get("helpers.widgets")
         if widgets_now is not None:
             try:
-                if widgets_now.momentum_active():
+                if widgets_now.atomic_scroll_busy():
                     return True
             except Exception:
                 pass
