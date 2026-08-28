@@ -22,15 +22,12 @@ _startup_dpr_patch.install()
 
 # Scrolling method restored from commit 0825ee369243802147ead89b7c51cc27027261ea:
 # cached DPR-correct QPixmap raster layer translated over the viewport while the
-# real QWidget body is frozen. Do not layer the later Quick/live-page detach or
-# requestUpdate scheduler over this; the owner identified this exact method as
-# the best measured result.
+# real QWidget body is frozen.
 from . import motion_patch as _motion_patch
 
 _motion_patch.install()
 
-# This is cadence-equivalent to the historical patch's native screen interval
-# and retains the explicit ATOMIC_PRESENT_HZ diagnostic override.
+# Preserve native per-monitor cadence and explicit diagnostic override.
 from . import native_refresh_motion_patch as _native_refresh_motion_patch
 
 _native_refresh_motion_patch.install()
@@ -40,19 +37,23 @@ from . import typography_motion_patch as _typography_motion_patch
 
 _typography_motion_patch.install()
 
-# Retain later non-destructive live-UI improvements: decorative tween deferral
-# during motion and paced horizontal thumb dragging. Its monitor-specific wheel
-# friction branch was removed in 1.10.120, so it no longer changes vertical
-# wheel physics or replaces the restored raster compositor.
+# Retain later non-destructive live-UI improvements. Its monitor-specific wheel
+# friction branch was removed in 1.10.120.
 from . import high_refresh_live_pacing_patch as _high_refresh_live_pacing_patch
 
 _high_refresh_live_pacing_patch.install()
 
-# IMPORTANT: do not install hero_pages_live_scroll_patch. That later experiment
-# deliberately detached Home/Tracker from _atomic_motion_surface and would turn
-# off the 0825ee3 compositor exactly where it is needed.
-# IMPORTANT: do not install ultimate_scroll_patch. It was a later alternative
-# QWindow.requestUpdate scheduler and is intentionally superseded here.
+# Preserve the later Home/Main, Discover, History and Schedule fixes WITHOUT the
+# old Qt Quick compositor-detach behavior. This module keeps hero prewarming,
+# deferred artwork/poster swaps and lazy Tracker-tab handling while leaving the
+# 0825ee3 raster _atomic_motion_surface intact.
+from . import page_scroll_fixes_patch as _page_scroll_fixes_patch
+
+_page_scroll_fixes_patch.install()
+
+# Do not install hero_pages_live_scroll_patch: its compositor-detach half would
+# remove the restored 0825ee3 raster surface. Do not install ultimate_scroll_patch
+# either; its QWindow.requestUpdate scheduler is the later alternative path.
 
 # Later Watch/Read source fixes remain intact.
 from . import source_coverage_patch as _source_coverage_patch
@@ -64,5 +65,4 @@ from . import read_coverage_patch as _read_coverage_patch
 _read_coverage_patch.install()
 
 # Do not install poster_grid_quick_patch or the old interaction interception
-# experiments. The restored raster compositor is the single vertical scroll
-# rendering path for ordinary Atomic scroll_area() pages.
+# experiments. Raster motion remains the authoritative vertical scrolling path.
