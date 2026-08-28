@@ -1,14 +1,18 @@
-"""Keep Home and Discover on live widget scrolling.
+"""Keep Home and tracker sections on live widget scrolling.
 
-Movies is the owner's known-perfect control.  Home/Discover were the only
-remaining pages where a page-wide Qt Quick snapshot could cover nested live
-scrollers and where the first wheel gesture had to synchronously build a large
-snapshot containing a HeroBanner.  Detach those pages from that compositor
-after they are fully constructed.  The existing _Momentum implementation then
-falls back to its normal native-refresh live QWidget path automatically.
+Movies is the owner's known-perfect control. Home and the tracker views contain
+nested/lazy scroll surfaces where a page-wide Qt Quick snapshot is the wrong
+owner: it can cover live content and make the first wheel gesture pay for a
+synchronous snapshot.
 
-This is intentionally page-local: all other scroll_area() users keep the GPU
-compositor, and the confirmed startup-DPR fix remains independent.
+Detach those surfaces from the compositor after construction. Tracker sections
+such as Saved, Schedule and History are built lazily when _set_tab() runs, so
+repeat the same detach after every section switch as well. The existing
+_Momentum implementation then falls back to its normal native-refresh live
+QWidget path automatically.
+
+This is intentionally page-local. Other scroll_area() users keep the GPU path,
+and the confirmed startup-DPR fix remains independent.
 """
 
 from __future__ import annotations
@@ -39,7 +43,8 @@ def _disable_page_compositors(page):
             # immediately before detaching it.
             if getattr(surface, "_active", False):
                 motion = getattr(surface, "_motion", None)
-                pos = float(getattr(surface, "_visual", area.verticalScrollBar().value()))
+                pos = float(getattr(
+                    surface, "_visual", area.verticalScrollBar().value()))
                 try:
                     if motion is not None:
                         if hasattr(motion, "_pos"):
@@ -91,16 +96,32 @@ def _patch_tracker(module):
     if key in _PATCHED:
         return
     _PATCHED.add(key)
-    cls = getattr(module, "DiscoverPage", None)
+
+    # Saved, Schedule, History, Discover and the category views all belong to
+    # TrackerPage. Some of their scroll areas do not exist until _set_tab()
+    # builds that section, so patch the shared base rather than only the
+    # DiscoverPage subclass.
+    cls = getattr(module, "TrackerPage", None)
     if cls is None:
         return
+
     old_init = cls.__init__
+    old_set_tab = cls._set_tab
 
     def init(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
         _disable_page_compositors(self)
 
+    def set_tab(self, key, *args, **kwargs):
+        result = old_set_tab(self, key, *args, **kwargs)
+        # Saved's grid is lazy, Schedule is rebuilt on every visit, and
+        # History/category views can also create fresh scroll_area() instances.
+        # Detach any compositor created by that build before the user can wheel.
+        _disable_page_compositors(self)
+        return result
+
     cls.__init__ = init
+    cls._set_tab = set_tab
 
 
 def _patch(module):
