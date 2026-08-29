@@ -1,11 +1,17 @@
 """Qt Quick wheel compositor for small vertical PosterGrid surfaces.
 
-Large libraries keep PosterGrid's virtualized QWidget painter.  On >=200 Hz
-screens, small grids such as Discover can instead cache their already-composed
-cards once and move that cache as one Qt Quick scene-graph texture during wheel
-momentum.  PosterStrip and scrollbar dragging remain on their existing paths.
-The Quick window is created lazily on the first qualifying wheel event, so the
-proven 165 Hz path does not even construct an extra scene-graph surface.
+Small grids can cache their already-composed cards once and move that cache as
+one Qt Quick scene-graph texture during wheel momentum. The successful 240 Hz
+A/B proved this architecture can make motion genuinely smooth.
+
+Do not embed the QQuickWindow with createWindowContainer(). Atomic's first Quick
+experiment did that and the resulting native-child promotion destabilised the
+widgets around Home/Discover/Saved/History. The compositor below is instead a
+mouse-transparent transient top-level window positioned exactly over the grid
+only while wheel momentum is active. The QWidget hierarchy remains untouched.
+
+165 Hz now uses the same path as 240 Hz. 144 Hz and below remain unchanged until
+separately measured.
 """
 
 from __future__ import annotations
@@ -26,10 +32,9 @@ def _patch(module):
         return
     _PATCHED = True
 
-    from PyQt6.QtCore import QObject, QPointF, QRectF, Qt
+    from PyQt6.QtCore import QObject, QPoint, QPointF, QRectF, Qt
     from PyQt6.QtGui import QColor, QImage, QPainter
     from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
-    from PyQt6.QtWidgets import QWidget
 
     PosterGrid = module.PosterGrid
 
@@ -46,6 +51,10 @@ def _patch(module):
             self._image = image
             self.setWidth(float(width))
             self.setHeight(float(height))
+            self.update()
+
+        def clear(self):
+            self._image = QImage()
             self.update()
 
         def paint(self, painter):
@@ -93,7 +102,7 @@ def _patch(module):
                 float(module.BAR_RADIUS), float(module.BAR_RADIUS))
 
     class _GridQuickSurface(QObject):
-        HIGH_REFRESH_HZ = 200.0
+        HIGH_REFRESH_HZ = 150.0
         MAX_RECORDS = 80
         MAX_PHYSICAL_H = 8192
         MAX_PHYSICAL_W = 8192
@@ -105,22 +114,9 @@ def _patch(module):
             self._active = False
             self._ending_after_swap = False
             self._dirty = True
-
-            self.quick = QQuickWindow()
-            self.quick.setColor(grid._ground)
-            try:
-                self.quick.setFlag(Qt.WindowType.WindowTransparentForInput, True)
-            except Exception:
-                pass
-            self.texture = _GridTexture(self.quick.contentItem())
-            self.bar = _GridBar(grid, self.quick.contentItem())
-            self.container = QWidget.createWindowContainer(self.quick, grid)
-            self.container.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self.container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self.container.setGeometry(grid.rect())
-            self.container.hide()
-            self.quick.frameSwapped.connect(self._frame_swapped)
+            self.quick = None
+            self.texture = None
+            self.bar = None
 
         def high_refresh(self):
             try:
@@ -148,12 +144,54 @@ def _patch(module):
                     and ph <= self.MAX_PHYSICAL_H
                     and pw * ph <= self.MAX_PHYSICAL_PIXELS)
 
+        def _ensure_quick(self):
+            if self.quick is not None:
+                return True
+            try:
+                quick = QQuickWindow()
+                quick.setColor(self.grid._ground)
+                quick.setFlags(
+                    Qt.WindowType.Tool
+                    | Qt.WindowType.FramelessWindowHint
+                    | Qt.WindowType.WindowDoesNotAcceptFocus
+                    | Qt.WindowType.WindowTransparentForInput)
+                try:
+                    top = self.grid.window()
+                    handle = top.windowHandle() if top is not None else None
+                    if handle is not None:
+                        quick.setTransientParent(handle)
+                except (AttributeError, RuntimeError):
+                    pass
+
+                texture = _GridTexture(quick.contentItem())
+                bar = _GridBar(self.grid, quick.contentItem())
+                quick.frameSwapped.connect(self._frame_swapped)
+                self.quick = quick
+                self.texture = texture
+                self.bar = bar
+                return True
+            except Exception:
+                self.quick = None
+                self.texture = None
+                self.bar = None
+                return False
+
+        def _place_overlay(self):
+            if self.quick is None:
+                return
+            try:
+                point = self.grid.mapToGlobal(QPoint(0, 0))
+                self.quick.setGeometry(point.x(), point.y(),
+                                       self.grid.width(), self.grid.height())
+            except RuntimeError:
+                pass
+
         def invalidate(self):
             self._dirty = True
 
         def _build(self):
             grid = self.grid
-            if not self.can_use():
+            if not self.can_use() or not self._ensure_quick():
                 return False
             m = grid._ensure_metrics()
             width = max(1, grid.width())
@@ -186,29 +224,35 @@ def _patch(module):
             if self._active:
                 self._ending_after_swap = False
                 self._draw()
-                self.quick.update()
+                self.quick.requestUpdate()
                 return True
             if self._dirty and not self._build():
                 return False
-            if self._dirty:
+            if self._dirty or self.quick is None:
                 return False
             self._active = True
             self._ending_after_swap = False
-            self.container.setGeometry(self.grid.rect())
+            self._place_overlay()
             self.bar.sync_geometry()
-            self.container.show()
-            self.container.raise_()
             self._draw()
-            self.quick.update()
+            try:
+                self.quick.show()
+                self.quick.raise_()
+                self.quick.requestUpdate()
+            except RuntimeError:
+                self.abort_to_live(stop_motion=False)
+                return False
             return True
 
         def _draw(self):
+            if self.texture is None or self.bar is None:
+                return
             pos = float(self.grid._motion.pos)
             self.texture.setY(-pos)
             self.bar.set_position(pos)
 
         def _frame_swapped(self):
-            if not self._active:
+            if not self._active or self.quick is None:
                 return
             if self._ending_after_swap:
                 self._finish()
@@ -218,12 +262,12 @@ def _patch(module):
             if not motion.running():
                 self._ending_after_swap = True
                 self._draw()
-                self.quick.update()
+                self.quick.requestUpdate()
                 return
 
             frame_s = float(self.grid._refresh_interval() or 0.0)
             if frame_s <= 0.0:
-                frame_s = 1.0 / 240.0
+                frame_s = 1.0 / max(self.HIGH_REFRESH_HZ, 150.0)
             motion.frame_s = frame_s
             if motion._last is None:
                 motion._last = time.perf_counter()
@@ -231,10 +275,17 @@ def _patch(module):
             self._draw()
             self.grid.scrolled.emit()
             if moving:
-                self.quick.update()
+                self.quick.requestUpdate()
             else:
                 self._ending_after_swap = True
-                self.quick.update()
+                self.quick.requestUpdate()
+
+        def _hide_overlay(self):
+            if self.quick is not None:
+                try:
+                    self.quick.hide()
+                except RuntimeError:
+                    pass
 
         def _finish(self):
             if not self._active:
@@ -245,7 +296,7 @@ def _patch(module):
                 self.grid.repaint()
             except RuntimeError:
                 pass
-            self.container.hide()
+            self._hide_overlay()
 
         def abort_to_live(self, stop_motion=True):
             if not self._active:
@@ -258,14 +309,14 @@ def _patch(module):
                 self.grid.repaint()
             except RuntimeError:
                 pass
-            self.container.hide()
+            self._hide_overlay()
 
         def resize(self):
             self.invalidate()
             if self._active:
                 self.abort_to_live(stop_motion=False)
-            self.container.setGeometry(self.grid.rect())
-            self.bar.sync_geometry()
+            if self.bar is not None:
+                self.bar.sync_geometry()
 
     old_init = PosterGrid.__init__
     old_wheel = PosterGrid.wheelEvent
@@ -287,7 +338,7 @@ def _patch(module):
             return False
         try:
             screen = self.screen()
-            return screen is not None and float(screen.refreshRate()) >= 200.0
+            return screen is not None and float(screen.refreshRate()) >= 150.0
         except Exception:
             return False
 
