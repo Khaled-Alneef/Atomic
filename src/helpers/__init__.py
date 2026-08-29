@@ -107,7 +107,6 @@ _discover_reading_search_patch.install()
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
-typography_motion_patch = _typography_motion_patch
 _typography_motion_patch.install()
 
 from . import source_coverage_patch as _source_coverage_patch
