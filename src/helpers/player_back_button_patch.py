@@ -1,11 +1,13 @@
-"""Make the player's visible Back arrow use the same reliable path as Escape.
+"""Make the player's visible Back arrow leave fullscreen playback directly.
 
-The button used to call close_player() directly while Escape and mouse Back go
-through go_back(), which first unwinds an open panel, episode list or fullscreen
-state. Keep the button as an ordinary child of the already-native top bar (the
-same arrangement as the working Episodes/resolution/audio controls), but route
-its click through that tested Back path and guard the press from the player's
-raw mouse poll.
+Outside fullscreen, the button still uses go_back() so an open player panel or
+episode list unwinds through the existing tested path. In fullscreen, however,
+the visible Back arrow is an explicit request to leave the player: it calls
+close_player() immediately instead of spending the first press only leaving
+fullscreen.
+
+The raw Windows mouse poll is guarded before either route so the physical click
+cannot be observed a second time after Qt delivers clicked().
 """
 
 from __future__ import annotations
@@ -37,8 +39,7 @@ def _patch(player):
         except Exception:
             pass
 
-        # Remove only the old close_player connection. This button owns no
-        # other clicked actions in the base player.
+        # This button owns only the base close_player connection.
         try:
             button.clicked.disconnect()
         except Exception:
@@ -47,14 +48,24 @@ def _patch(player):
         def leave():
             if getattr(self, "_closing", False):
                 return
-            # The Windows raw-mouse fallback can observe the same physical
-            # press after Qt delivered clicked(). Mark it as consumed before
-            # changing visibility, exactly as panels/skip buttons do.
             try:
                 self._guard_click()
             except Exception:
                 pass
-            self.go_back()
+
+            window = getattr(self, "_window", None)
+            try:
+                fullscreen = bool(window is not None and window.isFullScreen())
+            except Exception:
+                fullscreen = False
+
+            if fullscreen:
+                # Do not consume a press merely restoring the app window.
+                # The player owns fullscreen, so Back leaves the player now;
+                # close_player() performs the normal player teardown/restore.
+                self.close_player()
+            else:
+                self.go_back()
 
         button.clicked.connect(leave)
 
