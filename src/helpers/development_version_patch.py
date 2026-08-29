@@ -23,7 +23,10 @@ def install():
     regression_fixes_155.install()
 
     from . import updater
-    updater.APP_VERSION = "1.10.155"
+    # 1.10.156 is the isolated high-refresh scroll build: QQuickWindow is no
+    # longer embedded with createWindowContainer, and both 165 Hz and 240 Hz
+    # use the transient scene-graph overlay where the surface qualifies.
+    updater.APP_VERSION = "1.10.156"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
