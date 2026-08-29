@@ -1,16 +1,5 @@
 """Atomic helper package bootstrap."""
 
-# PyInstaller's Windows multiprocessing workers re-enter the frozen executable.
-# This must run before PyQt is imported by main.py, otherwise a spawned mpv
-# worker can recurse into the full GUI instead of diverting into spawn_main.
-# helpers is imported before PyQt in main.py, so this is the earliest safe hook.
-# In a normal source run Python's own spawn bootstrap already owns this path;
-# forcing freeze_support again from an imported worker module can re-enter it.
-import sys as _sys
-if getattr(_sys, "frozen", False):
-    import multiprocessing as _multiprocessing
-    _multiprocessing.freeze_support()
-
 import os
 
 os.environ.setdefault("QT_QPA_UPDATE_IDLE_TIME", "0")
@@ -52,19 +41,17 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# Final player architecture on Windows: libmpv is spawned in a dedicated
-# process and controlled through a multiprocessing pipe while it renders into
-# the same native VideoSurface HWND. This removes Atomic's Python/Qt process from
-# mpv's decode/render/core scheduling without changing source URLs, D3D11,
-# hwdec, sync, subtitles or the visible player UI. If spawn fails, it falls back
-# to the previous in-process backend instead of making playback unavailable.
-from . import player_process_backend_patch as _player_process_backend_patch
+# True low-frame-rate motion synthesis, following Harbor's current Windows SVP
+# path rather than mpv's rejected frame-blending interpolation. When an SVP 4
+# installation is present, Atomic loads its VapourSynth/svpflow engine and
+# synthesizes evenly-presented intermediate frames. With no valid SVP install it
+# is a strict no-op, leaving the stable native mpv path unchanged.
+from . import player_svp_patch as _player_svp_patch
 
-_player_process_backend_patch.install()
+_player_svp_patch.install()
 
-# The visible top-left Back control is itself native and shares the exact same
-# unwind path as Escape/mouse Back. This also avoids a non-native child being
-# lost in the native-window stack above mpv.
+# The visible top-left Back arrow uses the same unwind path as Escape/mouse
+# Back: close panel, close episode list, leave fullscreen, then leave player.
 from . import player_back_button_patch as _player_back_button_patch
 
 _player_back_button_patch.install()
@@ -119,6 +106,7 @@ _development_version_patch.install()
 # Intentionally NOT installed here:
 # - player_callback_pacing_patch (1.10.136 A/B: no visible improvement)
 # - player_windows_pacing_patch (1.10.135 A/B: no visible improvement)
+# - player_process_backend_patch (discarded before test; does not create frames)
 # - motion_patch (raster compositor)
 # - poster_grid_motion_patch
 # - high_refresh_live_pacing_patch
