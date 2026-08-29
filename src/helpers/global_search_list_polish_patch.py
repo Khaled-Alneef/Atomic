@@ -1,23 +1,32 @@
 """Search-suggestion list polish only.
 
-This patch intentionally touches only GlobalSearch's visual suggestion QListWidget:
+This patch intentionally touches only GlobalSearch's visual suggestion surface:
 - per-pixel, slower wheel travel;
-- app-theme frame/background;
-- Movies-style ACCENT_SOFT + ACCENT hover with a short fade;
-- pointing-hand cursor only while the pointer is over a real suggestion row.
+- a genuinely rounded app-theme panel/background;
+- stronger teal animated hover plus the app's pointing-hand cursor;
+- background-click dismissal that also exits the title-bar search field;
+- one reliable remote-art delivery path for Watch + Read suggestions.
 
 No other app scroll surface is modified.
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QObject, QRectF
+from PyQt6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer
+from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QAbstractItemView, QStyledItemDelegate
+from PyQt6.QtWidgets import QAbstractItemView, QListWidgetItem, QStyledItemDelegate
 
 _INSTALLED = False
 _NOTCH_SCALE = 0.50
 _HOVER_MS = 140
+
+
+class _ArtSignals(QObject):
+    ready = Signal(str, str, str)  # query, row token, cached path or ""
+
+
+_art_signals = _ArtSignals()
 
 
 def _with_alpha(colour, amount: float):
@@ -27,12 +36,16 @@ def _with_alpha(colour, amount: float):
 
 
 class _SuggestionDelegate(QStyledItemDelegate):
-    """Paint only Atomic's animated hover plate behind each item widget."""
+    """Paint Atomic's animated teal hover plate behind each item widget."""
 
     def __init__(self, view, theme):
         super().__init__(view)
         self._view = view
         self._theme = theme
+        # ACCENT_SOFT is intentionally subtle on cards/nav. Search suggestions
+        # need a clearer teal affordance, so lift it toward the app's teal
+        # accent while keeping it in the exact same palette family.
+        self._hover_fill = theme.mix(theme.ACCENT_SOFT, theme.ACCENT, 0.42)
         self._hover_row = -1
         self._previous_row = -1
         self._mix = 1.0
@@ -56,9 +69,9 @@ class _SuggestionDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(option.rect).adjusted(2.5, 1.5, -2.5, -1.5)
-        painter.setBrush(_with_alpha(self._theme.ACCENT_SOFT, amount))
-        painter.setPen(QPen(_with_alpha(self._theme.ACCENT, amount), 1.0))
+        rect = QRectF(option.rect).adjusted(3.0, 1.5, -3.0, -1.5)
+        painter.setBrush(_with_alpha(self._hover_fill, amount))
+        painter.setPen(QPen(_with_alpha(self._theme.ACCENT_HOVER, amount), 1.0))
         painter.drawRoundedRect(rect, self._theme.RADIUS, self._theme.RADIUS)
         painter.restore()
 
@@ -153,6 +166,67 @@ class _SuggestionHover(QObject):
             pass
 
 
+def _poster_url(row):
+    if not isinstance(row, dict):
+        return ""
+    for key in ("poster", "cover_url", "cover", "image"):
+        value = row.get(key)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _art_worker(module, query, token, url, logical_size):
+    """Download + prewarm one suggestion image, then return it to Qt."""
+    path = ""
+    try:
+        from helpers import images
+
+        found = images.download(url, timeout=8)
+        if found:
+            path = str(found)
+            # Pillow-only decode/crop here means the UI callback normally only
+            # has the cheap QPixmap conversion left to do.
+            try:
+                images.warm(path, tuple(logical_size))
+            except Exception:
+                pass
+    except Exception:
+        module.logs.exception("Global search: suggestion artwork failed")
+    finally:
+        _art_signals.ready.emit(query, token, path)
+
+
+def _exit_search_field(search):
+    """Close suggestions and leave the persistent search field cleanly."""
+    anchor = getattr(search, "_anchor", None)
+    window = getattr(search, "_window", None)
+    try:
+        search.close()
+    except RuntimeError:
+        pass
+
+    # Defer clearing until the mouse event has fully unwound. Clearing emits
+    # textChanged, which also owns panel teardown; doing both while the dialog
+    # is handling its own press event risks deleting the receiver mid-handler.
+    def finish():
+        if anchor is not None:
+            try:
+                anchor.clear()
+                anchor.clearFocus()
+            except RuntimeError:
+                pass
+        if window is not None:
+            try:
+                page = getattr(window, "_current_page", None)
+                if page is not None:
+                    page.setFocus(Qt.FocusReason.OtherFocusReason)
+            except RuntimeError:
+                pass
+
+    QTimer.singleShot(0, finish)
+
+
 def install():
     global _INSTALLED
     if _INSTALLED:
@@ -160,40 +234,52 @@ def install():
     _INSTALLED = True
 
     from helpers import global_search, theme
+    from helpers import global_search_visual_patch as visual
     from helpers import widgets
 
     Search = global_search.GlobalSearch
     old_init = Search.__init__
     old_set_query = Search.set_query
     old_close = Search.closeEvent
+    old_mouse_press = Search.mousePressEvent
 
     def init(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
         view = getattr(self, "_visual_list", None)
-        if view is None:
+        panel = getattr(self, "_visual_content", None)
+        if view is None or panel is None:
             return
 
-        # Search suggestions only: finer pixels and half the ordinary Atomic
-        # wheel distance. The already-installed _SmoothWheel reads notch_scale
+        # Search suggestions ONLY: finer pixels and half the ordinary Atomic
+        # wheel distance. The installed _SmoothWheel reads notch_scale
         # dynamically, so this changes no other list or page.
         view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         view.notch_scale = _NOTCH_SCALE
 
-        # Replace the black/transparent list edge with Atomic's own panel
-        # surface and border tokens. The dimmed overlay behind it is unchanged.
-        view.setStyleSheet(
-            f"QListWidget#UnifiedSearchList {{"
+        # The rounded surface belongs to the real outer container, not the
+        # QListWidget viewport. A styled scroll viewport is rectangular and was
+        # the sharp-corner slab visible behind the rounded list frame.
+        panel.setObjectName("UnifiedSearchPanel")
+        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        panel.setStyleSheet(
+            f"QWidget#UnifiedSearchPanel {{"
             f" background: {theme.PANEL_FILL};"
             f" border: 1px solid {theme.BORDER};"
             f" border-radius: {theme.RADIUS}px;"
-            f" outline: 0; padding: 4px;"
-            f"}}"
-            f"QListWidget#UnifiedSearchList::item {{"
-            f" background: transparent; border: none; padding: 0px;"
             f"}}"
         )
+        view.setStyleSheet(
+            "QListWidget#UnifiedSearchList {"
+            " background: transparent; border: none; outline: 0; padding: 4px;"
+            "}"
+            "QListWidget#UnifiedSearchList::item {"
+            " background: transparent; border: none; padding: 0px;"
+            "}"
+        )
+        view.viewport().setStyleSheet("background: transparent; border: none;")
 
         self._atomic_suggestion_hover = _SuggestionHover(self, view, theme, widgets)
+        _art_signals.ready.connect(self._atomic_polish_art_ready)
 
     def set_query(self, query):
         hover = getattr(self, "_atomic_suggestion_hover", None)
@@ -201,12 +287,111 @@ def install():
             hover.reset()
         return old_set_query(self, query)
 
+    def on_discover_ready(self, query, rows):
+        """Insert remote rows and own their image delivery exactly once."""
+        if query != getattr(self, "_query", None):
+            return
+
+        self._discover_rows = list(rows or [])
+        from helpers import images
+
+        for row in self._discover_rows:
+            title = str(row.get("title") or "").strip()
+            entry_type = str(
+                row.get("_atomic_entry_type") or row.get("type") or "Series"
+            )
+            route = visual._route_for_entry_type(entry_type)
+            key = (route, title.lower())
+            if not title or key in self._seen:
+                continue
+
+            meta = visual._meta_text(
+                entry_type,
+                row.get("year") or "",
+                row.get("imdbRating") or "",
+                "",
+            )
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, ("discover", entry_type, row))
+
+            poster = _poster_url(row)
+            token = f"{query}\x1f{route}\x1f{title}\x1f{poster}"
+            item.setData(visual._TOKEN_ROLE, token)
+
+            path = ""
+            existing = row.get("cover_path")
+            cached = images.cache_path_for_url(poster) if poster else None
+            if existing:
+                path = str(existing)
+            elif cached is not None and cached.is_file():
+                path = str(cached)
+
+            self._atomic_add_visual_item(item, title, meta, path)
+            self._seen.add(key)
+
+            # _make_row may delete a corrupt cached image while decoding it.
+            # Re-check the cache after insertion and queue exactly one fresh
+            # download when there is no valid file left.
+            if poster:
+                cached = images.cache_path_for_url(poster)
+                if not cached.is_file():
+                    global_search.lookup_pool.submit_cover(
+                        _art_worker,
+                        global_search,
+                        query,
+                        token,
+                        poster,
+                        (visual.THUMB_W, visual.THUMB_H),
+                    )
+
+        count = self._visual_list.count()
+        self._visual_status.setText(
+            "" if count else "No suggestions — press Enter to search Discover."
+        )
+        if count and self._visual_list.currentRow() < 0:
+            self._visual_list.setCurrentRow(0)
+        self._relayout(searching=False)
+
+    def art_ready(self, query, token, path):
+        if query != getattr(self, "_query", None) or not path:
+            return
+        for index in range(self._visual_list.count()):
+            item = self._visual_list.item(index)
+            if item.data(visual._TOKEN_ROLE) == token:
+                visual._set_row_art(
+                    global_search, self._visual_list.itemWidget(item), path
+                )
+                return
+
+    def mouse_press(self, event):
+        panel = getattr(self, "_visual_content", None)
+        try:
+            point = event.position().toPoint()
+        except AttributeError:
+            point = event.pos()
+
+        # A press on the dimmed background, not on the rounded panel, dismisses
+        # the whole search mode. Clicks inside the list keep their normal direct
+        # Watch/Read open behavior.
+        if panel is not None and panel.geometry().contains(point):
+            return old_mouse_press(self, event)
+
+        event.accept()
+        _exit_search_field(self)
+
     def close_event(self, event):
         hover = getattr(self, "_atomic_suggestion_hover", None)
         if hover is not None:
             hover.detach()
+        try:
+            _art_signals.ready.disconnect(self._atomic_polish_art_ready)
+        except (TypeError, RuntimeError):
+            pass
         return old_close(self, event)
 
     Search.__init__ = init
     Search.set_query = set_query
+    Search._on_discover_ready = on_discover_ready
+    Search._atomic_polish_art_ready = art_ready
+    Search.mousePressEvent = mouse_press
     Search.closeEvent = close_event
