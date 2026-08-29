@@ -1,14 +1,9 @@
-"""Make the combined Discover page's typed Reading search complete.
+"""Make Discover reading search keep configured providers as separate cards.
 
-The Read page intentionally browses only the user's configured reading sites,
-because those rows carry a direct chapter-source URL.  A *global* Discover
-search has a different job: it must answer that the manga exists even when none
-of those sites' search adapters returns it.  The combined Discover page therefore
-keeps configured-site matches first, then fills the typed Reading results from
-MangaDex as a catalogue fallback, deduplicated and title-ranked.
-
-Only DiscoverPage's typed `reading` row is changed.  Read-category browsing and
-its site-only rules are untouched.
+Two configured sites can legitimately carry the same title. They are separate
+reading sources and therefore separate cards; only the MangaDex catalogue
+fallback is suppressed when a configured-site card for that title already
+exists.
 """
 
 from __future__ import annotations
@@ -16,10 +11,21 @@ from __future__ import annotations
 import importlib.abc
 import importlib.machinery
 import sys
+from urllib.parse import urlparse
 
 _TARGET = "windows.tracker"
 _INSTALLED = False
 _PATCHED = False
+
+
+def _provider_key(row):
+    site = str(row.get("site_id") or row.get("site_name") or "").strip().casefold()
+    url = str(row.get("url") or "").strip()
+    try:
+        host = (urlparse(url).hostname or "").casefold()
+    except Exception:
+        host = ""
+    return site or host or url.casefold()
 
 
 def _merge_reading_results(module, query, limit):
@@ -39,25 +45,45 @@ def _merge_reading_results(module, query, limit):
         catalogue_rows = []
 
     merged = []
-    seen = set()
-    for priority, rows in enumerate((site_rows, catalogue_rows)):
-        for original in rows:
-            if not isinstance(original, dict):
-                continue
-            row = dict(original)
-            title = str(row.get("title") or "").strip()
-            if not title:
-                continue
-            key = title.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            row["_atomic_reading_source_priority"] = priority
-            merged.append(row)
+    seen_site = set()
+    site_titles = set()
 
-    # Exact/leading title matches first.  Among equivalent names prefer the
-    # configured-site row because it can open chapters directly; a MangaDex
-    # catalogue row remains the fallback that prevents a false empty result.
+    # Configured sites are distinct sources. Deduplicate only an accidental
+    # repeat from the *same provider*, never two sites that carry the same title.
+    for original in site_rows:
+        if not isinstance(original, dict):
+            continue
+        row = dict(original)
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        title_key = title.casefold()
+        key = (title_key, _provider_key(row))
+        if key in seen_site:
+            continue
+        seen_site.add(key)
+        site_titles.add(title_key)
+        row["_atomic_reading_source_priority"] = 0
+        merged.append(row)
+
+    # MangaDex is a catalogue fallback, not a third provider card beside the
+    # user's configured site results. Keep one catalogue row only when no
+    # configured provider already answered for that title.
+    seen_catalogue = set()
+    for original in catalogue_rows:
+        if not isinstance(original, dict):
+            continue
+        row = dict(original)
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        title_key = title.casefold()
+        if title_key in site_titles or title_key in seen_catalogue:
+            continue
+        seen_catalogue.add(title_key)
+        row["_atomic_reading_source_priority"] = 1
+        merged.append(row)
+
     try:
         wanted = module.title_match.normalize(query)
 
@@ -77,6 +103,7 @@ def _merge_reading_results(module, query, limit):
                 int(row.get("_atomic_reading_source_priority") or 0),
                 len(raw),
                 raw.casefold(),
+                str(row.get("site_name") or "").casefold(),
             )
 
         merged.sort(key=rank)
@@ -120,8 +147,6 @@ def _patch(module):
                 module.time.monotonic(), list(rows)
             )
         elif stamp_and_rows is not None:
-            # Keep stale-but-real results over a temporary source failure, the
-            # same contract the original worker uses for every other row.
             return
 
         self._discover_signals.results.emit(kind, rows, run)
