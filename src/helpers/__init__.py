@@ -119,6 +119,14 @@ from . import regression_fixes_145 as _regression_fixes_145
 
 _regression_fixes_145.install()
 
+# 1.10.146: the clipped native-child top bar still left one dark rectangle per
+# control. Promote only that bar to a true per-pixel-alpha owned overlay. Resume
+# now opens the playable head immediately and jumps to the saved seat only when
+# that exact range exists, instead of blocking first picture on start=<seat>.
+from . import regression_fixes_146 as _regression_fixes_146
+
+_regression_fixes_146.install()
+
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
 from . import development_version_patch as _development_version_patch
