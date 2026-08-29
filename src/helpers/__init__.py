@@ -34,6 +34,15 @@ from . import quick_scroll_patch as _quick_scroll_patch
 
 _quick_scroll_patch.install()
 
+# The libmpv Render API prototype replaces only the player's presentation
+# boundary: Qt owns an OpenGL FBO and mpv renders into it instead of owning a
+# child HWND/swapchain. It is intentionally opt-in with
+# ATOMIC_MPV_RENDER_API=1 until packaging supplies a no-Lua libmpv; standard
+# LuaJIT Windows builds have a confirmed non-recoverable MpvRenderContext crash.
+from . import player_render_api_patch as _player_render_api_patch
+
+_player_render_api_patch.install()
+
 # Episode stills follow the real watched state. Manual episode/chapter marks are
 # contiguous boundaries: marking watched/read fills everything before the
 # clicked item; marking unwatched/unread clears that item and everything after.
