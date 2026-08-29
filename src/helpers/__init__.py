@@ -41,16 +41,17 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# Windows video presentation follows the native path used by Stremio: libmpv
-# attaches to Atomic's real top-level player HWND instead of nesting inside a
-# second Qt native child, and copy-safe D3D11 hardware decode keeps decoder
-# surfaces from disabling VRR. This is player-only and changes no app UI motion.
-from . import player_native_present_patch as _player_native_present_patch
+# Atomic's bundled mpv 0.41 reduced swapchain depth from 3 to 2. The recorded
+# player pan shows held presentation samples followed by catch-up jumps; restore
+# the previous three-frame in-flight queue so D3D11 has one more frame of
+# presentation slack. No interpolation, timing mode, decoder, or app UI motion
+# is changed.
+from . import player_present_queue_patch as _player_present_queue_patch
 
-_player_native_present_patch.install()
+_player_present_queue_patch.install()
 
-# The visible top-left Back arrow uses the same unwind path as Escape/mouse
-# Back: close panel, close episode list, leave fullscreen, then leave player.
+# The visible top-left Back arrow leaves the player directly when the app is in
+# fullscreen. Outside fullscreen it keeps the normal panel/episode unwind path.
 from . import player_back_button_patch as _player_back_button_patch
 
 _player_back_button_patch.install()
@@ -103,6 +104,7 @@ from . import development_version_patch as _development_version_patch
 _development_version_patch.install()
 
 # Intentionally NOT installed here:
+# - player_native_present_patch (1.10.139 A/B: no visible improvement)
 # - player_callback_pacing_patch (1.10.136 A/B: no visible improvement)
 # - player_windows_pacing_patch (1.10.135 A/B: no visible improvement)
 # - player_process_backend_patch (discarded before test)
