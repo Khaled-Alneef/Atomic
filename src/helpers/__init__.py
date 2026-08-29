@@ -55,6 +55,20 @@ from . import global_search_list_polish_patch as _global_search_list_polish_patc
 
 _global_search_list_polish_patch.install()
 
+# The suggestion surface is a separate Tool window. Keep it attached to the
+# main window during move/resize (including monitor changes), and make any click
+# outside the actual list/search field leave global search completely.
+from . import global_search_interaction_patch as _global_search_interaction_patch
+
+_global_search_interaction_patch.install()
+
+# A full Enter search on the combined Discover page must include Reading too.
+# Configured reading-site matches stay first; MangaDex fills only the catalogue
+# gaps so a title cannot falsely read as "Nothing found".
+from . import discover_reading_search_patch as _discover_reading_search_patch
+
+_discover_reading_search_patch.install()
+
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
