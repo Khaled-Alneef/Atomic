@@ -16,6 +16,13 @@ the scroll body at wheel-start and, only while momentum is active, shows a
 mouse-transparent top-level QQuickWindow exactly over the viewport. The QWidget
 hierarchy therefore remains unchanged. The overlay is lazy, so displays below
 the activation threshold never create a QQuickWindow at all.
+
+The snapshot is already rasterized at the viewport's native device-pixel ratio.
+Do not bilinearly filter it again while translating it: filtering a page full of
+small text/card edges at a different fractional phase every refresh makes those
+edges shimmer even when the trajectory itself is perfectly smooth. The scene
+graph still receives the floating-point Y position; only texture resampling is
+disabled.
 """
 
 from __future__ import annotations
@@ -43,7 +50,9 @@ def install():
             self.setAntialiasing(False)
             self.setMipmap(False)
             self.setOpaquePainting(True)
-            self.setSmooth(True)
+            # The source image is already native-DPR. Linear texture filtering
+            # here makes text/card edges change weight on every fractional frame.
+            self.setSmooth(False)
 
         def set_image(self, image, logical_width, logical_height):
             self._image = image
@@ -58,13 +67,10 @@ def install():
         def paint(self, painter):
             if self._image.isNull():
                 return
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             painter.drawImage(QPointF(0.0, 0.0), self._image)
 
     class _QuickScrollSurface(QObject):
-        # 240 Hz is already user-confirmed smooth. 165 Hz still showed the old
-        # integer-position cadence, so let it use the same architecture. Keep
-        # 144 Hz and below unchanged until separately measured.
         HIGH_REFRESH_HZ = 150.0
         MAX_PHYSICAL_WIDTH = 4096
         MAX_PHYSICAL_HEIGHT = 8192
@@ -130,11 +136,6 @@ def install():
                          | Qt.WindowType.WindowDoesNotAcceptFocus
                          | Qt.WindowType.WindowTransparentForInput)
                 quick.setFlags(flags)
-
-                # Owned/transient to Atomic's real top-level window, but not a
-                # native child of the scroll viewport. This keeps it out of the
-                # taskbar and in the same z-order family without changing any
-                # QWidget's native-window status.
                 try:
                     top = self.area.window()
                     handle = top.windowHandle() if top is not None else None
@@ -180,6 +181,7 @@ def install():
             image.fill(QColor(w.theme.BG))
 
             painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             flags = (QWidget.RenderFlag.DrawWindowBackground
                      | QWidget.RenderFlag.DrawChildren)
             region = QRegion(QRect(0, 0, width, height))
@@ -217,8 +219,6 @@ def install():
         def present(self, pos):
             if not self.active or self.quick is None or self.texture is None:
                 return
-            # QQuickItem coordinates are qreal. Never round this value: keeping
-            # the fraction is the entire reason this compositor exists.
             self.texture.setY(-float(pos))
             try:
                 self.quick.requestUpdate()
@@ -249,8 +249,6 @@ def install():
                 return
             if pos is not None:
                 self.present(pos)
-            # Repaint the final integer QWidget state while the Quick overlay is
-            # still covering it, then hide the overlay. No stale-frame flash.
             self._reveal_qwidget()
 
         def abort(self):
@@ -267,8 +265,6 @@ def install():
     def quick_scroll_area(body, *args, **kwargs):
         area = old_scroll_area(body, *args, **kwargs)
         if isinstance(area, QScrollArea):
-            # This object is pure QObject state. It creates no QQuickWindow until
-            # a qualifying >=150 Hz wheel glide actually begins.
             try:
                 area._atomic_quick_scroll_surface = _QuickScrollSurface(area, body)
             except Exception:
