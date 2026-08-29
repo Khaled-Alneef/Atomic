@@ -1,27 +1,21 @@
 """Qt Quick compositor for ordinary high-refresh QScrollArea wheel motion.
 
-The QWidget scroll path stores its visual position in QScrollBar::value, which
-is an integer.  At 240 Hz a smooth deceleration frequently advances by less
-than one logical pixel per refresh, so several refreshes repeat the same
-position and the next refresh jumps a full pixel.  No timer/easing change can
-remove that final quantisation.
+QScrollBar stores an integer visual position. At high refresh rates a smooth
+wheel glide often advances by less than one logical pixel per refresh, so the
+QWidget path repeats a position and then jumps a full pixel. The successful
+240 Hz A/B proved that presenting the page through Qt Quick removes that final
+quantisation.
 
-For >=200 Hz screens this patch keeps the existing QWidget page as the source
-of truth but snapshots it at the beginning of wheel momentum and presents that
-snapshot through a real QQuickWindow.  The scene-graph item moves at the
-Momentum object's floating-point position, so the monitor can receive a new
-fractional position on every refresh.  The underlying QScrollArea continues to
-receive its normal integer values for state/scrollbar correctness, but its body
-is not repainted while the Quick surface is covering it.
+The first implementation embedded QQuickWindow with createWindowContainer().
+That was the wrong integration boundary for Atomic: even a hidden container can
+promote QWidget ancestors to native windows, which made Home/Discover/Saved/
+History visually unstable on both the 240 Hz and 165 Hz monitors.
 
-Important boundaries:
-  * <=165 Hz stays on the existing QWidget path unchanged.
-  * Only pages whose complete body can be cached inside conservative memory/
-    texture limits qualify. Large pages fall back rather than rebuilding a
-    cache in the middle of a glide.
-  * This uses QWidget.createWindowContainer(QQuickWindow), never QQuickWidget;
-    QQuickWidget disables the threaded render loop that is the point here.
-  * The surface is mouse-transparent and exists only during wheel momentum.
+This version never inserts a native child into the QWidget tree. It snapshots
+the scroll body at wheel-start and, only while momentum is active, shows a
+mouse-transparent top-level QQuickWindow exactly over the viewport. The QWidget
+hierarchy therefore remains unchanged. The overlay is lazy, so displays below
+the activation threshold never create a QQuickWindow at all.
 """
 
 from __future__ import annotations
@@ -35,7 +29,7 @@ def install():
         return
     _INSTALLED = True
 
-    from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt
+    from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
     from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
     from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
     from PyQt6.QtWidgets import QScrollArea, QWidget
@@ -57,6 +51,10 @@ def install():
             self.setHeight(float(logical_height))
             self.update()
 
+        def clear(self):
+            self._image = QImage()
+            self.update()
+
         def paint(self, painter):
             if self._image.isNull():
                 return
@@ -64,7 +62,10 @@ def install():
             painter.drawImage(QPointF(0.0, 0.0), self._image)
 
     class _QuickScrollSurface(QObject):
-        HIGH_REFRESH_HZ = 200.0
+        # 240 Hz is already user-confirmed smooth. 165 Hz still showed the old
+        # integer-position cadence, so let it use the same architecture. Keep
+        # 144 Hz and below unchanged until separately measured.
+        HIGH_REFRESH_HZ = 150.0
         MAX_PHYSICAL_WIDTH = 4096
         MAX_PHYSICAL_HEIGHT = 8192
         MAX_PHYSICAL_PIXELS = 20_000_000
@@ -76,20 +77,8 @@ def install():
             self.viewport = area.viewport()
             self.active = False
             self._image = QImage()
-
-            self.quick = QQuickWindow()
-            self.quick.setColor(QColor(w.theme.BG))
-            try:
-                self.quick.setFlag(Qt.WindowType.WindowTransparentForInput, True)
-            except Exception:
-                pass
-            self.texture = _PageTexture(self.quick.contentItem())
-            self.container = QWidget.createWindowContainer(self.quick, self.viewport)
-            self.container.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self.container.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            self.container.setGeometry(self.viewport.rect())
-            self.container.hide()
+            self.quick = None
+            self.texture = None
 
             self.viewport.installEventFilter(self)
             area.verticalScrollBar()._atomic_quick_scroll_surface = self
@@ -98,11 +87,8 @@ def install():
             if obj is not self.viewport:
                 return False
             kind = event.type()
-            if kind == QEvent.Type.Resize:
-                self.container.setGeometry(self.viewport.rect())
-                if self.active:
-                    self.abort()
-            elif kind in (QEvent.Type.Hide, QEvent.Type.MouseButtonPress):
+            if kind in (QEvent.Type.Resize, QEvent.Type.Hide,
+                        QEvent.Type.MouseButtonPress):
                 if self.active:
                     self.abort()
             return False
@@ -133,8 +119,52 @@ def install():
                     and ph <= self.MAX_PHYSICAL_HEIGHT
                     and pw * ph <= self.MAX_PHYSICAL_PIXELS)
 
+        def _ensure_quick(self):
+            if self.quick is not None:
+                return True
+            try:
+                quick = QQuickWindow()
+                quick.setColor(QColor(w.theme.BG))
+                flags = (Qt.WindowType.Tool
+                         | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowDoesNotAcceptFocus
+                         | Qt.WindowType.WindowTransparentForInput)
+                quick.setFlags(flags)
+
+                # Owned/transient to Atomic's real top-level window, but not a
+                # native child of the scroll viewport. This keeps it out of the
+                # taskbar and in the same z-order family without changing any
+                # QWidget's native-window status.
+                try:
+                    top = self.area.window()
+                    handle = top.windowHandle() if top is not None else None
+                    if handle is not None:
+                        quick.setTransientParent(handle)
+                except (AttributeError, RuntimeError):
+                    pass
+
+                texture = _PageTexture(quick.contentItem())
+                self.quick = quick
+                self.texture = texture
+                return True
+            except Exception:
+                self.quick = None
+                self.texture = None
+                return False
+
+        def _place_overlay(self):
+            if self.quick is None:
+                return
+            try:
+                point = self.viewport.mapToGlobal(QPoint(0, 0))
+                self.quick.setGeometry(point.x(), point.y(),
+                                       self.viewport.width(),
+                                       self.viewport.height())
+            except RuntimeError:
+                pass
+
         def _snapshot(self):
-            if not self.can_use():
+            if not self.can_use() or not self._ensure_quick():
                 return False
             width = max(self.viewport.width(), self.body.width())
             height = max(self.viewport.height(), self.body.height())
@@ -154,7 +184,7 @@ def install():
                      | QWidget.RenderFlag.DrawChildren)
             region = QRegion(QRect(0, 0, width, height))
             try:
-                self.body.render(painter, QPointF(0.0, 0.0).toPoint(), region, flags)
+                self.body.render(painter, QPoint(0, 0), region, flags)
             except Exception:
                 painter.end()
                 return False
@@ -170,47 +200,63 @@ def install():
                 return True
             if not self._snapshot():
                 return False
+
             self.active = True
-            self.container.setGeometry(self.viewport.rect())
             self.body.setUpdatesEnabled(False)
+            self._place_overlay()
             self.present(pos)
-            self.container.show()
-            self.container.raise_()
-            self.quick.update()
+            try:
+                self.quick.show()
+                self.quick.raise_()
+                self.quick.requestUpdate()
+            except RuntimeError:
+                self.abort()
+                return False
             return True
 
         def present(self, pos):
-            if not self.active:
+            if not self.active or self.quick is None or self.texture is None:
                 return
-            # QQuickItem coordinates are qreal. Do not round here: preserving
-            # this fraction is the entire reason this surface exists.
+            # QQuickItem coordinates are qreal. Never round this value: keeping
+            # the fraction is the entire reason this compositor exists.
             self.texture.setY(-float(pos))
-            self.quick.update()
+            try:
+                self.quick.requestUpdate()
+            except RuntimeError:
+                self.abort()
+
+        def _reveal_qwidget(self):
+            self.body.setUpdatesEnabled(True)
+            try:
+                self.viewport.repaint()
+            except RuntimeError:
+                pass
+            self.active = False
+            if self.quick is not None:
+                try:
+                    self.quick.hide()
+                except RuntimeError:
+                    pass
+            if self.texture is not None:
+                try:
+                    self.texture.clear()
+                except RuntimeError:
+                    pass
+            self._image = QImage()
 
         def end(self, pos=None):
             if not self.active:
                 return
             if pos is not None:
                 self.present(pos)
-            self.body.setUpdatesEnabled(True)
-            # Paint the QWidget state synchronously while the Quick child is
-            # still covering it, then reveal it. This prevents a one-frame
-            # flash of the pre-scroll body when momentum ends.
-            try:
-                self.viewport.repaint()
-            except RuntimeError:
-                pass
-            self.active = False
-            self.container.hide()
-            self._image = QImage()
+            # Repaint the final integer QWidget state while the Quick overlay is
+            # still covering it, then hide the overlay. No stale-frame flash.
+            self._reveal_qwidget()
 
         def abort(self):
             if not self.active:
                 return
-            self.body.setUpdatesEnabled(True)
-            self.active = False
-            self.container.hide()
-            self._image = QImage()
+            self._reveal_qwidget()
             try:
                 self.viewport.update()
             except RuntimeError:
@@ -221,11 +267,11 @@ def install():
     def quick_scroll_area(body, *args, **kwargs):
         area = old_scroll_area(body, *args, **kwargs)
         if isinstance(area, QScrollArea):
+            # This object is pure QObject state. It creates no QQuickWindow until
+            # a qualifying >=150 Hz wheel glide actually begins.
             try:
                 area._atomic_quick_scroll_surface = _QuickScrollSurface(area, body)
             except Exception:
-                # Qt Quick must be an optional presentation upgrade, never a
-                # reason an otherwise-valid page cannot be constructed.
                 area._atomic_quick_scroll_surface = None
         return area
 
