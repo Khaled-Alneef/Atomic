@@ -3,8 +3,8 @@
 Startup adopts the realised QWindow screen before rebuilding the first page.
 During monitor crossing the DPR itself is updated immediately, but the expensive
 page/image refresh is deferred until the window has stopped moving.  The refresh
-also preserves the page's primary vertical scroll position so changing monitors
-never navigates the user back to the top.
+also preserves the page's primary vertical scroll position and transient
+Discover search so changing monitors never navigates the user somewhere else.
 """
 
 from __future__ import annotations
@@ -92,6 +92,50 @@ def install():
         except (AttributeError, RuntimeError):
             return None
 
+    def _capture_transient_page_state(window):
+        """State that lives only on the current page instance.
+
+        The global Discover search field intentionally is not persisted by
+        TrackerPage, but `_discover_query` is what distinguishes the result grid
+        from the default Discover landing page. A DPI rebuild replaces the page
+        object, so carry that one transient value across the replacement.
+        """
+        try:
+            page = getattr(window, "_current_page", None)
+            if page is None:
+                return None
+            state = {}
+            query = getattr(page, "_discover_query", None)
+            if isinstance(query, str) and query.strip():
+                state["discover_query"] = query
+            return (type(page).__module__, type(page).__name__, state)
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _restore_transient_page_state(window, state):
+        if not state:
+            return
+        try:
+            module, name, saved = state
+            page = getattr(window, "_current_page", None)
+            if page is None or type(page).__module__ != module or type(page).__name__ != name:
+                return
+            query = str((saved or {}).get("discover_query") or "").strip()
+            if not query:
+                return
+            # A freshly rebuilt TrackerPage may not have constructed the
+            # Discover holders yet. Build them once, then immediately replace
+            # the default blank run with the exact query that was on screen.
+            if not getattr(page, "_discover_built", False):
+                show_discover = getattr(page, "_show_discover", None)
+                if callable(show_discover):
+                    show_discover()
+            start_discover = getattr(page, "_start_discover", None)
+            if callable(start_discover) and getattr(page, "_discover_query", "") != query:
+                start_discover(query)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
+
     def _restore_page_position(window, state):
         if not state:
             return
@@ -123,7 +167,7 @@ def install():
             from PyQt6.QtCore import QTimer
 
             _restore_page_position(window, state)
-            for delay in (0, 40, 120):
+            for delay in (0, 40, 120, 260):
                 QTimer.singleShot(
                     delay,
                     lambda w=window, s=state: _restore_page_position(w, s),
@@ -152,9 +196,14 @@ def install():
                 return
 
             position = _capture_page_position(window)
+            transient = _capture_transient_page_state(window)
             window._atomic_dpr_refresh_in_progress = True
             try:
                 window.refresh_current_page()
+                # Restore the result mode before restoring its scroll range;
+                # otherwise the position would be applied to the default
+                # Discover page that exists only for one event-loop turn.
+                _restore_transient_page_state(window, transient)
                 _restore_page_position_later(window, position)
             finally:
                 window._atomic_dpr_refresh_in_progress = False
@@ -268,9 +317,13 @@ def install():
                     except Exception:
                         pass
 
+                    position = _capture_page_position(window)
+                    transient = _capture_transient_page_state(window)
                     window._atomic_dpr_refresh_in_progress = True
                     try:
                         window.refresh_current_page()
+                        _restore_transient_page_state(window, transient)
+                        _restore_page_position_later(window, position)
                     finally:
                         window._atomic_dpr_refresh_in_progress = False
                 except RuntimeError:
