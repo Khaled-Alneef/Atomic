@@ -41,11 +41,10 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# Atomic's bundled mpv 0.41 reduced swapchain depth from 3 to 2. The recorded
-# player pan shows held presentation samples followed by catch-up jumps; restore
-# the previous three-frame in-flight queue so D3D11 has one more frame of
-# presentation slack. No interpolation, timing mode, decoder, or app UI motion
-# is changed.
+# mpv's Windows/NVIDIA stutter issue has multiple confirmations for Atomic's
+# exact sync mode (default video-sync=audio): swapchain-depth=1 removes visible
+# presentation stutter even when mpv reports no dropped frames. Apply that only
+# when an NVIDIA adapter is present; AMD/Intel keep mpv's normal default.
 from . import player_present_queue_patch as _player_present_queue_patch
 
 _player_present_queue_patch.install()
