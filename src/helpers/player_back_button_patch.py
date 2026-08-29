@@ -1,13 +1,11 @@
-"""Make the player's visible Back button a reliable native control.
+"""Make the player's visible Back arrow use the same reliable path as Escape.
 
-The video and the top bar are native child windows on Windows. The exit glyph
-was left as a non-native child inside that native bar, while the rest of the
-player relies on native stacking to stay above mpv. Promote the glyph itself to
-a native child and route it through go_back(), the same unwind rule as Escape
-and mouse button 4.
-
-The process-isolated backend also makes close teardown bounded, so a click can
-never sit on the UI thread waiting indefinitely for libmpv to terminate.
+The button used to call close_player() directly while Escape and mouse Back go
+through go_back(), which first unwinds an open panel, episode list or fullscreen
+state. Keep the button as an ordinary child of the already-native top bar (the
+same arrangement as the working Episodes/resolution/audio controls), but route
+its click through that tested Back path and guard the press from the player's
+raw mouse poll.
 """
 
 from __future__ import annotations
@@ -35,14 +33,12 @@ def _patch(player):
             return
 
         try:
-            player._make_native(button)
-        except Exception:
-            pass
-        try:
             player.use_hover_cursor(button)
         except Exception:
             pass
 
+        # Remove only the old close_player connection. This button owns no
+        # other clicked actions in the base player.
         try:
             button.clicked.disconnect()
         except Exception:
@@ -51,6 +47,9 @@ def _patch(player):
         def leave():
             if getattr(self, "_closing", False):
                 return
+            # The Windows raw-mouse fallback can observe the same physical
+            # press after Qt delivered clicked(). Mark it as consumed before
+            # changing visibility, exactly as panels/skip buttons do.
             try:
                 self._guard_click()
             except Exception:
@@ -58,10 +57,6 @@ def _patch(player):
             self.go_back()
 
         button.clicked.connect(leave)
-        try:
-            button.raise_()
-        except Exception:
-            pass
 
     Page._build_top_bar = build_top_bar
 
