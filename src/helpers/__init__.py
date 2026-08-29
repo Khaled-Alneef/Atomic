@@ -26,13 +26,20 @@ from . import scroll_presentation_patch as _scroll_presentation_patch
 _scroll_presentation_patch.install()
 
 # Ordinary QScrollArea pages still end at an integer QScrollBar position. On
-# >=200 Hz displays, qualifying pages are therefore cached once per wheel glide
-# and moved fractionally by a real QQuickWindow until momentum settles. This is
-# deliberately after scroll_presentation_patch so the two paths can hand off
-# cleanly; <=165 Hz never creates the Quick surface.
+# high-refresh displays, qualifying pages can be cached once per wheel glide and
+# moved by a real QQuickWindow until momentum settles.
 from . import quick_scroll_patch as _quick_scroll_patch
 
 _quick_scroll_patch.install()
+
+# Home and Tracker's Discover/Saved/History surfaces are live QWidget trees that
+# continue changing while visible. A moving raster snapshot is the wrong
+# boundary for them and produced the reported card shaking/corruption. Keep the
+# snapshot compositor out of those pages while preserving the separate
+# PosterGrid scene-graph path used by the category grids.
+from . import quick_scroll_scope_patch as _quick_scroll_scope_patch
+
+_quick_scroll_scope_patch.install()
 
 # The libmpv Render API prototype replaces only the player's presentation
 # boundary: Qt owns an OpenGL FBO and mpv renders into it instead of owning a
@@ -100,6 +107,7 @@ _discover_reading_search_patch.install()
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
+typography_motion_patch = _typography_motion_patch
 _typography_motion_patch.install()
 
 from . import source_coverage_patch as _source_coverage_patch
@@ -198,5 +206,5 @@ _development_version_patch.install()
 # - hero_pages_live_scroll_patch
 # - ultimate_scroll_patch
 # Those are failed/older experiments and are not stacked under the current
-# stable UI/player path. poster_grid_quick_patch is now intentionally installed
-# by native_refresh_motion_patch as the >=200 Hz scene-graph experiment.
+# stable UI/player path. poster_grid_quick_patch is intentionally installed by
+# native_refresh_motion_patch for the live category-grid experiment.
