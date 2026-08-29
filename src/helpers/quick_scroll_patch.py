@@ -35,8 +35,8 @@ def install():
         return
     _INSTALLED = True
 
-    from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, QRegion, QSize, Qt
-    from PyQt6.QtGui import QColor, QImage, QPainter
+    from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, QSize, Qt
+    from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
     from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
     from PyQt6.QtWidgets import QScrollArea, QWidget
 
