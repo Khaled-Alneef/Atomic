@@ -103,6 +103,14 @@ from . import requested_fixes_patch as _requested_fixes_patch
 
 _requested_fixes_patch.install()
 
+# Follow-up for the four remaining regressions: Reader Back no longer mutates
+# top-level geometry, Player's upper bar keeps one visual path across frame 1,
+# prepared streams do not sit at a fake 99% buffer stage, and a Discover result
+# query survives a mixed-DPI monitor rebuild. Scroll physics stay untouched.
+from . import regression_fixes_144 as _regression_fixes_144
+
+_regression_fixes_144.install()
+
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
 from . import development_version_patch as _development_version_patch
