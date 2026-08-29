@@ -1,27 +1,27 @@
 """Windows player presentation path aligned with Stremio and mpv VRR guidance.
 
-This is intentionally narrow.  It does not alter Atomic's source resolver,
+This is intentionally narrow. It does not alter Atomic's source resolver,
 player UI, buffering policy, watched-state logic, subtitles, seeking, or any
 app-wide rendering/scrolling code.
 
 Two Windows-only differences are corrected:
 
-1. Atomic historically handed libmpv a dedicated Qt VideoSurface HWND.  Because
+1. Atomic historically handed libmpv a dedicated Qt VideoSurface HWND. Because
    that widget uses WA_DontCreateNativeAncestors, its native parent is the real
    Atomic top-level window; mpv then created another D3D11 child *inside* that
-   surface.  Official Stremio Shell NG instead hands libmpv the real parent
-   HWND directly.  We do the same and leave VideoSurface as the bottom-most
-   fallback/background sibling.  Atomic's native control bars remain siblings
+   surface. Official Stremio Shell NG instead hands libmpv the real parent HWND
+   directly. We do the same and leave VideoSurface as the bottom-most
+   fallback/background sibling. Atomic's native control bars remain siblings
    above mpv, so their existing DWM alpha/stacking code keeps working.
 
-2. Atomic's hwdec=auto-safe resolves to direct d3d11va on Windows.  mpv issue
+2. Atomic's hwdec=auto-safe resolves to direct d3d11va on Windows. mpv issue
    #13304 demonstrates that direct d3d11va disables VRR while d3d11va-copy does
-   not.  mpv itself provides auto-copy-safe specifically to choose only safe
-   copying hardware decoders.  This keeps hardware decoding while decoupling
+   not. mpv itself provides auto-copy-safe specifically to choose only safe
+   copying hardware decoders. This keeps hardware decoding while decoupling
    decoder surfaces from the presentation swapchain.
 
-No interpolation, frame generation, display-resample, cadence lock, MMCSS, or
-SVP is involved.
+No interpolation, frame generation, display-resample, cadence lock, or MMCSS
+is involved.
 """
 
 from __future__ import annotations
@@ -165,7 +165,7 @@ def install() -> None:
         _patch_player(loaded)
         return
 
-    # Chain onto the existing player import hook.  This avoids installing a
+    # Chain onto the existing player import hook. This avoids installing a
     # second competing MetaPathFinder and preserves the 85%-watched patch and
     # the Back-button patch that chain through the same hook.
     from . import player_watch_threshold_patch as threshold
