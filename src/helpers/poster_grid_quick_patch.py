@@ -10,8 +10,13 @@ widgets around Home/Discover/Saved/History. The compositor below is instead a
 mouse-transparent transient top-level window positioned exactly over the grid
 only while wheel momentum is active. The QWidget hierarchy remains untouched.
 
-165 Hz now uses the same path as 240 Hz. 144 Hz and below remain unchanged until
+165 Hz uses the same path as 240 Hz. 144 Hz and below remain unchanged until
 separately measured.
+
+The cached grid is already painted at native device-pixel ratio. Texture
+smoothing is intentionally disabled: bilinear sampling of poster edges and text
+at a new fractional phase every refresh makes individual cards appear to
+shimmer even though the overall trajectory is smooth.
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ def _patch(module):
             self.setAntialiasing(False)
             self.setMipmap(False)
             self.setOpaquePainting(True)
-            self.setSmooth(True)
+            self.setSmooth(False)
 
         def set_image(self, image, width, height):
             self._image = image
@@ -60,7 +65,7 @@ def _patch(module):
         def paint(self, painter):
             if self._image.isNull():
                 return
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             painter.drawImage(QPointF(0.0, 0.0), self._image)
 
     class _GridBar(QQuickPaintedItem):
@@ -205,6 +210,7 @@ def _patch(module):
 
             painter = QPainter(image)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             hover = grid._hover
             grid._hover = -1
             try:
