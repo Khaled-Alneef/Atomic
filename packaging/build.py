@@ -91,6 +91,18 @@ def _ensure_pyinstaller():
         subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller>=6.0"], check=True)
 
 
+def _ensure_pinned_libmpv():
+    """Make the player engine reproducible before PyInstaller sees it.
+
+    fetch_libmpv.ensure_pinned() is a no-op once the Stremio-matched mpv
+    0.41.0 DLL and its hash marker are present, so offline rebuilds remain
+    possible after the first fetch. An unmarked/nightly DLL is replaced.
+    """
+    import fetch_libmpv
+
+    fetch_libmpv.ensure_pinned()
+
+
 def _resolve(node, known):
     """A spec-file expression as a string, or None if it isn't one this
     understands - a literal, a name assigned earlier, or os.path.join of
@@ -275,6 +287,10 @@ def main():
     if not SPEC_FILE.exists():
         sys.exit(f"Missing {SPEC_FILE.name} in {PACKAGING_DIR}.")
 
+    # Every build must use the same known player engine. This deliberately runs
+    # before the spec validates vendor/libmpv-2.dll so an old nightly copy is
+    # replaced instead of silently becoming part of the exe.
+    _ensure_pinned_libmpv()
     _ensure_pyinstaller()
     # Read before building: a spec this can't parse is a problem to hear
     # about now, not after a two-minute build.
