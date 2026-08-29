@@ -23,11 +23,11 @@ def install():
     regression_fixes_155.install()
 
     from . import updater
-    # 1.10.161 restores the user-confirmed high-refresh Quick path on Home and
-    # Tracker, but freezes the real QScrollArea underneath it during momentum.
-    # Quick is the only moving presentation surface; the QWidget scrollbar is
-    # committed once at the end before the live page is revealed.
-    updater.APP_VERSION = "1.10.161"
+    # 1.10.162 keeps the user-confirmed 1.10.161 high-refresh motion and
+    # freeze-underlay behavior unchanged. The only presentation change is that
+    # generic page snapshots bypass QQuickPaintedItem and are uploaded once as
+    # a direct QSGTexture/QSGImageNode, so subsequent frames are transform-only.
+    updater.APP_VERSION = "1.10.162"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
