@@ -135,6 +135,14 @@ from . import regression_fixes_147 as _regression_fixes_147
 
 _regression_fixes_147.install()
 
+# 1.10.148: a click on the video remains a click while the pointer is moving,
+# using the down-position rather than the release-position. Also stabilise the
+# promoted transparent top bar: correct global hit geometry, no raise-on-move
+# storm, arrow cursor on inert title/source labels, and stable pill hover paint.
+from . import regression_fixes_148 as _regression_fixes_148
+
+_regression_fixes_148.install()
+
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
 from . import development_version_patch as _development_version_patch
