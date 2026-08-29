@@ -12,8 +12,13 @@ def install():
     from . import regression_fixes_153
     regression_fixes_153.install()
 
+    # Make right-click anywhere inside a chapter row reach the existing reading
+    # context menu, including clicks landing on child buttons/labels/badges.
+    from . import regression_fixes_154
+    regression_fixes_154.install()
+
     from . import updater
-    updater.APP_VERSION = "1.10.153"
+    updater.APP_VERSION = "1.10.154"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
