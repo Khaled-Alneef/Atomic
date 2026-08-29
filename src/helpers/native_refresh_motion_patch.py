@@ -10,6 +10,14 @@ adaptive rather than being hard-coded for one panel.
 Keep ATOMIC_PRESENT_HZ as the diagnostic escape hatch: when it is explicitly
 set, the existing exact-divider implementation still owns the decision. In
 normal use, return the current widget screen's real refresh interval directly.
+
+At >=200 Hz, small PosterGrid surfaces additionally use the real QQuickWindow
+scene-graph compositor already carried by poster_grid_quick_patch.  The QWidget
+path still owns layout, hit-testing and ordinary rendering; only active wheel
+momentum is presented by Qt Quick, where the cached grid texture can move at a
+fractional scene position and frameSwapped supplies the presentation clock.
+This deliberately avoids QQuickWidget, whose extra render pass disables the
+threaded render loop that makes the experiment useful in the first place.
 """
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ def install():
         return
     _INSTALLED = True
 
-    from . import updater, widgets
+    from . import poster_grid_quick_patch, updater, widgets
 
     old_present_frame_s = widgets.present_frame_s
 
@@ -37,6 +45,12 @@ def install():
         return widgets.screen_frame_s(widget)
 
     widgets.present_frame_s = native_present_frame_s
+
+    # Install the compositor after the shared cadence override.  The patch is
+    # lazy: it creates no QQuickWindow until a qualifying >=200 Hz PosterGrid
+    # actually receives wheel momentum, and it falls back to the existing
+    # QWidget painter for large grids or unsupported surfaces.
+    poster_grid_quick_patch.install()
 
     # Development pushes advance the third component. This module is loaded by
     # helpers/__init__.py before main imports updater from the package, so the
