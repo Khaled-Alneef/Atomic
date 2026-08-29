@@ -1,16 +1,15 @@
-"""Episode-list watched-state fixes.
+"""Episode/chapter watched-state fixes.
 
-Two deliberately narrow corrections for windows.details:
+This patch keeps the details list's visible marks, History ticks and saved
+progress in one contiguous model:
 
-1. Episode still spoiler blur follows the row's real watched state. When the
-   Watching setting enables still blur, unwatched/upcoming episode stills use
-   the blurred cache and watched episodes use the sharp cache immediately.
-2. A single out-of-order watched mark must never manufacture contiguous
-   progress. In particular, clearing an explicit SxxE08 mark must not write
-   progress=SxxE07 and thereby make episode 7 appear watched.
+* episode still spoiler blur follows the row's real watched state;
+* marking an episode/chapter watched marks everything before it watched too;
+* marking an episode/chapter unwatched clears that item and everything after it;
+* the saved progress boundary moves to the same place as those visible marks.
 
-Kept as a post-import patch so the large details page stays untouched while the
-behaviour is easy to remove/merge later.
+The range is built from the rows the details page actually knows about, rather
+than assuming episode/chapter numbers are gapless.
 """
 
 from __future__ import annotations
@@ -77,33 +76,40 @@ def _patch(details):
             details._still_worker, self._signals, key, url, blur)
         return tile
 
-    def _single_mark_progress_target(self, season, episode,
-                                     watched_season, watched_episode):
-        """Advance saved progress only when this mark is the next contiguous ep."""
-        season = int(season or 0)
-        episode = int(episode or 0)
-        watched_season = int(watched_season or 0)
-        watched_episode = int(watched_episode or 0)
+    def _episode_pairs(self):
+        """Every real episode known to this page, in playback order."""
+        pairs = set()
+        for video in getattr(self, "_videos", ()) or ():
+            try:
+                season = int(video.get("season") or 0)
+                episode = int(video.get("number") or video.get("episode") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if episode > 0:
+                pairs.add((season, episode))
+        return sorted(pairs)
 
-        # A brand-new contiguous run starts at S01E01. Specials/out-of-order
-        # marks remain explicit History ticks rather than pretending all prior
-        # material was watched.
-        if not watched_episode:
-            return (season, episode) if season == 1 and episode == 1 else None
-
-        if season == watched_season and episode == watched_episode + 1:
-            return season, episode
-
-        # Crossing a season boundary is contiguous only when the stored season
-        # really reached its final aired episode.
-        if season == watched_season + 1 and episode == 1:
-            last = self._aired_last_episode(watched_season)
-            if last > 0 and watched_episode >= last:
-                return season, episode
-        return None
+    def _chapter_numbers(self):
+        """Every real chapter number known to this page, numerically sorted."""
+        numbers = set()
+        for chapter in getattr(self, "_chapters", ()) or ():
+            try:
+                number = details.chapter_number(chapter)
+            except Exception:
+                number = None
+            if number is not None:
+                try:
+                    numbers.add(float(number))
+                except (TypeError, ValueError):
+                    pass
+        return sorted(numbers)
 
     def fixed_episode_menu(self, event, season, episode):
-        """Right-click episode actions without inventing watched gaps."""
+        """Right-click episode actions with the clicked row as a boundary.
+
+        Mark watched => every known episode through this one is watched.
+        Mark unwatched => this episode and every known episode after it is clear.
+        """
         try:
             from windows.tracker import correct_progress
         except ImportError:                             # pragma: no cover
@@ -111,11 +117,12 @@ def _patch(details):
 
         season = int(season or 0)
         episode = int(episode or 0)
+        clicked = (season, episode)
         watched_season, watched_episode = self._progress()
         key = details.history.episode_key(season, episode)
         progress_covers = bool(
             watched_episode
-            and (watched_season, watched_episode) >= (season, episode))
+            and (watched_season, watched_episode) >= clicked)
         explicitly_watched = key in self._history_marks
         already = progress_covers or explicitly_watched
 
@@ -133,44 +140,41 @@ def _patch(details):
             self._open_source_picker(season, episode)
             return
 
+        pairs = _episode_pairs(self)
+        if clicked not in pairs and episode > 0:
+            pairs = sorted(set(pairs + [clicked]))
+
         target = None
         if chosen is mark:
             watched = not already
-            episodes = [episode]
-            if already:
-                # The bug: the old code always set target=episode-1 here.
-                # If E08 was watched only by an explicit History tick while E07
-                # was unwatched, clearing E08 wrote progress=E07 and *created*
-                # a watched E07. Only lower progress when progress itself was
-                # what made this row watched.
-                if progress_covers:
-                    if episode > 1:
-                        target = (season, episode - 1)
-                    elif season > 1:
-                        target = (season - 1,
-                                  self._aired_last_episode(season - 1))
-                    else:
-                        target = (0, 0)
+            if watched:
+                affected = [pair for pair in pairs if pair <= clicked]
+                target = clicked
             else:
-                # Likewise, marking E08 while progress is E05 should not make
-                # E06/E07 watched. Keep it as an explicit tick unless it is the
-                # next contiguous episode.
-                target = _single_mark_progress_target(
-                    self, season, episode, watched_season, watched_episode)
+                affected = [pair for pair in pairs if pair >= clicked]
+                earlier = [pair for pair in pairs if pair < clicked]
+                target = earlier[-1] if earlier else (0, 0)
         elif chosen is mark_all:
-            watched, episodes = True, self._season_episodes(season)
-            target = (season, max(1, self._aired_last_episode(season)))
+            # Preserve the existing menu meaning: all episodes in this season.
+            watched = True
+            affected = [(season, number)
+                        for number in self._season_episodes(season)]
+            last = max((pair for pair in affected), default=None)
+            target = last
         elif chosen is clear_all:
-            watched, episodes = False, self._season_episodes(season)
-            target = ((season - 1, self._aired_last_episode(season - 1))
-                      if season > 1 else (0, 0))
+            # Preserve the existing menu meaning: clear this entire season.
+            watched = False
+            affected = [(season, number)
+                        for number in self._season_episodes(season)]
+            earlier = [pair for pair in pairs if pair[0] < season]
+            target = earlier[-1] if earlier else (0, 0)
         else:
             return
 
-        # History is the exact per-episode truth, including out-of-order marks.
+        # History carries exact per-item truth, including unsaved Discover
+        # entries which have no saved progress record at all.
         self._mark_history(
-            [details.history.episode_key(season, number) for number in episodes],
-            watched)
+            [details.history.episode_key(s, e) for s, e in affected], watched)
 
         if self.entry.get("id") and target is not None:
             if target[1] <= 0:
@@ -180,13 +184,73 @@ def _patch(details):
                 details.show_toast(self, "Could Not Save That")
                 return
 
-        # Rebuild immediately. This updates both DONE and the still path:
-        # watched -> sharp, unwatched -> blurred.
+        # Rebuild immediately. This updates DONE plus watched -> sharp /
+        # unwatched -> blurred still artwork.
+        self._fill_rows()
+
+    def fixed_chapter_menu(self, event, number):
+        """Right-click chapter actions with the clicked row as a boundary.
+
+        Mark read => every known chapter through this one is read.
+        Mark unread => this chapter and every known chapter after it is clear.
+        """
+        try:
+            from windows.tracker import correct_progress
+        except ImportError:                             # pragma: no cover
+            return
+
+        try:
+            number = float(number)
+        except (TypeError, ValueError):
+            return
+
+        last_read = float(self._last_read() or 0.0)
+        key = details.history.chapter_key(number)
+        already = bool(last_read >= number or key in self._history_marks)
+
+        menu = details.QMenu(self)
+        mark = menu.addAction("Mark as Unread" if already else "Mark as Read")
+        menu.addSeparator()
+        mark_all = menu.addAction("Mark All as Read")
+        clear_all = menu.addAction("Mark All as Unread")
+        chosen = menu.exec(event.globalPosition().toPoint())
+
+        numbers = _chapter_numbers(self)
+        if number not in numbers:
+            numbers = sorted(set(numbers + [number]))
+
+        if chosen is mark:
+            read = not already
+            if read:
+                affected = [n for n in numbers if n <= number]
+                target = number
+            else:
+                affected = [n for n in numbers if n >= number]
+                earlier = [n for n in numbers if n < number]
+                target = earlier[-1] if earlier else 0.0
+        elif chosen is mark_all:
+            read, affected = True, numbers
+            target = max(numbers) if numbers else 0.0
+        elif chosen is clear_all:
+            read, affected = False, numbers
+            target = 0.0
+        else:
+            return
+
+        self._mark_history(
+            [details.history.chapter_key(n) for n in affected], read)
+
+        if self.entry.get("id") and not correct_progress(
+                self.entry, chapter=target):
+            details.show_toast(self, "Could Not Save That")
+            return
+
         self._fill_rows()
 
     Page._row_card = watched_row_card
     Page._still_tile = watched_still_tile
     Page._episode_menu = fixed_episode_menu
+    Page._chapter_menu = fixed_chapter_menu
 
 
 class _Loader(importlib.abc.Loader):
