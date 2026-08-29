@@ -7,18 +7,23 @@ def install():
     from . import regression_fixes_152
     regression_fixes_152.install()
 
-    # Apply the top-bar input/z-order reliability fix after the playback restore
-    # so this changes chrome interaction only, not startup/buffering/resume.
+    # Older top-bar experiments still install earlier for compatibility with
+    # existing code paths; 1.10.155 below removes them from the final player
+    # class and restores the exact 1.10.139 bar implementation.
     from . import regression_fixes_153
     regression_fixes_153.install()
 
-    # Make right-click anywhere inside a chapter row reach the existing reading
-    # context menu, including clicks landing on child buttons/labels/badges.
+    # Preserve the chapter-row right-click forwarding fix.
     from . import regression_fixes_154
     regression_fixes_154.install()
 
+    # Final 1.10.155 corrections: exact 1.10.139 upper bar, plus contiguous
+    # chapter unread semantics (clicked chapter and every newer chapter).
+    from . import regression_fixes_155
+    regression_fixes_155.install()
+
     from . import updater
-    updater.APP_VERSION = "1.10.154"
+    updater.APP_VERSION = "1.10.155"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
