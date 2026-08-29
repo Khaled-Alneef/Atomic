@@ -1,6 +1,7 @@
 """Requested 29-Aug fixes. Stable wheel/native-refresh physics stay untouched."""
 from __future__ import annotations
 
+import ctypes
 import importlib.abc
 import importlib.machinery
 import sys
@@ -148,34 +149,86 @@ def _patch_reader(module):
         self._sync_controls()
 
     def hold(window):
-        # Preserve the complete native state before edge-reach temporarily
-        # changes it, not merely a rectangle plus a maximised boolean.
+        """Snapshot Windows' placement before the 4px edge-reach mutates it."""
         try:
             if window is not None and not getattr(window, "_edge_reach_on", False):
                 window._atomic_reader_saved_geometry = window.saveGeometry()
+                window._atomic_reader_was_fullscreen = bool(window.isFullScreen())
+                window._atomic_reader_native_placement = None
+                if sys.platform == "win32":
+                    try:
+                        hwnd = ctypes.c_void_p(int(window.winId()))
+                        placement = module.window_chrome._placement(hwnd)
+                        if placement is not None:
+                            window._atomic_reader_native_placement = ctypes.string_at(
+                                ctypes.addressof(placement), ctypes.sizeof(placement))
+                    except Exception:
+                        pass
         except Exception:
             pass
         return old_hold(window)
 
     def release(window):
-        saved = (getattr(window, "_atomic_reader_saved_geometry", None)
-                 if window is not None else None)
-        if window is not None and getattr(window, "_edge_reach_on", False) and saved:
-            try:
-                # One native-state restoration avoids the old visible
-                # setGeometry(windowed) -> showMaximized() resize flash.
-                window._edge_reach_on = False
-                if window.restoreGeometry(saved):
-                    window._atomic_reader_saved_geometry = None
-                    window.update()
+        """Restore the pre-reader native placement in one non-painted step.
+
+        saveGeometry/restoreGeometry was not sufficient here: edge-reach calls
+        setGeometry on a maximised frameless window, so Qt and Windows no longer
+        agree about the maximise state. Restoring the actual WINDOWPLACEMENT is
+        the state transition Windows itself understands and avoids drawing the
+        restored-size window between Reader and the maximised app.
+        """
+        if window is None or not getattr(window, "_edge_reach_on", False):
+            return old_release(window)
+
+        native = getattr(window, "_atomic_reader_native_placement", None)
+        saved = getattr(window, "_atomic_reader_saved_geometry", None)
+        was_fullscreen = bool(getattr(window, "_atomic_reader_was_fullscreen", False))
+
+        try:
+            window._edge_reach_on = False
+
+            def restore_once():
+                if was_fullscreen:
+                    # Qt owns the fullscreen flag, so restore it through Qt; the
+                    # animation suppression below prevents an intermediate rect.
+                    window.showFullScreen()
                     return
+                if native and sys.platform == "win32":
+                    placement_type = module.window_chrome._WINDOWPLACEMENT
+                    placement = placement_type.from_buffer_copy(native)
+                    placement.length = ctypes.sizeof(placement_type)
+                    hwnd = ctypes.c_void_p(int(window.winId()))
+                    if not ctypes.windll.user32.SetWindowPlacement(
+                            hwnd, ctypes.byref(placement)):
+                        raise OSError("SetWindowPlacement failed")
+                    return
+                if saved and window.restoreGeometry(saved):
+                    return
+                raise RuntimeError("no reader placement could be restored")
+
+            quiet = getattr(module.theme, "without_window_animation", None)
+            if callable(quiet):
+                quiet(window, restore_once)
+            else:
+                restore_once()
+
+            try:
+                module.window_chrome.ensure_snap_styles(window)
+            except Exception:
+                pass
+            window._atomic_reader_native_placement = None
+            window._atomic_reader_saved_geometry = None
+            window.update()
+            return
+        except Exception:
+            # Put the flag back so the original, well-tested fallback sees the
+            # state it expects. It may animate, but it is still better than a
+            # window left in edge-reach geometry if Win32 restoration failed.
+            try:
                 window._edge_reach_on = True
             except Exception:
-                try:
-                    window._edge_reach_on = True
-                except Exception:
-                    pass
-        return old_release(window)
+                pass
+            return old_release(window)
 
     def leave(self):
         try:
@@ -261,18 +314,31 @@ def _patch_player(module):
         return
     _PATCHED.add(key)
     Page = module.PlayerPage
-    old = Page.close_player
+    old_close = Page.close_player
+    old_snapshot = Page._startup_snapshot
 
     def close(self):
         try:
             window = self.window()
         except RuntimeError:
             window = None
-        result = old(self)
+        result = old_close(self)
         _scroll_rearm(window)
         return result
 
+    def startup_snapshot(self):
+        target, text = old_snapshot(self)
+        # The engine's head-byte meter deliberately printed 99 even when the
+        # entire startup head was already present. At that point the remaining
+        # work is container/index opening, not buffering another 1%, so a frozen
+        # "99%" is both misleading and exactly the pause the owner reported.
+        if (getattr(self, "_awaiting_first_frame", False)
+                and str(text).startswith("Buffering... 99%")):
+            return min(float(target), 0.97), "Opening video..."
+        return target, text
+
     Page.close_player = close
+    Page._startup_snapshot = startup_snapshot
 
 
 def _patch_details(module):
@@ -410,6 +476,24 @@ def _tune_streams():
         pass
 
 
+def _tune_torrent_start():
+    """Do not hold a fully playable head for a multi-second optional index wait."""
+    try:
+        from . import torrent_engine
+        # await_start explicitly treats a missing index as non-fatal and keeps
+        # its tail pieces at high priority after handing mpv the URL. The old
+        # 3-second safety wait is therefore pure first-frame latency on the case
+        # reported as "99%". Keep a short overlap for fast indexes, then let mpv
+        # ask for whatever container bytes it actually needs.
+        if hasattr(torrent_engine, "INDEX_WAIT"):
+            torrent_engine.INDEX_WAIT = min(
+                float(torrent_engine.INDEX_WAIT), 0.6)
+        # RESUME_INDEX_WAIT is intentionally untouched: a resume offset is read
+        # out of that index, so skipping it would make resume less reliable.
+    except Exception:
+        pass
+
+
 def _chain_existing():
     # Use the existing player/details import-hook chains instead of competing
     # finders for the same modules.
@@ -488,5 +572,6 @@ def install():
     _INSTALLED = True
     _soften_2k_text()
     _tune_streams()
+    _tune_torrent_start()
     _chain_existing()
     _lazy_targets()
