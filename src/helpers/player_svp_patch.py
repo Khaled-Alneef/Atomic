@@ -1,9 +1,9 @@
 """Harbor-style motion-compensated frame synthesis for Atomic's mpv player.
 
 The owner's recording was measured frame by frame after the ordinary player
-pacing fixes made no visible difference.  Its repeated positions line up with
+pacing fixes made no visible difference. Its repeated positions line up with
 sampling a ~23.976 fps source at the recorder's ~25 fps timestamps, so another
-DWM/timer/cache tweak cannot create the missing motion samples.  Harbor solves
+DWM/timer/cache tweak cannot create the missing motion samples. Harbor solves
 this class of low-fps motion with SVP's VapourSynth/svpflow engine rather than
 mpv's simple temporal blending.
 
@@ -14,24 +14,31 @@ This module follows that architecture on Windows:
   * generate an Atomic-owned .vpy using Super -> Analyse -> SmoothFps;
   * add it as a named mpv VapourSynth filter;
   * switch hwdec to auto-copy while the filter is active, exactly because the
-    analysis filter needs CPU-visible frames.
+    analysis filter needs CPU-visible frames;
+  * expose a clear Ready / Not installed row in Settings > Watching.
 
-Nothing is downloaded or bundled here.  SVP is third-party licensed software;
-Atomic reuses an installation the user already has.  With no usable SVP install
-this patch is a complete no-op and the existing player remains unchanged.
+Nothing is downloaded or bundled here. SVP is third-party licensed software;
+Atomic reuses a local installation. With no usable SVP install this patch is a
+strict no-op for playback, so the existing stable player remains available.
 """
 
 from __future__ import annotations
 
 import ctypes
+import importlib.abc
+import importlib.machinery
 import json
 import os
 import subprocess
+import sys
+import webbrowser
 from pathlib import Path
 
 from . import storage
 
 _INSTALLED = False
+_BACKEND_PATCHED = False
+_SETTINGS_PATCHED = False
 _READY = False
 _ROOT = None
 _MANAGER = None
@@ -42,7 +49,9 @@ _SCRIPT = None
 _DLL_HANDLES = []
 _MANAGER_STARTED = False
 
+_SETTINGS_TARGET = "helpers.settings_dialog"
 _LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
+_GET_SVP_URL = "https://www.svp-team.com/get/"
 
 
 # Harbor's Windows search locations, plus the two common LOCALAPPDATA shapes.
@@ -134,6 +143,12 @@ def _vsscript_file(root: Path):
     return candidates[0] if candidates else None
 
 
+def _reset_discovery():
+    global _ROOT, _MANAGER, _VSSCRIPT, _FLOW1, _FLOW2, _SCRIPT, _READY
+    _ROOT = _MANAGER = _VSSCRIPT = _FLOW1 = _FLOW2 = _SCRIPT = None
+    _READY = False
+
+
 def _discover():
     global _ROOT, _MANAGER, _VSSCRIPT, _FLOW1, _FLOW2
     if os.name != "nt" or os.environ.get("ATOMIC_DISABLE_SVP"):
@@ -165,7 +180,7 @@ def _prepend_path(folder: Path):
 def _crt_set_env(name: str, value: str):
     """Mirror Harbor's CRT environment update for VSScript consumers."""
     entry = f"{name}={value}"
-    for module_name in ("ucrtbase", "msvcrt"):
+    for module_name in ("ucrtbase.dll", "msvcrt.dll"):
         try:
             module = ctypes.CDLL(module_name)
             putenv = module._wputenv
@@ -330,20 +345,27 @@ def status():
     }
 
 
-def install():
-    global _INSTALLED, _READY
-    if _INSTALLED:
-        return
-    _INSTALLED = True
+def refresh():
+    """Re-scan after SVP was installed/repaired without restarting Atomic."""
+    global _READY
+    _reset_discovery()
     if not _discover():
-        return
+        return False
     if not _prime_environment():
-        return
+        return False
     if _write_script() is None:
+        return False
+    _READY = True
+    return True
+
+
+def _patch_backend():
+    global _BACKEND_PATCHED
+    if _BACKEND_PATCHED:
         return
+    _BACKEND_PATCHED = True
 
     from . import video_backend
-
     original_create = video_backend.create
 
     def create(window_id: int, **overrides):
@@ -361,8 +383,8 @@ def install():
         try:
             return original_create(window_id, **tuned)
         except Exception:
-            # The filter is optional enhancement. A stale/broken SVP install
-            # must never take the ordinary player down with it.
+            # A stale/broken SVP install must never take ordinary playback
+            # down with it. The retry is the exact pre-SVP player path.
             try:
                 from . import logs
                 logs.exception("SVP filter could not start; using native playback")
@@ -371,4 +393,130 @@ def install():
             return original_create(window_id, **overrides)
 
     video_backend.create = create
-    _READY = True
+
+
+def _patch_settings(settings):
+    global _SETTINGS_PATCHED
+    if _SETTINGS_PATCHED:
+        return
+    _SETTINGS_PATCHED = True
+
+    Dialog = settings.SettingsDialog
+    old_build = Dialog._build_anime_page
+
+    def build(self):
+        page = old_build(self)
+        form = page.layout()
+        if form is None:
+            return page
+
+        # Replace the obsolete description of mpv's removed blend
+        # interpolation with what the current motion path actually does.
+        try:
+            for label in page.findChildren(settings.QLabel):
+                text = label.text() or ""
+                if text.startswith("Off by default, and off is what most people want"):
+                    label.setText(
+                        "Low-frame-rate releases (especially 23.976/24fps pans) "
+                        "can only become genuinely smoother by generating new "
+                        "motion samples. Atomic uses SVP's motion analysis for "
+                        "that when its local engine is ready; this is not the "
+                        "old frame-blending option and does not run on 50/60fps "
+                        "material.")
+                    break
+        except Exception:
+            pass
+
+        insert = max(0, form.count() - 1)  # immediately before final stretch
+        form.insertSpacing(insert, 16)
+        insert += 1
+        form.insertWidget(insert, settings.QLabel(
+            "Smooth Motion (SVP)", objectName="SectionTitle"))
+        insert += 1
+
+        row = settings.QHBoxLayout()
+        state = settings.QLabel()
+        state.setObjectName("Muted")
+        row.addWidget(state, stretch=1)
+        action = settings.QPushButton()
+        settings.use_hover_cursor(action)
+        row.addWidget(action)
+        form.insertLayout(insert, row)
+        insert += 1
+
+        hint = settings.QLabel(objectName="Muted")
+        hint.setWordWrap(True)
+        form.insertWidget(insert, hint)
+
+        def paint_state():
+            if ready():
+                state.setText("Ready - motion-compensated output is enabled")
+                action.setText("Open SVP")
+                hint.setText(
+                    "Atomic will synthesize an even high-frame-rate stream on "
+                    "the next playback. The target follows the active monitor "
+                    "instead of assuming one refresh rate.")
+            else:
+                state.setText("Not installed - playback stays at the source frame rate")
+                action.setText("Get SVP")
+                hint.setText(
+                    "Install SVP 4 for Windows, then reopen Settings (or restart "
+                    "Atomic). Atomic does not bundle or silently install this "
+                    "third-party licensed motion engine.")
+
+        def act():
+            if ready():
+                _ensure_manager()
+                return
+            webbrowser.open(_GET_SVP_URL)
+
+        action.clicked.connect(act)
+        paint_state()
+        return page
+
+    Dialog._build_anime_page = build
+
+
+class _SettingsLoader(importlib.abc.Loader):
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def create_module(self, spec):
+        creator = getattr(self._wrapped, "create_module", None)
+        return creator(spec) if creator is not None else None
+
+    def exec_module(self, module):
+        self._wrapped.exec_module(module)
+        _patch_settings(module)
+
+
+class _SettingsFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname != _SETTINGS_TARGET:
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is None or spec.loader is None:
+            return spec
+        spec.loader = _SettingsLoader(spec.loader)
+        return spec
+
+
+def _install_settings_hook():
+    loaded = sys.modules.get(_SETTINGS_TARGET)
+    if loaded is not None:
+        _patch_settings(loaded)
+    else:
+        sys.meta_path.insert(0, _SettingsFinder())
+
+
+def install():
+    global _INSTALLED
+    if _INSTALLED:
+        return
+    _INSTALLED = True
+
+    # Always wrap create() and expose Settings status. On a machine without SVP
+    # ready() is false and the wrapper calls the original backend byte-for-byte.
+    _patch_backend()
+    _install_settings_hook()
+    refresh()
