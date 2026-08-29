@@ -47,8 +47,8 @@ from . import player_back_button_patch as _player_back_button_patch
 
 _player_back_button_patch.install()
 
-# The player's full-width upper native bar should not draw a dark frame. Keep
-# every existing label/button/pill unchanged and remove only the container fill.
+# Restore the player's old upper-bar surface while removing only the gray-like
+# resting frames behind its labels and buttons.
 from . import player_top_bar_transparency_patch as _player_top_bar_transparency_patch
 
 _player_top_bar_transparency_patch.install()
@@ -75,8 +75,8 @@ from . import global_search_interaction_patch as _global_search_interaction_patc
 _global_search_interaction_patch.install()
 
 # A full Enter search on the combined Discover page must include Reading too.
-# Configured reading-site matches stay first; MangaDex fills only the catalogue
-# gaps so a title cannot falsely read as "Nothing found".
+# Configured reading providers stay as separate cards; MangaDex fills only
+# catalogue gaps so a title cannot falsely read as "Nothing found".
 from . import discover_reading_search_patch as _discover_reading_search_patch
 
 _discover_reading_search_patch.install()
@@ -93,6 +93,15 @@ _source_coverage_patch.install()
 from . import read_coverage_patch as _read_coverage_patch
 
 _read_coverage_patch.install()
+
+# The requested 29-Aug fixes are deliberately installed after typography and
+# source coverage: they soften only 2K+ UI text, cap the enlarged source waits,
+# remove the Settings Picture copy, fix reader chapter ordering/Continue/back,
+# shorten player initial buffering, and re-arm (not rewrite) scrolling after
+# immersive reader/player teardown.
+from . import requested_fixes_patch as _requested_fixes_patch
+
+_requested_fixes_patch.install()
 
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
