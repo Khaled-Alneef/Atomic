@@ -156,6 +156,13 @@ from . import regression_fixes_150 as _regression_fixes_150
 
 _regression_fixes_150.install()
 
+# 1.10.151: completely separate resume work from first-frame preparation,
+# bypass mpv's duplicate cache for Atomic's localhost torrent stream, and reject
+# tail/index time-pos probes so they can never become a fake EOF first frame.
+from . import regression_fixes_151 as _regression_fixes_151
+
+_regression_fixes_151.install()
+
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
 from . import development_version_patch as _development_version_patch
