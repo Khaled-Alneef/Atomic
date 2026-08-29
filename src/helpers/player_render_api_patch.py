@@ -1,9 +1,9 @@
 """Opt-in libmpv Render API presentation for the Windows player.
 
-Atomic's normal player currently gives mpv a QWidget HWND (`wid=`).  That makes
+Atomic's normal player currently gives mpv a QWidget HWND (`wid=`). That makes
 mpv own a separate native child window and swapchain inside Qt's top-level
-window, leaving DWM to reconcile two presentation systems. mpv's own render API
-is the architectural alternative: Qt owns the OpenGL surface/FBO and libmpv
+window, leaving DWM to reconcile two presentation systems. mpv's Render API is
+the architectural alternative: Qt owns the OpenGL surface/FBO and libmpv
 renders the decoded frame into that surface.
 
 This path is deliberately gated by ATOMIC_MPV_RENDER_API=1 for now. Atomic's
@@ -20,15 +20,12 @@ code untouched.
 
 from __future__ import annotations
 
-import importlib.abc
-import importlib.machinery
 import os
 import sys
 import weakref
 
-_TARGET = "windows.player"
 _INSTALLED = False
-_PATCHED = False
+_PATCHED = set()
 
 
 def enabled() -> bool:
@@ -36,14 +33,14 @@ def enabled() -> bool:
 
 
 def _patch(module):
-    global _PATCHED
-    if _PATCHED or not enabled():
+    key = ("render-api", id(module))
+    if key in _PATCHED or not enabled():
         return
-    _PATCHED = True
+    _PATCHED.add(key)
 
     from PyQt6.QtCore import Qt
     from PyQt6.QtCore import pyqtSignal as Signal
-    from PyQt6.QtGui import QColor, QPainter, QOpenGLContext
+    from PyQt6.QtGui import QColor, QOpenGLContext, QPainter
     from PyQt6.QtOpenGLWidgets import QOpenGLWidget
     from PyQt6.QtWidgets import QSizePolicy
 
@@ -88,9 +85,6 @@ def _patch(module):
             super().mousePressEvent(event)
 
         def initializeGL(self):
-            # The MPV object is normally attached only after the page has been
-            # shown and this context exists. If startup ordering ever changes,
-            # attach() calls makeCurrent and validates the context explicitly.
             pass
 
         def paintGL(self):
@@ -130,7 +124,7 @@ def _patch(module):
                 gl = QOpenGLContext.currentContext()
                 if gl is None:
                     return 0
-                address = gl.getProcAddress(bytes(name))
+                address = gl.getProcAddress(name)
                 return int(address) if address else 0
             except Exception:
                 return 0
@@ -282,39 +276,33 @@ def _patch(module):
     backend.shutdown = shutdown
 
 
-class _Loader(importlib.abc.Loader):
-    def __init__(self, wrapped):
-        self._wrapped = wrapped
-
-    def create_module(self, spec):
-        creator = getattr(self._wrapped, "create_module", None)
-        return creator(spec) if creator is not None else None
-
-    def exec_module(self, module):
-        self._wrapped.exec_module(module)
-        _patch(module)
-
-
-class _Finder(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path, target=None):
-        if fullname != _TARGET:
-            return None
-        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is None or spec.loader is None:
-            return spec
-        spec.loader = _Loader(spec.loader)
-        return spec
-
-
 def install():
+    """Chain after Atomic's shared player patch rather than competing for import.
+
+    requested_fixes_patch owns the one lazy `windows.player` loader used by the
+    current development stack, and later regression patches intentionally chain
+    around its `_patch_player` function. Joining that chain means every existing
+    player fix still runs and the Render API surface is applied at the same
+    deterministic patch boundary. A second independent meta-path finder would
+    race/shadow that chain and silently lose fixes depending on finder order.
+    """
     global _INSTALLED
     if _INSTALLED:
         return
     _INSTALLED = True
     if not enabled():
         return
-    module = sys.modules.get(_TARGET)
-    if module is not None:
+
+    from . import requested_fixes_patch as requested
+
+    previous = requested._patch_player
+
+    def player(module):
+        previous(module)
         _patch(module)
-    else:
-        sys.meta_path.insert(0, _Finder())
+
+    requested._patch_player = player
+
+    loaded = sys.modules.get("windows.player")
+    if loaded is not None:
+        _patch(loaded)
