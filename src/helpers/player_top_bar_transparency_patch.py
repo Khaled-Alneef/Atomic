@@ -72,7 +72,7 @@ def _clip_live_bar(player, page) -> None:
             bar.clearMask()
             return
 
-        from PyQt6.QtCore import QRegion
+        from PyQt6.QtGui import QRegion
         from PyQt6.QtWidgets import QWidget
 
         layout = bar.layout()
@@ -80,11 +80,11 @@ def _clip_live_bar(player, page) -> None:
             layout.activate()
 
         region = QRegion()
-        # Direct layout children are the actual visible controls/labels.  A
-        # couple of pixels of air avoids clipping antialiased glyph edges.
-        for child in bar.findChildren(
-                QWidget, options=player.Qt.FindChildOption.FindDirectChildrenOnly):
-            if not child.isVisible():
+        # Only immediate children belong to the top-bar layout.  children()
+        # avoids relying on a PyQt findChildren keyword signature that differs
+        # between Qt point releases.
+        for child in bar.children():
+            if not isinstance(child, QWidget) or not child.isVisible():
                 continue
             rect = child.geometry().adjusted(-3, -2, 3, 2)
             if rect.width() > 0 and rect.height() > 0:
@@ -94,7 +94,7 @@ def _clip_live_bar(player, page) -> None:
             bar.clearMask()
         else:
             bar.setMask(region)
-    except (AttributeError, RuntimeError):
+    except (AttributeError, RuntimeError, TypeError):
         pass
 
 
