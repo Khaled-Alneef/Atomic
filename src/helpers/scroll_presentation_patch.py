@@ -8,8 +8,11 @@ misses a presentation opportunity, the next accepted _Momentum tick integrates
 the real elapsed time instead of generating intermediate positions that Qt
 coalesces away.
 
-This is deliberately not a compositor and does not alter wheel distance,
-friction, acceleration, refresh-rate selection, or PosterGrid's painted path.
+At >=200 Hz, quick_scroll_patch may temporarily cover a qualifying area with a
+QQuickWindow compositor. While that surface is active there is deliberately no
+QWidget paint to acknowledge, so the gate yields to the compositor and lets the
+floating-point motion continue. The normal paint acknowledgement resumes the
+moment the Quick surface goes away.
 """
 
 from __future__ import annotations
@@ -47,6 +50,13 @@ def install():
         except RuntimeError:
             return None
         return None
+
+    def _quick_active(motion):
+        try:
+            surface = getattr(motion._bar, "_atomic_quick_scroll_surface", None)
+            return bool(surface is not None and surface.active)
+        except RuntimeError:
+            return False
 
     class _PaintAck(QObject):
         """Acknowledge the position once either scroll paint surface runs."""
@@ -93,15 +103,23 @@ def install():
             pass
 
     def set_value(self, value):
-        # Only a genuinely new integer position requires an acknowledgement.
-        # Rounded duplicates produce no bar write and therefore no scroll paint.
+        # The Quick compositor is the paint surface while active. The integer
+        # scrollbar still tracks state underneath it, but waiting for a QWidget
+        # paint that is intentionally disabled would stall the motion.
+        quick = _quick_active(self)
         changed = value != getattr(self, "_last_value", None)
-        if changed and getattr(self, "_atomic_paint_ack", None) is not None:
+        if (changed and not quick
+                and getattr(self, "_atomic_paint_ack", None) is not None):
             self._atomic_waiting_paint = True
             self._atomic_waiting_since = time.monotonic()
         return old_set_value(self, value)
 
     def tick(self):
+        if _quick_active(self):
+            self._atomic_waiting_paint = False
+            self._atomic_waiting_since = 0.0
+            return old_tick(self)
+
         if (getattr(self, "_atomic_waiting_paint", False)
                 and getattr(self, "_atomic_paint_ack", None) is not None):
             now = time.monotonic()
