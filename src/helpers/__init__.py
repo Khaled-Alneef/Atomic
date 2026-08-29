@@ -11,21 +11,28 @@ from . import startup_dpr_patch as _startup_dpr_patch
 _startup_dpr_patch._MOVE_SETTLE_MS = 80
 _startup_dpr_patch.install()
 
-# Restore the exact scrolling method that previously tested/felt correct:
-# leave the normal QWidget/PosterGrid rendering paths alone and only make the
-# committed motion clock follow the active monitor's native refresh rate.
-# ATOMIC_PRESENT_HZ remains the explicit diagnostic/A-B override.
+# Native display cadence remains the baseline. On >=200 Hz PosterGrid surfaces
+# this installer also enables the contained QQuickWindow scene-graph path; lower
+# refresh displays and large grids keep their existing painter unchanged.
 from . import native_refresh_motion_patch as _native_refresh_motion_patch
 
 _native_refresh_motion_patch.install()
 
-# Keep that exact native-refresh method, but do not let an ordinary QScrollArea
-# compute several integer positions before Qt has painted the previous one. This
-# is a presentation acknowledgement only; it does not add a compositor, change
-# wheel physics, or replace the normal QWidget/PosterGrid render paths.
+# QWidget QScrollAreas retain paint acknowledgement when they are the visible
+# presentation surface. The Quick compositor below temporarily bypasses this
+# gate while its own scene-graph surface is covering the page.
 from . import scroll_presentation_patch as _scroll_presentation_patch
 
 _scroll_presentation_patch.install()
+
+# Ordinary QScrollArea pages still end at an integer QScrollBar position. On
+# >=200 Hz displays, qualifying pages are therefore cached once per wheel glide
+# and moved fractionally by a real QQuickWindow until momentum settles. This is
+# deliberately after scroll_presentation_patch so the two paths can hand off
+# cleanly; <=165 Hz never creates the Quick surface.
+from . import quick_scroll_patch as _quick_scroll_patch
+
+_quick_scroll_patch.install()
 
 # Episode stills follow the real watched state. Manual episode/chapter marks are
 # contiguous boundaries: marking watched/read fills everything before the
@@ -175,12 +182,12 @@ _development_version_patch.install()
 # - player_callback_pacing_patch (1.10.136 A/B: no visible improvement)
 # - player_windows_pacing_patch (1.10.135 A/B: no visible improvement)
 # - player_process_backend_patch (discarded before test)
-# - motion_patch (raster compositor)
+# - motion_patch (old QWidget raster compositor)
 # - poster_grid_motion_patch
 # - high_refresh_live_pacing_patch
 # - page_scroll_fixes_patch
 # - hero_pages_live_scroll_patch
 # - ultimate_scroll_patch
-# - poster_grid_quick_patch
 # Those are failed/older experiments and are not stacked under the current
-# stable UI/player path.
+# stable UI/player path. poster_grid_quick_patch is now intentionally installed
+# by native_refresh_motion_patch as the >=200 Hz scene-graph experiment.
