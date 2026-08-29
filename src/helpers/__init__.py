@@ -41,14 +41,13 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# True low-frame-rate motion synthesis, following Harbor's current Windows SVP
-# path rather than mpv's rejected frame-blending interpolation. When an SVP 4
-# installation is present, Atomic loads its VapourSynth/svpflow engine and
-# synthesizes evenly-presented intermediate frames. With no valid SVP install it
-# is a strict no-op, leaving the stable native mpv path unchanged.
-from . import player_svp_patch as _player_svp_patch
+# Windows video presentation follows the native path used by Stremio: libmpv
+# attaches to Atomic's real top-level player HWND instead of nesting inside a
+# second Qt native child, and copy-safe D3D11 hardware decode keeps decoder
+# surfaces from disabling VRR. This is player-only and changes no app UI motion.
+from . import player_native_present_patch as _player_native_present_patch
 
-_player_svp_patch.install()
+_player_native_present_patch.install()
 
 # The visible top-left Back arrow uses the same unwind path as Escape/mouse
 # Back: close panel, close episode list, leave fullscreen, then leave player.
@@ -106,7 +105,7 @@ _development_version_patch.install()
 # Intentionally NOT installed here:
 # - player_callback_pacing_patch (1.10.136 A/B: no visible improvement)
 # - player_windows_pacing_patch (1.10.135 A/B: no visible improvement)
-# - player_process_backend_patch (discarded before test; does not create frames)
+# - player_process_backend_patch (discarded before test)
 # - motion_patch (raster compositor)
 # - poster_grid_motion_patch
 # - high_refresh_live_pacing_patch
