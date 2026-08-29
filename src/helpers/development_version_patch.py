@@ -23,11 +23,11 @@ def install():
     regression_fixes_155.install()
 
     from . import updater
-    # 1.10.162 keeps the user-confirmed 1.10.161 high-refresh motion and
-    # freeze-underlay behavior unchanged. The only presentation change is that
-    # generic page snapshots bypass QQuickPaintedItem and are uploaded once as
-    # a direct QSGTexture/QSGImageNode, so subsequent frames are transform-only.
-    updater.APP_VERSION = "1.10.162"
+    # 1.10.163 removes the crashing custom QSG-node experiment and returns to
+    # the proven 1.10.161 QQuickPaintedItem motion path. Home/Tracker alone use
+    # a bounded, adaptively supersampled snapshot within the same old texture
+    # budget so fractional 165/240 Hz movement has finer card/text samples.
+    updater.APP_VERSION = "1.10.163"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
