@@ -23,10 +23,10 @@ def install():
     regression_fixes_155.install()
 
     from . import updater
-    # 1.10.157 keeps the user-confirmed 165/240 Hz Quick cadence but disables
-    # bilinear filtering of the native-DPR page/grid snapshots so card and text
-    # edges do not shimmer at a different fractional phase every refresh.
-    updater.APP_VERSION = "1.10.157"
+    # 1.10.158 keeps the accepted high-refresh Quick path for category grids,
+    # but removes the moving QWidget-snapshot compositor from Home and Tracker
+    # surfaces where it caused Discover/Saved/History card corruption.
+    updater.APP_VERSION = "1.10.158"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
