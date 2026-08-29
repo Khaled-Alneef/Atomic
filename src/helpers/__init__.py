@@ -27,9 +27,9 @@ from . import scroll_presentation_patch as _scroll_presentation_patch
 
 _scroll_presentation_patch.install()
 
-# Episode-list spoiler art follows the real watched state, and single
-# out-of-order watched marks stay exact instead of manufacturing contiguous
-# progress for the episode before them.
+# Episode stills follow the real watched state. Manual episode/chapter marks are
+# contiguous boundaries: marking watched/read fills everything before the
+# clicked item; marking unwatched/unread clears that item and everything after.
 from . import episode_watch_state_patch as _episode_watch_state_patch
 
 _episode_watch_state_patch.install()
