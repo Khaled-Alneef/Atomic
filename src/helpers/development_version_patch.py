@@ -22,11 +22,15 @@ def install():
     from . import regression_fixes_155
     regression_fixes_155.install()
 
+    # 1.10.159 keeps Home/Tracker on one live QWidget surface (the snapshot
+    # compositor stays blocked there), but distributes their unavoidable whole-
+    # pixel scrollbar commits from the floating momentum residual instead of
+    # absolute round(position). This is scoped to >=150 Hz only.
+    from . import live_scroll_quantizer_patch
+    live_scroll_quantizer_patch.install()
+
     from . import updater
-    # 1.10.158 keeps the accepted high-refresh Quick path for category grids,
-    # but removes the moving QWidget-snapshot compositor from Home and Tracker
-    # surfaces where it caused Discover/Saved/History card corruption.
-    updater.APP_VERSION = "1.10.158"
+    updater.APP_VERSION = "1.10.159"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
