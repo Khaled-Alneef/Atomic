@@ -3,26 +3,26 @@
 QScrollBar stores an integer visual position. At high refresh rates a smooth
 wheel glide often advances by less than one logical pixel per refresh, so the
 QWidget path repeats a position and then jumps a full pixel. The successful
-240 Hz A/B proved that presenting the page through Qt Quick removes that final
-quantisation.
+165/240 Hz A/B proved that presenting the page through Qt Quick removes that
+final quantisation.
 
-The first implementation embedded QQuickWindow with createWindowContainer().
-That was the wrong integration boundary for Atomic: even a hidden container can
-promote QWidget ancestors to native windows, which made Home/Discover/Saved/
-History visually unstable on both the 240 Hz and 165 Hz monitors.
+The page itself remains QWidget-based. At wheel-start it is captured once at
+native device-pixel ratio and the immutable capture is translated fractionally
+by a mouse-transparent QQuickWindow while momentum is active.
 
-This version never inserts a native child into the QWidget tree. It snapshots
-the scroll body at wheel-start and, only while momentum is active, shows a
-mouse-transparent top-level QQuickWindow exactly over the viewport. The QWidget
-hierarchy therefore remains unchanged. The overlay is lazy, so displays below
-the activation threshold never create a QQuickWindow at all.
+Important: the capture is NOT presented through QQuickPaintedItem anymore.
+QQuickPaintedItem creates its own QImage-backed paint target and then uploads
+that result to the scene graph, adding a second raster/painter boundary around
+an image which is already fully composed. Home and Tracker were the surfaces
+where that extra boundary showed up as unstable/shaking card pixels even though
+the trajectory itself was smooth.
 
-The snapshot is already rasterized at the viewport's native device-pixel ratio.
-Do not bilinearly filter it again while translating it: filtering a page full of
-small text/card edges at a different fractional phase every refresh makes those
-edges shimmer even when the trajectory itself is perfectly smooth. The scene
-graph still receives the floating-point Y position; only texture resampling is
-disabled.
+Instead, _PageTexture is a plain QQuickItem with ItemHasContents. Its
+updatePaintNode() uploads the already-rendered native-DPR QImage directly to a
+QSGTexture once and draws it with QQuickWindow.createImageNode(). Every motion
+frame after that changes only the item's qreal Y transform; the pixels are not
+repainted or re-rasterized. The motion clock and fractional positions are the
+same as the user-confirmed smooth path.
 """
 
 from __future__ import annotations
@@ -36,39 +36,67 @@ def install():
         return
     _INSTALLED = True
 
-    from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
+    from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, Qt
     from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
-    from PyQt6.QtQuick import QQuickPaintedItem, QQuickWindow
+    from PyQt6.QtQuick import QQuickItem, QQuickWindow, QSGTexture
     from PyQt6.QtWidgets import QScrollArea, QWidget
 
     from . import widgets as w
 
-    class _PageTexture(QQuickPaintedItem):
+    class _PageTexture(QQuickItem):
+        """One immutable native-DPR snapshot uploaded straight to the SG.
+
+        A fresh item is created for each glide. That keeps texture ownership
+        simple: the image node owns its QSGTexture, and destroying the item at
+        the end of the glide lets Qt destroy the node/texture on the render
+        thread. There is no texture replacement while a node is live.
+        """
+
         def __init__(self, parent=None):
             super().__init__(parent)
             self._image = QImage()
-            self.setAntialiasing(False)
-            self.setMipmap(False)
-            self.setOpaquePainting(True)
-            # The source image is already native-DPR. Linear texture filtering
-            # here makes text/card edges change weight on every fractional frame.
-            self.setSmooth(False)
+            self.setFlag(QQuickItem.Flag.ItemHasContents, True)
 
         def set_image(self, image, logical_width, logical_height):
-            self._image = image
+            self._image = QImage(image)
             self.setWidth(float(logical_width))
             self.setHeight(float(logical_height))
             self.update()
 
-        def clear(self):
-            self._image = QImage()
-            self.update()
+        def updatePaintNode(self, old_node, update_data):
+            # Called on the Qt Quick render thread with the GUI thread blocked.
+            # Only create QSG resources here; after creation the node is reused
+            # unchanged for the whole glide and only QQuickItem.y moves.
+            try:
+                if self._image.isNull():
+                    return None
+                if old_node is not None:
+                    return old_node
 
-        def paint(self, painter):
-            if self._image.isNull():
-                return
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-            painter.drawImage(QPointF(0.0, 0.0), self._image)
+                window = self.window()
+                if window is None:
+                    return None
+                node = window.createImageNode()
+                if node is None:
+                    return None
+                texture = window.createTextureFromImage(self._image)
+                if texture is None:
+                    return None
+                node.setTexture(texture)
+                node.setOwnsTexture(True)
+                try:
+                    # Match the accepted smooth path: fractional scene-graph
+                    # translation uses linear sampling, but there is no second
+                    # QPainter image/texture pass anymore.
+                    node.setFiltering(QSGTexture.Filtering.Linear)
+                except Exception:
+                    pass
+                node.setRect(0.0, 0.0, float(self.width()), float(self.height()))
+                return node
+            except Exception:
+                # An exception escaping a Qt render callback can terminate a
+                # frozen PyQt application. A missing frame is preferable.
+                return old_node
 
     class _QuickScrollSurface(QObject):
         HIGH_REFRESH_HZ = 150.0
@@ -143,10 +171,7 @@ def install():
                         quick.setTransientParent(handle)
                 except (AttributeError, RuntimeError):
                     pass
-
-                texture = _PageTexture(quick.contentItem())
                 self.quick = quick
-                self.texture = texture
                 return True
             except Exception:
                 self.quick = None
@@ -161,6 +186,17 @@ def install():
                 self.quick.setGeometry(point.x(), point.y(),
                                        self.viewport.width(),
                                        self.viewport.height())
+            except RuntimeError:
+                pass
+
+        def _drop_texture_item(self):
+            item = self.texture
+            self.texture = None
+            if item is None:
+                return
+            try:
+                item.setVisible(False)
+                item.deleteLater()
             except RuntimeError:
                 pass
 
@@ -181,7 +217,6 @@ def install():
             image.fill(QColor(w.theme.BG))
 
             painter = QPainter(image)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             flags = (QWidget.RenderFlag.DrawWindowBackground
                      | QWidget.RenderFlag.DrawChildren)
             region = QRegion(QRect(0, 0, width, height))
@@ -192,8 +227,13 @@ def install():
                 return False
             painter.end()
 
+            # One scene-graph item/texture per glide. The old item's node owns
+            # its texture and will be cleaned up on the render thread.
+            self._drop_texture_item()
+            texture = _PageTexture(self.quick.contentItem())
+            texture.set_image(image, width, height)
+            self.texture = texture
             self._image = image
-            self.texture.set_image(image, width, height)
             return True
 
         def begin(self, pos):
@@ -219,6 +259,8 @@ def install():
         def present(self, pos):
             if not self.active or self.quick is None or self.texture is None:
                 return
+            # Preserve the exact successful motion model: this remains a qreal
+            # scene-graph transform and is never rounded to QWidget pixels.
             self.texture.setY(-float(pos))
             try:
                 self.quick.requestUpdate()
@@ -237,11 +279,7 @@ def install():
                     self.quick.hide()
                 except RuntimeError:
                     pass
-            if self.texture is not None:
-                try:
-                    self.texture.clear()
-                except RuntimeError:
-                    pass
+            self._drop_texture_item()
             self._image = QImage()
 
         def end(self, pos=None):
