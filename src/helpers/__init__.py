@@ -149,6 +149,13 @@ from . import regression_fixes_149 as _regression_fixes_149
 
 _regression_fixes_149.install()
 
+# 1.10.150: Atomic's source preparation is the startup buffer. Do not let mpv
+# impose a second initial cache pause after that preparation finishes; resume
+# playback immediately when mpv reports its cache ready.
+from . import regression_fixes_150 as _regression_fixes_150
+
+_regression_fixes_150.install()
+
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
 from . import development_version_patch as _development_version_patch
