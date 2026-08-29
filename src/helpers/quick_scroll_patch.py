@@ -18,6 +18,13 @@ QQuickPaintedItem's backing texture is enlarged by the same factor. The item
 still moves at the exact same fractional qreal Y positions and cadence; the
 extra samples only give text/card edges finer vertical phases while moving.
 Other QScrollArea pages keep the exact native-DPR renderer used by 1.10.161.
+
+For the affected Home/Tracker surfaces, the motion integrator is now clocked by
+QQuickWindow.frameSwapped instead of a second independent Qt timer. Movies and
+Anime's proven PosterGrid compositor already uses that ownership model: one
+presented frame advances one presentation step. The physics constants, impulse,
+friction, distance and floating-point position remain the existing _Momentum
+implementation; only the clock that calls it changes while Quick owns the page.
 """
 
 from __future__ import annotations
@@ -57,22 +64,13 @@ def install():
             self.setWidth(float(logical_width))
             self.setHeight(float(logical_height))
 
-            # textureSize is expressed in item coordinates; Qt applies the
-            # window DPR on top. Matching it to the capture's extra sampling
-            # keeps those samples alive in the scene-graph texture instead of
-            # downsampling them back to native resolution inside paint().
             try:
                 self.setTextureSize(QSize(
                     max(1, int(round(logical_width * self._sample_scale))),
                     max(1, int(round(logical_height * self._sample_scale)))))
             except (AttributeError, RuntimeError):
-                # Older Qt bindings still get the safe native path; never make
-                # optional supersampling a startup/runtime requirement.
                 self._sample_scale = 1.0
 
-            # Native snapshots deliberately use nearest sampling exactly as in
-            # 1.10.161. The supersampled target needs linear downsampling or its
-            # additional texels would be thrown away when the item is displayed.
             self.setSmooth(self._sample_scale > 1.0)
             self.update()
 
@@ -95,8 +93,6 @@ def install():
         MAX_PHYSICAL_HEIGHT = 8192
         MAX_PHYSICAL_PIXELS = 20_000_000
 
-        # The high-quality path never exceeds the old full-page pixel budget.
-        # It spends that same budget on a shorter, denser strip instead.
         TARGET_OVERSCAN_MIN = 520
         TARGET_OVERSCAN_VIEWPORT = 0.80
         TARGET_SAMPLE_FACTORS = (2.0, 1.75, 1.5, 1.25, 1.0)
@@ -115,6 +111,18 @@ def install():
             self._sample_scale = 1.0
             self._target_quality = False
 
+            # Home/Tracker use one presentation clock while Quick is visible.
+            # _motion_proxy is normally quick_scroll_scope_patch's freeze
+            # wrapper; keeping it lets the final integer scrollbar commit happen
+            # through the existing handoff rather than bypassing that policy.
+            self._frame_driven = False
+            self._motion = None
+            self._motion_proxy = None
+            self._driving_frame = False
+            self._terminal_pos = None
+            self._finish_after_swap = False
+            self._handoff_from_swap = False
+
             self.viewport.installEventFilter(self)
             area.verticalScrollBar()._atomic_quick_scroll_surface = self
 
@@ -125,7 +133,14 @@ def install():
             if kind in (QEvent.Type.Resize, QEvent.Type.Hide,
                         QEvent.Type.MouseButtonPress):
                 if self.active:
-                    self.abort()
+                    proxy = self._motion_proxy
+                    if proxy is not None and proxy is not self:
+                        try:
+                            proxy.abort()
+                        except (AttributeError, RuntimeError):
+                            self.abort()
+                    else:
+                        self.abort()
             return False
 
         def _screen_rate(self):
@@ -200,6 +215,7 @@ def install():
                     pass
 
                 texture = _PageTexture(quick.contentItem())
+                quick.frameSwapped.connect(self._frame_swapped)
                 self.quick = quick
                 self.texture = texture
                 return True
@@ -227,9 +243,6 @@ def install():
             bottom = min(body_height,
                          int(math.ceil(float(pos))) + viewport_h + overscan)
 
-            # Near an edge there may not be enough room on one side. Spend the
-            # unused margin on the other side so the strip keeps approximately
-            # the same total runway for a momentum tail.
             wanted = min(body_height, viewport_h + 2 * overscan)
             if bottom - top < wanted:
                 missing = wanted - (bottom - top)
@@ -308,12 +321,16 @@ def install():
             return (value >= self._snapshot_top
                     and value + viewport_h <= self._snapshot_bottom)
 
+        def bind_motion(self, motion, proxy):
+            self._motion = motion
+            self._motion_proxy = proxy
+            self._frame_driven = bool(self._target_quality)
+            self._terminal_pos = None
+            self._finish_after_swap = False
+
         def begin(self, pos):
             if self.active:
                 if not self._covers(pos):
-                    # Continuous wheel input can outrun the initial strip. A
-                    # recapture is rare because the strip has overscan, and it
-                    # does not touch the motion clock or QWidget scrollbar.
                     if not self._snapshot(pos):
                         return False
                 self.present(pos)
@@ -343,14 +360,68 @@ def install():
                     self.abort()
                     return
 
-            # The strip's logical top is an absolute body coordinate. Shift by
-            # (top - scroll position) so the viewport sees exactly the same
-            # content as the old full-page texture at -pos.
             self.texture.setY(self._snapshot_top - float(pos))
             try:
                 self.quick.requestUpdate()
             except RuntimeError:
                 self.abort()
+
+        def note_terminal(self, pos):
+            try:
+                self._terminal_pos = float(pos)
+            except (TypeError, ValueError):
+                self._terminal_pos = float(self.area.verticalScrollBar().value())
+
+        def _frame_swapped(self):
+            if not self.active or not self._frame_driven:
+                return
+
+            # The previous request contained the final position. It is now on
+            # screen, so the existing freeze-underlay proxy can commit the real
+            # scrollbar underneath it and reveal the QWidget page safely.
+            if self._finish_after_swap:
+                self._finish_after_swap = False
+                pos = self._terminal_pos
+                proxy = self._motion_proxy
+                self._handoff_from_swap = True
+                try:
+                    if proxy is not None:
+                        proxy.end(pos)
+                    else:
+                        self.end(pos)
+                finally:
+                    self._handoff_from_swap = False
+                return
+
+            motion = self._motion
+            if motion is None:
+                return
+
+            # This is the central change: integrate only after an actual Quick
+            # presentation. The ordinary millisecond/vblank ticker still exists
+            # as _Momentum's fallback and for every non-target surface, but its
+            # callbacks are ignored while this target Quick surface owns motion.
+            self._driving_frame = True
+            try:
+                old_tick(motion)
+            finally:
+                self._driving_frame = False
+
+            if self._terminal_pos is not None:
+                self.present(self._terminal_pos)
+                self._finish_after_swap = True
+                try:
+                    self.quick.requestUpdate()
+                except (AttributeError, RuntimeError):
+                    proxy = self._motion_proxy
+                    if proxy is not None:
+                        proxy.end(self._terminal_pos)
+                    else:
+                        self.end(self._terminal_pos)
+                return
+
+            pos = motion._pos if motion._pos is not None else motion._bar.value()
+            self.present(pos)
 
         def _reveal_qwidget(self):
             self.body.setUpdatesEnabled(True)
@@ -374,17 +445,26 @@ def install():
             self._snapshot_bottom = 0.0
             self._sample_scale = 1.0
             self._target_quality = False
+            self._frame_driven = False
+            self._motion = None
+            self._motion_proxy = None
+            self._terminal_pos = None
+            self._finish_after_swap = False
 
         def end(self, pos=None):
             if not self.active:
                 return
-            if pos is not None:
+            # During the frameSwapped handoff this exact final position was
+            # already presented. Do not schedule another frame just before hide.
+            if pos is not None and not self._handoff_from_swap:
                 self.present(pos)
             self._reveal_qwidget()
 
         def abort(self):
             if not self.active:
                 return
+            self._finish_after_swap = False
+            self._terminal_pos = None
             self._reveal_qwidget()
             try:
                 self.viewport.update()
@@ -411,17 +491,32 @@ def install():
     def _surface(motion):
         return getattr(motion._bar, "_atomic_quick_scroll_surface", None)
 
+    def _inner(surface):
+        candidate = getattr(surface, "_original", surface)
+        return candidate if isinstance(candidate, _QuickScrollSurface) else None
+
     def start(self):
         result = old_start(self)
         surface = _surface(self)
         if surface is not None:
             pos = self._pos if self._pos is not None else self._bar.value()
             surface.begin(pos)
+            inner = _inner(surface)
+            if inner is not None and inner.active:
+                inner.bind_motion(self, surface)
         return result
 
     def tick(self):
-        result = old_tick(self)
         surface = _surface(self)
+        inner = _inner(surface)
+        if (surface is not None and surface.active and inner is not None
+                and inner._frame_driven):
+            # QQuickWindow.frameSwapped owns this motion while the affected
+            # page overlay is visible. Running old_tick here as well would put
+            # the two independent clocks back on the same position.
+            return None
+
+        result = old_tick(self)
         if surface is not None and surface.active:
             pos = self._pos if self._pos is not None else self._bar.value()
             surface.present(pos)
@@ -429,6 +524,18 @@ def install():
 
     def stop(self):
         surface = _surface(self)
+        inner = _inner(surface)
+
+        # Called by old_tick when the frame-driven integrator reaches its tail.
+        # Stop the fallback timer now, but leave the Quick cover up. The current
+        # float is still available here; old_tick sets _pos=None immediately
+        # after this call, so remember it for the final presented frame.
+        if (surface is not None and surface.active and inner is not None
+                and inner._frame_driven and inner._driving_frame):
+            pos = self._pos if self._pos is not None else self._bar.value()
+            inner.note_terminal(pos)
+            return old_stop(self)
+
         result = old_stop(self)
         if surface is not None and surface.active:
             pos = self._pos if self._pos is not None else self._bar.value()
