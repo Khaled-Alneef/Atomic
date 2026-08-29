@@ -41,6 +41,14 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
+# Player-only Windows pacing: mpv keeps the same native D3D11 renderer and all
+# existing sync/interpolation choices, while DWM participates in MMCSS only for
+# the lifetime of a live player handle. This is intentionally isolated from the
+# app's QWidget scrolling/presentation patches.
+from . import player_windows_pacing_patch as _player_windows_pacing_patch
+
+_player_windows_pacing_patch.install()
+
 # Global search is one mixed, scrollable Watch + Read suggestion list under the
 # persistent field. Clicking a suggestion opens that title's episode/chapter
 # list; Enter keeps running the full query on Discover.
