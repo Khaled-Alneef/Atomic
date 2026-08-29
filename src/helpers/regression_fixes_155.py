@@ -1,17 +1,19 @@
 """Restore the exact 1.10.139 player top bar and fix chapter unread boundaries.
 
 Player core windows/player.py has not changed since 1.10.139; later helper
-patches promoted/re-styled/repositioned the top bar.  Restore the original core
+patches promoted/re-styled/repositioned the top bar. Restore the original core
 top-bar methods at the final patch boundary so its parenting, hit testing,
 hover/click behaviour and geometry are exactly the known-good 1.10.139 path.
 Playback/startup methods are deliberately untouched.
 
-Reading progress is contiguous by chapter number.  Marking chapter N unread
-must clear N and every newer chapter and leave the stored boundary at the
-largest chapter below N, regardless of newest->oldest visual row order.
+Reading progress is contiguous by chapter number. Marking chapter N unread
+clears N and every newer chapter and leaves the stored boundary at the largest
+chapter below N, regardless of newest->oldest visual row order.
 """
 from __future__ import annotations
 
+import importlib.abc
+import importlib.machinery
 import sys
 
 _INSTALLED = False
@@ -49,9 +51,11 @@ def _restore_player_topbar(module):
     _PATCHED.add(key)
     Page = module.PlayerPage
 
-    # These are the methods changed by the post-139 top-bar experiments.
-    # Restoring their core definitions also means _build_top_bar creates the
-    # original child/native bar instead of the 1.10.146 top-level Qt.Tool.
+    # windows/player.py is byte-for-byte unchanged from the 1.10.139 baseline.
+    # These are precisely the methods changed by the later top-bar experiments.
+    # Putting their original definitions back means the bar is once again the
+    # normal 1.10.139 child/native control surface; no Qt.Tool promotion, mask,
+    # follower, z-order timer, or post-build restyling remains in the hot path.
     for name in ("__init__", "_build_top_bar", "_layout_overlays",
                  "_wake_controls", "_pointer_in", "_widget_rect", "_veil"):
         current = getattr(Page, name, None)
@@ -99,13 +103,14 @@ def _patch_details(module):
 
         if chosen is mark:
             if already:
-                # N and every chapter AFTER/newer than N become unread.
+                # N and EVERY newer chapter become unread. Do not derive this
+                # from the row index: the list is newest->oldest and providers
+                # may contain gaps/duplicates, while progress is numeric.
                 affected = [v for v in values if v >= number]
                 older = [v for v in values if v < number]
                 target = max(older) if older else 0.0
                 read = False
             else:
-                # Contiguous read boundary: N and every older chapter are read.
                 affected = [v for v in values if v <= number]
                 target = number
                 read = True
@@ -121,10 +126,9 @@ def _patch_details(module):
             return
 
         self._mark_history([history.chapter_key(v) for v in affected], read)
-        if self.entry.get("id"):
-            if not correct_progress(self.entry, chapter=target):
-                module.show_toast(self, "Could Not Save That")
-                return
+        if self.entry.get("id") and not correct_progress(self.entry, chapter=target):
+            module.show_toast(self, "Could Not Save That")
+            return
         self._fill_rows()
 
     Page._chapter_menu = chapter_menu
@@ -168,10 +172,35 @@ def _patch_reader(module):
     Page._mark_chapter = mark
 
 
+class _DetailsLoader(importlib.abc.Loader):
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def create_module(self, spec):
+        create = getattr(self._wrapped, "create_module", None)
+        return create(spec) if create else None
+
+    def exec_module(self, module):
+        self._wrapped.exec_module(module)
+        _patch_details(module)
+
+
+class _DetailsFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != "windows.details":
+            return None
+        # Ask the standard PathFinder directly so this finder cannot recurse.
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is None or spec.loader is None or isinstance(spec.loader, _DetailsLoader):
+            return spec
+        spec.loader = _DetailsLoader(spec.loader)
+        return spec
+
+
 def _chain():
     from . import requested_fixes_patch as requested
-    previous_player = requested._patch_player
 
+    previous_player = requested._patch_player
     def player(module):
         previous_player(module)
         _restore_player_topbar(module)
@@ -181,27 +210,25 @@ def _chain():
     if loaded is not None:
         _restore_player_topbar(loaded)
 
-    # Details is normally imported before this final installer. Patch it now,
-    # and use a small import hook fallback only through its normal module load.
-    details = sys.modules.get("windows.details")
-    if details is not None:
-        _patch_details(details)
-    reader = sys.modules.get("windows.reader")
-    if reader is not None:
-        _patch_reader(reader)
-
-    # requested_fixes_patch already owns reader's lazy hook.
+    # Reader already has a shared lazy hook; chain the numeric unread boundary
+    # after the existing newest->oldest presentation patch.
     previous_reader = requested._patch_reader
     def reader_patch(module):
         previous_reader(module)
         _patch_reader(module)
     requested._patch_reader = reader_patch
 
-    # Details has no shared helper hook; patch through an import wrapper by
-    # chaining builtins only if it has not loaded yet would be too invasive.
-    # In Atomic startup, windows.details is loaded before a details page can be
-    # opened, so the current-module patch above is the normal path. Also expose
-    # this function for main/details loaders to call if needed.
+    reader = sys.modules.get("windows.reader")
+    if reader is not None:
+        _patch_reader(reader)
+
+    # Details may load after helpers bootstrap, so patch immediately when it is
+    # already present and otherwise install one narrow one-shot loader wrapper.
+    details = sys.modules.get("windows.details")
+    if details is not None:
+        _patch_details(details)
+    elif not any(isinstance(f, _DetailsFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _DetailsFinder())
 
 
 def install():
