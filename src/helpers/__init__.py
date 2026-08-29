@@ -4,9 +4,12 @@
 # This must run before PyQt is imported by main.py, otherwise a spawned mpv
 # worker can recurse into the full GUI instead of diverting into spawn_main.
 # helpers is imported before PyQt in main.py, so this is the earliest safe hook.
-import multiprocessing as _multiprocessing
-
-_multiprocessing.freeze_support()
+# In a normal source run Python's own spawn bootstrap already owns this path;
+# forcing freeze_support again from an imported worker module can re-enter it.
+import sys as _sys
+if getattr(_sys, "frozen", False):
+    import multiprocessing as _multiprocessing
+    _multiprocessing.freeze_support()
 
 import os
 
