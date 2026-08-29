@@ -127,6 +127,14 @@ from . import regression_fixes_146 as _regression_fixes_146
 
 _regression_fixes_146.install()
 
+# 1.10.147: keep torrent bandwidth locked to only frame-one reader/index pieces
+# until a decoded frame really appears; do not let a resume band compete with
+# startup. Reused torrents also drop stale resume byte state, and a saved seat is
+# checked against the actual loaded duration before any resume seek can reach EOF.
+from . import regression_fixes_147 as _regression_fixes_147
+
+_regression_fixes_147.install()
+
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
 from . import development_version_patch as _development_version_patch
