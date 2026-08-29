@@ -84,6 +84,7 @@ _discover_reading_search_patch.install()
 # Typography/source coverage fixes are independent of scroll rendering.
 from . import typography_motion_patch as _typography_motion_patch
 
+typography_motion_patch = _typography_motion_patch
 _typography_motion_patch.install()
 
 from . import source_coverage_patch as _source_coverage_patch
@@ -127,10 +128,8 @@ from . import regression_fixes_146 as _regression_fixes_146
 
 _regression_fixes_146.install()
 
-# 1.10.147: keep torrent bandwidth locked to only frame-one reader/index pieces
-# until a decoded frame really appears; do not let a resume band compete with
-# startup. Reused torrents also drop stale resume byte state, and a saved seat is
-# checked against the actual loaded duration before any resume seek can reach EOF.
+# 1.10.147 retains its safe stale-resume cleanup and actual-duration EOF guard.
+# Its strict startup-priority override is deliberately undone by 1.10.149 below.
 from . import regression_fixes_147 as _regression_fixes_147
 
 _regression_fixes_147.install()
@@ -142,6 +141,14 @@ _regression_fixes_147.install()
 from . import regression_fixes_148 as _regression_fixes_148
 
 _regression_fixes_148.install()
+
+# 1.10.149: restore the known-good pre-147 torrent opening policy (verified
+# against 1.10.133). Reader/index bands remain urgent, but the rest of the
+# selected episode stays fetchable at priority 1 so an unexpected mpv Range
+# request cannot deadlock first-frame startup behind a priority-0 piece.
+from . import regression_fixes_149 as _regression_fixes_149
+
+_regression_fixes_149.install()
 
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
