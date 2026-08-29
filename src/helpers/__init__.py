@@ -111,6 +111,14 @@ from . import regression_fixes_144 as _regression_fixes_144
 
 _regression_fixes_144.install()
 
+# 1.10.145 follow-up: actually apply the live top-bar clip at first frame,
+# remove resume-only startup waits, keep Settings Cancel from rebuilding the
+# page behind it, and give Skip Intro / Next Episode the same deep-teal action
+# colours as Continue Watching. No size or scroll changes.
+from . import regression_fixes_145 as _regression_fixes_145
+
+_regression_fixes_145.install()
+
 # Final identity must run after all runtime patches because some older modules
 # also set APP_VERSION.
 from . import development_version_patch as _development_version_patch
