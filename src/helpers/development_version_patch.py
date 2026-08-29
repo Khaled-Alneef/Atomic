@@ -23,13 +23,11 @@ def install():
     regression_fixes_155.install()
 
     from . import updater
-    # 1.10.160 deliberately restores the exact 1.10.158 Home/Tracker scrolling
-    # behavior after the 1.10.159 error-distributed integer quantizer A/B was
-    # reported even less smooth. The moving QWidget snapshot compositor remains
-    # blocked on Home/Discover/Saved/History because that path caused visible
-    # card corruption; their next smoothness step must be live Qt Quick content,
-    # not another integer-scroll timing experiment.
-    updater.APP_VERSION = "1.10.160"
+    # 1.10.161 restores the user-confirmed high-refresh Quick path on Home and
+    # Tracker, but freezes the real QScrollArea underneath it during momentum.
+    # Quick is the only moving presentation surface; the QWidget scrollbar is
+    # committed once at the end before the live page is revealed.
+    updater.APP_VERSION = "1.10.161"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
