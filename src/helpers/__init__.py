@@ -41,19 +41,17 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# mpv's Windows/NVIDIA stutter issue has multiple confirmations for Atomic's
-# exact sync mode (default video-sync=audio): swapchain-depth=1 removes visible
-# presentation stutter even when mpv reports no dropped frames. Apply that only
-# when an NVIDIA adapter is present; AMD/Intel keep mpv's normal default.
-from . import player_present_queue_patch as _player_present_queue_patch
-
-_player_present_queue_patch.install()
-
 # The visible top-left Back arrow leaves the player directly when the app is in
 # fullscreen. Outside fullscreen it keeps the normal panel/episode unwind path.
 from . import player_back_button_patch as _player_back_button_patch
 
 _player_back_button_patch.install()
+
+# The player's full-width upper native bar should not draw a dark frame. Keep
+# every existing label/button/pill unchanged and remove only the container fill.
+from . import player_top_bar_transparency_patch as _player_top_bar_transparency_patch
+
+_player_top_bar_transparency_patch.install()
 
 # Global search is one mixed, scrollable Watch + Read suggestion list under the
 # persistent field. Clicking a suggestion opens that title's episode/chapter
@@ -103,6 +101,7 @@ from . import development_version_patch as _development_version_patch
 _development_version_patch.install()
 
 # Intentionally NOT installed here:
+# - player_present_queue_patch (1.10.140 A/B: no visible improvement)
 # - player_native_present_patch (1.10.139 A/B: no visible improvement)
 # - player_callback_pacing_patch (1.10.136 A/B: no visible improvement)
 # - player_windows_pacing_patch (1.10.135 A/B: no visible improvement)
