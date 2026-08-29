@@ -1,5 +1,13 @@
 """Atomic helper package bootstrap."""
 
+# PyInstaller's Windows multiprocessing workers re-enter the frozen executable.
+# This must run before PyQt is imported by main.py, otherwise a spawned mpv
+# worker can recurse into the full GUI instead of diverting into spawn_main.
+# helpers is imported before PyQt in main.py, so this is the earliest safe hook.
+import multiprocessing as _multiprocessing
+
+_multiprocessing.freeze_support()
+
 import os
 
 os.environ.setdefault("QT_QPA_UPDATE_IDLE_TIME", "0")
@@ -41,13 +49,22 @@ from . import player_watch_threshold_patch as _player_watch_threshold_patch
 
 _player_watch_threshold_patch.install()
 
-# Player-only callback isolation: time-pos and demuxer-cache-time no longer
-# generate continuous python-mpv -> Python -> Qt callback traffic. They are
-# sampled at UI rate instead; renderer, D3D11, hwdec, sync and stream settings
-# are untouched. The previous DWM/MMCSS experiment is intentionally removed.
-from . import player_callback_pacing_patch as _player_callback_pacing_patch
+# Final player architecture on Windows: libmpv is spawned in a dedicated
+# process and controlled through a multiprocessing pipe while it renders into
+# the same native VideoSurface HWND. This removes Atomic's Python/Qt process from
+# mpv's decode/render/core scheduling without changing source URLs, D3D11,
+# hwdec, sync, subtitles or the visible player UI. If spawn fails, it falls back
+# to the previous in-process backend instead of making playback unavailable.
+from . import player_process_backend_patch as _player_process_backend_patch
 
-_player_callback_pacing_patch.install()
+_player_process_backend_patch.install()
+
+# The visible top-left Back control is itself native and shares the exact same
+# unwind path as Escape/mouse Back. This also avoids a non-native child being
+# lost in the native-window stack above mpv.
+from . import player_back_button_patch as _player_back_button_patch
+
+_player_back_button_patch.install()
 
 # Global search is one mixed, scrollable Watch + Read suggestion list under the
 # persistent field. Clicking a suggestion opens that title's episode/chapter
@@ -97,6 +114,8 @@ from . import development_version_patch as _development_version_patch
 _development_version_patch.install()
 
 # Intentionally NOT installed here:
+# - player_callback_pacing_patch (1.10.136 A/B: no visible improvement)
+# - player_windows_pacing_patch (1.10.135 A/B: no visible improvement)
 # - motion_patch (raster compositor)
 # - poster_grid_motion_patch
 # - high_refresh_live_pacing_patch
@@ -104,5 +123,5 @@ _development_version_patch.install()
 # - hero_pages_live_scroll_patch
 # - ultimate_scroll_patch
 # - poster_grid_quick_patch
-# Those are later experiments/layers and are not part of the previously
-# successful native-refresh fix.
+# Those are failed/older experiments and are not stacked under the current
+# stable UI/player path.
