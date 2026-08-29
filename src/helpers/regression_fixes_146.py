@@ -17,6 +17,7 @@ No scrolling, chapter, settings or unrelated player behaviour is changed.
 from __future__ import annotations
 
 import sys
+import time
 
 _INSTALLED = False
 _PATCHED = set()
@@ -40,9 +41,9 @@ def _override_old_topbar_helpers():
             bar.setAttribute(player.Qt.WidgetAttribute.WA_TranslucentBackground, True)
             bar.setStyleSheet("background: transparent; border: none;")
 
-            # The bar is now a true alpha surface.  These controls therefore
+            # The bar is now a true alpha surface. These controls therefore
             # need no resting rectangle of their own; their glyph/text pixels
-            # are what is painted.  Existing hover rules remain intact.
+            # are what is painted. Existing hover rules remain intact.
             for label in bar.findChildren(QLabel):
                 style = label.styleSheet() or ""
                 if "AtomicTopBarAlpha146" not in style:
@@ -216,7 +217,8 @@ def _patch_player(module):
             timer.stop()
         self._atomic_resume_job_146 = None
 
-    def _target_piece_ready(stream, seat):
+    def _target_piece_ready(stream):
+        """Whether the one piece containing the saved resume offset exists."""
         info_hash = str((stream or {}).get("info_hash") or "").strip().lower()
         if not info_hash:
             return True                 # HTTP/debrid: let mpv seek normally
@@ -225,9 +227,6 @@ def _patch_player(module):
             torrent = getattr(torrent_engine, "_torrents", {}).get(info_hash)
             if torrent is None:
                 return False
-            # Make sure an already-prepared URL and a fresh race behave the same.
-            torrent_engine.set_start_seconds(info_hash, float(seat))
-            torrent_engine.arm_start_band(info_hash)
             offset = getattr(torrent, "start_offset", None)
             if offset is None:
                 return False            # Cues still arriving; video keeps going
@@ -242,7 +241,10 @@ def _patch_player(module):
                "stream": dict(stream or {})}
         self._atomic_resume_job_146 = job
 
-        # Prime the saved range immediately, but DO NOT wait for it.
+        # Prime the saved range exactly once, immediately, but DO NOT wait for
+        # it. arm_start_band owns its own background retry when Cues are not yet
+        # readable; calling it from the 100ms poll would create duplicate retry
+        # threads fighting over the same torrent.
         info_hash = str(job["stream"].get("info_hash") or "").strip().lower()
         if info_hash:
             try:
@@ -266,7 +268,7 @@ def _patch_player(module):
                 if self._closing or current["run"] != self._run:
                     _stop_deferred_resume(self)
                     return
-                # First picture always wins.  This is the behaviour the old
+                # First picture always wins. This is the behaviour the old
                 # start=<seat> path made impossible.
                 if self._awaiting_first_frame:
                     return
@@ -275,17 +277,16 @@ def _patch_player(module):
                         seat_now - module.RESUME_LANDED_TOLERANCE_S:
                     _stop_deferred_resume(self)
                     return
-                if not _target_piece_ready(current["stream"], seat_now):
+                if not _target_piece_ready(current["stream"]):
                     return
 
                 _stop_deferred_resume(self)
-                # Now the exact target range exists.  Reuse the player's seat
+                # Now the exact target range exists. Reuse the player's seat
                 # reporting, but the seek itself is no longer allowed to gate
                 # the initial frame or cover the playing video while it waits.
                 self._resume_target = seat_now
                 self._seat_reported = None
-                self._seat_deadline = __import__("time").monotonic() \
-                    + module.SEAT_GIVE_UP_S
+                self._seat_deadline = time.monotonic() + module.SEAT_GIVE_UP_S
                 self._seat_timer.start()
                 if getattr(self, "_work_toast", None) is not None:
                     self._say_working(
@@ -306,7 +307,7 @@ def _patch_player(module):
             return old_load(self, stream, resume_at)
 
         # old_load decides whether to use mpv's blocking start=<seat> by asking
-        # _prime_seat.  Suppress that one internal read only.  The stream engine
+        # _prime_seat. Suppress that one internal read only. The stream engine
         # was already given the real seat by _prepare_stream_worker, and the
         # deferred poll above keeps it primed after the URL is handed to mpv.
         sentinel = object()
