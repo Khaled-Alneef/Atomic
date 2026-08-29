@@ -22,15 +22,14 @@ def install():
     from . import regression_fixes_155
     regression_fixes_155.install()
 
-    # 1.10.159 keeps Home/Tracker on one live QWidget surface (the snapshot
-    # compositor stays blocked there), but distributes their unavoidable whole-
-    # pixel scrollbar commits from the floating momentum residual instead of
-    # absolute round(position). This is scoped to >=150 Hz only.
-    from . import live_scroll_quantizer_patch
-    live_scroll_quantizer_patch.install()
-
     from . import updater
-    updater.APP_VERSION = "1.10.159"
+    # 1.10.160 deliberately restores the exact 1.10.158 Home/Tracker scrolling
+    # behavior after the 1.10.159 error-distributed integer quantizer A/B was
+    # reported even less smooth. The moving QWidget snapshot compositor remains
+    # blocked on Home/Discover/Saved/History because that path caused visible
+    # card corruption; their next smoothness step must be live Qt Quick content,
+    # not another integer-scroll timing experiment.
+    updater.APP_VERSION = "1.10.160"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
