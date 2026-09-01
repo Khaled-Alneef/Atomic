@@ -155,6 +155,24 @@ GitHub tags.
    Corollary: **say what was not measured.** "I did not exercise the
    browser launch live" is a finding. Silence about it is a claim.
 
+10. **A root-cause fix retires what it replaced - with his say-so.**
+    His rule, 31 August 2026: *"if we find a root changing fix, then
+    remove the old code if I approve"*. Two weeks of scroll work left
+    four superseded models layered on top of each other, and every later
+    measurement had to reason past all of them.
+
+    So when a fix changes the root rather than a symptom, say plainly
+    what it supersedes and ask. On approval, remove the old code **only
+    where nothing still uses it** - check by scanning the whole tree, and
+    re-check after each deletion, because removing one dead function
+    usually kills the constants it was the last caller of. Anything still
+    in use stays, and is said out loud: on the day this rule was written,
+    the painted scroll model was superseded on one page and still ran
+    every other, so only four members were genuinely dead.
+
+    Keep the measurement that justified the change in the code that
+    replaced it. The point is to remove dead machinery, not the evidence.
+
 ## Plan in named phases, always
 
 **The owner's ask, 23 August 2026**, after watching a run go past: *"the

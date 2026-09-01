@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.abc
 import importlib.machinery
+import os
 import sys
 import threading
 
@@ -174,18 +175,38 @@ def _meta_text(entry_type, year="", rating="", suffix=""):
     return "  •  ".join(bit for bit in bits if bit)
 
 
-def _cover_worker(module, query, token, url):
+def _cover_worker(module, query, token, url, title="", kind="", imdb_id=""):
+    """Resolve one suggestion's artwork, with every fallback the cards
+    already have.
+
+    cover_fetch.resolve, not a bare images.download - **the reading
+    sites' search cards carry no cover at all** (measured 30 August
+    2026: 8 of 8 Mangalek rows had an empty cover_url), so a Read
+    suggestion had literally nothing to download and stayed the grey
+    tile forever, which is the owner's "the watch and read images do
+    not load in the search suggestion list". resolve() asks the same
+    strictly-matched catalogues the tracker cards ask (MangaDex/AniList
+    for reading and anime, TMDB by IMDb id for video), so a coverless
+    row gets the art its card would have."""
     path = ""
     try:
-        from helpers import images
+        from helpers import cover_fetch
 
-        found = images.download(url, timeout=8)
+        found = cover_fetch.resolve(url, imdb_id=imdb_id, title=title,
+                                    kind=kind)
         if found:
             path = str(found)
     except Exception:
         module.logs.exception("Global search: suggestion artwork failed")
     finally:
         _visual_signals.ready.emit(query, token, path)
+
+
+def _cover_kind(entry_type, route):
+    if route == "manga":
+        return "reading"
+    return "anime" if str(entry_type or "").strip().lower() == "anime" \
+        else "video"
 
 
 def _search_worker(module, query):
@@ -399,10 +420,13 @@ def _patch_search(module):
         )
         content.addWidget(self._visual_status)
 
+        # **Left, not HCenter** - the horizontal position is computed in
+        # place() from the search field, and a centering flag would
+        # silently override it. See place() for the measurement.
         base.addWidget(
             self._visual_content,
             0,
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
         )
 
         self._seen = set()
@@ -434,8 +458,22 @@ def _patch_search(module):
             )
             item = QListWidgetItem(title)
             item.setData(Qt.ItemDataRole.UserRole, ("saved", page, entry))
-            add_item(self, item, title, meta, _local_art_path(entry))
+            art = _local_art_path(entry)
+            if art and not os.path.exists(art):
+                # A cover_path whose file the cache no longer holds is
+                # the trap cover_fetch's docstring records - treat it as
+                # absent so the fallback below can refill it.
+                art = ""
+            add_item(self, item, title, meta, art)
             self._seen.add(key)
+            if not art:
+                token = f"{query}\x1f{route}\x1f{title}\x1fsaved"
+                item.setData(_TOKEN_ROLE, token)
+                module.lookup_pool.submit_cover(
+                    _cover_worker, module, query, token,
+                    str(entry.get("cover_url") or ""), title,
+                    _cover_kind(entry_type, route),
+                    str(entry.get("imdb_id") or ""))
 
     def set_query(self, query: str):
         query = str(query or "")
@@ -499,8 +537,15 @@ def _patch_search(module):
 
             add_item(self, item, title, meta, path)
             self._seen.add(key)
-            if poster and not path:
-                module.lookup_pool.submit_cover(_cover_worker, module, query, token, poster)
+            # Whenever nothing is on disk yet - not only when a poster
+            # URL exists. A reading row usually has NO url at all (see
+            # _cover_worker), and the catalogue fallback is exactly for
+            # that case.
+            if not path:
+                module.lookup_pool.submit_cover(
+                    _cover_worker, module, query, token, poster,
+                    title, _cover_kind(entry_type, route),
+                    str(row.get("imdb_id") or ""))
 
         count = self._visual_list.count()
         self._visual_status.setText(
@@ -534,7 +579,8 @@ def _patch_search(module):
 
     def place(self):
         frame = self._window.geometry()
-        if self._anchor is not None and self._anchor.isVisible():
+        anchored = self._anchor is not None and self._anchor.isVisible()
+        if anchored:
             point = self._anchor.mapTo(self._window, QPoint(0, 0))
             top = frame.y() + point.y() + self._anchor.height() + 6
         else:
@@ -545,7 +591,32 @@ def _patch_search(module):
 
         usable = max(320, frame.width() - CONTENT_SIDE_MARGIN * 2)
         width = min(CONTENT_MAX_W, max(CONTENT_MIN_W, int(frame.width() * 0.56)))
-        self._visual_content.setFixedWidth(min(width, usable))
+        width = min(width, usable)
+        self._visual_content.setFixedWidth(width)
+
+        # **Centred under the field, not under the window.** The overlay
+        # spans the whole window (it carries the dim), and the content
+        # used to be centred inside it with AlignHCenter - which is only
+        # the same place when the search field happens to sit at the
+        # window's centre. It does not: the field lives in the title bar
+        # beside the window controls. Measured 30 August 2026 on the real
+        # window, panel centre minus field centre:
+        #
+        #     1600px window   -4px    (looks aligned)
+        #     full screen   -114px    (the owner's screenshot)
+        #
+        # so the bug only showed once the window got wide enough for the
+        # two centres to separate. Clamped to the window so a field near
+        # an edge cannot push the list off-screen.
+        left = (frame.width() - width) // 2
+        if anchored:
+            point = self._anchor.mapTo(self._window, QPoint(0, 0))
+            centred = point.x() + (self._anchor.width() - width) // 2
+            limit = max(0, frame.width() - width - CONTENT_SIDE_MARGIN)
+            left = max(min(centred, limit), min(CONTENT_SIDE_MARGIN, limit))
+        layout = self.layout()
+        if layout is not None:
+            layout.setContentsMargins(max(0, left), 0, 0, 0)
 
     def move_selection(self, delta):
         count = self._visual_list.count()

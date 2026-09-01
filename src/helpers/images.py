@@ -104,7 +104,20 @@ _ratio = None
 # rounded up to 1.5 and every tile was cut 44% larger than the screen
 # could show, which is memory spent on a downscale nobody sees. Every
 # Windows preset - 100/125/150/175/200% - lands on this step exactly.
-_RATIO_STEP = 0.25
+# **0.05, down from 0.25 - the owner's "the cards images in the home page
+# are blurry", 30 August 2026.** The coarse step was right while this
+# app's ratio *was* the Windows setting: 100/125/150/175/200% all land on
+# a quarter exactly, so nothing was ever rounded. It stopped being true
+# the day the app pinned one scale for every monitor (helpers/__init__):
+# the real ratio is now 1.1, `math.ceil` took that up to **1.25**, and
+# every tile was cut 14% larger than the surface it is drawn on and then
+# scaled back down by Qt. Measured in the running app - QScreen, QWindow
+# and QWidget all reported 1.1 while `images.device_ratio()` answered
+# 1.25 - and a downscale of a correctly cut tile is exactly the softness
+# he is describing. A twentieth keeps every Windows preset landing
+# exactly and lets 1.1 through unchanged; the cache cannot fragment over
+# it, because the app now has one ratio on every screen.
+_RATIO_STEP = 0.05
 _RATIO_MAX = 2.0
 
 

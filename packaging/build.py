@@ -103,6 +103,48 @@ def _ensure_pinned_libmpv():
     fetch_libmpv.ensure_pinned()
 
 
+
+def _ensure_webview2():
+    """Put Edge's WebView2 assemblies in vendor/, from the installed
+    pywebview.
+
+    Same arrangement as libmpv above and for the same reason: vendor/ is
+    gitignored, so a fresh clone has to be able to produce these rather
+    than carry them. They are three small files that ship inside the
+    pywebview wheel, and Atomic.spec lists them by literal path because
+    build.py verifies every datas entry with `ast` and cannot follow a
+    call into site-packages.
+
+    Not fatal when they are missing: helpers/webview2_host reports itself
+    unavailable and Home and Discover fall back to their Qt classes, so
+    the build is a working app either way.
+    """
+    target = PACKAGING_DIR.parent / "vendor" / "webview2"
+    wanted = ("Microsoft.Web.WebView2.Core.dll",
+              "Microsoft.Web.WebView2.WinForms.dll",
+              "WebView2Loader.dll")
+    if all((target / name).is_file() for name in wanted):
+        return
+    try:
+        import webview
+        lib = Path(webview.__file__).parent / "lib"
+    except Exception:
+        print("pywebview is not installed - Home and Discover will use Qt.")
+        return
+    sources = {
+        "Microsoft.Web.WebView2.Core.dll": lib / "Microsoft.Web.WebView2.Core.dll",
+        "Microsoft.Web.WebView2.WinForms.dll": lib / "Microsoft.Web.WebView2.WinForms.dll",
+        "WebView2Loader.dll": lib / "runtimes" / "win-x64" / "native" / "WebView2Loader.dll",
+    }
+    target.mkdir(parents=True, exist_ok=True)
+    for name, source in sources.items():
+        if not source.is_file():
+            print(f"WebView2: {source.name} not found in pywebview.")
+            return
+        shutil.copy2(source, target / name)
+    print(f"Vendored WebView2 assemblies into {target}")
+
+
 def _resolve(node, known):
     """A spec-file expression as a string, or None if it isn't one this
     understands - a literal, a name assigned earlier, or os.path.join of
@@ -291,6 +333,7 @@ def main():
     # before the spec validates vendor/libmpv-2.dll so an old nightly copy is
     # replaced instead of silently becoming part of the exe.
     _ensure_pinned_libmpv()
+    _ensure_webview2()
     _ensure_pyinstaller()
     # Read before building: a spec this can't parse is a problem to hear
     # about now, not after a two-minute build.

@@ -31,7 +31,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import (
@@ -40,7 +40,7 @@ from . import (
     updater,
 )
 from .widgets import (confirm, finish_toast, frameless_dialog, inform,
-                      scroll_area, show_toast, smooth_combo,
+                      show_toast, smooth_combo,
                       smooth_scrolling, use_hover_cursor)
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
@@ -460,6 +460,39 @@ class _NoScrollList(QListWidget):
         return
 
 
+def _plain_scroller(body: QWidget) -> QScrollArea:
+    """A Settings page that scrolls exactly the way Windows does.
+
+    **The owner's ask, 1 September 2026: "make scrolling in the settings
+    100% normal with no edits on notches".** So this is deliberately not
+    widgets.scroll_area, which installs the app's smooth-wheel model -
+    the per-notch distance, the glide and the pacing that the pages
+    want. A dialog is not a page: it is short, it is read rather than
+    browsed, and every one of those behaviours is felt as the settings
+    "not scrolling like everything else on the computer".
+
+    What is kept from that scroller is the one thing that was never
+    about notches: an **opaque** viewport. A transparent scroll body
+    denies Qt its blit path and makes it repaint every visible widget
+    every frame - measured on Home at 29.4ms per frame, 100% of them
+    over a 16.7ms budget, against 4.6ms and none once it had a ground.
+    That is a paint cost, not a wheel behaviour, and dropping it would
+    trade one complaint for a worse one.
+    """
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setWidget(body)
+    area.setStyleSheet(f"QScrollArea {{ background: {theme.BG}; border: 0; }}")
+    body.setAutoFillBackground(True)
+    palette = body.palette()
+    palette.setColor(body.backgroundRole(), QColor(theme.BG))
+    body.setPalette(palette)
+    area.viewport().setAutoFillBackground(True)
+    area.viewport().setPalette(palette)
+    return area
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -744,7 +777,7 @@ class SettingsDialog(QDialog):
             return
         self._built_pages.add(row)
         self.stack.widget(row).layout().addWidget(
-            scroll_area(self._page_builders[row]()))
+            _plain_scroller(self._page_builders[row]()))
 
     # ------------------------------------------------------------------
     def _build_general_page(self):

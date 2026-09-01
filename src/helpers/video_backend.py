@@ -247,6 +247,82 @@ def default_options() -> dict:
     }
 
 
+# **True from the first mpv core, for the rest of the process** - read by
+# helpers.widgets to choose the scroll clock. See the note below for what
+# it is compensating for and how that was measured.
+core_created = False
+
+
+# **Creating an mpv core costs this process two thirds of its paint rate,
+# permanently, and nothing here can prevent it.** Measured 30 August 2026
+# against the owner's standing report - "when I enter the player then
+# leave it, the whole app scrolling becomes low on FPS".
+#
+# Reproduced on the real window, counting the scroll body's own paints
+# during an identical wheel glide:
+#
+#     clean process                    135-146 paints/s
+#     after one mpv core exists         45-51 paints/s
+#     after that core is terminated     46-51 paints/s   (never recovers)
+#
+# The scroll position tracks the paints exactly - 4px steps become 11px -
+# so this is the whole of what "low FPS" means here.
+#
+# **What it actually is, found 31 August 2026: Qt's timers, and only
+# Qt's timers.** Painting is not the victim - driving `update()` in a
+# tight loop gives 405/s before an mpv core and 378/s after, and
+# `repaint()` 443 against 389. What collapses is timer delivery:
+#
+#     clean       QTimer precise 248/s   coarse 246/s   py thread 227/s
+#     mpv alive   QTimer precise  93/s   coarse  96/s   py thread 226/s
+#
+# A plain Python thread keeps perfect time while Qt's own timers lose
+# two thirds of their firings, so this is not the OS clock, not thread
+# scheduling and not the GPU - it is the main thread's message loop,
+# which is where Qt timers live and where a Python thread does not.
+# `_Momentum` and the painted grids both advance on a QTimer, which is
+# why every surface in the app slowed down together.
+#
+# The answer was to move the scroll clock off Qt's timers and onto the
+# shared vblank ticker, which is a Python thread. That started here, as
+# a switch thrown by `core_created` above; since 31 August 2026 the
+# ticker is simply the default for every surface (helpers.widgets has
+# the evenness table that settled it), so this flag no longer gates
+# anything - it stays because "has an mpv core ever existed in this
+# process" is the first question any future measurement of this will
+# need to answer.
+#
+# What it is NOT, each eliminated by measurement rather than by argument:
+#
+#   * the render backend - d3d11, auto, angle, dxinterop and vo=direct3d
+#     all land on 45-46/s;
+#   * video at all - vo=null is 45/s;
+#   * audio - ao=null is 47/s, and vo=null+ao=null is 46/s;
+#   * the native child window - creating and destroying one without mpv
+#     leaves the rate at 123-124/s;
+#   * which window it draws into - mpv on its own top-level window is
+#     still 45/s;
+#   * python-mpv's event thread - start_event_thread=False is 45/s;
+#   * anything in the option table below - a bare MPV(wid=...) with no
+#     options at all is 48-50/s;
+#   * the system timer resolution - NtQueryTimerResolution reads 0.5ms
+#     before, during and after, and re-claiming timeBeginPeriod(1)
+#     changes nothing;
+#   * the screen's reported refresh - 240.00Hz throughout;
+#   * CPU starvation - the process is idle between paints;
+#   * DWM's MMCSS scheduling - DwmEnableMMCSS(FALSE) returns 0xd0000001
+#     and restores nothing.
+#
+# So it is something libmpv's core initialisation does to the process
+# that outlives the handle, and no configuration reaches it. The only
+# fix that can work is to stop hosting libmpv in the UI process - a
+# player child process rendering into its own window - which is an
+# architecture change, not a patch. Until then this is a known cost of
+# opening the player once per session, and anyone re-measuring scroll
+# smoothness must do it in a process that has never opened the player,
+# or the number is about this and not about their change.
+
+
 class PlayerError(Exception):
     """Playback failed in a way the UI should say out loud."""
 
@@ -269,9 +345,14 @@ def create(window_id: int, **overrides):
     options = default_options()
     options.update(overrides)
     try:
-        return _mpv.MPV(wid=str(int(window_id)), **options)
+        handle = _mpv.MPV(wid=str(int(window_id)), **options)
     except Exception as error:
         raise PlayerError(str(error)) from error
+    # See core_created below - the scroll clock changes the moment this
+    # is true, and it never goes back for the life of the process.
+    global core_created
+    core_created = True
+    return handle
 
 
 def version_info() -> dict:

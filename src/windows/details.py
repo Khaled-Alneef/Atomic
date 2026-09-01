@@ -71,7 +71,10 @@ MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
 # a badge on one row; the rest of the window belongs to the artwork.
 # Widened with the rows: the owner asked for larger text throughout this
 # list, and 12pt names in a 440px panel elided half of everything.
-PANEL_WIDTH = 490
+# 560, up from 490 - the owner's ask, 30 August 2026: "make the ep
+# list wider". The rows inside are a still, two lines of text and a
+# DONE badge, and at 490 the badge crowded the date line.
+PANEL_WIDTH = 560
 ROW_HEIGHT = 72
 
 # **The list rows are not all one shape any more** (the owner's ask, 22
@@ -3029,6 +3032,19 @@ class DetailsPage(GlassPage):
                 self._history_marks.difference_update(marks)
         except Exception:
             logs.exception("details page could not write history")
+        # A mark is a deliberate statement of where watching stands, and
+        # it must outrank any stored half-watched position - including
+        # for an unsaved title, which never reaches correct_progress (no
+        # id to write against) but still owns resume records by identity.
+        # Without this, Continue reopened the last episode *entered*
+        # regardless of the mark (player.clear_entry_resume has the whole
+        # story).
+        if not self._is_reading:
+            try:
+                from windows import player
+                player.clear_entry_resume(self.entry)
+            except Exception:
+                logs.exception("details page could not clear resume state")
 
     def _clear_video_progress(self):
         from helpers import storage
@@ -3041,6 +3057,13 @@ class DetailsPage(GlassPage):
                                  self.entry.get("id"), fields)
         except Exception:
             logs.exception("details page could not clear progress")
+        # Same rule as correct_progress: "nothing watched" is a deliberate
+        # statement, so no stored position may outrank it.
+        try:
+            from windows import player
+            player.clear_entry_resume(self.entry)
+        except Exception:
+            logs.exception("details page could not clear resume state")
 
     def _chapter_menu(self, event, number):
         """Right-click on a chapter row - the reading mirror of

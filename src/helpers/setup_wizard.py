@@ -150,9 +150,17 @@ class SetupWizard(QDialog):
         dots_row.setSpacing(6)
         dots_row.addStretch()
         self._dots = []
-        for _ in range(STEPS):
-            dot = QLabel("")
-            dot.setFixedHeight(DOT_HEIGHT)
+        # The hero's own pager pill, not a lookalike - the owner's ask,
+        # 30 August 2026: "make their transition exactly like the
+        # bullets in the main page banner". _HeroDash carries the grow/
+        # shrink tween and the length-lit gradient; reusing it is what
+        # makes "exactly" true by construction. Imported lazily: home
+        # imports helpers at module scope, so a top-level import back
+        # would be a cycle.
+        from windows.home import _HeroDash
+        for index in range(STEPS):
+            dot = _HeroDash()
+            dot.clicked.connect(lambda step=index: self._go(step))
             dots_row.addWidget(dot)
             self._dots.append(dot)
         dots_row.addStretch()
@@ -208,15 +216,9 @@ class SetupWizard(QDialog):
         self._step = max(0, min(STEPS - 1, step))
         self.stack.setCurrentIndex(self._step)
         for index, dot in enumerate(self._dots):
-            active = index == self._step
-            dot.setFixedWidth(DOT_WIDTH_ACTIVE if active else DOT_WIDTH)
-            # Lit along its length, not top-down: at DOT_HEIGHT the
-            # vertical ramp's lip is well under a pixel and does not
-            # render at all (see theme.accent_gradient's note, and the
-            # hero dashes, which hit this first).
-            dot.setStyleSheet(
-                f"background: {theme.accent_gradient(0, 0, 1, 0) if active else theme.SURFACE_ACTIVE};"
-                f" border-radius: {DOT_HEIGHT // 2}px;")
+            # The hero pill animates itself - see _HeroDash.set_active,
+            # which tweens width and colour together.
+            dot.set_active(index == self._step)
         # Enabled rather than hidden: Back disappearing would shift Next
         # sideways under a pointer mid-click.
         self.back_btn.setEnabled(self._step > 0)

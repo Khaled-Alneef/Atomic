@@ -59,29 +59,41 @@ BASE_SCHEDULE_COVER = (96, 130)
 SCALE_SHARE = 0.35
 SCALE_MAX = 1.35
 
+# **How much bigger Home's own cards are than every other page's** - the
+# owner, 30 August 2026: *"KEEP THEM AS THEY ARE NOW (except the home
+# page make them a bit larger with the app)"*. Home is a short page of
+# few, large blocks; the catalogue pages are grids where the card size
+# is the column count.
+HOME_POSTER_BUMP = 1.10
+
 _scale = None
 
 
 def scale() -> float:
-    """How much bigger a card is on this screen than on a 1080p one.
+    """One card size on every screen - **1.0, always, since 30 August
+    2026.**
 
-    1.0 with no QApplication yet, and *not cached* in that case - the
-    first call that can see a screen is the one that decides."""
-    global _scale
-    if _scale is not None:
-        return _scale
-    try:
-        from PyQt6.QtGui import QGuiApplication
-        app = QGuiApplication.instance()
-        if app is None:
-            return 1.0
-        widest = max([s.availableGeometry().width() for s in app.screens()]
-                     or [BASELINE_WIDTH])
-    except Exception:
-        return 1.0
-    extra = max(0.0, widest - BASELINE_WIDTH) / float(BASELINE_WIDTH)
-    _scale = min(SCALE_MAX, 1.0 + extra * SCALE_SHARE)
-    return _scale
+    This used to grow the card with the widest attached screen's logical
+    width (the table in the module docstring), and that is exactly what
+    the owner then asked to stop: *"I did not like the sizes of
+    everything in the app changing from 1080P monitor to 2K monitor and
+    vice versa, make it the same size in all resolutions"*, and, the
+    next day, *"KEEP THEM AS THEY ARE NOW ... make sure that in 1080P
+    also it will be the exact same size"*. A screen-derived card size
+    cannot satisfy that by construction - it is a different number per
+    monitor, which is the complaint.
+
+    What replaces it is a size the app chooses once and everywhere,
+    scaled with the rest of the chrome by the app-wide QT_SCALE_FACTOR
+    (see helpers/__init__). On his 2K panel that lands 160 x 1.1 = 176
+    device pixels against the 179 the old width rule produced - the same
+    card, now the same on the 1080p panel too.
+
+    Kept as a function rather than deleted: `adopt()` and the sizing
+    helpers below are called from a dozen places, and the next person
+    asking "why is this fixed" needs to land on this note rather than on
+    a missing symbol."""
+    return 1.0
 
 
 def _sized(base):
@@ -126,11 +138,12 @@ def adopt():
     every page at the 1080p sizes it had before, which is the behaviour
     this whole module is an improvement on."""
     try:
-        if scale() <= 1.0:
-            return 1.0          # a 1080p screen gets exactly what it had
         poster = poster_size()
         hero = hero_cover_size()
         schedule = schedule_cover_size()
+        # Home's own, one step up - see HOME_POSTER_BUMP.
+        home_poster = (int(round(poster[0] * HOME_POSTER_BUMP)),
+                       int(round(poster[1] * HOME_POSTER_BUMP)))
 
         from helpers import widgets
         widgets.HERO_COVER_SIZE = hero
@@ -142,7 +155,7 @@ def adopt():
         tracker.DISCOVER_CARD_TEXT_WIDTH = poster[0] + 20 - 16
 
         from windows import home
-        home.POSTER_SIZE = poster
+        home.POSTER_SIZE = home_poster
         home.HERO_COVER_SIZE = hero
 
         from windows import link_grid

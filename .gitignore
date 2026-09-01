@@ -68,3 +68,21 @@ packaging/rd_token.txt
 # windows (packaging has no use for them; one got committed once).
 /events.jsonl
 *.jsonl
+
+# WebView2's own user-data folder. Edge creates it beside the exe the
+# first time a page is hosted (helpers/webview2_host) and fills it with
+# a browser profile - a cache, cookies, and a few thousand files. It is
+# per-machine state, never source.
+/Atomic.exe.WebView2/
+*.WebView2/
+
+# Vendored beside libmpv for the same reason: fetched, not written here.
+# Unlike libmpv these are small and the build needs them, so they stay
+# tracked - this line is only a reminder of where they came from.
+#   vendor/webview2/  <- tracked on purpose (packaging/Atomic.spec)
+
+# Run logs from driving the app during development.
+/debug.log
+/run_src.log
+/probe.log
+/cover.log

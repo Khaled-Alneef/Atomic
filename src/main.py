@@ -114,15 +114,44 @@ link_thumb_size = link_grid_module.THUMB_SIZE
 # button here, and the reader's and player's doors (reader.HOME_PAGE).
 HOME_PAGE_NAME = "home"
 
+# Home and Discover render in a WebView2 when this machine has one -
+# Edge's compositor rather than Qt's paint path, which is the owner's
+# "make the scrolling not use Qt" for these two pages. Everything else
+# is untouched, and a machine without the runtime keeps the Qt classes:
+# a blank page would be worse than the old scrolling.
+try:
+    from windows.web_pages import (WebDiscoverPage, WebHomePage,
+                                   available as _web_pages_ok)
+    _WEB_PAGES = _web_pages_ok()
+except Exception as _web_error:
+    # Said out loud, never swallowed: a silent fallback here looks
+    # exactly like the feature was never built, and cost an evening
+    # once already.
+    _WEB_PAGES = False
+    try:
+        from helpers import logs as _logs
+        _logs.info(f"web pages off: {type(_web_error).__name__}: "
+                   f"{str(_web_error)[:200]}")
+    except Exception:
+        pass
+
+try:
+    from helpers import logs as _logs
+    from helpers import webview2_host as _wv
+    _logs.info(f"web pages: enabled={_WEB_PAGES} "
+               f"host={_wv.available()} reason={_wv.unavailable_reason()[:120]}")
+except Exception:
+    pass
+
 PAGES = {
-    "home": HomePage,
+    "home": WebHomePage if _WEB_PAGES else HomePage,
     # No "anime" page: it merged into "series" (one watch page under the
     # camera glyph, the owner's ask). Anything still asking for it by
     # name - an old saved nav order, a stale history entry - resolves
     # through _page_name below rather than KeyErroring mid-navigation.
     # One Discover for both media - the sidebar's own row (see
     # nav_config.NAV_GROUPS).
-    "discover": DiscoverPage,
+    "discover": WebDiscoverPage if _WEB_PAGES else DiscoverPage,
     "manga": MangaPage,
     "series": SeriesPage,
     "games": GamesPage,
@@ -1939,6 +1968,10 @@ class MainWindow(QMainWindow):
         # changing the flag on a visible window re-creates it on
         # Windows, which would drop the geometry just restored onto it.
         window_chrome.make_frameless(self)
+        # And keep those bits across state changes: Qt recreates the
+        # native window on some transitions and takes them with it,
+        # which is why drag-to-top measured working and then stopped.
+        window_chrome.keep_snap_styles(self)
         # Edge-resize. On the application, not on the window: presses on
         # the perimeter land on whichever child covers it, so a filter
         # installed on the window never sees them. helpers/window_chrome
@@ -4180,6 +4213,17 @@ class MainWindow(QMainWindow):
         # screen in that state - see helpers/native_cursor.
         widget = QApplication.widgetAt(pos)
         if widget is not None:
+            # **A web page owns its own cursor.** Over a WebView2 child,
+            # widgetAt returns the Qt wrapper - whose cursor is the
+            # default arrow - while Edge has already set the pointer for
+            # whatever is under it. Enforcing Qt's answer here overwrote
+            # Edge's on every tick, which the owner saw as the banner's
+            # cursor flickering.
+            owner = widget
+            while owner is not None:
+                if getattr(owner, "owns_cursor", False):
+                    return
+                owner = owner.parentWidget()
             native_cursor.enforce(widget.cursor().shape())
 
     def _on_app_state_changed(self, state):
@@ -4234,6 +4278,18 @@ class MainWindow(QMainWindow):
             return
         if self.isMaximized():
             saved = app_settings.get_window_geometry()
+            # **Prefer where the window actually was**, which
+            # _remember_normal_rect keeps current, over the rectangle
+            # stored at the end of the last session. Without this the
+            # other half of the same bug survives a restart: maximizing
+            # on the second monitor re-saved the *old* rect mapped onto
+            # it, so the next launch un-maximized back to the position
+            # the window had two sessions ago.
+            live = getattr(self, "_restore_rect", None)
+            if live is not None and live.isValid() and live.width() > 0:
+                saved = {"x": live.x(), "y": live.y(),
+                         "width": live.width(), "height": live.height(),
+                         "maximized": bool(saved and saved.get("maximized"))}
             if saved:
                 kept = self._restored_rect_for_current_screen(
                     QRect(saved["x"], saved["y"],
@@ -4309,8 +4365,39 @@ class MainWindow(QMainWindow):
         if self._restore_rect is not None:
             self.setGeometry(self._restore_rect)
 
+    def _remember_normal_rect(self):
+        """Keep `_restore_rect` on where the window *actually is*, so
+        un-maximizing puts it back there.
+
+        **It used to be written once, at startup, and never again** -
+        `_restore_window_geometry` set it from the saved rectangle and
+        that was the only assignment. So the un-maximize fallback below
+        (and the fallback in `restore_from_maximised`) always aimed at
+        wherever the app had *opened*, not where the window was when it
+        was maximized. The owner's report, 28 August 2026: open on the
+        2560x1440 monitor, drag to the 1920x1080 one, maximize, restore -
+        and the window jumps back to the monitor it started on.
+
+        Only a genuinely normal window has a position worth keeping: a
+        maximized or snapped one is reporting the work area, and storing
+        that would make the restore rect the full screen and the restore
+        a no-op. `_looks_maximised` rather than `isMaximized` for the
+        same reason it is used everywhere else here - an Aero-snapped
+        window fills the screen without Qt calling it maximized."""
+        if self.isMinimized() or self.isFullScreen():
+            return
+        try:
+            if self._looks_maximised():
+                return
+        except (AttributeError, RuntimeError):
+            return
+        rect = self.geometry()
+        if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+            self._restore_rect = QRect(rect)
+
     def moveEvent(self, event):
         super().moveEvent(event)
+        self._remember_normal_rect()
         self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
 
     def closeEvent(self, event):
@@ -5145,6 +5232,7 @@ class MainWindow(QMainWindow):
         except Exception:
             logs.exception("sidebar fit failed")
         self._fit_current_page()
+        self._remember_normal_rect()
         self._geometry_save_timer.start(GEOMETRY_SAVE_DELAY_MS)
 
 
@@ -5380,7 +5468,8 @@ def main():
     # Off the UI thread and soft: see torrent_engine.warm.
     try:
         from helpers import torrent_engine
-        torrent_engine.prewarm()
+        if os.environ.get("ATOMIC_NO_TORRENT_PREWARM") != "1":
+            torrent_engine.prewarm()
     except Exception:
         logs.exception("Could not warm the torrent session")
     # The three overlay modules, imported now rather than inside the

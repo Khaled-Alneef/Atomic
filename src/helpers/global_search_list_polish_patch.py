@@ -176,13 +176,25 @@ def _poster_url(row):
     return ""
 
 
-def _art_worker(module, query, token, url, logical_size):
-    """Download + prewarm one suggestion image, then return it to Qt."""
+def _art_worker(module, query, token, url, logical_size,
+                title="", kind="", imdb_id=""):
+    """Resolve + prewarm one suggestion image, then return it to Qt.
+
+    cover_fetch.resolve rather than a bare download: **the reading
+    sites' search cards usually carry no cover at all** (measured 30
+    August 2026 - 8 of 8 Mangalek rows, empty cover_url), so a Read
+    suggestion had nothing to fetch and stayed the grey tile forever -
+    the owner's "the watch and read images do not load in the search
+    suggestion list". resolve() is the same guarded catalogue chain the
+    tracker cards use (MangaDex/AniList for reading and anime, TMDB by
+    IMDb id for video), so a coverless row gets its card's own art, and
+    a poster URL that refuses still falls through to a second source."""
     path = ""
     try:
-        from helpers import images
+        from helpers import cover_fetch, images
 
-        found = images.download(url, timeout=8)
+        found = cover_fetch.resolve(url, imdb_id=imdb_id, title=title,
+                                    kind=kind)
         if found:
             path = str(found)
             # Pillow-only decode/crop here means the UI callback normally only
@@ -331,18 +343,26 @@ def install():
 
             # _make_row may delete a corrupt cached image while decoding it.
             # Re-check the cache after insertion and queue exactly one fresh
-            # download when there is no valid file left.
-            if poster:
-                cached = images.cache_path_for_url(poster)
-                if not cached.is_file():
-                    global_search.lookup_pool.submit_cover(
-                        _art_worker,
-                        global_search,
-                        query,
-                        token,
-                        poster,
-                        (visual.THUMB_W, visual.THUMB_H),
-                    )
+            # resolve when there is no valid file left. **Whether or not the
+            # row carries a poster URL** - a reading row usually does not
+            # (see _art_worker), and the catalogue fallback exists for
+            # exactly that case.
+            cached = images.cache_path_for_url(poster) if poster else None
+            if cached is None or not cached.is_file():
+                kind = ("reading" if route == "manga"
+                        else ("anime" if entry_type.strip().lower() == "anime"
+                              else "video"))
+                global_search.lookup_pool.submit_cover(
+                    _art_worker,
+                    global_search,
+                    query,
+                    token,
+                    poster,
+                    (visual.THUMB_W, visual.THUMB_H),
+                    title,
+                    kind,
+                    str(row.get("imdb_id") or ""),
+                )
 
         count = self._visual_list.count()
         self._visual_status.setText(

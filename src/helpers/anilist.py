@@ -270,6 +270,40 @@ def fetch_next_episode(title: str, timeout: int = 8):
     }
 
 
+def anime_name_sets(title: str, timeout: int = 6):
+    """The names of every anime AniList's search finds for `title` - one
+    candidate-name list per hit - or **None when AniList could not be
+    asked at all**.
+
+    None and [] mean different things and the caller must keep them
+    apart: [] is AniList's real answer ("no anime is called that"),
+    None is silence - a timeout, a rate limit, a dead network - and
+    silence is no evidence either way. Discover's anime search filter
+    treats None as "leave the list as it was", because dropping every
+    row on a 403 would turn a rate limit into an empty section
+    (integrations.md: a source that is silently wrong is worse than no
+    source).
+
+    Synonyms are included on purpose. The season-matching rule that
+    bans them (the Go! Saitama trap) is about a synonym *stealing a
+    season's slot*; here the only question is whether any anime answers
+    to this name at all, and a synonym can only ever confirm that."""
+    title = (title or "").strip()
+    if not title:
+        return []
+    try:
+        body = _post(_AIRING_QUERY, {"search": title}, timeout)
+    except Exception:
+        return None
+    try:
+        media_list = (((body.get("data") or {}).get("Page") or {})
+                      .get("media")) or []
+        return [[name for name in _candidate_names(media) if name]
+                for media in media_list]
+    except Exception:
+        return None
+
+
 def fetch_external_urls(title: str, site_keyword: str, timeout: int = 8) -> list:
     """Every link AniList holds for `title` on the streaming site named
     by `site_keyword` ("crunchyroll", "netflix", ...), matched against

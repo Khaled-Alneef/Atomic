@@ -23,8 +23,8 @@ from PyQt6.QtWidgets import (
 # helpers.images) are already pulled by this module's own `images`
 # import - measured, not assumed, 22 August 2026.
 from helpers import (app_art, cover_fetch, game_art, game_launch,
-                     hero_art, images, launchers, lookup_pool, nav_config, storage,
-                     theme)
+                     hero_art, history, images, launchers, lookup_pool,
+                     nav_config, storage, theme)
 from helpers.widgets import (
     Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, _OpaqueGround,
     hero_logo_label,
@@ -37,7 +37,8 @@ from windows.tracker import (
     IN_PROGRESS_STATUSES, MANGA_TYPES, POSTER_SIZE, VIDEO_TYPES,
     _cover_kind,
     ContinueCover, _progress_data_file, attach_continue_cover,
-    format_chapter_progress, open_tracker_entry, shows_last_watched,
+    discover_entry, format_chapter_progress, open_tracker_entry,
+    shows_last_watched,
 )
 
 GREETING_REFRESH_MS = 60_000
@@ -363,6 +364,17 @@ class HomePage(GlassPage):
                 "Reading", self._build_poster_grid(reading_recent))))
 
         series_recent = self._recent_entries(self._home_series_entries)
+        if not series_recent:
+            # **Nothing saved does not mean nothing watched** - the
+            # owner, 31 August 2026: "I meant add it to the home page
+            # like the reading". The row was already here and had simply
+            # never had anything to draw: measured on his own data,
+            # series.json holds **0** entries while History holds 41, of
+            # which the watchable ones are what he has actually been
+            # watching (Attack on Titan S01E02, Reacher S01E02, The Angel
+            # Next Door S01E09). Reading looks populated beside it only
+            # because its eight titles happen to be saved ones.
+            series_recent = self._watching_from_history()
         if series_recent:
             pos = nav_config.nav_position("series")
             # "Watching", not the sidebar's "Watch": Home's rows keep the
@@ -469,6 +481,58 @@ class HomePage(GlassPage):
         the tracker pages give a long section."""
         return sorted(entries, key=lambda e: e.get("updated_at") or "",
                       reverse=True)
+
+    def _watching_from_history(self):
+        """The Watching row built out of History, for when series.json is
+        empty - see the call site for the counts that made this needed.
+
+        A saved entry is always preferred where one exists, so progress
+        marks and Save state stay real; only the rest are transient
+        records built from what History stored. That is the same rule
+        tracker._history_entry follows for the History tab, and it is
+        deliberately the same code shape - a second, subtly different
+        conversion is how two sources start disagreeing about one title.
+
+        Reading types are excluded: History holds those too (One Piece
+        sits in it at Ch 1190), and letting them through would put the
+        same titles in both Home rows.
+        """
+        try:
+            rows = history.recent(VIDEO_TYPES)
+        except Exception:
+            return []                       # a lost row, never a lost page
+
+        def key(title):
+            return " ".join(str(title or "").strip().lower().split())
+
+        saved = {key(entry.get("title")): entry
+                 for entry in self.series_entries}
+        out = []
+        for row in rows:
+            found = saved.get(key(row.get("title")))
+            if found is not None:
+                out.append(found)
+                continue
+            try:
+                entry = discover_entry(
+                    {"title": row.get("title"),
+                     "poster": row.get("cover_url"),
+                     "imdb_id": row.get("imdb_id")},
+                    row.get("type") or VIDEO_TYPES[0])
+            except Exception:
+                continue
+            # The site it was opened with, so resuming does not have to
+            # go looking for it again.
+            entry["url"] = row.get("url") or ""
+            entry["site_id"] = row.get("site_id")
+            entry["cover_path"] = row.get("cover_path")
+            if row.get("progress"):
+                entry["progress"] = row.get("progress")
+            # _recent_entries sorts on this; History's own stamp is
+            # last_opened, which is the same event by another name.
+            entry["updated_at"] = row.get("last_opened") or ""
+            out.append(entry)
+        return out
 
     def _recent_games(self):
         """Every game, most recently played first, then the ones never

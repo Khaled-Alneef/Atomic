@@ -1,209 +1,160 @@
-"""Atomic helper package bootstrap."""
+"""Atomic helper package bootstrap.
+
+**One finder per target module - never a second.** Python's import
+machinery uses the FIRST sys.meta_path finder that returns a spec, so
+when several patches each insert their own finder for the same module,
+only the one inserted last ever runs and the rest silently never apply.
+That is exactly what happened to windows.details: four finders
+(episode_watch_state_patch, regression_fixes_154, regression_fixes_155,
+development_version_patch's sharp stills) raced for it, only the newest
+won, and the cascade watched/read menus the owner asked for existed in
+the tree while the running app served the unpatched core methods -
+found 29 August 2026 by asserting the installed method names, not by
+reading the installs below, which all look correct. A new patch for an
+already-finder-hooked module must chain the owning patch's `_patch`
+(the windows.player patches show the shape) or be called from the
+winning finder (see development_version_patch for windows.details).
+"""
+
+# **Chromium's flags, and they must be set before Qt starts.** The
+# category grid renders in QtWebEngine (helpers/web_grid), and its
+# compositor otherwise caps itself well below a 240Hz panel - which is
+# the whole fault this move exists to leave behind. Unknown flags are
+# ignored by Chromium, so this is safe on any build.
+#
+# QtWebEngineWidgets is imported here for its side effect: Qt requires
+# it to be loaded before the QApplication exists, and importing it late
+# aborts the process with a message about shared OpenGL contexts.
+import os as _os
+
+# **One flag: smooth scrolling, which QtWebEngine does not give you.**
+# Measured 31 August 2026, and it is the whole of two weeks of "it jumps":
+# a wheel notch in the embedded grid produced **exactly two scroll events,
+# 60px apart, with nothing in between** - one discrete teleport per notch,
+# no animation. A browser carries the same notch across ~200ms of eased
+# frames, which is why Stremio looks like it does.
+#
+# It explains every number in the side-by-side: Atomic measured *more*
+# even than Stremio (9% against 22%) with **zero** lurches against its 11,
+# and still felt worse - because every notch being an identical single
+# jump is perfectly even and perfectly steppy at the same time.
+#
+# Chromium has this on by default; embedders do not get it. That is the
+# gap between "rendered by Chromium" and "behaves like Chromium".
+#
+# Nothing else is set here. An earlier version added --disable-gpu-vsync
+# and --disable-frame-rate-limit on the strength of a throttled
+# measurement, and unlocking presentation from the display refresh is
+# what tearing is - he felt that immediately too.
+# **And the animation has to run at the panel's rate.** Enabling smooth
+# scrolling alone gave him after-image traces immediately, and the frame
+# stamps say why: the eased notch arrived over 10 frames spaced 15.3,
+# 17.2, 15.8, 17.0, 16.8ms apart - **60fps on a 240Hz display**, so every
+# position is held for four refreshes and the eye sees four copies of it.
+# There was nothing to smear before because there was no animation at
+# all; adding one exposed the cap.
+#
+# --disable-frame-rate-limit lifts the compositor's own 60Hz ceiling.
+# **--disable-gpu-vsync is deliberately NOT here**: an earlier build set
+# both, and unlocking presentation from the refresh is what tearing is -
+# he felt that one immediately too. The cap and the sync are different
+# things, and only the cap is in the way.
+_os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS",
+    "--enable-smooth-scrolling --disable-frame-rate-limit")
+try:
+    from PyQt6 import QtWebEngineWidgets as _qt_web  # noqa: F401
+    # The cover scheme has to be declared before QApplication exists -
+    # see helpers/web_grid.COVER_SCHEME.
+    from .web_grid import register_cover_scheme as _register_covers
+    _register_covers()
+except Exception:
+    pass            # no web engine in this build - web_grid falls back
+
 
 import os
 
 os.environ.setdefault("QT_QPA_UPDATE_IDLE_TIME", "0")
 
-# Keep the later mixed-DPI/startup sharpness fix; it is independent of the
-# scrolling cadence change below.
-from . import startup_dpr_patch as _startup_dpr_patch
+# **Every monitor is scaled to the same logical width** - see
+# helpers/screen_scale, which carries the table of what was tried before
+# and why each earlier answer was the wrong reading of "the same size".
+# Short version: one factor for all screens makes a card the same number
+# of pixels everywhere, which on the smaller panel covers more of it and
+# reads as zoomed in ("the size of the 1080P now became larger"), and
+# Windows' own per-monitor factors are a step function that lands 6%
+# away from equal here. A factor of width/1920 per screen lays the app
+# out identically on both.
+#
+# PassThrough, because those factors are fractional (1.3333 for a
+# 2560-wide panel) and any rounding policy would quantise them straight
+# back to the mismatch this removes. QT_SCALE_FACTOR is deliberately not
+# set: it MULTIPLIES a live per-screen factor rather than replacing it
+# (measured 31 August 2026 - 1.25 gave 1.5625 on the 2K), so it would
+# undo the equality. QT_FONT_DPI likewise stays unset: it switches off
+# Qt's per-screen scaling altogether, which is the one thing this needs
+# to keep.
+#
+# All of it must happen before QGuiApplication exists, which importing
+# this package before main() guarantees.
+from . import screen_scale as _screen_scale
 
-_startup_dpr_patch._MOVE_SETTLE_MS = 80
-_startup_dpr_patch.install()
+_screen_scale.apply()
 
-# Native display cadence remains the baseline. On >=200 Hz PosterGrid surfaces
-# this installer also enables the contained QQuickWindow scene-graph path; lower
-# refresh displays and large grids keep their existing painter unchanged.
-from . import native_refresh_motion_patch as _native_refresh_motion_patch
+try:
+    from PyQt6.QtCore import Qt as _Qt
+    from PyQt6.QtGui import QGuiApplication as _QGuiApp
+    _QGuiApp.setHighDpiScaleFactorRoundingPolicy(
+        _Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+except Exception:
+    pass
 
-_native_refresh_motion_patch.install()
+# **Claim a 1ms timer for the life of the process.**
+#
+# Every smooth surface in this app schedules its next frame with a short
+# QTimer - `poster_grid._schedule_frame` asks for 0-4ms, `_Momentum`'s
+# fallback asks for one refresh - and Windows rounds a timer request up
+# to the **system-global** timer resolution, 15.6ms by default. That is
+# 64 frames a second on a 240Hz panel.
+#
+# poster_grid._hold_vblank already measured the consequence and named it
+# without being able to fix it: three identical runs of the same grid
+# gave 236.1, **65.2** and 235.2 steps a second - "whether this widget is
+# smooth depended on whether some other process on the machine happened
+# to raise the global timer resolution". Measured again 30 August 2026 on
+# the owner's manga grid: **89 committed positions a second** against a
+# 240Hz panel, in 5.7px steps, while the same grid dragged moved in 0.6px
+# steps.
+#
+# It also explains two of his reports that looked unrelated. A 240Hz
+# panel needs a 4.2ms timer and a 165Hz one needs 6.1ms, so the coarse
+# clock costs the faster panel more - his "the 165Hz 1080P monitor is
+# smoother than the 2K 240Hz". And **mpv raises this resolution itself
+# while it plays and drops it when it closes**, which is why the app
+# scrolled worse *after* visiting the player than before it: it was
+# borrowing mpv's clock and then losing it.
+#
+# timeBeginPeriod is per-process since Windows 10 2004 and is what every
+# browser and media player does. Released at exit for tidiness; Windows
+# reclaims it on process death either way.
+if os.name == "nt":
+    try:
+        import atexit as _atexit
+        import ctypes as _ctypes
 
-# QWidget QScrollAreas retain paint acknowledgement when they are the visible
-# presentation surface. The Quick compositor below temporarily bypasses this
-# gate while its own scene-graph surface is covering the page.
-from . import scroll_presentation_patch as _scroll_presentation_patch
+        _winmm = _ctypes.WinDLL("winmm")
+        if _winmm.timeBeginPeriod(1) == 0:      # TIMERR_NOERROR
+            _atexit.register(lambda: _winmm.timeEndPeriod(1))
+    except Exception:
+        pass
 
-_scroll_presentation_patch.install()
-
-# Ordinary QScrollArea pages still end at an integer QScrollBar position. On
-# high-refresh displays, qualifying pages can be cached once per wheel glide and
-# moved by a real QQuickWindow until momentum settles.
-from . import quick_scroll_patch as _quick_scroll_patch
-
-_quick_scroll_patch.install()
-
-# Home and Tracker's Discover/Saved/History surfaces are live QWidget trees that
-# continue changing while visible. A moving raster snapshot is the wrong
-# boundary for them and produced the reported card shaking/corruption. Keep the
-# snapshot compositor out of those pages while preserving the separate
-# PosterGrid scene-graph path used by the category grids.
-from . import quick_scroll_scope_patch as _quick_scroll_scope_patch
-
-_quick_scroll_scope_patch.install()
-
-# The libmpv Render API prototype replaces only the player's presentation
-# boundary: Qt owns an OpenGL FBO and mpv renders into it instead of owning a
-# child HWND/swapchain. It is intentionally opt-in with
-# ATOMIC_MPV_RENDER_API=1 until packaging supplies a no-Lua libmpv; standard
-# LuaJIT Windows builds have a confirmed non-recoverable MpvRenderContext crash.
-from . import player_render_api_patch as _player_render_api_patch
-
-_player_render_api_patch.install()
-
-# Episode stills follow the real watched state. Manual episode/chapter marks are
-# contiguous boundaries: marking watched/read fills everything before the
-# clicked item; marking unwatched/unread clears that item and everything after.
-from . import episode_watch_state_patch as _episode_watch_state_patch
-
-_episode_watch_state_patch.install()
-
-# Opening an episode records History but does not mark it watched. The automatic
-# watched mark is written only after the playhead reaches 85% of the duration;
-# end-file/source-switch events cannot force an early mark.
-from . import player_watch_threshold_patch as _player_watch_threshold_patch
-
-_player_watch_threshold_patch.install()
-
-# The visible top-left Back arrow leaves the player directly when the app is in
-# fullscreen. Outside fullscreen it keeps the normal panel/episode unwind path.
-from . import player_back_button_patch as _player_back_button_patch
-
-_player_back_button_patch.install()
-
-# Restore the player's old upper-bar surface while removing only the gray-like
-# resting frames behind its labels and buttons.
-from . import player_top_bar_transparency_patch as _player_top_bar_transparency_patch
-
-_player_top_bar_transparency_patch.install()
-
-# Global search is one mixed, scrollable Watch + Read suggestion list under the
-# persistent field. Clicking a suggestion opens that title's episode/chapter
-# list; Enter keeps running the full query on Discover.
-from . import global_search_visual_patch as _global_search_visual_patch
-
-_global_search_visual_patch.install()
-
-# Polish ONLY that suggestion QListWidget: per-pixel/slower mouse wheel,
-# app-theme frame, Movies-style animated accent hover, and pointing-hand cursor.
-# No other page/list receives these scroll or hover overrides.
-from . import global_search_list_polish_patch as _global_search_list_polish_patch
-
-_global_search_list_polish_patch.install()
-
-# The suggestion surface is a separate Tool window. Keep it attached to the
-# main window during move/resize (including monitor changes), and make any click
-# outside the actual list/search field leave global search completely.
-from . import global_search_interaction_patch as _global_search_interaction_patch
-
-_global_search_interaction_patch.install()
-
-# A full Enter search on the combined Discover page must include Reading too.
-# Configured reading providers stay as separate cards; MangaDex fills only
-# catalogue gaps so a title cannot falsely read as "Nothing found".
-from . import discover_reading_search_patch as _discover_reading_search_patch
-
-_discover_reading_search_patch.install()
-
-# Typography/source coverage fixes are independent of scroll rendering.
-from . import typography_motion_patch as _typography_motion_patch
-
-_typography_motion_patch.install()
-
-from . import source_coverage_patch as _source_coverage_patch
-
-_source_coverage_patch.install()
-
-from . import read_coverage_patch as _read_coverage_patch
-
-_read_coverage_patch.install()
-
-# The requested 29-Aug fixes are deliberately installed after typography and
-# source coverage: they soften only 2K+ UI text, cap the enlarged source waits,
-# remove the Settings Picture copy, fix reader chapter ordering/Continue/back,
-# shorten player initial buffering, and re-arm (not rewrite) scrolling after
-# immersive reader/player teardown.
-from . import requested_fixes_patch as _requested_fixes_patch
-
-_requested_fixes_patch.install()
-
-# Follow-up for the four remaining regressions: Reader Back no longer mutates
-# top-level geometry, Player's upper bar keeps one visual path across frame 1,
-# prepared streams do not sit at a fake 99% buffer stage, and a Discover result
-# query survives a mixed-DPI monitor rebuild. Scroll physics stay untouched.
-from . import regression_fixes_144 as _regression_fixes_144
-
-_regression_fixes_144.install()
-
-# 1.10.145 follow-up: actually apply the live top-bar clip at first frame,
-# remove resume-only startup waits, keep Settings Cancel from rebuilding the
-# page behind it, and give Skip Intro / Next Episode the same deep-teal action
-# colours as Continue Watching. No size or scroll changes.
-from . import regression_fixes_145 as _regression_fixes_145
-
-_regression_fixes_145.install()
-
-# 1.10.146: the clipped native-child top bar still left one dark rectangle per
-# control. Promote only that bar to a true per-pixel-alpha owned overlay. Resume
-# now opens the playable head immediately and jumps to the saved seat only when
-# that exact range exists, instead of blocking first picture on start=<seat>.
-from . import regression_fixes_146 as _regression_fixes_146
-
-_regression_fixes_146.install()
-
-# 1.10.147 retains its safe stale-resume cleanup and actual-duration EOF guard.
-# Its strict startup-priority override is deliberately undone by 1.10.149 below.
-from . import regression_fixes_147 as _regression_fixes_147
-
-_regression_fixes_147.install()
-
-# 1.10.148: a click on the video remains a click while the pointer is moving,
-# using the down-position rather than the release-position. Also stabilise the
-# promoted transparent top bar: correct global hit geometry, no raise-on-move
-# storm, arrow cursor on inert title/source labels, and stable pill hover paint.
-from . import regression_fixes_148 as _regression_fixes_148
-
-_regression_fixes_148.install()
-
-# 1.10.149: restore the known-good pre-147 torrent opening policy (verified
-# against 1.10.133). Reader/index bands remain urgent, but the rest of the
-# selected episode stays fetchable at priority 1 so an unexpected mpv Range
-# request cannot deadlock first-frame startup behind a priority-0 piece.
-from . import regression_fixes_149 as _regression_fixes_149
-
-_regression_fixes_149.install()
-
-# 1.10.150: Atomic's source preparation is the startup buffer. Do not let mpv
-# impose a second initial cache pause after that preparation finishes; resume
-# playback immediately when mpv reports its cache ready.
-from . import regression_fixes_150 as _regression_fixes_150
-
-_regression_fixes_150.install()
-
-# 1.10.151: completely separate resume work from first-frame preparation,
-# bypass mpv's duplicate cache for Atomic's localhost torrent stream, and reject
-# tail/index time-pos probes so they can never become a fake EOF first frame.
-from . import regression_fixes_151 as _regression_fixes_151
-
-_regression_fixes_151.install()
-
-# Final identity must run after all runtime patches because some older modules
-# also set APP_VERSION.
-from . import development_version_patch as _development_version_patch
-
-_development_version_patch.install()
-
-# Intentionally NOT installed here:
-# - player_present_queue_patch (1.10.140 A/B: no visible improvement)
-# - player_native_present_patch (1.10.139 A/B: no visible improvement)
-# - player_callback_pacing_patch (1.10.136 A/B: no visible improvement)
-# - player_windows_pacing_patch (1.10.135 A/B: no visible improvement)
-# - player_process_backend_patch (discarded before test)
-# - motion_patch (old QWidget raster compositor)
-# - poster_grid_motion_patch
-# - high_refresh_live_pacing_patch
-# - page_scroll_fixes_patch
-# - hero_pages_live_scroll_patch
-# - ultimate_scroll_patch
-# Those are failed/older experiments and are not stacked under the current
-# stable UI/player path. poster_grid_quick_patch is intentionally installed by
-# native_refresh_motion_patch for the live category-grid experiment.
+# Every Qt UI startup patch, in one module so that this package can be
+# imported without PyQt6 - see helpers/_ui_startup.py. A patch failing
+# for any other reason still raises, loudly, exactly as before: only a
+# missing PyQt6 is swallowed, and only the Qt-free web shell can produce
+# that.
+try:
+    from . import _ui_startup as _ui_startup      # noqa: F401
+except ModuleNotFoundError as _exc:
+    if not str(_exc.name or "").startswith("PyQt6"):
+        raise

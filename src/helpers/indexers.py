@@ -338,13 +338,25 @@ def episode_conflict(release_title: str, season, episode,
 def _strip_noise(title: str) -> str:
     """A release name with the parts that hold numbers-that-are-not-
     episodes taken out: resolution, year, bit depth, audio channels and
-    the CRC in brackets at the end."""
+    the CRC in brackets at the end.
+
+    **"Part N" and "Cour N" are on the list, and that is the owner's
+    "the sources plays a completely diff watchable" (30 August 2026).**
+    His own log has the mechanism: asked for Attack on Titan S1E2, a
+    lane repeatedly chose `...Movie - Part 2 Sing, Songs That Become Us
+    & Film Live...mkv` - the franchise's *concert film* - because the
+    loose-number pass read "Part 2" as episode 2, and the title guard
+    cannot help (it is genuinely an Attack on Titan release). The same
+    word already has this rule on the season side: anilist's
+    _SEASON_NUMBER_RE deliberately does not match "Part", because a
+    cour split is not a season - and a movie part is not an episode."""
     text = re.sub(r"\b(?:480|540|576|720|1080|1440|2160)p?\b", " ", title or "")
     text = re.sub(r"\b(?:19|20)\d{2}\b", " ", text)
     text = re.sub(r"\b(?:8|10|12)\s*bit\b", " ", text, flags=re.I)
     text = re.sub(r"\b(?:x|h)\.?26[45]\b", " ", text, flags=re.I)
     text = re.sub(r"\b(?:aac|flac|opus|eac3|ac3|dts)\s*\d(?:\.\d)?\b", " ",
                   text, flags=re.I)
+    text = re.sub(r"\b(?:part|cour)[\s._-]*\d{1,3}\b", " ", text, flags=re.I)
     text = re.sub(r"\[[0-9A-F]{8}\]", " ", text)
     return text
 

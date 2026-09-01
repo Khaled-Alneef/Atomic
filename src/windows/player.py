@@ -460,6 +460,24 @@ BAR_ALPHA = 180
 # ~78% still read solid on the near-black fill; below ~180 they start
 # going grey again, which is where this journey began.
 CONTROLS_VEIL_ALPHA = 200
+# **The top bar alone is opaque, and that is the owner's ask, 30 August
+# 2026: "make the upper bar while the video playing exactly the same as
+# when the video is still loading (logo is showing)."**
+#
+# Nothing about the bar changes between those two states - it is what is
+# *behind* it that does. SetLayeredWindowAttributes applies one uniform
+# alpha to the whole window, so at 200 the bar is 78% opaque and 22% of
+# whatever sits under it comes through: during loading that is the
+# near-black startup backdrop, so the bar reads as a solid dark strip;
+# once the picture starts it is the video, so the same bar suddenly
+# carries a moving image through it. Two different looks from one
+# constant.
+#
+# The lower controls keep 200 - that value is itself an explicit ask
+# ("the ui looks perfect ... make JUST the frame a bit more
+# transparent", against a 230 build), and the bar the owner is talking
+# about here is the upper one.
+TOPBAR_VEIL_ALPHA = 255
 # What the panels' scroll viewport paints as its ground - matched to
 # the bar gradient's body so rows scroll over a solid, blit-friendly
 # fill instead of transparency (see OverlayPanel).
@@ -1030,6 +1048,56 @@ def clear_resume(entry, season, episode):
         changed = True
     if changed:
         storage.save(RESUME_FILE, kept)
+
+
+def clear_entry_resume(entry):
+    """Forget every resume *position* this title holds, keeping releases.
+
+    Called when a person deliberately sets watch progress - the details
+    page's Mark as Watched/Unwatched, the player's own episode menu, a
+    typed correction. A half-watched position recorded before that
+    declaration now contradicts it: the owner marked episode 5 unwatched,
+    pressed Continue, and was taken back into the episode he *last
+    opened*, because resume_point reads only these records and orders
+    them by timestamp - it has no idea progress was just corrected.
+    After a correction, Continue must follow the declared progress, so
+    every stored position for the title is zeroed (same trim as
+    clear_resume: the remembered release survives, the position does
+    not).
+
+    Filtered on `entry_id`, which the subtitle-preference records in the
+    same file deliberately do not carry - see save_subtitle_choice."""
+    identities = set(entry_identities(entry))
+    if not identities:
+        return
+    try:
+        records = storage.load(RESUME_FILE, [])
+    except Exception:
+        return
+    changed = False
+    kept = []
+    for record in records:
+        if record.get("entry_id") not in identities:
+            kept.append(record)
+            continue
+        if not float(record.get("position") or 0.0):
+            kept.append(record)     # already offers nothing - no churn
+            continue
+        release = record.get("release")
+        if not release:
+            changed = True
+            continue                # nothing worth keeping - drop whole
+        trimmed = dict(record)
+        trimmed["position"] = 0.0
+        trimmed["duration"] = 0.0
+        trimmed["updated_at"] = storage.now_iso()
+        kept.append(trimmed)
+        changed = True
+    if changed:
+        try:
+            storage.save(RESUME_FILE, kept)
+        except Exception:
+            logs.exception("Could not clear the resume positions")
 
 
 def _mark_watched(entry, season, episode):
@@ -3547,6 +3615,10 @@ class PlayerPage(GlassPage):
                          "updated_at": storage.now_iso()})
                 except Exception:
                     logs.exception("Could not clear watch progress")
+                # This bypasses correct_progress, so it owes the same
+                # tidy-up: a stored half-watched position must not
+                # outrank "nothing watched" (see clear_entry_resume).
+                clear_entry_resume(self.entry)
         elif chosen is mark:
             if already:
                 # Everything before this episode stays seen; this one
@@ -4016,10 +4088,57 @@ class PlayerPage(GlassPage):
                 except Exception:
                     same_key = False
             if same_hash or same_key:
+                if not self._remembered_is_wanted(stream, playable):
+                    return False
                 if position:
                     playable.insert(0, playable.pop(position))
                 return True
         return False
+
+    def _remembered_is_wanted(self, remembered, playable) -> bool:
+        """Whether the release this episode was last watched with is
+        still the one to play.
+
+        **The owner, 31 August 2026: "when I play an ep by pressing
+        continue, it plays in 720p while the preferred playing resolution
+        in the settings is 1080P".** This is where that came from. The
+        hoist above matched on info hash alone, so whatever was watched
+        once became what Continue played for ever - and _on_streams'
+        guard could not catch it, because that one asks whether the
+        *batch* carries the preferred resolution, not whether the row
+        about to be played is it. A batch holding 1080p passed the guard
+        and then started the remembered 720p sitting at index 0.
+
+        So the memory is honoured only while it agrees with the setting.
+        A remembered release at the preferred resolution still leads -
+        which is what keeps a replay on the file already downloaded, and
+        with it the instant path (streams._prepare_with_own_engine). One
+        at any other resolution stands aside and the ordinary ranking
+        picks, which puts the preferred resolution first by definition.
+
+        Two cases deliberately keep the memory: "best" as a preference,
+        which names no particular resolution to prefer it over, and a
+        list carrying nothing at the preferred resolution at all - there
+        the remembered release is no worse than anything else on offer
+        and it is the one that is known to work.
+        """
+        try:
+            preferred = app_settings.get_preferred_resolution()
+        except Exception:
+            preferred = "1080p"
+        if not preferred or preferred == "best":
+            return True
+
+        def normalised(stream):
+            quality = str((stream or {}).get("quality") or "").lower()
+            return "2160p" if quality == "4k" else quality
+
+        if normalised(remembered) == preferred.lower():
+            return True
+        available = {normalised(s) for s in playable or ()
+                     if s.get("kind") != "drm"}
+        # Nothing better exists - keep the release that is known to play.
+        return preferred.lower() not in available
 
     def _playing_release(self) -> str:
         """The name of the release currently loaded, or "".
@@ -4896,6 +5015,20 @@ class PlayerPage(GlassPage):
                     title=wanted_title,
                     metadata_timeout=streams_module.SOLO_METADATA_TIMEOUT,
                     data_wait=streams_module.SOLO_DATA_WAIT,
+                    # The soft extension the race lanes already have.
+                    # The 4s+4s bound above was priced when metadata
+                    # took seconds of its own and the swarm connected
+                    # during it; the .torrent fast path now hands
+                    # metadata over instantly, so the whole peer
+                    # handshake has to fit inside the 4s data window -
+                    # and an in-player source switch started answering
+                    # "That Source Had No Peers" for swarms that were
+                    # merely still connecting (the owner, 30 August
+                    # 2026: switching inside the player fails where the
+                    # same source from the episode list works). A lane
+                    # that is actually receiving bytes at the soft
+                    # deadline keeps it, up to the ordinary wait.
+                    data_wait_max=streams_module.DATA_WAIT,
                     **_prime_kwargs(streams_module.prepare, prime))
             elif others and hasattr(streams_module, "prepare_fastest"):
                 stream = streams_module.prepare_fastest(
@@ -8496,10 +8629,11 @@ class PlayerPage(GlassPage):
             self._veil(self._episode_bar, BAR_ALPHA)
         if self._panel is not None:
             _raise_native(self._panel)
-        # Both bars wear the same low-alpha near-black veil now (see
-        # _build_top_bar for why the top bar's colour-keying is gone).
+        # The lower controls wear the low-alpha near-black veil; the top
+        # bar is opaque so it looks the same over a playing picture as it
+        # does over the loading backdrop - see TOPBAR_VEIL_ALPHA.
         self._veil(self.controls, CONTROLS_VEIL_ALPHA)
-        self._veil(self.top_bar, CONTROLS_VEIL_ALPHA)
+        self._veil(self.top_bar, TOPBAR_VEIL_ALPHA)
         # Deliberate, and reversed on every path that hides them again:
         # this is not the sticky-hand-cursor trap in .claude/rules/ui.md,
         # which is about a widget keeping a cursor it no longer earns.

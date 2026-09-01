@@ -340,13 +340,32 @@ def _patch(module):
         self._atomic_grid_quick = None
 
     def _qualifies_for_quick(self):
-        if type(self) is not PosterGrid:
-            return False
-        try:
-            screen = self.screen()
-            return screen is not None and float(screen.refreshRate()) >= 150.0
-        except Exception:
-            return False
+        """Always False - **the wheel now scrolls the way the scrollbar
+        drag does**, which is the owner's instruction of 30 August 2026:
+        *"make it exactly as if dragging the scrollbar since it has no
+        issues"*.
+
+        That sentence is also the diagnosis. This overlay was armed from
+        `patched_wheel` and from nowhere else: a wheel notch raised a
+        separate always-on-top QQuickWindow carrying a raster of the
+        *whole* grid and presented the glide through it, while a drag on
+        the painted scrollbar moved the ordinary widget. One path had a
+        second window in it and the other did not, so "the wheel is
+        glitchy and dragging is fine" was a description of the code.
+
+        It is also where the enlarged flash came from - his "sudden
+        appearance and disappearance super quickly of the images but
+        enlarged". The overlay's texture is built at the grid's device
+        ratio and shown at its logical size; with the app-wide 1.1 that
+        ratio is fractional, and any disagreement between those two
+        numbers is a scaled image for exactly the frames the overlay is
+        up, which is the beginning and end of every wheel glide.
+
+        The class below is left in place rather than deleted: it is the
+        only worked example of the scene-graph path in this codebase,
+        and the next person to try it needs the measurements above more
+        than they need the code."""
+        return False
 
     def patched_wheel(self, event):
         old_wheel(self, event)

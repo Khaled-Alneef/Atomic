@@ -1,30 +1,23 @@
-"""Qt Quick compositor for ordinary high-refresh QScrollArea wheel motion.
+"""Qt Quick compositor for QScrollArea wheel motion - **retired, kept inert.**
 
-QScrollBar stores an integer visual position. At high refresh rates a smooth
-wheel glide often advances by less than one logical pixel per refresh, so the
-QWidget path repeats a position and then jumps a full pixel. The successful
-165/240 Hz A/B proved that presenting the page through Qt Quick removes that
-final quantisation.
+QScrollBar stores an integer visual position, so at high refresh a smooth glide
+can advance less than one logical pixel per refresh and the QWidget path repeats
+a position then jumps a whole one. Presenting the page through a QQuickWindow
+removes that quantisation, and this module is that compositor.
 
-The compositor stays on the proven QQuickPaintedItem path. A custom QSG node
-experiment was deliberately removed after it crashed the frozen Windows build
-at startup: Python scene-graph resource ownership is not an acceptable runtime
-boundary here.
+It is switched off (`RETIRED`). What it cost was never sub-pixel smoothness but
+*entry*: a synchronous full-body QImage render plus a QQuickWindow creation on
+the first glide after every page build, measured at 28-101ms of stalled motion,
+against no gap over 16.7ms on the plain path. `can_use` carries the table. The
+owner reported this as glitching twice, against two successive versions of the
+compositor (the second being bounded supersampled strips re-captured mid-glide,
+clocked off frameSwapped - retired first, see `_is_target_page`).
 
-Home and Tracker are treated differently only at snapshot time. Their moving
-capture is a bounded strip around the viewport and, where the existing texture
-budget allows it, is rasterized at 1.25x-2x the native device-pixel density.
-QQuickPaintedItem's backing texture is enlarged by the same factor. The item
-still moves at the exact same fractional qreal Y positions and cadence; the
-extra samples only give text/card edges finer vertical phases while moving.
-Other QScrollArea pages keep the exact native-DPR renderer used by 1.10.161.
-
-For the affected Home/Tracker surfaces, the motion integrator is now clocked by
-QQuickWindow.frameSwapped instead of a second independent Qt timer. Movies and
-Anime's proven PosterGrid compositor already uses that ownership model: one
-presented frame advances one presentation step. The physics constants, impulse,
-friction, distance and floating-point position remain the existing _Momentum
-implementation; only the clock that calls it changes while Quick owns the page.
+Nothing is deleted, because two other patches key off a surface being active and
+a surface that never activates keeps them correctly out of the way:
+quick_scroll_scope_patch (which freezes the QWidget underlay during a glide) and
+scroll_presentation_patch. Flipping `RETIRED` re-enables the whole path for an
+A/B; beating the table in `can_use` on the same measurement is the bar.
 """
 
 from __future__ import annotations
@@ -32,6 +25,11 @@ from __future__ import annotations
 import math
 
 _INSTALLED = False
+
+# The compositor is off. See _QuickScrollSurface.can_use for the measured
+# table that retired it; flip this to re-enable the whole path for an A/B
+# without unpicking the module.
+RETIRED = True
 
 
 def install():
@@ -151,33 +149,93 @@ def install():
                 return 0.0
 
         def _is_target_page(self):
-            """Home and Tracker only; checked after final parenting exists."""
-            for start in (self.area, self.body):
-                node = start
-                seen = set()
-                for _ in range(32):
-                    if node is None or id(node) in seen:
-                        break
-                    seen.add(id(node))
-                    try:
-                        classes = type(node).__mro__
-                    except Exception:
-                        classes = ()
-                    for cls in classes:
-                        module = getattr(cls, "__module__", "")
-                        name = getattr(cls, "__name__", "")
-                        if module == "windows.home" and name == "HomePage":
-                            return True
-                        if module == "windows.tracker" and name == "TrackerPage":
-                            return True
-                    try:
-                        node = node.parentWidget()
-                    except (AttributeError, RuntimeError):
-                        break
+            """Always False - the Home/Tracker specialization is retired.
+
+            It selected Home and every TrackerPage descendant (Discover,
+            Saved, History and the genre pages included) for a bounded
+            strip snapshot at 1.25x-2x density, re-captured mid-glide
+            whenever the strip ran out, with the motion integrator
+            re-clocked from QQuickWindow.frameSwapped. The owner's
+            report, 29 August 2026: scrolling on exactly those pages is
+            *glitching* - and the mechanism carries the hitch in plain
+            sight: leaving the captured strip forces a synchronous
+            body.render() of several viewport-heights at up to 2x
+            density in the middle of a glide, and the final handoff
+            waits on an extra frame swap. Every page is back on the
+            full-body native-DPR snapshot below - the same path every
+            other QScrollArea page kept since 1.10.161, which is the
+            baseline that was never reported against. The strip/
+            supersample/frameSwapped members this used to drive stay
+            inert while this returns False."""
+            return False
+
+        def _inside_player(self):
+            """True for a scroll area living inside the video player.
+
+            The player's panels (episode list, sources, subtitles) come
+            through widgets.scroll_area like every page does, so a glide
+            there used to raise this overlay - a whole extra window - on
+            top of mpv's native child while it was presenting video, and
+            pay a synchronous body.render() snapshot per gesture with
+            the GPU already busy. That is the owner's "when I play any
+            watchable, the scrolling in the app becomes stuttering"
+            (29 August 2026). Measured: a playing mpv leaves the plain
+            momentum tick cadence untouched (p50 33.34ms both ways), so
+            the plain path is what the panels get - the sub-pixel
+            quantisation this overlay exists to hide is invisible on a
+            short panel list, and ui.md's rule stands: over the video,
+            native or nothing."""
+            node = self.area
+            for _ in range(32):
+                if node is None:
+                    return False
+                cls = type(node)
+                if (getattr(cls, "__module__", "") == "windows.player"
+                        and getattr(cls, "__name__", "") == "PlayerPage"):
+                    return True
+                try:
+                    node = node.parentWidget()
+                except (AttributeError, RuntimeError):
+                    return False
             return False
 
         def can_use(self):
+            # **The compositor is retired for QScrollArea pages.**
+            #
+            # It existed to remove sub-pixel quantisation at high refresh,
+            # and it buys that at the price of a synchronous full-body
+            # QImage render plus a QQuickWindow creation on the first
+            # glide of every page - and pages here rebuild from scratch
+            # on every visit, so "first glide" is not once, it is each
+            # time the page is opened. Measured 30 August 2026 on the
+            # real window (165Hz panel, gap between presented positions
+            # during one glide, two rounds of each, alternating):
+            #
+            #                     first glide   second glide
+            #     Discover  on      101.1ms         10.1ms
+            #     Discover  off       6.6ms         20.6ms
+            #     Saved     on       28.4ms          6.8ms
+            #     Saved     off       6.7ms          6.8ms
+            #
+            # A 101ms gap is ~17 missed frames in the middle of a glide,
+            # and it also ate the motion it stalled (827px travelled
+            # against 1122px for the same input with the overlay off).
+            # That is the owner's "the scrolling in the Home, Discover,
+            # Saved and History and the same generes pages are
+            # glitching", reported twice against two different versions
+            # of this compositor. The plain QWidget path produced no gap
+            # over 16.7ms in any run.
+            #
+            # Left inert rather than deleted: quick_scroll_scope_patch
+            # and scroll_presentation_patch both key off a surface being
+            # active, and a surface that never activates keeps them
+            # correctly out of the way. Any future attempt has to beat
+            # the table above on the same measurement.
+            if RETIRED:
+                return False
             if self._screen_rate() < self.HIGH_REFRESH_HZ:
+                return False
+            if self._inside_player():
                 return False
             if not self.area.isVisible() or not self.body.isVisible():
                 return False

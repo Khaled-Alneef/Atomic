@@ -34,11 +34,19 @@ error string, and the player says so.
 import os
 import re
 import shutil
+import socketserver
 import tempfile
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# **Imported here, on the main thread, and not left to the worker.** See
+# _LocalHTTPServer for the crash this is the second half of: the codec
+# registry resolves `encodings.idna` lazily, and the first thing that
+# ever asked for it was a background thread during startup. Paying the
+# import here means no thread can be the one to trigger it.
+import encodings.idna        # noqa: F401  (imported for its side effect)
 
 from . import logs
 
@@ -148,6 +156,86 @@ def _maybe_save_session_state():
         # Throttle failures like successes - a session that cannot
         # answer once should not be asked again every second.
         _state_saved_at = now
+
+
+# **Fast-resume, so a replay does not re-hash what is already on disk.**
+# The owner, 31 August 2026: "instant for the videos started watching
+# already before". Measured on Attack on Titan S01E02, the same episode
+# played twice in one session: sources came back in 0.17s (already
+# cached) and the picture still took **9.06s**, of which **8.4s was
+# prepare** - on a release whose pieces were sitting in the cache from
+# the play four seconds earlier.
+#
+# Nothing was re-downloaded. libtorrent simply does not know the files
+# are good: added without resume data it re-checks them piece by piece
+# before `have_piece` answers True for anything, and until then
+# await_start sees no data and waits. Saving what libtorrent already
+# knows - which pieces verified - and handing it back on the next add
+# skips that check entirely.
+#
+# Written beside the .torrent metadata cache and read the same way: a
+# missing or unparseable file is a normal state that costs one re-check,
+# never a failure to play.
+_RESUME_DIR = os.path.join(_CACHE_DIR, "resume")
+
+
+def _resume_path(info_hash: str) -> str:
+    return os.path.join(_RESUME_DIR, info_hash + ".resume")
+
+
+def _cached_resume(info_hash: str):
+    """Add-params carrying a previous session's verified pieces, or
+    None. Returns fully-formed params - resume data holds the save path
+    and the torrent's own identity, so it replaces the magnet parse
+    rather than decorating it."""
+    try:
+        path = _resume_path(info_hash)
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as handle:
+            blob = handle.read()
+        if not blob:
+            return None
+        return lt.read_resume_data(blob)
+    except Exception:
+        return None
+
+
+def _save_resume(info_hash: str, params) -> None:
+    """Write the resume params libtorrent handed back on a
+    save_resume_data alert. Atomic, for the reason the metadata cache
+    is: a truncated file that half-parses is worse than none."""
+    try:
+        os.makedirs(_RESUME_DIR, exist_ok=True)
+        blob = lt.write_resume_data_buf(params)
+        if not blob:
+            return
+        path = _resume_path((info_hash or "").lower())
+        temporary = path + ".part"
+        with open(temporary, "wb") as handle:
+            handle.write(blob)
+        os.replace(temporary, path)
+    except Exception:
+        pass
+
+
+def _request_resume_save(handle) -> None:
+    """Ask libtorrent to hand back this torrent's verified state. The
+    answer arrives as an alert - see _alert_pump."""
+    try:
+        if handle is None or not handle.is_valid():
+            return
+        status = handle.status()
+        if not status.has_metadata:
+            return
+        flags = 0
+        try:
+            flags = lt.save_resume_flags_t.save_info_dict
+        except Exception:
+            flags = 0
+        handle.save_resume_data(flags)
+    except Exception:
+        pass
 
 
 def _metadata_path(info_hash: str) -> str:
@@ -260,6 +348,14 @@ PRIMARY_READER = "primary"
 # session, not just at add(): see _tail_pieces, which every focus()
 # re-raises so a seek can never demote the index again.
 TAIL_BYTES = 4 * 1024 * 1024
+
+# How much of the head a *resume* primes, in pieces. Opening a file at a
+# seat reads the container header and then jumps, so the rest of the head
+# is bandwidth taken from the index and the seat itself - see
+# _apply_windows for the run where fetching 12MB of unwatched head left
+# the player with no picture at all. Two pieces is 4MB at the usual piece
+# size, comfortably past any Matroska/MP4 header.
+RESUME_HEADER_PIECES = 2
 
 # **Where playback is going to start, when that is not the beginning.**
 #
@@ -403,10 +499,36 @@ def _alert_pump():
             time.sleep(0.2)
             continue
         for alert in alerts:
+            # Verified-piece state coming back from a save_resume_data
+            # request - see _cached_resume for why it is kept.
+            if isinstance(alert, getattr(lt, "save_resume_data_alert", ())):
+                try:
+                    try:
+                        resume_hash = str(
+                            alert.handle.info_hashes().v1).lower()
+                    except AttributeError:      # libtorrent 1.x
+                        resume_hash = str(alert.handle.info_hash()).lower()
+                    _save_resume(resume_hash, alert.params)
+                except Exception:
+                    pass
+                continue
             if not isinstance(alert, lt.read_piece_alert):
                 continue
             try:
-                info_hash = str(alert.handle.info_hash()).lower()
+                # The *v1* hash, never the deprecated singular
+                # info_hash(): for a hybrid v1+v2 torrent that returns
+                # the truncated v2 hash, while every key in _torrents
+                # (and so in _reads) is the v1 hex the magnet named.
+                # Measured 29 August 2026 on a hybrid: the alert arrived
+                # with its buffer in under 0.1s and matched nothing, so
+                # every read_piece sat out its full 10s timeout and the
+                # local server streamed a fully-downloaded file at
+                # 0.10 MB/s - one dead decade per piece. That is
+                # "buffering finished but the video will not play".
+                try:
+                    info_hash = str(alert.handle.info_hashes().v1).lower()
+                except AttributeError:          # libtorrent 1.x
+                    info_hash = str(alert.handle.info_hash()).lower()
             except Exception:
                 continue
             key = (info_hash, int(alert.piece))
@@ -429,6 +551,25 @@ def _alert_pump():
 WINDOW_TICK_S = 1.0
 
 
+_RESUME_SAVE_INTERVAL_S = 20.0
+_resume_saved_at = {}
+
+
+def _maybe_save_resume() -> None:
+    """Ask each streaming torrent to hand back its verified state, at
+    most every _RESUME_SAVE_INTERVAL_S. The write happens when the alert
+    comes back (see _alert_pump); this only asks."""
+    now = time.time()
+    for key, torrent in list(_torrents.items()):
+        try:
+            if now - _resume_saved_at.get(key, 0.0) < _RESUME_SAVE_INTERVAL_S:
+                continue
+            _resume_saved_at[key] = now
+            _request_resume_save(torrent.handle)
+        except Exception:
+            continue
+
+
 def _window_ticker():
     """Keep every streaming torrent's window pointed at something that
     is actually missing. See _Torrent.refresh_windows for what this is
@@ -441,6 +582,12 @@ def _window_ticker():
         # inside means one status() probe per tick at most, and a save
         # every five minutes - see _maybe_save_session_state.
         _maybe_save_session_state()
+        # And each live torrent's verified pieces, on the same ride -
+        # see _cached_resume for the 8.4s replay this exists to remove.
+        # Throttled per torrent rather than globally: they start at
+        # different times, and the point is that whatever was watched is
+        # recorded before the app is closed.
+        _maybe_save_resume()
         for torrent in list(_torrents.values()):
             # A download owns its own priorities (see download_whole);
             # a torrent with no chosen file has nothing to point at.
@@ -846,7 +993,22 @@ class _Torrent:
             with open(self.file_path(), "rb") as handle:
                 handle.seek(offset)
                 data = handle.read(length)
-            return data if len(data) == length else None
+            if len(data) != length:
+                return None
+            # **A hole reads as zeros and passes every length check.**
+            # This fallback runs when read_piece could not answer for a
+            # piece have() says is there - and the usual reason for that
+            # is the one the comment above records, a piece completed but
+            # not yet flushed. Reading it then returns the sparse hole,
+            # full length, and zeros decode to macroblock garbage rather
+            # than failing: that is the picture in the owner's recording
+            # of 31 August 2026, and what clicking a minute the swarm has
+            # not reached produced. Refusing it makes the caller wait for
+            # the real bytes. A genuine all-zero read of a video is not a
+            # thing worth serving either.
+            if not data.strip(b"\x00"):
+                return None
+            return data
         except Exception:
             return None
 
@@ -1005,6 +1167,31 @@ class _Torrent:
             # couple of pieces are urgent, the rest of the window is
             # next, and everything outside it is not wanted at all.
             urgent_count = max(2, -(-URGENT_BYTES // self.piece_length()))
+            # **A resume does not read the head, so the head must not be
+            # allowed to spend the opening bandwidth.**
+            #
+            # Measured 30 August 2026, 217MB file, 2MB pieces, one seeder
+            # throttled to 1.5MB/s, resuming at 4:00 - the shipped order
+            # delivered head, head, head, then the index at 8.77s, by
+            # which time `await_start`'s 6s index wait had already given
+            # up and `await_start_band`'s 3s had expired with the seat's
+            # own piece still missing. mpv was handed the url with
+            # neither the index nor the data it was about to seek to, and
+            # **no picture arrived at all inside 90 seconds** while the
+            # startup gauge sat at 99% - the owner's "it does not play
+            # the video until it reaches 100%". The 99% is literally the
+            # head: 12MB nobody was going to watch, fetched in front of
+            # the two things playback was blocked on.
+            #
+            # Opening a file at a seat reads the header, the index, and
+            # the seat - and that is all. So while a resume is pending,
+            # the head keeps only the couple of pieces the container's
+            # header needs, and the seat band is ordered in front of the
+            # rest of the window below rather than behind it.
+            resuming = bool(self.start_seconds is not None
+                            and self._start_pieces())
+            if resuming:
+                urgent_count = min(urgent_count, RESUME_HEADER_PIECES)
 
             if self.want_whole:
                 # A *download* owns this torrent's priorities (see
@@ -1133,10 +1320,26 @@ class _Torrent:
             # the index is read, so 4MB of tail *is* the critical path,
             # and _tail_pieces goes empty the moment it lands, which
             # hands the bandwidth straight back to the head.
-            tail = self._tail_pieces()
-            for piece in tail:
+            # **Only the bytes the demuxer provably reads keep playback's
+            # own priority; the rest of the tail waits its turn.**
+            #
+            # Measured 30 August 2026, a swarm delivering 1.5x realtime -
+            # the owner's "it plays but stuck until it loads ~50%",
+            # reproduced: playback ran to 5.9s and then froze for **19.7
+            # seconds** while the torrent climbed 4.4% -> 11.5%. It was
+            # never short of bandwidth; it was short of the *next* piece,
+            # because the whole 4MB tail sat at priority 7 beside the
+            # head's urgent band and libtorrent split the line between
+            # them. `await_start` has already waited for
+            # INDEX_CRITICAL_BYTES of that tail before the url was
+            # handed over, so the remainder is readahead for a seek
+            # nobody has asked for yet - it stays wanted (4, above the
+            # ordinary fill) and stops competing with the picture.
+            critical = set(self._tail_pieces(INDEX_CRITICAL_BYTES))
+            for piece in self._tail_pieces():
                 if 0 <= piece < total_pieces:
-                    priorities[piece] = 7
+                    priorities[piece] = (7 if piece in critical
+                                         else max(priorities[piece], 4))
 
             # **And where playback is going to start**, when a resume
             # point says that is not the beginning. Full priority,
@@ -1242,21 +1445,48 @@ class _Torrent:
             # leaves the file's very first piece (deadline 200) ahead -
             # that one is what has_data() gates on, so putting the index
             # in front of it would move the wait rather than remove it.
-            for index, piece in enumerate(tail):
+            # **Back to front, and that is not a detail.** The tail is a
+            # range of pieces and this used to deadline them ascending,
+            # so the *last* piece of the file was fetched last of the
+            # three - while the last piece is precisely what the index
+            # actually needs: Matroska writes its Cues at the end of the
+            # file, and `await_start` asks `_tail_pieces(
+            # INDEX_CRITICAL_BYTES)`, i.e. the final 1MB alone.
+            #
+            # Measured 30 August 2026 (217MB file, 2MB pieces, one seeder
+            # at 1.5MB/s, resuming at 4:00): ascending order delivered
+            # tail piece 101 at 5.0s and had still not fetched piece 103
+            # fifteen seconds in, so the index wait timed out, the Cues
+            # were unreadable, `arm_start_band` could not turn 4:00 into
+            # a byte at all (start_offset stayed None) and the seat band
+            # was never armed. Reversed, the piece the check is waiting
+            # for is the first one asked for.
+            for index, piece in enumerate(reversed(tail)):
                 try:
                     handle.set_piece_deadline(piece, 300 + index * 120)
                 except Exception:
                     pass
-            # The resume band's deadlines sit behind the first few head
-            # pieces and ahead of the rest of the window. mpv reads
-            # roughly the first 20MB of the file (header plus attached
-            # fonts, measured), *then* jumps - so nothing between there
-            # and the resume offset is going to be read at all, and it
-            # should not be ordered in front of the place playback is
-            # about to start.
+            # **The resume band goes in front of the head window, not
+            # behind it.**
+            #
+            # It used to start at 1600 - behind every deadline the head
+            # window owns - on the reasoning that "mpv reads roughly the
+            # first 20MB of the file (header plus attached fonts),
+            # *then* jumps". That is what mpv does when it opens a file
+            # at the beginning and seeks afterwards. It is not what this
+            # player does: `_load_into_mpv` opens the file *at* the seat
+            # (`loadfile ... start=`), so those 20MB are never read, and
+            # ordering the seat behind them meant the one thing playback
+            # was blocked on came last. See the urgent-band note above
+            # for the run where no picture arrived at all.
+            #
+            # 600 puts it after the file's first piece (200) and the
+            # index (300-540) - both genuinely needed before the seat is
+            # useful - and ahead of the rest of the head window.
+            start_base = 600 if resuming else 1600
             for index, piece in enumerate(start_band):
                 try:
-                    handle.set_piece_deadline(piece, 1600 + index * 200)
+                    handle.set_piece_deadline(piece, start_base + index * 200)
                 except Exception:
                     pass
         except Exception:
@@ -1646,6 +1876,29 @@ def _names_episode(stem: str, season, episode) -> bool:
 _EXTRAS_RE = re.compile(r"\b(extras?|specials?|creditless|nc(?:op|ed)|"
                         r"bonus|sample|preview|pv|menu)\b", re.I)
 _LOOSE_NUM_RE = re.compile(r"(?:^|[\s\-_\[(])(\d{1,3})(?:v\d)?(?=[\s\-_\])]|$)")
+# "Part 2" is not episode 2 - it is how a film splits itself, and the
+# owner's Attack on Titan S1E2 ask was served the franchise's *concert
+# film* ("...Movie - Part 2 Sing, Songs That Become Us & Film Live")
+# because a loose read took the 2 (30 August 2026, his own log). Same
+# rule the season side has always had: anilist._SEASON_NUMBER_RE
+# deliberately does not match "Part". Masked before any loose-number
+# read; SxxExx statements are unaffected.
+_PART_NUM_RE = re.compile(r"\b(?:part|cour)[\s._-]*\d{1,3}\b", re.I)
+# A file that names itself a film, concert or compilation is not an
+# episode, whoever's fileIdx points at it - the trust the addon pointer
+# keeps for unnamed files does not extend to a file that positively
+# names itself something else. Word-bounded and deliberately short:
+# an episode *title* inside a file name ("Movie Night") is a real case,
+# which is why this is consulted only when nothing identifies the
+# episode and only to refuse, never to choose.
+_NON_EPISODE_RE = re.compile(
+    r"\b(movie|film|gekijou\s*ban|gekijouban|concert|compilation|"
+    r"recap|ova|oad)\b", re.I)
+
+
+def _blind_parts(stem: str) -> str:
+    """`stem` with the Part/Cour numbers masked out - see _PART_NUM_RE."""
+    return _PART_NUM_RE.sub(" ", str(stem or ""))
 
 
 def _loose_numbers(stem: str) -> set:
@@ -1656,7 +1909,7 @@ def _loose_numbers(stem: str) -> set:
     points somewhere the names disagree with: *does the file it chose
     claim to be a different episode?*"""
     out = set()
-    for found in _LOOSE_NUM_RE.findall(str(stem or "")):
+    for found in _LOOSE_NUM_RE.findall(_blind_parts(stem)):
         value = int(found)
         if 0 < value <= 999:
             out.add(value)
@@ -1690,7 +1943,7 @@ def _folder_episode_index(rows, episode):
     numbering wins by counting."""
     numbers = {}
     for index, _name, stem, _seasons in rows:
-        for found in _LOOSE_NUM_RE.findall(stem):
+        for found in _LOOSE_NUM_RE.findall(_blind_parts(stem)):
             value = int(found)
             if 0 < value <= 999:
                 numbers.setdefault(value, index)
@@ -1768,7 +2021,19 @@ def _identify_episode_file(info, season, episode, title=None):
     if named:
         best = next((row for row in named if _names_show(row[2], title)),
                     named[0])
-        return best[0], "folder"
+        # **An extras-named file is never strong enough to OVERRIDE the
+        # addon's pointer.** The owner's Attack on Titan S1E2, 30 August
+        # 2026, his own log: a 501-file Ultimate Collection names every
+        # season-1 file "[ITA BD Menu NN] ...", so the extras filter
+        # emptied `main`, the `or in_season` fallback put the menus
+        # back, "Menu 02" read as episode 2 inside a Season 01 folder -
+        # "folder" strength - and file 181, a BD menu loop, overrode the
+        # addon's correct fileIdx 5. A row that only exists because the
+        # extras filter had nothing left is weak evidence by
+        # construction, so it keeps "loose": enough to serve when the
+        # addon offers nothing, never enough to overrule it.
+        strength = "loose" if _EXTRAS_RE.search(best[1]) else "folder"
+        return best[0], strength
     if by_folder is not None:
         return by_folder, "folder"
 
@@ -1835,7 +2100,12 @@ def _plausible_episode(names, season, episode, title) -> bool:
         try:
             if indexers.episode_match(name, season, episode) is not None:
                 return True
-            if title and indexers.is_same_title(str(title), name):
+            # The show's name alone is enough only for a file that does
+            # not name itself something else: a franchise's concert film
+            # carries the title too, and it is not the episode
+            # (_NON_EPISODE_RE - the owner's S1E2, 30 August 2026).
+            if (title and indexers.is_same_title(str(title), name)
+                    and not _NON_EPISODE_RE.search(name)):
                 return True
         except Exception:
             return True
@@ -1944,11 +2214,32 @@ def _pick_file_chosen(info, season=None, episode=None, file_index=None, title=No
             # measured right for, six of six, and still owns.
             if named is not None and named != index and strength == "loose":
                 claimed = _loose_numbers(stem)
-                if claimed and int(episode) not in claimed:
+                # A loose candidate that names itself an extra (a BD
+                # menu, a creditless opening) never overrides - it is
+                # the demoted all-extras fallback from
+                # _identify_episode_file, and serving it over the
+                # addon's pointer is how a menu loop played for S1E2.
+                try:
+                    named_name = str(info.files().file_path(named))
+                except Exception:
+                    named_name = ""
+                if (claimed and int(episode) not in claimed
+                        and not _EXTRAS_RE.search(named_name)):
                     return named
             wrong_season = bool(seasons) and int(season or 0) not in seasons
             if wrong_season:
                 return named    # None when there is nothing better
+            # The pointer's trust covers files that say *nothing* - it
+            # does not cover a file that positively names itself a film
+            # or a concert when an episode was asked for. The owner's
+            # S1E2 played "...Movie - Part 2 Sing, Songs That Become Us
+            # & Film Live" on exactly this trust (30 August 2026, his
+            # log): nothing in that 4-file pack identified the episode,
+            # so the addon's fileIdx stood, and the title guard cannot
+            # object to a release that really is the same franchise.
+            if (season and episode and named is None
+                    and _NON_EPISODE_RE.search(stem)):
+                return None
             return index
     if named is not None:
         return named
@@ -2113,6 +2404,17 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
 
     try:
         params = lt.parse_magnet_uri(magnet)
+        # Verified pieces from a previous play, when there are any -
+        # see _cached_resume for what this is worth.
+        resumed = _cached_resume(info_hash)
+        if resumed is not None:
+            try:
+                for tracker in list(params.trackers or ()):
+                    if tracker not in (resumed.trackers or ()):
+                        resumed.trackers.append(tracker)
+            except Exception:
+                pass
+            params = resumed
         params.save_path = _CACHE_DIR
         # Metadata a previous attempt already fetched skips the whole
         # metadata wait - see _METADATA_DIR. The magnet's trackers stay
@@ -2126,8 +2428,20 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
             # for, never trusted: a mirror serving the wrong file must
             # fall through to the magnet, not hijack the add.
             try:
-                candidate = lt.torrent_info(lt.bdecode(torrent_bytes))
-                if str(candidate.info_hash()).lower() == info_hash:
+                # From the raw bytes, never via lt.bdecode: torrent_info
+                # over a decoded dict re-bencodes it non-canonically and
+                # computes a *different* info hash - measured 29 August
+                # 2026, 238ec1... against a true 3865dc... for the same
+                # file - so the guard below refused every .torrent the
+                # caller ever fetched and this fast path never once ran;
+                # every first play silently paid the full magnet
+                # metadata wait it was written to skip.
+                candidate = lt.torrent_info(torrent_bytes)
+                try:
+                    candidate_hash = str(candidate.info_hashes().v1)
+                except AttributeError:      # libtorrent 1.x
+                    candidate_hash = str(candidate.info_hash())
+                if candidate_hash.lower() == info_hash:
                     cached_info = candidate
             except Exception:
                 cached_info = None
@@ -2208,7 +2522,12 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
     except Exception:
         pass
 
-    torrent.focus(0, HEAD_BYTES)
+    # A resume primes the header only; the head window would otherwise be
+    # the first thing asked for and the seat the last - see
+    # _apply_windows. `start_at` was applied above, so _start_pieces is
+    # already answering by the time this window is built.
+    torrent.focus(0, (RESUME_HEADER_PIECES * torrent.piece_length()
+                      if start_at is not None else HEAD_BYTES))
     return info_hash
 
 
@@ -2284,6 +2603,53 @@ def download_whole(info_hash: str, *, all_files: bool = False) -> bool:
         return True
     except Exception:
         return False
+
+
+def finished_file_path(info_hash: str, *, season=None, episode=None,
+                       title=None, file_index=None):
+    """The complete file this release already holds on disk, or None.
+
+    **The instant replay path** - the owner, 31 August 2026: "instant for
+    the videos started watching already before". Everything else here
+    goes through the session: add the torrent, wait for metadata, wait
+    for the head pieces. Measured on his Attack on Titan S01E02, played
+    twice in one run, that was 8.4s of a 9.06s replay; fast-resume
+    (see _cached_resume) took it to ~2s, and the rest is libtorrent
+    checking the resume blob for six lanes at once, which is time spent
+    proving something the file itself already answers.
+
+    So: if the metadata is cached, and the file the episode maps to is
+    on disk at exactly the length the torrent says it should be, it is
+    the episode - complete, verified once already when it was written -
+    and it can be handed straight to the player as an ordinary file. No
+    session, no swarm, no wait.
+
+    Deliberately strict. A short file is a partial download and falls
+    through to the ordinary path; no metadata means no way to know what
+    the length should be, so that falls through too. Being wrong here
+    would play a truncated file, which is worse than waiting.
+    """
+    info = _cached_torrent_info((info_hash or "").lower())
+    if info is None:
+        return None
+    try:
+        index = file_index
+        if index is None:
+            index = _pick_file(info, season, episode, title=title)
+        if index is None:
+            return None
+        files = info.files()
+        expected = int(files.file_size(index))
+        if expected <= 0:
+            return None
+        path = os.path.join(_CACHE_DIR, files.file_path(index))
+        if not os.path.isfile(path):
+            return None
+        if int(os.path.getsize(path)) != expected:
+            return None         # still downloading - not ours to shortcut
+        return path
+    except Exception:
+        return None
 
 
 def episode_file(info_hash: str):
@@ -2672,6 +3038,7 @@ def await_start(info_hash: str, data_wait: float = 20.0,
     # and total_payload_download is not guaranteed to start clean.
     payload_base = None
     payload_now = 0
+    peers_connected = 0
     delivered = False
     last_alive = started
     recent = []                 # (t, payload) over the trailing window
@@ -2686,6 +3053,15 @@ def await_start(info_hash: str, data_wait: float = 20.0,
         if not got_index:
             got_index = not torrent._tail_pieces(INDEX_CRITICAL_BYTES)
         if got_data and got_index:
+            # Record the verified state now: this is the first moment it
+            # is worth anything, and a viewer who watches two minutes
+            # and leaves would otherwise never reach the ticker's
+            # interval with anything saved.
+            try:
+                _request_resume_save(torrent.handle)
+                _resume_saved_at[(info_hash or "").lower()] = time.time()
+            except Exception:
+                pass
             break
         now = time.time()
         if not got_data and now >= next_status:
@@ -2700,7 +3076,8 @@ def await_start(info_hash: str, data_wait: float = 20.0,
                     payload_base = payload_now
                 if payload_now - payload_base >= DELIVERED_MIN_BYTES:
                     delivered = True
-                if delivered or int(status.num_peers) > 0:
+                peers_connected = int(status.num_peers)
+                if delivered or peers_connected > 0:
                     last_alive = now
                 recent.append((now, payload_now))
                 while recent and now - recent[0][0] > EXTEND_WINDOW_S:
@@ -2722,8 +3099,20 @@ def await_start(info_hash: str, data_wait: float = 20.0,
                 # to the hard cap. The trailing-window test is what
                 # keeps a 288KB-in-six-seconds trickle from holding
                 # one - see EXTEND_MIN_BYTES.
-                flowing = (hard_deadline > now and recent
-                           and payload_now - recent[0][1] >= EXTEND_MIN_BYTES)
+                #
+                # **Connected counts too, not only delivering.** The
+                # 4s solo window was priced when the metadata wait ran
+                # first and the swarm connected during it; the .torrent
+                # fast path made metadata instant, so a switch inside
+                # the player gave a swarm 4s to handshake AND deliver -
+                # and live sources started failing as "no peers" (the
+                # owner, 30 August 2026). Peers on the wire at the soft
+                # deadline are evidence the swarm is real; the hard cap
+                # still bounds how long that faith lasts.
+                flowing = (hard_deadline > now
+                           and ((recent and payload_now - recent[0][1]
+                                 >= EXTEND_MIN_BYTES)
+                                or peers_connected > 0))
                 if not flowing:
                     break
         if got_data and now >= index_deadline:
@@ -2919,6 +3308,41 @@ class _Handler(BaseHTTPRequestHandler):
                 pass
 
 
+class _LocalHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the hostname lookup in `server_bind`.
+
+    **This is what was killing the app at launch**, and it took Windows'
+    own crash records plus faulthandler to find, because an access
+    violation leaves nothing in atomic.log. Reproduced 6 times out of 6
+    on 28 August 2026 by launching the way the owner does - a
+    double-click in Explorer - against 21 clean launches from a shell,
+    which is why it looked random for hours.
+
+    `HTTPServer.server_bind` sets `server_name` from `socket.getfqdn()`.
+    That resolves the local hostname, which reaches the codec registry
+    for `encodings.idna`, which imports `stringprep` - a **lazy import
+    running on the torrent prewarm thread while the main thread is still
+    importing the app**. Two threads inside the import machinery at once,
+    with PyInstaller's own importer and this package's meta_path hooks in
+    the middle of it, and the interpreter faulted: every capture ended
+
+        Current thread ...: <invalid frame>
+
+    with the fault at _PyEval_EvalFrameDefault+0x13eb - the bytecode loop
+    dereferencing something already gone.
+
+    `server_name` is only used to fill in Host headers, and this server
+    is bound to 127.0.0.1 and only ever talked to by mpv on this machine,
+    so the literal address is as correct as the FQDN would have been -
+    and it costs no DNS round trip on the startup path either."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def start_server():
     """The local HTTP endpoint, started once, on a free port."""
     global _server, _server_port
@@ -2927,7 +3351,7 @@ def start_server():
     if lt is None:
         return None
     try:
-        _server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        _server = _LocalHTTPServer(("127.0.0.1", 0), _Handler)
     except Exception:
         return None
     _server_port = _server.server_address[1]

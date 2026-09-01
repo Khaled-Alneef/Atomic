@@ -161,7 +161,11 @@ STREMIO_CATALOG_BY_TYPE = {"Anime": "series", "Series": "series", "Movie": "movi
 # next to main.py in the source tree is absent from the frozen build (the
 # same trap app_icon.ico is commented for in the spec).
 FILTER_ICON = "assets/filter_icon.png"
-FILTER_ICON_HEIGHT = 18
+# 22, up from 18, with the 46px button below - the owner's ask,
+# 30 August 2026: "increase the size of the filter button on all
+# pages". One constant and one size, so every page that draws the
+# button moves together.
+FILTER_ICON_HEIGHT = 22
 
 # The icon on a header section pill. 16, against the pill's 10pt label:
 # the same ratio the sidebar rows use (26px icon, 13pt label), so the
@@ -279,7 +283,16 @@ _DISCOVER_CACHE_TTL_S = 15 * 60
 # The worker already shows a stale list and refreshes it in place, so a
 # day-old disk row is drawn at once and quietly corrected.
 _DISCOVER_CACHE_FILE = "discover_cache.json"
-_DISCOVER_DISK_TTL_S = 24 * 60 * 60
+# Seven days, up from 24 hours - measured 30 August 2026 on a copy of the
+# real library: the rows on disk were 36.5 hours old, so one day away
+# from the app was enough for the loader to discard every browse row and
+# the Read page to open BARE, its medium sections waiting the full
+# whole-sites sweep (2-7s network-dependent) with zero scrollable height
+# - the owner's "only the manga page has this issue now". This constant
+# gates what may be *shown*, not what is trusted: the in-memory TTL
+# above still expires it at 15 minutes, so a shown disk row is always
+# refreshed in place - the schedule's stale-calendar rule, applied here.
+_DISCOVER_DISK_TTL_S = 7 * 24 * 60 * 60
 _discover_disk_loaded = False
 
 
@@ -1025,8 +1038,65 @@ def correct_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
     Separate function rather than a flag on record_progress, so nothing
     automatic can reach it by accident - every caller of this one is a
     person typing a number."""
-    return _write_progress(entry, season=season, episode=episode,
-                           chapter=chapter, forward_only=False)
+    result = _write_progress(entry, season=season, episode=episode,
+                             chapter=chapter, forward_only=False)
+    # A deliberate correction outranks any stored resume state. Without
+    # this, marking episode 5 unwatched and pressing Continue reopened
+    # the episode last *entered*: player.resume_point orders the resume
+    # records by timestamp alone, and the reader's Continue preferred a
+    # saved page position over the corrected number (_offer_resume).
+    # Done whether or not the write itself moved anything - the person
+    # said where they are, and that statement is the point.
+    _forget_contradicted_resume(entry, chapter=chapter)
+    return result
+
+
+def _forget_contradicted_resume(entry, *, chapter=None):
+    """Drop resume state a deliberate progress correction contradicts.
+
+    Video: every stored half-watched position for the title is zeroed
+    (player.clear_entry_resume - the release survives, the position does
+    not), so Continue computes from the declared progress again.
+
+    Reading: the saved in-chapter page position is dropped only when it
+    sits *past* the corrected number - a position inside the newly
+    declared chapter still means "continue after it", which is what
+    _offer_resume already does with it. Unknown chapter numbers count as
+    past: a position that cannot be placed must not outrank a number the
+    user just typed. Never raises - failing to tidy a resume record must
+    not fail the correction it rides on."""
+    entry_type = (entry or {}).get("type")
+    if entry_type in MANGA_TYPES:
+        if chapter is None:
+            return
+        saved = entry.get("reader_position")
+        if not isinstance(saved, dict):
+            return
+        try:
+            saved_number = float(saved.get("chapter_number") or 0.0)
+        except (TypeError, ValueError):
+            saved_number = 0.0
+        try:
+            target = float(chapter)
+        except (TypeError, ValueError):
+            return
+        if saved_number and saved_number <= target:
+            return
+        entry["reader_position"] = None
+        if entry.get("id"):
+            try:
+                storage.update_entry(
+                    _progress_data_file(entry), entry["id"],
+                    {"reader_position": None,
+                     "updated_at": storage.now_iso()})
+            except Exception:
+                logs.exception("Could not drop the stale reader position")
+        return
+    try:
+        from windows import player
+        player.clear_entry_resume(entry)
+    except Exception:
+        logs.exception("Could not clear the resume positions")
 
 
 def record_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
@@ -2159,19 +2229,61 @@ def _cover_kind(entry_type) -> str:
     return "anime" if entry_type == "Anime" else "video"
 
 
+def _make_category_grid(parent):
+    """The category grid: Chromium by default, the painted one on
+    request. Falls back to the painted grid if QtWebEngine cannot start,
+    because a page that does not render is worse than one that scrolls
+    differently."""
+    import os
+    if os.environ.get("ATOMIC_WEB_GRID") != "0":
+        try:
+            from helpers.web_grid import WebPosterGrid
+            return WebPosterGrid(POSTER_SIZE, ground=theme.PANEL_FILL,
+                                 parent=parent)
+        except Exception:
+            logs.exception("the Chromium grid could not start")
+    return PosterGrid(POSTER_SIZE, ground=theme.PANEL_FILL, parent=parent)
+
+
+def _is_grid(widget) -> bool:
+    """Whether this is a category grid, painted or rendered.
+
+    **Not isinstance(PosterGrid).** That is what it was, and
+    WebPosterGrid is a QWebEngineView rather than a PosterGrid, so every
+    check was false: the refill was refused (a revisited page came up
+    empty) and the append-to-live-grid path never ran (a section change
+    left the previous section's rows, which is why Anime showed Movies).
+    What the page needs is the API, and both grids have it.
+    """
+    return all(hasattr(widget, name)
+               for name in ("set_items", "append_items", "count", "record"))
+
+
 class _GridCover:
     """What a painted-grid record carries where a widget card carried its
     cover QLabel: something with `setPixmap`, so `_on_discover_poster`
     serves both kinds of card without knowing which it has."""
 
-    __slots__ = ("_grid", "_index")
+    __slots__ = ("_grid", "_index", "_gen")
 
     def __init__(self, grid, index):
         self._grid, self._index = grid, index
+        # **Which fill this cover was asked for.** A fetch started for
+        # Manhwa can land after the user has switched to Manga, and the
+        # grid is addressed by *index* - so cover 3 of the old section
+        # was written over cover 3 of the new one, which is exactly the
+        # "manga page showing manhwa images" the owner reported. The web
+        # grid counts its fills; the painted one has no such race
+        # because it holds the record itself.
+        self._gen = getattr(grid, "_gen", None)
 
     def setPixmap(self, pixmap):
         try:
-            self._grid.set_cover(self._index, pixmap)
+            if self._gen is None:
+                self._grid.set_cover(self._index, pixmap)
+            else:
+                self._grid.set_cover(self._index, pixmap,
+                                     generation=self._gen)
         except RuntimeError:
             pass        # the grid was rebuilt under the fetch
 
@@ -2444,7 +2556,7 @@ class TrackerPage(GlassPage):
         # "+" beside it, with a brighter pixmap for hover, since the PNG
         # is white and would otherwise sit brighter than its neighbours.
         self.filter_btn = QPushButton(objectName="Icon")
-        self.filter_btn.setFixedSize(40, 40)
+        self.filter_btn.setFixedSize(46, 46)
         self.filter_btn.setToolTip("Filter")
         dpr = QApplication.primaryScreen().devicePixelRatio()
         filter_icon = QIcon()
@@ -2566,8 +2678,13 @@ class TrackerPage(GlassPage):
         self._category_filter_btn.setMenu(self._category_filter_menu)
         category_header.addWidget(self._category_filter_btn)
         self._category_layout.addLayout(category_header)
-        self._category_widget = PosterGrid(POSTER_SIZE, ground=theme.PANEL_FILL,
-                                           parent=self.category_tab)
+        # **Chromium or the painted grid**, decided here and nowhere
+        # else - see helpers/web_grid. The web one is a drop-in: same
+        # clicked/needs_cover/scrolled signals, same set_items/
+        # append_items/set_cover, so everything below this line is
+        # identical either way. ATOMIC_WEB_GRID=0 goes back to the
+        # painted grid, which is how the two are compared.
+        self._category_widget = _make_category_grid(self.category_tab)
         self._category_widget.clicked.connect(self._on_category_grid_pick)
         self._category_widget.needs_cover.connect(self._on_category_grid_cover)
         self._category_layout.addWidget(self._category_widget, stretch=1)
@@ -5185,7 +5302,29 @@ class TrackerPage(GlassPage):
 
         Never raises - a dead pool worker takes every queued lookup in
         the app with it - and always reports, so a section that finds
-        nothing says so rather than sitting on "Looking around..."."""
+        nothing says so rather than sitting on "Looking around...".
+
+        **Cache first, out loud, then the network** - the same
+        stale-then-correct contract _discover_row_worker has always
+        kept, and the Read page is why it matters here too. Its medium
+        sections are fed by this worker alone, and the fetch behind
+        them is the whole-sites sweep (reading_sites_by_medium_all,
+        measured 3.5s on a good day and 36.4s on a bad one) - so the
+        page below the saved grid simply did not exist until the
+        user's sites answered: measured 30 August 2026 on a copy of
+        the real library, the page had *zero scrollable height for the
+        first 2-4 seconds* of every first visit, which reads as broken
+        scrolling (the owner's "only the manga page has this issue
+        now"). Last session's rows are on disk either way
+        (_load_discover_cache); drawing them immediately is rule 7's
+        "show what there is, fill the rest in"."""
+        _load_discover_cache()
+        cached = _DISCOVER_CACHE.get((kind, ""))
+        if cached and cached[1]:
+            self._category_signals.results.emit(
+                kind, [r for r in cached[1] if isinstance(r, dict)], run)
+            if time.monotonic() - cached[0] < _DISCOVER_CACHE_TTL_S:
+                return          # fresh enough - no request at all
         rows = _fetch_browse_rows(kind)
         self._category_signals.results.emit(
             kind, [r for r in (rows or []) if isinstance(r, dict)], run)
@@ -5206,11 +5345,43 @@ class TrackerPage(GlassPage):
         # jump on top of the shaking the append path caused. The
         # worker's answer is the merged cache now, so "nothing changed"
         # is the common case and costs a title-list comparison.
-        if results and [
-                (r.get("title") or "").strip().lower() for r in results
-        ] == [(r.get("title") or "").strip().lower()
-              for r in self._category_rows]:
+        current = [(r.get("title") or "").strip().lower()
+                   for r in self._category_rows]
+        incoming = [(r.get("title") or "").strip().lower() for r in results]
+        if results and incoming == current:
             return
+        # **A live grid keeps its order; a refresh may only append.**
+        # _remember_browse_rows puts the fresh sweep's rows first, and
+        # the reading sweep's interleave depends on which sites answered
+        # this minute - so on the Manga section (six sites, the least
+        # stable order) nearly every refresh produced a *reordered*
+        # list, and _refill_grid's keep_position redraw then swapped the
+        # titles under the cards the user was looking at. That is the
+        # owner's "Manga page is still glitching, make it exactly like
+        # the manhwa page" (30 August 2026) - Manhwa's single steady
+        # source produces the same order every time, so it never
+        # reshuffled. The fresh order still goes to the cache for the
+        # *next* visit; what is already on screen refreshes in place and
+        # grows at the bottom, exactly like the order-stable Cinemeta
+        # sections.
+        grid_live = (_is_grid(self._category_grid)
+                     and getattr(self._category_grid, "_kind", None) == kind
+                     and bool(self._category_rows))
+        if results and grid_live:
+            if set(incoming) == set(current):
+                return              # a pure reorder - nothing new to show
+            by_title = {}
+            for title, row in zip(incoming, results):
+                by_title.setdefault(title, row)
+            kept = [by_title.get(title, old)
+                    for title, old in zip(current, self._category_rows)]
+            seen = set(current)
+            appended = []
+            for title, row in zip(incoming, results):
+                if title not in seen:
+                    seen.add(title)
+                    appended.append(row)
+            results = kept + appended
         _key, label, _kind, entry_type = section
         self._draw_category(kind, results, label, entry_type, run)
 
@@ -5313,7 +5484,7 @@ class TrackerPage(GlassPage):
         """Put `results` into the painted grid already showing `kind`.
         False when there is no such grid, and the caller builds one."""
         grid = self._category_grid
-        if (not isinstance(grid, PosterGrid)
+        if (not _is_grid(grid)
                 or getattr(grid, "_kind", None) != kind or not results):
             return False
         carried = {}
@@ -5762,8 +5933,20 @@ class TrackerPage(GlassPage):
         if kind in self._category_no_more:
             return
         grid = self._category_widget
-        if grid.max_offset() - grid.scroll_offset() > CATEGORY_LOAD_MARGIN:
-            return
+        # **Duck-typed, because the two grids report position
+        # differently.** The painted grid is asked how far from the
+        # bottom it is; the web grid has no scroll offset to give - the
+        # page owns its own scrolling and posts `more` only when it is
+        # already near the end, which is this same question answered on
+        # the other side. Calling max_offset() on it raised
+        # AttributeError out of a signal handler, which aborts the
+        # process rather than merely failing (helpers/logs' excepthook
+        # records it; a control run without one dies 0xC0000409).
+        far = getattr(grid, "max_offset", None)
+        near = getattr(grid, "scroll_offset", None)
+        if callable(far) and callable(near):
+            if far() - near() > CATEGORY_LOAD_MARGIN:
+                return
         self._category_loading = True
         # The browse pool, like every category fetch - the shared queue
         # is drained by page-load backfill, and this answer is what the
@@ -6187,7 +6370,7 @@ class TrackerPage(GlassPage):
                         if row[0] == key), None)
         if section is None or not self.category_tab.isVisible():
             return
-        if isinstance(getattr(self, "_category_grid", None), PosterGrid):
+        if _is_grid(getattr(self, "_category_grid", None)):
             # The painted grid recomputes its columns in resizeEvent; a
             # redraw here would throw away every cover already in hand
             # for a re-wrap the widget has done on its own.
@@ -7761,17 +7944,28 @@ class TrackerPage(GlassPage):
         was the wrong show."""
         resolved = {}
         try:
-            rows = []
+            best, score = None, 0.0
+            # **Every catalog until one actually matches, not until one
+            # merely answers.** This used to `break` on the first kind
+            # that returned any rows at all, and the anime catalog is
+            # now genre-confirmed (discover._anime_confirmed), so a
+            # live-action title reaches it as a short list of unrelated
+            # anime rather than as nothing. Measured 30 August 2026 on
+            # the owner's report: "Vigil" asked of the anime catalog
+            # answers one row - *Vigilante*, similarity 0.714 - which
+            # took the break, scored under the bar, and reported
+            # "couldn't match" for a title the series catalog returns at
+            # 1.0. Answering is not matching; only a confident match may
+            # stop the walk.
             for kind in ("anime", "series"):
                 rows = (discover.discover_video(kind, query=title, limit=6)
                         if discover is not None else []) or []
-                if rows:
+                for row in rows:
+                    value = title_match.similarity(title, row.get("title") or "")
+                    if value > score:
+                        best, score = row, value
+                if score >= 0.8:
                     break
-            best, score = None, 0.0
-            for row in rows:
-                value = title_match.similarity(title, row.get("title") or "")
-                if value > score:
-                    best, score = row, value
             # 0.8, the same bar anilist's cover lookup uses. Below it the
             # honest answer is "open it unresolved and say so" rather
             # than a confident wrong match.

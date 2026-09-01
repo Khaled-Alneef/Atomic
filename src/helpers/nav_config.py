@@ -78,6 +78,10 @@ PINNED_EXTRA = [("Discover", "discover")]
 # Discover is not in these blocks at all - it browses *both* media, so
 # filing it under either half would be wrong, and it now sits pinned
 # beside Home (see PINNED_EXTRA).
+# **Watching is not a row here** - it was added on 31 August 2026 and
+# taken straight back out the same day: *"remove the watching you just
+# added to the sidebar, I meant add it to the home page like the
+# reading"*. It lives as a Home section beside Reading, not on the rail.
 NAV_GROUPS = [
     [
         ("Movies", "series:cat_movies"),

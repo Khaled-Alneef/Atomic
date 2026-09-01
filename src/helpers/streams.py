@@ -851,6 +851,25 @@ def _prepare_with_own_engine(stream, info_hash, season, episode,
     if not torrent_engine.available():
         return None
 
+    # **Already on disk from the last time it was watched.** Before the
+    # session is touched at all: a complete file needs no swarm, no
+    # metadata wait and no piece check, and asking for them anyway was
+    # measured at 8.4s of a 9.06s replay (see
+    # torrent_engine.finished_file_path). Strict by construction - only
+    # a file whose length matches the torrent's exactly takes this road,
+    # so a partial download still goes the ordinary way.
+    try:
+        done = torrent_engine.finished_file_path(
+            info_hash, season=season, episode=episode, title=title,
+            file_index=stream.get("file_index"))
+    except Exception:
+        done = None
+    if done:
+        stream = dict(stream)
+        stream["url"] = done
+        stream["local_file"] = True
+        return stream
+
     trackers = list(stream.get("sources") or [])
     have = {t[len("tracker:"):] if t.startswith("tracker:") else t
             for t in trackers}
@@ -1408,7 +1427,69 @@ def _side_content_rank(stream) -> int:
         return 0
 
 
-def _default_pick_key(stream, preferred):
+# **A release that names the season beats one that does not.**
+# The owner, 31 August 2026: *"when I continued The Angel Next Door
+# Spoils Me Rotten EP09 S01 it played an ep from season 2"*.
+#
+# Measured that day, asking indexers.episode_match for S01E09:
+#
+#     'The Angel ... S2 - 09'          rejected   (states season 2)
+#     'The Angel ... Season 2 09'      rejected
+#     'The Angel ... S01E09 1080p'     exact
+#     'The Angel ... - 09 [1080p]'     exact      <- the hole
+#
+# The filter is right to take the last one: for a single-season show a
+# bare "- 09" is episode 9 and nothing else. But fansub groups number a
+# *second* season the same way, so for a show that has one, the same
+# string is season 2 episode 9 - and it was ranked level with a release
+# that says S01 outright.
+#
+# Rejecting bare-numbered releases would break every single-season show,
+# so they are demoted instead: a release stating the season asked for
+# leads, and an unmarked one still plays when nothing else is on offer.
+# Placed directly behind the resolution term - above Arabic and seeders,
+# which are preferences, because this one is about playing the right
+# episode at all.
+_SEASON_STATED_RE_CACHE = {}
+
+
+def states_season(name, season) -> bool:
+    """Whether this release name says outright which season it is."""
+    try:
+        number = int(season)
+    except (TypeError, ValueError):
+        return False
+    if number <= 0:
+        return False
+    pattern = _SEASON_STATED_RE_CACHE.get(number)
+    if pattern is None:
+        # The leading word boundary matters: without it "s2"
+        # matches inside any word ending in an s before a 2
+        # ("Tools2"), and the rank stops meaning anything.
+        #
+        # A range is deliberately allowed to match: a pack labelled
+        # S01-S04 really does hold season 1, so reading it as a
+        # claim about season 1 is right. What this exists to demote
+        # is a release that states no season at all - that is the
+        # one that may be season 2 numbered from 1, which is what
+        # played the wrong episode.
+        pattern = re.compile(
+            rf"(?:\bs\s*0*{number}\b"
+            rf"|\bseason\s*0*{number}\b"
+            rf"|\bs0*{number}e\d{{1,3}}\b)", re.I)
+        _SEASON_STATED_RE_CACHE[number] = pattern
+    return bool(pattern.search(str(name or "")))
+
+
+def _season_rank(stream, season) -> int:
+    """0 when the release names the season asked for, 1 otherwise."""
+    if not season:
+        return 0
+    name = (stream or {}).get("name") or (stream or {}).get("title") or ""
+    return 0 if states_season(name, season) else 1
+
+
+def _default_pick_key(stream, preferred, season=None):
     """The sort key deciding what plays by default. Smaller sorts first.
 
     Three rules, in this order:
@@ -1462,11 +1543,15 @@ def _default_pick_key(stream, preferred):
     # season pack, and behind `resolvable` so it is still preferred to a
     # row with no way to play it at all.
     side = _side_content_rank(stream)
+    # See states_season: right episode before nicest episode.
+    stated = _season_rank(stream, season)
     if preferred != "best" and quality == preferred:
         size = int(stream.get("size_bytes") or 0)
         size_key = size if size >= _MIN_REAL_SIZE else float("inf")
-        return (drm, resolvable, side, 0, arabic, -raw_seeders, size_key)
-    return (drm, resolvable, side, 1, -_quality_rank(quality), arabic, -seeders)
+        return (drm, resolvable, side, 0, stated, arabic, -raw_seeders,
+                size_key)
+    return (drm, resolvable, side, 1, -_quality_rank(quality), stated,
+            arabic, -seeders)
 
 
 def _stremio_id(entry, season=None, episode=None) -> str:
@@ -2339,7 +2424,10 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
     # list. Fails soft to nothing marked.
     _flag_instant(results, deadline)
 
-    ranked = _rank(results)
+    # The season, so a release that states it outranks one that
+    # says nothing - see states_season for the episode this
+    # played wrong.
+    ranked = _rank(results, season)
     # **What each source actually returned, in one line.** The owner
     # sent a log on 27 August 2026 asking whether a short source list
     # for Attack on Titan S01E02 was his connection. It could not be
@@ -2458,7 +2546,7 @@ def _promote_seeded_head(ranked: list, preferred: str) -> list:
     return moved
 
 
-def _rank(streams: list) -> list:
+def _rank(streams: list, season=None) -> list:
     """Playable before unplayable, then the default-pick order (see
     _default_pick_key).
 
@@ -2471,7 +2559,7 @@ def _rank(streams: list) -> list:
         preferred = "1080p"
 
     def key(stream):
-        return _default_pick_key(stream, preferred)
+        return _default_pick_key(stream, preferred, season)
     seen, unique = set(), []
     for stream in sorted(streams, key=key):
         marker = stream_key(stream)

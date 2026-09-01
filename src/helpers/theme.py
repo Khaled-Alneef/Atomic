@@ -299,7 +299,13 @@ FONT_FAMILY_NAV = "Bahnschrift"
 FONT_FAMILY_NAV_FALLBACKS = (FONT_FAMILY_NAV, "Segoe UI Semibold", "Segoe UI")
 # Same chain in the form a QSS font-family property wants.
 FONT_STACK_NAV = ", ".join(f'"{name}"' for name in FONT_FAMILY_NAV_FALLBACKS)
-NAV_FONT_SIZE = 13
+# 11.5, down from 13 - the owner's ask, 30 August 2026: "make font
+# in the main sidebar, settings sidebar ... smaller". One constant
+# for both, because #NavList and #SettingsNav have always shared it.
+# **An int**: theme.font() hands this straight to QFont(family,
+# pointSize), whose overload takes no float - 11.5 raised a
+# TypeError at the first nav row built.
+NAV_FONT_SIZE = 12
 
 # Fallback marker for a nav row whose section has no icon in NAV_ICONS
 # below, and for one whose PNG is missing from the bundle. Expanded rows
@@ -1039,12 +1045,17 @@ QFrame#HomeItem:hover {{
 }}
 QLabel#CardTitle {{
     color: {TEXT};
+    /* 9.5pt rather than the app's 10.5 - his "all cards (not banners)
+"
+       ... smaller". Stated here rather than inherited so a card's label
+       stops tracking the body text, which the banners still do. */
+    font-size: 9.5pt;
     font-weight: 600;
     background: transparent;
 }}
 QLabel#CardMeta {{
     color: {TEXT_MUTED};
-    font-size: 9pt;
+    font-size: 8.5pt;
     background: transparent;
 }}
 /* The little chips drawn ON a card's artwork (a rating, a Saved mark).

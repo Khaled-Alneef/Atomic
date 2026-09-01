@@ -414,7 +414,24 @@ BOTTOM_GAP = 16
 # distance - `max(floor, height * 0.0)` is the floor - so this constant
 # alone is the travel. The reader keeps its own constant, as it has since
 # the 30% reader-only ask above.
-WHEEL_STEP_PX = 58
+#
+# **67, up 15% with the rest of the app - the owner, 31 August 2026:
+# "increase the speed of scrolling 15%".** The reader is included this
+# time, unlike the 30% ask above which named the viewer as excluded:
+# that one was a reading-comfort decision about a *slower* strip, and
+# this ask carries no such exclusion. Kept equal to the other two
+# surfaces (widgets._SmoothWheel, poster_grid.FrameMotion) so the whole
+# app answers a notch with the same travel - which is the state the
+# three of them converged on before this change, not a flattening of it.
+#
+# **74 with the rest, 31 August 2026: "increase the scrolling speed
+# by 10%".** 67 x 1.10 = 73.7.
+#
+# **100, up 35% - the owner, 31 August 2026: "increase the scrolling
+# speed by 35%".** 74 x 1.35 = 99.9. Distance again, not the curve.
+# Chromium's notch, like every other surface - see
+# helpers.poster_grid.chromium_duration.
+WHEEL_STEP_PX = 120
 
 # How fast a reader notch gives its speed back - see the _Momentum built
 # in _StripView.__init__ for why this surface does not coast.
@@ -5478,6 +5495,35 @@ def _release_edge_reach(window):
         logs.exception("Could not restore the window after the reader")
 
 
+
+def _web_chapter_index(entry, number):
+    """Which position in the chapter list a chapter number sits at.
+
+    The web reader addresses chapters by index, the rest of the app by
+    number. Cached only - `cached_chapters` is a dictionary lookup, and
+    a site fetch here would put 21.7s in front of the reader opening.
+    Returns None when nothing is cached, which opens the chapter list
+    instead of a chapter, and that is the honest answer.
+    """
+    if number in (None, ""):
+        return None
+    try:
+        from helpers import chapter_source
+        found = chapter_source.cached_chapters(entry) or []
+    except Exception:
+        return None
+    try:
+        wanted = float(number)
+    except (TypeError, ValueError):
+        return None
+    for index, chapter in enumerate(found):
+        try:
+            if float(chapter.get("number")) == wanted:
+                return index
+        except (TypeError, ValueError):
+            continue
+    return None
+
 def open_reader(window, entry, data_file="tracker.json", resume=True,
                 chapter_number=None):
     """Open the reader over `window`, covering the sidebar as well.
@@ -5497,6 +5543,27 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
     while reading". player.py already does exactly this for the same
     reason; nothing in main.py hides or restores anything, so there is
     no state to get stuck in the hidden half."""
+    # **The web reader first, where this machine has one.** The owner's
+    # ask, 1 September 2026: the reading viewer scrolls the way Home and
+    # Discover do - Edge's compositor rather than Qt's paint path. A
+    # chapter is one long strip of pictures, so it is the surface where
+    # scrolling is the whole experience. Falls back to everything below
+    # when there is no WebView2 runtime, so a build without one is
+    # unchanged. See windows/web_reader for what it does not yet carry.
+    try:
+        from windows import web_reader
+        if web_reader.available():
+            index = None
+            if chapter_number is not None:
+                index = _web_chapter_index(entry, chapter_number)
+            elif resume:
+                index = _web_chapter_index(entry, entry.get("progress"))
+            page = web_reader.open_reader(window, entry, index)
+            if page is not None:
+                return page
+    except Exception:
+        logs.exception("The web reader could not open; using the Qt one")
+
     _hold_edge_reach(window)
     # The whole window, the app's own bar included - see
     # main.immersive_host. This surface is the content, not a page

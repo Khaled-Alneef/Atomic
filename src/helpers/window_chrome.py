@@ -239,14 +239,32 @@ _CORNERS = (
 )
 
 
-# Window styles. WS_CAPTION is deliberately absent - putting it back is
-# putting the title bar back.
+# Window styles. **WS_CAPTION is set, and that note used to say the
+# opposite.** "Putting it back is putting the title bar back" was an
+# assertion, and it is not what happens: this window answers
+# WM_NCCALCSIZE with no non-client area, so measured with the bit on,
+# the window rect and the client rect are the same size and nothing is
+# drawn for it. What the bit buys is the drag-to-top maximise and the
+# Snap Layouts overlay, which Windows gates on a caption and which
+# WS_THICKFRAME/WS_MAXIMIZEBOX alone do not give - the owner, 31 August
+# 2026, with both of those already set.
 GWL_STYLE = -16
 SW_MAXIMIZE = 3
 SW_RESTORE = 9
+WS_CAPTION = 0x00C00000
 WS_THICKFRAME = 0x00040000
 WS_MAXIMIZEBOX = 0x00010000
 WS_MINIMIZEBOX = 0x00020000
+# **And this one has to come *off*.** Measured 31 August 2026 on the
+# running window: style 0x96CF0000 - WS_CAPTION, WS_THICKFRAME,
+# WS_MAXIMIZEBOX and WS_MINIMIZEBOX all present exactly as intended, and
+# the drag-to-top still did nothing. WS_POPUP was set too, which Qt does
+# for a frameless window, and a popup is not an overlapped window:
+# Windows will not snap one, will not show the Snap Layouts overlay over
+# its maximise button, and ignores every other bit while it is there.
+# Adding bits could never have fixed this, which is why two passes of
+# adding them did not.
+WS_POPUP = 0x80000000
 
 
 def make_frameless(window):
@@ -276,9 +294,14 @@ def make_frameless(window):
         user = ctypes.windll.user32
         user.GetWindowLongW.restype = ctypes.c_long
         style = user.GetWindowLongW(hwnd, GWL_STYLE)
+        # WS_POPUP off in the same call. Qt.FramelessWindowHint sets it,
+        # and Windows snaps no popup window - see WS_POPUP's note above.
+        # The window stays frameless because it answers WM_NCCALCSIZE
+        # with no non-client area, not because of this bit.
         user.SetWindowLongW(hwnd, GWL_STYLE,
-                            ctypes.c_long(style | WS_THICKFRAME
-                                          | WS_MAXIMIZEBOX | WS_MINIMIZEBOX))
+                            ctypes.c_long((style | WS_CAPTION | WS_THICKFRAME
+                                           | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
+                                          & ~WS_POPUP))
     except Exception:
         # A platform plugin with no real HWND, or a Windows build that
         # refuses the change - the window is still frameless and still
@@ -315,18 +338,73 @@ def ensure_snap_styles(window) -> bool:
     ones known to need it."""
     if not WINDOWS:
         return False
-    wanted = WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX
+    # WS_CAPTION with them: the other two buy edge snapping, and
+    # the drag-to-top maximise and the Snap Layouts overlay are
+    # gated on the caption bit - measured 31 August 2026 with
+    # both of the others set and the drag still doing nothing.
+    # Nothing is drawn for it; the frameless window answers
+    # WM_NCCALCSIZE with no non-client area.
+    wanted = WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX
     try:
         hwnd = ctypes.c_void_p(int(window.winId()))
         user = ctypes.windll.user32
         user.GetWindowLongW.restype = ctypes.c_long
         style = user.GetWindowLongW(hwnd, GWL_STYLE)
-        if style & wanted == wanted:
+        if style & wanted == wanted and not style & WS_POPUP:
             return False
-        user.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(style | wanted))
+        # WS_POPUP cleared as well as the four set - see its note above.
+        # A popup window is not an overlapped one and Windows snaps
+        # neither it nor anything else about it.
+        fixed = (style | wanted) & ~WS_POPUP
+        user.SetWindowLongW(hwnd, GWL_STYLE, ctypes.c_long(fixed))
+        # SWP_FRAMECHANGED, or the new style is not read until something
+        # else forces a frame recalculation - which on this window may be
+        # never, since it draws no frame.
+        user.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                          0x0001 | 0x0002 | 0x0004 | 0x0020)
     except Exception:
         return False
     return True
+
+
+def keep_snap_styles(window):
+    """Re-apply the snap bits whenever the window changes state.
+
+    **Qt recreates the native window on some transitions**, and manual
+    style bits do not survive that - which is why WS_CAPTION measured
+    present after make_frameless and the drag-to-top still did nothing
+    later in the session. Cheap and idempotent, so it is simply done
+    again on every state change rather than reasoned about."""
+    if not WINDOWS:
+        return
+
+    def again(*_args):
+        try:
+            ensure_snap_styles(window)
+        except Exception:
+            pass
+
+    try:
+        window.windowHandle().windowStateChanged.connect(again)
+        window.windowHandle().visibilityChanged.connect(again)
+    except Exception:
+        pass
+    again()
+
+    # **And again after Qt has finished.** Measured 31 August 2026: with
+    # only the calls above, the window settled at style 0x960B0000 -
+    # WS_CAPTION and WS_THICKFRAME gone and WS_POPUP back - because Qt
+    # applies FramelessWindowHint to the native window after these
+    # signals have fired, and that overwrites whatever was set. The
+    # state changes alone therefore cannot win, however many of them are
+    # connected. Four single shots, idempotent, and done inside three
+    # seconds of launch.
+    try:
+        from PyQt6.QtCore import QTimer
+        for delay in (0, 250, 1000, 3000):
+            QTimer.singleShot(delay, again)
+    except Exception:
+        pass
 
 
 def is_zoomed(window) -> bool:

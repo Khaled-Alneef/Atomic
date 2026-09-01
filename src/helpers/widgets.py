@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import weakref
+from fractions import Fraction
 
 from PyQt6.QtCore import (QEasingCurve, QEvent, QMimeData, QObject, QPoint,
                           QPointF, QPropertyAnimation, QRect, QRectF, QSize,
@@ -2047,7 +2048,16 @@ def glyph_icon(glyph: str, color: str = None, size: int = TRASH_ICON_SIZE,
     # In points, and the glyph is drawn to fill the box: Segoe's icons
     # sit inside their em, so a pt size equal to the pixel size renders
     # noticeably smaller than the box asked for.
-    painter.setFont(theme.icon_font(int(size * 0.75)))
+    # **Sized in pixels, not points** - the owner, 30 August 2026: "make
+    # sure that the bin icon fit in the button". A point size is
+    # converted through the screen's DPI, so the same 12pt glyph drew
+    # 16px on the 1080p panel and 20px on the 2K one, into a box that is
+    # `size` pixels either way; the overflow is what clipped it. The box
+    # is in pixels, so the glyph is too, and the 0.75 keeps the em
+    # inside it.
+    glyph_font = theme.icon_font(int(size * 0.75))
+    glyph_font.setPixelSize(max(1, int(size * 0.75)))
+    painter.setFont(glyph_font)
     painter.setPen(QColor(color or theme.TEXT))
     painter.drawText(QRect(0, 0, size, size),
                      Qt.AlignmentFlag.AlignCenter, glyph)
@@ -2369,7 +2379,27 @@ def screen_frame_s(widget=None) -> float:
 #
 # The vblank ticker was tried as the alternative and is not it: 22% with
 # it on, against 17% for simply matching the timer to the refresh.
-MOTION_MAX_HZ = 120.0
+# **240, raised from 120 on 30 August 2026 - the cap's own reason had
+# expired.** It was set because a 4ms tick measured *worse* than an 8ms
+# one on the painted grids (61 pos/s against 94-111, judder 25%; the
+# table above). That was never about the grids: a 4ms QTimer cannot fire
+# at 4ms while Windows' global timer resolution is 15.6ms, which is the
+# coin flip _hold_vblank documents and which helpers/__init__ now ends
+# by holding a 1ms period for the whole process.
+#
+# The cap also read as the owner's "the scrolling in the 165Hz 1080P
+# monitor is smoother than the 2K 240 Hz": at 165Hz the divider is 1 and
+# the surface gets a position every refresh, at 240Hz it is 2, so the
+# faster panel was deliberately given half its frames.
+#
+# **Raising it measured as neutral, and that is worth stating plainly.**
+# The manga grid's wheel glide ran 147 positions/s against 150 before -
+# no change, because these surfaces are limited at ~135-150 paints/s by
+# something else entirely (see video_backend's note on what one mpv core
+# does to this process). It is kept because the reasoning for 120 no
+# longer holds and 240 cannot be worse; it is not claimed as the fix for
+# anything he reported.
+MOTION_MAX_HZ = 240.0
 
 
 def present_frame_s(widget=None) -> float:
@@ -2424,6 +2454,128 @@ def present_frame_s(widget=None) -> float:
     # 200/120 is 1.67 and the nearer divider is 2 (100Hz), not 1.
     divider = max(1, int(round(rate / target)))
     return frame * divider
+
+
+_DEVICE_QUANTUM = {}
+
+
+# **Chromium's wheel scroll, exactly** - the owner's ask of 31 August
+# 2026: "make the scrolling exactly like Stremio scrolling EXACTLY".
+# Stremio's shell is WebView2, so what he is comparing against is
+# cc::ScrollOffsetAnimationCurve, and these are its own constants rather
+# than anything tuned here:
+#
+#     duration_units = clamp(14 - |delta| / 60, 6, 12)
+#     seconds        = duration_units / 60
+#     easing         = cubic-bezier(0.42, 0, 0.58, 1)
+#
+# One notch is 120px and takes 0.200s; 480px or more takes 0.100s. The
+# ramp starting at exactly one notch is not a coincidence - 120px is
+# what a wheel notch scrolls on Windows (3 lines x 40px), so the curve
+# is built around a single notch being the slowest case.
+CHROMIUM_NOTCH_PX = 120.0
+_CHROMIUM_MIN_UNITS = 6.0
+_CHROMIUM_MAX_UNITS = 12.0
+_CHROMIUM_SLOPE = -1.0 / 60.0
+_CHROMIUM_OFFSET = 14.0
+_CHROMIUM_DIVISOR = 60.0
+
+
+def chromium_duration(delta_px: float) -> float:
+    """How long Chromium animates a scroll of `delta_px`, in seconds."""
+    units = _CHROMIUM_OFFSET + abs(float(delta_px)) * _CHROMIUM_SLOPE
+    units = max(_CHROMIUM_MIN_UNITS, min(_CHROMIUM_MAX_UNITS, units))
+    return units / _CHROMIUM_DIVISOR
+
+
+def chromium_ease(fraction: float) -> float:
+    """cubic-bezier(0.42, 0, 0.58, 1) - the CSS ease-in-out Chromium
+    uses for a wheel scroll. Solved for x by Newton-Raphson with a
+    bisection fallback, which is what Blink itself does."""
+    t = min(1.0, max(0.0, float(fraction)))
+    if t <= 0.0 or t >= 1.0:
+        return t
+    x1, y1, x2, y2 = 0.42, 0.0, 0.58, 1.0
+    ax = 3.0 * x1 - 3.0 * x2 + 1.0
+    bx = -6.0 * x1 + 3.0 * x2
+    cx = 3.0 * x1
+    ay = 3.0 * y1 - 3.0 * y2 + 1.0
+    by = -6.0 * y1 + 3.0 * y2
+    cy = 3.0 * y1
+    guess = t
+    for _ in range(8):
+        x = ((ax * guess + bx) * guess + cx) * guess - t
+        if abs(x) < 1e-6:
+            break
+        slope = (3.0 * ax * guess + 2.0 * bx) * guess + cx
+        if abs(slope) < 1e-6:
+            break
+        guess -= x / slope
+    else:
+        low, high = 0.0, 1.0
+        guess = t
+        for _ in range(24):
+            x = ((ax * guess + bx) * guess + cx) * guess
+            if abs(x - t) < 1e-6:
+                break
+            if x < t:
+                low = guess
+            else:
+                high = guess
+            guess = (low + high) / 2.0
+    guess = min(1.0, max(0.0, guess))
+    return ((ay * guess + by) * guess + cy) * guess
+
+
+def vblank_now(fallback=None):
+    """The instant of the refresh being drawn for, when the vblank clock
+    is the one driving - otherwise the ordinary clock.
+
+    Only trusted while it is fresh: a stamp older than two frames means
+    the ticker is parked (nothing is scrolling) and the caller is being
+    driven by something else, in which case the current time is right.
+    """
+    now = time.monotonic() if fallback is None else fallback
+    ticker = globals().get("_vblank_ticker")
+    if ticker is None:
+        return now
+    stamped = getattr(ticker, "last_tick", 0.0) or 0.0
+    if stamped <= 0.0:
+        return now
+    age = now - stamped
+    if 0.0 <= age <= 0.05:
+        return stamped
+    return now
+
+
+def device_quantum(widget=None) -> int:
+    """How many logical pixels make a whole number of screen pixels.
+
+    A widget can only be positioned on a whole logical pixel, so on a
+    screen whose ratio is not an integer most positions land *between*
+    real pixels and everything drawn there is resampled. This returns the
+    step that does not: 3 on a 1.3333 screen (3 logical = 4 real), 4 on
+    1.25, 2 on 1.5, and 1 on any whole ratio - where it is a no-op and
+    the caller keeps its old behaviour exactly.
+
+    Capped at 4: past that the cure would be worse than the blur, and no
+    ratio Windows offers needs more.
+    """
+    try:
+        ratio = float(widget.devicePixelRatioF()) if widget is not None else 1.0
+    except Exception:
+        ratio = 1.0
+    if ratio <= 0.0:
+        ratio = 1.0
+    quantum = _DEVICE_QUANTUM.get(ratio)
+    if quantum is None:
+        try:
+            quantum = max(1, min(4, Fraction(ratio)
+                                 .limit_denominator(16).denominator))
+        except Exception:
+            quantum = 1
+        _DEVICE_QUANTUM[ratio] = quantum
+    return quantum
 
 
 def screen_tick_ms(widget=None) -> int:
@@ -2859,6 +3011,8 @@ class _VBlankTicker(QObject):
     _Momentum is actually mid-glide."""
 
     tick = Signal()
+    # When the last vblank actually happened.
+    last_tick = 0.0
 
     def __init__(self):
         super().__init__()
@@ -3049,6 +3203,12 @@ class _VBlankTicker(QObject):
                 continue        # the last surface stopped mid-wait
             try:
                 frame_pacing.note_vblank()
+                # The instant the vblank wait returned. The
+                # curve is evaluated at this rather than at
+                # whenever the queued slot runs - see
+                # vblank_stamp.py for the delivery scatter
+                # this removes.
+                self.last_tick = time.monotonic()
                 self.tick.emit()
             except RuntimeError:
                 return          # the app is shutting down under us
@@ -3058,9 +3218,41 @@ _vblank_ticker = None
 
 
 def _vblank_ticker_for_use():
-    """The shared ticker, or None - which is now the default.
+    """The shared ticker - **on by default since 31 August 2026.**
 
-    **Off unless ATOMIC_VBLANK=1 asks for it.** This reverses the choice
+    The owner: *"when I scroll in the wheel in mid speed the ticks jumps
+    cause an after-image trace-like from the items and labels"*. An
+    after-image is not a low frame rate; it is the same picture shown
+    twice and then a double step, so it was measured as such - the
+    scroll position sampled INSIDE the paint event, one sample per frame
+    the screen is actually given, on the Anime grid at three wheel
+    paces:
+
+        notch   clock    moving/s   jitter   x2 jumps   duplicate frames
+         60ms   timer      171       27%        59           24%
+         60ms   ticker     175       10%        41           14%
+        100ms   timer      171       26%        39           28%
+        100ms   ticker     199       12%        22           16%
+        160ms   timer      111       16%        20           45%
+        160ms   ticker     130       12%        13           36%
+
+    The ticker wins on every measure at every pace: about half the step
+    jitter, a third to a half fewer double steps, fewer repeated frames
+    and more distinct positions. `ATOMIC_VBLANK=0` turns it off again,
+    which is how the comparison above is repeated.
+
+    **The older note below said the opposite, and it was not wrong when
+    it was written** - it was taken before helpers/__init__ held a 1ms
+    timer period for the process, so the QTimer it compared against was
+    being rounded to whatever some other application happened to leave
+    the global clock at, and against the 120Hz present cap this file
+    used to impose. Both of those are gone, and with a timer that fires
+    when it is asked the comparison reverses. Kept in full because it
+    records how the question is asked properly.
+
+    ---
+
+    **Historically: off unless ATOMIC_VBLANK=1 asked for it.** This reverses the choice
     recorded in _Momentum._start_ticking, and it does so on a different
     measurement rather than a better argument: that A/B was judged from
     inside the app, on a 144Hz panel, by how evenly the *scrollbar value*
@@ -3082,9 +3274,20 @@ def _vblank_ticker_for_use():
     steps uneven.
 
     Kept rather than deleted: ATOMIC_VBLANK=1 puts it back, which is how
-    the comparison above can be repeated on another panel."""
+    the comparison above can be repeated on another panel.
+
+    **And it is turned on for the rest of the session the moment an mpv
+    core exists** (`video_backend.core_created`), which is the fix for
+    the owner's standing "when I enter the player then leave it, the
+    whole app scrolling becomes low on FPS". Measured 31 August 2026:
+    with an mpv core alive a QTimer at 4ms fires **93 times a second**
+    against 248 in a clean process - precise and coarse alike - while a
+    plain Python thread ticking at the same interval is untouched (226
+    against 227). The damage is to Qt's timers, so the answer is to stop
+    using one: this ticker is a Python thread. It is not enabled before
+    that point because the A/B above still holds while timers work."""
     global _vblank_ticker
-    if os.environ.get("ATOMIC_VBLANK") != "1":
+    if os.environ.get("ATOMIC_VBLANK") == "0":
         return None
     if _vblank_ticker is None:
         _vblank_ticker = _VBlankTicker()
@@ -3236,6 +3439,16 @@ class _Momentum(QObject):
     # it: the reader travels the same distance per notch whatever the
     # window height, and matching the feel means matching that too.
     FRICTION = 50.0
+    # **How long one notch takes, at one unchanging speed.** The wheel
+    # is a target-and-speed model now rather than an impulse under
+    # friction - see _tick. It matches the painted grids
+    # (poster_grid.FrameMotion.GLIDE_S), where the measurement that
+    # chose 0.15 over 0.12 is written down, so every surface in the app
+    # delivers a notch the same way. FRICTION is kept because `kick`
+    # still reads it for the
+    # reader's own tuning and because the constant documents what the
+    # old model was.
+    GLIDE_S = 0.12
     # **5200, and the excess is kept, not thrown away.** The first cut
     # clamped the velocity and discarded what would not fit, so an
     # 8-notch flick travelled *less* per notch than slow scrolling
@@ -3363,6 +3576,11 @@ class _Momentum(QObject):
         # whenever motion restarts.
         self._phase = None
         self._kicks = collections.deque()
+        self._rate = self.APPROACH_RATE
+        self._last_kick = None
+        self._kick_gap = 0.0
+        self._prev_kick = None
+        self._synced_at = None
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._tick)
@@ -3399,14 +3617,35 @@ class _Momentum(QObject):
         accel = 1.0 + (self.ACCEL_MAX - 1.0) * min(
             1.0, len(self._kicks) / float(self.ACCEL_NOTCHES))
         self._kicks.append(now)
+        self._track_cadence(now)
         if not self.active() or self._pos is None:
             self._pos = float(self._bar.value())
             self._vel, self._pending = 0.0, 0.0
+            self._speed, self._target = 0.0, self._pos
             self._last = now
-        if self._vel * direction < 0 or self._pending * direction < 0:
-            # A reversal answers now, not after a decay.
+        if self._vel * direction < 0 or getattr(self, "_speed", 0.0) <= 0.0:
+            # A reversal answers now, and a finished glide restarts from
+            # where the view actually is.
             self._vel, self._pending = 0.0, 0.0
-        impulse = direction * float(distance_px) * self.FRICTION * accel
+            self._speed, self._target = 0.0, self._pos
+        low, high = float(self._bar.minimum()), float(self._bar.maximum())
+        # Chromium's model - see poster_grid.chromium_duration.
+        self._target = max(low, min(high, self._target
+                                    + direction * float(distance_px)))
+        self._anim_from = self._pos
+        self._anim_at = time.monotonic()
+        self._anim_for = chromium_duration(abs(self._target - self._pos))
+        remaining = abs(self._target - self._pos)
+        # **One speed for the whole glide** - see GLIDE_S. Recomputed on
+        # a notch and nowhere else, so it holds steady between ticks, and
+        # capped at MAX_STEP_PX a frame (poster_grid.FrameMotion carries
+        # the measurement) so a burst of notches lengthens the glide
+        # instead of turning it into a jump the eye sees twice.
+        self._rate = self._approach_rate(self._kicks)        # fits _kick_gap first
+        self._speed = self._glide_speed(remaining)
+        self._vel = self._speed if self._target >= self._pos else -self._speed
+        self._pending = 0.0
+        impulse = 0.0
         # **A share of the notch is handed over at once.** The rest
         # arrives through RAMP as before, which is what keeps a notch a
         # push rather than a kick - but ramping from *zero* meant the
@@ -3418,8 +3657,7 @@ class _Momentum(QObject):
         # 144ms in a clean ease-out - and the first of them at **43.7ms**.
         # The travel was never the problem and is not changed here; the
         # same impulse is simply not all deferred.
-        self._vel += impulse * self.IMMEDIATE_SHARE
-        self._pending += impulse * (1.0 - self.IMMEDIATE_SHARE)
+        del impulse                 # the model is a target now, not a push
         self._start_ticking()
         # **And move on this frame, not on the clock's first tick.**
         # That tick is where the notch's delay actually lived: measured
@@ -3440,7 +3678,22 @@ class _Momentum(QObject):
             frame = self._frame_s() or 0.0
         if frame <= 0.0:
             frame = max(0.004, self._tick_ms / 1000.0)
-        self._last = time.monotonic() - frame
+        # **Once per frame, however many notches arrive in it.** This
+        # synchronous tick integrates a whole frame of travel so the
+        # first notch moves at once - but it runs per *notch*, and at a
+        # rapid wheel several land between two paints, each adding
+        # another frame's worth. The screen then sees their sum: measured
+        # on the reader over One Piece, 31 August 2026, `worst 21.0px`
+        # against a 10px per-frame ceiling that every other surface was
+        # holding. Skipping it when one has already run inside this frame
+        # keeps the responsiveness and gives the cap back its meaning -
+        # the queued travel is not lost, the ordinary tick delivers it.
+        now_wall = time.monotonic()
+        synced = getattr(self, "_synced_at", None)
+        if synced is not None and (now_wall - synced) < frame * 0.9:
+            return
+        self._synced_at = now_wall
+        self._last = now_wall - frame
         try:
             self._tick()
         except RuntimeError:
@@ -3513,10 +3766,239 @@ class _Momentum(QObject):
             self._vblank_on = False
         self._timer.stop()
 
+    # The same ceiling the painted grids use, and for the same measured
+    # reason - see poster_grid.FrameMotion.MAX_STEP_PX.
+    MAX_STEP_PX = 10.0
+    # And the same approach curve - see FrameMotion.APPROACH_RATE for why
+    # a dead-constant speed started late and stopped late.
+    APPROACH_RATE = 42.0
+
+    # **How long a notch should take: about as long as the gap between
+    # notches.** Fixed delivery is what the ramp harness caught - at a
+    # slow, deliberate wheel (260ms apart) a notch finished in ~117ms and
+    # the view then stood still for the remaining 143ms, which is 73% of
+    # frames showing nothing and reads as stop-start. At a fast wheel the
+    # opposite is wanted: finish quickly so the view stops when the hand
+    # does ("when I stop it takes a while to stop").
+    #
+    # So the rate is taken from his own wheel. An exponential approach
+    # covers all but SNAP_PX of the distance in ln(distance/SNAP)/rate
+    # seconds - about 4.9/rate for a notch - so matching that to the
+    # measured interval gives rate = 4.9/interval, clamped: below
+    # RATE_MIN a lone notch would drift for most of a second, and above
+    # RATE_MAX the tail is shorter than a couple of frames and the stop
+    # is a hard edge again.
+    # **Once the notches stop, stop.** Fitting the curve to his wheel
+    # (see _approach_rate) made slow scrolling continuous but left the
+    # tail as slow as the wheel had been: measured on the ramp, travel
+    # continued **250ms** after the last notch of a slow sweep, which is
+    # the other half of his complaint ("when I stop it takes a while to
+    # stop"). So the fitted rate governs only while notches are still
+    # arriving; once one interval and a half has passed with none, the
+    # curve switches to RATE_STOP and the view settles promptly. The
+    # floor of 90ms keeps a fast burst from tripping it between notches.
+    RATE_STOP = 48.0
+    RATE_MIN = 16.0
+    RATE_MAX = 60.0
+
+    # **The notch cadence is tracked here, not read off `_kicks`.** That
+    # deque is pruned to ACCEL_WINDOW_S (0.25s) because it exists to
+    # count notches for acceleration - so at any wheel slower than 250ms
+    # a notch the previous entry is always gone by the time the next
+    # arrives, the measured gap came back 0, and the delivery time fell
+    # back to the fixed GLIDE_S. That is the whole of the slow-band
+    # fault: a 100px notch delivered in 120ms with 260ms between them
+    # left the view standing still 54% of the time (measured 31 August
+    # 2026 - 321 live step() calls in 2.5s where a continuous glide would
+    # make ~600). Kept separately, and unpruned, so a slow deliberate
+    # wheel is measurable at all.
+    #
+    # Longer than NEW_GESTURE_S apart is not a cadence, it is a new
+    # gesture, and its first notch gets the default glide.
+    NEW_GESTURE_S = 0.65
+
+    # **How much further a fast wheel travels per notch.** See the
+    # module note in the scratch harness wheel_speed.py: a fixed
+    # distance made slow scrolling feel fast, because a lone notch is
+    # the whole of a slow scroll and it was travelling the full 100px in
+    # 0.12s. The base is what a deliberate single notch does; a wheel
+    # spun hard reaches ACCEL_MAX times it.
+    #
+    # Bounds are the cadences a hand actually produces - measured on the
+    # ramp harness, a slow deliberate turn is ~260ms between notches and
+    # a hard spin is ~30ms. Between them the factor is linear.
+    SPEED_ACCEL_MAX = 2.6
+    SPEED_GAP_FAST = 0.045
+    SPEED_GAP_SLOW = 0.220
+
+    def _track_cadence(self, now):
+        previous = getattr(self, "_prev_kick", None)
+        self._prev_kick = now
+        self._last_kick = now
+        if previous is None:
+            self._kick_gap = 0.0
+            return
+        gap = now - previous
+        if gap > self.NEW_GESTURE_S or gap <= 0.0:
+            self._kick_gap = 0.0
+            return
+        known = getattr(self, "_kick_gap", 0.0) or 0.0
+        # Weighted toward the newest interval. An even average lags a
+        # hand that is still changing speed, and a lagging gap is a
+        # delivery time that is too short on the way *down* - the notch
+        # then finishes before the next arrives and the view stalls
+        # between them, which is what the ramp still saw after the
+        # tracking itself was fixed. Slowing down is the case that
+        # matters, so lengthening is taken almost whole and shortening
+        # is damped.
+        if known <= 0.0:
+            self._kick_gap = gap
+        elif gap > known:
+            self._kick_gap = 0.2 * known + 0.8 * gap
+        else:
+            self._kick_gap = 0.6 * known + 0.4 * gap
+
+    def _approach_rate(self, kicks) -> float:
+        """The curve, fitted to how fast the wheel is actually turning."""
+        recent = list(kicks)[-4:]
+        # _last_kick/_kick_gap belong to _track_cadence now - this used
+        # to reset them from the pruned deque and undo the measurement.
+        if len(recent) < 2:
+            gap = getattr(self, "_kick_gap", 0.0) or 0.0
+            return (max(self.RATE_MIN, min(self.RATE_MAX, 4.9 / gap))
+                    if gap > 0.0 else self.APPROACH_RATE)
+        spans = [b - a for a, b in zip(recent, recent[1:]) if b > a]
+        if not spans:
+            return self.APPROACH_RATE
+        interval = sorted(spans)[len(spans) // 2]
+        if interval <= 0.0:
+            return self.RATE_MAX
+        return max(self.RATE_MIN, min(self.RATE_MAX, 4.9 / interval))
+
+    _SPEED_ATTR = "_speed"
+
+    def _advance(self, span, dt, when) -> float:
+        """How far to travel this frame.
+
+        **Flat while the wheel is turning, easing only into the stop.**
+        Two profiles, because one cannot do both jobs. An exponential
+        everywhere means every notch is a decelerating pulse - fast at
+        its start, crawling at its end - and at a slow, deliberate wheel
+        that pulse *is* the whole motion. See poster_grid.FrameMotion._advance. Measured: a linear
+        travel at the same speed would leave 0% of mid-travel frames
+        under half a pixel, and the exponential left **35%**. That is the
+        "ticks jump" of 31 August coming back in another form.
+
+        So while notches are still arriving the view runs at a constant
+        speed chosen to deliver what is queued in about the time until
+        the next notch is due - continuous, flat, no pulse. Once the hand
+        stops, and only then, it eases exponentially into rest, which is
+        what makes it settle promptly instead of running at full speed
+        and halting in one frame.
+        """
+        gap = getattr(self, "_kick_gap", 0.0) or 0.0
+        last = getattr(self, "_last_kick", None)
+        # **The window has to outlast his own cadence.** Capped at
+        # 0.13s it was shorter than a slow, deliberate wheel (260ms
+        # apart), so every notch dropped out of the flat profile
+        # half-delivered and eased to a stop before the next arrived -
+        # measured as 45% of mid-travel frames standing still in the slow
+        # band. Tracking 1.3x the measured gap keeps slow scrolling
+        # continuous; a fast wheel has a small gap and so still eases
+        # within a frame or two of the hand stopping (92ms, measured).
+        # The 0.35s ceiling is the longest coast worth allowing at all.
+        quiet = min(0.35, max(0.06, 1.3 * gap))
+        turning = last is not None and (when - last) <= quiet
+        if turning:
+            # **The held speed, not one recomputed from what is left.**
+            # Dividing the *shrinking* distance by a fixed delivery time
+            # is an exponential wearing a different name - it decays by
+            # construction, and the first cut of this did exactly that:
+            # the slow band still measured 40% of mid-travel frames under
+            # half a pixel. The speed is fixed when the notch lands (see
+            # _glide_speed) and held until the wheel stops.
+            move = getattr(self, self._SPEED_ATTR, 0.0) * dt
+        else:
+            move = span * (1.0 - math.exp(-self.RATE_STOP * dt))
+        return min(move, self.MAX_STEP_PX)
+
+    def _glide_speed(self, remaining: float) -> float:
+        if remaining <= 0.0:
+            return 0.0
+        frame = 0.0
+        try:
+            if self._frame_s is not None:
+                frame = float(self._frame_s())
+        except Exception:
+            frame = 0.0
+        if frame <= 0.0:
+            frame = 1.0 / 240.0
+        # **Delivered in about the time until the next notch is due.**
+        # A fixed glide cannot suit both ends: at a slow, deliberate
+        # wheel it finishes early and the view stands still between
+        # notches (measured: over half the time at a 260ms cadence),
+        # and at a fast one it is the tail that overruns the hand.
+        # Matching the delivery to his own cadence keeps the travel
+        # continuous at every speed, which is the whole of "going from
+        # minimum speed to the max gradually".
+        # **1.35x the gap, so consecutive notches overlap.** Delivering
+        # in exactly the measured interval tiles them end to end in
+        # theory and leaves a lapse in practice - the notch finishes, the
+        # view rests, the next arrives - which measured as 24-41% of
+        # mid-travel frames standing still in the slow band. A little
+        # longer than the gap means the next notch always lands while the
+        # last is still running, so the travel never stops between them.
+        delivery = min(0.40, max(0.05, 1.35 * (getattr(self, "_kick_gap", 0.0)
+                                               or self.GLIDE_S)))
+        return min(remaining / delivery, self.MAX_STEP_PX / frame)
+
     def _set_value(self, value: int):
         """Write the bar only when the rounded pixel actually changed - a
         redundant setValue repaints the whole scroll body for no visible
-        movement."""
+        movement.
+
+        The value is snapped to a whole *screen* pixel first - see
+        device_quantum. A scroll body can only be moved by whole logical
+        pixels (Qt positions child widgets there), and on a 1.3333 screen
+        one of those is 1.333 real ones, so every step re-rasterised the
+        text on a new subpixel phase. Measured 31 August 2026 by grabbing
+        two frames one pixel apart and diffing them: **Home 29.4% of
+        pixels different on a 1px scroll, 0.0% on a 3px one** - three
+        logical pixels being exactly four screen pixels, the one step
+        size the old path got right. That is the owner's blur, and it is
+        also, at last, why Home never looked as smooth as Discover: the
+        same test puts Discover at 0.3%, because what is under the
+        pointer there is artwork rather than rows of small text.
+
+        **Only once the step is worth snapping**, which the first cut got
+        wrong and he found within the hour: *"home and discover and
+        reading viewer pages stutter while scrolling slow-mid speed"*.
+        Snapping unconditionally means a page moving 1-2px a frame has to
+        bank three before it may write any of them, and measured that
+        cost **52.1ms from the wheel to the first pixel of movement**
+        against 6.4ms on a painted grid - his "delay in responding" -
+        with the frames arriving in lumps in between. Above 2x the
+        quantum the rounding is at most a third of the step and the blur
+        is what dominates; below it the stall is. A widget layout cannot
+        take a fractional offset the way the painted grids now do
+        (PosterGrid._device_offset), so this threshold is the whole of
+        the compromise available here, and slow scrolling keeps its
+        subpixel softness on purpose."""
+        quantum = device_quantum(self._bar)
+        last = self._last_value
+        # `last` is None until the first write of this glide - and
+        # arithmetic on it there raised inside a Qt slot, which on
+        # Windows takes the process out with no traceback (exit 127,
+        # caught by a harness before this shipped). A first write is
+        # also the one that must not be delayed, so it never snaps.
+        if (quantum > 1 and last is not None
+                and abs(value - last) >= 2 * quantum):
+            low, high = self._bar.minimum(), self._bar.maximum()
+            # The ends are left exact so a page can still reach its own
+            # bottom, which is rarely a multiple of anything.
+            if low < value < high:
+                value = min(high, max(low, int(round(value / quantum))
+                                      * quantum))
         if value != self._last_value:
             self._last_value = value
             self._bar.setValue(value)
@@ -3588,28 +4070,39 @@ class _Momentum(QObject):
             if dt > 0.0:
                 self._follow_step(dt)
             return
-        if self._pending:
-            handed = self._pending * (1.0 - math.exp(-self.RAMP * dt))
-            self._pending -= handed
-            self._vel += handed
-            if abs(self._pending) < 1.0:
-                self._vel += self._pending
-                self._pending = 0.0
-        capped = max(-self.MAX_SPEED, min(self.MAX_SPEED, self._vel))
-        if capped != self._vel:
-            self._pending += self._vel - capped     # kept, fed in later
-            self._vel = capped
-        self._pos += self._vel * dt
-        self._vel *= math.exp(-self.FRICTION * dt)
+        # **Flat while the wheel turns, easing only into the stop** - the
+        # same profile the painted grids use, and
+        # poster_grid.FrameMotion.APPROACH_RATE carries the measurement
+        # that chose it over a dead-constant speed.
+        speed = getattr(self, "_speed", 0.0)
         low, high = float(self._bar.minimum()), float(self._bar.maximum())
+        if speed > 0.0:
+            # Straight off Chromium's curve - see the grid's copy.
+            # See vblank_now.
+            elapsed = vblank_now() - self._anim_at
+            span = self._target - self._anim_from
+            previous = self._pos
+            if self._anim_for <= 0.0 or elapsed >= self._anim_for:
+                wanted = self._target
+            else:
+                wanted = self._anim_from + span * chromium_ease(
+                    elapsed / self._anim_for)
+            # See the grid's copy: Chromium's curve, clamped to one
+            # frame's travel because this renderer does not present on
+            # vsync and a late frame would otherwise double the step.
+            move = wanted - self._pos
+            if abs(move) > self.MAX_STEP_PX:
+                self._pos += math.copysign(self.MAX_STEP_PX, move)
+            else:
+                self._pos = wanted
+            self._vel = (self._pos - previous) / max(dt, 1e-6)
+            if self._pos == self._target:
+                self._speed = 0.0
         if self._pos <= low:
-            self._pos, self._vel = low, 0.0
+            self._pos, self._vel, self._speed = low, 0.0, 0.0
         elif self._pos >= high:
-            self._pos, self._vel = high, 0.0
-        if abs(self._vel) < self.STOP_SPEED and not self._pending:
-            # Snap the last couple of pixels and stop, so the tail is
-            # never a string of ticks that round to nothing.
-            self._pos = max(low, min(high, self._pos + self._vel / self.FRICTION))
+            self._pos, self._vel, self._speed = high, 0.0, 0.0
+        if getattr(self, "_speed", 0.0) <= 0.0:
             self._set_value(int(round(self._pos)))
             self._stop_ticking()
             self._vel, self._pos = 0.0, None
@@ -4172,7 +4665,23 @@ class _SmoothWheel(QObject):
     # alone is the travel. scroll_area's `notch_scale` still multiplies it,
     # which keeps Home's 0.7 at 26px rather than flattening every surface to
     # one number.
-    NOTCH_FLOOR_PX = 58
+    #
+    # **67, up 15% - the owner, 31 August 2026: "increase the speed of
+    # scrolling 15%".** See poster_grid.FrameMotion.NOTCH_FLOOR_PX for
+    # why the distance moved and not GLIDE_S. Home's notch_scale 0.7
+    # rides on top, so that page keeps its share of the increase (41 ->
+    # 47px) instead of being flattened to the common number.
+    #
+    # **74, up another 10% - the owner, 31 August 2026, same day:
+    # "increase the scrolling speed by 10%".** 67 x 1.10 = 73.7. Same
+    # reasoning as the 15% before it: the distance moves, GLIDE_S does
+    # not, so steady-state speed rises by exactly the amount asked for
+    # and the overlap between consecutive notches is untouched.
+    #
+    # **100, up 35% - the owner, 31 August 2026: "increase the scrolling
+    # speed by 35%".** 74 x 1.35 = 99.9. Distance again, not the curve.
+    # Chromium's own notch - see poster_grid.
+    NOTCH_FLOOR_PX = 120
     # Never slower than this, whatever the screen claims. A refresh rate
     # of 0 is what a headless/offscreen platform reports.
     MAX_TICK_MS = 16

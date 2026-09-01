@@ -83,8 +83,16 @@ def _clip_live_bar(player, page) -> None:
         # Only immediate children belong to the top-bar layout.  children()
         # avoids relying on a PyQt findChildren keyword signature that differs
         # between Qt point releases.
+        #
+        # isVisibleTo(bar), never isVisible(): Qt visibility is
+        # conjunctive, so while the bar itself is hidden (controls
+        # asleep) every child reports False and the region came out
+        # empty - the clip then only ever held if it happened to be
+        # recomputed while the bar was on screen. Parent-relative
+        # visibility answers "will this child show when the bar does",
+        # which is the question the mask is asking.
         for child in bar.children():
-            if not isinstance(child, QWidget) or not child.isVisible():
+            if not isinstance(child, QWidget) or not child.isVisibleTo(bar):
                 continue
             rect = child.geometry().adjusted(-3, -2, 3, 2)
             if rect.width() > 0 and rect.height() > 0:

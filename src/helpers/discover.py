@@ -134,6 +134,98 @@ def _is_animated(meta: dict) -> bool:
     return any(str(g).lower() in ("animation", "anime") for g in genres)
 
 
+# How close a Cinemeta search row's title must sit to an AniList hit
+# before the anime section will claim it. The same bar anilist.py's own
+# schedule matching uses (_MATCH_THRESHOLD) - identity matching, where
+# inheriting a different franchise's row is the failure to avoid.
+_ANIME_CONFIRM_THRESHOLD = 0.8
+
+# How long the anime section will hold for AniList's verdict once its own
+# rows are in hand. It is started beside the Cinemeta request (see
+# _anime_witness), so this is only ever the *remainder* - AniList's own
+# leg measured 0.4-0.5s including the global throttle. Past this the
+# section draws unfiltered rather than making the user wait, which is
+# rule 7: show what there is inside a second.
+ANIME_WITNESS_WAIT = 2.0
+
+
+def _anime_witness(query: str):
+    """Start AniList's "what anime is called this" lookup **now**, and
+    return a handle to collect it from later.
+
+    Beside the Cinemeta request rather than after it. Serial, this cost
+    the anime section a whole extra round trip on the one path a person
+    is watching - measured 30 August 2026: the AniList leg is ~0.4-0.5s
+    on its own, and `anilist._MIN_REQUEST_GAP` is a *global* 0.7s
+    throttle shared with the tracker's schedule lookups, so a search
+    fired while the tracker was backfilling queued behind those as well.
+    That is the owner's "when I search and press Enter the animes takes
+    a while to show". The two requests contend for nothing (different
+    hosts), so racing them makes the confirmation free whenever AniList
+    answers inside Cinemeta's own time, which is the usual case."""
+    import concurrent.futures
+    try:
+        from . import anilist
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="atomic-anime-witness")
+        future = pool.submit(anilist.anime_name_sets, query)
+        pool.shutdown(wait=False)
+        return future
+    except Exception:
+        return None
+
+
+def _anime_confirmed(rows: list, query: str, witness=None) -> list:
+    """Search rows narrowed to titles AniList also knows as anime.
+
+    The anime section's search is a plain Cinemeta *series* search -
+    search rows carry `genres: null` (measured, see discover_video), so
+    Cinemeta alone cannot say which results are anime, and the owner's
+    report followed: live-action series listed under Anime. AniList's
+    search (type: ANIME, keyless) is the second witness: a row stays
+    only when its title matches one of the anime AniList returns for the
+    same query - or when the row itself carries an animated genre, which
+    a search row does not today but costs nothing to honour.
+
+    Fails soft to the *unfiltered* list: None from anime_name_sets means
+    AniList could not be asked (rate limit, timeout), and emptying the
+    section on silence would be worse than the mislabelling this fixes.
+    An empty name-set list, though, is a real answer - a search for a
+    live-action show correctly leaves the anime section empty.
+
+    `witness` is an in-flight `_anime_witness` future when the caller
+    started one beside its own request; without it the lookup runs here,
+    which is what a direct caller (and every test) gets."""
+    try:
+        from . import anilist, title_match
+        if witness is not None:
+            # Bounded: the row list is already in hand, and holding the
+            # section back past this for a confirmation is the very cost
+            # the witness exists to remove. A timeout reads as silence,
+            # which leaves the list unfiltered.
+            try:
+                name_sets = witness.result(timeout=ANIME_WITNESS_WAIT)
+            except Exception:
+                name_sets = None
+        else:
+            name_sets = anilist.anime_name_sets(query)
+        if name_sets is None:
+            return rows
+        kept = []
+        for row in rows:
+            if _is_animated(row):
+                kept.append(row)
+                continue
+            title = row.get("title") or ""
+            if any(title_match.best_similarity(title, names)
+                   >= _ANIME_CONFIRM_THRESHOLD
+                   for names in name_sets if names):
+                kept.append(row)
+        return kept
+    except Exception:
+        return rows
+
+
 def _video_row(meta: dict, label: str):
     """One Cinemeta meta as a Discover row, or None if there's nothing to
     show."""
@@ -193,11 +285,13 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
     where the 49-row first page ended). Ignored for a search - the
     search catalog is one page.
 
-    Anime search is a plain series search, deliberately: Cinemeta's
+    Anime search is a plain series search at the Cinemeta end: its
     search rows come back with `genres: null` (measured on every search
     tried), so there is nothing to filter on and no genre-scoped search
-    form to ask instead. Someone typing a title has already narrowed it
-    further than a genre would."""
+    form to ask instead. What separates anime from the live-action rows
+    sharing those results is a second witness - AniList's own search -
+    applied after the fact by _anime_confirmed, failing soft to the
+    unfiltered list when AniList cannot be asked."""
     kind = (kind or "").strip().lower()
     content_type = _KIND_TYPES.get(kind)
     if not content_type or limit <= 0:
@@ -209,6 +303,10 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
     genre = (genre or "").strip()
     label = _KIND_LABELS[kind]
     skip = max(0, int(skip or 0))
+
+    # Started before the first Cinemeta request, collected after the last
+    # one - see _anime_witness for the measurement that put it here.
+    witness = _anime_witness(query) if (kind == "anime" and query) else None
 
     if query:
         encoded = urllib.parse.quote(query)
@@ -237,6 +335,11 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
         if kind == "anime" and not query and index == len(urls) - 1 and len(urls) > 1:
             metas = [m for m in metas if _is_animated(m)]
         rows = [row for row in (_video_row(m, label) for m in metas) if row]
+        # A searched anime section is a plain series search (see the
+        # docstring), so a second witness separates anime from the
+        # live-action rows sharing the results - see _anime_confirmed.
+        if witness is not None and rows:
+            rows = _anime_confirmed(rows, query, witness=witness)
         if rows:
             return rows[:limit]
     return []

@@ -340,12 +340,14 @@ class MediaCardDelegate(QStyledItemDelegate):
         if not isinstance(base, QFont):
             base = QFont()
         title_font = QFont(base)
-        # #CardTitle is the app font at weight 600 (theme.py) - matched
-        # here rather than read from QSS, because a QStyledItemDelegate
-        # has no styled widget to read it off.
+        # #CardTitle is 9.5pt at weight 600 (theme.py) - matched here
+        # rather than read from QSS, because a QStyledItemDelegate has
+        # no styled widget to read it off. Both numbers move with that
+        # rule; a card must not change size with the surface drawing it.
+        title_font.setPointSizeF(9.5)
         title_font.setWeight(QFont.Weight.DemiBold)
         meta_font = QFont(base)
-        meta_font.setPointSizeF(9.0)        # #CardMeta
+        meta_font.setPointSizeF(8.5)        # #CardMeta
         title_line = QFontMetrics(title_font).height()
         meta_line = QFontMetrics(meta_font).height()
         card_h = (CARD_PADDING_TOP + self._cover_h + TEXT_GAP

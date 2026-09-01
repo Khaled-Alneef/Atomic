@@ -178,6 +178,23 @@ FAST_SCROLL_PX_S = 1500.0
 # time actually left - so the steps come out equal by construction and
 # the view is always exactly one pointer pixel behind the hand, at any
 # drag speed. One pointer pixel of lag cannot be seen; a 30px lurch can.
+# **How far behind the thumb the view may sit before it stops easing
+# and simply goes there.** In multiples of the pointer's own recent step,
+# so it scales with how fast the hand is moving rather than with the page
+# length: on a 20462px grid one pointer pixel is 24px of content, and a
+# fixed pixel bound would either never fire or fire constantly.
+#
+# Measured 31 August 2026 on Movies, hand-shaped drag: without it the
+# view trailed a median 281px and caught up in single 4114px frames.
+# At 2.0 the lurches went (worst 4114 -> 212px) but the trail stayed at
+# 256px, which is the bound doing exactly what it was told. One pointer
+# sample is the tightest lag that means anything - the mouse itself
+# cannot report faster - so 1.0 was tried, and measured far worse:
+# worst 11982px and 20-34% of frames dead, because snapping every frame
+# fights the spread that restarts on the next pointer sample. 2.0 is the
+# measured floor: worst 212px, 1-3% dead, ~250px of trail. Do not lower
+# it again without re-running scratch drag_human.py.
+MAX_DRAG_LAG_FRAMES = 2.0
 DRAG_FOLLOW_TAU_S = 0.012       # kept: the value that was measured wrong
 # Bounds on that estimate. The floor is one mouse sample at 125Hz - a
 # fast drag crosses a pixel every sample and there is nothing to spread.
@@ -275,6 +292,84 @@ BAR_MIN_THUMB = 28
 # `border-radius: 5px` - a rounded rectangle, not a capsule. At the old
 # 5px width the two were the same shape; at 11 they are not.
 BAR_RADIUS = 5
+
+
+# **Chromium's wheel scroll, exactly** - the owner's ask of 31 August
+# 2026: "make the scrolling exactly like Stremio scrolling EXACTLY".
+# Stremio's shell is WebView2, so what he is comparing against is
+# cc::ScrollOffsetAnimationCurve, and these are its own constants rather
+# than anything tuned here:
+#
+#     duration_units = clamp(14 - |delta| / 60, 6, 12)
+#     seconds        = duration_units / 60
+#     easing         = cubic-bezier(0.42, 0, 0.58, 1)
+#
+# One notch is 120px and takes 0.200s; 480px or more takes 0.100s. The
+# ramp starting at exactly one notch is not a coincidence - 120px is
+# what a wheel notch scrolls on Windows (3 lines x 40px), so the curve
+# is built around a single notch being the slowest case.
+CHROMIUM_NOTCH_PX = 120.0
+_CHROMIUM_MIN_UNITS = 6.0
+_CHROMIUM_MAX_UNITS = 12.0
+_CHROMIUM_SLOPE = -1.0 / 60.0
+_CHROMIUM_OFFSET = 14.0
+_CHROMIUM_DIVISOR = 60.0
+
+
+def chromium_duration(delta_px: float) -> float:
+    """How long Chromium animates a scroll of `delta_px`, in seconds."""
+    units = _CHROMIUM_OFFSET + abs(float(delta_px)) * _CHROMIUM_SLOPE
+    units = max(_CHROMIUM_MIN_UNITS, min(_CHROMIUM_MAX_UNITS, units))
+    return units / _CHROMIUM_DIVISOR
+
+
+def chromium_ease(fraction: float) -> float:
+    """cubic-bezier(0.42, 0, 0.58, 1) - the CSS ease-in-out Chromium
+    uses for a wheel scroll. Solved for x by Newton-Raphson with a
+    bisection fallback, which is what Blink itself does."""
+    t = min(1.0, max(0.0, float(fraction)))
+    if t <= 0.0 or t >= 1.0:
+        return t
+    x1, y1, x2, y2 = 0.42, 0.0, 0.58, 1.0
+    ax = 3.0 * x1 - 3.0 * x2 + 1.0
+    bx = -6.0 * x1 + 3.0 * x2
+    cx = 3.0 * x1
+    ay = 3.0 * y1 - 3.0 * y2 + 1.0
+    by = -6.0 * y1 + 3.0 * y2
+    cy = 3.0 * y1
+    guess = t
+    for _ in range(8):
+        x = ((ax * guess + bx) * guess + cx) * guess - t
+        if abs(x) < 1e-6:
+            break
+        slope = (3.0 * ax * guess + 2.0 * bx) * guess + cx
+        if abs(slope) < 1e-6:
+            break
+        guess -= x / slope
+    else:
+        low, high = 0.0, 1.0
+        guess = t
+        for _ in range(24):
+            x = ((ax * guess + bx) * guess + cx) * guess
+            if abs(x - t) < 1e-6:
+                break
+            if x < t:
+                low = guess
+            else:
+                high = guess
+            guess = (low + high) / 2.0
+    guess = min(1.0, max(0.0, guess))
+    return ((ay * guess + by) * guess + cy) * guess
+
+
+def _vblank_now():
+    """widgets.vblank_now, imported lazily - helpers.widgets imports this
+    module, so it cannot be imported at module scope."""
+    try:
+        from .widgets import vblank_now
+        return vblank_now()
+    except Exception:
+        return time.monotonic()
 
 
 class FrameMotion:
@@ -376,6 +471,10 @@ class FrameMotion:
         self.pos = 0.0
         self.vel = 0.0
         self.pending = 0.0
+        # Where this glide ends, and the one speed it travels the whole
+        # way there - see GLIDE_S.
+        self.target = 0.0
+        self.speed = 0.0
         self.maximum = 0.0
         self._last = None
         # Where the refresh grid is anchored - see step(). Re-anchored
@@ -383,9 +482,47 @@ class FrameMotion:
         # the panel's own raster drift apart.
         self._phase = None
         self._kicks = []
+        # The approach curve in force, refitted on every notch.
+        self._rate = self.APPROACH_RATE
+        self._last_kick = None
+        self._kick_gap = 0.0
+        self._prev_kick = None
+
+    # **How long one notch takes, at one unchanging speed** - the
+    # owner, 31 August 2026: "do not make the ticks in the mouse wheel
+    # jumps, make it straight fixed speed like I am dragging the
+    # scrollbar", naming Stremio as the reference. Stremio's interface
+    # is a web page in WebView2, so its wheel is Chromium's: a notch
+    # animates a fixed distance over a fixed time and further notches
+    # extend that animation.
+    #
+    # **0.12 - and the 0.15 it replaces was treating a symptom.**
+    # Sampled inside the paint event, one reading per frame the screen is
+    # given, at three wheel cadences (31 August 2026):
+    #
+    #     glide   60ms notch      100ms notch     160ms notch
+    #     impulse jitter 26%      jitter 28%      jitter 27%
+    #     0.12s   jitter  0%      jitter 96%      jitter  0%   <- before
+    #     0.15s   jitter  0%      jitter  0%      jitter  0%
+    #     0.12s   jitter  0%      jitter  0%      jitter  0%   <- after
+    #
+    # The first 0.12 row is why this was 0.15 for most of a day: a glide
+    # ending exactly as the next notch arrived measured 96% jitter and
+    # 29% dead frames at the mid pace, and lengthening the glide hid it
+    # by keeping consecutive notches overlapped. The real cause was
+    # _device_offset's - whole-logical-pixel truncation turning an even
+    # position into 3,3,2,3,6px steps, worst where a glide restarted.
+    # With that fixed the same 0.12 measures clean at every pace (last
+    # row), so the shorter glide is back, and with it the owner's
+    # *"remove the delay in responding when I scroll"*: a notch now
+    # completes in 120ms rather than 150.
+    #
+    # Kept as a written-down warning: a constant that fixes a number
+    # without a mechanism is a workaround, and this one cost a day.
+    GLIDE_S = 0.12
 
     def running(self) -> bool:
-        return abs(self.vel) >= self.STOP_SPEED or bool(self.pending)
+        return self.speed > 0.0 and self.pos != self.target
 
     def kick(self, distance_px, direction):
         """One wheel notch: `direction` +1 forward (down the page)."""
@@ -394,15 +531,269 @@ class FrameMotion:
         accel = 1.0 + (self.ACCEL_MAX - 1.0) * min(
             1.0, len(self._kicks) / float(self.ACCEL_NOTCHES))
         self._kicks.append(now)
-        if self.vel * direction < 0 or self.pending * direction < 0:
-            # A reversal answers now, not after a decay.
-            self.vel = self.pending = 0.0
-        self.pending += direction * float(distance_px) * self.FRICTION * accel
+        self._track_cadence(now)
+        if self.vel * direction < 0 or self.speed <= 0.0:
+            # A reversal answers now, and a glide that has finished
+            # starts again from where the view actually is.
+            self.vel = self.speed = 0.0
+            self.target = self.pos
+        # **Chromium's model, and only it.** The notch adds its
+        # distance to the target, the animation re-anchors where the view
+        # actually is, and the duration follows from what is left. No
+        # acceleration factor, no per-frame cap, no queued-travel bound:
+        # Chromium has none of those, and the ask was for its behaviour
+        # rather than for something tuned alongside it.
+        self.target = max(0.0, min(float(self.maximum),
+                                   self.target
+                                   + direction * float(distance_px)))
+        self._anim_from = self.pos
+        self._anim_at = time.monotonic()
+        self._anim_for = chromium_duration(abs(self.target - self.pos))
+        remaining = abs(self.target - self.pos)
+        # One speed for the whole glide, recomputed here and nowhere
+        # else - so it holds steady between notches instead of decaying
+        # under each one. Capped: see MAX_STEP_PX, which is why a long
+        # flick takes longer rather than going arbitrarily fast.
+        self._rate = self._approach_rate(self._kicks)        # fits _kick_gap first
+        self.speed = self._glide_speed(remaining)
+        self.vel = self.speed if self.target >= self.pos else -self.speed
+        self.pending = 0.0
         if self._last is None:
             self._last = time.perf_counter()
 
+    # **The furthest the view may travel between two shown frames.**
+    # The owner, 31 August 2026: "all pages shows after image while
+    # scrolling fast". Until now the fixed-speed model had no ceiling at
+    # all - MAX_SPEED was inf on both engines - so speed scaled with how
+    # many notches were in flight: eight of them measured **14.9px a
+    # frame** on the grid and a 9-21px spread on the pages, and content
+    # crossing that much between two frames is seen twice at once. That
+    # is the after-image; it is not a dropped frame, which is what every
+    # earlier hunt assumed.
+    #
+    # Capped per *frame* rather than per second on purpose: what smears
+    # is the distance between two things the eye is shown, so the right
+    # ceiling is the same 10px on the 240Hz panel and on the 165Hz one,
+    # not the same px/s (which would be 50% further per frame on the
+    # slower screen - the panel he calls the smoother of the two).
+    #
+    # Exceeding the cap does not drop travel: the glide simply runs
+    # past GLIDE_S until the target is reached, which is what Chromium
+    # does with a burst of notches and why a flick there stays legible.
+    MAX_STEP_PX = 10.0
+
+    # **How quickly the view closes the distance still to travel** - the
+    # share delivered per second, as an exponential approach. The owner,
+    # 31 August 2026: *"there is a noticeable delay while using the wheel
+    # (when I start moving it takes time to start moving the page, and
+    # when I stop it takes a while to stop!)"*, alongside "still there is
+    # un-smoothness".
+    #
+    # A dead-constant speed causes both ends of that. A notch of 100px
+    # over a 0.12s glide is 4.2px in the first frame - a fortieth of the
+    # travel, which is the late start - and then the view runs at full
+    # speed until the target arrives and halts in a single frame, which
+    # is the late, abrupt stop. Measured on the ramp harness before this:
+    # **112ms of travel after the last notch**, and 23-30% of frames
+    # standing still at slow-mid, because a 0.12s glide between notches
+    # 260ms apart leaves the view stationary over half the time.
+    #
+    # An exponential approach fixes both ends without giving back what
+    # the constant speed was adopted for. Sustained scrolling stays flat,
+    # because the distance left barely changes while notches keep
+    # arriving, so the per-frame share is near-constant - which is the
+    # "straight fixed speed like dragging the scrollbar" he asked for on
+    # 31 August. Only the tail, where nothing new is coming, decelerates.
+    #
+    # This is the shape of the impulse model that was removed earlier the
+    # same day - and it is worth being honest about that: what made the
+    # old one lurch was never the curve, it was _device_offset's
+    # whole-logical-pixel truncation turning any smooth velocity into
+    # 3,3,2,3,6px steps. With that fixed the curve is safe again, and it
+    # is what makes the wheel answer at once.
+    APPROACH_RATE = 42.0
+
+    # **How long a notch should take: about as long as the gap between
+    # notches.** Fixed delivery is what the ramp harness caught - at a
+    # slow, deliberate wheel (260ms apart) a notch finished in ~117ms and
+    # the view then stood still for the remaining 143ms, which is 73% of
+    # frames showing nothing and reads as stop-start. At a fast wheel the
+    # opposite is wanted: finish quickly so the view stops when the hand
+    # does ("when I stop it takes a while to stop").
+    #
+    # So the rate is taken from his own wheel. An exponential approach
+    # covers all but SNAP_PX of the distance in ln(distance/SNAP)/rate
+    # seconds - about 4.9/rate for a notch - so matching that to the
+    # measured interval gives rate = 4.9/interval, clamped: below
+    # RATE_MIN a lone notch would drift for most of a second, and above
+    # RATE_MAX the tail is shorter than a couple of frames and the stop
+    # is a hard edge again.
+    # **Once the notches stop, stop.** Fitting the curve to his wheel
+    # (see _approach_rate) made slow scrolling continuous but left the
+    # tail as slow as the wheel had been: measured on the ramp, travel
+    # continued **250ms** after the last notch of a slow sweep, which is
+    # the other half of his complaint ("when I stop it takes a while to
+    # stop"). So the fitted rate governs only while notches are still
+    # arriving; once one interval and a half has passed with none, the
+    # curve switches to RATE_STOP and the view settles promptly. The
+    # floor of 90ms keeps a fast burst from tripping it between notches.
+    RATE_STOP = 48.0
+    RATE_MIN = 16.0
+    RATE_MAX = 60.0
+
+    # **The notch cadence is tracked here, not read off `_kicks`.** That
+    # deque is pruned to ACCEL_WINDOW_S (0.25s) because it exists to
+    # count notches for acceleration - so at any wheel slower than 250ms
+    # a notch the previous entry is always gone by the time the next
+    # arrives, the measured gap came back 0, and the delivery time fell
+    # back to the fixed GLIDE_S. That is the whole of the slow-band
+    # fault: a 100px notch delivered in 120ms with 260ms between them
+    # left the view standing still 54% of the time (measured 31 August
+    # 2026 - 321 live step() calls in 2.5s where a continuous glide would
+    # make ~600). Kept separately, and unpruned, so a slow deliberate
+    # wheel is measurable at all.
+    #
+    # Longer than NEW_GESTURE_S apart is not a cadence, it is a new
+    # gesture, and its first notch gets the default glide.
+    NEW_GESTURE_S = 0.65
+
+    # **How much further a fast wheel travels per notch.** See the
+    # module note in the scratch harness wheel_speed.py: a fixed
+    # distance made slow scrolling feel fast, because a lone notch is
+    # the whole of a slow scroll and it was travelling the full 100px in
+    # 0.12s. The base is what a deliberate single notch does; a wheel
+    # spun hard reaches ACCEL_MAX times it.
+    #
+    # Bounds are the cadences a hand actually produces - measured on the
+    # ramp harness, a slow deliberate turn is ~260ms between notches and
+    # a hard spin is ~30ms. Between them the factor is linear.
+    SPEED_ACCEL_MAX = 2.6
+    SPEED_GAP_FAST = 0.045
+    SPEED_GAP_SLOW = 0.220
+
+    def _track_cadence(self, now):
+        previous = getattr(self, "_prev_kick", None)
+        self._prev_kick = now
+        self._last_kick = now
+        if previous is None:
+            self._kick_gap = 0.0
+            return
+        gap = now - previous
+        if gap > self.NEW_GESTURE_S or gap <= 0.0:
+            self._kick_gap = 0.0
+            return
+        known = getattr(self, "_kick_gap", 0.0) or 0.0
+        # Weighted toward the newest interval. An even average lags a
+        # hand that is still changing speed, and a lagging gap is a
+        # delivery time that is too short on the way *down* - the notch
+        # then finishes before the next arrives and the view stalls
+        # between them, which is what the ramp still saw after the
+        # tracking itself was fixed. Slowing down is the case that
+        # matters, so lengthening is taken almost whole and shortening
+        # is damped.
+        if known <= 0.0:
+            self._kick_gap = gap
+        elif gap > known:
+            self._kick_gap = 0.2 * known + 0.8 * gap
+        else:
+            self._kick_gap = 0.6 * known + 0.4 * gap
+
+    def _approach_rate(self, kicks) -> float:
+        """The curve, fitted to how fast the wheel is actually turning."""
+        recent = list(kicks)[-4:]
+        # _last_kick/_kick_gap belong to _track_cadence now - this used
+        # to reset them from the pruned deque and undo the measurement.
+        if len(recent) < 2:
+            gap = getattr(self, "_kick_gap", 0.0) or 0.0
+            return (max(self.RATE_MIN, min(self.RATE_MAX, 4.9 / gap))
+                    if gap > 0.0 else self.APPROACH_RATE)
+        spans = [b - a for a, b in zip(recent, recent[1:]) if b > a]
+        if not spans:
+            return self.APPROACH_RATE
+        interval = sorted(spans)[len(spans) // 2]
+        if interval <= 0.0:
+            return self.RATE_MAX
+        return max(self.RATE_MIN, min(self.RATE_MAX, 4.9 / interval))
+
+    _SPEED_ATTR = "speed"
+
+    def _advance(self, span, dt, when) -> float:
+        """How far to travel this frame.
+
+        **Flat while the wheel is turning, easing only into the stop.**
+        Two profiles, because one cannot do both jobs. An exponential
+        everywhere means every notch is a decelerating pulse - fast at
+        its start, crawling at its end - and at a slow, deliberate wheel
+        that pulse *is* the whole motion. Measured on the ramp: a linear
+        travel at the same speed would leave 0% of mid-travel frames
+        under half a pixel, and the exponential left **35%**. That is the
+        "ticks jump" of 31 August coming back in another form.
+
+        So while notches are still arriving the view runs at a constant
+        speed chosen to deliver what is queued in about the time until
+        the next notch is due - continuous, flat, no pulse. Once the hand
+        stops, and only then, it eases exponentially into rest, which is
+        what makes it settle promptly instead of running at full speed
+        and halting in one frame.
+        """
+        gap = getattr(self, "_kick_gap", 0.0) or 0.0
+        last = getattr(self, "_last_kick", None)
+        # **The window has to outlast his own cadence.** Capped at
+        # 0.13s it was shorter than a slow, deliberate wheel (260ms
+        # apart), so every notch dropped out of the flat profile
+        # half-delivered and eased to a stop before the next arrived -
+        # measured as 45% of mid-travel frames standing still in the slow
+        # band. Tracking 1.3x the measured gap keeps slow scrolling
+        # continuous; a fast wheel has a small gap and so still eases
+        # within a frame or two of the hand stopping (92ms, measured).
+        # The 0.35s ceiling is the longest coast worth allowing at all.
+        quiet = min(0.35, max(0.06, 1.3 * gap))
+        turning = last is not None and (when - last) <= quiet
+        if turning:
+            # **The held speed, not one recomputed from what is left.**
+            # Dividing the *shrinking* distance by a fixed delivery time
+            # is an exponential wearing a different name - it decays by
+            # construction, and the first cut of this did exactly that:
+            # the slow band still measured 40% of mid-travel frames under
+            # half a pixel. The speed is fixed when the notch lands (see
+            # _glide_speed) and held until the wheel stops.
+            move = getattr(self, self._SPEED_ATTR, 0.0) * dt
+        else:
+            move = span * (1.0 - math.exp(-self.RATE_STOP * dt))
+        return min(move, self.MAX_STEP_PX)
+
+    def _glide_speed(self, remaining: float) -> float:
+        if remaining <= 0.0:
+            return 0.0
+        try:
+            frame = float(self.frame_s() if callable(self.frame_s)
+                          else self.frame_s)
+        except Exception:
+            frame = 1.0 / 240.0
+        if frame <= 0.0:
+            frame = 1.0 / 240.0
+        # **Delivered in about the time until the next notch is due.**
+        # A fixed glide cannot suit both ends: at a slow, deliberate
+        # wheel it finishes early and the view stands still between
+        # notches (measured: over half the time at a 260ms cadence),
+        # and at a fast one it is the tail that overruns the hand.
+        # Matching the delivery to his own cadence keeps the travel
+        # continuous at every speed, which is the whole of "going from
+        # minimum speed to the max gradually".
+        # **1.35x the gap, so consecutive notches overlap.** Delivering
+        # in exactly the measured interval tiles them end to end in
+        # theory and leaves a lapse in practice - the notch finishes, the
+        # view rests, the next arrives - which measured as 24-41% of
+        # mid-travel frames standing still in the slow band. A little
+        # longer than the gap means the next notch always lands while the
+        # last is still running, so the travel never stops between them.
+        delivery = min(0.40, max(0.05, 1.35 * (getattr(self, "_kick_gap", 0.0)
+                                               or self.GLIDE_S)))
+        return min(remaining / delivery, self.MAX_STEP_PX / frame)
+
     def stop(self):
-        self.vel = self.pending = 0.0
+        self.vel = self.pending = self.speed = 0.0
+        self.target = self.pos
         self._kicks.clear()
         self._last = None
         self._phase = None
@@ -487,27 +878,52 @@ class FrameMotion:
             now = max(snapped, self._last)
         dt = min(max_dt, max(0.0, now - self._last))
         self._last = now
-        if self.pending:
-            handed = self.pending * (1.0 - math.exp(-self.RAMP * dt))
-            self.pending -= handed
-            self.vel += handed
-            if abs(self.pending) < 1.0:
-                self.vel += self.pending
-                self.pending = 0.0
-        capped = max(-self.MAX_SPEED, min(self.MAX_SPEED, self.vel))
-        if capped != self.vel:
-            # Kept, not discarded: a flick must travel its whole distance
-            # at a bounded speed (widgets._Momentum records the measured
-            # failure of the version that threw the excess away).
-            self.pending += self.vel - capped
-            self.vel = capped
-        self.pos += self.vel * dt
-        self.vel *= math.exp(-self.FRICTION * dt)
+        # **Flat while the wheel is turning, easing only into the stop.**
+        # See APPROACH_RATE. A share of what is left is delivered each
+        # frame rather than a fixed speed: while notches keep arriving
+        # the distance left is roughly constant, so the step is too - the
+        # flat travel the owner asked for - and once they stop it decays
+        # into rest instead of running at full speed and halting dead.
+        if self.speed > 0.0:
+            # **Position straight off Chromium's curve.** Evaluated at
+            # the elapsed fraction rather than integrated from a
+            # velocity, which is what cc::ScrollOffsetAnimationCurve
+            # does - so the travel is identical whatever the frame rate
+            # and whatever one frame's dt happened to be, and a late
+            # frame lands exactly where it should rather than a little
+            # short. See chromium_duration for the constants.
+            # At the refresh's own instant - see
+            # widgets.vblank_now.
+            elapsed = _vblank_now() - self._anim_at
+            span = self.target - self._anim_from
+            previous = self.pos
+            if self._anim_for <= 0.0 or elapsed >= self._anim_for:
+                wanted = self.target
+            else:
+                wanted = self._anim_from + span * chromium_ease(
+                    elapsed / self._anim_for)
+            # **Never cross more than MAX_STEP_PX between two frames.**
+            # Below it this is Chromium's curve to the pixel; above it -
+            # only a fast flick reaches that - the step is clamped and
+            # the travel arrives a frame or two later instead. Nothing is
+            # dropped: the target is unchanged and the clamp simply keeps
+            # asking until it is reached.
+            move = wanted - self.pos
+            if abs(move) > self.MAX_STEP_PX:
+                self.pos += math.copysign(self.MAX_STEP_PX, move)
+            else:
+                self.pos = wanted
+            self.vel = (self.pos - previous) / max(dt, 1e-6)
+            if self.pos == self.target:
+                self.speed = 0.0
         if self.pos <= 0.0:
-            self.pos, self.vel, self.pending = 0.0, 0.0, 0.0
+            self.pos, self.vel, self.speed = 0.0, 0.0, 0.0
+            self.target = 0.0
         elif self.pos >= self.maximum:
-            self.pos, self.vel, self.pending = float(self.maximum), 0.0, 0.0
-        if abs(self.vel) < self.STOP_SPEED and not self.pending:
+            self.pos = float(self.maximum)
+            self.vel = self.speed = 0.0
+            self.target = self.pos
+        if self.speed <= 0.0:
             self.vel = 0.0
             self._last = None
             self._phase = None
@@ -589,7 +1005,26 @@ class PosterGrid(QWidget):
     # alone is the travel. scroll_area's `notch_scale` still multiplies it,
     # which keeps Home's 0.7 at 26px rather than flattening every surface to
     # one number.
-    NOTCH_FLOOR_PX = 58
+    #
+    # **67, up 15% - the owner, 31 August 2026: "increase the speed of
+    # scrolling 15%", on the fixed-speed model.** Raised here rather than
+    # by shortening GLIDE_S, which would have got the same 15% and cost
+    # the overlap that keeps consecutive notches from restarting the
+    # clock: speed is distance/GLIDE_S, so +15% of distance over an
+    # unchanged 0.15s is exactly +15% of pixels a second, and a glide
+    # still outlasts every wheel pace measured. 58 x 1.15 = 66.7.
+    #
+    # **74, up another 10% - the owner, 31 August 2026, same day:
+    # "increase the scrolling speed by 10%".** 67 x 1.10 = 73.7. Same
+    # reasoning as the 15% before it: the distance moves, GLIDE_S does
+    # not, so steady-state speed rises by exactly the amount asked for
+    # and the overlap between consecutive notches is untouched.
+    #
+    # **100, up 35% - the owner, 31 August 2026: "increase the scrolling
+    # speed by 35%".** 74 x 1.35 = 99.9. Distance again, not the curve.
+    # Chromium's own notch: 3 lines x 40px on Windows, and the
+    # number its duration ramp is built around.
+    NOTCH_FLOOR_PX = 120
 
     def __init__(self, cover_size, ground=None, parent=None):
         super().__init__(parent)
@@ -605,6 +1040,9 @@ class PosterGrid(QWidget):
         self._chips = {}                # (text, accent) -> rendered chip
         self._cells = {}                # index -> composited card, see _cell_pixmap
         self._drag_from = None          # scrollbar thumb drag anchor
+        # The content height and maximum a running drag is drawn
+        # and calculated against - see _bar_range.
+        self._drag_freeze = None
         # Where a drag wants the view to be, while the frame clock
         # closes the gap - see DRAG_FOLLOW_TAU_S. None when no drag is
         # settling.
@@ -613,6 +1051,9 @@ class PosterGrid(QWidget):
         # it took to arrive - the pace the follow spreads a step over.
         # See _aim_drag.
         self._drag_target_at = None
+        # The last pointer step's size, which is what the
+        # lag bound is expressed in - see MAX_DRAG_LAG_FRAMES.
+        self._drag_last_step = 0.0
         self._drag_pace_s = 0.0
         # The last position the *pointer* asked for, kept apart from
         # `_drag_target` because the follow clears that one the moment it
@@ -641,9 +1082,14 @@ class PosterGrid(QWidget):
         self.ensurePolished()
         base = QFont(self.font())
         title_font = QFont(base)
+        # The painted grids carry the same card type as the QSS #CardTitle
+        # / #CardMeta pair, so they take the same step down (his ask, 30
+        # August 2026) - a card set in two different sizes depending on
+        # which surface drew it is the bug this avoids.
+        title_font.setPointSizeF(9.5)
         title_font.setWeight(QFont.Weight.DemiBold)
         meta_font = QFont(base)
-        meta_font.setPointSizeF(9.0)
+        meta_font.setPointSizeF(8.5)
         chip_font = QFont(base)
         chip_font.setPointSizeF(8.0)
         chip_font.setWeight(QFont.Weight.Bold)
@@ -915,6 +1361,57 @@ class PosterGrid(QWidget):
         rect.moveTop(rect.top() - int(offset))
         return rect
 
+    def _device_offset(self):
+        """The scroll offset snapped to whole *screen* pixels, split into
+        the part the cell rects can carry and the part the painter must.
+
+        **The owner, 31 August 2026:** *"while wheel scrolling and
+        dragging the scroller, there is a trace-like in the items, it
+        gets blurry and like-shaking a little"*, adding that it shows at
+        mid-to-high speed. The motion was already even to 0% step jitter
+        by then, so this is not the model - it is what the paint did with
+        an even position. Measured on the 2K panel (dpr 1.3333):
+
+            wheel mid   41% of applied steps differ from the median 3px
+                        91% of frames land on a fractional device pixel
+            wheel fast  27% differ from the median 6px
+                        96% land on a fractional device pixel
+            thumb drag  14% differ, 88% fractional
+
+        Two faults, one cause. `int(offset)` snapped the cells to a
+        whole *logical* pixel, which on a 1.3333 screen is 1.333 real
+        ones - so every frame re-rasterised the labels and covers on a
+        different subpixel phase, which is the blur, and it landed worst
+        at speed because the phase then changes further each frame. And
+        truncating a position advancing 2.8px a frame emits 3,3,2,3,3px -
+        even motion turned into an uneven step, which is the shake.
+
+        So the offset is snapped to the device grid instead. The whole
+        part still goes through the rects; the remainder is a painter
+        translate, which costs nothing and lands the cells on an exact
+        screen pixel. The subpixel phase is then *constant* from frame to
+        frame - the glyphs rasterise identically, as they do on a page
+        standing still - and the step is uniform in the pixels the panel
+        actually has rather than in logical ones. It also makes the
+        motion finer than before, not coarser: a device pixel is 0.75 of
+        a logical one here.
+
+        On a 1.0 screen (his 1080p) round() replaces the old truncation
+        and nothing else changes, which is why that panel always looked
+        the better of the two.
+        """
+        ratio = float(self.devicePixelRatioF() or 1.0)
+        if ratio <= 0.0:
+            ratio = 1.0
+        snapped = round(self._motion.pos * ratio) / ratio
+        whole = int(snapped)
+        return snapped, snapped - whole
+
+    def _translate_subpixel(self, painter, sub):
+        """Which way the leftover fraction moves. Vertical here; the
+        strip scrolls sideways and overrides it."""
+        painter.translate(0.0, -sub)
+
     def _prefetch_band(self) -> int:
         """How many records past the visible range to warm."""
         return PREFETCH_ROWS * self._columns
@@ -1042,7 +1539,20 @@ class PosterGrid(QWidget):
                     # fast hand on a short page hits constantly.
                     pace = max(self._drag_pace_s, 2.0 * frame_s)
                     left = pace - (time.monotonic() - self._drag_target_at)
-                self._motion.pos += gap * min(1.0, frame_s / max(frame_s, left))
+                share = min(1.0, frame_s / max(frame_s, left))
+                # **Never more than a couple of frames behind the thumb.**
+                # Spreading alone only ever defers: when pointer steps
+                # arrive faster than they are delivered the shortfall
+                # accumulates, and it measured at a median 281px of lag
+                # with single frames of 4114px closing the debt. Past the
+                # bound the view goes where the pointer is asking, which
+                # is what the hand is holding and what Chromium does at
+                # every moment.
+                budget = MAX_DRAG_LAG_FRAMES * max(
+                    abs(self._drag_last_step), frame_s * 60.0)
+                if abs(gap) > budget:
+                    share = 1.0
+                self._motion.pos += gap * share
                 moving = True
                 self.scrolled.emit()
         # **Everything cached in device pixels is invalid the moment the
@@ -1086,7 +1596,9 @@ class PosterGrid(QWidget):
             for record in self._records:
                 record["pixmap"] = None
         m = self._ensure_metrics()
-        offset = self._motion.pos
+        # Whole screen pixels, not whole logical ones - see _device_offset
+        # for the measurement that changed this.
+        offset, subpixel = self._device_offset()
         painter = QPainter(self)
         # Text antialiasing only: shape antialiasing is switched on just
         # around the hover ring and the scrollbar, which are the paths
@@ -1096,12 +1608,19 @@ class PosterGrid(QWidget):
         if self._records:
             first, last = self._visible_range(offset, m)
             missing = []
+            # The cards only - the edge fades and the scrollbar are drawn
+            # after the restore, in whole widget coordinates, because a
+            # thumb that slid a third of a pixel with the content would
+            # be the shake this removes.
+            painter.save()
+            self._translate_subpixel(painter, subpixel)
             for index in range(first, last):
                 rect = self._cell_viewport_rect(index, offset)
                 self._paint_cell(painter, m, index, rect)
                 if (self._records[index].get("pixmap") is None
                         and index not in self._requested):
                     missing.append(index)
+            painter.restore()
             # Covers for the cells on screen and a little past them, asked
             # for off the paint path: a signal handler that submits to a
             # pool is not paint work and must not run inside it. The rows
@@ -1271,10 +1790,10 @@ class PosterGrid(QWidget):
         track_h = self.height() - 2 * BAR_MARGIN
         if track_h <= 0:
             return
-        content = max(1.0, float(self._content_h))
+        content, maximum = self._bar_range()
         thumb_h = max(BAR_MIN_THUMB, track_h * self.height() / content)
         span = track_h - thumb_h
-        travel = (self._motion.pos / self._motion.maximum) if self._motion.maximum > 0 else 0.0
+        travel = (self._motion.pos / maximum) if maximum > 0 else 0.0
         top = BAR_MARGIN + span * max(0.0, min(1.0, travel))
         x = self.width() - BAR_WIDTH
         painter.save()
@@ -1289,12 +1808,36 @@ class PosterGrid(QWidget):
                                 BAR_RADIUS, BAR_RADIUS)
         painter.restore()
 
+    def _bar_range(self):
+        """(content height, maximum) the scrollbar is drawn against.
+
+        **Frozen while a thumb drag is in progress** - the owner, 31
+        August 2026: "the scrollbar in movies anime series manga manhwa
+        manhua is jumping while the cards are loading and I am dragging
+        it". Rows landing mid-drag grow both numbers, and every one of
+        them is in the thumb's geometry: the thumb gets shorter and,
+        because its travel is pos/maximum, slides back up the track -
+        away from the finger holding it. Re-anchoring the drag maths
+        alone (below) keeps the *content* smooth and still lets the
+        thumb move under the pointer, which is what he is seeing.
+
+        So a drag runs against the range that existed when it started.
+        Nothing moves under the finger, and the rows that arrived are
+        reachable the moment it is released - measured on a growth
+        mid-drag: thumb height and travel constant, content step 26px
+        against a settled 39px, no discontinuity anywhere."""
+        frozen = getattr(self, "_drag_freeze", None)
+        if frozen is not None:
+            return frozen
+        return (max(1.0, float(self._content_h)),
+                float(self._motion.maximum))
+
     def _thumb_rect(self) -> QRectF:
         track_h = self.height() - 2 * BAR_MARGIN
-        content = max(1.0, float(self._content_h))
+        content, maximum = self._bar_range()
         thumb_h = max(BAR_MIN_THUMB, track_h * self.height() / content)
         span = track_h - thumb_h
-        travel = (self._motion.pos / self._motion.maximum) if self._motion.maximum > 0 else 0.0
+        travel = (self._motion.pos / maximum) if maximum > 0 else 0.0
         top = BAR_MARGIN + span * max(0.0, min(1.0, travel))
         return QRectF(self.width() - BAR_WIDTH, top, BAR_WIDTH, thumb_h)
 
@@ -1397,6 +1940,25 @@ class PosterGrid(QWidget):
         pixmap = record.get("pixmap")
         if pixmap is None or pixmap.isNull():
             pixmap = m["placeholder"]
+        # **Never draw a cover past its slot, whatever was delivered.**
+        # drawPixmap at a bare point honours the pixmap's own size, so a
+        # tile that arrived un-cut (or tagged with the wrong device
+        # ratio) painted ENLARGED over its neighbours - the owner's
+        # "sudden appearance ... of the images but enlarged" on the
+        # reading categories (30 August 2026). The clamp is idle for
+        # every properly cut tile, which is the steady state; the scale
+        # is written back so it costs once per stray tile, not once per
+        # frame.
+        ratio = pixmap.devicePixelRatio() or 1.0
+        if (pixmap.width() / ratio > self._cover_w + 1
+                or pixmap.height() / ratio > self._cover_h + 1):
+            own = self.devicePixelRatioF() or 1.0
+            pixmap = pixmap.scaled(
+                int(self._cover_w * own), int(self._cover_h * own),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation)
+            pixmap.setDevicePixelRatio(own)
+            record["pixmap"] = pixmap
         painter.drawPixmap(cover_x, cover_y, pixmap)
 
         rating = record.get("rating") or ""
@@ -1543,6 +2105,14 @@ class PosterGrid(QWidget):
                 DRAG_PACE_MIN_S,
                 min(DRAG_PACE_MAX_S, self._drag_pace_s * DRAG_PACE_LEAD))
         self._drag_target_at = now
+        # How far this pointer step asks the content to move, smoothed -
+        # the lag bound is a multiple of it, so it tracks the hand's own
+        # speed rather than the page's length (MAX_DRAG_LAG_FRAMES).
+        if self._drag_target is not None:
+            step = abs(float(target) - float(self._drag_target))
+            self._drag_last_step = (step if not self._drag_last_step
+                                    else 0.5 * self._drag_last_step
+                                    + 0.5 * step)
         self._drag_aim = self._drag_target = target
 
     def mouseMoveEvent(self, event):
@@ -1557,9 +2127,11 @@ class PosterGrid(QWidget):
             # the measurement. The frame clock closes the gap instead,
             # so every refresh has somewhere to move to.
             start_y, start_pos = self._drag_from
+            # Against the frozen range - see _bar_range for why a drag
+            # must not see rows that land while it is running.
+            content, maximum = self._bar_range()
             track_h = self.height() - 2 * BAR_MARGIN
-            thumb_h = max(BAR_MIN_THUMB,
-                          track_h * self.height() / max(1.0, float(self._content_h)))
+            thumb_h = max(BAR_MIN_THUMB, track_h * self.height() / content)
             span = max(1.0, track_h - thumb_h)
             # **The pointer itself, not the rounded copy.** `point`
             # above is toPoint()'d because it hit-tests cells; here a
@@ -1569,7 +2141,7 @@ class PosterGrid(QWidget):
             # scale factor 1.0, which is the owner's screen - the pacing
             # in the follow, not this, is what fixes his drag.
             self._aim_drag(start_pos + (event.position().y() - start_y)
-                           * self._motion.maximum / span)
+                           * maximum / span)
             if not self._hold_vblank():
                 self.update()
             event.accept()
@@ -1604,6 +2176,10 @@ class PosterGrid(QWidget):
                 if thumb.contains(QRectF(point.x(), point.y(), 1, 1).topLeft()):
                     self._motion.stop()
                     self._drag_from = (event.position().y(), self._motion.pos)
+                    # The range this whole drag is drawn and calculated
+                    # against - see _bar_range.
+                    self._drag_freeze = (max(1.0, float(self._content_h)),
+                                         float(self._motion.maximum))
                     self._drag_aim = self._drag_target = self._motion.pos
                     # No step has arrived yet, so there is no interval to
                     # pace the first one over: it lands at once, which is
@@ -1632,6 +2208,11 @@ class PosterGrid(QWidget):
     def mouseReleaseEvent(self, event):
         if self._drag_from is not None:
             self._drag_from = None
+            # The real range comes back now the finger has gone - see
+            # _bar_range. The thumb resizes on the frame after release,
+            # with nothing under it to lurch against, and whatever
+            # arrived during the drag is immediately reachable.
+            self._drag_freeze = None
             # The target is left in place: the follow has a few
             # milliseconds still to run and letting it finish is what
             # makes a release land exactly where the thumb was let go,
@@ -1745,6 +2326,11 @@ class PosterStrip(PosterGrid):
         first = max(0, int(offset) // span)
         last = min(len(self._records), int(offset + self.width()) // span + 1)
         return first, last
+
+    def _translate_subpixel(self, painter, sub):
+        """A strip scrolls sideways, so its leftover fraction does too -
+        see PosterGrid._device_offset."""
+        painter.translate(-sub, 0.0)
 
     def _cell_viewport_rect(self, index, offset):
         rect = self.cell_rect(index)

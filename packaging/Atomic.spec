@@ -22,6 +22,16 @@ BUILD_DIR = os.path.join(SPECPATH, "build")
 # The video player's decode engine. Not in the repository (see
 # fetch_libmpv.py for why); the build stops here rather than producing an
 # exe whose player silently cannot open anything.
+# Home and Discover render in a WebView2 hosted inside the Qt window
+# (helpers/webview2_host.py). Three things travel with the exe for that:
+# the pages, Edge's .NET assemblies, and the native loader. Vendored
+# rather than read out of site-packages because build.py resolves every
+# datas entry with `ast` and cannot follow a call into an installed
+# package - and a build that depends on what happens to be pip-installed
+# breaks on the next machine.
+WEB_DIR = os.path.join(SRC_DIR, "web", "static")
+WEBVIEW_LIB = os.path.join(SPECPATH, "..", "vendor", "webview2")
+
 LIBMPV_FILE = os.path.join(SPECPATH, "..", "vendor", "libmpv-2.dll")
 if not os.path.isfile(LIBMPV_FILE):
     raise SystemExit(
@@ -168,7 +178,21 @@ a = Analysis(
            # bundle check verifies exactly this list, so being in it is
            # what makes a stale or missing token a rejected build rather
            # than a quietly artwork-less exe.
-           (TMDB_TOKEN_FILE, '.')],
+           (TMDB_TOKEN_FILE, '.'),
+           (os.path.join(WEB_DIR, "index.html"), 'static'),
+           (os.path.join(WEB_DIR, "app.css"), 'static'),
+           (os.path.join(WEB_DIR, "app.js"), 'static'),
+           (os.path.join(WEBVIEW_LIB, "Microsoft.Web.WebView2.Core.dll"),
+            'webview/lib'),
+           (os.path.join(WEBVIEW_LIB, "Microsoft.Web.WebView2.WinForms.dll"),
+            'webview/lib'),
+           (os.path.join(WEBVIEW_LIB, "WebView2Loader.dll"),
+            'webview/lib'),
+           # And at the bundle root as well. WebView2Loader.dll is a
+           # *native* DLL the .NET assembly loads by name, so it has to
+           # be on the search path - which is the unpacked bundle root,
+           # not the folder the managed assemblies were put in.
+           (os.path.join(WEBVIEW_LIB, "WebView2Loader.dll"), '.')],
     # python-mpv is loaded by helpers/video_backend.py only after the DLL
     # directory is registered, so the import is inside a function and
     # PyInstaller's static analysis never sees it. libtorrent is imported
@@ -182,7 +206,13 @@ a = Analysis(
     # import is precisely what PyInstaller's static analysis skips.
     # Without it named here every rail icon in the frozen exe renders as
     # nothing - a null pixmap, silently (25 August 2026).
-    hiddenimports=['mpv', 'libtorrent', 'PyQt6.QtSvg'],
+    hiddenimports=['mpv', 'libtorrent', 'PyQt6.QtSvg',
+                   # Reached only from inside a function, so the
+                   # analysis never sees them.
+                   'clr', 'clr_loader', 'clr_loader.netfx', 'webview',
+                   'web', 'web.server', 'web.backend',
+                   'windows.web_pages', 'windows.web_reader',
+                   'helpers.webview2_host'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -250,6 +280,27 @@ _DEAD_WEIGHT = ("/pil/_avif", "/qt6pdf.dll", "/imageformats/qpdf.dll")
 a.binaries = [entry for entry in a.binaries
               if not any(dead in "/" + entry[0].lower().replace("\\", "/")
                          for dead in _DEAD_WEIGHT)]
+
+# **QtWebEngine's developer tools, and Qt's translations.** Measured
+# 31 August 2026 against this build - 248.5MB, of which QtWebEngine is
+# 120.9MB, 49% of the whole executable:
+#
+#   qtwebengine_devtools_resources.debug.pak   13.8MB
+#   qtwebengine_devtools_resources.pak         11.1MB
+#   PyQt6/Qt6/translations/*                    2.4MB
+#
+# The devtools are the F12 inspector's own UI. Nothing in this app can
+# open it - web_grid sets no devtools shortcut and the page it serves is
+# generated here - and the *debug* copy is not shipped by browsers at
+# all. The translations are Qt's own strings in forty languages for an
+# app whose every string is English.
+#
+# Datas rather than binaries: these arrive through PyQt6's hook as data
+# files, which `excludes=` cannot reach either.
+_DEAD_DATA = ("qtwebengine_devtools_resources", "/qt6/translations/")
+a.datas = [entry for entry in a.datas
+           if not any(dead in "/" + entry[0].lower().replace("\\", "/")
+                      for dead in _DEAD_DATA)]
 
 pyz = PYZ(a.pure)
 
