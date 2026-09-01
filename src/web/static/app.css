@@ -44,9 +44,23 @@ body.embed #page { inset: 0; }
 #page {
   position: fixed; inset: 0 0 0 var(--rail);
   overflow-y: auto; overflow-x: hidden;
-  scrollbar-width: none;                 /* the bar is drawn below */
 }
-#page::-webkit-scrollbar { width: 0; height: 0; }
+
+/* **Chromium's own scrollbar, wearing the app's colours.** This page
+   used to draw one and ease the content toward the pointer, because his
+   mouse reports at ~125Hz against 238Hz of frames and snapping straight
+   to it stepped. Every version of that follower traded stepping for lag
+   or lag for stepping, and the last was "a bad delay in the dragging
+   scrollbar method". The browser drags with no interpolation at all. */
+#page::-webkit-scrollbar { width: 12px; }
+#page::-webkit-scrollbar-track { background: transparent; }
+#page::-webkit-scrollbar-thumb {
+  background: #263143;                   /* theme.SURFACE_ACTIVE */
+  border-radius: 6px;
+  border: 3px solid var(--bg);           /* insets the thumb to 6px */
+}
+#page:hover::-webkit-scrollbar-thumb { background: #3a4761; }
+#page::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 
 /* ---- the banner --------------------------------------------------
    The same shape the Qt one has: widgets.HERO_BANNER_HEIGHT is 300 and
@@ -194,13 +208,6 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .strip .card { flex: 0 0 auto; width: 176px; }
 
 .empty { padding: 60px 28px; color: var(--dim); }
-
-/* ---- the scrollbar this page draws itself ------------------------ */
-#sb { position: fixed; top: 0; right: 0; width: 14px; height: 100%;
-      z-index: 30; }
-#th { position: absolute; right: 3px; width: 8px; border-radius: 4px;
-      background: var(--dim); opacity: .5; }
-#sb:hover #th, #th.on { background: var(--accent); opacity: 1; }
 
 /* ---- the reader ---------------------------------------------------
    The Qt reader's own numbers, from windows/reader.py: BAR_HEIGHT 48,

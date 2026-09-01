@@ -439,7 +439,6 @@ async function go(route) {
   if (!(data.sections || []).some(function (s) { return s.rows.length; })) {
     page.appendChild(el('div', 'empty', 'Nothing here yet.'));
   }
-  bar.layout();
 }
 
 /* ---- sideways gestures on a row -----------------------------------
@@ -500,98 +499,19 @@ page.addEventListener('wheel', function (e) {
   if (strip._side(e.shiftKey ? e.deltaY : e.deltaX)) e.preventDefault();
 }, { passive: false });
 
-/* ---- the scrollbar ------------------------------------------------
-   **Velocity, not a target.** The first version eased toward wherever
-   the pointer last was, and the owner still called it stepped. Measured
-   on his own drag: frames were arriving perfectly (4.20ms median, one
-   miss in 1194), but his mouse reports at ~125Hz against 238Hz of
-   frames, so between two pointer samples the remaining gap shrank until
-   a fraction of it was under a pixel and the page could not move at
-   all. Jump, decay, freeze, jump - every two frames.
+/* ---- the scrollbar -------------------------------------------------
+   **The browser's own, deliberately.** This file used to draw one and
+   ease the content toward the pointer, because his mouse reports at
+   ~125Hz against 238Hz of frames and snapping straight to it stepped.
+   Every version of that follower traded stepping for lag or lag for
+   stepping, and the last one the owner described as "a bad delay in the
+   dragging scrollbar method".
 
-   So the thumb now carries a speed. Each pointer sample updates it, and
-   every frame in between advances by that speed, with a gentle pull
-   back toward the true position so it can never drift. Motion is
-   continuous at the panel's rate rather than restarting 125 times a
-   second. */
-const bar = (function () {
-  const track = document.getElementById('sb');
-  const thumb = document.getElementById('th');
-  let dragging = false, raf = 0;
-  let wanted = 0, shown = 0, speed = 0, lastFrame = 0, lastSample = 0;
-
-  function layout() {
-    const view = page.clientHeight, all = page.scrollHeight;
-    if (all <= view + 1) { thumb.style.display = 'none'; return; }
-    thumb.style.display = 'block';
-    const h = Math.max(36, view * view / all);
-    thumb.style.height = h + 'px';
-    thumb.style.top = (view - h) * (page.scrollTop / (all - view)) + 'px';
-  }
-
-  function follow(now) {
-    raf = 0;
-    if (!dragging) return;
-    const dt = lastFrame ? Math.min(48, now - lastFrame) : 8;
-    lastFrame = now;
-
-    // Carry on at the last known speed, and lean toward the truth. The
-    // 0.012 gain closes a gap in about five frames at 240Hz - fast
-    // enough that a direction change is not felt as lag, slow enough
-    // that it never becomes the jump this replaced.
-    shown += speed * dt + (wanted - shown) * Math.min(1, 0.012 * dt);
-    const limit = page.scrollHeight - page.clientHeight;
-    shown = Math.max(0, Math.min(limit, shown));
-    page.scrollTop = shown;
-    raf = requestAnimationFrame(follow);
-  }
-
-  function aim(clientY) {
-    const view = page.clientHeight, all = page.scrollHeight;
-    const h = Math.max(36, view * view / all);
-    let target = (clientY - h / 2) / Math.max(1, view - h) * (all - view);
-    target = Math.max(0, Math.min(all - view, target));
-
-    const now = performance.now();
-    if (lastSample) {
-      const gap = now - lastSample;
-      if (gap > 0.5 && gap < 200) {
-        // Smoothed: one late sample should bend the speed, not define it.
-        const fresh = (target - wanted) / gap;
-        speed = speed * 0.35 + fresh * 0.65;
-      }
-    }
-    lastSample = now;
-    wanted = target;
-    if (!raf) raf = requestAnimationFrame(follow);
-  }
-
-  track.addEventListener('pointerdown', function (e) {
-    dragging = true;
-    wanted = shown = page.scrollTop;
-    speed = 0; lastFrame = 0; lastSample = 0;
-    thumb.classList.add('on');
-    track.setPointerCapture(e.pointerId);
-    aim(e.clientY);
-    e.preventDefault();
-  });
-  track.addEventListener('pointermove', function (e) {
-    if (dragging) aim(e.clientY);
-  });
-  function release(e) {
-    if (!dragging) return;
-    dragging = false;
-    speed = 0;
-    thumb.classList.remove('on');
-    try { track.releasePointerCapture(e.pointerId); } catch (err) {}
-    page.scrollTop = wanted;
-  }
-  track.addEventListener('pointerup', release);
-  track.addEventListener('pointercancel', release);
-  page.addEventListener('scroll', layout, { passive: true });
-  addEventListener('resize', layout);
-  return { layout: layout };
-})();
+   Chromium has already solved this and drags with no interpolation at
+   all. `::-webkit-scrollbar` in app.css gives it the app's colours, so
+   nothing is lost but the code - and with it the pointer-pace estimate,
+   the frame-length estimate and the thumb layout that had to be kept in
+   step with the page. */
 
 /* ---- start -------------------------------------------------------- */
 if (EMBED) document.body.classList.add('embed');
