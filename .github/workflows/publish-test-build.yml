@@ -1,5 +1,26 @@
 # Keep the newest test build behind one permanent, fast download link.
 #
+# **This workflow cannot run any more, and the reason is a hard limit.**
+# It uploads the `Atomic.zip` committed on this branch, and since
+# 1.10.221 that file is 209.3 MB against GitHub's 100 MB ceiling for any
+# file in a repository - so the zip can never reach the branch for this
+# to pick up. Measured 1 September 2026; the push is refused by the
+# server with GH001.
+#
+# Zipping does not help: PyInstaller already zlib-compresses its
+# embedded archive, so 210.4 MB of exe becomes 209.3 MB of zip, a gain
+# of 0.5%. Nor does slimming the exe - QtWebEngine is 85.1 MB of it and
+# removing it entirely still leaves about 125 MB.
+#
+# The fix is to stop routing the artifact through git and upload it to
+# the release directly, where the ceiling is 2 GB:
+#
+#     gh release upload test-latest Atomic.zip --clobber
+#
+# Left in place rather than deleted: the tag, the permanent link and the
+# reasoning below are all still right, and only the source of the file
+# has to move.
+#
 # **Why this exists, as a measurement.** Atomic.zip on this branch is
 # what the owner installs from on his other machine, and downloading it
 # straight off the branch is a cold CDN miss *every single time*:

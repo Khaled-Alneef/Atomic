@@ -1,5 +1,31 @@
 # Remote Tests
 
+> **The build on this branch is 1.10.107 and cannot be updated in place.**
+> `Atomic.zip` is now **209.3 MB** and GitHub refuses any file in a
+> repository over **100 MB**, so a newer build cannot be committed here at
+> all. The push is rejected by the server, not by a setting anybody can
+> change:
+>
+>     remote: error: File Atomic.zip is 209.32 MB; this exceeds
+>     remote: error: GitHub's file size limit of 100.00 MB
+>
+> Zipping buys nothing: PyInstaller already zlib-compresses its embedded
+> archive, so 210.4 MB of exe becomes 209.3 MB of zip - **0.5%**. The
+> 92 MB file sitting in this branch is from 1.10.107, when the exe was
+> less than half the size.
+>
+> **What has to change.** The workflow below publishes the release asset
+> *from the copy committed here*, so the zip has to reach the branch
+> first, and it no longer can. Dropping QtWebEngine (85.1 MB, and only
+> the category grids still use it) would take the exe to about 125 MB -
+> still over the limit. So the artifact has to stop travelling through
+> git: uploaded straight to the `test-latest` release instead, where the
+> ceiling is 2 GB.
+>
+>     gh release upload test-latest Atomic.zip --clobber
+>
+> Until that lands, build locally with `python packaging/build.py --zip`.
+
 Builds parked here so they can be downloaded and tried on another
 machine. **Nothing here is a release**: no tag, no version bump, and the
 in-app updater ignores this branch.
@@ -16,6 +42,22 @@ pre-release, or straight from the link in the table.
 
 Windows is the only platform Atomic is built for. There is no macOS or
 Linux build and no web version.
+
+**What the current build is made of** (measured 1 September 2026, out of
+the frozen archive):
+
+| | size | share |
+|---|---|---|
+| QtWebEngine | 85.1 MB | 41% |
+| PyQt6 / Qt | 55.4 MB | 26% |
+| libmpv | 43.2 MB | 21% |
+| everything else | 26.2 MB | 12% |
+| **total** | **209.9 MB** | |
+
+QtWebEngine is still there for the category grids alone. Home, Discover
+and the reading viewer render in **WebView2** now - Edge's own
+compositor, which is what the whole scroll effort turned out to be
+about - and neither they nor the reader need it.
 
 That link never changes and always serves the newest build: a push to
 this branch republishes it automatically, through
