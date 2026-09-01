@@ -117,10 +117,12 @@ function heroFor(hero) {
   // never left waiting on a network call.
   const bullets = el('p', 'bullets', (hero.bullets || []).join('  ·  '));
   text.appendChild(bullets);
-  if (!hero.id && hero.title) {
-    // A discover title: no saved entry, so the wide still and the title
+  if (hero.poster && hero.title) {
+    // Standing in with the cover, so the wide still and the title
     // treatment come from TMDB by name - the same two calls
-    // tracker._featured_backdrop_worker makes.
+    // tracker._featured_backdrop_worker makes. Two banners land here: a
+    // discover title, which has no saved entry at all, and a library
+    // entry helpers/hero_art has not yet given hero_backdrop to.
     fetch('/api/featured?title=' + encodeURIComponent(hero.title) +
           '&imdb=' + encodeURIComponent(hero.imdb || '') +
           '&type=' + encodeURIComponent(hero.type || ''))
@@ -531,6 +533,24 @@ async function go(route) {
   if (!(data.sections || []).some(function (s) { return s.rows.length; })) {
     page.appendChild(el('div', 'empty', 'Nothing here yet.'));
   }
+
+  // A medium page's catalogue is a site search - seconds - so the cached
+  // copy is drawn above and this replaces it when the live one answers.
+  if (data.browse) {
+    fetch('/api/browse?medium=' + encodeURIComponent(data.browse))
+      .then(function (r) { return r.json(); })
+      .then(function (live) {
+        if (mine !== token || !(live.rows || []).length) return;
+        const blocks = page.querySelectorAll('.row');
+        const last = blocks[blocks.length - 1];
+        if (last && /^Browse/.test(last.querySelector('h2').textContent)) {
+          last.remove();
+        }
+        sectionsInto(page, [{ title: live.title || 'Browse',
+                              rows: live.rows }]);
+      })
+      .catch(function () { /* the cached catalogue stays */ });
+  }
 }
 
 /* ---- sideways gestures on a row -----------------------------------
@@ -627,4 +647,16 @@ else {
     rail.appendChild(item);
   });
 }
-go((location.hash || '#home').slice(1) || 'home');
+// **The hash is how the host changes pages.** WebTrackerPage points the
+// view at #movies, #manhwa and so on, and a URL that differs only in its
+// fragment is a *same-document* navigation - Chromium fires hashchange
+// and never reloads, so without this the router runs once and the page
+// stays on whatever it first drew. That is what left a converted
+// watch/read page blank while the view itself reported loaded, visible
+// and uncovered.
+function currentRoute() {
+  return (location.hash || '#home').slice(1) || 'home';
+}
+
+addEventListener('hashchange', function () { go(currentRoute()); });
+go(currentRoute());

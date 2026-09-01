@@ -421,7 +421,7 @@ class WebView2Page(QWidget):
         except Exception:
             logs.exception("A web page key could not be forwarded")
 
-    def _navigated(self, _sender, _args):
+    def _navigated(self, _sender, args):
         """The page has content; only now is it safe to show.
 
         A WebView2 that has not loaded anything paints white, and this
@@ -430,6 +430,27 @@ class WebView2Page(QWidget):
         opened, which is the block the owner reported three times. Kept
         hidden until here, it shows nothing at all instead.
         """
+        # **Only a navigation that actually arrived counts.** A second
+        # Navigate cancels the first, and NavigationCompleted then fires
+        # with IsSuccess false - so marking the view loaded here
+        # regardless showed an empty document. That is what left a
+        # converted watch/read page blank while the view reported
+        # loaded, visible and uncovered: WebTrackerPage.set_active_section
+        # navigates moments after construction, cancelling the first.
+        ok = True
+        try:
+            ok = bool(args.IsSuccess)
+        except Exception:
+            pass
+        if not ok:
+            try:
+                core = self._view.CoreWebView2
+                if core is not None and self._url:
+                    core.Navigate(self._url)
+            except Exception:
+                logs.exception("Could not retry the page")
+            return
+
         self._loaded = True
         if self._suppressed:
             return              # an overlay is up; stay hidden
@@ -446,6 +467,13 @@ class WebView2Page(QWidget):
             logs.exception("A web page message could not be read")
 
     def show_url(self, url):
+        """Point the view at `url`.
+
+        A URL differing only in its fragment is a same-document
+        navigation: Chromium fires hashchange rather than reloading, and
+        the page listens for it (app.js). Navigate is still the right
+        call - it is what makes the browser fire that event at all.
+        """
         self._url = url
         try:
             if self._view is not None and self._view.CoreWebView2 is not None:

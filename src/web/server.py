@@ -130,6 +130,29 @@ def _heroes(candidates):
         found.append(hero)
         if len(found) >= HERO_SLIDES:
             break
+    if not found:
+        # **Nothing here has been given banner art yet.** hero_backdrop is
+        # written by helpers/hero_art onto a saved entry, and measured 1
+        # September 2026 not one Movies or Anime entry carries it, so
+        # those two pages had no banner at all while the other four did.
+        # The cover stands in - blurred and over-scaled, exactly as a
+        # Discover banner does - and the page then asks /api/featured for
+        # the real wide still, which is the same pair of calls
+        # tracker._featured_backdrop_worker makes.
+        for entry in candidates:
+            cover = backend.cover_url(entry)
+            if not cover:
+                continue
+            found.append({
+                "title": str(entry.get("title") or ""), "backdrop": cover,
+                "cover": cover, "logo": "", "poster": True,
+                "type": str(entry.get("type") or ""), "hide_title": False,
+                "meta": str(entry.get("progress") or ""),
+                "bullets": backend._bullets(entry),
+                "imdb": str(entry.get("imdb_id") or ""),
+                "id": str(entry.get("id") or entry.get("entry_id") or ""),
+            })
+            break
     return found
 
 
@@ -299,10 +322,113 @@ def _search(text):
     return {"kind": "rows", "sections": sections, "note": note, "hero": None}
 
 
+
+# What each of the six catalogue rows reads, and out of which file. The
+# app splits the same data the same way: series.json holds what is
+# watched and tracker.json what is read.
+SECTIONS = {
+    "movies": ("series.json", ("Movie", "Movies")),
+    "series": ("series.json", ("Series",)),
+    "anime": ("series.json", ("Anime",)),
+    "manga": ("tracker.json", ("Manga",)),
+    "manhwa": ("tracker.json", ("Manhwa",)),
+    "manhua": ("tracker.json", ("Manhua",)),
+}
+
+# Which discover-cache section holds each medium's catalogue. The cache
+# paints instantly; the live call underneath it is a site search and
+# takes seconds, so the page asks for that separately (rule 7).
+BROWSE_CACHE = {
+    "movies": "movie", "series": "series", "anime": "anime",
+    "manga": "medium:Manga", "manhwa": "medium:Manhwa",
+    "manhua": "medium:Manhua",
+}
+BROWSE_LIMIT = 60
+
+
+def _cached_browse(key):
+    try:
+        cached = json.loads(
+            (DATA / "discover_cache.json").read_text(encoding="utf-8-sig"))
+    except Exception:
+        return []
+    block = cached.get(key) if isinstance(cached, dict) else None
+    if not isinstance(block, dict):
+        return []
+    return [r for r in (block.get("rows") or [])
+            if isinstance(r, dict) and r.get("title")]
+
+
+def _medium(route):
+    """One medium's page: the library first, then the catalogue.
+
+    The Qt pages these replace are a catalogue browse with the user's own
+    entries above it, so the order is kept - what he already has is what
+    he came for, and the browse sits underneath it.
+    """
+    name, kinds = SECTIONS[route]
+    wanted = tuple(k.lower() for k in kinds)
+
+    mine = [e for e in _rows(name)
+            if str(e.get("type", "")).lower() in wanted]
+    seen = {str(m.get("title") or "").strip().lower() for m in mine}
+    recent = [e for e in _history(kinds)
+              if str(e.get("title") or "").strip().lower() not in seen]
+
+    sections = []
+    if mine:
+        sections.append({"title": f"In your library  ({len(mine)})",
+                         "rows": [_row(e, resume=True) for e in mine]})
+    if recent:
+        sections.append({"title": f"Recently opened  ({len(recent)})",
+                         "rows": [_row(e, resume=True) for e in recent]})
+    browse = _cached_browse(BROWSE_CACHE.get(route, ""))
+    if browse:
+        sections.append({"title": f"Browse  ({len(browse)})",
+                         "rows": [_row(e) for e in browse[:BROWSE_LIMIT]]})
+
+    # The same banner Home carries, over this medium's own library - the
+    # owner's ask was that these pages be "like the main and discover
+    # page", and the banner is the first thing that reads as different.
+    # History rows first, so the carousel opens on what he last touched,
+    # and _heroes prefers the saved entry behind each one anyway (that is
+    # where hero_backdrop and hero_logo are written).
+    heroes = _heroes(recent + mine)
+
+    total = sum(len(x["rows"]) for x in sections)
+    return {"kind": "rows", "sections": sections,
+            "hero": heroes[0] if heroes else None, "heroes": heroes,
+            "browse": route,
+            "note": f"{total} titles" if total else "nothing here yet"}
+
+
+def _browse(route):
+    """A live catalogue for one medium - a site search, so its own route."""
+    if route not in SECTIONS:
+        return {"rows": []}
+    try:
+        from helpers import discover as finder
+        if route in ("movies", "series", "anime"):
+            kind = "movie" if route == "movies" else route
+            rows = finder.discover_video(kind, "", limit=BROWSE_LIMIT) or []
+        else:
+            rows = finder.discover_reading_medium(
+                route.capitalize(), limit=BROWSE_LIMIT) or []
+    except Exception as error:
+        return {"rows": [], "error": str(error)[:120]}
+    rows = [r for r in rows if isinstance(r, dict) and r.get("title")]
+    return {"rows": [_row(e) for e in rows],
+            "title": f"Browse  ({len(rows)})"}
+
+
 def answer(route, query=None):
     query = query or {}
     one = lambda k, d="": (query.get(k) or [d])[0]      # noqa: E731
 
+    if route in SECTIONS:
+        return _medium(route)
+    if route == "browse":
+        return _browse(one("medium"))
     if route == "home":
         return _home()
     if route == "discover":

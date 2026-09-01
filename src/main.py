@@ -136,6 +136,7 @@ HOME_PAGE_NAME = "home"
 # a blank page would be worse than the old scrolling.
 try:
     from windows.web_pages import (WebDiscoverPage, WebHomePage,
+                                   WebReadPage, WebWatchPage,
                                    available as _web_pages_ok)
     _WEB_PAGES = _web_pages_ok()
 except Exception as _web_error:
@@ -167,8 +168,8 @@ PAGES = {
     # One Discover for both media - the sidebar's own row (see
     # nav_config.NAV_GROUPS).
     "discover": WebDiscoverPage if _WEB_PAGES else DiscoverPage,
-    "manga": MangaPage,
-    "series": SeriesPage,
+    "manga": WebReadPage if _WEB_PAGES else MangaPage,
+    "series": WebWatchPage if _WEB_PAGES else SeriesPage,
     "games": GamesPage,
     "apps": AppsPage,
     "websites": WebsitesPage,

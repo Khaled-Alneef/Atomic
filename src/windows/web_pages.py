@@ -26,8 +26,8 @@ The pages themselves are in src/web, served over http://.
 
 import os
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtCore import QEvent, QTimer
+from PyQt6.QtWidgets import QWidget
 
 from helpers import logs, storage, webview2_host
 from helpers.widgets import GlassPage
@@ -109,13 +109,18 @@ class _WebPage(GlassPage):
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        # **Geometry, not a layout.** Measured 1 September 2026: on the
+        # animated page swap the page itself came out (0, 0, 1714, 1001)
+        # while the view inside it stayed 94x29 - main grabs a pixmap of
+        # each page to slide (see navigate_to), and the layout on a page
+        # built that way never activated. Home only worked because the
+        # first page skips the animation entirely. The document was
+        # complete the whole time; the window showing it was a postage
+        # stamp, which is why the page read as blank.
         self.view = webview2_host.WebView2Page(
             url=f"{base_url()}?embed=1#{self.ROUTE}", parent=self)
         self.view.message.connect(self._from_page)
-        layout.addWidget(self.view, 1)
+        self.view.setGeometry(self.rect())
         _live_pages.append(self)
         if overlay_open():
             # Built while an overlay is up - stay down until it closes.
@@ -136,9 +141,42 @@ class _WebPage(GlassPage):
 
     def _check_covered(self):
         try:
+            self._fill()
             self.view.suppress(not self.isVisible() or _covered(self))
         except RuntimeError:
             pass                 # this page is on its way out
+
+    def _fill(self):
+        """Keep the view exactly over this page.
+
+        The 150ms check above calls this too, because the page swap
+        animates a *pixmap* of each page and only sets the real geometry
+        when it lands - so a page can be the right size while the view
+        inside it is still the wrong one, and no single event marks the
+        moment that stops being true.
+        """
+        try:
+            if self.view.geometry() != self.rect():
+                self.view.setGeometry(self.rect())
+        except RuntimeError:
+            pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fill()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fill()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # A native child is not hidden with its Qt parent, and would go
+        # on painting over whatever replaced this page.
+        try:
+            self.view.suppress(True)
+        except RuntimeError:
+            pass
 
     # ---- what the page asks the app to do ---------------------------
     def _from_page(self, body):
@@ -335,6 +373,36 @@ def _find(entry_id, title):
 
 class WebHomePage(_WebPage):
     ROUTE = "home"
+
+
+class WebTrackerPage(_WebPage):
+    """One of the six catalogue pages, on WebView2.
+
+    nav_config.NAV_GROUPS routes these as `series:cat_movies` and the
+    like, so main._apply_route_section hands the section here and the
+    view is pointed at that medium. The page half only decides which
+    medium the row lands on before a section arrives.
+    """
+
+    SECTION_ROUTES = {
+        "cat_movies": "movies", "cat_series": "series", "cat_anime": "anime",
+        "cat_manga": "manga", "cat_manhwa": "manhwa", "cat_manhua": "manhua",
+    }
+
+    def set_active_section(self, section):
+        route = self.SECTION_ROUTES.get(str(section or ""), "")
+        if not route:
+            return
+        self.ROUTE = route
+        self.view.show_url(f"{base_url()}?embed=1#{route}")
+
+
+class WebWatchPage(WebTrackerPage):
+    ROUTE = "series"
+
+
+class WebReadPage(WebTrackerPage):
+    ROUTE = "manga"
 
 
 class WebDiscoverPage(_WebPage):

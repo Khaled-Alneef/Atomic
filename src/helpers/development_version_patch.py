@@ -1248,7 +1248,21 @@ def install():
     # every catalog until one *matches* rather than stopping at the
     # first that answers; and the player's upper bar is opaque, so it
     # looks the same over a picture as over the loading backdrop.
-    updater.APP_VERSION = "1.10.226"
+    #
+    # 1.10.227: the six watch/read pages move onto WebView2, so every
+    # scrolling surface in the app is now the one engine. They rendered
+    # blank at first for a reason worth keeping: main animates a page
+    # swap by grabbing a *pixmap* of each page, and a layout on a page
+    # built that way never activates - the page came out (0, 0, 1714,
+    # 1001) with the view inside it still 94x29, a postage stamp showing
+    # a complete document. Geometry is set directly now, and re-checked
+    # on the same 150ms tick that asks whether anything is covering the
+    # view, because no single event marks the moment the swap lands.
+    # Each page also carries Home's banner over its own library; Movies
+    # and Anime had none, since not one of their entries has been given
+    # hero_backdrop, so the cover stands in until /api/featured answers
+    # with the real wide still.
+    updater.APP_VERSION = "1.10.227"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
