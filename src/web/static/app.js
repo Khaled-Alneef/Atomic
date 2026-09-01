@@ -524,33 +524,92 @@ async function go(route) {
 
   const heroes = data.heroes || (data.hero ? [data.hero] : []);
   if (heroes.length) page.appendChild(heroCarousel(heroes));
-  if (data.note) {
-    const head = el('header');
-    head.appendChild(el('p', null, data.note));
+  if (data.note || data.title) {
+    // The medium name and the note under it - the two lines the Qt page
+    // opens with, where the name is the panel heading its own chrome
+    // drew and the note is _category_note. Both small and dim: when the
+    // name was set large the two "sat stacked" and the owner sent a
+    // screenshot of it (tracker's own note, 22 August 2026).
+    const head = el('header', data.kind === 'grid' ? 'gridhead' : null);
+    if (data.title) head.appendChild(el('p', 'ptitle', data.title));
+    if (data.note) head.appendChild(el('p', null, data.note));
     page.appendChild(head);
   }
+  if (data.kind === 'grid') {
+    const grid = el('div', 'grid');
+    (data.rows || []).forEach(function (row) { grid.appendChild(gridCard(row)); });
+    page.appendChild(grid);
+    if (!(data.rows || []).length) {
+      page.appendChild(el('div', 'empty', 'Looking around...'));
+    }
+    liveBrowse(data, page, grid, token);
+    return;
+  }
+
   sectionsInto(page, data.sections || []);
   if (!(data.sections || []).some(function (s) { return s.rows.length; })) {
     page.appendChild(el('div', 'empty', 'Nothing here yet.'));
   }
+}
 
-  // A medium page's catalogue is a site search - seconds - so the cached
-  // copy is drawn above and this replaces it when the live one answers.
-  if (data.browse) {
-    fetch('/api/browse?medium=' + encodeURIComponent(data.browse))
-      .then(function (r) { return r.json(); })
-      .then(function (live) {
-        if (mine !== token || !(live.rows || []).length) return;
-        const blocks = page.querySelectorAll('.row');
-        const last = blocks[blocks.length - 1];
-        if (last && /^Browse/.test(last.querySelector('h2').textContent)) {
-          last.remove();
-        }
-        sectionsInto(page, [{ title: live.title || 'Browse',
-                              rows: live.rows }]);
-      })
-      .catch(function () { /* the cached catalogue stays */ });
-  }
+/* ---- the catalogue grid -------------------------------------------
+   One card, shaped exactly as helpers/web_grid.py builds it: cover,
+   title, meta, and the meta in ACCENT when the title is already his. */
+function gridCard(row) {
+  const card = el('div', 'gc');
+  const img = el('img', 'p');
+  img.width = 160; img.height = 216;
+  img.alt = '';
+  // Decoded off the thread that scrolls - web_grid's note: a cover
+  // arriving mid-scroll can otherwise decode inline and cost the frame
+  // it lands on. Lazy for the same reason the rest of the app is.
+  img.decoding = 'async';
+  img.loading = 'lazy';
+  if (row.cover) img.src = row.cover;
+  card.appendChild(img);
+  card.appendChild(el('div', 't', row.title || ''));
+  card.appendChild(el('div', 'm' + (row.saved ? ' s' : ''), row.meta || ''));
+  card.addEventListener('click', function () {
+    tellHost({ action: 'open', kind: row.kind || 'title', id: row.id || '',
+               title: row.title || '', type: row.type || '',
+               url: row.url || '', poster: row.cover || '',
+               imdb: row.imdb || '' });
+  });
+  return card;
+}
+
+/* A medium's catalogue is a whole-sites sweep - measured 3.5s on a good
+   day and 36.4s on a bad one - so the cache is drawn first and this
+   fills in behind it, which is rule 7's "show what there is".
+
+   **It may only append.** tracker._on_category_results pays for this
+   lesson twice over: the sweep's row order depends on which sites
+   answered this minute, so a refresh that redraws the grid swaps the
+   titles under the cards the user is looking at, and one that replaces
+   it wholesale cut a live grid from 60 cards to 30 and clamped the
+   scroll position mid-scroll. Nothing already on screen moves; the grid
+   only grows at the bottom. */
+function liveBrowse(data, page, grid, token) {
+  if (!data.browse) return;
+  fetch('/api/browse?medium=' + encodeURIComponent(data.browse))
+    .then(function (r) { return r.json(); })
+    .then(function (live) {
+      if (mine !== token) return;              // a later click won
+      const key = function (r) { return (r.title || '').trim().toLowerCase(); };
+      const have = new Set((data.rows || []).map(key));
+      const fresh = (live.rows || []).filter(function (r) {
+        return r.title && !have.has(key(r));
+      });
+      if (!fresh.length) return;
+      const frag = document.createDocumentFragment();
+      fresh.forEach(function (r) { frag.appendChild(gridCard(r)); });
+      grid.appendChild(frag);
+      const note = page.querySelector('header p');
+      if (note) note.textContent = data.note;
+      const empty = page.querySelector('.empty');
+      if (empty) empty.remove();
+    })
+    .catch(function () { /* the cached catalogue stays */ });
 }
 
 /* ---- sideways gestures on a row -----------------------------------

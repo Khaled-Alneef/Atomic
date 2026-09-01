@@ -103,7 +103,47 @@ def _row(entry, kind="title", resume=False):
         "meta": "  ".join(b for b in bits if b)[:40],
         "cover": backend.cover_url(entry),
         "url": str(entry.get("url") or ""),
+        "imdb": str(entry.get("imdb_id") or ""),
     }
+
+
+def _saved_titles():
+    """Every title already in the library, lowercased.
+
+    The catalogue grid writes a saved row's meta line in ACCENT, which is
+    the only mark on a card saying "you have this" - tracker._grid_record
+    does the same test against the same three files.
+    """
+    found = set()
+    for name in ("series.json", "tracker.json"):
+        for entry in _rows(name):
+            title = str(entry.get("title") or "").strip().lower()
+            if title:
+                found.add(title)
+    return found
+
+
+def _grid_row(entry, saved_titles):
+    """One catalogue row, as tracker._grid_record builds it.
+
+    The meta line is year and rating joined by two spaces (web_grid line
+    649), the rating being "* 7.4" from a Cinemeta row's imdbRating to
+    one decimal - "7.0" written ":g" renders "7", which reads as a
+    different number. Reading rows carry neither and get a blank line,
+    which is why .m has a min-height.
+    """
+    row = _row(entry)
+    year = str(entry.get("year") or "").strip()
+    raw = entry.get("imdbRating")
+    rating = ""
+    if raw not in (None, ""):
+        try:
+            rating = f"★ {float(raw):.1f}"
+        except (TypeError, ValueError):
+            rating = f"★ {str(raw).strip()}" if str(raw).strip() else ""
+    row["meta"] = "  ".join(part for part in (year, rating) if part)
+    row["saved"] = row["title"].strip().lower() in saved_titles
+    return row
 
 
 # How many titles the banner rotates through. Home shows one at a time
@@ -340,61 +380,65 @@ def _cached_browse(key):
             if isinstance(r, dict) and r.get("title")]
 
 
+MEDIUM_TITLE = {"movies": "Movies", "series": "Series", "anime": "Anime",
+                "manga": "Manga", "manhwa": "Manhwa", "manhua": "Manhua"}
+
+
+def _category_note(route):
+    """tracker._category_note, by the same words it uses."""
+    key = BROWSE_CACHE.get(route, "")
+    if key.startswith("medium:"):
+        return f"Most followed {key.split(':', 1)[1].lower()}"
+    return "Most watched"
+
+
 def _medium(route):
-    """One medium's page: the library first, then the catalogue.
+    """One medium's page, laid out as the Qt page it replaces.
 
-    The Qt pages these replace are a catalogue browse with the user's own
-    entries above it, so the order is kept - what he already has is what
-    he came for, and the browse sits underneath it.
+    The owner, 1 September 2026: "use the same design as before but with
+    the WebView2". Before is a *catalogue grid* and nothing else - the
+    page name small at the top, tracker._category_note under it ("Most
+    watched", "Most followed manhwa"), then one wrapping grid of every
+    row the browse cache holds. It carries no banner and no library
+    sections; those were mine and are gone.
+
+    The whole cache, uncapped, exactly as the Qt grid draws it - the card
+    CSS carries `content-visibility`, so the rows below the fold cost
+    nothing until they are scrolled to.
     """
-    name, kinds = SECTIONS[route]
-    wanted = tuple(k.lower() for k in kinds)
-
-    mine = [e for e in _rows(name)
-            if str(e.get("type", "")).lower() in wanted]
-    seen = {str(m.get("title") or "").strip().lower() for m in mine}
-    recent = [e for e in _history(kinds)
-              if str(e.get("title") or "").strip().lower() not in seen]
-
-    sections = []
-    if mine:
-        sections.append({"title": f"In your library  ({len(mine)})",
-                         "rows": [_row(e, resume=True) for e in mine]})
-    if recent:
-        sections.append({"title": f"Recently opened  ({len(recent)})",
-                         "rows": [_row(e, resume=True) for e in recent]})
-    browse = _cached_browse(BROWSE_CACHE.get(route, ""))
-    if browse:
-        sections.append({"title": f"Browse  ({len(browse)})",
-                         "rows": [_row(e) for e in browse[:BROWSE_LIMIT]]})
-
-    # **No banner here.** These pages carried one for a day, matching
-    # Home; the owner's ask, 1 September 2026: "keep the banners only in
-    # the Home and Discover pages... make them just cards". A medium page
-    # is a catalogue, so it is cards from the first row down.
-    total = sum(len(x["rows"]) for x in sections)
-    return {"kind": "rows", "sections": sections, "hero": None,
-            "browse": route,
-            "note": f"{total} titles" if total else "nothing here yet"}
+    rows = _cached_browse(BROWSE_CACHE.get(route, ""))
+    saved = _saved_titles()
+    return {"kind": "grid", "hero": None, "browse": route,
+            "title": MEDIUM_TITLE.get(route, route.title()),
+            "note": _category_note(route),
+            "rows": [_grid_row(e, saved) for e in rows]}
 
 
 def _browse(route):
-    """A live catalogue for one medium - a site search, so its own route."""
-    if route not in SECTIONS:
+    """A live catalogue for one medium - a site sweep, so its own route.
+
+    **tracker._fetch_browse_rows, not a fresh call of our own.** It is
+    what the Qt page has always used: it writes the sweep into the same
+    shared cache (memory and disk), fills all four `medium:` keys from
+    the one sweep that produced them, and returns the *merged* list
+    rather than the page it just fetched - so the depth already on
+    screen is kept. Calling helpers.discover directly, as this did for a
+    day, bypassed all three.
+
+    Imported here rather than at module scope: tracker pulls in Qt, and
+    run.py serves these same routes with no Qt in the process at all.
+    """
+    kind = BROWSE_CACHE.get(route, "")
+    if not kind:
         return {"rows": []}
     try:
-        from helpers import discover as finder
-        if route in ("movies", "series", "anime"):
-            kind = "movie" if route == "movies" else route
-            rows = finder.discover_video(kind, "", limit=BROWSE_LIMIT) or []
-        else:
-            rows = finder.discover_reading_medium(
-                route.capitalize(), limit=BROWSE_LIMIT) or []
+        from windows import tracker
+        rows = tracker._fetch_browse_rows(kind) or []
     except Exception as error:
         return {"rows": [], "error": str(error)[:120]}
     rows = [r for r in rows if isinstance(r, dict) and r.get("title")]
-    return {"rows": [_row(e) for e in rows],
-            "title": f"Browse  ({len(rows)})"}
+    saved = _saved_titles()
+    return {"rows": [_grid_row(e, saved) for e in rows]}
 
 
 def answer(route, query=None):

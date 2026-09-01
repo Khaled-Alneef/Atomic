@@ -1269,7 +1269,20 @@ def install():
     # catalogue, so it is cards from the first row down. The
     # cover-as-backdrop fallback added for Movies and Anime went with
     # them, so Home draws only the art helpers/hero_art has written.
-    updater.APP_VERSION = "1.10.228"
+    #
+    # 1.10.229: and the medium pages get their old design back - "use the
+    # same design as before but with the WebView2". Before is a catalogue
+    # grid: the page name small at the top, tracker._category_note under
+    # it, then one wrapping grid, and no library rows at all. The card is
+    # the Qt one's by its own constants rather than by eye - a 160x216
+    # poster (layout.poster_size), a 180px cell (poster + 20) and
+    # poster_grid.GRID_SPACING's 14px gap, both pages measured at DPR
+    # 1.25 - and the meta line is year and rating as tracker._grid_record
+    # joins them, in ACCENT when the title is already his. The live
+    # sweep may only append: tracker._on_category_results paid twice for
+    # that, once when a reorder swapped titles under the cards being
+    # looked at and once when a replace cut a live grid from 60 to 30.
+    updater.APP_VERSION = "1.10.229"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
