@@ -141,6 +141,10 @@ def hero_for(entry):
         # The entry's own cover, beside the wide art. The banner had
         # only the backdrop and the owner asked for the cover on it.
         "cover": cover_url(entry),
+        # The medium decides the second button's wording - View
+        # Chapters, View Episodes or View Details - exactly as
+        # home._hero_open does.
+        "type": str(entry.get("type") or ""),
         "hide_title": bool(entry.get("hero_hide_title")),
         "meta": _readable(entry.get("next_release"))
                 or str(entry.get("progress") or ""),

@@ -328,3 +328,17 @@ class WebHomePage(_WebPage):
 
 class WebDiscoverPage(_WebPage):
     ROUTE = "discover"
+
+    def start_search(self, query):
+        """Show `query`'s results here.
+
+        main._search_in_discover navigates to Discover and then calls
+        this; a page without it left the user on the ordinary Discover
+        with no results, which is what pressing Enter did.
+        """
+        text = str(query or "").strip()
+        if not text:
+            return
+        import urllib.parse
+        route = "search/" + urllib.parse.quote(text, safe="")
+        self.view.show_url(f"{base_url()}?embed=1#{route}")

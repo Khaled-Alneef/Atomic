@@ -242,6 +242,59 @@ def _discover():
     return {"kind": "rows", "sections": sections, "note": note, "hero": banner}
 
 
+def _search(text):
+    """Every source's results for one query, as sections.
+
+    The window's search field sends Enter here through
+    WebDiscoverPage.start_search - main._search_in_discover navigates to
+    Discover and then calls `start_search`, and a page without that
+    method silently showed the ordinary Discover instead, which is
+    exactly what the owner reported.
+
+    Anime, series, movies and reading are asked in parallel: serially
+    this is the sum of four site searches, and one slow source would
+    hold up every other.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return {"kind": "rows", "sections": [], "note": ""}
+
+    from concurrent.futures import ThreadPoolExecutor
+    from helpers import discover as finder
+
+    def video(kind):
+        try:
+            return finder.discover_video(kind, text, limit=30) or []
+        except Exception:
+            return []
+
+    def reading():
+        try:
+            return finder.discover_reading(text, limit=30) or []
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        jobs = {"Anime": pool.submit(video, "anime"),
+                "Series": pool.submit(video, "series"),
+                "Movies": pool.submit(video, "movie"),
+                "Reading": pool.submit(reading)}
+        found = {name: job.result() for name, job in jobs.items()}
+
+    sections, total = [], 0
+    for name in ("Anime", "Series", "Movies", "Reading"):
+        rows = [r for r in found.get(name) or [] if isinstance(r, dict)
+                and r.get("title")]
+        if not rows:
+            continue
+        total += len(rows)
+        sections.append({"title": f"{name}  ({len(rows)})",
+                         "rows": [_row(e) for e in rows]})
+    note = (f"{total} results for “{text}”" if total
+            else f"nothing found for “{text}”")
+    return {"kind": "rows", "sections": sections, "note": note, "hero": None}
+
+
 def answer(route, query=None):
     query = query or {}
     one = lambda k, d="": (query.get(k) or [d])[0]      # noqa: E731
@@ -250,6 +303,8 @@ def answer(route, query=None):
         return _home()
     if route == "discover":
         return _discover()
+    if route == "search":
+        return _search(one("q"))
     if route == "settings":
         return backend.settings()
     if route == "hero":

@@ -101,7 +101,7 @@ function heroFor(hero) {
     art.src = hero.cover; art.alt = ''; art.decoding = 'async';
     inner.appendChild(art);
   }
-  const text = el('div');
+  const text = el('div', 'col');
   if (hero.logo) {
     const logo = el('img', 'logo');
     logo.src = hero.logo; logo.alt = hero.title || '';
@@ -127,16 +127,33 @@ function heroFor(hero) {
   }
   if (hero.meta) text.appendChild(el('p', null, hero.meta));
   inner.appendChild(text);
-  box.appendChild(inner);
+  // Home's two hero actions: Continue resumes where the entry stopped,
+  // the outlined one opens the episode or chapter list. Same pair the Qt
+  // banner carries, and the same wording it uses.
   if (hero.id) {
-    // The class carries the cursor, not an inline style: setting it
-    // per-element made the page re-resolve the cursor on every hover
-    // change, which showed up as the banner's pointer flickering.
-    box.classList.add('clickable');
-    box.addEventListener('click', function () {
-      tellHost({ action: 'open', id: hero.id, title: hero.title || '' });
+    const acts = el('div', 'acts');
+    const go = el('button', 'act go', '\u25B6  Continue');
+    go.addEventListener('click', function (e) {
+      e.stopPropagation();
+      tellHost({ action: 'open', mode: 'continue', kind: 'title',
+                 id: hero.id, title: hero.title || '' });
     });
+    acts.appendChild(go);
+
+    const reading = ['manga', 'manhwa', 'manhua'];
+    const kind = (hero.type || '').toLowerCase();
+    const label = reading.indexOf(kind) >= 0 ? 'View Chapters'
+      : (kind.indexOf('movie') === 0 ? 'View Details' : 'View Episodes');
+    const view = el('button', 'act quiet', label);
+    view.addEventListener('click', function (e) {
+      e.stopPropagation();
+      tellHost({ action: 'open', kind: 'title',
+                 id: hero.id, title: hero.title || '' });
+    });
+    acts.appendChild(view);
+    text.appendChild(acts);
   }
+  box.appendChild(inner);
   return box;
 }
 
@@ -414,6 +431,30 @@ async function go(route) {
   }
   if (bits[0] === 'chapters') {
     showChapters(decodeURIComponent(bits[1] || ''));
+    return;
+  }
+  if (bits[0] === 'search') {
+    // Drawn before the answer arrives: four site searches take seconds
+    // and an empty window for that long reads as nothing happening.
+    const term = decodeURIComponent(bits.slice(1).join('/') || '');
+    page.innerHTML = '';
+    const head = el('header');
+    head.appendChild(el('h1', null, 'Search'));
+    head.appendChild(el('p', null, 'searching for “' + term + '”…'));
+    page.appendChild(head);
+    try {
+      const found = await (await fetch('/api/search?q=' +
+        encodeURIComponent(term))).json();
+      if (mine !== token) return;
+      page.innerHTML = '';
+      const done = el('header');
+      done.appendChild(el('h1', null, 'Search'));
+      done.appendChild(el('p', null, found.note || ''));
+      page.appendChild(done);
+      sectionsInto(page, found.sections || []);
+    } catch (err) {
+      page.appendChild(el('div', 'empty', 'the search could not finish'));
+    }
     return;
   }
   page.scrollTop = 0;
