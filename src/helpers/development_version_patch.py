@@ -1248,7 +1248,7 @@ def install():
     # every catalog until one *matches* rather than stopping at the
     # first that answers; and the player's upper bar is opaque, so it
     # looks the same over a picture as over the loading backdrop.
-    updater.APP_VERSION = "1.10.219"
+    updater.APP_VERSION = "1.10.220"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

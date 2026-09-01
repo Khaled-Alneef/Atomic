@@ -96,6 +96,32 @@ body.embed #page { inset: 0; }
 .hero h1 { margin: 0; font-size: 32px; font-weight: 700; letter-spacing: .2px; }
 .hero p { margin: 10px 0 0; color: #c7d2e2; font-size: 12.5px; }
 
+/* ---- the banner's pager pills -------------------------------------
+   windows.home._HeroDash's own numbers: 18px at rest, 30px lit, 6px
+   tall, 200ms. Lit along its length rather than top-down - at 6px a
+   vertical ramp is under a pixel and does not render at all. */
+.herobox { position: relative; }
+.herobox .slide { display: none; }
+.herobox .slide.on { display: flex; }
+.pager {
+  position: absolute; left: 0; right: 0; bottom: 14px; z-index: 3;
+  display: flex; justify-content: center; gap: 6px;
+}
+.pill {
+  width: 18px; height: 6px; border-radius: 3px; cursor: pointer;
+  background: #263143;                     /* theme.SURFACE_ACTIVE */
+  transition: width .2s ease, background-color .2s ease;
+}
+.pill:hover { background: #93a1b5; }        /* theme.TEXT_MUTED */
+.pill.on {
+  width: 30px;
+  /* theme.accent_stops(), along the length */
+  background: linear-gradient(90deg, #63c8bc 0%, #2fb9a6 7%, #1c8f80 100%);
+}
+.pill.on:hover {
+  background: linear-gradient(90deg, #75dace 0%, #48d2be 7%, #26a795 100%);
+}
+
 header { padding: 22px 28px 10px; }
 header h1 { margin: 0; font-size: 23px; font-weight: 600; }
 header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }

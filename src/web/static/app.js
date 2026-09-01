@@ -151,6 +151,59 @@ function tileFor(row) {
   return item;
 }
 
+
+/* ---- the banner's pager -------------------------------------------
+   windows.home._HeroDash, in CSS. Its constants: 18px at rest, 30px
+   lit, 6px tall, a 200ms tween that grows the incoming pill while the
+   outgoing one shrinks, and HERO_SLIDE_INTERVAL_MS of 6000 between
+   slides. The rotation re-arms whenever a pill is used, because a slide
+   that changes as somebody reaches for it is worse than no rotation. */
+const HERO_SLIDE_MS = 6000;
+
+function heroCarousel(heroes) {
+  const box = el('div', 'herobox');
+  const slides = heroes.map(function (hero, i) {
+    const slide = heroFor(hero);
+    slide.classList.add('slide');
+    if (i === 0) slide.classList.add('on');
+    box.appendChild(slide);
+    return slide;
+  });
+
+  let at = 0, timer = 0;
+  const pager = el('div', 'pager');
+  const pills = heroes.map(function (_hero, i) {
+    const pill = el('div', 'pill' + (i === 0 ? ' on' : ''));
+    pill.addEventListener('click', function () { show(i); });
+    pager.appendChild(pill);
+    return pill;
+  });
+  if (heroes.length > 1) box.appendChild(pager);
+
+  function show(next) {
+    if (next === at) return;
+    slides[at].classList.remove('on');
+    pills[at].classList.remove('on');
+    at = (next + slides.length) % slides.length;
+    slides[at].classList.add('on');
+    pills[at].classList.add('on');
+    arm();
+  }
+
+  function arm() {
+    clearInterval(timer);
+    if (slides.length > 1) {
+      timer = setInterval(function () { show(at + 1); }, HERO_SLIDE_MS);
+    }
+  }
+
+  arm();
+  // Reaching for the banner stops it moving under the pointer.
+  box.addEventListener('mouseenter', function () { clearInterval(timer); });
+  box.addEventListener('mouseleave', arm);
+  return box;
+}
+
 function sectionsInto(parent, sections) {
   sections.forEach(function (section) {
     if (!section.rows || !section.rows.length) return;
@@ -360,7 +413,8 @@ async function go(route) {
   }
   if (mine !== token) return;              // a later click won
 
-  if (data.hero) page.appendChild(heroFor(data.hero));
+  const heroes = data.heroes || (data.hero ? [data.hero] : []);
+  if (heroes.length) page.appendChild(heroCarousel(heroes));
   if (data.note) {
     const head = el('header');
     head.appendChild(el('p', null, data.note));

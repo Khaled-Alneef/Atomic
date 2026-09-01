@@ -100,18 +100,31 @@ def _row(entry, kind="title"):
     }
 
 
-def _hero(candidates):
-    """The banner: the first of these that actually carries hero art.
+# How many titles the banner rotates through. Home shows one at a time
+# and pages between them; more than a handful is a pager nobody reads.
+HERO_SLIDES = 6
+
+
+def _heroes(candidates):
+    """Every banner-worthy entry, in order, without repeats.
 
     Saved entries are asked before history, because hero_backdrop and
     hero_logo are written onto the saved entry - a history row for the
     same show has neither.
     """
+    found, seen = [], set()
     for entry in candidates:
-        found = backend.hero_for(entry)
-        if found:
-            return found
-    return None
+        hero = backend.hero_for(entry)
+        if not hero:
+            continue
+        key = (hero.get("id") or hero.get("title") or "").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(hero)
+        if len(found) >= HERO_SLIDES:
+            break
+    return found
 
 
 def _home():
@@ -151,7 +164,10 @@ def _home():
             out.append(row)
         return out
 
-    return {"kind": "rows", "note": "", "hero": _hero(ordered), "sections": [
+    heroes = _heroes(ordered)
+    return {"kind": "rows", "note": "",
+            "hero": heroes[0] if heroes else None,
+            "heroes": heroes, "sections": [
         {"title": "Watching", "rows": [_row(e) for e in watching]},
         {"title": "Reading", "rows": [_row(e) for e in reading]},
         {"title": "Games",
