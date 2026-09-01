@@ -130,29 +130,10 @@ def _heroes(candidates):
         found.append(hero)
         if len(found) >= HERO_SLIDES:
             break
-    if not found:
-        # **Nothing here has been given banner art yet.** hero_backdrop is
-        # written by helpers/hero_art onto a saved entry, and measured 1
-        # September 2026 not one Movies or Anime entry carries it, so
-        # those two pages had no banner at all while the other four did.
-        # The cover stands in - blurred and over-scaled, exactly as a
-        # Discover banner does - and the page then asks /api/featured for
-        # the real wide still, which is the same pair of calls
-        # tracker._featured_backdrop_worker makes.
-        for entry in candidates:
-            cover = backend.cover_url(entry)
-            if not cover:
-                continue
-            found.append({
-                "title": str(entry.get("title") or ""), "backdrop": cover,
-                "cover": cover, "logo": "", "poster": True,
-                "type": str(entry.get("type") or ""), "hide_title": False,
-                "meta": str(entry.get("progress") or ""),
-                "bullets": backend._bullets(entry),
-                "imdb": str(entry.get("imdb_id") or ""),
-                "id": str(entry.get("id") or entry.get("entry_id") or ""),
-            })
-            break
+    # A cover-as-backdrop fallback lived here for a day, so that Movies
+    # and Anime - whose entries carry no hero_backdrop - got a banner
+    # too. Removed with the banners themselves; Home is back to drawing
+    # exactly the art helpers/hero_art has written, and nothing else.
     return found
 
 
@@ -387,17 +368,12 @@ def _medium(route):
         sections.append({"title": f"Browse  ({len(browse)})",
                          "rows": [_row(e) for e in browse[:BROWSE_LIMIT]]})
 
-    # The same banner Home carries, over this medium's own library - the
-    # owner's ask was that these pages be "like the main and discover
-    # page", and the banner is the first thing that reads as different.
-    # History rows first, so the carousel opens on what he last touched,
-    # and _heroes prefers the saved entry behind each one anyway (that is
-    # where hero_backdrop and hero_logo are written).
-    heroes = _heroes(recent + mine)
-
+    # **No banner here.** These pages carried one for a day, matching
+    # Home; the owner's ask, 1 September 2026: "keep the banners only in
+    # the Home and Discover pages... make them just cards". A medium page
+    # is a catalogue, so it is cards from the first row down.
     total = sum(len(x["rows"]) for x in sections)
-    return {"kind": "rows", "sections": sections,
-            "hero": heroes[0] if heroes else None, "heroes": heroes,
+    return {"kind": "rows", "sections": sections, "hero": None,
             "browse": route,
             "note": f"{total} titles" if total else "nothing here yet"}
 

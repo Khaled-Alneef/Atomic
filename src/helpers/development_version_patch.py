@@ -1262,7 +1262,14 @@ def install():
     # and Anime had none, since not one of their entries has been given
     # hero_backdrop, so the cover stands in until /api/featured answers
     # with the real wide still.
-    updater.APP_VERSION = "1.10.227"
+    #
+    # 1.10.228: and then the banners come off those six again - the
+    # owner, an hour later: "keep the banners only in the Home and
+    # Discover pages... make them just cards". A medium page is a
+    # catalogue, so it is cards from the first row down. The
+    # cover-as-backdrop fallback added for Movies and Anime went with
+    # them, so Home draws only the art helpers/hero_art has written.
+    updater.APP_VERSION = "1.10.228"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
