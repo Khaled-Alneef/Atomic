@@ -1282,7 +1282,7 @@ def install():
     # sweep may only append: tracker._on_category_results paid twice for
     # that, once when a reorder swapped titles under the cards being
     # looked at and once when a replace cut a live grid from 60 to 30.
-    updater.APP_VERSION = "1.10.229"
+    updater.APP_VERSION = "1.10.230"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

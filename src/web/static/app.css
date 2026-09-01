@@ -331,11 +331,21 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 /* ---- the catalogue grid -------------------------------------------
    The medium pages' own design, carried over from helpers/web_grid.py's
    shell rather than reinvented - the owner, 1 September 2026: "use the
-   same design as before but with the WebView2". Every number below is
-   that file's: CARD_W/CARD_H 160x216, 10px gap, 16px/20px padding, an
-   8px card pad with a 10px radius, a 7px-radius cover, the title block
+   same design as before but with the WebView2". The card is that file's
+   - an 8px pad with a 10px radius, a 7px-radius cover, the title block
    fixed at 31px so a two-line title cannot shift the row under it, and
-   the meta line in ACCENT when the title is one of his. */
+   the meta line in ACCENT when the title is one of his.
+
+   The *cell* is the painted grid's, which is what these pages actually
+   drew: layout.poster_size is 160x216 and layout.adopt makes the card
+   poster + 20, so 180px, with poster_grid.GRID_SPACING's 14px between
+   them - not web_grid's 176 and 10. Both pages were measured running at
+   DPR 1.25 with the same 160x216 poster (from the page's own
+   getBoundingClientRect, and from layout.poster_size), so these are the
+   same numbers on the glass rather than numbers that merely match on
+   paper. Read out of the screenshots first and thrown away: a colour
+   classifier over the two shots split posters wherever the artwork went
+   dark, and was measuring itself. */
 .grid {
   /* 42px in from each edge, which is the Qt page's own 18 + 24: its
      outer panel margin plus the body's (tracker.py:2477, 2482). At 20px
