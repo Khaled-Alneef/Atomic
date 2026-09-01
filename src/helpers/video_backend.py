@@ -30,6 +30,8 @@ import os
 import sys
 import threading
 
+from . import logs
+
 
 # Resolved once, at import: python-mpv finds the library through ctypes
 # at *its* import time, so the search path has to be in place before
@@ -339,18 +341,41 @@ def create(window_id: int, **overrides):
     already has to tell the user something, and a None that means two
     different things (no engine / bad options) is how that message goes
     wrong."""
+    global core_created
     _load()
     if _mpv is None:
         raise PlayerError(_load_error or "no video engine")
     options = default_options()
     options.update(overrides)
+
+    # **In its own process, because an mpv core in this one permanently
+    # wrecks Qt's timers.** Measured: QTimer 250/s clean, 64/s once a
+    # core has existed and for the rest of the session, against 226/s
+    # unchanged for a plain Python thread. It is not the timer
+    # resolution (NtQueryTimerResolution reports 0.500ms throughout) and
+    # not power throttling (opting out changed nothing) - it is Qt's own
+    # dispatcher, and nothing here can undo it. The same measurement put
+    # mpv in a separate process at 250/s, 100% of baseline.
+    #
+    # The child renders into this window: mpv is handed `wid` and
+    # parents its own window under it, which Windows allows across
+    # processes on the same desktop.
+    from . import mpv_proxy
+    if mpv_proxy.enabled():
+        try:
+            handle = mpv_proxy.start(window_id, options)
+            core_created = True
+            return handle
+        except Exception as error:
+            logs.info(f"the video process failed ({error}); "
+                      f"falling back to an in-process core")
+
     try:
         handle = _mpv.MPV(wid=str(int(window_id)), **options)
     except Exception as error:
         raise PlayerError(str(error)) from error
     # See core_created below - the scroll clock changes the moment this
     # is true, and it never goes back for the life of the process.
-    global core_created
     core_created = True
     return handle
 

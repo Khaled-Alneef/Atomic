@@ -139,6 +139,38 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
   display: block; width: 160px; height: 216px; margin: 0 auto;
   object-fit: cover; border-radius: 7px; background: #0e131d;
 }
+
+/* ---- the continue ring --------------------------------------------
+   tracker.ContinueCover's numbers: CONTINUE_BUTTON_SIZE 46 and
+   COVER_FADE_IN_MS 220. A ring with an empty middle, in its own words,
+   "so the artwork stays visible through it" - and the cover frosts
+   under it rather than the ring sitting on a plain dark square. */
+.art { position: relative; width: 160px; margin: 0 auto; }
+.art::after {
+  content: ""; position: absolute; inset: 0; border-radius: 7px;
+  background: rgba(8, 11, 18, .45);
+  backdrop-filter: blur(2px);
+  opacity: 0; transition: opacity .22s ease; pointer-events: none;
+}
+.card:hover .art::after { opacity: 1; }
+.ring {
+  position: absolute; left: 50%; top: 50%;
+  width: 46px; height: 46px; margin: -23px 0 0 -23px;
+  border-radius: 50%; cursor: pointer;
+  border: 2px solid var(--accent);
+  background: rgba(8, 11, 18, .35);
+  opacity: 0; transform: scale(.82);
+  transition: opacity .22s ease, transform .22s ease, background-color .22s ease;
+}
+.card:hover .ring { opacity: 1; transform: scale(1); }
+.ring:hover { background: rgba(47, 185, 166, .28); }
+.ring::before {
+  /* A play triangle, drawn rather than typed: a glyph would size itself
+     off the font and sit slightly off-centre. */
+  content: ""; position: absolute; left: 17px; top: 13px;
+  border-style: solid; border-width: 10px 0 10px 15px;
+  border-color: transparent transparent transparent var(--accent);
+}
 .card .t { margin-top: 7px; font-size: 12px; height: 31px; overflow: hidden; }
 .card .m { color: var(--dim); font-size: 11px; min-height: 14px; }
 

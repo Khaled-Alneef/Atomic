@@ -23,6 +23,21 @@ import threading
 import time
 from pathlib import Path
 
+# **The video process, before anything else is imported.** Atomic runs
+# mpv in a second copy of itself, because an mpv core in the Qt process
+# permanently cuts QTimer delivery from 250 to 64 firings a second - see
+# helpers/mpv_proxy for the measurement. This branch must come before
+# PyQt6 is imported: the child needs libmpv and a socket, and nothing
+# else at all.
+if "--mpv-host" in sys.argv:
+    _here = Path(__file__).resolve().parent
+    if str(_here) not in sys.path:
+        sys.path.insert(0, str(_here))
+    from helpers import mpv_proxy as _mpv_proxy
+    _flag = sys.argv.index("--mpv-host")
+    _mpv_proxy.serve(sys.argv[_flag + 1], sys.argv[_flag + 2])
+    raise SystemExit(0)
+
 from helpers import (app_settings, downloads, frame_pacing, images, layout, logs,
                      rail_anim, rail_icons, splash, window_chrome,
                      native_cursor, setup_wizard, startup,

@@ -360,8 +360,20 @@ def ensure_snap_styles(window) -> bool:
         # SWP_FRAMECHANGED, or the new style is not read until something
         # else forces a frame recalculation - which on this window may be
         # never, since it draws no frame.
+        #
+        # **With NOREDRAW and NOACTIVATE.** A frame change asks Windows
+        # to recalculate and repaint the whole non-client area, and on a
+        # frameless window that is the entire window: it blanks and
+        # comes back, which the owner reported as the app reopening when
+        # he first entered a watch or read page. The style still takes
+        # effect - the recalculation is what FRAMECHANGED is for - and
+        # nothing needs repainting, because this window draws no frame
+        # to repaint.
+        #
+        #   SWP_NOSIZE 0x0001  NOMOVE 0x0002  NOZORDER 0x0004
+        #   NOREDRAW   0x0008  NOACTIVATE 0x0010  FRAMECHANGED 0x0020
         user.SetWindowPos(hwnd, None, 0, 0, 0, 0,
-                          0x0001 | 0x0002 | 0x0004 | 0x0020)
+                          0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020)
     except Exception:
         return False
     return True

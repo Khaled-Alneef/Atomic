@@ -174,8 +174,16 @@ class _WebPage(GlassPage):
             return
 
         entry = _find(entry_id, title)
-        if entry is not None:
-            self._open_overlay(entry)
+        if entry is None:
+            return
+        if body.get("mode") == "continue":
+            # The ring on the cover resumes; the card body opens the
+            # list. Same two targets Home always had, and the same call
+            # windows/home._continue_entry makes, so the reader, the
+            # player and the site handling are whatever it already does.
+            self._run(lambda: _continue(self, entry))
+            return
+        self._open_overlay(entry)
 
     def _app_key(self, name):
         """A key the window owns, forwarded out of the page.
@@ -256,6 +264,12 @@ def _covered(page) -> bool:
         if child.geometry().intersects(area):
             return True
     return False
+
+def _continue(page, entry):
+    from windows.tracker import open_tracker_entry
+    if not open_tracker_entry(page, entry, resume=True):
+        logs.info(f"nothing to resume for {entry.get('title')!r}")
+
 
 def _launch_game(entry):
     from helpers import game_launch

@@ -54,13 +54,28 @@ function tellHost(message) {
 /* ---- rendering ---------------------------------------------------- */
 function cardFor(row) {
   const card = el('div', 'card');
+  const art = el('div', 'art');
   const img = el('img');
   img.loading = 'lazy';
   img.decoding = 'async';
   img.width = 160; img.height = 216;
   img.alt = '';
   if (row.cover) img.src = row.cover;
-  card.appendChild(img);
+  art.appendChild(img);
+  if (row.resume) {
+    // tracker.ContinueCover: the ring resumes, the rest of the card
+    // opens the list. Two targets on one card, as Home always had.
+    const ring = el('div', 'ring');
+    ring.title = 'Continue';
+    ring.addEventListener('click', function (e) {
+      e.stopPropagation();          // the body must not also fire
+      tellHost({ action: 'open', mode: 'continue', kind: row.kind || 'title',
+                 id: row.id || '', title: row.title || '',
+                 type: row.type || '', url: row.url || '' });
+    });
+    art.appendChild(ring);
+  }
+  card.appendChild(art);
   card.appendChild(el('div', 't', row.title || ''));
   card.appendChild(el('div', 'm', row.meta || ''));
   card.addEventListener('click', function () {

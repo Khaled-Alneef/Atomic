@@ -88,8 +88,15 @@ def _row(entry, kind="title"):
     """
     bits = [str(entry.get(key) or "").strip()
             for key in ("year", "progress", "quality")]
+    # Whether the cover offers a continue ring. Home gave every tracker
+    # medium two targets (the owner's ask - anime, series and movies used
+    # to be one), and games, apps and websites have nothing to resume.
+    medium = str(entry.get("type") or "").strip().lower()
     return {
         "kind": kind,
+        "resume": kind == "title" and medium in (
+            "manga", "manhwa", "manhua", "anime", "series", "movie",
+            "movies"),
         "id": str(entry.get("id") or entry.get("entry_id")
                   or entry.get("key") or ""),
         "title": str(entry.get("title") or entry.get("name") or "").strip(),
