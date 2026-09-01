@@ -77,7 +77,7 @@ def _history(kinds):
     return rows
 
 
-def _row(entry, kind="title"):
+def _row(entry, kind="title", resume=False):
     """One entry, as the page wants it.
 
     `kind` is what the app should *do* with a click, decided here where
@@ -90,13 +90,12 @@ def _row(entry, kind="title"):
             for key in ("year", "progress", "quality")]
     # Whether the cover offers a continue ring. Home gave every tracker
     # medium two targets (the owner's ask - anime, series and movies used
-    # to be one), and games, apps and websites have nothing to resume.
-    medium = str(entry.get("type") or "").strip().lower()
+    # to be one); games, apps and websites have nothing to resume, and
+    # neither does a Discover row, which is not in the library at all -
+    # `resume` is opt-in per section for exactly that reason.
     return {
         "kind": kind,
-        "resume": kind == "title" and medium in (
-            "manga", "manhwa", "manhua", "anime", "series", "movie",
-            "movies"),
+        "resume": bool(resume),
         "id": str(entry.get("id") or entry.get("entry_id")
                   or entry.get("key") or ""),
         "title": str(entry.get("title") or entry.get("name") or "").strip(),
@@ -175,8 +174,10 @@ def _home():
     return {"kind": "rows", "note": "",
             "hero": heroes[0] if heroes else None,
             "heroes": heroes, "sections": [
-        {"title": "Watching", "rows": [_row(e) for e in watching]},
-        {"title": "Reading", "rows": [_row(e) for e in reading]},
+        {"title": "Watching",
+         "rows": [_row(e, resume=True) for e in watching]},
+        {"title": "Reading",
+         "rows": [_row(e, resume=True) for e in reading]},
         {"title": "Games",
          "rows": [_row(e, "game") for e in _rows("games.json")]},
         # `style: list` - these two were a list of icon, name and link
@@ -221,6 +222,9 @@ def _discover():
             picture = backend.cover_url(first)
             if picture:
                 banner = {"title": str(first.get("title") or ""),
+                          "imdb": str(first.get("imdb_id") or ""),
+                          "type": str(first.get("type") or ""),
+                          "url": str(first.get("url") or ""),
                           # The same picture twice on purpose: blurred
                           # and blown up as the wide backdrop, and sharp
                           # at its own size as the cover. A discover row
@@ -303,6 +307,9 @@ def answer(route, query=None):
         return _home()
     if route == "discover":
         return _discover()
+    if route == "featured":
+        return backend.featured_art(one("title"), one("imdb"),
+                                    one("type"))
     if route == "search":
         return _search(one("q"))
     if route == "settings":

@@ -481,3 +481,33 @@ def hero_meta(entry_id):
     if isinstance(genres, list):
         bullets.extend(str(g).strip() for g in genres[:3] if str(g).strip())
     return {"bullets": bullets}
+
+
+def featured_art(title, imdb="", kind=""):
+    """A discover title's wide still and title treatment.
+
+    The same three calls tracker._featured_backdrop_worker makes: the
+    small backdrop first because it is there in a moment, then the
+    full-resolution one, then the logo. A discover row has no saved
+    entry, so everything is found by name (and by IMDb id where the row
+    carries one).
+    """
+    title = str(title or "").strip()
+    if not title:
+        return {"backdrop": "", "logo": ""}
+    probe = {"title": title, "imdb_id": str(imdb or ""),
+             "type": str(kind or "")}
+    backdrop = logo = ""
+    try:
+        from helpers import artwork
+        found = artwork.backdrop_path(probe) or artwork.backdrop_fast_path(probe)
+        backdrop = local_url(found) if found else ""
+    except Exception:
+        pass
+    try:
+        from helpers import artwork
+        found = artwork.logo_path(probe) or artwork.logo_path_by_title(title)
+        logo = local_url(found) if found else ""
+    except Exception:
+        pass
+    return {"backdrop": backdrop, "logo": logo}

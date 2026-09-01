@@ -54,7 +54,9 @@ function tellHost(message) {
 /* ---- rendering ---------------------------------------------------- */
 function cardFor(row) {
   const card = el('div', 'card');
-  const art = el('div', 'art');
+  // The frost is part of the ring, so a card without one is a plain
+  // cover - a Discover result has nothing to resume.
+  const art = el('div', row.resume ? 'art' : 'art plain');
   const img = el('img');
   img.loading = 'lazy';
   img.decoding = 'async';
@@ -92,9 +94,9 @@ function heroFor(hero) {
   // page with the page's own ground around it - the same shape
   // widgets.HeroBanner has (300px tall, 28px corners, inset) - rather
   // than an image behind everything.
-  const art = el('img', 'hart');
-  art.src = hero.backdrop; art.alt = ''; art.decoding = 'async';
-  box.appendChild(art);
+  const art_el = el('img', 'hart');
+  art_el.src = hero.backdrop; art_el.alt = ''; art_el.decoding = 'async';
+  box.appendChild(art_el);
   const inner = el('div', 'inner');
   if (hero.cover) {
     const art = el('img', 'herocover');
@@ -115,6 +117,29 @@ function heroFor(hero) {
   // never left waiting on a network call.
   const bullets = el('p', 'bullets', (hero.bullets || []).join('  ·  '));
   text.appendChild(bullets);
+  if (!hero.id && hero.title) {
+    // A discover title: no saved entry, so the wide still and the title
+    // treatment come from TMDB by name - the same two calls
+    // tracker._featured_backdrop_worker makes.
+    fetch('/api/featured?title=' + encodeURIComponent(hero.title) +
+          '&imdb=' + encodeURIComponent(hero.imdb || '') +
+          '&type=' + encodeURIComponent(hero.type || ''))
+      .then(function (r) { return r.json(); })
+      .then(function (art) {
+        if (art.backdrop) {
+          box.classList.remove('poster');
+          art_el.src = art.backdrop;
+        }
+        if (art.logo) {
+          const logo = el('img', 'logo');
+          logo.src = art.logo; logo.alt = hero.title || '';
+          const first = text.firstChild;
+          if (first && first.tagName === 'H1') text.removeChild(first);
+          text.insertBefore(logo, text.firstChild);
+        }
+      })
+      .catch(function () { /* the poster stays */ });
+  }
   if (hero.id) {
     fetch('/api/hero?id=' + encodeURIComponent(hero.id))
       .then(function (r) { return r.json(); })
@@ -127,16 +152,31 @@ function heroFor(hero) {
   }
   if (hero.meta) text.appendChild(el('p', null, hero.meta));
   inner.appendChild(text);
+  // The backdrop itself opens the list, as a card body does everywhere
+  // else here. Lost when the buttons went on; the buttons stop their own
+  // clicks so the two never both fire.
+  box.classList.add('clickable');
+  box.addEventListener('click', function () {
+    tellHost({ action: 'open', kind: 'title', id: hero.id || '',
+               title: hero.title || '', type: hero.type || '',
+               url: hero.url || '', poster: hero.cover || '',
+               imdb: hero.imdb || '' });
+  });
+
   // Home's two hero actions: Continue resumes where the entry stopped,
   // the outlined one opens the episode or chapter list. Same pair the Qt
-  // banner carries, and the same wording it uses.
-  if (hero.id) {
+  // banner carries, and the same wording it uses. Discover's banner gets
+  // them too - its title is not in the library, so both open the list.
+  if (hero.id || hero.title) {
     const acts = el('div', 'acts');
     const go = el('button', 'act go', '\u25B6  Continue');
     go.addEventListener('click', function (e) {
       e.stopPropagation();
-      tellHost({ action: 'open', mode: 'continue', kind: 'title',
-                 id: hero.id, title: hero.title || '' });
+      tellHost({ action: 'open', mode: hero.id ? 'continue' : '',
+                 kind: 'title', id: hero.id || '',
+                 title: hero.title || '', type: hero.type || '',
+                 url: hero.url || '', poster: hero.cover || '',
+                 imdb: hero.imdb || '' });
     });
     acts.appendChild(go);
 
@@ -147,8 +187,10 @@ function heroFor(hero) {
     const view = el('button', 'act quiet', label);
     view.addEventListener('click', function (e) {
       e.stopPropagation();
-      tellHost({ action: 'open', kind: 'title',
-                 id: hero.id, title: hero.title || '' });
+      tellHost({ action: 'open', kind: 'title', id: hero.id || '',
+                 title: hero.title || '', type: hero.type || '',
+                 url: hero.url || '', poster: hero.cover || '',
+                 imdb: hero.imdb || '' });
     });
     acts.appendChild(view);
     text.appendChild(acts);
@@ -279,16 +321,25 @@ async function openChapter(id, index) {
   page.appendChild(reach);
   const back = el('button', 'rbtn', '‹  Library');
   back.addEventListener('click', function () { tellHost({ action: 'close' }); });
-  const prev = el('button', 'rbtn', 'Previous');
-  const next = el('button', 'rbtn', 'Next');
+  const prev = el('button', 'rbtn', '\u2039  Previous');
+  const next = el('button', 'rbtn go', 'Continue  \u203A');
   const label = el('div', 'rlabel', 'loading…');
-  const list = el('button', 'rbtn', 'Chapters');
   topbar.appendChild(back);
-  topbar.appendChild(prev);
   topbar.appendChild(label);
-  topbar.appendChild(next);
-  topbar.appendChild(list);
   page.appendChild(topbar);
+
+  // **The chapter controls, on the floor.** reader.BOTTOM_HEIGHT is 60
+  // and they are "previous and next pinned hard to the window's two
+  // edges with the chapter list centred between them" - so that is what
+  // this is, rather than five buttons crowded into the top bar.
+  const floorReach = el('div', 'rreach-b');
+  page.appendChild(floorReach);
+  const floor = el('div', 'rfloor');
+  const list = el('button', 'rbtn', 'Chapters');
+  floor.appendChild(prev);
+  floor.appendChild(list);
+  floor.appendChild(next);
+  page.appendChild(floor);
 
   const strip = el('div', 'reader');
   page.appendChild(strip);

@@ -175,7 +175,18 @@ class _WebPage(GlassPage):
 
         entry = _find(entry_id, title)
         if entry is None:
-            return
+            # A Discover title is not in the library, so there is nothing
+            # to look up - the details page takes the row itself, which
+            # carries everything it needs to show a title it has never
+            # seen before.
+            if title:
+                entry = {"title": title,
+                         "type": str(body.get("type") or "Series"),
+                         "url": str(body.get("url") or ""),
+                         "imdb_id": str(body.get("imdb") or ""),
+                         "cover_url": ""}
+            else:
+                return
         if body.get("mode") == "continue":
             # The ring on the cover resumes; the card body opens the
             # list. Same two targets Home always had, and the same call
