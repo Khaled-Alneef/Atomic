@@ -20,7 +20,7 @@ next/previous, and marking a chapter read all work.
 
 import os
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal as Signal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
@@ -38,7 +38,17 @@ def available() -> bool:
 
 
 class WebReader(QWidget):
-    """One chapter strip, over the whole window."""
+    """One chapter strip, over the whole window.
+
+    Carries the Qt reader's own `closed` signal (reader.py:2252) because
+    both callers rely on it: details._read connects it to redraw the
+    entry, and tracker._wire_overlay_refresh does the same so a card
+    shows new progress without a page switch. Without it both raised
+    AttributeError into an `except` that swallowed it - the reader
+    opened and nothing was ever told it had closed.
+    """
+
+    closed = Signal()
 
     def __init__(self, base_url, entry, chapter_index, host):
         super().__init__(host)
@@ -79,14 +89,19 @@ class WebReader(QWidget):
             self.close_reader()
 
     def close_reader(self):
-        # The native child goes first. A native child paints above every
-        # non-native sibling, so a reader merely hidden leaves its last
-        # frame on screen over whatever is underneath.
+        # The view goes down first. Its widget is a native window, and Qt
+        # excludes a native child's rectangle from the top-level's own
+        # painting - so a reader merely hidden leaves a hole where it was
+        # (see helpers/webview2_host.suppress).
         try:
-            self.view.set_child_visible(False)
+            self.view.suppress(True)
         except Exception:
             pass
         self.hide()
+        try:
+            self.closed.emit()
+        except RuntimeError:
+            pass
         self.deleteLater()
 
 
