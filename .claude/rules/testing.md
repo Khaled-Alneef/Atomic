@@ -11,6 +11,30 @@ a temp directory and redirect `storage.DATA_DIR` before importing any
 page - order is not negotiable, `DATA_DIR` is read at import time.
 Delete temp directories when done.
 
+**Redirecting `storage.DATA_DIR` is not enough on its own, and the
+failure is silent.** `web/backend.py` sets `storage.DATA_DIR` to
+`%APPDATA%\Atomic` *at import*, deliberately - the source tree's own
+default points at `src/data`, which is empty. So a harness that sets
+`storage.DATA_DIR` to a temp copy and then imports `web.server` or
+`web.backend` has its redirect quietly undone, and every write lands on
+the real files. Measured 1 September 2026, testing drag-reorder: the
+copy was made, the redirect was set, and `storage.move_entry` moved a
+game in the owner's real `games.json` (Guild Wars 2 from fourth to
+first). Nothing failed; the test simply reported no change, because it
+was reading the copy and writing the original.
+
+Set **all three**, after every import, and assert before writing:
+
+    from web import backend, server          # imports first
+    storage.DATA_DIR = copy
+    backend.DATA_DIR = copy
+    server.DATA = copy
+    assert storage.DATA_DIR == copy          # cheap, and it would have caught this
+
+The general form: anything that re-points a module global can be
+re-pointed back by the next import. Check the value at the moment of the
+write, not at the top of the script.
+
 ## How to test this app
 
 - **Logic and flows:** offscreen, fabricated entries, stub the network.
@@ -106,3 +130,135 @@ Small, obvious fix → quick targeted check. Reserve pixel-probe suites,
 exe archaeology and multi-pass runs for cases actually in doubt: a
 critical bug, an effect that can't be eyeballed, or a result that
 contradicts expectation.
+
+## The proof loop (CLAUDE.md rule 12) - what each step actually means
+
+**His rule, 3 September 2026: "the testing methods you used for
+testing make them rules!!! it is perfect!"** These are those methods,
+in the order they ran that day, with what each one caught.
+
+### 1. Reproduce on the build he tested, on a copy of his data
+
+Launch the exe he reported against (not the source tree) with `APPDATA`
+pointed at a directory holding a copy of `%APPDATA%\Atomic`, navigate
+to the page he named, and photograph it - `rig.py` in the `test` skill
+does all three. Compare what is on screen with the words of the report
+before forming a theory. That day: "apps and games images are not there"
+drew every cover inside 1s cold and after a heavy page; what actually
+reproduced was two blank tiles (a trimmed exe icon, a trimmed favicon)
+and a portability bomb (every game cover path pointing into the source
+tree). The fix that followed was for those, not for a lazy loader that
+had already been "fixed" twice on the strength of the report alone.
+
+### 2. Split the report until the log names the cause
+
+Read `atomic.log` around the times he was using the app before reading
+the code. "The player freezes at ~28s", "does not start when I
+continue" and "refresh freezes" were one line: `the video process
+failed ([WinError 10053] ...); falling back to an in-process core` - a
+child dying 20s after the parent's last message. A 26-second harness
+(spawn the child, send nothing, poll it) turned the theory into a
+number before any code changed.
+
+### 3. Source run as a preview, never as the proof
+
+`py -3.13 src/main.py` against a copy, driven by the same rig, is where
+a wrong click path is cheapest to find and fix (the manga "Kingdom"
+card opening the *anime's* details page was found there and fixed
+before the first build). It proves nothing about the exe: the frozen
+child's DLL path, PyInstaller's cache, the bundle's data files are all
+different there. A screenshot from a source run is a step, not the
+evidence (rule 10).
+
+### 4. Read the archive back before photographing it
+
+After every build, extract `PYZ.pyz` (`CArchiveReader` →
+`ZlibArchiveReader`) and check the changed modules' `co_names` and
+string constants for **both** the names the change added and the names
+it deleted. A no-op rebuild silently re-copies the previous binary, and
+a screenshot of a stale exe proves the old code. The version string
+sits inside a function's constants, so walk nested code objects.
+
+### 5. Drive the frozen exe from outside
+
+- **Input and screenshots come from a separate process** - the rig.
+  Match the window title exactly and take the largest window with that
+  title: "Atomic - File Explorer" took a batch of clicks once, and the
+  search suggestions popup is a second window called "Atomic", 72px
+  lower, that a screenshot cropped against.
+- **Keyboard is the fallback.** Ctrl+1..9 reach every sidebar page
+  without a pointer, which is how a dead mouse was told apart from a
+  dead app.
+- **A click is not a click until the button-up lands on the same
+  element.** Between down and up, put the cursor back where it was.
+- **Playback is watched from the screen, then confirmed from the
+  app.** `playwatch.py` diffs the picture once a second and reports
+  runs of still samples; a stall of three seconds or more is a stall
+  *unless the content holds a frame* - anime does, for seconds at a
+  time, so the ground truth is `player_state.json`: the saved position
+  must advance one second per wall second (measured 15.0 in 15.0 and
+  14.9 in 15.0). Run each title for 90-100 seconds - the child used to
+  die at 20 and the owner's freeze was at 28.
+- **The log lines that prove the claim are named in advance.** For the
+  player: one `mpv running in process N` per title, `(pre-started)` on
+  the second and later ones, and none of `stopped mid-episode`, `was
+  gone`, `could not open`, `falling back`. Stop, continue, and R are
+  three separate runs, each with its own line.
+- **Motion is measured as positions per frame.** Grab a thin band
+  across the moving row as fast as PIL allows (~40ms) through the whole
+  animation, find the card edges in each frame, and print the sequence.
+  Continuous motion reads as a different position in every frame and
+  no single jump larger than a frame's travel; the shipped fold read as
+  eleven identical frames and one 198px jump.
+- **Sizes are compared against the source's own rule.** A reader page
+  is measured in device pixels on the screenshot and compared with the
+  file's natural width times the DPR (828 CSS px → 1035 device px,
+  measured 1035), not eyeballed as "looks right".
+
+### 6. Every regression found goes back through the loop
+
+The verification is not a gate at the end; it is where the next bug
+comes from. That day step 5 found a broken image proxy (a local
+`import` that shadowed a module name), a chapter row opening the list
+instead of the reader (two caches disagreeing), and three covers over
+a size cap - three builds, each read back and photographed again.
+
+### Let the log find the next bug
+
+A silent `except ... pass` on a path the user triggers becomes a log
+line (host and error kind, never a URL that can carry a token), and
+**the line is then read**: the covers and the proxy above were both
+found by lines that had not existed an hour earlier. A fix that logs
+its failure is how the next report arrives with its cause attached.
+
+### Rule out the environment before the app
+
+When input dies but timers run, ask Windows before reading code:
+`GetClipCursor`, `WindowFromPoint`, `GetGUIThreadInfo`, the process's
+own top-level windows. The dead pointer that day was another
+application confining the cursor to its monitor on every click, and
+`grep ClipCursor src/` proved it was not Atomic in one line. A screen
+recorder's watermark in a screenshot is likewise not the app's.
+
+### Verify the verification
+
+A review finding is fixed only after two independent readers have
+tried to refute it against the code *as it stands now* (line numbers
+move) and failed; a finding neither could confirm is left alone and
+said so. A fix the Manager applied gets a checker of its own that reads
+the code after the fact and hunts for the site the fix missed: one of
+nine found a wrapper that replaced the patched function outright, so
+the fix had never run. Dead-code removal is verified mechanically:
+count whole-word references across every `.py`, `.js`, `.html`,
+`.css` and `.spec` (patches look functions up by string), delete only
+at zero, re-scan until nothing new is orphaned, import every module,
+and read the archive back for the absence.
+
+### Copies go out, never back
+
+Every harness copies `%APPDATA%\Atomic` to a temp dir and deletes it.
+Nothing ever copies a temp dir back: the day after a long pass the live
+`discover_cache.json` was a day-old 1053-row snapshot while its `.bak`
+held the newer 2667 rows, which only a copy with a preserved
+timestamp can produce. If a harness must touch his files it says so
+before it runs, and the fix is left to him.

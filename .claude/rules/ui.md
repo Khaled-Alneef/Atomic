@@ -83,6 +83,39 @@ Comments explain *why*, often recording what failed and what was
 measured - match that density and voice. A comment restating the code
 is noise; "this is not mapToGlobal because..." is the point.
 
+## Every visible change is checked on a screenshot, from his side of the glass
+
+**His rule, 2 September 2026**: *"make it a rule to test any UI
+modifications on screenshots from the user POV!"*
+
+It was written after three changes in one session that were verified in
+a browser and shipped broken in the app - the pictures on Games and Apps,
+the sidebar fold, the website logos. Every one of them would have been
+caught by one screenshot of the running window.
+
+So, for anything he can see:
+
+1. **Run the real app** and photograph the real window - `QScreen.
+   grabWindow(0)` cropped to the window's own geometry. A WebView2 page
+   is a native child window and Qt excludes it from `widget.grab()`, so
+   a Qt-side grab shows a hole where the page is; only a screen capture
+   is what he sees.
+2. **Photograph the state he described**, not a neighbouring one: the
+   page he named, at the size he runs, mid-animation if the complaint is
+   about an animation.
+3. **Look at the picture before saying it works.** A route that answers
+   200 and a DOM that says `complete === true` are not the claim being
+   made; the claim is about pixels.
+4. A page rendered in another browser is a *step*, never the evidence.
+   The app runs WebView2 inside a Qt window at his DPI - none of which
+   Chrome-in-a-pane reproduces.
+5. **Say which screenshots were taken.** "Verified on Games, Apps and
+   Websites at 1400x900" is a finding; silence about it is a claim.
+
+Never test against real user data while doing it - point `APPDATA` at a
+copy first (`.claude/rules/testing.md`), which is enough here because
+`storage.DATA_DIR` and `web/backend.DATA_DIR` both read it.
+
 ## How deep to dig
 
 Routine visible fix (colour, layout tweak, known cause) → go straight to

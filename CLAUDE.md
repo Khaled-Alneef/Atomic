@@ -155,7 +155,16 @@ GitHub tags.
    Corollary: **say what was not measured.** "I did not exercise the
    browser launch live" is a finding. Silence about it is a claim.
 
-10. **A root-cause fix retires what it replaced - with his say-so.**
+10. **A visible change is proven on a screenshot of the running app.**
+    His rule, 2 September 2026: *"make it a rule to test any UI
+    modifications on screenshots from the user POV!"* - after three
+    changes verified in a browser pane shipped broken in the window.
+    Photograph the real window (`QScreen.grabWindow(0)`, cropped to its
+    geometry - a WebView2 page is a native child and `widget.grab()`
+    leaves a hole where it is), look at the picture, and say which
+    screenshots were taken. `.claude/rules/ui.md` has the procedure.
+
+11. **A root-cause fix retires what it replaced - with his say-so.**
     His rule, 31 August 2026: *"if we find a root changing fix, then
     remove the old code if I approve"*. Two weeks of scroll work left
     four superseded models layered on top of each other, and every later
@@ -172,6 +181,45 @@ GitHub tags.
 
     Keep the measurement that justified the change in the code that
     replaced it. The point is to remove dead machinery, not the evidence.
+
+12. **A change is proven by the loop, not by any one step of it.** His
+    rule, 3 September 2026, after the pass that closed his eighteen-item
+    list: *"the testing methods you used for testing make them rules!!!
+    it is perfect!"*. The method, in order, and every step is written
+    out in `.claude/rules/testing.md`:
+
+    1. **Reproduce on the build he tested**, against a copy of his
+       data, and photograph the exact state he described. Two of his
+       reports did not reproduce that day (the shelves drew in under a
+       second) and one reproduced differently (two blank tiles, not
+       every tile) - the fix that followed was for what was actually
+       on screen.
+    2. Fix, with the number written into the code (rule 9).
+    3. **Run the source tree against a copy as a preview**, never as
+       the proof - it is where a wrong click path is cheapest to find
+       (the manga "Kingdom" opening the anime's page was found there).
+    4. **Build, then read the archive back**: the symbols the change
+       added must be in the frozen code and the ones it deleted must
+       be gone, before a single screenshot is taken of it.
+    5. **Drive the frozen exe from a separate process** (the rig in the
+       `test` skill): the screenshots of rule 10, playback watched from
+       the screen and confirmed against the app's own state file, and
+       the log lines that prove the claim - the child stayed alive, the
+       restart took the pre-started one, nothing fell back.
+    6. **Every regression the verification finds goes back through 2
+       to 5.** Three builds that day, and the second and third existed
+       only because step 5 of the one before found something.
+
+    Three habits ride with it. **Let the log find the next bug**: a
+    silent `except` becomes a log line, and the line it produces is
+    read - the three oversized covers and a broken image proxy were both
+    found by lines that had not existed an hour earlier. **Rule out the
+    environment before the app**: a dead pointer was another program's
+    cursor clip and a stray window's title, not Atomic. **Verify the
+    verification**: a review finding is refuted by two independent
+    readers before it is fixed, and a fix the Manager applied gets its
+    own checker - one of nine checks that day found a wrapper that
+    silently bypassed the fix.
 
 ## Plan in named phases, always
 
