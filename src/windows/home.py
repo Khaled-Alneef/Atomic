@@ -1097,7 +1097,7 @@ class HomePage(GlassPage):
             lbl.setPixmap(pixmap)
 
         cover_fetch.ensure(
-            f"game:{game_id}", game.get("cover"),
+            f"game:{game_id}", images.resolve_art_path(game.get("cover")),
             lambda n=name, p=install_path: game_art.fetch_cover(
                 n, install_path=p),
             name, POSTER_SIZE, _set,
@@ -1293,8 +1293,11 @@ class HomePage(GlassPage):
 
             cover = QLabel()
             cover.setFixedSize(*POSTER_SIZE)
+            # Resolved by name too (helpers/art_paths): the saved path
+            # may name a cache this machine does not have.
             cover.setPixmap(images.thumbnail_or_avatar(
-                game.get("cover"), game["name"], POSTER_SIZE))
+                images.resolve_art_path(game.get("cover")), game["name"],
+                POSTER_SIZE))
             # **And fetch it if there is none - the owner, 24 August
             # 2026: "the games images only load from the games page,
             # make them start loading from the main page also!".** This
@@ -1435,16 +1438,17 @@ class HomePage(GlassPage):
             # the same app wore two different icons on the two pages (the
             # owner's Wand report). Websites entries have no `art` and
             # keep their favicon through the fallback.
+            art = (images.resolve_art_path(entry.get("art"))
+                   or images.resolve_art_path(entry.get("image")))
             icon.setPixmap(images.thumbnail_or_avatar(
-                entry.get("art") or entry.get("image"), entry["name"],
-                ROW_ICON_SIZE))
+                art, entry["name"], ROW_ICON_SIZE))
             if data_file == APPS_FILE:
                 # The Apps page resolves artwork through app_art on its
                 # own build; Home only ever drew what that page had left
                 # behind - the owner's "the apps images do not load until
                 # I go to the apps page". Same lookup, from here.
                 cover_fetch.ensure(
-                    entry.get("id"), entry.get("art") or entry.get("image"),
+                    entry.get("id"), art,
                     lambda n=entry.get("name") or "": app_art.fetch_art(n),
                     entry["name"], ROW_ICON_SIZE, icon.setPixmap,
                     persist=lambda path, en=entry: (

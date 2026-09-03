@@ -175,6 +175,11 @@ def install():
             merged = [dict(a) for a in (local or [])]
             seen = {streams._normalize_addon(a.get("base_url") or "") for a in merged}
             for addon in account_addons:
+                # The account collection carries Stremio's own local
+                # server addon too - the same six-second dead end
+                # streams.usable_addon drops from the file.
+                if not streams.usable_addon(addon):
+                    continue
                 base = streams._normalize_addon(addon.get("base_url") or "")
                 if base and base not in seen:
                     merged.append(dict(addon))
@@ -191,15 +196,39 @@ def install():
                     pass
                 last_fingerprint[0] = fingerprint
 
-            previous_load = streams._load
-            streams._load = merged_load
-            try:
-                return original_find_streams(
-                    entry, season=season, episode=episode,
-                    deadline=deadline, on_partial=on_partial)
-            finally:
-                streams._load = previous_load
+        # **Not under the lock.** This used to hold _lookup_lock across
+        # the whole original_find_streams call, so that _load could be
+        # swapped for its duration - which serialised every lookup in
+        # the app behind whichever one was in flight. Measured 3
+        # September 2026 on the owner's Reacher: the details page
+        # prefetches Continue's episode on open, that fan-out waited
+        # 6.05s on the dead "Local Files" addon at 127.0.0.1:11470, and
+        # the source picker the owner then pressed showed its first rows
+        # **6.3s** after the press (its find_streams started the same
+        # instant the prefetch's returned; the addons themselves answer
+        # in 0.1-0.4s). The swap is per thread now, so lookups overlap:
+        # first rows in the picker 0.13-0.15s after the press - except
+        # the process's first lookup in each _CACHE_TTL_S window, which
+        # pays _account_addons' addonCollectionGet before its fan-out
+        # (0.69-0.91s to first rows on Reacher, measured the same day).
+        _routed.merged = merged_load
+        try:
+            return original_find_streams(
+                entry, season=season, episode=episode,
+                deadline=deadline, on_partial=on_partial)
+        finally:
+            _routed.merged = None
 
+    # The merged addon set is visible only to the thread inside its own
+    # find_streams; every other caller of _load (Settings, seeding) keeps
+    # reading the file, so account addons are never written into it.
+    _routed = threading.local()
+
+    def routed_load():
+        merged = getattr(_routed, "merged", None)
+        return merged() if merged is not None else original_load()
+
+    streams._load = routed_load
     streams.find_streams = find_streams_with_account
 
     # Keep the development version coherent at runtime with the commit. Older

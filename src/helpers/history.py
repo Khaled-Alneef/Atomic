@@ -34,7 +34,7 @@ that cannot be read costs a history list, and must never cost playback.
 
 import threading
 
-from . import storage
+from . import logs, storage
 
 HISTORY_FILE = "history.json"
 
@@ -95,7 +95,11 @@ def _save(rows):
     try:
         storage.save(HISTORY_FILE, rows[:MAX_TITLES])
     except Exception:
-        pass          # a history that cannot be written must not raise
+        # Must not raise - a history that cannot be written must never
+        # cost playback - but it is logged now: Home's Watching row
+        # silently stopped following the player when this failed
+        # (review, 3 September 2026).
+        logs.exception("Could not write history")
 
 
 def _find(rows, key):
@@ -162,10 +166,6 @@ def touch(entry, *, progress=None) -> dict:
 def watched_keys(entry) -> set:
     """Every tick this title carries."""
     return set(get(entry).get("watched") or ())
-
-
-def is_watched(entry, mark: str) -> bool:
-    return bool(mark) and mark in watched_keys(entry)
 
 
 def set_watched(entry, marks, watched: bool = True) -> bool:

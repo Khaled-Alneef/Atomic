@@ -20,7 +20,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import app_art, child_process, images, lookup_pool, storage, theme
+from helpers import (app_art, art_paths, child_process, images, lookup_pool,
+                     storage, theme)
 from helpers.widgets import (
     # CardTextLabel is re-exported: it used to be defined here.
     CardTextLabel,  # noqa: F401
@@ -373,8 +374,7 @@ class LinkGridPage(GridSelection, GlassPage):
         if not self.POSTER_CARDS:
             return
         for entry in self.entries:
-            art = entry.get("art")
-            if art and Path(art).exists():
+            if images.resolve_art_path(entry.get("art")):
                 continue
             lookup_pool.submit(self._app_art_worker, entry.get("id"),
                                entry.get("name") or "")
@@ -549,6 +549,14 @@ class LinkGridPage(GridSelection, GlassPage):
         missing = missing_app_targets(entry)
 
         icon = QLabel()
+        # Resolved, not read as written: the saved path may name a cache
+        # this machine does not have (helpers/art_paths). When neither
+        # picture can be found at all, the extracted icon is re-made in
+        # the background and written back for the next build.
+        art = images.resolve_art_path(entry.get("art"))
+        image = images.resolve_art_path(entry.get("image"))
+        if not art and not image:
+            art_paths.heal_missing_art(entry, self.DATA_FILE)
         if poster:
             # Square, at the poster card's full width: store icons are
             # square originals, and cropping one to the movie tile's
@@ -558,12 +566,12 @@ class LinkGridPage(GridSelection, GlassPage):
             art_size = (POSTER_ART_SIZE[0], POSTER_ART_SIZE[0])
             icon.setFixedSize(*art_size)
             icon.setPixmap(images.thumbnail_or_avatar(
-                entry.get("art") or entry.get("image"), entry["name"], art_size))
+                art or image, entry["name"], art_size))
             self._art_labels[entry.get("id")] = icon
         else:
             icon.setFixedSize(*THUMB_SIZE)
             icon.setPixmap(images.thumbnail_or_avatar(
-                entry.get("image"), entry["name"], THUMB_SIZE))
+                image, entry["name"], THUMB_SIZE))
         if missing:
             # Dimmed rather than swapped for a warning glyph: the icon is
             # how a card is picked out of a grid at a glance, and losing

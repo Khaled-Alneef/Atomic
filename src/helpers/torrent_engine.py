@@ -316,6 +316,14 @@ WINDOW_SKIP_FACTOR = 4
 # already stalled.
 STREAM_REFOCUS_BYTES = 8 * 1024 * 1024
 
+# How long a response may go without sending a byte before it gives up
+# and lets the reader reopen. Longer than _Torrent.wait_for's own 45s
+# cap on one piece, so a slow swarm that is still making progress is
+# never cut off by this - it only catches the paths that cannot make
+# progress at all (see _serve). A minute of frozen picture is already
+# far too long; the point of the number is that it is finite.
+STREAM_STALL_S = 60.0
+
 # The window that belongs to nobody in particular - what add(),
 # set_start_seconds() and a bare focus() move. Every live HTTP read
 # holds one of its own beside it.
@@ -2647,9 +2655,73 @@ def finished_file_path(info_hash: str, *, season=None, episode=None,
             return None
         if int(os.path.getsize(path)) != expected:
             return None         # still downloading - not ours to shortcut
+        if not _fully_written(path, expected):
+            return None         # the right length, and full of holes
         return path
     except Exception:
         return None
+
+
+
+def _fully_written(path: str, expected: int) -> bool:
+    """Is every byte of this file actually on disk?
+
+    **A length check is not a completeness check, and that cost three
+    bugs.** libtorrent pre-allocates the whole file the moment a torrent
+    starts, so a download that has fetched a tenth of the pieces still
+    has a file of exactly the right size - it is *sparse*, with holes
+    where the missing pieces go. finished_file_path tested only the
+    length, so it handed the player a half-empty file as though it were
+    a finished one.
+
+    Measured 1 September 2026 on the owner's Reacher S01E02: 2,021,317,323
+    bytes on disk, the exact torrent length, real data in the last 4KB and
+    **4KB of zeros in the middle**. Played from that file mpv seeks into a
+    hole and lands at the end of what it can index, which is his "when I
+    click in random time ahead in the progress bar it takes me to the vid
+    end"; playback stops on reaching the first hole, which is his "freezes
+    after ~25 seconds"; and the buffering readout disagrees with the bytes
+    that exist, which is his "99% buffering although it loaded ~16%".
+
+    Asked two ways. NTFS records how much of a sparse file is really
+    allocated, and GetCompressedFileSizeW reports it - that is exact and
+    costs one call. Where that is unavailable the file is sampled
+    instead: a hole reads as zeros, and a compressed video stream does
+    not contain 4KB of aligned zeros by accident.
+
+    Wrong in the safe direction on purpose: saying "no" only means the
+    ordinary path is taken, which plays. Saying "yes" wrongly is what
+    breaks playback.
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+            import ctypes.wintypes as w
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.GetCompressedFileSizeW.restype = w.DWORD
+            kernel.GetCompressedFileSizeW.argtypes = [w.LPCWSTR,
+                                                      ctypes.POINTER(w.DWORD)]
+            high = w.DWORD(0)
+            low = kernel.GetCompressedFileSizeW(str(path), ctypes.byref(high))
+            if low != 0xFFFFFFFF or ctypes.get_last_error() == 0:
+                allocated = (int(high.value) << 32) | int(low)
+                if allocated > 0:
+                    # A hair under, because a compressed volume can store
+                    # a complete file in fewer bytes than it holds.
+                    return allocated >= expected * 0.98
+    except Exception:
+        pass
+    try:
+        holes = 0
+        with open(path, "rb") as handle:
+            for step in range(1, 12):
+                handle.seek(expected * step // 13)
+                block = handle.read(4096)
+                if block and not any(block):
+                    holes += 1
+        return holes == 0
+    except OSError:
+        return False
 
 
 def episode_file(info_hash: str):
@@ -3207,8 +3279,32 @@ class _Handler(BaseHTTPRequestHandler):
         # noticing there is a download at all.
         focused_at = start
         cached_piece, cached_bytes = None, None
+        # **This loop had no deadline, and two of its paths never send a
+        # byte.** `if not data: time.sleep(0.1); continue` spins forever
+        # when the file reads back empty and libtorrent will not answer,
+        # and the reader on the other end waits with no timeout of its
+        # own (player_seekable_stream_patch._EngineStream) - so mpv's
+        # stream thread blocked, mpv's play loop blocked behind it, and
+        # every property the UI thread asked for blocked behind that.
+        # _Torrent.wait_for's docstring already spells out that chain
+        # for its own 45s cap; this path simply had no cap at all. That
+        # is the owner's "the video player freeze after playing for
+        # sometime", 2 September 2026.
+        #
+        # A stall ends the response instead. The client sees a short
+        # read, reopens from where it stopped, and the engine re-aims
+        # its window at that offset - which is what it does after every
+        # seek anyway, so the recovery path is one that already runs
+        # thousands of times a session.
+        stalled_since = time.monotonic()
         try:
             while remaining > 0:
+                if time.monotonic() - stalled_since > STREAM_STALL_S:
+                    logs.info(
+                        f"stream stalled at {offset} of {size} after "
+                        f"{STREAM_STALL_S:g}s with nothing to send - "
+                        f"ending the response so the reader reopens")
+                    return
                 if offset - focused_at >= STREAM_REFOCUS_BYTES:
                     focused_at = offset
                     torrent.focus(offset, reader=reader)
@@ -3218,6 +3314,7 @@ class _Handler(BaseHTTPRequestHandler):
                     torrent.focus(offset, reader=reader)
                     if not torrent.wait_for(piece):
                         return          # client sees a short read; mpv retries
+                    stalled_since = time.monotonic()   # the piece arrived
                 # Read no further than the end of the piece we know is
                 # present, so a partially written next piece is never
                 # handed over as real data.
@@ -3282,6 +3379,7 @@ class _Handler(BaseHTTPRequestHandler):
                     time.sleep(0.1)
                     continue
                 self.wfile.write(data)
+                stalled_since = time.monotonic()   # progress, so start over
                 offset += len(data)
                 remaining -= len(data)
                 if offset > torrent.served_hwm:
@@ -3491,13 +3589,3 @@ def clear_cache():
         release(info_hash)
     shutil.rmtree(_CACHE_DIR, ignore_errors=True)
 
-
-def cache_size_bytes() -> int:
-    total = 0
-    for root, _dirs, files in os.walk(_CACHE_DIR):
-        for name in files:
-            try:
-                total += os.path.getsize(os.path.join(root, name))
-            except OSError:
-                pass
-    return total

@@ -267,6 +267,19 @@ def install():
         # dynamically, so this changes no other list or page.
         view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         view.notch_scale = _NOTCH_SCALE
+        # **And in pixels, because nothing reads notch_scale any more.**
+        # It was widgets._SmoothWheel that applied it, and that no longer
+        # takes the wheel at all (the owner asked for plain scrolling
+        # everywhere, 1 September 2026) - so this list went from half the
+        # app's notch to Qt's own three lines, which is faster than it
+        # has ever been. His "decrease the speed of search suggestion
+        # scrolling" is that regression. Qt moves three single-steps per
+        # notch, so the step is a third of the distance wanted.
+        try:
+            step = max(4, int(round(120.0 * _NOTCH_SCALE / 3.0)))
+            view.verticalScrollBar().setSingleStep(step)
+        except Exception:
+            pass
 
         # The rounded surface belongs to the real outer container, not the
         # QListWidget viewport. A styled scroll viewport is rectangular and was

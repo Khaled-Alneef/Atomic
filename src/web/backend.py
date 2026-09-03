@@ -20,9 +20,11 @@ Three reasons, each one a bug that happened:
 
 import hashlib
 import os
+import re
 import pathlib
 import sys
 import threading
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -30,7 +32,27 @@ _SRC = pathlib.Path(__file__).resolve().parent.parent
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from helpers import storage                                   # noqa: E402
+STAR = "★"
+DOT = "·"
+
+from helpers import art_paths, storage                        # noqa: E402
+
+
+# A running show's years, as a card should show them.
+#
+# The owner, 1 September 2026: "in all dates on the cards and banners, do
+# not use (2001- ) to the unfinished watchable, use just the start date
+# (2001)". Cinemeta writes releaseInfo with a trailing dash for anything
+# still airing - "2001-", and sometimes with an en or em dash - which on
+# a card reads as a number that failed to load rather than as "still
+# going". A *closed* range is left exactly as it is: "2001-2005" says
+# something a single year does not.
+_OPEN_RANGE = re.compile(r"(\d{4})\s*[-‒–—―]\s*\Z")
+
+
+def years_text(raw):
+    match = _OPEN_RANGE.fullmatch(str(raw or "").strip())
+    return match.group(1) if match else str(raw or "").strip()
 
 # storage picks src/data from a source tree and %APPDATA%/Atomic only
 # when frozen, so a page run from source would show an empty library
@@ -108,17 +130,32 @@ def cover_url(entry):
     # and `icon` what games do - all absolute paths on disk. Reading only
     # some of them is a row of blank cards, which is how Apps and
     # Websites first arrived on Home.
-    for key in ("cover", "icon", "image", "art"):
-        value = str(entry.get(key) or "")
-        if value and os.path.isabs(value):
-            found = local_url(value)
-            if found:
-                return found
+    # `cover_path` again, this time as the absolute path it is. The
+    # check above only asks whether image_cache holds a file of that
+    # *name*, and a schedule or history row written while the app ran
+    # from source points at src/data/image_cache instead - so a picture
+    # already on the disk was being re-fetched from AniList.
+    #
+    # Through art_paths.resolve_art_path rather than the path as written:
+    # the owner's games.json names every cover inside the *source tree's*
+    # image_cache (imported from a source run), which is dead on any
+    # other machine - measured 2 September 2026 with those paths hidden,
+    # games 0/10 and apps 0/5 resolved. The same file name under the
+    # live cache is looked for before giving up.
+    for key in ("cover_path", "cover", "icon", "image", "art"):
+        found = local_url(art_paths.resolve_art_path(entry.get(key)))
+        if found:
+            return found
     for key in ("cover_url", "poster", "cover", "image"):
         value = str(entry.get(key) or "")
         if value.startswith("http"):
             return remote_url(value)
-    return ""
+    # Nothing on disk and nothing remote: restore it. An app's exe icon
+    # is made here, on the server thread, because this page is answered
+    # once and not asked again - 1.3ms warm, 24ms cold, once per entry
+    # per process (the blank Stremio tile the owner photographed). A
+    # game's cover or a site's favicon is a network fetch, queued.
+    return local_url(art_paths.heal_missing_art(entry, inline_icon=True))
 
 
 def hero_for(entry):
@@ -146,8 +183,14 @@ def hero_for(entry):
         # home._hero_open does.
         "type": str(entry.get("type") or ""),
         "hide_title": bool(entry.get("hero_hide_title")),
-        "meta": _readable(entry.get("next_release"))
-                or str(entry.get("progress") or ""),
+        # **Never the progress.** The owner, 2 September 2026: "do not
+        # show what is the last season and ep / ch watched in the banner
+        # in main page". The banner is what a title *is* - the schedule
+        # line when there is one, and the four fact lines below it
+        # (_bullets, which reading and watching both go through, so the
+        # two banners are the same shape by construction). Where he has
+        # got to is on the card, where he chose it.
+        "meta": schedule_lines(entry),
         # The bullet line the Qt banner carried - runtime, years, genres
         # - built here so the page only has to join them.
         "bullets": _bullets(entry),
@@ -156,39 +199,47 @@ def hero_for(entry):
 
 
 def _bullets(entry):
-    """The short facts a banner shows, in the order the Qt one used.
+    """The banner's facts, in the four lines the owner asked for.
 
-    Only what the entry actually has: an empty bullet reads as a stray
-    separator, which is worse than a shorter line.
+    His format, 1 September 2026, with a screenshot of the old single
+    run: line 1 the runtime, line 2 the rating and the year, line 3 the
+    genres - and line 4 the schedule, which hero_for adds because it
+    needs the whole entry (see schedule_lines).
+
+    A line with nothing in it is dropped by the page rather than drawn
+    empty, which is the rule the bullet run followed before it.
     """
-    out = []
+    lines = []
+
     runtime = str(entry.get("runtime") or entry.get("duration") or "").strip()
-    if runtime:
-        out.append(runtime if "min" in runtime.lower() else f"{runtime} min")
-    years = str(entry.get("years") or entry.get("year") or "").strip()
+    lines.append(runtime if not runtime or "min" in runtime.lower()
+                 else f"{runtime} min")
+
+    second = []
+    rating = str(entry.get("imdbRating") or entry.get("rating") or "").strip()
+    if rating:
+        second.append(rating if rating.startswith(STAR)
+                      else f"{STAR} {rating} IMDb")
+    years = years_text(entry.get("years") or entry.get("year"))
     if years:
-        out.append(years)
-    kind = str(entry.get("type") or "").strip()
-    if kind:
-        out.append(kind)
-    progress = str(entry.get("progress") or "").strip()
-    if progress:
-        out.append(progress)
+        second.append(years)
+    lines.append(f"  {DOT}  ".join(second))
+
     genres = entry.get("genres")
     if isinstance(genres, list) and genres:
-        out.extend(str(g).strip() for g in genres[:3] if str(g).strip())
+        lines.append(f"  {DOT}  ".join(str(g).strip() for g in genres[:4]
+                                       if str(g).strip()))
     elif str(genres or "").strip():
-        out.append(str(genres).strip())
-    country = str(entry.get("country") or "").strip()
-    if country:
-        out.append(country)
-    seen, unique = set(), []
-    for item in out:
-        low = item.lower()
-        if low not in seen:
-            seen.add(low)
-            unique.append(item)
-    return unique[:6]
+        lines.append(str(genres).strip())
+    else:
+        # Not a genre, but the one word that says what this is while
+        # Cinemeta has not answered yet.
+        lines.append(str(entry.get("type") or "").strip())
+    return lines
+
+
+# See fetch_image: the largest picture the proxy will carry.
+IMAGE_MAX_BYTES = 16 * 1024 * 1024
 
 
 def fetch_image(token):
@@ -224,8 +275,31 @@ def fetch_image(token):
         request = urllib.request.Request(net.ascii_url(where), headers=headers)
         deadline = net.deadline_in(12.0)
         with net.urlopen(request, timeout=12.0) as response:
-            blob = net.read_bytes(response, deadline)
-    except Exception:
+            # **A picture's own cap, above net's default.** Three of the
+            # Manga page's 3asq covers are 5.9-6.6MB uploads (measured 3
+            # September 2026: 6,530,291 / 6,601,443 / 5,874,369 bytes)
+            # and net.MAX_RESPONSE_BYTES threw them away as "over the
+            # size cap" - three blank cards, invisible until this fetch
+            # started logging. Chapter pages measured up to 2.4MB. The
+            # deadline still bounds the transfer.
+            blob = net.read_bytes(response, deadline,
+                                  max_bytes=IMAGE_MAX_BYTES)
+    except Exception as error:
+        # A blank card had no cause on record (review, 3 September
+        # 2026). The host and the error kind only - a cover URL can
+        # carry a token.
+        # (urllib.parse is imported at module scope on purpose: an
+        # `import urllib.parse` here made `urllib` a local of the whole
+        # function, and the Request above raised UnboundLocalError for
+        # every remote picture - caught on the frozen build's log, 3
+        # September 2026.)
+        try:
+            from helpers import logs
+            logs.info(f"image fetch failed for "
+                      f"{urllib.parse.urlsplit(where).netloc}: "
+                      f"{type(error).__name__}")
+        except Exception:
+            pass
         return None, None
     if not blob:
         return None, None
@@ -249,48 +323,124 @@ def _kind(head):
     return "application/octet-stream"
 
 
-def _readable(value):
-    """One stored field as a line a person can read.
+def schedule_lines(entry):
+    """The banner's schedule, as the lines it is drawn on.
 
-    next_release is a record - {at, chapter, episode, season, estimated,
-    source} - and printing it raw put a Python dict on the page. It says
-    "estimated" out loud because MangaDex announces no dates and that
-    number is extrapolated from release history.
+    release_schedule.tooltip_lines is the wording, and it is called here
+    rather than re-implemented: "Next Chapter: 886", then "Expected:
+    Monday 8:00 PM" - always the weekday name, never a date, "so every
+    card reads the same way", and no source anywhere in it.
+
+    The banner had been printing the stored next_release record instead,
+    which put the raw date and "via mangadex" on screen - the owner, 1
+    September 2026: "make the discover and home pages banners shows
+    labels the same as old e.g do not show the manga site". The estimate
+    is still declared, by the word "Expected" that carries it on every
+    other surface (see .claude/rules/integrations.md on why a MangaDex
+    date must never read as announced).
     """
-    if value is None or value == "":
-        return ""
-    if isinstance(value, list):
-        return ", ".join(str(v) for v in value if v not in (None, ""))
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    if not isinstance(value, dict):
-        return str(value).strip()
+    try:
+        from helpers import release_schedule
+        kind = str(entry.get("type") or "").strip().lower()
+        # Manhwa and manhua are scheduled exactly as manga is; the
+        # constant is the *medium* the formatter branches on, not the
+        # entry's own word for itself.
+        if kind in ("manga", "manhwa", "manhua", "other"):
+            medium = release_schedule.MEDIUM_MANGA
+        elif kind == "anime":
+            medium = release_schedule.MEDIUM_ANIME
+        else:
+            medium = release_schedule.MEDIUM_SERIES
+        lines = release_schedule.tooltip_lines(entry, medium) or []
+    except Exception:
+        return []
+    lines = [str(line) for line in lines if line]
+    if not lines:
+        return []
+    # **The chapter on its own line, the timing under it.** The owner, 2
+    # September 2026: "in the readings banners in the main page, make the
+    # next chapter label in one line then the expected and the countdown
+    # in the line below it". release_schedule.tooltip_lines gives three -
+    # "Next Chapter: 886", "Expected: Monday 8:00 PM", "Countdown: 2d 5h"
+    # - and all three were joined into one run, which is what made the
+    # banner's schedule read as a sentence rather than a fact and a time.
+    #
+    # A video entry has no chapter line, so it falls through as the one
+    # joined line it always was.
+    if lines[0].startswith("Next Chapter"):
+        return [lines[0], "  ·  ".join(lines[1:])] if len(lines) > 1 else lines
+    return ["  ·  ".join(lines)]
 
-    bits = []
-    chapter, season, episode = (value.get("chapter"), value.get("season"),
-                                value.get("episode"))
-    if chapter not in (None, ""):
-        bits.append(f"Chapter {chapter}")
-    elif episode not in (None, ""):
-        bits.append(f"S{int(season or 1):02d}E{int(episode):02d}")
-    when = str(value.get("at") or "")
-    if when:
-        try:
-            bits.append(datetime.fromisoformat(
-                when.replace("Z", "+00:00")).strftime("%d %b %Y"))
-        except ValueError:
-            bits.append(when[:10])
-    if value.get("estimated"):
-        bits.append("estimated")
-    source = str(value.get("source") or "")
-    if source:
-        bits.append(f"via {source}")
-    return "  ·  ".join(bits)
+
+# ---- titles that are not in the library ------------------------------
+# **A chapter opened from the Manga/Manhwa/Manhua catalogue on an unsaved
+# title used to answer "that title is not in your library"** - the
+# owner, 2 September 2026: "why is it showing me that this is not in my
+# lib when I try to read a ch directly from the manga/manhwa/manhua
+# pages". web_pages._from_page builds a transient {title, type, url}
+# for a card `_find` misses, and the reader's route is `read/<id>/<n>`,
+# so an entry with no id routed to `read//0` and entry_by_id, which reads
+# only the saved files, found nothing. Measured on the harness before the
+# fix: `_entry_id_for` -> '' and chapters/pages both erroring in 0.00s.
+#
+# The chapter source never needed the library: list_chapters reads url +
+# type and keys its cache on the url when there is no id (chapter_source.
+# _cache_key), so the whole missing piece is an id the routes can hand
+# back. This registry is it - in memory only, deterministic so the same
+# card gets the same id across openings within a run, and bounded because
+# every catalogue card he clicks would otherwise stay here for the life
+# of the process. Nothing here is ever written to a file: the stored copy
+# carries no "id", so history.set_watched/touch record `entry_id: None`
+# exactly as they do for any unsaved title, and a later save of the same
+# title links up by history.title_key rather than by this id.
+TRANSIENT_PREFIX = "t-"
+_TRANSIENT_LIMIT = 200
+_transient = {}
+
+
+def transient_id(entry):
+    """The registry id for this entry - the url when it has one (that
+    is what the chapter cache keys on too), else the medium and title."""
+    entry = entry or {}
+    seed = str(entry.get("url") or "").strip()
+    if not seed:
+        seed = (str(entry.get("type") or "").strip().lower() + ":"
+                + " ".join(str(entry.get("title") or "").strip().lower().split()))
+    if seed in ("", ":"):
+        return ""
+    return TRANSIENT_PREFIX + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def register_transient(entry):
+    """Remember an unsaved entry so the reader routes can find it by id.
+
+    Returns the id, or "" for an entry with neither url nor title. The
+    stored copy deliberately drops any "id"/"entry_id" so nothing
+    downstream mistakes it for a saved row.
+    """
+    entry_id = transient_id(entry)
+    if not entry_id:
+        return ""
+    copy = {k: v for k, v in dict(entry).items() if k not in ("id", "entry_id")}
+    with _lock:
+        _transient.pop(entry_id, None)          # re-insert moves it newest
+        _transient[entry_id] = copy
+        while len(_transient) > _TRANSIENT_LIMIT:
+            _transient.pop(next(iter(_transient)), None)
+    return entry_id
 
 
 def entry_by_id(entry_id):
     if not entry_id:
         return None
+    entry_id = str(entry_id)
+    # A registry id can never collide with a saved uuid or a history key
+    # (those carry no "t-" prefix), so it is answered from memory before
+    # any file is opened; every other id keeps the saved files first.
+    if entry_id.startswith(TRANSIENT_PREFIX):
+        with _lock:
+            found = _transient.get(entry_id)
+        return dict(found) if found is not None else None
     for name in ("tracker.json", "series.json", "games.json"):
         for row in _load(name):
             if str(row.get("id") or "") == entry_id:
@@ -366,11 +516,20 @@ def _chapter_row(chapter, index):
 def chapters(entry_id, live=False):
     """This entry's chapters. `live` goes to the site; otherwise cache."""
     entry = entry_by_id(entry_id)
-    if entry is None or chapter_source is None:
-        return {"items": [], "error": "no reader here"}
+    if chapter_source is None:
+        return {"items": [], "error": "this build has no chapter reader"}
+    if entry is None:
+        # Says which of the two it is. "no reader here" covered both and
+        # told him nothing - see web_reader._entry_id_for for the empty
+        # id that used to land here.
+        return {"items": [], "error": "that title is not in your library"}
     try:
+        # Not live: the fresh cache, then the last list seen whatever
+        # its age - the list the reader's jump list and next/previous
+        # index into, which has to be the one pages() reads.
         found = (chapter_source.list_chapters(entry) if live
-                 else chapter_source.cached_chapters(entry)) or []
+                 else (chapter_source.cached_chapters(entry)
+                       or chapter_source.stale_chapters(entry))) or []
     except Exception as exc:
         return {"items": [], "error": str(exc)[:160]}
     return {"items": [_chapter_row(c, i) for i, c in enumerate(found)],
@@ -386,10 +545,18 @@ def pages(entry_id, index):
     headers back with the list, and they are replayed by fetch_image.
     """
     entry = entry_by_id(entry_id)
-    if entry is None or chapter_source is None:
-        return {"pages": [], "error": "no reader here"}
+    if chapter_source is None:
+        return {"pages": [], "error": "this build has no chapter reader"}
+    if entry is None:
+        return {"pages": [], "error": "that title is not in your library"}
     try:
-        found = chapter_source.cached_chapters(entry) or []
+        # The fresh cache, then the last list seen whatever its age -
+        # the list the details page and reader._web_chapter_index index
+        # into - and only then the site. Reading the site here would
+        # renumber the list under an index taken from the stale one
+        # (a chapter published since shifts everything by one).
+        found = (chapter_source.cached_chapters(entry)
+                 or chapter_source.stale_chapters(entry) or [])
         if not found or index >= len(found):
             found = chapter_source.list_chapters(entry) or []
         if index < 0 or index >= len(found):
@@ -432,11 +599,28 @@ def read_state(entry_id):
     entry = entry_by_id(entry_id)
     if entry is None:
         return {"watched": []}
+    # The row that mark_read wrote is the one keyed by history.title_key
+    # - "read:kingdom" for a manga, "imdb:tt..." for a show - so that is
+    # asked first. The bare title match stays as the fallback for a
+    # saved entry whose row predates the key, but it must not come
+    # first: measured 2 September 2026 on the owner's copy, the *anime*
+    # Kingdom's history row (imdb:tt2404499, title "Kingdom") sat ahead
+    # of the manga's, so the transient manga's marks were written to
+    # one row and read back from another - an empty round trip.
+    try:
+        from helpers import history
+        wanted = history.title_key(entry)
+    except Exception:
+        wanted = ""
+    rows = _load("history.json")
+    saved_id = str(entry.get("id") or "")
+    for row in rows:
+        if ((wanted and str(row.get("key") or "") == wanted)
+                or (saved_id and str(row.get("entry_id") or "") == saved_id)):
+            return {"watched": sorted(str(k) for k in (row.get("watched") or []))}
     title = str(entry.get("title") or "").strip().lower()
-    for row in _load("history.json"):
-        same = (str(row.get("entry_id") or "") == str(entry.get("id") or "")
-                or str(row.get("title") or "").strip().lower() == title)
-        if same:
+    for row in rows:
+        if title and str(row.get("title") or "").strip().lower() == title:
             return {"watched": sorted(str(k) for k in (row.get("watched") or []))}
     return {"watched": []}
 
@@ -467,20 +651,23 @@ def hero_meta(entry_id):
     except Exception:
         return {"bullets": []}
 
-    bullets = []
+    # The same three-line shape _bullets returns, so the live answer
+    # replaces the lines in place instead of collapsing them back into
+    # one run. details._fill_facts' wording throughout.
     runtime = str(meta.get("runtime") or "").strip()
-    if runtime:
-        bullets.append(runtime)
-    years = str(meta.get("releaseInfo") or meta.get("year") or "").strip()
-    if years:
-        bullets.append(years)
+
+    second = []
     rating = str(meta.get("imdbRating") or "").strip()
     if rating:
-        bullets.append(f"★ {rating} IMDb")
+        second.append(f"{STAR} {rating} IMDb")
+    years = years_text(meta.get("releaseInfo") or meta.get("year"))
+    if years:
+        second.append(years)
+
     genres = meta.get("genres")
-    if isinstance(genres, list):
-        bullets.extend(str(g).strip() for g in genres[:3] if str(g).strip())
-    return {"bullets": bullets}
+    third = (f"  {DOT}  ".join(str(g).strip() for g in genres[:4] if str(g).strip())
+             if isinstance(genres, list) else str(genres or "").strip())
+    return {"bullets": [runtime, f"  {DOT}  ".join(second), third]}
 
 
 def featured_art(title, imdb="", kind=""):

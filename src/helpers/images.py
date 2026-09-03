@@ -34,7 +34,11 @@ try:
 except ImportError:                      # pragma: no cover - see above
     QSvgRenderer = None
 
-from . import icon_extract, net, storage, theme
+from . import art_paths, icon_extract, net, storage, theme
+
+# Where a saved art path actually is - see helpers/art_paths for why the
+# path logic is Qt-free and only re-exported here.
+resolve_art_path = art_paths.resolve_art_path
 
 CACHE_DIR = storage.DATA_DIR / "image_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -390,9 +394,18 @@ def _touch(path):
 def protected_paths() -> set:
     """Every image file a saved entry points at, lowercased - what
     trim_cache must never delete, whatever its age."""
+    # **Every art key of every shelf, not the tracker's four.** This
+    # read only cover_path/hero_backdrop/hero_logo/icon_path, so a game's
+    # `cover`/`icon`, an app's `image`/`art` and a website's `image` were
+    # never protected and the trim evicted them: measured 2 September
+    # 2026 on the owner's data, all five apps' extracted exe icons and
+    # one favicon were gone (24 distinct protected values → 59 with the
+    # table; 118 entries in the set once each is also kept by name).
+    # Also kept under the same *name* here, because a row can name the
+    # source tree's copy of a file this cache also holds (see
+    # art_paths.resolve_art_path).
     keep = set()
-    for name in ("series.json", "tracker.json", "games.json", "apps.json",
-                 "websites.json"):
+    for name, keys in art_paths.ART_KEYS.items():
         try:
             entries = storage.load(name, [])
         except Exception:
@@ -400,10 +413,11 @@ def protected_paths() -> set:
         for entry in entries if isinstance(entries, list) else []:
             if not isinstance(entry, dict):
                 continue
-            for key in ("cover_path", "hero_backdrop", "hero_logo", "icon_path"):
-                value = entry.get(key)
-                if value:
-                    keep.add(os.path.normcase(str(value)))
+            for key in keys:
+                value = str(entry.get(key) or "")
+                if value and not value.startswith(("http://", "https://")):
+                    keep.add(os.path.normcase(value))
+                    keep.add(os.path.normcase(str(CACHE_DIR / Path(value).name)))
     return keep
 
 

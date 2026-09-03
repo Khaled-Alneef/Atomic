@@ -5509,7 +5509,16 @@ def _web_chapter_index(entry, number):
         return None
     try:
         from helpers import chapter_source
-        found = chapter_source.cached_chapters(entry) or []
+        # **The same list the details page drew.** Since 3 September
+        # 2026 the page shows the last list on disk whatever its age
+        # and refreshes behind it (details._start_lookups), so a row can
+        # be pressed while the six-hour cache is empty - and this then
+        # answered None and opened the chapter *list* instead of the
+        # chapter (measured on the frozen build: One Piece, row 1191,
+        # list page). The stale list is what the row came from, so its
+        # index is the right one; web/backend.pages reads the same list.
+        found = (chapter_source.cached_chapters(entry)
+                 or chapter_source.stale_chapters(entry) or [])
     except Exception:
         return None
     try:

@@ -97,18 +97,6 @@ def resolve(host: str, timeout: float = TIMEOUT):
     return None
 
 
-def blocked_locally(host: str) -> bool:
-    """True when the local resolver refuses a name that DoH answers.
-
-    This is the honest distinction: a domain that fails everywhere is
-    dead and should be reported as such, not presented as censorship."""
-    try:
-        socket.gethostbyname(host)
-        return False
-    except OSError:
-        return resolve(host) is not None
-
-
 import urllib.parse  # noqa: E402  (used by resolve, kept below the docstring)
 
 

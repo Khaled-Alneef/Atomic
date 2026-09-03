@@ -88,6 +88,16 @@ def _patch(player):
                       else window))
 
         player.forget_untethered_resume()
+        # This wrapper replaces player.open_player outright, so the
+        # prewarm added there on 3 September 2026 never ran through it
+        # (found by the review's check): the video child starts here as
+        # well, before the page is built, and mpv_proxy.start joins it
+        # if it is still connecting.
+        try:
+            from helpers import mpv_proxy
+            mpv_proxy.prewarm()
+        except Exception:
+            pass
 
         # Opening something should still make it appear in Watch History, but
         # "opened" is not "watched". The watched key is added only by

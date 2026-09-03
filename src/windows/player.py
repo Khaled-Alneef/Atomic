@@ -57,12 +57,12 @@ import threading
 import time
 import uuid
 
-from PyQt6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt,
-                          QTimer)
+from PyQt6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF,
+                          QRegularExpression, Qt, QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
                          QLinearGradient, QPainter, QPen, QPixmap,
-                         QPolygonF, QRegion)
+                         QPolygonF, QRegion, QRegularExpressionValidator)
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
@@ -217,6 +217,24 @@ SUB_SIZE_STEP = SUB_SIZE_DEFAULT * SUB_SIZE_STEP_PCT / 100.0
 SUB_SIZE_MIN = SUB_SIZE_DEFAULT * 0.50
 SUB_SIZE_MAX = SUB_SIZE_DEFAULT * 1.65
 SUB_DELAY_STEP = 0.1
+
+
+def _bare_number(text):
+    """A stepper field's text with its unit taken off.
+
+    The three subtitle values are shown with units - "+0.4s", "110%",
+    "-12" - and the owner asked for them to be typable. Rather than let
+    the validator accept "s" and "%" so the display stays honest (which
+    would also let a stray letter through), the unit is stripped here on
+    the way in and re-applied by the caller's own _*_text() on the way
+    out.
+    """
+    keep = "".join(c for c in str(text or "") if c.isdigit() or c in "-.")
+    # A "+" prefix is display only; a "-" is meaning, so only the minus
+    # survives, and only where it belongs.
+    if keep.startswith("-"):
+        return "-" + keep[1:].replace("-", "")
+    return keep.replace("-", "")
 
 # Hold-to-repeat on the +/- steppers. See _stepper_button: a tenth of a
 # second per click is unusable for a release seconds out of sync.
@@ -1495,6 +1513,7 @@ class _MpvBridge(QObject):
     prop = Signal(str, object)      # property name, new value
     ended = Signal(str)             # end-file reason
     loaded = Signal()               # mpv finished opening a file
+    host_lost = Signal()            # the video process went away unasked
 
 
 class _WorkBridge(QObject):
@@ -1530,8 +1549,53 @@ class _WorkBridge(QObject):
     note = Signal(str, int)
 
 
+class _BrowserLinkBridge(QObject):
+    """Worker -> Qt for the Download panel's "Download in Browser": the
+    direct link found (or None) and the request it answers. Parented to
+    the page, so a link that resolves after the player closed lands on
+    nothing rather than on a deleted widget."""
+    resolved = Signal(object, object)   # {"url", "name", "size"} | None, request
+
+
 # ---------------------------------------------------------------------
 # Pieces of the page
+
+
+
+def _fit_native_children(widget):
+    """Size every direct child window of `widget` to its client area."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        import ctypes.wintypes as w
+        user = ctypes.WinDLL("user32")
+        user.GetClientRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(w.RECT)]
+        user.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int, w.UINT]
+        parent = ctypes.c_void_p(int(widget.winId()))
+        rect = w.RECT()
+        user.GetClientRect(parent, ctypes.byref(rect))
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            return
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, w.HWND, w.LPARAM)
+        def visit(child, _lparam):
+            found.append(child)
+            return True
+
+        user.EnumChildWindows(parent, visit, 0)
+        for child in found:
+            # SWP_NOZORDER|SWP_NOACTIVATE|SWP_DEFERERASE - the same flags
+            # the web view's own resize uses, for the same reason: this
+            # runs on every frame of a window drag.
+            user.SetWindowPos(w.HWND(child), None, 0, 0, width, height,
+                              0x0004 | 0x0010 | 0x2000)
+    except Exception:
+        logs.exception("Could not resize the video window")
 
 
 class VideoSurface(QWidget):
@@ -1547,6 +1611,26 @@ class VideoSurface(QWidget):
         palette.setColor(self.backgroundRole(), QColor(theme.BG))
         self.setPalette(palette)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def resizeEvent(self, event):
+        """Carry the new size to mpv's own window.
+
+        **mpv cannot follow this one on its own any more.** Given `wid`
+        it creates its window as a child of ours and tracks the parent by
+        subclassing it - which Windows does not allow across a process
+        boundary, and since the core moved out of this process (see
+        helpers/mpv_proxy) that is exactly what it would have to do. So
+        the picture kept whatever size the surface had at the moment the
+        core started, and every later resize left it short: the owner's
+        "the video is not fitting the screen", with the frame ending part
+        way across a maximised window.
+
+        Nothing here knows which child is mpv's, and it does not need to
+        - the surface has no other children, so every direct child is
+        sized to it.
+        """
+        super().resizeEvent(event)
+        _fit_native_children(self)
 
     # **A strip along the top edge that drags the window.** The owner,
     # 27 August 2026: "sometimes while in the vid player when I drag the
@@ -2208,7 +2292,7 @@ class OverlayPanel(QFrame):
         return value.setText
 
     def add_stepper(self, name, value_text, on_left, on_right, step_text="",
-                    into=None):
+                    into=None, on_typed=None, signed=True):
         """A stepper as the owner sketched it: the name small above, then
         a full-width row of − button, the value centred between them,
         + button.
@@ -2247,11 +2331,54 @@ class OverlayPanel(QFrame):
         minus.clicked.connect(on_left)
         row.addWidget(minus)
 
-        value = QLabel(value_text)
+        # **Typed as well as stepped.** The owner's ask, 1 September
+        # 2026: "make the delay, font size, vertical pos for the
+        # subtitles values can be changed by typing ... also, and keep
+        # the buttons". So this is the same centred number it always was,
+        # in a field - the two round buttons are untouched.
+        #
+        # "only accepts numbers, no alphabets no symbols no special
+        # characters": the validator below refuses every one of those.
+        # It does allow a leading minus and a single decimal point on the
+        # rows that need them, because a delay of -0.5s and a position
+        # offset of -12 are numbers the panel has always been able to
+        # hold - a field that could not express them would take function
+        # away rather than add it.
+        value = QLineEdit(value_text)
         value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        value.setFrame(False)
+        pattern = r"-?\d*\.?\d*" if signed else r"\d*\.?\d*"
+        value.setValidator(QRegularExpressionValidator(
+            QRegularExpression(f"^{pattern}$"), value))
         value.setStyleSheet(
             f"color: {theme.TEXT}; font-size: 12pt; font-weight: 700;"
-            f" background: transparent; border: none;")
+            f" background: transparent; border: none;"
+            f" selection-background-color: {theme.ACCENT};")
+        if on_typed is None:
+            value.setReadOnly(True)
+        else:
+            # The unit ("s", "%") is dropped while the field has the
+            # caret and put back when it loses it, so the validator never
+            # has to allow a letter to keep the display honest.
+            def _focus_in(event, box=value):
+                QLineEdit.focusInEvent(box, event)
+                box.setText(_bare_number(box.text()))
+                box.selectAll()
+
+            def _commit(box=value, handler=on_typed):
+                text = _bare_number(box.text())
+                try:
+                    handler(float(text))
+                except (TypeError, ValueError):
+                    pass          # left mid-edit or empty - keep the old
+
+            def _focus_out(event, box=value):
+                QLineEdit.focusOutEvent(box, event)
+                _commit(box)
+
+            value.focusInEvent = _focus_in
+            value.focusOutEvent = _focus_out
+            value.returnPressed.connect(lambda box=value: box.clearFocus())
         # The value takes the whole middle, so the two buttons sit at the
         # row's ends and never move as the number changes width.
         row.addWidget(value, stretch=1)
@@ -2564,6 +2691,10 @@ class PlayerPage(GlassPage):
         self._bridge.prop.connect(self._on_property)
         self._bridge.ended.connect(self._on_ended)
         self._bridge.loaded.connect(self._on_file_loaded)
+        self._bridge.host_lost.connect(self._on_host_lost)
+        # The run whose lost video process was already reloaded once -
+        # see _on_host_lost.
+        self._host_recovered_run = None
         self._work = _WorkBridge()
         self._work.streams_ready.connect(self._on_streams)
         self._work.subs_ready.connect(self._on_subtitles)
@@ -3718,13 +3849,64 @@ class PlayerPage(GlassPage):
                 "python packaging/fetch_libmpv.py")
             self.controls.hide()
             return
+        if not self._create_handle():
+            return
+
+        self._pointer_timer.start(POINTER_POLL_MS)
+        self._mouse_timer.start(MOUSE_POLL_MS)
+        self._save_timer.start(POSITION_SAVE_MS)
+        self._wake_controls()
+        self.setFocus()
+        self._begin_episode()
+        # Said out loud, not swallowed: the player was asked for the
+        # episode after the last one watched and that one is not out, so
+        # it is playing something other than what Play meant. Announced
+        # after _begin_episode so it lands over the source lookup rather
+        # than being replaced by it.
+        if getattr(self, "_clamped_from", None):
+            show_toast(self._toast_anchor(),
+                       f"Episode {self._clamped_from} Is Not Out Yet - "
+                       f"Playing Episode {self.episode}")
+            self._clamped_from = None
+
+    def _handle_dead(self) -> bool:
+        """A handle whose video process has gone. Only the proxy knows
+        this about itself (RemoteMPV.alive); an in-process core has no
+        such state and is never dead by this test."""
+        handle = self.handle
+        if handle is None:
+            return False
+        if not isinstance(getattr(type(handle), "alive", None), property):
+            return False
+        return not handle.alive
+
+    def _create_handle(self) -> bool:
+        """The mpv handle, configured the way every file expects it.
+
+        **One path, used at start and again after the video process is
+        lost.** It was the top of `_start` and nothing else could run
+        it, so when the child died mid-episode (helpers/mpv_proxy.serve
+        has the 20s idle death, measured 2 September 2026) the page kept
+        a handle that answered None to everything: R "reloaded" into
+        it, `_play_stream` fed it a URL, and nothing on screen changed.
+        Now a dead handle is replaced through here, with the same
+        observers, event callback, subtitle preferences and volume
+        ceiling a fresh page gets - the state the old core held is lost
+        with its process, and re-applying it is what makes the reloaded
+        picture come back the way it was.
+
+        False, with the failure already on screen, when there is no
+        handle to be had."""
+        old, self.handle = self.handle, None
+        if old is not None:
+            video_backend.shutdown(old)     # reaps on a thread, never here
         try:
             self.handle = video_backend.create(self.surface.native_handle())
         except video_backend.PlayerError as error:
             logs.exception("Could not create the mpv instance")
             self._show_status(f"The player could not start.\n\n{error}")
             self.controls.hide()
-            return
+            return False
 
         for name in ("time-pos", "duration", "pause", "demuxer-cache-time",
                      "track-list", "volume", "mute", "speed", "core-idle",
@@ -3775,23 +3957,30 @@ class PlayerPage(GlassPage):
             self.handle["alang"] = ",".join(self._audio_language_preference())
         except Exception:
             logs.exception("Could not set the audio language preference")
+        return True
 
-        self._pointer_timer.start(POINTER_POLL_MS)
-        self._mouse_timer.start(MOUSE_POLL_MS)
-        self._save_timer.start(POSITION_SAVE_MS)
-        self._wake_controls()
-        self.setFocus()
-        self._begin_episode()
-        # Said out loud, not swallowed: the player was asked for the
-        # episode after the last one watched and that one is not out, so
-        # it is playing something other than what Play meant. Announced
-        # after _begin_episode so it lands over the source lookup rather
-        # than being replaced by it.
-        if getattr(self, "_clamped_from", None):
-            show_toast(self._toast_anchor(),
-                       f"Episode {self._clamped_from} Is Not Out Yet - "
-                       f"Playing Episode {self.episode}")
-            self._clamped_from = None
+    def _on_host_lost(self):
+        """The video process went away without being asked to.
+
+        Reached on the UI thread through `_bridge.host_lost`, which
+        helpers/mpv_proxy fires from its listener the moment the socket
+        closes. Once per episode the source is reloaded from where it
+        was - `reload_source` recreates the handle (`_play_stream` does,
+        when it finds the old one dead) and lands on `_position`, which
+        is the last time-pos the child pushed before it went. A second
+        loss in the same episode is said rather than retried: a child
+        that keeps dying is something to read the log about, not to
+        loop on."""
+        if self._closing or self.handle is None:
+            return
+        logs.info("the video process stopped mid-episode")
+        recovered = getattr(self, "_host_recovered_run", None)
+        if recovered == self._run or not self._streams:
+            self._show_status("The video process stopped - press R to reload")
+            return
+        self._host_recovered_run = self._run
+        self._show_loading_soon("The video process stopped - reloading...")
+        self.reload_source()
 
     def _fetch_logo_worker(self, run):
         """The title's backdrop and logo, off the UI thread.
@@ -3843,6 +4032,25 @@ class PlayerPage(GlassPage):
         try:
             from helpers import torrent_engine
             torrent_engine.prewarm()
+        except Exception:
+            pass
+        # **And the video process, for the same reason and a bigger
+        # number.** helpers/mpv_proxy.prewarm exists to pay the child's
+        # startup while the source lookup is still running, and its own
+        # docstring carries the measurement: **3.03s** for the frozen
+        # build, because the onefile bootloader unpacks ~200MB before
+        # any of its code runs. Nothing called it - measured 2 September
+        # 2026 by searching the tree - so every play paid that inside
+        # the wait the owner is looking at ("make the connecting to
+        # source stage faster").
+        #
+        # Here rather than at launch: it costs a resident process, and
+        # this is the earliest moment we know one is actually wanted.
+        # The lookup that follows is 3-7s of network, so the whole of it
+        # lands in that gap.
+        try:
+            from helpers import mpv_proxy
+            mpv_proxy.prewarm()
         except Exception:
             pass
         self._run += 1
@@ -4832,6 +5040,12 @@ class PlayerPage(GlassPage):
     def _play_stream(self, index, resume_at=None, solo=False):
         if self.handle is None or not self._streams:
             return
+        # A handle whose process has died is replaced here rather than
+        # loaded into - see _create_handle. Here and not only in
+        # reload_source because the Sources panel and _try_next_source
+        # arrive by this path too.
+        if self._handle_dead() and not self._create_handle():
+            return
         index = max(0, min(index, len(self._streams) - 1))
         stream = self._streams[index]
         if stream.get("kind") == "drm":
@@ -5413,8 +5627,22 @@ class PlayerPage(GlassPage):
             if done > 0:
                 head = float(getattr(engine, "HEAD_BYTES", 0)
                              or 12 * 1024 * 1024)
-                return (0.42 + 0.48 * min(1.0, done / head),
-                        f"Buffering... {min(99, int(100 * done / head))}%")
+                # **Of the head, and said so.** This is how much of the
+                # first HEAD_BYTES is in - not of the file - so a source
+                # that had 12MB of a 3GB episode read "Buffering... 99%"
+                # beside a download sitting at 16%, which is the owner's
+                # report. Two different denominators wearing one label.
+                #
+                # The clamp is why it stuck at 99: min(99, ...) can never
+                # say 100, so once the head was complete the number
+                # froze there and the message never changed, however long
+                # the wait after it ran. Now it counts to 100 and then
+                # says what it is actually waiting for.
+                share = min(1.0, done / head)
+                if share >= 1.0:
+                    return (0.90, "Starting playback...")
+                return (0.42 + 0.48 * share,
+                        f"Buffering the first seconds... {int(100 * share)}%")
             return ((0.40 if progress.get("peers") else 0.36),
                     "Finding peers for this source...\n"
                     "The first few seconds take longest.")
@@ -6002,6 +6230,11 @@ class PlayerPage(GlassPage):
         the file-loaded gate that `_on_file_loaded` depends on actually
         fire."""
         try:
+            # Not mpv's: the proxy's own word for "the child is gone"
+            # (helpers/mpv_proxy.HOST_LOST), sent as a plain dict.
+            if isinstance(event, dict) and event.get("event") == "atomic-host-lost":
+                self._bridge.host_lost.emit()
+                return
             name = str(getattr(event, "event_id", "")).lower()
             if "end-file" in name:
                 self._bridge.ended.emit("eof")
@@ -6813,20 +7046,22 @@ class PlayerPage(GlassPage):
             "Delay", self._delay_text(),
             lambda: self._nudge_delay(-SUB_DELAY_STEP),
             lambda: self._nudge_delay(SUB_DELAY_STEP),
-            step_text=f"{SUB_DELAY_STEP:g}s", into=settings_col)
+            step_text=f"{SUB_DELAY_STEP:g}s", into=settings_col,
+            on_typed=self._set_delay)
         set_size = panel.add_stepper(
             "Size", self._sub_size_text(),
             lambda: self._nudge_size(-SUB_SIZE_STEP),
             lambda: self._nudge_size(SUB_SIZE_STEP),
             step_text=f"{round(SUB_SIZE_STEP * 100 / SUB_SIZE_DEFAULT)}%",
-            into=settings_col)
+            into=settings_col, on_typed=self._set_size_percent, signed=False)
         # Left raises the line, right lowers it - the arrows point the
         # way the text moves rather than the way mpv's number goes.
         set_pos = panel.add_stepper(
             "Vertical Position", self._sub_pos_text(),
             lambda: self._nudge_sub_pos(SUB_POS_OFFSET_STEP),
             lambda: self._nudge_sub_pos(-SUB_POS_OFFSET_STEP),
-            step_text=str(SUB_POS_OFFSET_STEP), into=settings_col)
+            step_text=str(SUB_POS_OFFSET_STEP), into=settings_col,
+            on_typed=self._set_sub_pos)
         settings_col.addStretch(1)
         # Held on the panel, not captured in the nudge calls: the panel
         # is rebuilt whenever a subtitle is picked, and a setter
@@ -6944,6 +7179,33 @@ class PlayerPage(GlassPage):
         except RuntimeError:
             self._sub_toast = show_toast(self._toast_anchor(), message,
                                          duration_ms=None)
+
+    def _set_delay(self, seconds):
+        """A delay typed into the panel, in seconds."""
+        self._sub_delay = round(float(seconds), 2)
+        self._apply_sub_delay()
+        self._update_stepper("set_delay_text", self._delay_text())
+        self._remember_sub_prefs()
+
+    def _set_size_percent(self, percent):
+        """A size typed into the panel, as the percentage it displays.
+
+        Clamped to the stepper's own bounds - the field is free text and
+        400% would put one word on the screen (the same reasoning
+        _restore_sub_prefs records for the saved file)."""
+        raw = float(percent) * SUB_SIZE_DEFAULT / 100.0
+        self._sub_size = max(SUB_SIZE_MIN, min(SUB_SIZE_MAX, raw))
+        self._apply_sub_style()
+        self._update_stepper("set_size_text", self._sub_size_text())
+        self._remember_sub_prefs()
+
+    def _set_sub_pos(self, offset):
+        """A vertical offset typed into the panel."""
+        self._sub_pos_offset = max(SUB_POS_OFFSET_MIN,
+                                   min(SUB_POS_OFFSET_MAX, float(offset)))
+        self._apply_sub_position()
+        self._update_stepper("set_pos_text", self._sub_pos_text())
+        self._remember_sub_prefs()
 
     def _nudge_delay(self, delta):
         self._sub_delay = round(self._sub_delay + delta, 2)
@@ -7504,6 +7766,12 @@ class PlayerPage(GlassPage):
         panel = self._new_panel("Statistics", "stats", rebuild)
         if panel is None:
             return          # the same button closed it
+        # **Wider than the rest, because its rows are two facts side by
+        # side.** At PANEL_WIDTH's 460 the right-hand one was cut off -
+        # the owner's screenshot, 2 September 2026, with "Container FPS
+        # 24.0" running off the edge. Every other panel here is a list of
+        # single items and fits; this one is a table.
+        panel.panel_width = 620
         info_hash = self._playing_info_hash()
 
         setters = {}
@@ -8028,6 +8296,25 @@ class PlayerPage(GlassPage):
         folder_btn.clicked.connect(self._dl_pick_folder)
         panel.footer_layout.addWidget(self._dl_footer_row("Folder", folder_btn))
 
+        # **"Download in Browser"** - the owner's ask, 2 September 2026
+        # (roadmap #14): a download at the line's speed rather than the
+        # source's. What a browser can take is a direct http(s) link -
+        # a release the debrid service holds, or an addon's own URL
+        # (downloads.direct_url_for says which, and measured the 206 a
+        # Range request gets from the debrid CDN). A torrent has no
+        # such link, and _on_dl_browser_resolved says so and queues it
+        # here instead. One episode only: a season would be a browser
+        # tab per episode, and the in-app queue is the right tool there.
+        browser = _text_button(
+            "Download in Browser",
+            "Open a direct link in your browser, which downloads it at "
+            "your connection's full speed" if self._dl_scope != "season"
+            else "One episode at a time - a whole season would open a "
+                 "browser tab per episode")
+        browser.setEnabled(self._dl_scope != "season")
+        browser.clicked.connect(self._dl_open_in_browser)
+        panel.footer_layout.addWidget(browser)
+
         start = _text_button("Download", "Add this to the download queue")
         start.setStyleSheet(
             start.styleSheet()
@@ -8038,6 +8325,81 @@ class PlayerPage(GlassPage):
         start.clicked.connect(self._dl_start)
         panel.footer_layout.addWidget(start)
         self._show_panel(panel)
+
+    def _dl_open_in_browser(self):
+        """Find a direct link off the UI thread and hand it to the system
+        browser; when only the swarm can serve the release, say so and
+        queue it in Atomic instead (see _on_dl_browser_resolved).
+
+        The playing release goes first (`prefer`) and the list the
+        panel already shows is passed along, so nothing here repeats the
+        stream fan-out - measured 6.9s cold. A sticky toast goes up at
+        once (rule 7): the debrid round trips took 0.70s on Reacher
+        S1E2 and a whole lookup can take longer than a second."""
+        if self._dl_scope == "season" and self.episode:
+            show_toast(self._toast_anchor(), "One Episode at a Time in the Browser")
+            return
+        bridge = getattr(self, "_dl_browser_bridge", None)
+        if bridge is None:
+            bridge = self._dl_browser_bridge = _BrowserLinkBridge(self)
+            bridge.resolved.connect(self._on_dl_browser_resolved)
+        request = {
+            "entry": self.entry, "season": self.season, "episode": self.episode,
+            "quality": self._dl_quality, "subtitle": self._dl_subtitle,
+            "audio": self._dl_audio, "folder": self._download_folder(),
+        }
+        prefer = None
+        if 0 <= self._stream_index < len(self._streams):
+            prefer = self._streams[self._stream_index] or None
+        self._close_panel()
+        self._dl_browser_toast = show_toast(
+            self._toast_anchor(), "Finding a Direct Link...", duration_ms=None)
+        self._spawn(self._dl_browser_worker, request, list(self._streams), prefer)
+
+    def _dl_browser_worker(self, request, found, prefer):
+        """Never raises - an exception here would kill the thread
+        silently and leave the sticky toast up forever."""
+        result = None
+        try:
+            result = downloads.direct_url_for(
+                request["entry"], season=request["season"],
+                episode=request["episode"], quality=request["quality"],
+                audio=request["audio"], streams_found=found, prefer=prefer)
+        except Exception:
+            logs.exception("Direct link lookup failed")
+        try:
+            if not self._closing:
+                self._dl_browser_bridge.resolved.emit(result, request)
+        except RuntimeError:
+            pass            # the page (and the bridge with it) is gone
+
+    def _on_dl_browser_resolved(self, result, request):
+        if self._closing:
+            return
+        anchor = self._toast_anchor()
+        toast = getattr(self, "_dl_browser_toast", None)
+        self._dl_browser_toast = None
+        url = str((result or {}).get("url") or "")
+        if url:
+            # The URL carries an account token: opened, never logged.
+            import webbrowser
+            webbrowser.open(url)
+            finish_toast(toast, anchor, "Opened in Your Browser")
+            return
+        try:
+            downloads.queue_episode(
+                request["entry"], season=request["season"],
+                episode=request["episode"], quality=request["quality"],
+                subtitle=request["subtitle"], audio=request["audio"],
+                folder=request["folder"])
+        except Exception:
+            logs.exception("Could not queue a download")
+            finish_toast(toast, anchor, "Only a Torrent Is Available - "
+                                        "Could Not Queue It")
+            return
+        finish_toast(toast, anchor, "Only a Torrent Is Available - "
+                                    "Queued in Atomic Instead",
+                     duration_ms=4000)
 
     @staticmethod
     def _dl_footer_row(name, button):
@@ -9942,6 +10304,16 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     # Once per open, and cheap: the file is a couple of dozen records and
     # it is only rewritten when there is actually something to drop.
     forget_untethered_resume()
+    # Before the page is built, for the play that did not come through a
+    # details page (Home's continue ring): _start creates the handle in
+    # __init__, and mpv_proxy.start joins a prewarm that is still
+    # connecting rather than spawning beside it (review, 3 September
+    # 2026: the first play of a session paid the spawn on the UI thread).
+    try:
+        from helpers import mpv_proxy
+        mpv_proxy.prewarm()
+    except Exception:
+        pass
     # History is written on *open*, not only when the watched threshold
     # is crossed: the owner played things and found Watch History empty,
     # because the only writer was _check_watched at 90% of the runtime.
@@ -9994,5 +10366,22 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     page.show()
     page.raise_()
     freeze_covered(page)   # see widgets._CoveredFreeze
+    # **And the web pages go down.** mpv renders into a native child
+    # window and so does every WebView2 page; on Windows a native child
+    # paints above its non-native siblings, and two native children are
+    # ordered between themselves - so the Home page underneath went on
+    # drawing over the video. The owner photographed it: his player's own
+    # bar and seek bar around a full copy of Home, with the episode
+    # playing behind it.
+    #
+    # The details page and the reader already register (see
+    # windows/web_pages.overlay_opened); the player never did, which is
+    # the whole of the bug. Registering here rather than in PlayerPage
+    # keeps it beside the raise_() it belongs with.
+    try:
+        from windows import web_pages
+        web_pages.overlay_opened(page)
+    except Exception:
+        logs.exception("Could not put the web pages down for the player")
     page.setFocus()
     return page

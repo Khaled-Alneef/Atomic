@@ -2312,6 +2312,68 @@ class DriftButton(QPushButton):
         super().paintEvent(event)
 
 
+def clear_icon(hover: bool = False, size: int = SEARCH_ICON_SIZE) -> QIcon:
+    """The x that empties a search field, drawn the same way as the glass
+    at the other end of it.
+
+    Two states, because the field's own clear button has none: at rest
+    the two strokes in TEXT_MUTED, matching the magnifier; under the
+    pointer a disc tinted toward ACCENT with the strokes in ACCENT on it,
+    which is the "hover highlight" the owner asked for on 2 September
+    2026. Drawn rather than styled - see _ClearButtonHighlight for why a
+    stylesheet cannot do this."""
+    screen = QApplication.primaryScreen()
+    dpr = screen.devicePixelRatio() if screen is not None else 1.0
+    pixmap = QPixmap(int(size * dpr), int(size * dpr))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if hover:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.mix(theme.SURFACE_HOVER, theme.ACCENT, 0.35)))
+        painter.drawEllipse(QRectF(0.5, 0.5, size - 1.0, size - 1.0))
+    pen = QPen(QColor(theme.ACCENT if hover else theme.TEXT_MUTED))
+    pen.setWidthF(1.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    # The strokes stop well inside the disc so the x reads as a glyph on
+    # a button rather than a disc split in quarters.
+    inset = size * 0.3
+    painter.drawLine(QPointF(inset, inset), QPointF(size - inset, size - inset))
+    painter.drawLine(QPointF(size - inset, inset), QPointF(inset, size - inset))
+    painter.end()
+    return QIcon(pixmap)
+
+
+class _ClearButtonHighlight(QObject):
+    """Swaps a search field's clear button between its rest and hover
+    glyphs, keyed off the cursor rather than off Enter/Leave.
+
+    **A stylesheet does not reach this button.** Qt's clear button is a
+    private QLineEditIconButton whose paintEvent draws its pixmap itself
+    and never asks the style for a background, so `QLineEdit >
+    QToolButton:hover { background: ... }` paints nothing. Measured
+    offscreen, 2 September 2026: an unconditional red background rule on
+    the button changed 0 of the 396 pixels in its rect. Repainting the
+    icon is the one lever left, and the button repaints on its own when
+    its action's icon changes.
+
+    Keyed off CursorChange rather than Enter/Leave so the highlight can
+    never outlive the hand cursor: the hover-cursor registry is what puts
+    the hand on this button and what takes it back (including the
+    watchdog's release after a modal dialog, when no Leave ever comes -
+    see _HOVER_CURSOR_WIDGETS), and unsetCursor() sends CursorChange
+    either way. One source of truth for both halves of "hovered"."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.CursorChange:
+            hovered = obj.cursor().shape() == Qt.CursorShape.PointingHandCursor
+            action = obj.defaultAction()
+            (action if action is not None else obj).setIcon(clear_icon(hover=hovered))
+        return False
+
+
 def search_field(placeholder: str, width: int = None) -> QLineEdit:
     """A search box with the glass on its left, which is what every
     search field in this app is.
@@ -2319,10 +2381,31 @@ def search_field(placeholder: str, width: int = None) -> QLineEdit:
     One helper rather than four copies: the icon is drawn (see above), so
     a copy per page would mean four chances to draw it at a different
     size or colour."""
+    from PyQt6.QtWidgets import QToolButton
     field = QLineEdit()
     field.setPlaceholderText(placeholder)
     field.setClearButtonEnabled(True)
     field.addAction(magnifier_icon(), QLineEdit.ActionPosition.LeadingPosition)
+    # The clear button Qt just made is a plain tool button child with the
+    # arrow cursor and no hover state (measured 2 September 2026: 0
+    # pixels changed under a synthetic hover). It gets the hand through
+    # the registry like every other clickable thing, and its glyph
+    # follows the cursor - see _ClearButtonHighlight.
+    button = field.findChild(QToolButton)
+    if button is not None:
+        action = button.defaultAction()
+        (action if action is not None else button).setIcon(clear_icon())
+        button.installEventFilter(_ClearButtonHighlight(button))
+        use_hover_cursor(button)
+        # **The wrapper has to be kept, or both filters silently stop.**
+        # The button is Qt's, so this wrapper is a transient sip made for
+        # findChild - and sip keeps a child's Python object (the two
+        # filters, parented to the button) alive through references on
+        # the *parent's* wrapper. Let this one go and the filters fall
+        # back to QObject.eventFilter, which does nothing. Measured 2
+        # September 2026: Enter reached the button and the registry stayed
+        # empty, cursor still the arrow, until this line.
+        field._clear_button = button
     if width:
         field.setFixedWidth(width)
     return field
@@ -4707,6 +4790,29 @@ class _SmoothWheel(QObject):
         kind = event.type()
         if kind != QEvent.Type.Wheel:
             return False
+        # **The wheel is Qt's again, everywhere.** The owner, 1 September
+        # 2026: "make all the scrolling that uses the old method, like
+        # search bar suggestions, ep/ch list, subtitles list in the video
+        # player, etc... all normal scrolling remove any notch effect or
+        # drift or anything", and, in the same breath, "when I scroll
+        # using the laptop touchpad, it is super smooth, but the mouse
+        # wheel and the scrollbar dragging are not smooth in comparison".
+        #
+        # Those two are one finding. The line below this one is why: a
+        # trackpad sends pixel deltas and was always handed straight to
+        # Qt, 1:1 with the finger, while a mouse notch was taken over and
+        # animated over a curve. So the touchpad has been showing what
+        # the untouched path looks like all along, and the wheel has been
+        # showing the model. Returning here gives the wheel the same path
+        # the finger already had.
+        #
+        # The animation below is left in place rather than deleted: this
+        # class still owns the relay from an inner row to its page
+        # (_EdgeWheelRelay) and the keyboard's own kicks, and
+        # poster_grid.FrameMotion is the same model on a surface this
+        # does not filter. Superseded, not yet unused - CLAUDE.md rule 10
+        # says say so and wait, so this is the saying.
+        return False
         if not event.pixelDelta().isNull():
             return False
         if event.modifiers() & (Qt.KeyboardModifier.ControlModifier

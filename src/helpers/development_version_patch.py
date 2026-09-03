@@ -1282,7 +1282,36 @@ def install():
     # sweep may only append: tracker._on_category_results paid twice for
     # that, once when a reorder swapped titles under the cards being
     # looked at and once when a replace cut a live grid from 60 to 30.
-    updater.APP_VERSION = "1.10.230"
+    #
+    # 1.10.231: the owner's list of 2 September 2026, eighteen items,
+    # each measured before it was touched (CLAUDE.md rule 9):
+    #   * the video child process exited after 20 idle seconds - a
+    #     socket timeout left on by create_connection, read as EOF - so
+    #     a pre-warmed child was dead by the next play (the in-process
+    #     fallback that wrecks Qt's timers), a live one died ~20s into
+    #     an episode (the Reacher freeze), and a reload waited 8s on the
+    #     dead socket; the child now blocks for ever, a warm child is
+    #     pinged before use, a lost host is announced and re-created;
+    #   * reader pages drawn at min(natural, column) CSS px, as the
+    #     source site draws them (3asq: 1325px scans were 20% smaller);
+    #   * an unsaved catalogue title reads through a transient id
+    #     instead of "not in your library";
+    #   * cast chips open a TMDB filmography page, and genre/cast pages
+    #     load on scroll until the source is dry;
+    #   * the discover banner is a weighted draw per visit (30/30/30/10);
+    #   * "Recently Released" follows each site's latest-updates wall
+    #     and drops the sliders; Kingdom's art is kind-aware on TMDB;
+    #   * details pages draw the disk copy first (first row 0.07s),
+    #     source lists are no longer serialised behind a lock or a dead
+    #     local-server addon, stills go newest-first and retry;
+    #   * shelf art resolves by name across cache dirs, is protected
+    #     from the trim, and an app's exe icon heals itself;
+    #   * the search field's x has a hover disc and the hand cursor;
+    #   * the sidebar fold carries the catalogue cards with the rail
+    #     (0-7% dead frames against 100%, one native resize per fold);
+    #   * "Download in Browser" hands a direct/debrid link to the system
+    #     browser; chapters fetch six pages at once.
+    updater.APP_VERSION = "1.10.231"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

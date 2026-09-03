@@ -144,12 +144,29 @@ def _normalize_addon(url: str) -> str:
     return url[:-len("/manifest.json")] if url.endswith("/manifest.json") else url.rstrip("/")
 
 
+# **The Stremio local server is never an addon here.** The owner's
+# stream_addons.json still carried "Local Files (without catalog
+# support)" at http://127.0.0.1:11470/local-addon from the account import
+# that used to live in this module, and integrations.md is explicit that
+# the 127.0.0.1:11470 route must not come back. Measured 3 September 2026
+# on his Reacher S1E2: that addon hung 6.04-6.06s and answered 0 rows on
+# every lookup, so the source picker's *final* list - and every auto-pick
+# that waits for it - paid six seconds behind addons that answer in
+# 0.1-1.4s. Dropped at read time rather than by editing his file: a
+# Settings save that rewrites the list simply stops carrying it.
+_LOCAL_SERVER_HOSTS = ("127.0.0.1:11470", "localhost:11470")
+
+
+def usable_addon(addon) -> bool:
+    """Whether an addon row is one this app will ask at all."""
+    if not isinstance(addon, dict):
+        return False
+    base = str(addon.get("base_url") or "").lower()
+    return not any(host in base for host in _LOCAL_SERVER_HOSTS)
+
+
 def _load() -> list:
-    return storage.load(SITES_FILE, [])
-
-
-def list_addons() -> list:
-    return _load()
+    return [a for a in storage.load(SITES_FILE, []) if usable_addon(a)]
 
 
 def add_addon(url: str, timeout: int = DEFAULT_TIMEOUT):
@@ -181,27 +198,6 @@ def add_addon(url: str, timeout: int = DEFAULT_TIMEOUT):
     addons.append(addon)
     storage.save(SITES_FILE, addons)
     return addon
-
-
-def remove_addon(addon_id: str):
-    addons = [a for a in _load() if a.get("id") != addon_id]
-    storage.save(SITES_FILE, addons)
-
-
-def _supports_streams(manifest: dict) -> bool:
-    """Whether this addon answers /stream at all.
-
-    Most of a user's installed collection does not - Cinemeta is
-    metadata, OpenSubtitles is subtitles - and asking those for streams
-    is a guaranteed 404 per entry, per lookup. The manifest says so;
-    read it instead of finding out the expensive way."""
-    resources = manifest.get("resources") or []
-    for resource in resources:
-        if resource == "stream":
-            return True
-        if isinstance(resource, dict) and resource.get("name") == "stream":
-            return True
-    return False
 
 
 # Public, keyless addons that answer /stream, each measured against a
@@ -1554,17 +1550,6 @@ def _default_pick_key(stream, preferred, season=None):
             arabic, -seeders)
 
 
-def _stremio_id(entry, season=None, episode=None) -> str:
-    imdb_id = (entry or {}).get("imdb_id") or ""
-    if not imdb_id:
-        return ""
-    if season and episode:
-        return f"{imdb_id}:{int(season)}:{int(episode)}"
-    if episode:
-        return f"{imdb_id}:1:{int(episode)}"
-    return imdb_id
-
-
 def _stream_from_addon(item: dict, addon_name: str):
     """One entry of an addon's `streams[]`, as this app's shape."""
     title = (item.get("title") or item.get("name") or "").replace("\n", " ").strip()
@@ -2147,8 +2132,13 @@ def _run_all(jobs, deadline, *, on_result=None) -> list:
                                                           timeout=remaining):
                 try:
                     found = future.result() or []
-                except Exception:
-                    continue        # one dead source is not a dead lookup
+                except Exception as error:
+                    # One dead source is not a dead lookup - but a dead
+                    # addon or indexer was invisible in atomic.log
+                    # (review, 3 September 2026).
+                    logs.info(f"stream source raised: "
+                              f"{type(error).__name__}: {str(error)[:120]}")
+                    continue
                 if not found:
                     continue
                 results.extend(found)
@@ -2809,30 +2799,3 @@ def resolve_page(page_url: str, *, deadline=None, _depth: int = 0) -> list:
             break
     return _rank(results)
 
-
-def playable_check(stream: dict, timeout: float = 6) -> bool:
-    """Whether a resolved URL actually serves media, by asking for the
-    first bytes only.
-
-    A Range request rather than a HEAD: these hosts routinely answer 405
-    or 404 to HEAD while serving the same URL perfectly to a GET, so a
-    HEAD-based check discards working streams."""
-    url = stream.get("url") or ""
-    if not url.startswith("http"):
-        return False
-    headers = dict(stream.get("headers") or {})
-    headers.setdefault("User-Agent", _UA)
-    headers["Range"] = "bytes=0-1023"
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with net.urlopen(request, timeout=timeout) as response:
-            content_type = (response.headers.get("Content-Type") or "").lower()
-            body = response.read(1024)
-    except Exception:
-        return False
-    if any(marker in content_type for marker in
-           ("video", "mpegurl", "octet-stream", "dash+xml", "mp4")):
-        return True
-    # An HLS playlist is text/plain on plenty of hosts; its first line is
-    # not ambiguous.
-    return body.lstrip().startswith(b"#EXTM3U")

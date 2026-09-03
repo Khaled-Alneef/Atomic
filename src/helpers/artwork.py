@@ -139,8 +139,53 @@ def _get_json(url, timeout):
     return answer
 
 
-def _tmdb_id(imdb_id: str, timeout, title: str = ""):
+# TMDB's genre id for Animation, on both the tv and the movie lists.
+_ANIMATION_GENRE_ID = 16
+# Atomic's own kinds, lowered, and which TMDB rows may answer a *title*
+# search for each: the lists to ask in order, and whether the row must
+# be animated (True), must not be (False), or may be either (None).
+_KIND_SEARCH = {
+    "anime": (("tv", "movie"), True),
+    "manga": (("tv", "movie"), True),
+    "manhwa": (("tv", "movie"), True),
+    "manhua": (("tv", "movie"), True),
+    "reading": (("tv", "movie"), True),
+    "series": (("tv",), False),
+    "movie": (("movie",), None),
+    "movies": (("movie",), None),
+}
+_TITLE_YEAR_RE = re.compile(r"\(\s*((?:19|20)\d\d)\s*\)\s*$")
+
+
+def _row_agrees(row, animated, year) -> bool:
+    """Whether a search row can be the kind (and year) the caller
+    already knows the title to be. `animated` None accepts either."""
+    if animated is not None:
+        genres = row.get("genre_ids") or []
+        if (_ANIMATION_GENRE_ID in genres) != animated:
+            return False
+    if year:
+        stamp = str(row.get("first_air_date") or row.get("release_date") or "")
+        if stamp[:4].isdigit() and abs(int(stamp[:4]) - year) > 1:
+            return False
+    return True
+
+
+def _tmdb_id(imdb_id: str, timeout, title: str = "", kind: str = ""):
     """TMDB's own id and media type for an IMDb id.
+
+    **`kind` makes the title fallback agree with what the caller already
+    knows.** Measured 2 September 2026 on "Kingdom", which is a 2012
+    anime, a 2014 US drama and a 2019 Korean series on TMDB's tv list:
+    the fallback took the first exact name (today the anime, because
+    TMDB ranks it first - a popularity order this app does not control)
+    for *every* kind, so a Series called Kingdom with no id would have
+    carried the anime's poster, and the day TMDB reorders, the reverse.
+    An Anime or reading kind therefore needs an animated row (genre 16,
+    and Japan is preferred among those), a Series a non-animated one, a
+    Movie the movie list only; a "(2019)" on the asked title must agree
+    within a year. The id path is untouched - an id cannot pick the
+    wrong show, and it answers tt2404499 as 46437 correctly.
 
     `find` rather than `search`: the tracker already stores an IMDb id
     for everything it resolved, and matching on an id cannot pick the
@@ -176,14 +221,27 @@ def _tmdb_id(imdb_id: str, timeout, title: str = ""):
     if not title:
         return None, None
     from . import title_match
+    lists, animated = _KIND_SEARCH.get((kind or "").strip().lower(),
+                                       (("tv", "movie"), None))
+    stamped = _TITLE_YEAR_RE.search(title)
+    year = int(stamped.group(1)) if stamped else 0
+    if stamped:
+        title = title[:stamped.start()].strip()
     asked = title.lower()
-    for kind in ("tv", "movie"):
+    for media in lists:
         try:
             found = _get_json(
-                f"{API}/search/{kind}?query={urllib.parse.quote(title)}",
+                f"{API}/search/{media}?query={urllib.parse.quote(title)}",
                 timeout)
         except Exception:
             continue
+        # Every acceptable row on this list, then the best of them: an
+        # exact name over a franchise prefix, and among animated rows a
+        # Japanese one over the rest - TMDB's "Kingdom" tv list carries
+        # the anime and, under the same name, nothing else animated, but
+        # a title shared by a Western cartoon would otherwise be decided
+        # by TMDB's popularity order alone.
+        best, best_rank = None, None
         for row in (found or {}).get("results") or []:
             name = str(row.get("name") or row.get("title") or "").strip()
             if not name or row.get("id") is None:
@@ -193,8 +251,18 @@ def _tmdb_id(imdb_id: str, timeout, title: str = ""):
                       and len(lowered) >= 4
                       and (len(asked) == len(lowered)
                            or not asked[len(lowered)].isalnum()))
-            if prefix or title_match.similarity(title, name) >= 0.85:
-                return kind, row.get("id")
+            exact = title_match.similarity(title, name) >= 0.85
+            if not (prefix or exact):
+                continue
+            if not _row_agrees(row, animated, year):
+                continue
+            rank = (0 if exact else 1,
+                    0 if (animated and "JP" in (row.get("origin_country") or []))
+                    else 1)
+            if best_rank is None or rank < best_rank:
+                best, best_rank = row, rank
+        if best is not None:
+            return media, best.get("id")
     return None, None
 
 
@@ -223,7 +291,7 @@ POSTER_SIZE_PATH = "w500"
 
 
 def poster_url(imdb_id: str = "", title: str = "",
-               timeout: int = DEFAULT_TIMEOUT):
+               timeout: int = DEFAULT_TIMEOUT, kind: str = ""):
     """A TMDB poster URL for a title, or None.
 
     **The second art source for video rows, and the reason it exists is
@@ -253,13 +321,13 @@ def poster_url(imdb_id: str = "", title: str = "",
     if not imdb_id and not title:
         return None
     try:
-        kind, ident = _tmdb_id(imdb_id, timeout, title)
+        media, ident = _tmdb_id(imdb_id, timeout, title, kind)
     except Exception:
         return None
     if not ident:
         return None
     try:
-        body = _get_json(f"{API}/{kind}/{ident}", timeout) or {}
+        body = _get_json(f"{API}/{media}/{ident}", timeout) or {}
     except Exception:
         return None
     path = body.get("poster_path")
@@ -409,7 +477,8 @@ def logo_path(entry, timeout: int = DEFAULT_TIMEOUT):
 
     try:
         kind, tmdb_id = _tmdb_id(imdb_id, timeout,
-                                 (entry or {}).get("title") or "")
+                                 (entry or {}).get("title") or "",
+                                 (entry or {}).get("type") or "")
         if not tmdb_id:
             missing.touch()
             return None
@@ -569,7 +638,8 @@ def backdrop_fast_path(entry, timeout: int = DEFAULT_TIMEOUT):
         return None
     try:
         kind, tmdb_id = _tmdb_id(imdb_id, timeout,
-                                 (entry or {}).get("title") or "")
+                                 (entry or {}).get("title") or "",
+                                 (entry or {}).get("type") or "")
         if not tmdb_id:
             missing.touch()
             return None
@@ -619,7 +689,8 @@ def backdrop_path(entry, timeout: int = DEFAULT_TIMEOUT):
 
     try:
         kind, tmdb_id = _tmdb_id(imdb_id, timeout,
-                                 (entry or {}).get("title") or "")
+                                 (entry or {}).get("title") or "",
+                                 (entry or {}).get("type") or "")
         if not tmdb_id:
             missing.touch()
             return None

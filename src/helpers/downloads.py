@@ -30,6 +30,7 @@ import threading
 import time
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 from . import logs, net, storage
 
@@ -134,7 +135,10 @@ def _save_unlocked():
     try:
         storage.save(JOBS_FILE, list(_jobs or []))
     except Exception:
-        pass
+        # Swallowed so a worker never raises, but no longer silently: a
+        # queue that stopped persisting had nothing in atomic.log
+        # (review, 3 September 2026).
+        logs.exception("Could not save the download queue")
 
 
 def cancel(job_id):
@@ -531,6 +535,148 @@ def queue_chapters(entry, chapters, *, folder=None) -> list:
     return jobs
 
 
+# ------------------------------------------------ the browser's download
+
+# The owner's ask, 2 September 2026 (roadmap #14): "make the ep/ch
+# downloads open the browser somehow to make it purely on the Wi-Fi speed
+# not the source speed". What a browser can download is a plain http(s)
+# URL - a debrid link served from the service's own CDN, or an addon's
+# direct URL. A torrent has no such URL: a magnet needs a torrent client,
+# and the app's own engine already pulls it at swarm speed, so for a
+# torrent-only release the honest answer is None and the in-app queue.
+#
+# Measured 2 September 2026 on Reacher S1E2 (81 rows): 2 of the top 20
+# releases were held by the debrid service; `playable_url` on the first
+# answered in 0.70s with a URL on the service's download host, and a
+# Range request against it came back **206** with `Accept-Ranges: bytes`
+# (1024 bytes in 0.61s) - so the browser can download it as an ordinary
+# file, at whatever the line does.
+BROWSER_DEBRID_TRIES = 4
+BROWSER_LINK_BUDGET_S = 25.0
+BROWSER_PROBE_TIMEOUT_S = 6.0
+
+
+def _browser_can_fetch(url, deadline) -> bool:
+    """Whether a plain GET of `url` answers with a body - a 200, or a
+    206 to the one-byte Range asked for here. Checked before the link
+    is handed to a browser: a link that 403s there is a blank tab, and
+    nothing in the app would ever hear about it."""
+    timeout = net.step_timeout(deadline, BROWSER_PROBE_TIMEOUT_S)
+    if timeout is None:
+        return False
+    try:
+        request = urllib.request.Request(
+            url, headers={"Range": "bytes=0-0", "User-Agent": _UA})
+        with net.urlopen(request, timeout=timeout) as response:
+            return int(getattr(response, "status", 0) or 0) in (200, 206)
+    except Exception:
+        return False
+
+
+def direct_url_for(entry, *, season=None, episode=None, quality=None,
+                   audio=None, streams_found=None, prefer=None,
+                   deadline=None):
+    """A plain http(s) URL for this episode (or film) that the system
+    browser can download by itself, or None when only the swarm can
+    serve it.
+
+    The pick follows the queue's own order (`quality` via
+    streams.matching_quality, then `_order_by_audio`), with `prefer` -
+    the release the player is showing - moved to the front. Releases
+    the debrid service already holds are asked first, because that is
+    the one source measured answering Range requests from a CDN; an
+    addon's own direct URL is the fallback. Every link is probed
+    (`_browser_can_fetch`) before it is returned.
+
+    **Deliberately not streams.prepare().** That races the debrid arm
+    against the engine, and the engine's win is a 127.0.0.1 URL served
+    from the swarm - exactly the speed this exists to get away from -
+    with a torrent left added for a download that is going to happen in
+    the browser instead. Only the debrid half is wanted here, so only
+    that half is asked. `streams_found` skips the fan-out when the
+    caller already has the list (the player does; find_streams measured
+    6.9s cold on Reacher S1E2, 0s from its cache).
+
+    Returns {"url", "name", "size"} - the URL carries an account token
+    and must never be logged or shown, only opened."""
+    from . import streams
+    try:
+        from . import debrid
+    except Exception:
+        debrid = None
+    if deadline is None:
+        deadline = net.deadline_in(BROWSER_LINK_BUDGET_S)
+
+    found = list(streams_found or [])
+    if not found:
+        budget = net.step_timeout(deadline, 40.0)
+        if budget is None:
+            return None
+        found = list(streams.find_streams(
+            entry, season=season, episode=episode,
+            deadline=net.deadline_in(budget)) or [])
+    ordered = streams.matching_quality(found, quality) if quality else []
+    candidates = list(ordered or found)
+    candidates = _order_by_audio(candidates, audio)
+    if prefer:
+        key = (prefer.get("info_hash") or "").lower(), prefer.get("url")
+        rest = [s for s in candidates
+                if ((s.get("info_hash") or "").lower(), s.get("url")) != key]
+        candidates = [dict(prefer)] + rest
+
+    torrents = [s for s in candidates
+                if s.get("kind") == "torrent" and s.get("info_hash")]
+    directs = [s for s in candidates
+               if s.get("kind") == "direct"
+               and str(s.get("url") or "").startswith("http")]
+    # The playing release may already be a debrid link (prepare() turns
+    # the stream into kind="direct"); that is the best answer there is.
+    if prefer and prefer in directs:
+        directs.remove(prefer)
+        directs.insert(0, prefer)
+
+    if debrid is not None and torrents:
+        try:
+            available = debrid.available()
+        except Exception:
+            available = False
+        if available:
+            hashes = [s["info_hash"].lower() for s in torrents[:20]]
+            try:
+                cached = debrid.cached_hashes(
+                    hashes, deadline=net.deadline_in(
+                        net.step_timeout(deadline, 8.0) or 1.0))
+            except Exception:
+                cached = set()
+            tries = 0
+            for stream in torrents:
+                info_hash = stream["info_hash"].lower()
+                if info_hash not in cached or tries >= BROWSER_DEBRID_TRIES:
+                    continue
+                budget = net.step_timeout(deadline, 12.0)
+                if budget is None:
+                    break
+                tries += 1
+                try:
+                    got = debrid.playable_url(
+                        info_hash, season=season, episode=episode,
+                        deadline=net.deadline_in(budget),
+                        title=entry.get("title"))
+                except Exception:
+                    got = None
+                url = (got or {}).get("url") or ""
+                if url.startswith("http") and _browser_can_fetch(url, deadline):
+                    return {"url": url,
+                            "name": got.get("file_name") or stream.get("name"),
+                            "size": got.get("size")}
+    for stream in directs:
+        url = stream.get("url")
+        if _browser_can_fetch(url, deadline):
+            return {"url": url, "name": stream.get("name"),
+                    "size": stream.get("size")}
+    return None
+
+
 # ------------------------------------------------------------- worker
 
 def _ensure_worker():
@@ -848,6 +994,22 @@ def _run_video(job) -> str:
     return target
 
 
+# Pages in flight at once for one chapter - see the note in _run_chapter
+# for the measurement, and net.MAX_IDLE_PER_HOST for why six.
+CHAPTER_PAGE_WORKERS = 6
+
+
+def _fetch_page(url, headers) -> bytes:
+    """One page's bytes, or an exception - the caller records which."""
+    request = urllib.request.Request(url, headers=headers)
+    deadline = net.deadline_in(30)
+    with net.urlopen(request, timeout=20) as response:
+        # net.MAX_IMAGE_BYTES, not the API ceiling - see the note there
+        # for the chapter this was measured on and the page it was
+        # dropping.
+        return net.read_bytes(response, deadline, net.MAX_IMAGE_BYTES)
+
+
 def _run_chapter(job) -> str:
     from . import chapter_source
 
@@ -911,47 +1073,81 @@ def _run_chapter(job) -> str:
     # swallowed: a chapter that saved 6 of 7 pages is not a success, and
     # saying nothing about it is how a truncated .cbz reached the owner.
     dropped = []
+    # **The pages are fetched six at a time, and written in order.**
+    # The owner's ask, 2 September 2026 (roadmap #14), was for downloads
+    # at the line's speed rather than the source's; for a chapter the
+    # browser is no answer (the site refuses a page without the chapter
+    # as Referer - see chapter_source.chapter_pages), and the real cost
+    # was this loop asking for one image at a time. Measured on Kingdom
+    # (WAN) chapter 886 on 3asq, 21 pages, 35.7MB: **5.95s and 10.73s**
+    # serial on two runs, **2.87s and 2.66s** with six in flight - the
+    # same pages, the same bytes, and one connection per worker kept
+    # alive by net's pool (MAX_IDLE_PER_HOST is six, which is where the
+    # width comes from). Re-measured 3 September 2026, same chapter,
+    # fetch time after the page list: serial 4.22s and 4.52s, six wide
+    # 3.42s and 2.32s - the site was faster that day and the gain
+    # smaller (1.2-1.9x against 2.1-4.0x), so the width buys most when
+    # the source is slowest, which is the case it exists for. Total
+    # including the page list: 4.98/5.28s serial, 4.10/3.04s parallel,
+    # 35.73MB either way. The same runs also named the page every run
+    # was dropping: page 21 of that chapter is over net.MAX_IMAGE_BYTES
+    # and is refused by read_bytes, serial or not - a cap question for
+    # net, not a fetch one. Writes stay on this thread, in page order,
+    # because a zip is appended sequentially and a reader wants the
+    # pages numbered as they came; a pause or cancel stops handing out
+    # new fetches (cancel_futures) and the ones in flight finish into
+    # nothing.
+    missing = [(index, url) for index, url in enumerate(pages, 1)
+               if index not in existing]
+    # **Not a `with`: the executor's __exit__ joins every running fetch**,
+    # so a pause or cancel held the one download worker until the six
+    # in-flight 2MB pages had finished arriving (review, 3 September
+    # 2026). The shutdown in the finally below hands out nothing new and
+    # lets the reads in flight drain on their own threads while the
+    # queue moves on to the next job.
+    pool = ThreadPoolExecutor(max_workers=CHAPTER_PAGE_WORKERS,
+                              thread_name_prefix="chapter-page")
     with zipfile.ZipFile(target, mode, zipfile.ZIP_DEFLATED) as archive:
-        for index, url in enumerate(pages, 1):
-            if job_id in _cancelled:
-                break
-            if job_id in _paused:
-                # Held, not stopped - the same contract _run_video
-                # keeps. `with` closes the archive on the way out, so
-                # the pages already written stay readable and the next
-                # run appends to them. pause() has already set the
-                # state, so returning "" here must not be read as a
-                # failure - the queue checks `_paused` before it judges
-                # the result.
-                return ""
-            if index not in existing:
-                request = urllib.request.Request(url, headers=headers)
-                deadline = net.deadline_in(30)
-                try:
-                    with net.urlopen(request, timeout=20) as response:
-                        # net.MAX_IMAGE_BYTES, not the API ceiling - see
-                        # the note there for the chapter this was
-                        # measured on and the page it was dropping.
-                        data = net.read_bytes(response, deadline,
-                                              net.MAX_IMAGE_BYTES)
-                except Exception:
-                    # A missing page must not lose the chapter - but it
-                    # must not be silent either. This `continue` is why
-                    # the size cap above went unnoticed: the .cbz simply
-                    # came out short and nothing anywhere said so.
-                    dropped.append(index)
-                    logs.exception(f"chapter page {index} could not be "
-                                   f"downloaded: {url}")
-                    continue
-                extension = os.path.splitext(url.split("?")[0])[1].lower() or ".jpg"
-                # Zero-padded so readers show pages in order rather than
-                # 1, 10, 11, 2 - the classic cbz mistake.
-                archive.writestr(f"{index:03d}{extension}", data)
-            # Advanced for a page that was already there too, so a
-            # resumed chapter shows where it actually is instead of
-            # crawling up from zero again.
-            _update(job_id, progress=round(index / len(pages), 4),
-                    detail=f"page {index} of {len(pages)}")
+        futures = {index: pool.submit(_fetch_page, url, headers)
+                   for index, url in missing}
+        try:
+            for index, url in enumerate(pages, 1):
+                if job_id in _cancelled:
+                    break
+                if job_id in _paused:
+                    # Held, not stopped - the same contract _run_video
+                    # keeps. `with` closes the archive on the way out,
+                    # so the pages already written stay readable and
+                    # the next run appends to them. pause() has already
+                    # set the state, so returning "" here must not be
+                    # read as a failure - the queue checks `_paused`
+                    # before it judges the result.
+                    return ""
+                future = futures.get(index)
+                if future is not None:
+                    try:
+                        data = future.result()
+                    except Exception:
+                        # A missing page must not lose the chapter - but
+                        # it must not be silent either. This `continue`
+                        # is why the size cap in net went unnoticed: the
+                        # .cbz simply came out short and nothing
+                        # anywhere said so.
+                        dropped.append(index)
+                        logs.exception(f"chapter page {index} could not "
+                                       f"be downloaded: {url}")
+                        continue
+                    extension = os.path.splitext(url.split("?")[0])[1].lower() or ".jpg"
+                    # Zero-padded so readers show pages in order rather
+                    # than 1, 10, 11, 2 - the classic cbz mistake.
+                    archive.writestr(f"{index:03d}{extension}", data)
+                # Advanced for a page that was already there too, so a
+                # resumed chapter shows where it actually is instead of
+                # crawling up from zero again.
+                _update(job_id, progress=round(index / len(pages), 4),
+                        detail=f"page {index} of {len(pages)}")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     if job_id in _cancelled:
         try:

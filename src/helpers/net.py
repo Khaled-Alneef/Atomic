@@ -337,20 +337,6 @@ def _give_back(key, conn):
         bucket.append((conn, time.monotonic()))
 
 
-def close_idle_connections():
-    """Drop every pooled connection. Nothing in the app needs this - it
-    exists so a test can prove the pool is what made a measurement
-    fast."""
-    with _idle_lock:
-        for bucket in _idle.values():
-            for conn, _at in bucket:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        _idle.clear()
-
-
 def _new_connection(scheme, host, port, timeout):
     """A connected http.client connection, retrying a stalled handshake
     instead of waiting it out (see CONNECT_ATTEMPT_S).

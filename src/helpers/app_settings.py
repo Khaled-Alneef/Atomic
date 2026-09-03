@@ -500,10 +500,6 @@ def get_tmdb_key() -> str:
     return get_api_key("tmdb")
 
 
-def set_tmdb_key(value: str):
-    set_api_key("tmdb", value)
-
-
 def get_api_key(name: str) -> str:
     """One of API_KEYS, or "" when the user has not supplied it."""
     return str(_load().get(f"{name}_api_key") or "")
@@ -515,20 +511,10 @@ def set_api_key(name: str, value: str):
     storage.save(SETTINGS_FILE, data)
 
 
-def configured_api_keys() -> list:
-    """Which keys actually have a value - what a source or translator
-    checks before offering itself."""
-    return [name for name in API_KEYS if get_api_key(name)]
-
-
 def get_subdl_key() -> str:
     """Kept as its own name because helpers/subtitles.py already calls
     it; it now reads the same store as every other key."""
     return get_api_key("subdl")
-
-
-def set_subdl_key(value: str):
-    set_api_key("subdl", value)
 
 
 def get_stremio_auth():
@@ -537,17 +523,6 @@ def get_stremio_auth():
     password."""
     data = _load()
     return data.get("stremio_email"), data.get("stremio_auth_key")
-
-
-def set_stremio_auth(email: str, auth_key: str):
-    data = _load()
-    data["stremio_email"] = email or ""
-    data["stremio_auth_key"] = auth_key or ""
-    storage.save(SETTINGS_FILE, data)
-
-
-def clear_stremio_auth():
-    set_stremio_auth("", "")
 
 
 def get_seeded_default_sites() -> list:

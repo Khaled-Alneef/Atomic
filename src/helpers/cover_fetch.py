@@ -155,7 +155,7 @@ def resolve(url, *, imdb_id="", title="", kind="", timeout=8):
         try:
             from . import artwork
             second = artwork.poster_url(imdb_id, title,
-                                        timeout=FALLBACK_TIMEOUT)
+                                        timeout=FALLBACK_TIMEOUT, kind=kind)
         except Exception:
             second = None
         if second:

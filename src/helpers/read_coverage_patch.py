@@ -76,8 +76,16 @@ def install():
         # those too so the duplicate rows disappear immediately after upgrade.
         return _isolate(entry, original_cached(entry))
 
+    def provider_stale(entry):
+        # The details page's any-age read of the same store; isolated for
+        # the same reason as the fresh one.
+        return _isolate(entry, original_stale(entry))
+
     chapter_source.list_chapters = provider_list
     chapter_source.cached_chapters = provider_cached
+    original_stale = getattr(chapter_source, "stale_chapters", None)
+    if original_stale is not None:
+        chapter_source.stale_chapters = provider_stale
 
     updater.APP_VERSION = "1.10.142"
     try:

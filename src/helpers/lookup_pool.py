@@ -188,7 +188,19 @@ def _run_latest_forever(key, ready):
         try:
             fn(*args, **kwargs)
         except Exception:
-            pass
+            _note_failure(fn)
+
+
+def _note_failure(fn):
+    """A lookup that raised is still swallowed - the worker must live -
+    but no longer silently: a page waiting on a result that will never
+    come had nothing in atomic.log to explain it (review, 3 September
+    2026)."""
+    try:
+        from . import logs
+        logs.exception(f"lookup {getattr(fn, '__qualname__', fn)} raised")
+    except Exception:
+        pass
 
 
 def _run_forever(work_queue):
@@ -201,6 +213,6 @@ def _run_forever(work_queue):
         try:
             fn(*args, **kwargs)
         except Exception:
-            pass
+            _note_failure(fn)
         finally:
             work_queue.task_done()

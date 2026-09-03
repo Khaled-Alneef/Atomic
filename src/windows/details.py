@@ -264,22 +264,56 @@ def _meta_cache_name(imdb_id, content_type) -> str:
     return f"meta-{content_type}-{safe}.json"
 
 
-def _meta_worker(signals, run, imdb_id, content_type):
+def _cached_meta(imdb_id, content_type, any_age=False):
+    """The disk-cached Cinemeta meta for a title, or None.
+
+    Read on the UI thread by _start_lookups before any worker exists,
+    and that is the point: measured 2 September 2026 on the owner's own
+    Reacher and Attack on Titan, the *cached* meta went worker -> queued
+    signal -> slot in 116-515ms (the first page of a session pays the
+    high end), while storage.load of the same files is 0.2-7ms warm and
+    15.8ms for the largest meta on disk (One Piece, 1.98MB). A list
+    that is already on disk is drawn in the same frame the page opens
+    (CLAUDE.md rule 7), and the worker only ever has the live answer to
+    add.
+
+    `any_age` ignores META_CACHE_TTL_S: the copy on disk however old it
+    is, for a page that has to show something now and refresh behind.
+    Measured 3 September 2026 on the owner's own data: Reacher's and
+    Attack on Titan's metas were both **42-43 hours** old, so the 24h
+    read above answered None for every title he had opened yesterday
+    and the page waited on Cinemeta - **1.54-2.60s** to the first row
+    on the session's first page (a cold connection), 0.15s on the next.
+    Drawn stale and refreshed behind: **0.036-0.074s** to the first
+    row, same list, and _meta_worker redraws only if Cinemeta's differs
+    (it did not, either title - no second draw)."""
+    name = _meta_cache_name(imdb_id, content_type)
+    try:
+        stored = storage.load(name, None)
+        if (isinstance(stored, dict) and isinstance(stored.get("meta"), dict)
+                and (any_age or time.time() - float(stored.get("ts") or 0)
+                     < META_CACHE_TTL_S)):
+            return stored["meta"]
+    except Exception:
+        pass
+    return None
+
+
+def _meta_worker(signals, run, imdb_id, content_type, drawn=False):
     """Never raises - lookup_pool workers die silently (see that module).
 
     Emits the cached meta first when there is one, then the live answer
     only if its episode list differs - so a cached title draws its rows
-    immediately and a second emit never rebuilds identical rows."""
+    immediately and a second emit never rebuilds identical rows.
+    `drawn` says the page already drew the disk copy itself - of any
+    age, see _cached_meta - so only the live answer is emitted, and
+    still only when it differs from what is showing. A failed lookup
+    then emits nothing: the stale list stays up rather than being
+    replaced by "couldn't be loaded", and the refresh button is the way
+    to ask again."""
     name = _meta_cache_name(imdb_id, content_type)
-    cached = None
-    try:
-        stored = storage.load(name, None)
-        if (isinstance(stored, dict) and isinstance(stored.get("meta"), dict)
-                and time.time() - float(stored.get("ts") or 0) < META_CACHE_TTL_S):
-            cached = stored["meta"]
-    except Exception:
-        cached = None
-    if cached is not None:
+    cached = _cached_meta(imdb_id, content_type, any_age=bool(drawn))
+    if cached is not None and not drawn:
         signals.meta.emit(run, cached)
     try:
         meta = stremio.fetch_meta(imdb_id, content_type) if stremio else None
@@ -315,6 +349,31 @@ def _episode_ratings_worker(signals, run, imdb_id, season, videos):
         logs.exception("details TMDB ratings lookup failed")
         mapping = {}
     signals.episode_ratings.emit(run, (imdb_id, season), mapping)
+
+
+class _BrowserLinkBridge(QObject):
+    """Worker -> Qt for the download dialog's "Download in Browser": the
+    direct link found (or None) and the request it answers. Parented to
+    the page, so a link resolving after the page closed lands on nothing
+    rather than on a deleted widget."""
+    resolved = Signal(object, object)   # {"url", "name", "size"} | None, request
+
+
+def _browser_link_worker(bridge, request):
+    """Never raises - lookup_pool workers die silently (see that module),
+    and a dead one here would leave the sticky toast up forever."""
+    result = None
+    try:
+        from helpers import downloads
+        result = downloads.direct_url_for(
+            request["entry"], season=request["season"],
+            episode=request["episode"], audio=request["audio"])
+    except Exception:
+        logs.exception("details direct link lookup failed")
+    try:
+        bridge.resolved.emit(result, request)
+    except RuntimeError:
+        pass                # the page, and the bridge with it, is gone
 
 
 def _resolve_id_worker(signals, run, title, entry_type):
@@ -404,7 +463,7 @@ def _blurred_still(path):
         return source
 
 
-def _still_worker(signals, key, url, blur):
+def _still_worker(signals, key, url, blur, alive=None):
     """One episode's still: download it, blur it if that is on, and
     **decode it here rather than in the slot**.
 
@@ -415,12 +474,27 @@ def _still_worker(signals, key, url, blur):
     Warming _fitted here leaves the slot with only the ~0.1ms QPixmap
     conversion.
 
+    `alive` answers whether the page that asked is still open: a still
+    for a page the user has already left is a download nobody will see,
+    and on the cover queue it would sit ahead of the page they are
+    looking at now. Skipped before the first byte, not after.
+
     Never raises - a lookup_pool worker dies silently otherwise, taking
     every still still queued behind it with it."""
     try:
+        if alive is not None and not alive():
+            return
         path = images.download(url)
         if not path:
-            return              # no still: the row keeps its play tile
+            # A refusing host (net.host_refusing - two failures, ten
+            # minutes) is skipped by download without a request, so
+            # the row would keep its play tile for the life of the
+            # page. An empty path tells the page to ask again later
+            # (_on_episode_still); anything else - a 404, a file that
+            # is not an image - is final and the row keeps its tile.
+            if net.host_refusing(url):
+                signals.episode_still.emit(key, "")
+            return
         if blur:
             path = _blurred_still(path)
         # A file that will not decode is not a still - say nothing and
@@ -588,7 +662,8 @@ def _site_resolve_worker(signals, run, site, title):
     signals.site_resolved.emit(run, fields, site_name)
 
 
-def _chapters_worker(signals, run, entry, refresh=False):
+def _chapters_worker(signals, run, entry, refresh=False, drawn=None,
+                     alive=None):
     """`refresh` skips chapter_source's six-hour disk cache - what the
     panel's refresh button passes, and the only way a title that
     published an hour ago shows its new chapter today.
@@ -598,9 +673,24 @@ def _chapters_worker(signals, run, entry, refresh=False):
     fetches (21.7s measured on olympustaff), and the newest chapters -
     the ones on page one - are what someone opening a series is nearly
     always after. Every emission is a superset of the last, so the panel
-    just refills."""
+    just refills.
+
+    `drawn` is the list the page already put on screen from the stale
+    disk cache (see DetailsPage._start_lookups). While one is up, this
+    emits only a *different* complete answer: a first-page partial is
+    shorter than what is showing and would shrink the list under the
+    pointer, an identical answer would rebuild identical rows, and a
+    failed or empty lookup must not wipe a list that is there - the
+    refresh button stays the way to ask again.
+
+    `alive` (DetailsPage._still_wanted) is asked once, before the first
+    request: a listing for a page that has been left is 2-22s of site
+    pages nobody will see, on one of the two watched workers."""
+    if alive is not None and not alive():
+        return
     def partial(found):
-        signals.chapters.emit(run, list(found or []))
+        if drawn is None:
+            signals.chapters.emit(run, list(found or []))
 
     try:
         chapters = chapter_source.list_chapters(
@@ -608,6 +698,8 @@ def _chapters_worker(signals, run, entry, refresh=False):
             refresh=refresh, on_partial=partial)
     except Exception:
         logs.exception("details chapter listing failed")
+        if drawn is not None:
+            return
         # None, not []: an exception here is "the lookup failed", and
         # collapsing it into an empty list made a dead connection read
         # as "this title has no chapters" - with no retry, since the
@@ -615,7 +707,10 @@ def _chapters_worker(signals, run, entry, refresh=False):
         # once and only then says so.
         signals.chapters.emit(run, None)
         return
-    signals.chapters.emit(run, list(chapters or []))
+    chapters = list(chapters or [])
+    if drawn is not None and (not chapters or chapters == drawn):
+        return
+    signals.chapters.emit(run, chapters)
 
 
 # What a release *is*, read off its own name: the codec, the bit depth,
@@ -953,6 +1048,16 @@ class DetailsPage(GlassPage):
         # widget a download was started for may already be gone.
         self._still_tiles = {}
         self._still_key = 0
+        # Stills asked for during one _materialise_rows batch, submitted
+        # together at its end - see _queue_still for the order.
+        self._still_batch = None
+        # What each pending still was asked for, so a refused one can be
+        # asked again - see _on_episode_still.
+        self._still_asks = {}
+        self._still_refused = set()
+        self._still_retry_timer = QTimer(self)
+        self._still_retry_timer.setSingleShot(True)
+        self._still_retry_timer.timeout.connect(self._retry_refused_stills)
         # Settings > Watching, read once per list fill (see _still_tile).
         self._blur_stills = app_settings.get_blur_episode_stills()
 
@@ -1344,14 +1449,36 @@ class DetailsPage(GlassPage):
                 # chapters from whichever one is picked.
                 self._fill_site_rows()
             else:
-                lookup_pool.submit_watched(_chapters_worker, self._signals, self._run,
-                                   dict(self.entry))
-                self._expect_list()
+                # **The last list seen, drawn before any request** (rule
+                # 7). Measured 3 September 2026 on the owner's Kingdom
+                # (WAN), whose reader_cache row was past the six-hour
+                # TTL: the page sat on "Loading..." for **3.36-4.24s**
+                # while 3asq listed 381 chapters it already had on disk.
+                # Now **0.078-0.088s** to the first 40 rows from the
+                # stale row (the 381 builders are the cost), and the
+                # worker redraws only if the site's answer differs - it
+                # did not, so 3asq's 3.7s answer changed nothing.
+                stale = self._stale_chapters()
+                if stale:
+                    self._show_chapters(stale)
+                lookup_pool.submit_watched(
+                    _chapters_worker, self._signals, self._run,
+                    dict(self.entry), False, stale or None,
+                    alive=self._still_wanted(self._run))
+                if not stale:
+                    self._expect_list()
         elif self.entry.get("imdb_id") and stremio is not None:
             kind = "movie" if self.entry.get("type") == "Movie" else "series"
+            # Same shape for the episode list: the disk copy whatever
+            # its age, now - see _cached_meta for the numbers.
+            stale = _cached_meta(self.entry.get("imdb_id"), kind, any_age=True)
+            if stale is not None:
+                self._show_meta(stale)
             lookup_pool.submit_watched(_meta_worker, self._signals, self._run,
-                               self.entry.get("imdb_id"), kind)
-            self._expect_list()
+                               self.entry.get("imdb_id"), kind,
+                               stale is not None)
+            if stale is None:
+                self._expect_list()
         elif stremio is not None and (self.entry.get("title") or "").strip():
             # **No id, but a title - so look the title up rather than
             # giving up.** This used to go straight to the note below,
@@ -1421,12 +1548,40 @@ class DetailsPage(GlassPage):
                       "connection and reopen this page.")
             return
         self._finish_refresh()
+        self._show_meta(meta)
+
+    def _show_meta(self, meta):
+        """Put a Cinemeta answer on the page - the facts, the season
+        picker, the rows. Called with the disk copy from _start_lookups
+        and with the live one from _on_meta."""
         self._meta = meta
         self._videos = [v for v in (meta.get("videos") or [])
                         if isinstance(v, dict)]
         self._fill_facts()
         self._fill_seasons()
         self._fill_rows()
+
+    def _stale_chapters(self):
+        """This entry's last chapter list from chapter_source's store,
+        whatever its age - [] when there is none, or the build has no
+        chapter source."""
+        reader = getattr(chapter_source, "stale_chapters", None)
+        if reader is None:
+            return []
+        try:
+            return list(reader(dict(self.entry)) or [])
+        except Exception:
+            logs.exception("details stale chapter read failed")
+            return []
+
+    def _still_wanted(self, run):
+        """A predicate a worker can ask before paying for a slow fetch:
+        is this page still open, and still on the run that asked? A
+        chapter listing is up to 21.7s of site pages (olympustaff), and
+        on the two watched workers a closed page's listing sat ahead of
+        the page the user had moved to."""
+        return lambda page=self, run=run: (not page._closed
+                                           and page._run == run)
 
     def _seed_backdrop_from_cover(self):
         """Put a blurred ground made from the entry's **own cover** up, so
@@ -1635,6 +1790,13 @@ class DetailsPage(GlassPage):
             self._clear_rows()
             self._say("No chapters were found for this title.")
             return
+        self._show_chapters(self._chapters)
+
+    def _show_chapters(self, chapters):
+        """Put a chapter list on the page - the count, then the rows.
+        Called with the stale disk row from _start_lookups and with the
+        site's answer from _on_chapters."""
+        self._chapters = list(chapters)
         read = self._last_read()
         total = len({c.get("number") for c in self._chapters})
         self._set_facts([f"{total} chapters"]
@@ -1706,7 +1868,7 @@ class DetailsPage(GlassPage):
         cast = [c for c in (meta.get("cast") or []) if c][:4]
         if cast:
             self._cast_head.setVisible(True)
-            fill(self._cast_row, cast)
+            self._fill_cast_buttons(cast)
         description = str(meta.get("description") or "").strip()
         if description:
             self._summary_head.setVisible(True)
@@ -1735,6 +1897,38 @@ class DetailsPage(GlassPage):
         self._genres_head.setVisible(True)
         self._fill_genre_buttons([str(n) for n in names][:5])
 
+    # ---- the cast as doors too ---------------------------------------
+    def _fill_cast_buttons(self, names):
+        """The cast chips, pressable - the owner, 2 September 2026:
+        "make the cast also clickable as the genres". Cleared before it
+        fills, the rule _fill_facts' fill() records (every meta arrival
+        used to append the same names again)."""
+        while self._cast_row.count() > 1:
+            item = self._cast_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for name in names:
+            button = _chip_button(str(name))
+            button.clicked.connect(
+                lambda _checked=False, n=str(name): self._open_cast_browse(n))
+            self._cast_row.insertWidget(self._cast_row.count() - 1, button)
+
+    def _open_cast_browse(self, name):
+        """One cast member's titles as a full page over the window - the
+        web genre shell with a cast route (web_reader.WebCastBrowse).
+        No painted fallback: the page never existed as a Qt grid, so
+        without WebView2 this logs and the chip does nothing."""
+        page = None
+        try:
+            from windows import web_reader
+            page = web_reader.open_cast_browse(self.window(), name)
+        except Exception:
+            logs.exception("web cast browse unavailable")
+        if page is not None:
+            self._genre_page = page
+        return page
+
     def _open_genre_browse(self, genre):
         """Open the genre as its own full page over the window - not a
         dialog (the owner's ask). Hosted on the central widget like this
@@ -1745,6 +1939,20 @@ class DetailsPage(GlassPage):
                 else (window.centralWidget() if hasattr(window, "centralWidget")
                       else window))
         host = host if host is not None else window
+        # **The web page when this build has one.** The owner, 2
+        # September 2026: "make the same generes page use the same scroll
+        # as other pages (WebView2)". GenreBrowsePage stays as the
+        # fallback, exactly as the Qt reader does behind the web one.
+        page = None
+        try:
+            from windows import web_reader
+            page = web_reader.open_genre_browse(self.window(), genre,
+                                                self._is_reading)
+        except Exception:
+            logs.exception("web genre browse unavailable")
+        if page is not None:
+            self._genre_page = page
+            return
         page = GenreBrowsePage(genre, self._is_reading, host)
         page.open_title = self._open_browsed_title
         page.follow(host)
@@ -1868,6 +2076,7 @@ class DetailsPage(GlassPage):
         if not self._row_queue:
             return
         self._rows_host.setUpdatesEnabled(False)
+        self._still_batch = []
         try:
             # count() - 1: the trailing stretch is always the last item,
             # and rows go in above it.
@@ -1880,6 +2089,56 @@ class DetailsPage(GlassPage):
                 shown += 1
         finally:
             self._rows_host.setUpdatesEnabled(True)
+            batch, self._still_batch = self._still_batch, None
+            self._submit_stills(batch)
+
+    def _queue_still(self, key, url, blur):
+        """Ask for one row's still. Inside a _materialise_rows batch the
+        ask is held and submitted with the batch; anywhere else it goes
+        straight out. Both _still_tile and the installed patch's tile
+        builder come through here, so the queueing lives in one place."""
+        self._still_asks[key] = (url, blur)
+        if self._still_batch is not None:
+            self._still_batch.append((key, url, blur))
+        else:
+            self._submit_stills([(key, url, blur)])
+
+    def _submit_stills(self, batch):
+        """**The cover queue, not the shared one - measured 2 September
+        2026.** Stills used to go on lookup_pool.submit, the four workers
+        the tracker's page-load backfill drains: with thirty 1s lookups
+        queued ahead (one tracker page's worth), Reacher's eight stills
+        landed at **7.02-7.05s** after the page opened, against 0.60-0.62s
+        on an idle pool - the owner's "the episodes images are not
+        loading". The cover queue is LIFO and three wide, built for
+        exactly "the page being looked at, first".
+
+        LIFO means the batch is pushed **last row first**, so the pops
+        come out row 1, row 2, ... - the first screen fills from the
+        top, and a batch built for a later scroll lands ahead of the
+        rest of this one, which is where the user now is. A page that
+        has been left is skipped by the worker before it downloads
+        (`alive`), so a stale batch costs the next page nothing."""
+        if not batch:
+            return
+        alive = lambda page=self: not page._closed
+        for key, url, blur in reversed(batch):
+            lookup_pool.submit_cover(_still_worker, self._signals, key, url,
+                                     blur, alive)
+
+    # How long a refused still waits before it is asked for again.
+    STILL_RETRY_MS = 20_000
+
+    def _retry_refused_stills(self):
+        """Re-queue every still whose host was refusing, for the rows
+        that still exist (a rebuilt list drops its keys from
+        _still_tiles)."""
+        if self._closed:
+            return
+        keys, self._still_refused = self._still_refused, set()
+        batch = [(key,) + self._still_asks[key] for key in sorted(keys)
+                 if key in self._still_tiles and key in self._still_asks]
+        self._submit_stills(batch)
 
     def _maybe_extend_rows(self, _value=None):
         """Build the next batch when the view nears the end of what has
@@ -1906,6 +2165,9 @@ class DetailsPage(GlassPage):
         # download itself is already paid for - _STILL_READY keeps it,
         # so the rebuilt row draws it without asking the pool again.
         self._still_tiles.clear()
+        # The asks for those tiles too, or a rebuilt page re-asks nothing
+        # and the dict grows one entry per still for its life.
+        self._still_asks.clear()
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
             widget = item.widget()
@@ -2224,12 +2486,21 @@ class DetailsPage(GlassPage):
             # (saved titles) or an explicit History tick (which is all
             # an unsaved title has, and what an out-of-order tick on a
             # saved one writes).
-            watched = not upcoming and (
-                (watched_episode
-                 and (season < watched_season
-                      or (season == watched_season
-                          and number <= watched_episode)))
-                or history.episode_key(season, number) in self._history_marks)
+            # The same "ticks win" rule the menu uses (_episode_menu and
+            # episode_watch_state_patch.fixed_episode_menu): with any
+            # explicit mark on the entry the marks decide; the progress
+            # number only speaks when there are none. The badge and the
+            # menu disagreed on a ticked-off episode before (review, 3
+            # September 2026).
+            if self._history_marks:
+                watched = not upcoming and (
+                    history.episode_key(season, number) in self._history_marks)
+            else:
+                watched = not upcoming and bool(
+                    watched_episode
+                    and (season < watched_season
+                         or (season == watched_season
+                             and number <= watched_episode)))
             # "DONE" for both media (the owner's ask) - one word for
             # "you have finished this", rather than WATCHED here and
             # READ on the chapter rows.
@@ -2475,7 +2746,7 @@ class DetailsPage(GlassPage):
         key = self._still_key
         self._still_key += 1
         self._still_tiles[key] = tile
-        lookup_pool.submit(_still_worker, self._signals, key, url, blur)
+        self._queue_still(key, url, blur)
         return tile
 
     @staticmethod
@@ -2491,7 +2762,25 @@ class DetailsPage(GlassPage):
         tile.setPixmap(pixmap)
 
     def _on_episode_still(self, key, path):
+        if not path:
+            # The still's host is refusing (see _still_worker). Keep the
+            # tile registered and ask again in STILL_RETRY_MS: download
+            # answers None without a request while the refusal holds,
+            # so a retry costs a queue trip and nothing on the wire,
+            # and the first one after the window clears (600s, or one
+            # success against the host) fetches. Measured 3 September
+            # 2026 on Attack on Titan, metahub refusing at open and
+            # cleared 1.5s later (retry at 1s for the test): all 25
+            # rows' stills refused at 0.53s, and the first 12 landed
+            # 0.9-2.4s after the retry that found the host clear (a
+            # cold connection, three cover workers) - against never.
+            if key in self._still_tiles:
+                self._still_refused.add(key)
+                if not self._still_retry_timer.isActive():
+                    self._still_retry_timer.start(self.STILL_RETRY_MS)
+            return
         tile = self._still_tiles.pop(key, None)
+        self._still_asks.pop(key, None)
         if tile is None:
             return
         try:
@@ -2947,10 +3236,24 @@ class DetailsPage(GlassPage):
         except ImportError:                             # pragma: no cover
             return
         watched_season, watched_episode = self._progress()
-        # Either store counts, exactly as the row badge reads them.
-        already = ((watched_episode
-                    and (watched_season, watched_episode) >= (season, episode))
-                   or history.episode_key(season, episode) in self._history_marks)
+        # **The tick wins where there are ticks.** Either store counts,
+        # exactly as the row badge reads them - but the progress number
+        # alone says "everything up to here", so with progress at S01E03
+        # episode 1 read as watched whatever its own tick said, and the
+        # menu never once offered to mark it. The owner: "sometimes the
+        # 1st episode cannot be marked as watched/unwatched" - it is the
+        # earliest episode of a started season every time, because that
+        # is the one the number always covers.
+        #
+        # So: once this title has per-episode ticks, they are the answer
+        # and each episode is independent. A title with none falls back
+        # to the number, which is all it has.
+        key = history.episode_key(season, episode)
+        if self._history_marks:
+            already = key in self._history_marks
+        else:
+            already = bool(watched_episode
+                           and (watched_season, watched_episode) >= (season, episode))
         menu = QMenu(self)
         # The explicit way into the source list while auto-pick is on -
         # the left click plays right away then (see _start_episode).
@@ -2999,8 +3302,11 @@ class DetailsPage(GlassPage):
                 self._clear_video_progress()
             elif not correct_progress(self.entry, season=target[0],
                                       episode=target[1]):
+                # The tick is already written and is the thing the row
+                # draws, so the rows are refreshed either way - returning
+                # here left the list showing the old state after a mark
+                # that had in fact been saved.
                 show_toast(self, "Could Not Save That")
-                return
         self._fill_rows()
 
     def _season_episodes(self, season) -> list:
@@ -3135,13 +3441,16 @@ class DetailsPage(GlassPage):
         return dialog, column
 
     @staticmethod
-    def _dialog_buttons(dialog, column, on_start):
+    def _dialog_buttons(dialog, column, on_start, extra=()):
+        """Cancel, any `extra` buttons, then the accent Download."""
         buttons = QHBoxLayout()
         buttons.addStretch()
         cancel_btn = QPushButton("Cancel")
         use_hover_cursor(cancel_btn)
         cancel_btn.clicked.connect(dialog.reject)
         buttons.addWidget(cancel_btn)
+        for button in extra:
+            buttons.addWidget(button)
         start_btn = QPushButton("Download", objectName="Accent")
         use_hover_cursor(start_btn)
         start_btn.clicked.connect(on_start)
@@ -3263,6 +3572,19 @@ class DetailsPage(GlassPage):
         column.addWidget(count_label)
         folder_of = self._folder_row(column, dialog)
 
+        # **"Download in Browser"** - the owner's ask, 2 September 2026
+        # (roadmap #14): a download at the line's speed rather than the
+        # source's. A browser can take a direct http(s) link and nothing
+        # else, so this resolves one (downloads.direct_url_for - a
+        # release the debrid service holds answered a Range request 206
+        # from its CDN, measured) and falls back to the in-app queue,
+        # saying so, when only a torrent exists. One episode at a time:
+        # a range would be a browser tab per episode.
+        browser_btn = QPushButton("Download in Browser")
+        browser_btn.setToolTip("Open a direct link in your browser, which "
+                               "downloads it at your connection's full speed")
+        use_hover_cursor(browser_btn)
+
         def picked_numbers():
             if is_movie:
                 return []
@@ -3281,6 +3603,13 @@ class DetailsPage(GlassPage):
                 return
             whole = scope.currentIndex() == 2
             ranged = scope.currentIndex() == 1
+            one = len(picked_numbers()) == 1
+            browser_btn.setEnabled(one)
+            browser_btn.setToolTip(
+                "Open a direct link in your browser, which downloads it "
+                "at your connection's full speed" if one else
+                "One episode at a time - a range would open a browser "
+                "tab per episode")
             last_box.setEnabled(ranged)
             # Hidden rather than merely disabled: a greyed-out "To:" is
             # still a caption saying a range is being chosen, and a
@@ -3328,8 +3657,60 @@ class DetailsPage(GlassPage):
             dialog.accept()
             show_toast(self, "Queued - See the Downloads Page")
 
-        self._dialog_buttons(dialog, column, start)
+        def in_browser():
+            numbers = picked_numbers()
+            if not is_movie and len(numbers) != 1:
+                return          # the button is disabled for a range
+            dialog.accept()
+            self._open_episode_in_browser(
+                season=None if is_movie else season,
+                episode=None if is_movie else numbers[0],
+                audio=audio_box.currentData(), folder=folder_of())
+        browser_btn.clicked.connect(in_browser)
+
+        self._dialog_buttons(dialog, column, start, extra=[browser_btn])
         dialog.exec()
+
+    def _open_episode_in_browser(self, *, season, episode, audio, folder):
+        """Resolve a direct link on a watched worker, then hand it to the
+        system browser - or queue the episode in Atomic, saying why,
+        when only the swarm can serve it. The sticky toast goes up at
+        once (rule 7): the lookup is a stream fan-out (6.9s cold on
+        Reacher S1E2) plus the debrid round trips (0.70s)."""
+        bridge = getattr(self, "_browser_link_bridge", None)
+        if bridge is None:
+            bridge = self._browser_link_bridge = _BrowserLinkBridge(self)
+            bridge.resolved.connect(self._on_browser_link)
+        request = {"entry": dict(self.entry), "season": season,
+                   "episode": episode, "audio": audio, "folder": folder}
+        self._browser_link_toast = show_toast(
+            self, "Finding a Direct Link...", duration_ms=None)
+        lookup_pool.submit_watched(_browser_link_worker, bridge, request)
+
+    def _on_browser_link(self, result, request):
+        from helpers import downloads
+        from helpers.widgets import finish_toast
+        toast = getattr(self, "_browser_link_toast", None)
+        self._browser_link_toast = None
+        url = str((result or {}).get("url") or "")
+        if url:
+            # The URL carries an account token: opened, never logged.
+            import webbrowser
+            webbrowser.open(url)
+            finish_toast(toast, self, "Opened in Your Browser")
+            return
+        try:
+            downloads.queue_episode(request["entry"], season=request["season"],
+                                    episode=request["episode"],
+                                    audio=request["audio"],
+                                    folder=request["folder"])
+        except Exception:
+            logs.exception("details page could not queue a download")
+            finish_toast(toast, self, "Only a Torrent Is Available - "
+                                      "Could Not Queue It")
+            return
+        finish_toast(toast, self, "Only a Torrent Is Available - "
+                                  "Queued in Atomic Instead", duration_ms=4000)
 
     def _open_chapter_download_dialog(self):
         """Which chapters - one, or a chosen range - then queue as .cbz.
@@ -3392,6 +3773,20 @@ class DetailsPage(GlassPage):
         count_label = QLabel("", objectName="Muted")
         count_label.setWordWrap(True)
         column.addWidget(count_label)
+        # No "Download in Browser" here, and the label says why in the
+        # owner's terms (roadmap #14, 2 September 2026): a reading site
+        # hands out its page images only to a request carrying the
+        # chapter page as Referer (3asq answers 403 without it - see
+        # chapter_source.chapter_pages), and a browser link cannot carry
+        # one. The speed went into the fetch instead: six pages at a
+        # time (downloads._run_chapter), measured 5.95-10.73s to
+        # 2.66-2.87s on a 21-page chapter.
+        why = QLabel("Chapters are saved by Atomic itself, six pages at a "
+                     "time: the site only hands out pages to a request "
+                     "carrying the app's own headers, so a browser link "
+                     "would be refused.", objectName="Muted")
+        why.setWordWrap(True)
+        column.addWidget(why)
         folder_of = self._folder_row(column, dialog)
 
         def picked():
@@ -4326,6 +4721,20 @@ def open_details(window, entry):
             else (window.centralWidget() if hasattr(window, "centralWidget")
                   else window))
     host = host if host is not None else getattr(window, "container", window)
+    # **The video child starts while the list is being read.** The
+    # player's own prewarm ran after its handle was created, so the
+    # first play of a session still paid the spawn on the UI thread
+    # (3.03s in the frozen build - review, 3 September 2026). A details
+    # page for something watchable is the earliest honest signal that a
+    # play is coming; the child costs a resident process and nothing
+    # else, and mpv_proxy.start joins it if it is still connecting.
+    try:
+        kind = str((entry or {}).get("type") or "").strip().lower()
+        if kind in ("anime", "series", "movie", "movies"):
+            from helpers import mpv_proxy
+            mpv_proxy.prewarm()
+    except Exception:
+        pass
     page = DetailsPage(entry, host)
     page.follow(host)
     page.show()

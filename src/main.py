@@ -30,6 +30,55 @@ from pathlib import Path
 # PyQt6 is imported: the child needs libmpv and a socket, and nothing
 # else at all.
 if "--mpv-host" in sys.argv:
+    # **Per-monitor DPI aware, before mpv exists.** The parent is (Qt
+    # sets it); this child is a bare interpreter and was not, so Windows
+    # virtualised its coordinates: GetClientRect on the surface handed
+    # mpv the size divided by the scale factor, and mpv drew a picture
+    # exactly that fraction of the window - 80% of the width at the
+    # owner's 1.25, anchored top-left, with the rest black. His report:
+    # "the video is not fitting the screen", and "does not fit until I go
+    # Fullscreen", because that hands mpv a different size to read.
+    #
+    # Set here rather than in mpv_proxy.serve: it has to be the first
+    # thing the process does, before anything can cache a metric.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            # PER_MONITOR_AWARE_V2, with the older call as the fallback
+            # for Windows builds that do not have the context API.
+            if not ctypes.windll.user32.SetProcessDpiAwarenessContext(
+                    ctypes.c_void_p(-4)):
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+        # **And never throttled for being in the background.** This
+        # process owns no window of its own - it draws into the parent's
+        # - so as far as Windows is concerned nothing here is ever in the
+        # foreground, and EcoQoS throttles it the moment the user clicks
+        # another application. The video then stops: the owner, "the vid
+        # player freeze happened to me also when I used another app while
+        # inside the player".
+        #
+        # PROCESS_POWER_THROTTLING_EXECUTION_SPEED with a zero state mask
+        # is the documented opt-out; helpers/startup does the same for
+        # the timer resolution in the parent. Fails soft on a Windows
+        # without it.
+        try:
+            class _Throttle(ctypes.Structure):
+                _fields_ = [("Version", ctypes.c_uint),
+                            ("ControlMask", ctypes.c_uint),
+                            ("StateMask", ctypes.c_uint)]
+
+            state = _Throttle(1, 0x1, 0)      # EXECUTION_SPEED, off
+            ctypes.windll.kernel32.SetProcessInformation(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                4,                            # ProcessPowerThrottling
+                ctypes.byref(state), ctypes.sizeof(state))
+        except Exception:
+            pass
     _here = Path(__file__).resolve().parent
     if str(_here) not in sys.path:
         sys.path.insert(0, str(_here))
@@ -135,8 +184,10 @@ HOME_PAGE_NAME = "home"
 # is untouched, and a machine without the runtime keeps the Qt classes:
 # a blank page would be worse than the old scrolling.
 try:
-    from windows.web_pages import (WebDiscoverPage, WebHomePage,
-                                   WebReadPage, WebWatchPage,
+    from windows.web_pages import (WebAppsPage, WebDiscoverPage,
+                                   WebDownloadsPage, WebGamesPage,
+                                   WebHomePage, WebReadPage, WebSitesPage,
+                                   WebWatchPage,
                                    available as _web_pages_ok)
     _WEB_PAGES = _web_pages_ok()
 except Exception as _web_error:
@@ -150,6 +201,24 @@ except Exception as _web_error:
                    f"{str(_web_error)[:200]}")
     except Exception:
         pass
+
+# **Say whether debrid is on, at every start.** Without a token every
+# release is served by the local torrent engine, which needs enough of
+# the swarm to demux before a frame appears - measured 30s against 1.7s
+# for a file already on disk. That is not a bug in the player and it is
+# invisible from the outside, so it is stated in the log rather than
+# left to be re-diagnosed. The token is packaging/rd_token.txt; there is
+# deliberately no Settings row for it (app_settings.API_KEYS).
+try:
+    from helpers import debrid as _debrid
+    from helpers import logs as _dlogs
+    _dlogs.info("debrid: "
+                + ("on - releases it has cached play over HTTPS"
+                   if _debrid.available()
+                   else "OFF (no token) - every release goes through the "
+                        "local torrent engine, which is slower to start"))
+except Exception:
+    pass
 
 try:
     from helpers import logs as _logs
@@ -170,10 +239,14 @@ PAGES = {
     "discover": WebDiscoverPage if _WEB_PAGES else DiscoverPage,
     "manga": WebReadPage if _WEB_PAGES else MangaPage,
     "series": WebWatchPage if _WEB_PAGES else SeriesPage,
-    "games": GamesPage,
-    "apps": AppsPage,
-    "websites": WebsitesPage,
-    "downloads": DownloadsPage,
+    # The three shelves and the queue. Their Qt pages are not retired:
+    # each web shelf builds one, invisibly, the first time an action
+    # needs a dialog - add, the right-click menu and delete all run the
+    # page's own code, undo toast included (windows/web_pages).
+    "games": WebGamesPage if _WEB_PAGES else GamesPage,
+    "apps": WebAppsPage if _WEB_PAGES else AppsPage,
+    "websites": WebSitesPage if _WEB_PAGES else WebsitesPage,
+    "downloads": WebDownloadsPage if _WEB_PAGES else DownloadsPage,
 }
 
 
@@ -296,6 +369,19 @@ SIDEBAR_WIDTH = 220
 # viewport 40, row 36, ceiling 30 >= 29.
 SIDEBAR_COLLAPSED_WIDTH = 72
 SIDEBAR_ANIM_MS = 180
+# How long a web page gets to say it has taken a fold (offer_fold) before
+# the rail moves without it, on the shipped pinned path. Measured 3
+# September 2026 from the tell() to the ack arriving back in Qt: 22ms
+# with the 8ms WinForms pump alone, 4.7-8.4ms with webview2_host.
+# pump_burst turning it every millisecond meanwhile. The budget is
+# several times that, and it is the only delay between the click and
+# the rail moving.
+FOLD_ACK_MS = 40
+# And how long it then gets to draw itself at the new size before the
+# rail starts regardless. Measured 3 September 2026: 16-24ms from a
+# SetWindowPos on the child to Edge presenting a frame at the new size,
+# with the renderer idle or kept busy alike.
+FOLD_SIZED_MS = 60
 # The spacing every sidebar's QVBoxLayout is built with, and the slack
 # NavListWidget.sizeHint keeps under its last row - both read by
 # RAIL_GAP_SLACK below, so a change to either stays in step with the
@@ -2709,6 +2795,9 @@ class MainWindow(QMainWindow):
         self._sidebar_collapsed = False
         self._sidebar_anim = None
         self._fold_in_flight = False
+        # Where a live (web) page is held while the rail animates - see
+        # _toggle_sidebar. None whenever no fold is running.
+        self._fold_target = None
         # The flat picture standing in for the page while a fold runs,
         # the page it was taken of, and whatever on that page held the
         # keyboard - see _FoldFreeze/_settle_fold.
@@ -3471,6 +3560,31 @@ class MainWindow(QMainWindow):
         identically - the same shape as _settle_swap. Without it a
         SmoothTween.stop() would strand the page hidden behind a picture
         of itself, because stop() deliberately does not run on_done."""
+        # **And the pin goes with it.** `_fold_target` is cleared in
+        # landed(), which stop() never calls - so a fold interrupted by a
+        # second click or a navigation left every page after it held at
+        # the width the rail happened to be at. A web page pinned to a
+        # width that is no longer real is a WebView2 laid out for a
+        # window that does not exist, and centred content then sits
+        # outside the visible area entirely.
+        self._fold_target = None
+        self._fold_mover = None
+        # A fold still waiting on the page's answer (offer_fold) when
+        # something ends it: the rail must still move, or the button
+        # says folded while the column stays wide.
+        begin, self._fold_begin = getattr(self, "_fold_begin", None), None
+        if getattr(self, "_fold_pending", None) is not None:
+            self._fold_pending = None
+            if begin is not None:
+                begin()
+        # The page that was told about the fold hears that it is over,
+        # completed or cut short, and drops the widths it held for it.
+        told, self._fold_told_page = getattr(self, "_fold_told_page", None), None
+        if told is not None:
+            try:
+                told.fold_done()
+            except RuntimeError:
+                pass
         freeze, self._fold_freeze = self._fold_freeze, None
         page, self._fold_frozen_page = self._fold_frozen_page, None
         focused, self._fold_focus = self._fold_focus, None
@@ -3581,6 +3695,12 @@ class MainWindow(QMainWindow):
             # pins min and max together, so driving one alone does
             # nothing until the other is moved too.
             holder.setMinimumWidth(width)
+            # A live web page travels with the rail only because this
+            # moves its native window every step - see the fold block
+            # below and webview2_host.sync_position.
+            mover = self._fold_mover
+            if mover is not None:
+                mover()
             # The mark turns with the column. Phase is 0 at either end
             # of the travel and 1 halfway, so the lean happens *during*
             # the fold and the mark is level whichever way it went -
@@ -3594,7 +3714,15 @@ class MainWindow(QMainWindow):
             holder.setFixedWidth(SIDEBAR_COLLAPSED_WIDTH
                                  if self._sidebar_collapsed else SIDEBAR_WIDTH)
             self._fold_in_flight = False
+            self._fold_target = None
             self._fit_current_page()
+            # The last step put the view where the rail's final width
+            # says; a fold that did not resize the page (the child was
+            # already at its final width) gets no resize from the fit
+            # above, so this is the call that guarantees the end place.
+            mover = self._fold_mover
+            if mover is not None:
+                mover()
             # The live page comes back only now, at its real width, with
             # the picture dropped in the same turn of the event loop -
             # showing it first and removing the picture after would cost
@@ -3637,10 +3765,125 @@ class MainWindow(QMainWindow):
         # never animating.
         live_fold = bool(getattr(self._current_page, "FOLD_LIVE", False))
         self._fold_in_flight = not live_fold
+        widest = self.container.rect()
+        # **Pinned to where the page ends up, not to the widest it
+        # passes through.** Both earlier versions of this line were
+        # wrong, in opposite directions, and the owner reported each:
+        #
+        #   * live (no pin) re-flowed the document and re-sized the
+        #     native view once per animation frame - "the cards in watch
+        #     and read pages have a really un smooth transition";
+        #   * pinned to the *widest* rect held the fold's outgoing
+        #     layout on an unfold and snapped to the new one at the end,
+        #     which is the jump he described as the cards not shifting.
+        #
+        # The final rect has neither problem. The document is laid out
+        # once, at the width it will keep, before the first step; after
+        # that the page only *moves*, because the container it sits in
+        # moves - so the cards do travel with the rail (his ask), and
+        # they travel without a single re-flow or SetWindowPos behind
+        # them. Folding, the page is wider than the container and the
+        # extra is revealed as the rail retreats; unfolding, it is
+        # narrower and the band left over is the app's own ground, on
+        # its way to being nothing.
+        #
+        # Measured 2 September 2026, Watch page, real window and real
+        # WebView2, counting SetWindowPos on the native child:
+        #
+        #                      live (as shipped)        pinned
+        #   fold               11, widths 1590..1770    1, straight to 1770
+        #   unfold             10, widths 1730..1573    1, straight to 1573
+        #
+        # Every one of those 21 is a full re-layout of the grid inside
+        # Edge, spread across a 220ms animation - which is the stepping
+        # he sees. Two remain, one per direction, and they happen before
+        # the first frame.
+        #
+        # Only the live pages take it. A Qt page is photographed and
+        # blitted (below), which needs the pixmap to cover every width
+        # the fold passes through - that is what `widest` is for, and it
+        # is unchanged.
+        #
+        # **The width it starts at, not the width it ends at.** Pinning
+        # to the final rect laid the document out before the first step,
+        # so the whole re-flow landed at the *beginning* of the
+        # animation - the owner, 2 September 2026: "when I fold the page
+        # act like I unfolded, and when I unfold it acts like I folded
+        # it". He was watching the end state arrive first.
+        #
+        # Held at the outgoing width instead, the page is still while the
+        # rail moves and settles once when it lands - landed() clears
+        # this and _fit_current_page then takes the real rect. Same one
+        # re-flow per fold either way (measured: 11 and 10 native resizes
+        # live, 1 pinned), on the right side of the animation.
+        #
+        # **Home and Discover are not pinned at all.** The owner, 2
+        # September 2026: "make the page and banner transition like
+        # before when folding and unfolding, ONLY in Home and Discover
+        # pages". Those two are a banner and a few rows - their re-flow
+        # is cheap and following the rail is what he wants to see there.
+        # The catalogue pages are hundreds of cards, which is where the
+        # per-frame re-layout was felt, so they keep the pin.
+        #
+        # **The page never travelled with the rail at all.** Everything
+        # above about it "only moving" was reasoned, not measured, and
+        # measuring it (3 September 2026, scratchpad driver.py, a screen
+        # band across the poster row sampled at 240Hz) found the cards
+        # dead still for all 43 samples inside the 180ms motion and then
+        # moving 198 device pixels in one sample at 196ms, with a 53px
+        # re-flow step behind it - fold and unfold alike. Qt does not
+        # move a native child window when a layout moves one of its
+        # alien ancestors (webview2_host.sync_position has the test), and
+        # the pin means the page's own geometry does not change until
+        # the fold lands. So the whole page stood where it was and then
+        # leapt the width of the rail: "not smooth at all".
+        #
+        # Now, for a pinned web page:
+        #   * `_fold_mover` places the view every step (a move only - no
+        #     resize, so Edge lays nothing out);
+        #   * the page is told the width it will end at (offer_fold →
+        #     app.js hostFold), lays its grid out there once and slides
+        #     every visible card from its old place to its new one on the
+        #     compositor, on the rail's own curve and clock;
+        #   * on the page's ack the child is sized once to its final
+        #     width, and once the page has drawn itself at that size the
+        #     rail starts. No ack inside FOLD_ACK_MS and the rail starts
+        #     anyway on the pin alone, which is the shipped path plus
+        #     the mover (measured on that path: the page travels, 39%
+        #     of samples dead, one re-flow at landing).
+        # Card edges on the glass, same rig, before -> after:
+        #
+        #                              fold                 unfold
+        #   distinct positions         3        -> 40       3        -> 43
+        #   dead samples in 180ms      43/43    -> 3/44     43/43    -> 0/44
+        #   largest step               198px    -> 57px     198px    -> 44px
+        #   motion spans               14ms     -> 207ms    10ms     -> 186ms
+        #   SetWindowPos on the child  1 (at landing) -> 1 (before the rail moves)
+        #
+        # 240Hz panel, DPR 1.3333, 60 cards, band across the poster row;
+        # before, the one step was the page leaping the rail's width at
+        # 196ms with a 53px re-flow step behind it.
+        self._fold_target = None
+        self._fold_mover = None
+        route = str(getattr(self._current_page, "ROUTE", ""))
+        web_fold = live_fold and route not in ("home", "discover")
+        if web_fold:
+            self._fold_target = QRect(0, 0, max(1, self.container.width()),
+                                      self.container.height())
+            follow = getattr(self._current_page, "follow_fold", None)
+            if callable(follow):
+                def move_view(follow=follow):
+                    # apply() has only *asked* the layout to move the
+                    # container; deliver that first, or the view is put
+                    # where the rail was a step ago.
+                    QApplication.sendPostedEvents(
+                        None, QEvent.Type.LayoutRequest)
+                    try:
+                        follow()
+                    except RuntimeError:
+                        pass
+                self._fold_mover = move_view
         if self._current_page is not None and not live_fold:
-            widest = self.container.rect()
-            widest.setWidth(max(widest.width(),
-                                self.width() - SIDEBAR_COLLAPSED_WIDTH))
             self._current_page.setGeometry(widest)
             # **Painted once and blitted for the rest of the fold** - the
             # page's own repaint was 80-91% of the paint events in a
@@ -3677,7 +3920,111 @@ class MainWindow(QMainWindow):
         relayout = getattr(self._current_page, "relayout_for_sidebar", None)
         if callable(relayout):
             relayout()
-        self._sidebar_anim.start(holder.width(), target)
+
+        start_width = holder.width()
+        anim = self._sidebar_anim
+
+        def begin():
+            # Wall clock, for the page: go_fold hands it this instant
+            # and Date.now() in the page reads the same clock.
+            self._fold_started_ms = time.time() * 1000.0
+            anim.start(start_width, target)
+
+        offer = (getattr(self._current_page, "offer_fold", None)
+                 if web_fold else None)
+        if not callable(offer):
+            begin()
+            return
+        # Where the container ends up: whatever the rail gives back.
+        to_width = max(1, self.container.width() + (start_width - target))
+        # **The view is sized to the width it will finish at, before
+        # the rail moves, and never again during the fold.** Measured 3
+        # September 2026 (scratchpad driver.py, rAF intervals read in
+        # the page, band sampled on the glass at 240Hz), every other
+        # shape was worse in a way he would see:
+        #   * view pinned to the *wider* width and moved with the rail:
+        #     a fold runs clean (0 of 43 samples dead), but an unfold -
+        #     the same view moved the other way, so more of it lies past
+        #     the window's right edge each step - stalls Edge's frames,
+        #     10-16 of 43 at 8.3-16.7ms, with the page's main thread
+        #     idle (<2.4ms of work a frame) in every page-side variant
+        #     tried, and with the move done by Qt or by SetWindowPos
+        #     alone, NOCOPYBITS or NOREDRAW. Shrinking the window's
+        #     visible region by a SetWindowRgn each step stalls too (5
+        #     of 43), so it is the region, not the move.
+        #   * view left still and the page sliding its own content by
+        #     the rail's travel ("carry"): a clean glide, then the one
+        #     move-and-shrink at landing shows Edge's last frame at the
+        #     new origin for 17-24ms - the whole grid 198 device pixels
+        #     right and back - because a resize's new frame takes that
+        #     long whether or not the renderer is kept busy.
+        #   * view at the final width from the start (this): 1-2 of 44
+        #     samples dead each way, no jumps, one SetWindowPos per fold
+        #     and none at landing. The price is on an unfold, where the
+        #     view shrinks before the rail starts and the outgoing last
+        #     column loses the part of it past the final edge for the
+        #     16ms it takes Edge to show the new size - one frame and a
+        #     half of a still picture, and then those cards are the
+        #     first to move, straight out of that strip.
+        # The page holds every card at its old place until `go`, so the
+        # final layout is never seen early - which is what sank "pinned
+        # to the final rect" the first time (comment above).
+        seq = self._fold_seq = getattr(self, "_fold_seq", 0) + 1
+        self._fold_pending = seq
+        self._fold_begin = begin
+        self._fold_told_page = self._current_page
+        page = self._current_page
+
+        def current():
+            return (getattr(self, "_fold_seq", 0) == seq
+                    and self._fold_told_page is page)
+
+        def go():
+            # Rail and cards from the same instant - go_fold carries it.
+            if getattr(self, "_fold_pending", None) == seq:
+                self._fold_pending = None
+                self._fold_begin = None
+                begin()
+            page.go_fold(getattr(self, "_fold_started_ms", 0.0))
+
+        def acked():
+            if not current():
+                return                    # settled or superseded since
+            # Laid out at its final width and holding still: size the
+            # view to it now, once. A late answer (the rail already left
+            # on the fallback) still gets sized and told where the rail
+            # is, and the cards catch up.
+            self._fold_target = QRect(0, 0, to_width, self.container.height())
+            self._fit_current_page()
+            if getattr(self, "_fold_pending", None) != seq:
+                page.go_fold(getattr(self, "_fold_started_ms", 0.0))
+                return
+            # Not yet: Edge shows its old frame in the new box for
+            # ~16ms after a resize (measured at landing, above), so a
+            # rail that starts now has the cards frozen for its first
+            # four frames and then lurching to catch up - the 45px steps
+            # the fold's first samples showed. The page says when the
+            # new size has been drawn (sized); a bounded wait, in case
+            # the size did not change and no resize ever fires.
+            QTimer.singleShot(FOLD_SIZED_MS, go)
+
+        def fallback():
+            if getattr(self, "_fold_pending", None) != seq:
+                return
+            # No answer in time: the pin at the outgoing width and the
+            # view following the rail, re-flowing once when it lands.
+            self._fold_pending = None
+            self._fold_begin = None
+            begin()
+
+        if not offer(to_width, SIDEBAR_ANIM_MS, acked, go):
+            # No page to tell yet (still loading): the pin alone.
+            self._fold_pending = None
+            self._fold_begin = None
+            self._fold_told_page = None
+            begin()
+            return
+        QTimer.singleShot(FOLD_ACK_MS, fallback)
 
     def _populate_nav_list(self):
         """Fill every block from nav_config, and hide a block that has
@@ -4145,18 +4492,26 @@ class MainWindow(QMainWindow):
     def _fit_current_page(self):
         if self._current_page is None:
             return
-        # **The page follows the fold now, frame by frame.** It used
-        # to be pinned to the widest the container would be and clipped,
-        # so nothing on it moved during the animation and the whole
-        # layout snapped into place at the end - which is what the owner
-        # reported, 26 August 2026, about the banners and artwork.
+        # **A Qt page follows the fold frame by frame.** It used to be
+        # pinned to the widest the container would be and clipped, so
+        # nothing on it moved during the animation and the layout
+        # snapped into place at the end - the owner's report of 26
+        # August 2026 about the banners and artwork. The pin was there
+        # for a measured cost and the measurement is what let it go:
+        # re-fitting held 63-75 positions a second on the tracker pages
+        # (Home 111) against a budget of 60 (CLAUDE.md rule 7).
         #
-        # The pin was there for a measured cost, and the measurement is
-        # what says it can go: re-fitting held **63-75 positions a
-        # second on the tracker pages** (Home 111), and the budget is 60
-        # (CLAUDE.md rule 7). It was optimising past the point that
-        # matters, and buying a snap with the change.
-        self._current_page.setGeometry(self.container.rect())
+        # **A live web page is held at the width it will finish at**,
+        # for the length of the fold only - see _toggle_sidebar, which
+        # carries that measurement. The view fills the page, so pinning
+        # the page is what stops the native child being re-sized on
+        # every frame; it still travels with the container, so the cards
+        # move.
+        rect = self.container.rect()
+        target = getattr(self, "_fold_target", None)
+        if target is not None and getattr(self._current_page, "FOLD_LIVE", False):
+            rect.setWidth(target.width())
+        self._current_page.setGeometry(rect)
 
     def _drain_override_cursor(self):
         """Drop any application-wide override cursor.
@@ -4746,9 +5101,96 @@ class MainWindow(QMainWindow):
         self.move(avail.x() + (avail.width() - self.width()) // 2,
                   avail.y() + (avail.height() - self.height()) // 3)
 
+    def _apply_maximised_inset(self):
+        """Pull the content back inside the work area while maximised.
+
+        **Windows maximises a window to the work area *plus* its frame**,
+        on the understanding that the frame is where the border is drawn.
+        This window has no frame - and it still carries WS_THICKFRAME and
+        WS_CAPTION, because Aero Snap and the drag-to-top maximise are
+        gated on them (see window_chrome.ensure_snap_styles) - so Windows
+        sizes it as though a border existed and the client area runs off
+        every edge. Measured 1 September 2026 on the owner's report that
+        the top bar is clipped when he maximises:
+
+            work area   0,0 1920x1035   (logical)
+            window      -7,-7 1934x1049
+            Win32 rect  -9,-9 2578x1398 (device)
+
+        so seven logical pixels of the bar were above the top of the
+        screen. The usual fix is to answer WM_NCCALCSIZE with an inset
+        client rect when zoomed, and that route is closed here:
+        overriding nativeEvent in PyQt6 kills the process while the
+        window is being realised, which is the whole story at the top of
+        helpers/window_chrome. WM_GETMINMAXINFO never arrives either -
+        instrumented at 0 messages across a maximise.
+
+        So the layout is inset instead by exactly the overhang. The band
+        that is left over sits off the edge of the screen where nothing
+        can be seen, and the window keeps its maximised state, which
+        setGeometry would have cost it (window_chrome.apply_edge_reach
+        carries that measurement).
+        """
+        layout = getattr(self, "_root_layout", None)
+        if layout is None:
+            return
+        timer = getattr(self, "_inset_timer", None)
+        if timer is not None:
+            timer.stop()
+        margins = (0, 0, 0, 0)
+        try:
+            # Never in full screen: there the window covers the taskbar
+            # too, so measuring against the *available* geometry would
+            # inset the picture by the taskbar's height.
+            if self._looks_maximised() and not self.isFullScreen():
+                screen = self.screen()
+                avail = screen.availableGeometry() if screen else None
+                frame = self.geometry()
+                # **Only the settled rect, never a frame mid-resize.**
+                # This runs from resizeEvent, and Qt resizes more than
+                # once on the way into maximised: caught in the act, the
+                # window was at the origin and merely oversized, which
+                # computed a 14/62 inset on the right and bottom and
+                # nothing at the top - visibly worse than the bug. The
+                # real maximised rect is the one that starts *above and
+                # left of* the work area, which no transient does.
+                if (avail is not None
+                        and frame.left() < avail.left()
+                        and frame.top() < avail.top()):
+                    margins = (avail.left() - frame.left(),
+                               avail.top() - frame.top(),
+                               max(0, frame.right() - avail.right()),
+                               max(0, frame.bottom() - avail.bottom()))
+        except (AttributeError, RuntimeError):
+            margins = (0, 0, 0, 0)
+        if layout.getContentsMargins() != margins:
+            layout.setContentsMargins(*margins)
+
+    def _settle_maximised_inset(self):
+        """Ask for the inset again once the window has stopped moving.
+
+        Both hooks that call it fire mid-flight: Qt posts the state
+        change before the geometry catches up, and the second maximise
+        goes through window_chrome.maximise's SetWindowPlacement, which
+        Qt sees as a resize and no state change at all - measured, the
+        inset came back (0, 0, 0, 0) on every re-maximise until this
+        existed. One shot, restarted by each event, so a drag-resize
+        pays for one call rather than one per frame.
+        """
+        timer = getattr(self, "_inset_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(120)
+            timer.timeout.connect(self._apply_maximised_inset)
+            self._inset_timer = timer
+        timer.start()
+
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowStateChange:
             self._apply_fullscreen_chrome()
+            self._apply_maximised_inset()
+            self._settle_maximised_inset()
             bar = getattr(self, "window_buttons", None)
             if bar is not None:
                 bar.set_maximised(self._looks_maximised())
@@ -5240,6 +5682,13 @@ class MainWindow(QMainWindow):
         bar = getattr(self, "window_buttons", None)
         if bar is not None:
             bar.set_maximised(self._looks_maximised())
+        # ...and for the same reason the overhang inset is applied here
+        # too, not only on WindowStateChange: a Windows-side maximise
+        # (drag to the top edge) posts no state change at all, and even
+        # Qt's own posts it before the geometry has caught up, so the
+        # margins would be computed against the old rect.
+        self._apply_maximised_inset()
+        self._settle_maximised_inset()
         super().resizeEvent(event)
         # The sidebar re-fits with the window: how many rows fit without
         # scrolling is a function of its height (see _fit_rails).

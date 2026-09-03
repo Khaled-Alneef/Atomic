@@ -265,6 +265,50 @@ def collect(query: str):
     return results[:MAX_RESULTS]
 
 
+
+def _cached_outside(query, limit=MAX_DISCOVER_RESULTS):
+    """Outside matches already on disk, for the instant half of a search.
+
+    The network lookup below is the *right* answer and takes seconds; the
+    discover cache holds well over a thousand rows this machine has
+    already seen, and matching them costs a dictionary walk. So the panel
+    fills at once and the network only ever adds to it - the owner: "make
+    sure that the search suggestion appear super faster than now".
+
+    Never a substitute: _on_discover_ready replaces these the moment the
+    real answer lands, keyed on the same query.
+    """
+    wanted = str(query or "").strip().lower()
+    if len(wanted) < 2:
+        return []
+    try:
+        import json
+        from web import backend as _backend
+        raw = (_backend.DATA_DIR / "discover_cache.json").read_text(
+            encoding="utf-8-sig")
+        cached = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(cached, dict):
+        return []
+    found, seen = [], set()
+    for block in cached.values():
+        if not isinstance(block, dict):
+            continue
+        for row in (block.get("rows") or []):
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            key = title.lower()
+            if not title or key in seen or wanted not in key:
+                continue
+            seen.add(key)
+            found.append(row)
+            if len(found) >= limit:
+                return found
+    return found
+
+
 class GlobalSearch(QDialog):
     """The results, under whichever field is driving them.
 
@@ -360,6 +404,10 @@ class GlobalSearch(QDialog):
         # by page-load backfill this must not queue behind
         # (.claude/rules/integrations.md).
         if query.strip():
+            # The cache first, on this thread - it is a dictionary walk
+            # and it means the panel is never empty while the network
+            # thinks. The real answer replaces these when it lands.
+            self._show_outside(_cached_outside(query), cached=True)
             lookup_pool.submit_latest("global-search", discover_worker, query)
         self._relayout(searching=bool(query.strip()))
         return bool(self._rows)
@@ -368,17 +416,33 @@ class GlobalSearch(QDialog):
         """Outside results, appended under the owned ones."""
         if query != self._query:
             return          # the user typed on; this answers a dead query
-        self._discover_rows = list(rows or [])
-        for row in self._discover_rows:
+        self._show_outside(rows, cached=False)
+        self._relayout(searching=False)
+
+    def _show_outside(self, rows, cached):
+        """Draw the outside half. A live answer replaces a cached one."""
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        if not cached:
+            # Take the cached stand-ins back out before adding the real
+            # ones, so the same title cannot appear twice.
+            for index in range(self.results.count() - 1, -1, -1):
+                data = self.results.item(index).data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, tuple) and data and data[0] is _DISCOVER:
+                    self.results.takeItem(index)
+        elif self._discover_rows:
+            return              # the live answer is already showing
+        if not rows:
+            return
+        self._discover_rows = list(rows) if not cached else []
+        for row in rows:
             bits = [row.get("type") or "", str(row.get("year") or "")]
             label = "  ".join(bit for bit in bits if bit)
             item = QListWidgetItem(
                 f"{row.get('title', '')}    ·    {label}  —  Discover")
             item.setData(Qt.ItemDataRole.UserRole, (_DISCOVER, row))
             self.results.addItem(item)
-        if not self._rows and self._discover_rows:
+        if not self._rows and self.results.count():
             self.results.setCurrentRow(0)
-        self._relayout(searching=False)
 
     def _relayout(self, searching):
         """Size the panel to whatever it is currently showing.

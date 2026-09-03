@@ -861,6 +861,63 @@ _ANCHOR_TITLE_ATTR_RE = re.compile(r'<a\b[^>]*?\btitle="([^"]{1,300})"', re.I)
 # "20th Century Boys") keeps it.
 _LEADING_ID_RE = re.compile(r"^\d{6,}[\s.\-:]*")
 
+# A card inside a carousel rather than on the listing wall. Measured 2
+# September 2026 on the three HTML sites: 3asq wraps its popular block
+# in `slider__item`/`slider__thumb_item`, TeamX its "most viewed" block
+# in `swiper-slide`, while the walls carry `page-item-detail` (3asq),
+# `box uta imgu` (TeamX) and `manga-card-v` (LavaScans).
+#
+# **Judged by the element the anchor sits inside, not by the classes
+# written near it.** The first version looked at the nearest three
+# class attributes before the anchor, and measured 3 September 2026 that
+# put TeamX's "most viewed" block *first*: each swiper slide holds a
+# cover anchor and, three tags later, a heading anchor to the same
+# series, and the heading anchor's nearest classes name the caption, not
+# the slide - so the second sighting read as "now on the wall" and moved
+# the row to the wall's head. Ten evergreen titles (Martial Peak,
+# Demonic Emperor, Apotheosis ...) led the site's latest-chapters list.
+# So the tags are walked once with a stack, and a slider is the span of
+# any element whose class names one; an anchor is in a slider when it
+# falls inside such a span. A page whose markup never closes the slider
+# marks everything as one, and _browse_html then keeps the whole list.
+_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>")
+_CLASS_ATTR_RE = re.compile(r'class="([^"]{1,120})"', re.I)
+_SLIDER_CLASS_RE = re.compile(r"slider|swiper|carousel|\bowl-", re.I)
+_VOID_TAGS = frozenset({"img", "br", "hr", "input", "meta", "link",
+                        "source", "wbr", "area", "base", "col", "embed",
+                        "param", "track"})
+
+
+def _slider_spans(body: str) -> list:
+    """[(start, end), ...] of every element carrying a slider class."""
+    spans, stack = [], []
+    for match in _TAG_RE.finditer(body):
+        closing, name, attrs = match.group(1), match.group(2).lower(), match.group(3)
+        if name in _VOID_TAGS or attrs.rstrip().endswith("/"):
+            continue
+        if not closing:
+            classes = _CLASS_ATTR_RE.search(attrs)
+            slider = bool(classes and _SLIDER_CLASS_RE.search(classes.group(1)))
+            stack.append((name, match.start(), slider))
+            continue
+        # Pop to the matching open tag; a stray close with no opener is
+        # ignored rather than unwinding the stack past a real slider.
+        for depth in range(len(stack) - 1, -1, -1):
+            if stack[depth][0] == name:
+                for _, start, slider in stack[depth:]:
+                    if slider:
+                        spans.append((start, match.end()))
+                del stack[depth:]
+                break
+    for _, start, slider in stack:
+        if slider:
+            spans.append((start, len(body)))
+    return spans
+
+
+def _in_slider(spans: list, at: int) -> bool:
+    return any(start <= at < end for start, end in spans)
+
 
 def _clean_text(value: str) -> str:
     text = " ".join(html.unescape(_TAG_RE.sub(" ", value or "")).split())
@@ -951,14 +1008,26 @@ def _browse_html(base_url: str, path: str, limit: int, timeout: int) -> list:
     body = _get(base_url + path, timeout)
     found = {}
     order = []
+    slid = set()
+    spans = _slider_spans(body)
     for match in _ANCHOR_RE.finditer(body):
         href, inner = match.group(1), match.group(2)
         url = urllib.parse.urljoin(base_url, html.unescape(href))
         if not _SERIES_URL_RE.search(urllib.parse.urlsplit(url).path):
             continue
+        in_slider = _in_slider(spans, match.start())
         if url not in found:
             found[url] = {"title": "", "url": url, "cover_url": None,
                           "latest_chapter": None}
+            order.append(url)
+            if in_slider:
+                slid.add(url)
+        elif url in slid and not in_slider:
+            # Seen in the slider first and now on the wall (3asq lists
+            # Hunter X Hunter in both): it is a wall row, at the wall's
+            # position, not the slider's.
+            slid.discard(url)
+            order.remove(url)
             order.append(url)
         record = found[url]
 
@@ -1002,6 +1071,32 @@ def _browse_html(base_url: str, path: str, limit: int, timeout: int) -> list:
             record["title"] = _title_from_slug(url) or record["title"]
 
     rows = [found[url] for url in order if found[url]["title"]]
+    # **The slider is not the listing.** The owner, 2 September 2026:
+    # "in the reading schedule there is HxH anime!!!!" - Hunter X Hunter
+    # led Recently Released, and it was 3asq's *manga*, sitting first
+    # because the site's front page opens with a twelve-card "team
+    # releases" slider (class slider__item) ahead of its latest-chapters
+    # wall, and TeamX's with a ten-card "most viewed" swiper ahead of
+    # its. Measured that day: HxH was 1st in the cache and 9th on 3asq's
+    # actual wall; TeamX's first seven rows were its slider. A slider is
+    # the site's pick of the popular, so the newest strip was showing
+    # the oldest evergreen titles. Dropped only when a listing remains
+    # (browse_site wants three rows), so a page that is nothing but a
+    # carousel still answers rather than going empty.
+    #
+    # Measured again 3 September 2026 with the element-span test in
+    # _slider_spans, front pages fetched live: 3asq 24 slider anchors /
+    # 42 wall, TeamX 25 / 84, LavaScans 68 / 64, Azora 86 / 36, Mangalek
+    # 0 / 60 (no carousel at all), and every site's first row is now
+    # the first card under its own "latest chapters" heading - TeamX's
+    # "اخر الفصول" and LavaScans' "آخر التحديثات" - where LavaScans had
+    # been leading with its "القائمة" hero slider and TeamX with its
+    # "most viewed" swiper. HxH was still on 3asq's wall (chapter 419,
+    # 27 August 2026), 9th, which is where it now sits. _slider_spans
+    # costs 1.8-12.5ms a page against a 1.4-2.3s browse.
+    wall = [r for r in rows if r["url"] not in slid]
+    if len(wall) >= 3:
+        rows = wall
     # Cards with artwork fill the row first, the rest behind them and
     # both in the page's own order: this feeds a wall of poster tiles,
     # and a letter avatar among real covers reads as a broken image

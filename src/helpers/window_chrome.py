@@ -80,7 +80,7 @@ WINDOWS = sys.platform == "win32"
 # one of its own. Windows' caption is 32 at 100% - this is the app's
 # bar, not an imitation of that one.
 BAR_HEIGHT = theme.TITLE_BAR_HEIGHT
-WINDOW_BUTTON_WIDTH = 46
+
 # **The three window buttons are discs**, 28 August 2026 (see
 # _window_button). Their diameter and the gap between them, and the flat
 # circle each rests on - SURFACE rather than SURFACE_HOVER, which is
@@ -159,23 +159,6 @@ def _window_mark_icon(kind: str, colour: str,
     return QIcon(_window_mark_pixmap(kind, colour, size))
 
 
-def _window_mark(kind: str, size: int = WINDOW_BUTTON_SIZE) -> QIcon:
-    """The maximise square, or the restore pair, as a two-mode icon.
-
-    `kind` is "maximise" or "restore". Normal is the muted colour every
-    window button rests at; **Active is the lit one, which is what Qt
-    draws while the pointer is on the button** - the owner, 28 August
-    2026: "make the shape in this button light like the min when hover".
-    The minimise and close glyphs get that from the stylesheet's
-    `:hover { color }`, which cannot reach inside a QIcon, so the icon
-    carries both colours itself. Same two-mode pattern the tracker's
-    filter button already uses."""
-    icon = QIcon()
-    icon.addPixmap(_window_mark_pixmap(kind, theme.TEXT_MUTED, size),
-                   QIcon.Mode.Normal)
-    icon.addPixmap(_window_mark_pixmap(kind, theme.TEXT, size),
-                   QIcon.Mode.Active)
-    return icon
 # The field is centred *in the window*, not in the space left over
 # between the two side groups - so both groups take the same minimum
 # width and the field sits between two equal stretches. Home's header
@@ -207,8 +190,8 @@ SEARCH_HEIGHT = theme.TOP_SEARCH_HEIGHT
 # the button's colour - which is exactly why this app does not use emoji
 # for chrome, as theme.py and rail_icons.py both record.
 MINIMISE_GLYPH = ""   # ChromeMinimize
-MAXIMISE_GLYPH = ""   # ChromeMaximize
-RESTORE_GLYPH = ""    # ChromeRestore
+
+
 CLOSE_GLYPH = ""      # ChromeClose
 
 # How wide the grab band along each edge is, in logical pixels. 6 rather

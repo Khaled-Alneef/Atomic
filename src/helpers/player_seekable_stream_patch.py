@@ -60,10 +60,25 @@ _ENGINE_URL = re.compile(
 SCHEME = "atomic"
 
 # Opening the stream HEADs the URL for its size; the handler answers from
-# metadata it already holds, so this is bounded and quick. Reads carry no
-# timeout at all: the handler deliberately blocks while pieces arrive,
-# and cancel() is how mpv aborts one.
+# metadata it already holds, so this is bounded and quick.
 OPEN_TIMEOUT_S = 10.0
+
+# **A read waits out silence, not the transfer.** It used to pass
+# `timeout=None`, on the reasoning that the handler deliberately blocks
+# while pieces arrive. True - and it also meant a handler that stopped
+# sending for any other reason blocked mpv's stream thread for ever,
+# which blocks mpv's play loop, which is what answers every property the
+# UI thread reads (torrent_engine._Torrent.wait_for's docstring spells
+# out that chain). Two unbounded waits, stacked, one at each end of the
+# same socket: the owner's "the video player freeze after playing for
+# sometime", 2 September 2026.
+#
+# A socket timeout bounds one recv rather than the transfer, which is
+# exactly the right shape here - every byte that arrives restarts it, so
+# a slow swarm is never cut off and a silent one is. Longer than the
+# engine's own STREAM_STALL_S so the server ends the response tidily
+# first; this is the backstop for a server that cannot.
+READ_SILENCE_S = 75.0
 
 
 class _EngineStream:
@@ -84,7 +99,7 @@ class _EngineStream:
     def _open_from(self, pos):
         request = urllib.request.Request(
             self._url, headers={"Range": f"bytes={int(pos)}-"})
-        return urllib.request.urlopen(request, timeout=None)
+        return urllib.request.urlopen(request, timeout=READ_SILENCE_S)
 
     def read(self, length):
         with self._lock:
@@ -350,16 +365,33 @@ def direct_uri(url, headers=None):
 
 
 def attach(handle):
-    """Register both protocols on one mpv handle. Safe to call twice."""
+    """Register both protocols on one mpv handle. Safe to call twice.
+
+    **Returns whether mpv can actually open these schemes**, and the
+    caller must not rewrite a URL when it cannot. This used to return
+    nothing and swallow the failure, so when registration broke - mpv
+    moved to its own process and a Python opener stopped being something
+    that could be handed over (helpers/mpv_proxy) - the load path went on
+    rewriting every URL to `atomic://` regardless. mpv was then asked for
+    a scheme it had never heard of, so **every source of every episode
+    failed to open** while the log recorded one line per attempt. The
+    owner: "it does not play videos, get stuck in sourcing."
+
+    A false here is not a disaster: the URL stays http:// and playback
+    falls back to the vendored libmpv's own path, which is the seekless
+    behaviour this module was written to improve on - slow, but playing.
+    """
     try:
         if getattr(handle, "_atomic_seekable_stream", False):
-            return
+            return True
         handle.register_stream_protocol(SCHEME, _open)
         handle.register_stream_protocol(DIRECT_SCHEME, _open_direct)
         handle._atomic_seekable_stream = True
+        return True
     except Exception:
         from . import logs
         logs.exception("could not register the seekable engine stream")
+        return False
 
 
 def engine_uri(url):
@@ -380,10 +412,11 @@ def _patch_player(module):
     old_load = Page._load_into_mpv
 
     def load_into_mpv(self, stream, resume_at=None):
-        attach(getattr(self, "handle", None))
+        # Only rewrite when mpv has the schemes - see attach().
+        ready = attach(getattr(self, "handle", None))
         url = (stream or {}).get("url")
-        uri = engine_uri(url)
-        if uri is None:
+        uri = engine_uri(url) if ready else None
+        if uri is None and ready:
             uri = direct_uri(url, (stream or {}).get("headers"))
         if uri:
             # A copy, not the live dict: the source list, the panel and

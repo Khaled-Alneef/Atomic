@@ -34,7 +34,7 @@ import pathlib
 import sys
 import time
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QWidget
 
 from . import logs
@@ -64,11 +64,50 @@ def _lib_dir():
     return pathlib.Path(webview.__file__).parent / "lib"
 
 
+# **Chromium's wheel animation, off.** The owner, 1 September 2026:
+# "there is a delay between start scrolling in the wheel and the page
+# starts scrolling really", and "when I scroll using the laptop touchpad
+# it is super smooth, but the mouse wheel ... not smooth in comparison".
+#
+# Both are the same mechanism, and it is the browser's, not this app's -
+# app.js takes no wheel events at all. Chromium animates a *mouse* notch
+# over a curve (cc::ScrollOffsetAnimationCurve, the same one app.js
+# copies for its sideways rows) while a precision touchpad's pixel
+# deltas are applied on the frame they arrive. So the touchpad has been
+# showing the untouched path and the wheel the animated one - exactly the
+# split widgets._SmoothWheel produced on the Qt side, for exactly the
+# same reason.
+#
+# Measured 1 September 2026 on Home, one real wheel notch driven through
+# SendInput and scrollTop read from inside the page, two control runs:
+#
+#                        animation ON          animation OFF
+#   first movement       ~35 ms after          ~18 ms after
+#   frames for one notch 42, over ~660 ms      1
+#   step size            0.8-6.4 px, med 2.4   100 px
+#
+# So a notch was being dribbled out over two thirds of a second in
+# forty-two sub-pixel-ish steps. That is the delay, and the reason a
+# touchpad felt better is that its deltas skipped all of it.
+#
+# Set through the environment variable rather than by building a
+# CoreWebView2Environment by hand: WebView2 reads it when it creates the
+# default environment, so it needs none of the async plumbing that
+# CreateAsync would drag in here, and a runtime that ignores the flag
+# simply scrolls as it did before.
+_BROWSER_ARGS = "--disable-smooth-scrolling"
+
+
 def _load():
     global _forms, _control, _load_error
     if _forms is not None or _load_error:
         return
     try:
+        import os
+        existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+        if _BROWSER_ARGS not in existing:
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+                f"{existing} {_BROWSER_ARGS}".strip())
         import clr
         for name in ("Microsoft.Web.WebView2.Core",
                      "Microsoft.Web.WebView2.WinForms"):
@@ -101,6 +140,12 @@ _u.GetWindowLongPtrW.restype = ctypes.c_longlong
 _u.GetWindowLongPtrW.argtypes = [w.HWND, ctypes.c_int]
 _u.SetWindowLongPtrW.restype = ctypes.c_longlong
 _u.SetWindowLongPtrW.argtypes = [w.HWND, ctypes.c_int, ctypes.c_longlong]
+# Asked on every fit, so the child's real size is read from Windows
+# rather than from a cache this process keeps - see _fit.
+_u.GetClientRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+_u.GetClientRect.restype = ctypes.c_bool
+_u.IsWindowVisible.argtypes = [w.HWND]
+_u.IsWindowVisible.restype = ctypes.c_bool
 _u.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int,
                             ctypes.c_int, ctypes.c_int, w.UINT]
 
@@ -119,6 +164,28 @@ SWP_DEFERERASE = 0x2000
 SWP_NOSIZE = 0x0001
 
 _pump_timer = None
+_burst_timer = None
+
+
+def pump_burst(ms=60):
+    """Drain WinForms' queue every millisecond for `ms`.
+
+    The regular pump below turns every 8ms, which is fine for a click
+    and too slow for an answer the window is standing still for: a
+    page's reply to a sidebar fold (web_pages.offer_fold) sat in the
+    WinForms queue for up to a pump interval before Qt heard it.
+    Measured 3 September 2026, offer to ack, Watch page: 22.0ms with
+    the 8ms pump alone, 4.7-8.4ms with this burst running.
+    """
+    global _burst_timer
+    if _forms is None:
+        return
+    if _burst_timer is None:
+        _burst_timer = QTimer()
+        _burst_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        _burst_timer.timeout.connect(_pump_once)
+    _burst_timer.start(1)
+    QTimer.singleShot(int(ms), _burst_timer.stop)
 
 
 def _start_pump():
@@ -259,12 +326,45 @@ class WebView2Page(QWidget):
         """
         if not self._child:
             return
+        # **Showing an already-shown window is not free, and this is
+        # asked seven times a second.** windows/web_pages._check_covered
+        # runs on a 150ms timer and calls suppress() on every tick
+        # rather than on a change - deliberately, because no event
+        # reliably says "something is covering me". Measured 2 September
+        # 2026 on the Watch page: 27 SetWindowPos calls on the child
+        # across four idle seconds, 6.75 a second, every one of them a
+        # ShowWindow plus a full re-size of Edge's composition surface
+        # for a window that was already visible at that size. Two of
+        # them land inside a 220ms sidebar fold. After: 4 across the
+        # same four seconds, and none at all during a fold.
+        #
+        # Only the visible case is skipped. Hiding stays unconditional:
+        # the docstring above records that other paths bring the child
+        # back over an overlay, and re-parking it is the insurance that
+        # was measured to be needed.
+        # **Asked of Windows, not of a flag this process keeps.** The
+        # first version of this skipped on a `self._shown` boolean, and
+        # a cached answer to an outside question is exactly the bug it
+        # was meant to make cheaper: anything that hid or parked the
+        # child by another route left the flag saying "shown", the
+        # re-show was skipped, and the page stayed invisible until it
+        # was rebuilt. That is the owner's "sometimes the Home page goes
+        # empty suddenly then I need to change page then come back", and
+        # the same shape as the size cache below it.
+        #
+        # IsWindowVisible is a syscall of about a microsecond, against
+        # the ShowWindow plus full composition-surface resize it guards.
+        if visible and _u.IsWindowVisible(self._child):
+            # Shown already, so only the geometry may need correcting -
+            # and _fit returns immediately when it does not.
+            self._fit()
+            return
         child = ctypes.c_void_p(self._child)
         try:
             if visible:
                 _u.ShowWindow(child, 5)          # SW_SHOW
-                self._sized = (0, 0)             # force the next _fit
-                self._fit()
+                self._sized = (0, 0)
+                self._fit(force=True)            # also un-parks it
             else:
                 _u.ShowWindow(child, 0)          # SW_HIDE
                 _u.SetWindowPos(child, None, -32000, -32000, 0, 0,
@@ -409,11 +509,50 @@ class WebView2Page(QWidget):
     # else in it.
     _APP_KEYS = {0x7A: "F11", 0x1B: "Escape"}
 
+    # **The rest of global_search.SHORTCUTS' "Anywhere" block.** The web
+    # view holds the keyboard while it has focus, so on a web page none
+    # of these reached the window at all - the owner's "re-add all of the
+    # shortcuts and make them functional... as the settings keybinds
+    # says". Only ever taken with their modifier held, so ordinary typing
+    # in the page is untouched: bare F is a letter, Ctrl+F is the app's.
+    _CTRL_KEYS = {
+        0x46: "Ctrl+F", 0x4E: "Ctrl+N", 0x5A: "Ctrl+Z", 0x59: "Ctrl+Y",
+        0xBC: "Ctrl+,",                                  # VK_OEM_COMMA
+    }
+    _CTRL_KEYS.update({0x30 + n: f"Ctrl+{n}" for n in range(1, 10)})
+    _ALT_KEYS = {0x25: "Alt+Left", 0x27: "Alt+Right"}
+
+    # Private handle with a declared signature - `ctypes.windll.user32`
+    # is one process-wide cached object whose prototypes other code in
+    # this app has already redeclared (see .claude/rules/testing.md).
+    _user32 = ctypes.WinDLL("user32")
+    _user32.GetKeyState.restype = ctypes.c_short
+    _user32.GetKeyState.argtypes = [ctypes.c_int]
+
+    @classmethod
+    def _modifier_held(cls, virtual_key) -> bool:
+        """Whether a modifier is down right now.
+
+        WebView2's accelerator args carry the key and its physical
+        status but not the modifier state, and the app is the foreground
+        window whenever this fires, so asking Windows is both the
+        simplest route and the correct one.
+        """
+        try:
+            return bool(cls._user32.GetKeyState(virtual_key) & 0x8000)
+        except Exception:
+            return False
+
     def _accelerator(self, _sender, args):
         try:
             if int(args.KeyEventKind) not in (0, 2):     # KeyDown, SysKeyDown
                 return
-            name = self._APP_KEYS.get(int(args.VirtualKey))
+            code = int(args.VirtualKey)
+            name = self._APP_KEYS.get(code)
+            if name is None and self._modifier_held(0x11):        # VK_CONTROL
+                name = self._CTRL_KEYS.get(code)
+            if name is None and self._modifier_held(0x12):        # VK_MENU
+                name = self._ALT_KEYS.get(code)
             if not name:
                 return
             args.Handled = True
@@ -456,6 +595,49 @@ class WebView2Page(QWidget):
             return              # an overlay is up; stay hidden
         self.set_child_visible(True)
 
+    def tell(self, body) -> bool:
+        """Post `body` (a dict) into the page - window.chrome.webview's
+        'message' event, app.js hostMessage. False when there is no page
+        to hear it yet; the caller then does whatever it did before the
+        page could be told (main._toggle_sidebar falls back to the pin)."""
+        try:
+            core = self._view.CoreWebView2 if self._view is not None else None
+            if core is None or not self._loaded:
+                return False
+            core.PostWebMessageAsJson(json.dumps(body))
+            return True
+        except Exception:
+            return False
+
+    def sync_position(self):
+        """Put the native window where this widget now is.
+
+        **Qt does not do this on its own.** Measured 3 September 2026
+        (scratchpad native_move2.py): a layout moving an alien ancestor
+        from x=220 to x=150 left this widget's HWND exactly where it was
+        - GetWindowRect unchanged through three event-loop passes, while
+        mapTo() already answered 150 - and only a change to *this*
+        widget's own geometry made Qt re-place it. That is why, for the
+        whole of a sidebar fold, the web pages stood still on screen and
+        then leapt the full width of the rail when the fold landed (the
+        page is pinned at one width during a fold, so its own geometry
+        never changes until the end - see main._toggle_sidebar).
+
+        Setting the QWindow's position is Qt's own route, so its record
+        of where the window is stays right and the next real resize
+        agrees with it. Same widget: 0.29ms per step across 40 steps,
+        one SetWindowPos with the size untouched - Edge does not lay the
+        document out again for a move.
+        """
+        try:
+            handle = self.windowHandle()
+            parent = self.nativeParentWidget()
+            if handle is None or parent is None:
+                return
+            handle.setPosition(self.mapTo(parent, QPoint(0, 0)))
+        except RuntimeError:
+            pass
+
     def _got_message(self, _sender, args):
         """A click in the page. Never trusted as anything but data."""
         try:
@@ -483,19 +665,23 @@ class WebView2Page(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # **Coalesced, because the sidebar fold sends one of these per
-        # animation frame.** Each one is a SetWindowPos on a native
-        # window plus a full re-layout inside Edge, and at 60-240 frames
-        # a second most of that work is thrown away by the next frame.
-        # The size is applied at most every 33ms during the burst, and
-        # once more when it stops so the final size is always exact.
-        now = time.monotonic()
-        if now - self._last_fit >= 0.033:
-            self._last_fit = now
-            self._fit()
+        # **Every frame, not every 33ms.** This used to coalesce to
+        # 0.033s on the reasoning that a fold sends one resize per
+        # animation frame and most of that work is thrown away. What it
+        # actually produced was 30 sizes a second against a 165Hz panel -
+        # the view held still for four to eight frames and then jumped,
+        # which is the owner's "they move in a clear steps".
+        #
+        # Nothing is thrown away now, because _fit already returns
+        # immediately when the device size has not changed: one
+        # SetWindowPos per real change is the fewest possible, and
+        # anything less than that is a step the eye can see. The settle
+        # timer stays, so the final size is exact even if the last
+        # resizeEvent arrives with the animation still mid-flight.
+        self._fit()
         self._settle.start(120)
 
-    def _fit(self):
+    def _fit(self, force=False):
         if not self._alive():
             return
         """Size the native child to this widget, in device pixels.
@@ -512,8 +698,42 @@ class WebView2Page(QWidget):
         ratio = self.devicePixelRatioF()
         width = int(self.width() * ratio)
         height = int(self.height() * ratio)
-        if (width, height) == self._sized:
-            return              # the fold sends many resizes per frame
+        if width <= 0 or height <= 0:
+            return
+        # **Ask Windows what size the child actually is.** This used to
+        # compare against a `self._sized` written by whoever last called
+        # here, which is a cache of an outside fact - and it went stale
+        # the moment anything sized the child by another route, or when
+        # a fit ran while the widget was hidden and therefore the wrong
+        # size. The view then kept that size, and a WebView2 with a
+        # stale (or zero) box lays nothing out: the page is there, the
+        # cards are there, and every picture is waiting for a viewport
+        # that never arrives - which is the owner's "the apps and games
+        # images are not showing", and the fold looking broken.
+        #
+        # It stayed hidden for as long as it did because set_child_visible
+        # reset _sized to (0, 0) every 150ms and re-fitted, so the stale
+        # value was never more than a sixth of a second old. Removing
+        # that storm (measured: 6.75 SetWindowPos a second, for nothing)
+        # is right; keeping a cache it was quietly repairing is not.
+        #
+        # GetClientRect is a syscall costing about a microsecond, against
+        # the SetWindowPos it guards, so this is cheaper than the
+        # bookkeeping it replaces and cannot be wrong.
+        #
+        # **`force` skips the check, and set_child_visible needs it.**
+        # This call sets the child's position as well as its size, and
+        # hiding parks it at -32000 with SWP_NOSIZE - so a window that
+        # is off screen at the *right size* has to be moved back, and a
+        # size test alone says there is nothing to do. Screenshotting
+        # the real window is what caught it: every page came back 100%
+        # flat background (rules/ui.md, and the reason that rule exists).
+        if not force:
+            box = w.RECT()
+            if _u.GetClientRect(self._child, ctypes.byref(box)):
+                if ((box.right - box.left, box.bottom - box.top)
+                        == (width, height)):
+                    return      # the fold sends many resizes per frame
         self._sized = (width, height)
         # NOACTIVATE and DEFERERASE as well as NOZORDER: the sidebar fold
         # resizes this on every frame of its animation, and the default

@@ -223,10 +223,27 @@ def default_options() -> dict:
         "input_vo_keyboard": False,
         "cache": "yes",
         # A stream that stalls mid-buffer should recover rather than end
-        # the file; these are the values mpv itself recommends for
-        # network playback.
+        # the file; 64MiB is the ceiling mpv itself recommends for
+        # network playback and it only costs memory when it is used.
         "demuxer_max_bytes": "64MiB",
-        "demuxer_readahead_secs": 20,
+        # **Start on what is there, then read ahead** - the owner: "it
+        # still does not play until it reaches 100%".
+        #
+        # This was 20 seconds. Twenty seconds of a 1080p stream is about
+        # 12MB, which is HEAD_BYTES to within rounding - so the app's own
+        # "Buffering... N%" (which counts the first HEAD_BYTES) and mpv's
+        # prebuffer filled at the same rate and finished together, and
+        # the picture appeared exactly as the bar hit the end. The bar
+        # was never the cause; it was measuring the same thing.
+        #
+        # 2s is enough for the demuxer to have a decodable run and is
+        # what makes the first frame land while the rest arrives.
+        # `cache_pause_initial` is stated rather than left to the default
+        # so that no future mpv can decide to hold the first frame back:
+        # a stall *during* playback still pauses and recovers, which is
+        # what cache-pause on its own does.
+        "demuxer_readahead_secs": 2,
+        "cache_pause_initial": False,
         "sub_font": ARABIC_FONTS[0],
         "sub_ass_override": "scale",  # keep .ass styling, honour our size
         "sub_auto": "no",             # we choose subtitles explicitly
@@ -362,13 +379,27 @@ def create(window_id: int, **overrides):
     # processes on the same desktop.
     from . import mpv_proxy
     if mpv_proxy.enabled():
+        # **Reached only when a fresh child cannot be started.** Until 2
+        # September 2026 a pre-started child that had died (its socket
+        # carried a 20s idle timeout - see mpv_proxy.serve) raised out of
+        # start() and landed here, so the "fallback" put the core that
+        # wrecks Qt's timers into this process in the middle of a normal
+        # session - twice in the owner's log for that day, both right
+        # after a stop and a continue ("the player seems does not start
+        # when I stopped when I continue"). start() now checks the warm
+        # child and spawns another itself, so an exception here means
+        # the child genuinely cannot run, and the line says which core
+        # the session is on from now on.
         try:
             handle = mpv_proxy.start(window_id, options)
             core_created = True
             return handle
         except Exception as error:
-            logs.info(f"the video process failed ({error}); "
-                      f"falling back to an in-process core")
+            logs.info(f"the video process could not be started ({error}); "
+                      f"falling back to an in-process core for the rest "
+                      f"of this session")
+    else:
+        logs.info("mpv in-process core requested (ATOMIC_MPV_INPROC=1)")
 
     try:
         handle = _mpv.MPV(wid=str(int(window_id)), **options)
@@ -378,26 +409,6 @@ def create(window_id: int, **overrides):
     # is true, and it never goes back for the life of the process.
     core_created = True
     return handle
-
-
-def version_info() -> dict:
-    """What engine is actually loaded - for Settings, and for a bug
-    report that would otherwise be a guess about which build ran."""
-    _load()
-    if _mpv is None:
-        return {}
-    handle = None
-    try:
-        handle = _mpv.MPV(vo="null", ao="null", idle="yes")
-        return {"mpv": handle.mpv_version, "ffmpeg": handle.ffmpeg_version}
-    except Exception:
-        return {}
-    finally:
-        if handle is not None:
-            try:
-                handle.terminate()
-            except Exception:
-                pass
 
 
 # mpv delivers events and log messages on its own thread. Anything

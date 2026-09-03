@@ -72,8 +72,9 @@ def _patch(details):
         key = self._still_key
         self._still_key += 1
         self._still_tiles[key] = tile
-        details.lookup_pool.submit(
-            details._still_worker, self._signals, key, url, blur)
+        # Through the page's own queueing (the cover queue, batched per
+        # row build) - see DetailsPage._submit_stills for the measurement.
+        self._queue_still(key, url, blur)
         return tile
 
     def _episode_pairs(self):
@@ -120,11 +121,19 @@ def _patch(details):
         clicked = (season, episode)
         watched_season, watched_episode = self._progress()
         key = details.history.episode_key(season, episode)
-        progress_covers = bool(
-            watched_episode
-            and (watched_season, watched_episode) >= clicked)
-        explicitly_watched = key in self._history_marks
-        already = progress_covers or explicitly_watched
+        # **The ticks win.** details._episode_menu carries this rule and
+        # this wrapper replaces it at import (helpers/_ui_startup), so
+        # the rule has to live here too: once any episode carries an
+        # explicit mark, the marks are the truth and the progress number
+        # is not consulted. The OR that stood here read a later episode
+        # as watched off the progress and offered "Mark as Unwatched"
+        # for one the owner had ticked off (review, 3 September 2026:
+        # DetailsPage._episode_menu resolves to this function).
+        if self._history_marks:
+            already = key in self._history_marks
+        else:
+            already = bool(watched_episode
+                           and (watched_season, watched_episode) >= clicked)
 
         menu = details.QMenu(self)
         pick_source = menu.addAction("Choose Source...")

@@ -43,14 +43,6 @@ _last_request_at = 0.0
 # schedule is trusted (see title_match.similarity).
 _MATCH_THRESHOLD = 0.8
 
-_SEARCH_QUERY = """
-query ($search: String) {
-  Media(search: $search, type: ANIME) {
-    id
-  }
-}
-"""
-
 # Deliberately a paged search, not the single-Media one above: a title
 # like "Bleach: Thousand-Year Blood War" resolves to the *first* season's
 # finished entry, while the currently-airing cour is a separate entry
@@ -62,6 +54,7 @@ query ($search: String) {
     media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
       title { romaji english native }
       synonyms
+      startDate { year }
       nextAiringEpisode { episode airingAt }
     }
   }
@@ -304,6 +297,42 @@ def anime_name_sets(title: str, timeout: int = 6):
         return None
 
 
+def anime_name_years(title: str, timeout: int = 6):
+    """Like `anime_name_sets`, but each hit carries the year it began.
+
+    **A title alone cannot separate two works that share one.** Measured
+    2 September 2026 on the owner's own search: AniList's set for
+    "Kingdom" contains the exact string "Kingdom", and so does Cinemeta's
+    row for the 2019 Korean live-action series - so a name-only test put
+    that series in the Anime section and, once the seasons collapsed to
+    one row, it was the *only* thing left there. The 2012 anime it was
+    standing in for had gone.
+
+    The year is what tells them apart, and AniList already knows it. Same
+    contract as anime_name_sets: [] is a real "no anime is called that",
+    None is silence.
+    """
+    title = (title or "").strip()
+    if not title:
+        return []
+    try:
+        body = _post(_AIRING_QUERY, {"search": title}, timeout)
+    except Exception:
+        return None
+    try:
+        media_list = (((body.get("data") or {}).get("Page") or {})
+                      .get("media")) or []
+        out = []
+        for media in media_list:
+            names = [name for name in _candidate_names(media) if name]
+            year = ((media.get("startDate") or {}).get("year")
+                    if isinstance(media.get("startDate"), dict) else None)
+            out.append({"names": names, "year": year})
+        return out
+    except Exception:
+        return None
+
+
 def fetch_external_urls(title: str, site_keyword: str, timeout: int = 8) -> list:
     """Every link AniList holds for `title` on the streaming site named
     by `site_keyword` ("crunchyroll", "netflix", ...), matched against
@@ -356,12 +385,6 @@ def fetch_external_urls(title: str, site_keyword: str, timeout: int = 8) -> list
     if not scored:
         return []
     return min(scored)[2]
-
-
-def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
-    """Crunchyroll's own links for `title` - see fetch_external_urls,
-    which this is the original and most-used case of."""
-    return fetch_external_urls(title, "crunchyroll", timeout)
 
 
 def _best_url(title: str, media_list, pick):

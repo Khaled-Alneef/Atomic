@@ -160,27 +160,6 @@ def ink_box(name: str) -> QRectF:
     return box
 
 
-def ink_center_for_left(name: str, size: int, ink_left: float) -> float:
-    """The `ink_center` that puts this shape's ink box at `ink_left`.
-
-    Two contexts want two different rules and both are right:
-
-      * the **folded** rail shows the icon alone, so it wants the ink
-        *centred* on the rail;
-      * the **expanded** rail shows icon-then-label down a column, so it
-        wants every ink box to start on the same x, or the labels line
-        up while the pictures do not.
-
-    A single shared centre cannot do both, because the two shapes are
-    different widths - the bookmark's ink is 12.6 grid units and the
-    cat's 19.6, so centring both leaves their left edges 3.5 units
-    apart. Measured on the real window: with one shared centre the cat
-    started at x=11 and the bookmark at x=14."""
-    box = ink_box(name)
-    per_unit = float(size) / _GRID
-    return float(ink_left) + box.width() * per_unit / 2.0
-
-
 def pixmap(name: str, size: int, color: str, lead: int = 0,
            ink_center: float = None) -> QPixmap:
     """`name` drawn at `size` logical pixels in `color`. Cached.

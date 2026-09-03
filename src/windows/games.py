@@ -189,8 +189,10 @@ class GamesPage(GridSelection, GlassPage):
         hits and authoritative misses on disk, so later loads cost a
         stat, not a request."""
         for game in self.games:
-            cover = game.get("cover")
-            if cover and Path(cover).exists():
+            # Resolved by name too, not only as written: the owner's
+            # covers were imported from a source run and name the source
+            # tree's cache (helpers/art_paths).
+            if images.resolve_art_path(game.get("cover")):
                 continue
             lookup_pool.submit(self._cover_worker, game.get("id"),
                                game.get("name") or "", game.get("path"))
@@ -427,7 +429,8 @@ class GamesPage(GridSelection, GlassPage):
         cover = QLabel()
         cover.setFixedSize(*CARD_COVER_SIZE)
         cover.setPixmap(images.thumbnail_or_avatar(
-            game.get("cover"), game["name"], CARD_COVER_SIZE))
+            images.resolve_art_path(game.get("cover")), game["name"],
+            CARD_COVER_SIZE))
         layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._cover_labels[game.get("id")] = cover
 
@@ -490,7 +493,7 @@ class GamesPage(GridSelection, GlassPage):
         measured. Here it is one decode per card that is actually looked
         at, off the paint path.
         """
-        path = game.get("cover")
+        path = images.resolve_art_path(game.get("cover"))
         if not path or self._virtual is None:
             return
         pixmap = images.thumbnail_or_avatar(

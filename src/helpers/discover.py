@@ -168,11 +168,90 @@ def _anime_witness(query: str):
         from . import anilist
         pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="atomic-anime-witness")
-        future = pool.submit(anilist.anime_name_sets, query)
+        future = pool.submit(anilist.anime_name_years, query)
         pool.shutdown(wait=False)
         return future
     except Exception:
         return None
+
+
+def _plain_title(text) -> str:
+    """A title reduced to its words, for comparing one against another."""
+    keep = [c.lower() if (c.isalnum() or c.isspace()) else " "
+            for c in str(text or "")]
+    return " ".join("".join(keep).split())
+
+
+def _row_year(row) -> int:
+    """The year a Cinemeta row begins, or 0. Its `year` is "2019-2020",
+    "2015-" or "2012" depending on the shape of the title."""
+    for field in ("year", "years", "releaseInfo"):
+        text = str(row.get(field) or "")
+        digits = "".join(c if c.isdigit() else " " for c in text).split()
+        for chunk in digits:
+            if len(chunk) == 4:
+                return int(chunk)
+    return 0
+
+
+def _same_work(title: str, names) -> bool:
+    """Is `title` one of `names`, rather than merely starting like one?
+
+    **A ratio was not enough, and the number says why.** This used
+    title_match.best_similarity against _ANIME_CONFIRM_THRESHOLD (0.8),
+    which is a prefix-tolerant score - measured 2 September 2026 against
+    AniList's own name set for "Kingdom":
+
+        Kingdom              1.000     Animal Kingdom     0.667
+        Kingdom of Heaven    0.950     The Kingdom        0.778
+        The Last Kingdom     0.609
+
+    so Ridley Scott's film scored 0.95 against the anime and was filed
+    under Anime. That is the owner's "in the search the anime contains
+    movies and series when I searched Kingdom". Any title that merely
+    *contains* the one AniList knows scores high, and a search is
+    exactly the case where every result contains the query.
+
+    AniList's name set already carries the romaji, the english and the
+    synonyms of one work, so a real match is an equal one - "Attack on
+    Titan" and "Shingeki no Kyojin" are both in the set. Whole-title
+    equality on the words alone is therefore strict without being
+    brittle, and it is what separates a work from a phrase it shares a
+    word with.
+    """
+    plain = _plain_title(title)
+    if not plain:
+        return False
+    return any(_plain_title(name) == plain for name in names if name)
+
+
+def _same_hit(title: str, year: int, hit) -> bool:
+    """Is this Cinemeta row the AniList work `hit` describes?
+
+    The title has to match whole (see _same_work) **and the years have to
+    agree**, because a title alone does not identify a work: "Kingdom" is
+    both a 2012 anime and a 2019 Korean live-action series, and matching
+    on the name put the live-action one in the Anime section - the
+    owner's "when I searched for kingdom, the animes did not show!!!
+    instead there was only one series on the anime section", 2 September
+    2026. Once the seasons collapsed to a single row it was the only
+    thing left there.
+
+    Three years of slack, and only when both sides state one: AniList
+    dates a work by its first broadcast and Cinemeta by its IMDb entry,
+    which disagree by a year on split cours and late licensing. An
+    unknown year on either side falls back to the name alone, which is
+    where this started but is still better than dropping a real hit.
+    """
+    if isinstance(hit, dict):
+        names, anime_year = hit.get("names") or [], hit.get("year") or 0
+    else:
+        names, anime_year = hit, 0        # an older name-only answer
+    if not _same_work(title, names):
+        return False
+    if not year or not anime_year:
+        return True
+    return abs(int(year) - int(anime_year)) <= 3
 
 
 def _anime_confirmed(rows: list, query: str, witness=None) -> list:
@@ -208,20 +287,52 @@ def _anime_confirmed(rows: list, query: str, witness=None) -> list:
             except Exception:
                 name_sets = None
         else:
-            name_sets = anilist.anime_name_sets(query)
+            name_sets = anilist.anime_name_years(query)
         if name_sets is None:
             return rows
         kept = []
         for row in rows:
             if _is_animated(row):
-                kept.append(row)
+                kept.append((row, 0))
                 continue
             title = row.get("title") or ""
-            if any(title_match.best_similarity(title, names)
-                   >= _ANIME_CONFIRM_THRESHOLD
-                   for names in name_sets if names):
-                kept.append(row)
-        return kept
+            year = _row_year(row)
+            gaps = [abs(int(year) - int(hit.get("year") or 0))
+                    if (year and isinstance(hit, dict) and hit.get("year"))
+                    else 0
+                    for hit in name_sets if hit and _same_hit(title, year, hit)]
+            if gaps:
+                kept.append((row, min(gaps)))
+        # **Among rows naming one work, the year that matches leads.**
+        # The owner, 2 September 2026: "the anime Kingdom is not having
+        # the correct image cover". Measured that day on his search:
+        # Cinemeta answers three series called "Kingdom" (2019 KR, 2014
+        # US, 2012 JP), the witness rightly drops the Korean one, but the
+        # three-year slack _same_hit needs for split cours also admits
+        # the 2014 MMA drama, and it comes *first* in Cinemeta's order -
+        # so server._one_per_work, which keeps the leader, showed the
+        # anime under that show's poster. The rows stay in Cinemeta's
+        # order between works; inside a work the smallest year gap
+        # wins, so the exact match is the leader and the slack only
+        # rescues a row that has no exact rival. Measured after: the
+        # Anime section's "Kingdom" is tt2404499 (2012), 3 of 3 runs.
+        lead = {}
+        for row, gap in kept:
+            key = _plain_title(row.get("title") or "")
+            if key not in lead or gap < lead[key][1]:
+                lead[key] = (row, gap)
+        out, seen = [], set()
+        for row, gap in kept:
+            key = _plain_title(row.get("title") or "")
+            leader = lead[key][0]
+            if key not in seen:
+                seen.add(key)
+                out.append(leader)
+                if leader is not row:
+                    out.append(row)
+            elif row is not leader:
+                out.append(row)
+        return out
     except Exception:
         return rows
 
@@ -479,7 +590,18 @@ def discover_reading_latest(limit: int = 30, deadline=None) -> list:
     if limit <= 0:
         return []
     rows = discover_reading_sites(query="", limit=limit * 2, deadline=deadline)
-    return _serving_sites_only(rows, deadline)[:limit]
+    # One row per title: two sites carrying the same series (Hunter X
+    # Hunter sat at seven indexes of one cached sweep, 2 September 2026)
+    # is one release, not seven - the first site to list it keeps it,
+    # in its position.
+    seen, unique = set(), []
+    for row in _serving_sites_only(rows, deadline):
+        key = " ".join(str(row.get("title") or "").lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique[:limit]
 
 
 # Which sites have been seen to actually hand over a chapter list, and
@@ -495,8 +617,6 @@ def discover_reading_latest(limit: int = 30, deadline=None) -> list:
 # path the owner was waiting on.
 _META_FILE = "reading_meta.json"
 _meta_loaded = False
-_meta_dirty = False
-
 
 def _load_reading_meta():
     global _meta_loaded
@@ -656,17 +776,6 @@ MEDIUM_LANGUAGES = {
     "Manhwa": ("ko",),
     "Manhua": ("zh", "zh-hk"),
 }
-_ALL_MEDIUM_LANGUAGES = tuple(
-    code for codes in MEDIUM_LANGUAGES.values() for code in codes)
-# What "Other" actually asks for. **Named rather than inverted**, and
-# that is a measured correction: filtering the three known languages out
-# of the most-followed list returned **zero rows** - the head of that
-# list is entirely Japanese, Korean and Chinese, so there was nothing
-# left after the filter. MangaDex has no "not these" operator, so the
-# rest has to be listed. These are the origin languages it actually
-# carries series under.
-_OTHER_LANGUAGES = ("en", "fr", "es", "es-la", "pt-br", "id", "vi", "th",
-                    "ru", "de", "it", "pl", "tr")
 
 
 # One title -> "Manga" / "Manhwa" / "Manhua" / "Other", cached for the
@@ -806,29 +915,6 @@ def cached_genres(title: str) -> list:
         # written before BLOCKED_GENRES existed still holds the tag, and
         # these entries keep forever by design.
         return [g for g in _GENRE_CACHE.get(key, []) if _allowed_genre(g)]
-
-
-def discover_reading_sites_by_medium(medium: str, limit: int = 30,
-                                     deadline=None) -> list:
-    """`medium`'s titles, **browsed from the owner's own sites**.
-
-    The owner's ask, 21 August 2026: "the manga/manhwa/manhua list are
-    taken from the wrong site, take them from the provided websites like
-    SWAT, TeamX". They were coming from MangaDex's own catalogue, which
-    made the sections a browse of a site the owner does not read from -
-    every card opened the "where should this be read from" flow instead
-    of a chapter list.
-
-    So the rows come from `discover_reading_sites` exactly as Discover's
-    do - carrying `url`, `site_id` and `site_name`, so a card opens that
-    site's chapters - and the *medium* is looked up per title, because
-    no scanlation site records it. Classification is cached forever and
-    fanned out MEDIUM_WORKERS at a time; a second visit costs nothing.
-
-    A site's listing is not sorted by medium, so a wider draw is taken
-    than will be kept - most of what a mixed listing returns is not the
-    medium being asked for."""
-    return reading_sites_by_medium_all(limit, deadline).get(medium, [])
 
 
 def reading_sites_by_medium_all(limit: int = 30, deadline=None) -> dict:
@@ -993,46 +1079,6 @@ def reading_genre_sites(genre: str, limit: int = 30, deadline=None) -> list:
         if len(kept) >= limit:
             break
     return kept
-
-
-def discover_reading_medium(medium: str, limit: int = 30, deadline=None) -> list:
-    """The most-followed titles of one medium - what the Read page's
-    Manga / Manhwa / Manhua / Other sections show.
-
-    Asked of MangaDex by `originalLanguage`, which is the field that
-    actually decides the answer (see MEDIUM_LANGUAGES). "Other" asks for
-    everything and filters the three known languages out afterwards,
-    because MangaDex has no "not these" operator.
-
-    Fails soft to [] like everything here."""
-    if limit <= 0:
-        return []
-    if deadline is None:
-        deadline = net.deadline_in(READING_BUDGET)
-    step = net.step_timeout(deadline, READING_TIMEOUT)
-    if step is None:
-        return []
-    languages = MEDIUM_LANGUAGES.get(medium) or _OTHER_LANGUAGES
-    count = min(int(limit), _MANGADEX_MAX_LIMIT)
-    query = "".join(f"&originalLanguage[]={code}" for code in languages)
-    url = (f"{mangadex.BASE_URL}/manga?limit={count}&includes[]=cover_art"
-           f"&order[followedCount]=desc{_BROWSE_RATINGS}{query}")
-    try:
-        body = mangadex._get(url, step)
-    except Exception:
-        return []
-    named = MEDIUM_LANGUAGES.get(medium) is not None
-    rows = []
-    for manga in (body or {}).get("data") or []:
-        row = _reading_row(manga)
-        if row:
-            # A section's rows say what they are, so saving one from
-            # Manhwa files it as Manhwa rather than as the form's
-            # default. "Other" has no type of its own in this app, so it
-            # keeps Manga - the reader treats it the same way.
-            row["type"] = medium if named else "Manga"
-            rows.append(row)
-    return rows[:limit]
 
 
 def discover_reading_sites(query: str = "", limit: int = 30,

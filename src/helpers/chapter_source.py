@@ -642,6 +642,26 @@ def cached_chapters(entry):
     return _cached(key)
 
 
+def stale_chapters(entry):
+    """This entry's last chapter list whatever its age, or None.
+
+    For a surface that has to show something now and refresh behind
+    (the details page). Measured 2 September 2026 on the owner's own
+    Kingdom (WAN): the row in reader_cache.json was 31 hours old, so
+    cached_chapters answered nothing and the page sat on "Loading..."
+    for **2.05-2.36s** while 3asq listed all 381 chapters again - a list
+    that was on disk the whole time, one chapter short at most. The six
+    hour TTL still decides what counts as *current* (list_chapters is
+    unchanged); this only says what was seen last."""
+    key = _cache_key(entry)
+    if not key:
+        return None
+    row = _load_store().get(key)
+    if not row:
+        return None
+    return row.get("chapters") or None
+
+
 def list_chapters(entry, *, deadline=None, refresh=False,
                   on_partial=None) -> list:
     """Chapters for this entry, newest first. Never raises.
