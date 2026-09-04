@@ -69,8 +69,9 @@ from PyQt6.QtWidgets import (
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
-from helpers import (skiptimes, app_settings, artwork, downloads, logs, net, storage,
-                     theme, video_backend, window_chrome)
+from helpers import (skiptimes, app_settings, artwork, downloads, logs,
+                     mkv_subs, net, storage, theme, video_backend,
+                     window_chrome)
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
                              PickCombo,
                              confirm, finish_toast, freeze_covered,
@@ -2662,6 +2663,9 @@ class PlayerPage(GlassPage):
         # _auto_select_arabic_track.
         self._arabic_track_done = False
         self._remembered_track_done = False
+        self._playing_path = ""
+        self._embedded_subs_for = None
+        self._embedded_subs = []
         self._panel = None
         # What the download panel is currently set to. Held on the page,
         # not in the panel: the panel is rebuilt from scratch on every
@@ -4171,6 +4175,9 @@ class PlayerPage(GlassPage):
         self._marked_watched = False
         self._arabic_track_done = False
         self._remembered_track_done = False
+        self._playing_path = ""
+        self._embedded_subs_for = None
+        self._embedded_subs = []
         self._prefetched = False
         # The warm-up done for *this* episode has served its purpose (or
         # not); either way the next one owns the question now. Nothing is
@@ -4486,7 +4493,21 @@ class PlayerPage(GlassPage):
         the English row is one line further down the panel for anyone
         who wants it, and whatever track was already up is left alone."""
         try:
-            text = subtitles_module.fetch(result, net.deadline_in(SUBTITLE_BUDGET_S))
+            track = int(result.get("embedded_track") or 0)
+            if track:
+                # **Already here, so it is read rather than fetched.**
+                # helpers/mkv_subs walks the file's clusters for this one
+                # track - measured 6.2s over a 1.78GB episode, against a
+                # search plus a download for text the release carries.
+                text = mkv_subs.extract_srt(getattr(self, "_playing_path", ""),
+                                            track)
+                if not text:
+                    self._work.failed.emit(
+                        "That Track Could Not Be Read From The File", run)
+                    return
+            else:
+                text = subtitles_module.fetch(
+                    result, net.deadline_in(SUBTITLE_BUDGET_S))
             if not text:
                 self._work.failed.emit("That Subtitle Could Not Be Downloaded", run)
                 return
@@ -5021,6 +5042,51 @@ class PlayerPage(GlassPage):
             return
         self._sub_auto_done = True
         self._pick_track("sid", track)
+
+    def _embedded_feedstock(self):
+        """Text subtitle tracks inside the playing file the AI can
+        translate from.
+
+        The owner, 4 September 2026: "if there is En embedded then add it
+        as an option so that AI can translate from, not just
+        Opensubtitles!" - a release that already carries English should
+        not send the app out to a search for text it is already holding.
+
+        Only a local file, and only text codecs: helpers/mkv_subs says
+        why on both counts. Arabic tracks are left out - they are the
+        answer, not the feedstock, and the Arabic column already lists
+        them.
+
+        Read once per file and kept: the track list is 4ms on a 1.78GB
+        file (measured) but this is asked on every panel rebuild.
+        """
+        path = getattr(self, "_playing_path", "")
+        if not path or not mkv_subs.usable(path):
+            return []
+        if getattr(self, "_embedded_subs_for", None) == path:
+            return self._embedded_subs
+        rows = []
+        try:
+            for track in mkv_subs.list_tracks(path):
+                lang = str(track.get("lang") or "").lower()
+                if (subtitles_module is not None
+                        and subtitles_module.is_arabic_code(lang)):
+                    continue
+                name = (track.get("title") or lang or "Subtitle").strip()
+                rows.append({"source": "In this file", "lang": lang,
+                             "embedded_track": int(track.get("number") or 0),
+                             "format": "srt",
+                             "display_name": f"{name} (in this file)",
+                             "release": name})
+        except Exception:
+            logs.exception("Could not list the file's subtitle tracks")
+            rows = []
+        # English first: it is the language the translator reads best
+        # and the one he named. The rest keep the file's own order.
+        rows.sort(key=lambda r: 0 if str(r["lang"]).startswith("en") else 1)
+        self._embedded_subs_for = path
+        self._embedded_subs = rows
+        return rows
 
     def _auto_select_arabic_track(self):
         """Select an embedded Arabic subtitle track the moment the file
@@ -6624,6 +6690,10 @@ class PlayerPage(GlassPage):
             # replaced it.
             self._file_ready = bool(value) and str(value) == \
                 str(self._loading_url or "")
+            # Kept for helpers/mkv_subs: an embedded track can only
+            # be read out of the file mpv is actually playing, and
+            # only when that is a local one - _embedded_feedstock.
+            self._playing_path = str(value or "")
         elif name == "duration" and value:
             self._duration = float(value)
             self.seek_bar.set_duration(self._duration)
@@ -7253,6 +7323,12 @@ class PlayerPage(GlassPage):
             # first** - four pasted keys once offered exactly one
             # translator; a group per provider makes which model does
             # the work a choice at the moment of picking.
+            # **The file's own English counts as feedstock.** The owner,
+            # 4 September 2026: "if there is En embedded then add it as
+            # an option so that AI can translate from, not just
+            # Opensubtitles!". Listed first, because it needs no search
+            # and no download - the lines are already on this disk.
+            other = self._embedded_feedstock() + list(other)
             if translators and other:
                 for provider in translators:
                     translator = ai_translate.label(provider)
