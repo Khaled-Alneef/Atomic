@@ -146,6 +146,23 @@ _refused_hosts = {}
 _refused_lock = threading.Lock()
 
 
+def why(exc) -> str:
+    """A short, loggable reason for a failed request.
+
+    The exception's class name alone was what the owner's second machine
+    reported - "SSLCertVerificationError" and nothing else - and it took
+    a round trip to learn *which* verification failed. A certificate
+    error carries the answer ("unable to get local issuer certificate"
+    names a missing root; "certificate has expired" names a clock), so
+    it is worth the extra few words. Never the URL: a v3 API key travels
+    in the query string."""
+    name = type(exc).__name__
+    detail = getattr(exc, "verify_message", None) or getattr(exc, "reason", None)
+    if isinstance(detail, str) and detail and detail != name:
+        return f"{name} ({detail})"
+    return name
+
+
 def _url_host(url) -> str:
     try:
         text = url if isinstance(url, str) else url.full_url
@@ -292,11 +309,63 @@ def ssl_context():
     and costs **47ms every time it is called** (measured). Sharing one
     context also lets TLS session tickets be reused between connections
     to the same host, which is the difference between a full handshake
-    and a resumed one."""
+    and a resumed one.
+
+    **The Windows store alone is not enough, and the owner's second
+    machine is the proof.** 4 September 2026, from its atomic.log:
+
+        TMDB unreachable at api.themoviedb.org: SSLCertVerificationError
+
+    while Torrentio, TorrentsDB, Cinemeta and 3asq answered on the same
+    connection all session - so TLS worked, and exactly one host did not
+    verify. api.themoviedb.org is issued by "Amazon RSA 2048 M04", which
+    chains to **Amazon Root CA 1**, and Windows ships a deliberately
+    small root store that fills in on demand: Schannel fetches a missing
+    root when a browser needs it, and **Python's OpenSSL never triggers
+    that**. So a root the machine has not happened to need through
+    Windows' own stack is simply absent here, and only the sites under
+    it fail. Measured on this machine: the store holds **54** anchors.
+
+    Reproduced exactly, by verifying with no anchors at all:
+
+        SSLCertVerificationError: unable to get local issuer certificate
+
+    Both sources are loaded, never one: `certifi` carries the public
+    roots Windows has not cached (54 -> 151 anchors here), and the
+    Windows store carries anything only this machine trusts - a
+    corporate or anti-virus TLS-inspecting proxy installs its root
+    there and nowhere else, so dropping the store would break every
+    machine behind one. `load_verify_locations` adds anchors, it does
+    not replace them; measured after the change, api.themoviedb.org,
+    image.tmdb.org, v3-cinemeta.strem.io, graphql.anilist.co and
+    api.github.com all verify."""
     global _ssl_context
     with _ssl_lock:
         if _ssl_context is None:
-            _ssl_context = ssl.create_default_context()
+            context = ssl.create_default_context()
+            store = len(context.get_ca_certs())
+            bundled = False
+            try:
+                import certifi
+                context.load_verify_locations(certifi.where())
+                bundled = True
+            except Exception:
+                # A build without certifi keeps exactly the behaviour it
+                # had - the Windows store - rather than no trust at all.
+                pass
+            # Said once per run, and it is the line that settles this
+            # class of report on a machine nobody here can measure: a
+            # store-only count means the roots did not ship, and a
+            # machine failing one host with the bundle loaded is a
+            # different problem than the one this fixed.
+            try:
+                from . import logs
+                logs.info(f"TLS trust: {len(context.get_ca_certs())} anchors "
+                          f"({store} from the Windows store, bundled roots "
+                          f"{'loaded' if bundled else 'MISSING'})")
+            except Exception:
+                pass
+            _ssl_context = context
         return _ssl_context
 
 

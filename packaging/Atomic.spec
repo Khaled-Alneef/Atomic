@@ -212,7 +212,18 @@ a = Analysis(
                    'clr', 'clr_loader', 'clr_loader.netfx', 'webview',
                    'web', 'web.server', 'web.backend',
                    'windows.web_pages', 'windows.web_reader',
-                   'helpers.webview2_host'],
+                   'helpers.webview2_host',
+                   # The public CA roots, imported inside
+                   # helpers/net.ssl_context. Named here so PyInstaller's
+                   # certifi hook runs and bundles cacert.pem: without it
+                   # the app trusts only the Windows root store, which
+                   # ships small and fills in on demand for Windows' own
+                   # TLS stack and never for Python's. That is why the
+                   # owner's second machine could reach every other host
+                   # and failed api.themoviedb.org with
+                   # SSLCertVerificationError - its store had no Amazon
+                   # Root CA 1. See net.ssl_context for the measurement.
+                   'certifi'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -237,9 +237,9 @@ def _get_json(url, timeout):
         net.note_host_failure(url)
         _say_once(f"{_safe_host(url)}-down",
                   f"TMDB unreachable at {_safe_host(url)}: "
-                  f"{type(exc).__name__} - no logos or backdrops "
+                  f"{net.why(exc)} - no logos or backdrops "
                   f"while this lasts")
-        raise Unreachable(f"{_safe_host(url)}: {type(exc).__name__}") from exc
+        raise Unreachable(f"{_safe_host(url)}: {net.why(exc)}") from exc
     net.note_host_success(url)
     return answer
 

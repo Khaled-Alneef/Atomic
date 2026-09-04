@@ -113,7 +113,15 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             (self._address, self.port or 443), self.timeout)
         if self._tunnel_host:
             self._tunnel()
-        context = self._context or ssl.create_default_context()
+        # net.ssl_context, not a bare default one: the Windows root store
+        # on its own is missing public roots on some machines and every
+        # site under them fails to verify - see that function for the
+        # measurement. This is the second place a context was built.
+        if self._context is not None:
+            context = self._context
+        else:
+            from . import net
+            context = net.ssl_context()
         # server_hostname stays the real name: the certificate must still
         # match it, so a DoH answer cannot point this at an impostor.
         self.sock = context.wrap_socket(self.sock, server_hostname=self.host)
