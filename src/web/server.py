@@ -1518,6 +1518,14 @@ def _one_per_work(rows):
     return out
 
 
+# How long the search page may spend before it draws what it has. Rule
+# 7's one second is the target for what is already local; a search is
+# five round trips to five services and cannot be, so this is the point
+# at which a straggler stops being worth waiting for - measured against
+# an anime lookup that took 18.5s to answer with nothing.
+SEARCH_BUDGET_S = 6.0
+
+
 def _search(text):
     """Every source's results for one query, as sections.
 
@@ -1610,13 +1618,43 @@ def _search(text):
         except Exception:
             return []
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        jobs = {"Anime": pool.submit(video, "anime"),
-                "Series": pool.submit(video, "series"),
-                "Movies": pool.submit(video, "movie"),
-                "Reading": pool.submit(reading),
-                "Cast": pool.submit(faces)}
-        found = {name: job.result() for name, job in jobs.items()}
+    # **One source may not hold the whole page.** The owner, 4 September
+    # 2026: "the search still takes long when I hit enter!". The five
+    # jobs already run in parallel, so the page costs the slowest of
+    # them - and measured on his own connection, for "legend of the
+    # northern blade":
+    #
+    #     discover_video anime     18,481 ms  ->  0 rows
+    #     discover_video series        719 ms  -> 11
+    #     discover_video movie         715 ms  -> 22
+    #     manga_sites.search_all     1,628 ms  ->  3
+    #     _serving_sites_only            1 ms
+    #     people.search                259 ms  ->  0
+    #
+    # Eighteen and a half seconds spent on a section that then had
+    # nothing in it. Rule 7's answer is a page that shows what has
+    # arrived rather than an empty surface waiting on the slowest
+    # source, so the wait is bounded and a job that misses it is simply
+    # a section that is not there - which is what an 18s empty answer
+    # was going to be anyway.
+    #
+    # The pool is not waited on: a straggler finishes into a result
+    # nobody reads, on a daemon-less worker that ends with it. Shutting
+    # down with wait=True here would put the whole 18s back.
+    pool = ThreadPoolExecutor(max_workers=5)
+    jobs = {"Anime": pool.submit(video, "anime"),
+            "Series": pool.submit(video, "series"),
+            "Movies": pool.submit(video, "movie"),
+            "Reading": pool.submit(reading),
+            "Cast": pool.submit(faces)}
+    found = {}
+    limit = time.monotonic() + SEARCH_BUDGET_S
+    for name, job in jobs.items():
+        try:
+            found[name] = job.result(timeout=max(0.0, limit - time.monotonic()))
+        except Exception:
+            found[name] = []
+    pool.shutdown(wait=False)
 
     sections, total = [], 0
     cast = [r for r in found.get("Cast") or [] if r.get("title")]

@@ -1719,6 +1719,8 @@ class DetailsPage(GlassPage):
                 made = hero_art.wide_ground(source) if source else None
             except Exception:
                 made = None
+            if not made and self._is_reading:
+                made = self._catalogue_ground()
             if not made:
                 return
             try:
@@ -1728,6 +1730,49 @@ class DetailsPage(GlassPage):
 
         threading.Thread(target=compose, daemon=True,
                          name="atomic-details-ground").start()
+
+    def _catalogue_ground(self):
+        """A blurred ground made from a catalogue's cover, or None.
+
+        **The last rung, for a reading title whose own site will not
+        answer.** The owner, 4 September 2026: "the readings ch list page
+        when entered from searching page has no bg blurred image!!!!".
+
+        A row from the search page carries the picture the card was drawn
+        with, and for Legend of the Northern Blade that picture lives on
+        meshmanga.com - which his own log says would not answer him that
+        day ("cover host would not answer: meshmanga.com"). With nothing
+        to download there is nothing to blur, and the page opened flat.
+
+        The catalogues know the same title and are reachable: AniList,
+        then MangaDex, then MangaUpdates, which is the chain
+        _reading_art_worker has always used. Asked only here, after the
+        entry's own cover has failed - a saved title with its cover on
+        disk never pays for it.
+
+        Never raises: no match, no network, no ground, same as before.
+        """
+        title = str(self.entry.get("title") or "").strip()
+        if not title:
+            return None
+        for source in ("anilist", "mangadex", "mangaupdates"):
+            try:
+                if source == "anilist":
+                    from helpers import anilist
+                    url = anilist.fetch_manga_artwork(title)
+                elif source == "mangadex":
+                    from helpers import mangadex
+                    url = mangadex.fetch_cover_url(title)
+                else:
+                    from helpers import mangaupdates
+                    url = mangaupdates.fetch_cover_url(title)
+                local = images.download(url) if url else None
+                made = hero_art.wide_ground(local) if local else None
+                if made:
+                    return made
+            except Exception:
+                continue
+        return None
 
     def _cover_source(self, allow_download=False):
         """A local image file for this entry's cover, or "".

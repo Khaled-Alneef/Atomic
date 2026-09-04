@@ -777,8 +777,14 @@ header p.ptitle { margin: 0 0 22px; }
      own shape and a rounded box round it reads as a second frame. */
   background: transparent; border-radius: 0; overflow: visible;
 }
+/* **The icon itself is rounded.** The owner, 4 September 2026: "make
+   the apps icons in the main page has round corners!". On the picture,
+   not on `.tart` - the plate behind it is deliberately absent (see
+   above), so rounding the box would round nothing. 6px on a 28px icon
+   is the same proportion the 160px shelf art carries at 7px on its own
+   corners, and a logo that is already a circle is unaffected. */
 .tart img { width: 28px; height: 28px; object-fit: contain; display: block;
-            background: transparent; }
+            background: transparent; border-radius: 6px; }
 .tbody { min-width: 0; flex: 1; }
 .tname { font-size: 13px; overflow: hidden; white-space: nowrap;
          text-overflow: ellipsis; }
