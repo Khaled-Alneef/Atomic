@@ -173,3 +173,113 @@ def page(name, skip, limit):
     rows, _note = filmography(name)
     skip = max(0, int(skip or 0))
     return rows[skip:skip + max(0, int(limit or 0))]
+
+
+# A face on a card. w185 is TMDB's portrait thumbnail: a cast card draws
+# 160 CSS px, 200 device pixels at the owner's 1.25, so w185 is within
+# 8% of the drawn size and w342 would be twice the bytes for nothing.
+FACE_SIZE = "w185"
+
+# How long a Cast section on Discover keeps the same faces. Discover
+# rebuilds on every visit (server._discover) and TMDB's trending list
+# changes daily, so a per-visit request would be one call per page view
+# for an answer that cannot have changed.
+_POPULAR_TTL = 6 * 3600
+_POPULAR = {"at": 0.0, "rows": []}
+
+
+def _face(hit):
+    """One `search/person` or `person/popular` row as a card.
+
+    `kind` is "person" so the app opens this name's own page rather than
+    a details page - windows/web_pages._from_page routes on it, the same
+    way it routes a game to a launch and a title to the details page.
+    """
+    name = str(hit.get("name") or "").strip()
+    if not name:
+        return None
+    path = str(hit.get("profile_path") or "")
+    known = [str((k or {}).get("title") or (k or {}).get("name") or "").strip()
+             for k in (hit.get("known_for") or []) if isinstance(k, dict)]
+    known = [k for k in known if k][:2]
+    return {"title": name,
+            "kind": "person",
+            "type": "Person",
+            "poster": f"{artwork.CDN}/{FACE_SIZE}{path}" if path else "",
+            "imdb_id": "",
+            "year": "",
+            # The meta line under a face: what this person is known for,
+            # which is the one fact that tells two same-named actors
+            # apart on a card.
+            "note": "  ".join(known),
+            "genres": []}
+
+
+def search(query, limit=20):
+    """People whose name matches `query`, most prominent first.
+
+    TMDB's own ranking is kept - it is popularity, which is what puts
+    the actor above the crew member and the namesake. Acting-department
+    rows first, because this is the cast list and a cinematographer
+    sharing a name has no filmography to show behind the card.
+
+    Fails soft to [] - a search page must still answer with its other
+    sections when TMDB does not.
+    """
+    query = str(query or "").strip()
+    if not query or not artwork.available():
+        return []
+    try:
+        url = (f"{artwork.API}/search/person"
+               f"?query={urllib.parse.quote(query)}&include_adult=false")
+        body = artwork._get_json(url, TIMEOUT) or {}
+    except Exception:
+        return []
+    hits = [h for h in (body.get("results") or []) if isinstance(h, dict)]
+    hits.sort(key=lambda h: (str(h.get("known_for_department") or "")
+                             != "Acting",))
+    rows = []
+    for hit in hits:
+        row = _face(hit)
+        if row is not None:
+            rows.append(row)
+        if len(rows) >= max(1, int(limit or 1)):
+            break
+    return rows
+
+
+def popular(limit=20):
+    """The faces Discover shows when nothing has been typed.
+
+    `person/popular`, not `trending/person/week`, and that was measured
+    3 September 2026: trending answers 20 rows whose `known_for` is
+    **absent**, so every card came up with a face and a blank line under
+    it, while popular carries two titles per row ("Jason Statham -
+    Snatch, The Meg") - which is the one fact that tells a face apart
+    from another face. Cached for _POPULAR_TTL, because Discover is
+    rebuilt on every visit.
+    """
+    if not artwork.available():
+        return []
+    import time as _time
+    with _LOCK:
+        if _POPULAR["rows"] and _time.time() - _POPULAR["at"] < _POPULAR_TTL:
+            return _POPULAR["rows"][:limit]
+    try:
+        body = artwork._get_json(f"{artwork.API}/person/popular", TIMEOUT) or {}
+    except Exception:
+        return []
+    rows = []
+    for hit in body.get("results") or []:
+        if not isinstance(hit, dict):
+            continue
+        row = _face(hit)
+        # A face with no picture is a letter in a circle, which says
+        # nothing about who the person is - dropped rather than drawn.
+        if row is not None and row["poster"]:
+            rows.append(row)
+    if rows:
+        with _LOCK:
+            _POPULAR["at"] = _time.time()
+            _POPULAR["rows"] = rows
+    return rows[:limit]

@@ -237,9 +237,38 @@ def resolve(launcher_key: str, root_dir, game_dir):
     return command_for(launcher_key, index_for(launcher_key, root_dir), game_dir)
 
 
+def _stamp_played(game):
+    """Record that this game was just started.
+
+    **Here, not in the page that called.** The owner, 4 September 2026:
+    "when I open a game from the main page make it also comes 1st on the
+    left like the apps and the websites." Apps and websites were the same
+    bug and were fixed on the same day: only the Qt shelf's own
+    `_launch` wrote the stamp, and Home is a web page whose click never
+    reaches that method - so server._recent_first had nothing to sort by
+    and the game stayed where it was. windows/link_grid._stamp_used is
+    the twin of this for the other two shelves.
+
+    One field on one entry through storage.update_entry, never the whole
+    list back - the write that once erased freshly imported games
+    (rules/ui.md).
+    """
+    entry_id = game.get("id")
+    if not entry_id:
+        return
+    try:
+        from . import storage
+        stamp = storage.now_iso()
+        game["last_played"] = stamp
+        storage.update_entry("games.json", entry_id, {"last_played": stamp})
+    except Exception:
+        pass            # a launch must never fail on bookkeeping
+
+
 def run(game):
     """Start `game`, through its launcher when one was resolved. Raises
     OSError, which is what every call site already reports on."""
+    _stamp_played(game)
     command = game.get("launch") or {}
     uri = command.get("uri")
     if uri:

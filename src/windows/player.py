@@ -48,6 +48,7 @@ session's worth of debugging elsewhere:
 """
 
 import ctypes
+import ctypes.wintypes as wintypes
 import inspect
 import os
 import re
@@ -1168,6 +1169,80 @@ def _name_subtitles(found) -> list:
 # GetWindow's "the sibling above this one in z-order". NULL means the
 # window is already at the top of its siblings - see _raise_native.
 _GW_HWNDPREV = 3
+# ShowWindow's two commands, for mpv's own window - see _set_video_shown.
+_SW_HIDE = 0
+_SW_SHOWNA = 8
+
+
+def _mpv_hwnd(page):
+    """mpv's own window handle, or 0.
+
+    **It is a sibling, not a child of the video surface, and that is the
+    whole of the owner's "the picture holds its last frame for ~3
+    seconds during the reload".** VideoSurface's docstring says mpv
+    renders into it, and mpv is given `wid` - but the core lives in its
+    own process now (helpers/mpv_proxy), and probing the real window
+    tree on 4 September 2026 while a reload ran puts `mpv` and the Qt
+    surface next to each other at z99/z100 under the *top level*. So
+    `surface.hide()` takes the Qt window away and leaves mpv's picture
+    exactly where it was - measured, that is precisely what happened.
+
+    Nor can it be covered: the loading backdrop sits at **z2**, above
+    mpv's z99, full-window, with an opaque fill as the first line of its
+    paintEvent - and the screenshots through the wait are plain video.
+    A hardware-composited swapchain is presented by DWM above sibling
+    child windows whatever SetWindowPos was told, which is why every
+    attempt to raise something over it measured as doing nothing.
+
+    Found by class name, which is mpv's own and stable, and cached on
+    the page: a reload does not recreate the window (the same handle
+    comes back), and a run that cannot find it simply does nothing.
+    """
+    cached = getattr(page, "_mpv_hwnd_cache", None)
+    if cached and ctypes.windll.user32.IsWindow(cached):
+        return cached
+    try:
+        top = page.window()
+        parent = int(top.winId()) if top is not None else 0
+    except (RuntimeError, AttributeError):
+        return 0
+    if not parent:
+        return 0
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def visit(child, _param):
+        name = ctypes.create_unicode_buffer(64)
+        ctypes.windll.user32.GetClassNameW(child, name, 64)
+        if name.value == "mpv":
+            found.append(child)
+            return False
+        ctypes.windll.user32.EnumChildWindows(child, visit, 0)
+        return True
+
+    try:
+        ctypes.windll.user32.EnumChildWindows(parent, visit, 0)
+    except Exception:
+        return 0
+    handle = found[0] if found else 0
+    page._mpv_hwnd_cache = handle
+    return handle
+
+
+def _set_video_shown(page, shown):
+    """Show or hide mpv's picture without touching Qt's own windows.
+
+    SW_SHOWNA rather than SW_SHOW on the way back: this must not take
+    activation off whatever the user is on, and mpv's window has never
+    been a focus target here.
+    """
+    handle = _mpv_hwnd(page)
+    if not handle:
+        return
+    try:
+        ctypes.windll.user32.ShowWindow(handle, _SW_SHOWNA if shown else _SW_HIDE)
+    except Exception:
+        pass
 
 
 def _raise_native(widget) -> None:
@@ -5296,7 +5371,27 @@ class PlayerPage(GlassPage):
                 "Try again in a moment, or pick one from the list.")
             return
         self._streams[index] = stream
-        self._hide_status()
+        # **Only over a running picture** - the same guard _play_stream
+        # carries 200 lines above, and for the same measured reason:
+        # `_hide_status` drops the loading backdrop, and here it was
+        # dropping it in the gap between "the source is ready" and "mpv
+        # has decoded a frame of it".
+        #
+        # That gap is the whole of the owner's report of 4 September
+        # 2026, "the player still hangs when reloading, in Qt before it
+        # was perfect!". Photographed on the frozen build: pressing R
+        # left the last frame on screen, unchanged, for ~3 seconds with
+        # nothing saying anything - frames half a second apart are
+        # pixel-identical - and then playback resumed correctly. The
+        # loading frame reload_source asks for was going up and being
+        # taken down again here, before the picture it was covering for
+        # had arrived.
+        #
+        # Nothing is left stuck: _on_property calls _hide_status the
+        # moment the first frame lands, which is what ends the wait
+        # honestly rather than early.
+        if not self._awaiting_first_frame:
+            self._hide_status()
         # **The pinned resolution is *not* cleared here, and that is the
         # owner's "when I choose the 4K from inside the player, it loads
         # and plays then after sometime it auto loads the 1080P again".**
@@ -5929,6 +6024,50 @@ class PlayerPage(GlassPage):
             # The picture under this is the wrong one until the pieces
             # land, so cover it rather than letting the tearing show.
             self.backdrop.set_stall(True)
+            self._prime_engine_for(target)
+
+    def _prime_engine_for(self, target):
+        """Tell the torrent engine where the picture is going, now.
+
+        **The owner, 3 September 2026: "the video player still has
+        issues fix them especially when I click on the progress bar to
+        move forward a lot!!!"**
+
+        A long forward seek on an engine stream had nothing pointing the
+        swarm at the new offset. mpv is told to present the timestamp,
+        the seat narrates the wait - and the engine only learns where
+        the reader has gone when the reader actually asks for those
+        bytes, which it cannot do until its own pending read finishes.
+        So the first seconds of a big skip were spent finishing a fetch
+        for a part of the episode nobody was going to watch.
+
+        `set_start_seconds` + `arm_start_band` are the pair a *resume*
+        already uses to prime exactly this - the band around a byte
+        offset, at top priority - so this is that machinery pointed at
+        the seek target rather than at a saved position. Nothing else
+        changes: mpv has already been told to seek, the seat still
+        narrates and still gives up honestly.
+
+        A direct URL (debrid, an addon) has no engine and needs none:
+        a range request is the whole mechanism there.
+        """
+        try:
+            stream = (self._streams or [])[self._stream_index] or {}
+        except (IndexError, TypeError):
+            return
+        kind = str(stream.get("kind") or "").strip().lower()
+        engine = str(stream.get("engine") or "").strip().lower()
+        if kind != "torrent" and engine != "atomic":
+            return
+        info_hash = str(stream.get("info_hash") or "").strip().lower()
+        if not info_hash:
+            return
+        try:
+            from helpers import torrent_engine
+            torrent_engine.set_start_seconds(info_hash, float(target))
+            torrent_engine.arm_start_band(info_hash)
+        except Exception:
+            logs.exception("could not point the engine at a seek target")
 
     # **How long one press keeps counting toward the next.** A chain
     # window, not a landing timeout - and the difference is the whole
@@ -6235,8 +6374,52 @@ class PlayerPage(GlassPage):
             if isinstance(event, dict) and event.get("event") == "atomic-host-lost":
                 self._bridge.host_lost.emit()
                 return
-            name = str(getattr(event, "event_id", "")).lower()
-            if "end-file" in name:
+            # **And out here it is a *string*, not an mpv object.**
+            # The owner, 4 September 2026: "the player still hang when
+            # refresh". mpv runs in its own process and every event
+            # crosses the wire as JSON: mpv_proxy._plain cannot turn an
+            # mpv event into a JSON type, so it falls through to
+            # `str(value)` and what arrives here is the event's repr.
+            # Captured from his own log on 4 September, the two that
+            # matter:
+            #
+            #   <NoneType (8) err=0 p=00.. d={'event': b'file-loaded'}>
+            #   <MpvEventEndFile (7) err=0 .. d={'event': b'end-file',
+            #                                    'reason': b'stop', ..}>
+            #
+            # `getattr(str, "event_id", "")` answers the default, so
+            # `name` was "" for all 546 events of a play and **neither
+            # branch below has ever fired in a frozen build** - not only
+            # the id-stringifying problem the note above describes.
+            #
+            # What that costs is the whole of his report, measured that
+            # day. The load gate `_file_ready` then has one way left to
+            # open, a *change* of the observed `path` - and R re-loads
+            # the same url, so the path never changes. Pressing R at
+            # 42:55: mpv's time-pos went on arriving once a second (0.00
+            # to 29.45 - the picture was never in trouble) and every one
+            # was dropped by `if not self._file_ready`. `_position` sat
+            # at **2575.16 for the whole run**, so the clock and the
+            # seek bar were frozen over playing video, the seat watchdog
+            # bit at 12s and re-opened from the head (losing his place),
+            # and the 5-second save kept writing the stale position over
+            # his resume point. The control, same build, no reload:
+            # 607.6 to 632.6 in 22 seconds.
+            #
+            # The repr carries the name, so the substring tests below
+            # are right as they stand - they were only ever being handed
+            # an empty string.
+            name = str(event).lower()
+            # **end-file deliberately stays as it was: unmatched.** It
+            # fires with `reason: b'stop'` on every `loadfile ...
+            # replace`, which is exactly what R does - so opening that
+            # branch now would tell the page an episode had ended every
+            # time the source was reloaded. Its only job is marking an
+            # episode watched at the very end and the WATCHED_FRACTION
+            # check on time-pos has been covering that for as long as
+            # this has been dead (see the note above). Reviving it is a
+            # separate change with its own test.
+            if "'reason': b'eof'" in name and "end-file" in name:
                 self._bridge.ended.emit("eof")
             elif "file-loaded" in name:
                 self._bridge.loaded.emit()
@@ -8802,6 +8985,33 @@ class PlayerPage(GlassPage):
             # status box shown over a *running* picture can never flip
             # the badge into a full frame over the video.
             self._reset_stall_frame()
+            # **And take the stale picture off the screen.** The owner,
+            # 4 September 2026: "the picture holds its last frame for ~3
+            # seconds during the reload - fix that 3 sec".
+            #
+            # This frame was already going up for the whole wait and
+            # being seen by nobody. Traced on the running app: R at
+            # 44:45, `_show_backdrop` at +0.06s, `_hide_status` at
+            # +3.7s, and every screenshot between them plain frozen
+            # video. The window is not the problem - probing the native
+            # z-order during the wait puts this widget at **z2** with
+            # mpv's own window at **z100**, so it is above it and
+            # full-window, and paintEvent's first line is an opaque
+            # fill. mpv simply goes on *presenting* the last decoded
+            # frame of the file being replaced, and a presented
+            # swapchain is not something a sibling's z-order settles.
+            #
+            # So the picture is removed rather than covered: mpv's window
+            # is a child of `surface` (VideoSurface's docstring), so
+            # hiding that hides the stale frame with it, and _hide_status
+            # brings it back the moment a real frame exists. Which is
+            # also simply honest - during a reload there is no picture,
+            # and what was on screen belonged to a file that is gone.
+            #
+            # Deliberately not on the `force` path: that is the buffer
+            # stall badge, where keeping the frozen frame visible around
+            # the logo is the owner's own ask of 23 August 2026.
+            _set_video_shown(self, False)
         self.backdrop.show()
         _raise_native(self.backdrop)
         self.logo.setVisible(self.logo.has_logo())
@@ -8814,6 +9024,9 @@ class PlayerPage(GlassPage):
                 _raise_native(overlay)
 
     def _hide_status(self):
+        # The wait is over, so the picture comes back - see
+        # _show_backdrop for why it went away.
+        _set_video_shown(self, True)
         self._loading_delay.stop()
         self._startup_ticker.stop()
         self._startup_text = ""
@@ -8979,6 +9192,33 @@ class PlayerPage(GlassPage):
             # itself, or is raised again below.
             self.controls.raise_()
             self.top_bar.raise_()
+            # **And repaint it, or after a reload it shows video.** The
+            # owner, 4 September 2026: "the player still hang when
+            # refresh and the upper bar hides!!".
+            #
+            # Measured that day on the frozen build and again from
+            # source, pressing R mid-episode: the bar's HWND comes back
+            # `visible=True` at the right geometry, with no mask, and
+            # every one of its six children reporting isVisibleTo(bar)
+            # True and a sane rect - and the strip on screen is the
+            # picture. A control run of the same build without the
+            # reload has the bar drawing normally, so this is the
+            # reload's doing and nothing else's.
+            #
+            # What R changes is that mpv's surface is recreated under a
+            # native sibling that has nothing animating in it. The lower
+            # controls survive because the seek bar redraws several
+            # times a second and each redraw refreshes that HWND; the
+            # top bar has no clock in it, so Qt has nothing to send it
+            # and its window keeps whatever the compositor left there.
+            # `repaint()` rather than `update()`: update only schedules,
+            # and the schedule is exactly what is not arriving.
+            #
+            # Once per wake from hidden, not per pointer tick - the
+            # branch above is already `if was_hidden` - so this is one
+            # synchronous paint of a 50px strip, not the churn
+            # _poll_pointer's note warns about.
+            self.top_bar.repaint()
         # Still unconditional, and still correct - but through
         # _raise_native, which does nothing when the window is already on
         # top. This ran up to 5.5 times a second for as long as the
@@ -10110,6 +10350,44 @@ class PlayerPage(GlassPage):
             return
         at = (None if self._awaiting_first_frame
               else float(self._position or 0.0) or None)
+        # **Point the swarm at where this is going to resume, now.** The
+        # owner, 4 September 2026: "the player still hang when refresh".
+        # Measured pressing R at 7:47 into an episode: the picture froze
+        # for **4.8s**, played, then froze **another 4s**, and the log
+        # said `seat: no picture at the seat in 12s; reopening from the
+        # head`. The engine was still fetching around the *old* position
+        # while mpv had already been told to open at the new one, so the
+        # first seconds of a reload were spent on bytes nobody was going
+        # to watch - the same shape as the long-seek stall that
+        # _prime_engine_for was written for, and this is that same pair
+        # (set_start_seconds + arm_start_band) called on the same
+        # machinery. A direct URL has no engine and this is a no-op.
+        if at:
+            self._prime_engine_for(at)
+        # **The wait starts here, not when mpv is finally handed a url.**
+        # The owner, 4 September 2026: "the player still hangs when
+        # reloading, in Qt before it was perfect!". Photographed on the
+        # frozen build that day: pressing R froze the picture on its last
+        # frame for **three seconds** with nothing on screen saying
+        # anything - frames at 1.62s and 3.16s are pixel-identical
+        # video - and then playback resumed at the right place. The
+        # clock and the seat are correct now; what is missing is any
+        # sign that the app is working.
+        #
+        # `_show_loading_soon` arms LOADING_FLASH_GUARD_MS and
+        # `_pending_loading_show` then returns early on `not
+        # self._awaiting_first_frame` - and 350ms after R the reload is
+        # still *preparing* the source, so that flag is still False from
+        # the episode that is playing. The frame was therefore skipped
+        # every time and nothing re-armed it once _load_into_mpv finally
+        # set the flag. `_show_backdrop`'s own guard reads the same two
+        # values and would have refused for the same reason.
+        #
+        # Declaring the wait at the press is also simply true: from the
+        # moment R is pressed the player is waiting for the first frame
+        # of a source it is re-opening. `at` is read above, so the
+        # resume point is already in hand.
+        self._awaiting_first_frame = True
         self._show_loading_soon("Reloading the source...")
         self._play_stream(self._stream_index, resume_at=at)
 

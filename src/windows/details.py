@@ -50,11 +50,12 @@ from helpers import (anime_identity, app_settings, artwork, hero_art, history,
                      images,
                      logs, lookup_pool, net, storage, theme)
 from helpers.poster_grid import PosterGrid
-from helpers.widgets import (TRASH_GLYPH, TRASH_ICON_SIZE, Card, GlassPage,
+from helpers.widgets import (CHECK_GLYPH, PLUS_GLYPH, TRASH_GLYPH,
+                             TRASH_ICON_SIZE, Card, GlassPage,
                              GlyphButton, PickCombo, confirm,
                              frameless_dialog, freeze_covered, glyph_icon,
-                             scroll_area, show_toast, show_undo_toast,
-                             use_hover_cursor)
+                             scroll_area, search_field, show_toast,
+                             show_undo_toast, use_hover_cursor)
 
 try:
     from helpers import stremio
@@ -1334,6 +1335,11 @@ class DetailsPage(GlassPage):
         self._save_btn.setFixedHeight(44)
         use_hover_cursor(self._save_btn)
         self._save_btn.clicked.connect(self._toggle_saved)
+        # The hover swap above lives on an event filter rather than on
+        # QSS, because what changes is the *icon* and its word, and
+        # neither is reachable from a stylesheet.
+        self._save_hover = False
+        self._save_btn.installEventFilter(self)
         # **Into the layout first, and only then made visible.** The
         # owner, 25 August 2026, with a screenshot: "a small window
         # (white) appears then closes in a moment". This is it - a
@@ -1343,10 +1349,19 @@ class DetailsPage(GlassPage):
         column.addWidget(self._save_btn)
         self._sync_save_button()
 
-        self._search = QLineEdit()
-        self._search.setPlaceholderText(
+        # **widgets.search_field, not a bare QLineEdit.** The owner, 4
+        # September 2026: "the x in the search videos or ch in the ep/ch
+        # list make it has hover and finger-pointing cursor like the
+        # global search". Qt's own clear button is a plain tool button
+        # child with the arrow cursor and no hover state - measured 2
+        # September 2026, 0 pixels changed under a synthetic hover - and
+        # `search_field` is the helper that fixes exactly that, giving it
+        # the hand through the cursor registry and a glyph that follows
+        # the pointer (_ClearButtonHighlight). This page was the one
+        # search box in the app not built through it, so it was the one
+        # box whose × behaved like nothing else.
+        self._search = search_field(
             "search chapters" if self._is_reading else "search videos")
-        self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(lambda _t: self._search_timer.start(220))
         column.addWidget(self._search)
 
@@ -1515,6 +1530,21 @@ class DetailsPage(GlassPage):
         # download panel and progress syncing all read imdb_id off it,
         # and re-deriving it per feature would be three more lookups.
         self.entry["imdb_id"] = imdb_id
+        # **And now the artwork, which nothing had asked for.** The owner,
+        # 4 September 2026: "when I enter the watches from the schedule
+        # page the ep list page bg is blurred and the logo does not
+        # load". _start_lookups fires _art_worker only when the entry
+        # already carries an id, and a Schedule row does not - measured
+        # 0 of 40 calendar rows carry one - so both TMDB lookups
+        # (artwork.backdrop_path, artwork.logo_path key off imdb_id and
+        # return None without it) were skipped for exactly the entries
+        # this branch exists to rescue. The page kept the blurred copy of
+        # its own cover that _seed_backdrop_from_cover puts up as the
+        # placeholder, and the typed title where the logo goes.
+        import threading
+        threading.Thread(target=_art_worker,
+                         args=(self._signals, self._run, dict(self.entry)),
+                         daemon=True).start()
         kind = "movie" if self.entry.get("type") == "Movie" else "series"
         lookup_pool.submit_watched(_meta_worker, self._signals, self._run,
                            imdb_id, kind)
@@ -3355,7 +3385,24 @@ class DetailsPage(GlassPage):
     def _clear_video_progress(self):
         from helpers import storage
         from windows.tracker import _progress_data_file
+        # **`progress_cleared_at` is the statement, not just the empty
+        # field.** The owner, 4 September 2026, after the number came
+        # back: "when 1st ep season one is marked as unwatched that means
+        # that the user did not watch anything in this watchable yet".
+        #
+        # Emptying `progress` alone cannot hold, because the Stremio sync
+        # is forward-only against whatever is stored - and *every* number
+        # is forward of nothing, so the next sync writes 51 straight back
+        # with progress_verified True (tracker._on_progress_synced). His
+        # own log has the app asking for "The Apothecary Diaries S1E52"
+        # on a title he had just declared himself at the start of.
+        #
+        # So the clear leaves a mark, and the sync steps around a title
+        # carrying one. It is dropped the moment anything real happens
+        # here - playing an episode, or marking one - because
+        # tracker._write_progress clears it on every successful write.
         fields = {"progress": "", "progress_verified": False,
+                  "progress_cleared_at": storage.now_iso(),
                   "updated_at": storage.now_iso()}
         self.entry.update(fields)
         try:
@@ -3845,18 +3892,52 @@ class DetailsPage(GlassPage):
         same place, same height - so it still reads as the same control
         having changed its mind."""
         saved = bool(self.entry.get("id"))
-        self._save_btn.setText("Remove From My List" if saved
-                               else "+  Save to My List")
+        hovering = bool(getattr(self, "_save_hover", False))
+        # **A tick when it is saved, a plus when it is not, and the bin
+        # only under the pointer.** The owner, 4 September 2026: "in the
+        # ch/ep list pages in the save button make it shows
+        # correct-icon like the banner in the discover page if saved and
+        # + icon when not saved, and make in both ch/ep list page and
+        # the discover page banner when hover and it is saved make the
+        # correct-icon turns into bin icon".
+        #
+        # So the resting state says what *is* - saved, or not - and the
+        # destructive reading appears only when the pointer is on the
+        # thing that would do it. That also fixes a smaller wrong note:
+        # a bin sitting on the page permanently made "you have this"
+        # look like a warning.
+        self._save_btn.setText(
+            ("Remove From My List" if hovering else "Saved to My List")
+            if saved else "Save to My List")
         # A QIcon, not a glyph in the label: a QPushButton paints its
         # text in one font, and the app font has no U+E74D - the bin
         # would be a hollow box beside the words. widgets.glyph_icon
         # renders it in the Fluent font at the screen's own ratio.
         if saved:
-            self._save_btn.setIcon(glyph_icon(TRASH_GLYPH, theme.TEXT))
+            glyph = TRASH_GLYPH if hovering else CHECK_GLYPH
+            # The bin reads on the red ground, so it takes the same
+            # colour the words do - see the objectName below.
+            self._save_btn.setIcon(glyph_icon(
+                glyph, theme.ON_ACCENT if hovering else theme.TEXT))
             self._save_btn.setIconSize(QSize(TRASH_ICON_SIZE, TRASH_ICON_SIZE))
         else:
-            self._save_btn.setIcon(QIcon())
-        self._save_btn.setObjectName("" if saved else "Accent")
+            self._save_btn.setIcon(glyph_icon(PLUS_GLYPH, theme.ON_ACCENT))
+            self._save_btn.setIconSize(QSize(TRASH_ICON_SIZE, TRASH_ICON_SIZE))
+        # **And it goes red under the pointer.** The owner, 4 September
+        # 2026, with a picture of this button hovered: "make it goes red
+        # when hover like the discover banner". The banner has done
+        # exactly this since the day before (`.hero .act.danger`, which
+        # fills with --danger and darkens its text) while this one only
+        # swapped its words and its icon and kept the ordinary surface -
+        # so the two surfaces the same ask was made about disagreed.
+        #
+        # Only while hovered, and that is still the rule the note above
+        # states: a resting saved title says what *is*, and the
+        # destructive reading appears on the control that would do it.
+        # #Danger is the app's one red button - the same style the
+        # selection bar's bin wears - so this needed no new colour.
+        self._save_btn.setObjectName(
+            ("Danger" if hovering else "") if saved else "Accent")
         # A QSS objectName change is not re-applied on its own - the
         # style has already been computed for the old name. Measured the
         # hard way once on the sidebar: unpolish/polish is what makes it
@@ -3888,33 +3969,20 @@ class DetailsPage(GlassPage):
         The page behind the overlay drops the row when this one closes -
         see tracker._on_inapp_closed, which had no "it is gone from disk"
         branch until this button could make one happen."""
-        entry_id = self.entry.get("id")
-        if not entry_id:
+        if not self.entry.get("id"):
             return
-        try:
-            from windows.tracker import _progress_data_file
-            data_file = _progress_data_file(self.entry)
-            entries = storage.load(data_file, [])
-            index = next((i for i, e in enumerate(entries)
-                          if e.get("id") == entry_id), None)
-            if index is None:
-                # Already gone - another surface deleted it while this
-                # overlay sat open. The button is simply wrong, not the
-                # file, so re-face it and say nothing.
-                self.entry.pop("id", None)
-                self._sync_save_button()
+        # The file work is remove_from_library (module scope, so the
+        # Discover banner can call it too); what is left here is the
+        # page's own half - the button's face and the undo offer.
+        data_file, index, removed = remove_from_library(self.entry)
+        if removed is None:
+            if data_file is None:
+                show_toast(self, "Could Not Remove That")
                 return
-            removed = copy.deepcopy(entries.pop(index))
-            storage.save(data_file, entries)
-        except Exception:
-            logs.exception("details page could not remove the entry")
-            show_toast(self, "Could Not Remove That")
+            # Nothing to remove - another surface deleted it while this
+            # overlay sat open, so the button is wrong, not the file.
+            self._sync_save_button()
             return
-        self.entry.pop("id", None)
-        # link_entry writes `entry.get("id") or None`, so calling it with
-        # the id gone is what unlinks the History row - History and the
-        # tracker stay one story in both directions.
-        history.link_entry(self.entry)
         self._sync_save_button()
         title = removed.get("title") or "that"
         show_undo_toast(
@@ -3962,30 +4030,13 @@ class DetailsPage(GlassPage):
         the grid behind it."""
         if self.entry.get("id"):
             return
-        try:
-            from windows.tracker import _progress_data_file
-            data_file = _progress_data_file(self.entry)
-            stamp = storage.now_iso()
-            self.entry["id"] = str(uuid.uuid4())
-            self.entry.setdefault("status", "Reading" if self._is_reading
-                                  else "Watching")
-            self.entry["added_at"] = stamp
-            self.entry["updated_at"] = stamp
-            # A plain append of a fresh read: update_entry cannot create,
-            # and any tracker page open behind this overlay re-reads the
-            # file the moment the overlay closes.
-            entries = storage.load(data_file, [])
-            entries.append(dict(self.entry))
-            storage.save(data_file, entries)
-        except Exception:
-            logs.exception("details page could not save the entry")
+        # The file work is save_to_library (module scope, so the Discover
+        # banner can call it too): it stamps the id, the status and the
+        # two timestamps onto this dict and links the History row.
+        data_file = save_to_library(self.entry)
+        if not data_file:
             show_toast(self, "Could Not Save That")
-            self.entry.pop("id", None)
             return
-        # History and the tracker are one story about the same title -
-        # a row already in History gains the new entry's id rather than
-        # sitting there looking unsaved forever.
-        history.link_entry(self.entry)
         # Not "Saved to My List" and disabled any more - the button
         # stays live and turns into the way back out (_sync_save_button).
         self._sync_save_button()
@@ -4316,6 +4367,15 @@ class DetailsPage(GlassPage):
     def eventFilter(self, obj, event):
         if obj is getattr(self, "_host", None) and event.type() == QEvent.Type.Resize:
             self.setGeometry(obj.rect())
+        # The Save/Remove button's own hover, so the tick can become a
+        # bin under the pointer - see _sync_save_button.
+        if obj is getattr(self, "_save_btn", None):
+            if event.type() == QEvent.Type.Enter:
+                self._save_hover = True
+                self._sync_save_button()
+            elif event.type() == QEvent.Type.Leave:
+                self._save_hover = False
+                self._sync_save_button()
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event):
@@ -4713,13 +4773,26 @@ class GenreBrowsePage(GlassPage):
                      or ("Manga" if self._is_reading else "Series"))
 
 
-def open_details(window, entry):
+def open_details(window, entry, host=None):
     """Put the details page over `window`. The one entry point - the same
     central-widget host trick reader.open_reader documents, so the
-    sidebar is covered rather than hidden."""
-    host = (window.overlay_host() if hasattr(window, "overlay_host")
-            else (window.centralWidget() if hasattr(window, "centralWidget")
-                  else window))
+    sidebar is covered rather than hidden.
+
+    `host` overrides where it lands, and exists for one caller. The
+    genre and cast pages are drawn in web_reader's shell, which takes
+    `immersive_host` (the central widget); the details page's own host
+    is `overlay_host`, the row *under* the app's bar - and that row is a
+    **child** of the central widget, so a details page opened from one
+    of those pages was a sibling underneath the shell and could not be
+    seen until the shell closed. The owner, 3 September 2026: *"the
+    genre and the cast pages still do not open on clicking the cards,
+    instead if I click one it will take me to it when I click the back
+    button"* - it had opened every time, behind.
+    """
+    if host is None:
+        host = (window.overlay_host() if hasattr(window, "overlay_host")
+                else (window.centralWidget() if hasattr(window, "centralWidget")
+                      else window))
     host = host if host is not None else getattr(window, "container", window)
     # **The video child starts while the list is being read.** The
     # player's own prewarm ran after its handle was created, so the
@@ -4742,3 +4815,97 @@ def open_details(window, entry):
     freeze_covered(page)   # see widgets._CoveredFreeze
     page.setFocus()
     return page
+
+
+# ---- the library, as two functions rather than two methods ----------
+#
+# **Extracted 3 September 2026 so the Discover banner could save.** The
+# owner asked for "Save to My List" / "Remove from My List" on that
+# banner (web_pages._list_action), and the only implementation of either
+# was inside DetailsPage._save_entry / _unsave_entry - bound to a page
+# with a button to re-face, a toast to show and an undo to offer. A
+# second copy of the file work is exactly the shape that produces a
+# saved row none of the rest of the app recognises, so the file work is
+# here and both surfaces call it.
+#
+# What stays on the page: the button's face, the toast wording, and the
+# undo offer, because an undo has to know which page to put the row back
+# on. What moves here: the id, the status, the stamps, the append, and
+# history.link_entry - the five things that make a dict a saved entry.
+
+
+def save_to_library(entry):
+    """Write `entry` into its tracker file. Returns the file it landed
+    in, or "" if it could not be written.
+
+    `entry` is stamped in place: id, status, added_at, updated_at - the
+    caller's dict gains the id, which is what every "is it saved" check
+    in the app reads.
+    """
+    if not isinstance(entry, dict) or entry.get("id"):
+        return ""
+    try:
+        from windows.tracker import _progress_data_file
+        data_file = _progress_data_file(entry)
+        stamp = storage.now_iso()
+        entry["id"] = str(uuid.uuid4())
+        # MANGA_TYPES is this module's own list and what
+        # DetailsPage._is_reading is computed from, so the status a
+        # banner save writes is the status the page would have written.
+        reading = entry.get("type") in MANGA_TYPES
+        entry.setdefault("status", "Reading" if reading else "Watching")
+        entry["added_at"] = stamp
+        entry["updated_at"] = stamp
+        # A plain append of a fresh read: update_entry cannot create,
+        # and any tracker page open behind an overlay re-reads the file
+        # the moment the overlay closes.
+        entries = storage.load(data_file, [])
+        entries.append(dict(entry))
+        storage.save(data_file, entries)
+    except Exception:
+        logs.exception("could not save an entry to the library")
+        entry.pop("id", None)
+        return ""
+    # History and the tracker are one story about the same title - a row
+    # already in History gains the new entry's id rather than sitting
+    # there looking unsaved forever.
+    history.link_entry(entry)
+    return data_file
+
+
+def remove_from_library(entry):
+    """Take `entry` out of its tracker file.
+
+    Returns (data_file, index, the record as it was) so a caller can
+    offer to put it back. Two ways it can decline, told apart because a
+    caller has different words for them: `("", None, None)` is "there
+    was nothing to remove" (another surface got there first - the
+    button is wrong, not the file) and `(None, None, None)` is "the
+    write failed", which is already in the log. `entry` loses its id,
+    and History is unlinked with it.
+    """
+    entry_id = (entry or {}).get("id")
+    if not entry_id:
+        return "", None, None
+    try:
+        from windows.tracker import _progress_data_file
+        data_file = _progress_data_file(entry)
+        entries = storage.load(data_file, [])
+        index = next((i for i, e in enumerate(entries)
+                      if e.get("id") == entry_id), None)
+        if index is None:
+            # Already gone - another surface deleted it. The caller's
+            # dict is what is wrong, not the file.
+            entry.pop("id", None)
+            return "", None, None
+        removed = copy.deepcopy(entries.pop(index))
+        storage.save(data_file, entries)
+    except Exception:
+        logs.exception("could not remove an entry from the library")
+        return None, None, None
+    entry.pop("id", None)
+    # link_entry writes `entry.get("id") or None`, so calling it with the
+    # id gone is what unlinks the History row - History and the tracker
+    # stay one story in both directions.
+    history.link_entry(entry)
+    return data_file, index, removed

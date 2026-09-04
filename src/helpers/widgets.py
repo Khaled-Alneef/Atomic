@@ -2023,6 +2023,14 @@ class GlyphButton(QPushButton):
 TRASH_GLYPH = ""
 TRASH_ICON_SIZE = 16
 
+# The other two faces of the one Save/Remove control, from the same
+# family: "Accept" (U+E73E), the tick the Discover banner draws when a
+# title is in the library, and "Add" (U+E710) when it is not. Defined
+# beside the bin because the three are read as one set - see
+# details._sync_save_button, which swaps between them.
+CHECK_GLYPH = ""
+PLUS_GLYPH = ""
+
 
 def glyph_icon(glyph: str, color: str = None, size: int = TRASH_ICON_SIZE,
                disabled_color: str = None) -> QIcon:
@@ -2385,13 +2393,30 @@ def search_field(placeholder: str, width: int = None) -> QLineEdit:
     field = QLineEdit()
     field.setPlaceholderText(placeholder)
     field.setClearButtonEnabled(True)
-    field.addAction(magnifier_icon(), QLineEdit.ActionPosition.LeadingPosition)
+    glass = field.addAction(magnifier_icon(),
+                            QLineEdit.ActionPosition.LeadingPosition)
     # The clear button Qt just made is a plain tool button child with the
     # arrow cursor and no hover state (measured 2 September 2026: 0
     # pixels changed under a synthetic hover). It gets the hand through
     # the registry like every other clickable thing, and its glyph
     # follows the cursor - see _ClearButtonHighlight.
-    button = field.findChild(QToolButton)
+    #
+    # **Found by its action, not by being first.** The owner, 4 September
+    # 2026: "the x in the search videos or ch in the ep/ch list make it
+    # has hover and finger-pointing cursor like the global search" - and
+    # the global search's own x had neither, measured that day with the
+    # pointer on it: cursor ARROW, **0 pixels changed**. `findChild`
+    # returns the first QToolButton in child order, and after the line
+    # above that is the *magnifier's* button, not the clear one. So every
+    # field in the app had been dressing its leading icon - which is not
+    # clickable - and leaving the x plain. The magnifier's button is the
+    # one whose defaultAction is the action just added; the other is the
+    # clear button, whatever order they happen to be in.
+    button = None
+    for child in field.findChildren(QToolButton):
+        if child.defaultAction() is not glass:
+            button = child
+            break
     if button is not None:
         action = button.defaultAction()
         (action if action is not None else button).setIcon(clear_icon())

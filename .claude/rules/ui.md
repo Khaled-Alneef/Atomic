@@ -123,3 +123,112 @@ the change. Save tracing/profiling/multi-pass digging for a genuinely
 unknown cause or a critical bug (broken functionality, data-loss risk) -
 guessing there is worse than taking the time. If unsure which case
 applies, say so.
+
+## The search suggestion panel is patched twice, and the second one wins
+
+`helpers/global_search_visual_patch` rebuilds the panel, and
+`helpers/global_search_list_polish_patch` then **replaces** several of
+its methods outright - `__init__`, `set_query`, `_on_discover_ready`,
+`closeEvent`, `mousePressEvent`. It installs after, so a change made in
+the visual patch's `on_discover_ready` never runs.
+
+Caught on a screenshot, 3 September 2026: cast rows added to the panel
+drew through the polish patch's generic title path instead, wearing
+"Watch - Person" as their meta and carrying a payload that would have
+sent a click to a details page for a person. The fix is one
+implementation both call - `visual.add_face_row` - not a copy in each.
+This is `.claude/rules/testing.md`'s "a wrapper that replaced the
+patched function outright, so the fix had never run", and the way to
+catch it is to photograph the thing rather than read the diff.
+
+## A rect read inside a `content-visibility` card is not free
+
+Measured 3 September 2026, chasing "the cards transition while
+fold/unfold the sidebar on Manhwa and Movies still not the same as
+series and anime".
+
+`.gc` carries `content-visibility: auto`, so Chromium skips the layout
+of every card off screen. Asking for a rectangle **inside** one - the
+`<img>`, say - forces that skipped subtree to be laid out. `sweepLazy`
+did exactly that, for every pending picture, and it runs on every
+scroll and at the end of every fold (`endFold` dispatches a resize).
+
+On a scrolled Movies or Manhwa page that is 850 pending pictures.
+Measured against 900 cards with layout dirty:
+
+    reading the card's rect     median 0.6ms   worst 1.0ms
+    reading the image's rect    median 0.8ms   worst 890.8ms
+
+**The 890ms is a one-off and the control is what proved it** - two more
+passes of the same pair measured 0.7-1.8ms for both, because Chromium
+had by then realised the 900 subtrees. It is still a real freeze, and it
+lands the first time a freshly-scrolled page is folded or scrolled,
+which is precisely where he saw it. Series has five pending pictures and
+never pays it at all.
+
+So: read the rectangle of the **contained** element, never of something
+inside it. The card is what `content-visibility` is on, its own rect
+costs nothing, and the picture is centred in it - which is all a
+"is this near the viewport" test needs.
+
+The same reasoning removed the fold's own scan: `hostFold` read a rect
+for every card in the grid, twice, to find the ~45 that move. A grid is
+row-major so `top` never decreases, and the visible band is found by
+bisection - ten reads instead of nine hundred. His log measured what it
+had cost: prep 0.8ms at 31 cards against 3.6ms at 917, with the same 45
+cards moving on both.
+
+## The Qt reader's targets are image pixels, not logical ones
+
+Measured 4 September 2026, after "the manga still has no size and
+quality as before in Qt" - the second report in a row about the same
+thing, and the first fix had matched Qt's *numbers* while getting their
+*units* wrong.
+
+`windows/reader.py`'s chain: `_on_page_width` picks a target
+(MEDIUM_TARGET_WIDTH manga 1100 / manhwa 762 / manhua 762,
+STRIP_TARGET_WIDTH 762, or the scan's own width capped to the window),
+`_decode_page_job` scales the page to that many **pixels**, and
+`_tagged` hands the pixmap to Qt with the screen's device ratio on it.
+So a 1100-pixel page occupies 1100/1.25 = **880 logical pixels** on his
+panel and is blitted one image pixel to one screen pixel.
+
+Reading those numbers as CSS pixels makes every page 1.25x too wide
+*and* upscaled by the compositor on top - bigger and softer, which were
+his two words. Dividing by the device ratio is what makes it Qt:
+
+    Kingdom 883   1326px scan -> 1326 image px -> 1061 CSS (1:1)
+    Kingdom 885    829px scan -> 1100 image px ->  880 CSS
+    Eternal Sup.   800px strip ->  762 image px ->  610 CSS (a downscale)
+    any spread                 -> the column, as reader._show fits it
+
+The other half is **who resamples**. Qt resampled once, in the decode,
+with SmoothTransformation. A browser handed the scan at its own
+resolution and a CSS width resamples on every paint with the compositor's
+filter, which on line art is what softens the inking. So the reader asks
+the proxy for the page at its drawn width in device pixels
+(`?w=<px>&exact=1`, web/server._scaled) and draws the answer 1:1 - Qt's
+pipeline, and measurably so: served pixel count equals device pixel count
+on every page of the four chapters checked.
+
+Two consequences worth knowing: the served image must not feed back into
+the sizing (`_natW/_natH` pin each page's *own* size, or the next pass
+reads its own last answer and the page walks), and `_scaled` needs an
+`exact` mode - the card path's "already about the right size, leave it"
+shortcut would skip precisely the resample this depends on.
+
+## Two CSS traps this app has now paid for
+
+**`background` shorthand on a styled checkbox.** A genre tick drawn with
+`appearance: none` took its unchecked colours fine and refused the
+checked ones - the element matched `:checked`, `--accent` resolved on it,
+and the computed background stayed the ground colour *even when set
+inline*. The shorthand resets `background-image` with it, and Chromium
+keeps a checkbox's own rendering in that slot under `appearance: none`.
+Longhand `background-color` works. Measured 4 September 2026.
+
+**`accent-color` is not "make the checkbox match the theme".** It tints
+the tick's fill when the box is on; the box itself stays the platform's
+white square, which on this ground is the brightest thing on the page.
+The owner asked for the theme colour and that property does not give it -
+the control has to be taken out of the paint and drawn.

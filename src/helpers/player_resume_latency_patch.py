@@ -60,6 +60,12 @@ POLL_MS = 120
 # leave a timer running for the life of the page.
 SEAT_GIVE_UP_S = 180.0
 
+# How long a file opened *at* the seat has to produce a picture before
+# it is re-opened from the head. Generous enough for a slow host to
+# answer a range request and short enough that a viewer is not staring
+# at black - see _arm_seat_watchdog.
+SEAT_WATCHDOG_S = 12.0
+
 
 def _patch(module):
     key = ("resume-latency", id(module))
@@ -116,6 +122,163 @@ def _patch(module):
             return not torrent._start_pieces()
         except Exception:
             return False
+
+    def _seat_reachable_now(self, stream, seat):
+        """Can this file be *opened* at the seat, right now?
+
+        Deliberately not `_seat_data_ready`, and the difference is the
+        default. That function answers the poll's question - "is there
+        anything left to wait for" - and says yes when there is no
+        torrent behind the url at all, because nothing can be waited
+        for. Here the question is the opposite way round: opening at the
+        seat is only safe when the bytes are *known* to be there, so
+        anything unproven answers no and the file opens from the head as
+        it did before.
+
+        Measured 3 September 2026 with a stub page driving this method:
+        the first version called `_seat_data_ready` and a torrent the
+        engine had never heard of opened at the seat - the one case the
+        module exists to prevent. In a real play `streams.prepare` has
+        already added the torrent, so the engine not holding it means
+        something is wrong or racing, and that is not a moment to
+        gamble a black screen on.
+
+        Two cases are safe and both are proven, not assumed:
+
+          * **a stream this app is not serving itself** - a debrid link,
+            an addon's HTTP stream, an HLS playlist. There is no engine
+            behind it, nothing to fill, and range seeking is a request:
+            `player._load_into_mpv`'s own note measured `start=8.05`
+            opening at time-pos 8.050 against a deliberately slow
+            source.
+          * **an engine stream whose resume band is already on disk** -
+            an episode played before, or a swarm that filled while the
+            source list was being drawn. `_start_pieces()` empty is
+            exactly that, and it is the same test the poll uses to
+            decide the seek can succeed.
+
+        **Told apart by `kind`, never by `info_hash`, and that is not a
+        detail.** streams._prepare_with_debrid keeps the hash *for
+        identity* - its own docstring says so - while handing back
+        `kind="direct"` and a plain HTTPS URL. A guard reading the hash
+        therefore sent every debrid play down the slow path, and his own
+        log says `debrid: on - releases it has cached play over HTTPS`,
+        so that is most of his plays: exactly the case he was reporting.
+        `kind="torrent"` with `engine="atomic"` is what
+        streams._prepare_with_own_engine hands back, and only that is
+        served out of the piece store.
+        """
+        stream = stream or {}
+        kind = str(stream.get("kind") or "").strip().lower()
+        engine = str(stream.get("engine") or "").strip().lower()
+        if kind != "torrent" and engine != "atomic":
+            return True
+        info_hash = str(stream.get("info_hash") or "").strip().lower()
+        if not info_hash:
+            return False          # an engine stream with no hash: unproven
+        try:
+            from helpers import torrent_engine
+            torrent = getattr(torrent_engine, "_torrents", {}).get(info_hash)
+            if torrent is None:
+                return False
+            offset = getattr(torrent, "start_offset", None)
+            if offset is None:
+                return False
+            # **`_start_pieces()` being empty is not proof.** Measured 4
+            # September 2026, after the owner reported that reloading a
+            # source from inside the player "hides the upper bar and
+            # freeze": that function returns [] both when the band has
+            # landed *and* when it was never armed
+            # (`if self.start_offset is None or not self.start_armed:
+            # return []`), and a reload re-hands the torrent to the
+            # engine - so a `start_offset` left over from the previous
+            # play with `start_armed` still false read as "the bytes are
+            # here". mpv was then opened at a seat whose pieces did not
+            # exist, which is the blocking read this whole module exists
+            # to prevent, and the freeze he saw.
+            #
+            # So the pieces are asked for directly. `have()` on the
+            # piece holding the seat and on the one after it is the
+            # cheapest honest question: a demuxer needs a run past the
+            # offset, not just the byte at it, and two pieces is 4MB.
+            if not getattr(torrent, "start_armed", False):
+                return False
+            first = torrent.piece_at(int(offset))
+            if not all(torrent.have(p) for p in (first, first + 1)):
+                return False
+            return not torrent._start_pieces()
+        except Exception:
+            return False
+
+    def _arm_seat_watchdog(self, stream, resume_at):
+        """If opening at the seat produces no picture, go back to the head.
+
+        **A net under the fast path, not a second mechanism.** Opening
+        with `start=` is safe for the two cases `_seat_reachable_now`
+        proves - a stream this app does not serve, and an engine stream
+        whose band is on disk - but "proved" is about the bytes, and a
+        host can still stall, refuse a range, or hand back something mpv
+        cannot demux from the middle. The failure mode that costs is the
+        one this whole module exists for: a viewer left on black under a
+        message that cannot come true.
+
+        So the picture is given SEAT_WATCHDOG_S to appear, and if it has
+        not, the file is re-opened from the head and the ordinary poll
+        takes over - which is exactly the path this would have taken
+        without the fast route. Cancelled the moment a frame lands, so
+        the ordinary case pays one timer.
+        """
+        _cancel_watchdog(self)
+        run = self._run
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(int(SEAT_WATCHDOG_S * 1000))
+
+        def bite():
+            if getattr(self, "_closing", False) or self._run != run:
+                return
+            if not getattr(self, "_awaiting_first_frame", True):
+                return                    # a frame arrived; nothing to do
+            try:
+                from helpers import logs
+                logs.info("seat: no picture at the seat in "
+                          f"{SEAT_WATCHDOG_S:.0f}s; reopening from the head")
+            except Exception:
+                pass
+            _load_from_head(self, stream, resume_at)
+
+        timer.timeout.connect(bite)
+        self._atomic_seat_watchdog = timer
+        timer.start()
+
+    def _cancel_watchdog(self):
+        timer = getattr(self, "_atomic_seat_watchdog", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
+        self._atomic_seat_watchdog = None
+
+    def _load_from_head(self, stream, resume_at):
+        """The slow path, taken deliberately: open unseated and poll."""
+        try:
+            seat = self._prime_seat(resume_at)[0]
+        except Exception:
+            seat = None
+        if not seat:
+            return
+        sentinel = object()
+        prior = self.__dict__.get("_prime_seat", sentinel)
+        self._prime_seat = lambda _resume_at=None: (None, None)
+        try:
+            old_load(self, stream, resume_at)
+        finally:
+            if prior is sentinel:
+                self.__dict__.pop("_prime_seat", None)
+            else:
+                self.__dict__["_prime_seat"] = prior
+        _begin_seat_poll(self, stream, seat)
 
     def _begin_seat_poll(self, stream, seat):
         _stop_poll(self)
@@ -206,6 +369,45 @@ def _patch(module):
             _stop_poll(self)
             return old_load(self, stream, resume_at)
 
+        # **Open at the seat when the seat is already reachable.** The
+        # owner, 3 September 2026: *"when I play Reacher it takes a while
+        # to skip to the progress point, make it start from the stopped
+        # point directly."*
+        #
+        # He is right, and this module was doing it to him on purpose in
+        # a case where it buys nothing. What it exists for is written at
+        # the top: a torrent whose bytes at the seat do **not exist yet**
+        # cannot be opened with `start=`, because mpv blocks on a stream
+        # read tens of seconds long, gives up, and restarts at the head
+        # under a "Skipping to 4:00..." that can never come true. That is
+        # a real measurement and it stands.
+        #
+        # It was applied to every resume regardless. Two of them never
+        # needed it:
+        #
+        #   * **a direct URL** - a debrid link, an addon's HTTP stream -
+        #     has no engine behind it and nothing to wait for. HTTP range
+        #     seeking is a request, so `start=` is exact and immediate,
+        #     which is what player._load_into_mpv's own note measured
+        #     (start=8.05 opened at time-pos 8.050 against a deliberately
+        #     slow source);
+        #   * **a torrent whose resume band is already on disk** - an
+        #     episode played before, or a swarm that filled while the
+        #     sources were being listed. `_seat_data_ready` is the exact
+        #     question and it is asked here, before the load, rather than
+        #     only from the poll afterwards.
+        #
+        # In both, going through the head first means watching the
+        # opening of an episode he has already seen and then a skip - the
+        # "takes a while to skip to the progress point" he is describing.
+        # Where the band genuinely is not there, nothing changes: the
+        # file opens from the head and the seat is applied when it lands.
+        if _seat_reachable_now(self, stream, seat):
+            _stop_poll(self)
+            result = old_load(self, stream, resume_at)
+            _arm_seat_watchdog(self, stream, resume_at)
+            return result
+
         # `old_load` reads the seat back out of `_prime_seat` to decide
         # whether to open with mpv's blocking `start=`. Suppress that one
         # read so the file opens from the head; the engine already has
@@ -227,6 +429,7 @@ def _patch(module):
 
     def close_player(self):
         _stop_poll(self)
+        _cancel_watchdog(self)
         return old_close(self)
 
     Page._load_into_mpv = load_into_mpv

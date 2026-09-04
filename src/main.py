@@ -5599,6 +5599,34 @@ class MainWindow(QMainWindow):
         self._sync_nav_highlight(page_name)
 
         old_page = self._current_page
+        # **The route before the page, so the view is aimed once.** A
+        # route naming a section ("series:cat_movies") built the page
+        # first - whose view starts on the class's own default, `series`
+        # for Watch and `manga` for Read - and only then called
+        # set_active_section, which pointed the same view at `movies`.
+        #
+        # Measured 3 September 2026, and the measurement is the reason
+        # this comment does not claim a speed-up: a control run with
+        # this handoff switched off drew **one** page per arrival either
+        # way (app.js sayRender in atomic.log), because navigating to a
+        # URL that differs in nothing is a same-document navigation and
+        # fires no hashchange. What this removes is a redundant Navigate
+        # into a load that is still in flight; see
+        # web_pages.set_active_section for the rest of it.
+        #
+        # A module-level handoff rather than a constructor argument:
+        # every page in PAGES is built as `Cls(self)` and giving one of
+        # them a different signature is the kind of difference that
+        # rots. It is consumed by the next _WebPage built and cleared
+        # whether or not it was wanted, and construction here is
+        # synchronous on this thread, so there is no window in which it
+        # could be picked up by the wrong page.
+        if _WEB_PAGES:
+            try:
+                from windows import web_pages as _web
+                _web.start_at(route_section(page_name) and page_name)
+            except Exception:
+                pass
         new_page = PAGES[_page_name(page_name)](self)
         self._apply_route_section(new_page, page_name)
         new_page.setParent(self.container)

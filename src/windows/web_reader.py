@@ -157,8 +157,15 @@ class WebReader(QWidget):
     def _route_for(self, entry, chapter_index):
         """Which page this shell shows. Overridden by WebGenreBrowse."""
         entry_id = _entry_id_for(entry)
-        return (f"read/{entry_id}/{int(chapter_index)}"
-                if chapter_index is not None else f"chapters/{entry_id}")
+        # **Always a chapter, never a list.** The owner, 4 September
+        # 2026: the reader's chapter-list page is gone ("REMOVE IT
+        # ENTIRELY AND REMOVE ITS PAGE"), so an open with nothing to
+        # resume starts at index 0 - the newest chapter, the list being
+        # newest-first - rather than at a route that no longer exists.
+        # Every chapter is still one press away from the dropdown in the
+        # reader's own top bar, and from the details page's list.
+        index = int(chapter_index) if chapter_index is not None else 0
+        return f"read/{entry_id}/{index}"
 
     def follow(self, host):
         """Cover the host exactly, and keep covering it."""
@@ -179,9 +186,92 @@ class WebReader(QWidget):
             self.close_reader()
         elif action == "key":
             self._app_key(str(body.get("key") or ""))
+        elif action == "diag":
+            # **The reader's own numbers reach the log from here.** The
+            # page has written a "reader sized" line since 4 September
+            # 2026 (app.js, where `single` is decided) and nothing was
+            # listening: this shell handles four actions and drops the
+            # rest, so three rounds of "the size and quality are wrong"
+            # were argued with no measurement on either side.
+            logs.info("web reader: " + ", ".join(
+                f"{k}={v}" for k, v in body.items() if k != "action"))
         elif action == "browser":
             self._open_in_browser(str(body.get("id") or ""),
                                   body.get("i") or 0)
+        elif action == "open":
+            self._open_card(body)
+
+    def _open_card(self, body):
+        """A card clicked on a page drawn in this shell.
+
+        **The owner, 3 September 2026: "Also, the cards do not take me to
+        the ep list when I click on them they do nothing."** This shell
+        was written for the reader, where the only things to click are
+        its own controls, and it handled `close`, `key` and `browser`
+        and dropped everything else. WebGenreBrowse and WebCastBrowse
+        borrow it to draw a *grid*, and app.js's gridCard sends
+        `{action:'open', ...}` like every other card in the app - so
+        every click on a genre or cast page reached this method-that-was-
+        not-there and was thrown away. The page was never broken; the
+        message had nowhere to go.
+
+        A face opens that person's own page in a shell of its own (the
+        cast row on Discover and the search results carry faces too);
+        anything else opens the details page over this one, which is
+        where the episode or chapter list lives.
+        """
+        title = str(body.get("title") or "")
+        if str(body.get("kind") or "") == "person":
+            if title:
+                open_cast_browse(self.window(), title)
+            return
+        from windows import details
+        from windows.web_pages import _find, overlay_opened
+        entry = _find(str(body.get("id") or ""), title, body.get("type"))
+        if entry is None:
+            if not title:
+                return
+            # A catalogue row is not in the library, so there is nothing
+            # to look up - the details page takes the row itself, the
+            # same transient-entry road a Discover card takes. Through
+            # web_pages._transient, so it carries its picture: without
+            # one the details page opens on flat black, which is exactly
+            # what he reported for these two pages.
+            from windows.web_pages import _transient
+            entry = _transient(body)
+        try:
+            # **On this shell's own host, and above it.** The shell takes
+            # `immersive_host` (the central widget) while the details
+            # page's own host is `overlay_host`, the row under the app's
+            # bar - and that row is a child of the central widget, so a
+            # details page opened the ordinary way was a sibling
+            # *underneath* this shell. It opened every time and could
+            # only be seen by closing the page it opened from, which is
+            # exactly what the owner described.
+            host = self.parentWidget() or _overlay_host(self.window())
+            page = details.open_details(self.window(), entry, host=host)
+            page.raise_()
+            # And the view goes down with it: this shell's view is a
+            # native child window, and on Windows a native child paints
+            # above every non-native sibling whatever raise_() was told
+            # (.claude/rules/ui.md). Raising the details page is not
+            # enough on its own; the web page has to stop painting.
+            self.view.suppress(True)
+            try:
+                page.destroyed.connect(self._card_closed)
+            except Exception:
+                self._card_closed()
+            overlay_opened(page)
+        except Exception:
+            logs.exception("Opening a title from a genre or cast page failed")
+
+    def _card_closed(self, *_args):
+        """The details page opened from a card has gone - draw again."""
+        try:
+            if self.isVisible():
+                self.view.suppress(False)
+        except RuntimeError:
+            pass
 
     def _app_key(self, name):
         """Full screen, from the reader's own bar or its F key.

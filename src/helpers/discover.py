@@ -69,6 +69,18 @@ _MANGADEX_MAX_LIMIT = 100
 # "anime" is not a Cinemeta type - it is series filtered by genre (see
 # _video_catalog_urls) - but the card still has to say "Anime".
 _KIND_TYPES = {"anime": "series", "series": "series", "movie": "movie"}
+# How many extra catalog pages a genre applied to the *rows* may walk -
+# see discover_video's `local_genre`. Four pages is 200 rows scanned,
+# which on the owner's connection is about a second.
+LOCAL_GENRE_PAGES = 4
+# ...and how long that walk may take, whatever it has found. Measured 4
+# September 2026 on the owner's connection: Romance walked all four
+# pages and the whole genre answer took **17.8s**, which is nothing like
+# rule 7's second - a Cinemeta page is 0.3-10s depending on whether its
+# CDN holds it. Four seconds returns what has been found and stops,
+# which is the partial answer that rule asks for; Comedy fills its 50
+# inside it and Horror runs the catalog out.
+LOCAL_GENRE_BUDGET_S = 4.0
 _KIND_LABELS = {"anime": "Anime", "series": "Series", "movie": "Movie"}
 
 # Unprompted browse grid, so it stays filtered: measured, the unfiltered
@@ -377,7 +389,7 @@ def _video_row(meta: dict, label: str):
 
 
 def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
-                   genre: str = "", skip: int = 0) -> list:
+                   genre: str = "", skip: int = 0, reached=None) -> list:
     """Popular or searched titles for one of the video trackers.
 
     `kind` is "anime", "series" or "movie". An empty `query` returns the
@@ -387,6 +399,11 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
     any failure, an unknown kind, or nothing found; an unknown genre is
     a fast empty answer, never an unfiltered list (measured, see
     _video_catalog_urls).
+
+    `reached` is an optional dict this fills with `{"skip": n}` - how far
+    into the catalog the call actually read, which for a genre applied to
+    the *rows* is much further than the number of rows it answers with.
+    Its caller needs that to page: see _genre_video.
 
     `skip` pages the browse catalog past its first rows - the category
     pages' load-on-scroll. Cinemeta's standard addon paging, measured
@@ -412,6 +429,9 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
 
     query = (query or "").strip()
     genre = (genre or "").strip()
+    # Set when the genre has to be applied to the rows instead of to the
+    # catalog - see the `elif genre` branch below.
+    local_genre = ""
     label = _KIND_LABELS[kind]
     skip = max(0, int(skip or 0))
 
@@ -423,8 +443,28 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
         encoded = urllib.parse.quote(query)
         urls = [f"{CINEMETA_URL}/catalog/{content_type}/top/search={encoded}.json"]
     elif genre:
-        urls = [f"{CINEMETA_URL}/catalog/{content_type}/top/"
-                f"genre={urllib.parse.quote(genre)}.json"]
+        # **Cinemeta takes one genre per catalog, and anime *is* a
+        # genre here.** _video_catalog_urls explains why the anime
+        # section asks for `genre=Anime` on the series catalog: there is
+        # no anime content type, and the distinction exists only
+        # server-side. So "anime AND romance" cannot be asked for at
+        # all - and asking `genre=Romance` on the series catalog was
+        # answering with plain live-action series that _KIND_LABELS then
+        # stamped "Anime". Measured 4 September 2026 on the Anime page's
+        # Romance tick: 50 rows, every one labelled Anime, headed by Off
+        # Campus, My Life with the Walter Boys and Grey's Anatomy.
+        #
+        # So the anime catalog is asked and the wanted genre is applied
+        # to the rows themselves. Their `genres` are real (a romance
+        # anime lists Romance), and a row that names nothing is dropped
+        # rather than guessed at - a wrong row on a genre page is worse
+        # than a short one.
+        if kind == "anime" and genre.strip().lower() != "anime":
+            urls = _video_catalog_urls(kind, content_type)
+            local_genre = genre
+        else:
+            urls = [f"{CINEMETA_URL}/catalog/{content_type}/top/"
+                    f"genre={urllib.parse.quote(genre)}.json"]
     else:
         urls = _video_catalog_urls(kind, content_type)
     if skip and not query:
@@ -446,14 +486,55 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
         if kind == "anime" and not query and index == len(urls) - 1 and len(urls) > 1:
             metas = [m for m in metas if _is_animated(m)]
         rows = [row for row in (_video_row(m, label) for m in metas) if row]
+        if local_genre:
+            wanted = local_genre.strip().lower()
+
+            def _wanted(batch):
+                return [r for r in batch
+                        if any(str(g).strip().lower() == wanted
+                               for g in (r.get("genres") or ()))]
+
+            rows = _wanted(rows)
+            # **A page of the anime catalog holds few of any one genre.**
+            # Measured 4 September 2026: one page of 49 answered a single
+            # Romance title. Cinemeta pages at 50, so a handful of pages
+            # is walked until there are enough or the catalog runs out -
+            # bounded, because this is a tick the user just pressed and a
+            # thin answer is better than a slow one.
+            page = skip
+            walk_until = time.monotonic() + LOCAL_GENRE_BUDGET_S
+            for _ in range(LOCAL_GENRE_PAGES):
+                _note_reached(reached, page + (len(metas) or 50))
+                if len(rows) >= limit or time.monotonic() > walk_until:
+                    break
+                if net.step_timeout(deadline, 1.0) is None:
+                    break
+                page += len(metas) or 50
+                more = _get_json(
+                    (url[:-5] + f"&skip={page}.json" if "/top/" in url
+                     else url[:-5] + f"/skip={page}.json"),
+                    deadline, VIDEO_TIMEOUT)
+                metas = (more or {}).get("metas") or []
+                if not metas:
+                    break
+                rows += _wanted(
+                    [r for r in (_video_row(m, label) for m in metas) if r])
         # A searched anime section is a plain series search (see the
         # docstring), so a second witness separates anime from the
         # live-action rows sharing the results - see _anime_confirmed.
         if witness is not None and rows:
             rows = _anime_confirmed(rows, query, witness=witness)
+        if not local_genre:
+            _note_reached(reached, skip + len(metas))
         if rows:
             return rows[:limit]
     return []
+
+
+def _note_reached(store, page):
+    """Record the furthest catalog row a call has read past."""
+    if isinstance(store, dict):
+        store["skip"] = max(int(store.get("skip") or 0), int(page or 0))
 
 
 def _reading_title(attributes: dict) -> str:

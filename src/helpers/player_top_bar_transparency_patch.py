@@ -106,6 +106,47 @@ def _clip_live_bar(player, page) -> None:
         pass
 
 
+def _sink_bar(player, page) -> None:
+    """Take the bar out of the hit test as well as out of sight.
+
+    **The owner, 3 September 2026:** *"the vid player sometimes hide the
+    upper bar but still I can click on the button places!!!!"*
+
+    The mask this module sets is what makes that possible. Once video is
+    live the bar's HWND is clipped to the union of its controls' rects,
+    so the empty full-width rectangle stops covering the picture - and a
+    mask on a native child is `SetWindowRgn`, which clips **painting and
+    hit-testing together**. That is right while the bar is up. It is
+    wrong the moment `_hide_controls` puts the bar away, because the
+    region is a property of the window and survives the hide: anything
+    that shows that HWND again - a layout pass, a screen change, Qt
+    recreating the native child - brings back a bar that paints only
+    its controls, over a picture, where nothing looks like a bar.
+
+    So hiding drops the region and hides the handle explicitly rather
+    than trusting the widget-level hide alone. `_wake_controls` already
+    recomputes the mask on the way back up (see the patch below), so
+    nothing is lost by clearing it here.
+    """
+    bar = getattr(page, "top_bar", None)
+    if bar is None:
+        return
+    try:
+        # **The region only. Qt owns whether the window is up.** The
+        # first version also called ShowWindow(SW_HIDE) on the handle as
+        # belt and braces, and belt and braces on a native child Qt is
+        # also managing is how a bar ends up stuck down - the owner, 4
+        # September 2026: reloading from inside the player "hides the
+        # upper bar and freeze". Dropping the region is the part that
+        # actually fixes the click-through, because a region set with
+        # SetWindowRgn survives the hide and comes back with the window;
+        # hiding the handle behind Qt's back fixes nothing it had not
+        # already done.
+        bar.clearMask()
+    except (AttributeError, RuntimeError, OSError):
+        pass
+
+
 def _patch(player) -> None:
     global _PATCHED
     if _PATCHED:
@@ -116,6 +157,7 @@ def _patch(player) -> None:
     old_build = Page._build_top_bar
     old_layout = Page._layout_overlays
     old_wake = Page._wake_controls
+    old_hide = Page._hide_controls
 
     def build_top_bar(self):
         old_build(self)
@@ -137,9 +179,20 @@ def _patch(player) -> None:
         _clip_live_bar(player, self)
         return result
 
+    def hide_controls(self):
+        result = old_hide(self)
+        # Only when the hide actually happened - _hide_controls returns
+        # early while the pointer is on the bar, the episode list is up,
+        # a status is showing, or playback is paused.
+        bar = getattr(self, "top_bar", None)
+        if bar is not None and bar.isHidden():
+            _sink_bar(player, self)
+        return result
+
     Page._build_top_bar = build_top_bar
     Page._layout_overlays = layout_overlays
     Page._wake_controls = wake_controls
+    Page._hide_controls = hide_controls
 
 
 def install() -> None:

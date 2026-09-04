@@ -191,6 +191,29 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
   content-visibility: auto; contain-intrinsic-size: 300px;
 }
 .card:hover { background: var(--hover); border-color: var(--accent); }
+/* **Saved's select mode** - the owner, 4 September 2026: "add a select
+   button in saved to select multi then delete!". The same 20px box the
+   shelf cards wear (.sc .spick), placed against the poster rather than
+   the card so it sits on the artwork and not in the padding. `position`
+   is set only while picking, so a card outside select mode keeps the
+   containing block it has always had. */
+.card.picking { position: relative; }
+/* The sheet that takes the click while picking - see statusCard for why
+   the card underneath is left wired rather than replaced. */
+.card.picking .spickover { position: absolute; inset: 0; z-index: 3; }
+.card .spick {
+  position: absolute; top: 18px; right: 18px; width: 20px; height: 20px;
+  border-radius: 6px; border: 1px solid var(--text);
+  background: rgba(8, 11, 18, .55);
+}
+.card .spick.on { background: var(--accent); border-color: var(--accent); }
+.card .spick.on::after {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 4px; height: 9px; border: solid var(--bg);
+  border-width: 0 2.5px 2.5px 0;
+  transform: translate(-50%, -64%) rotate(45deg);
+}
+.card.picked img { outline: 2px solid var(--accent); outline-offset: 1px; }
 .card img {
   display: block; width: 160px; height: 216px; margin: 0 auto;
   object-fit: cover; border-radius: 7px; background: #0e131d;
@@ -341,13 +364,36 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .rglyph:hover { background: var(--hover); border-color: var(--border); }
 .rglyph:disabled { opacity: .38; cursor: default; }
 
-/* The jump list, centred on the floor between the two chapter buttons. */
+/* The chapter list, now in the middle of the top bar. */
 .rjump {
   background: var(--surface); color: var(--text); font: inherit;
   font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px;
   padding: 6px 10px; max-width: 560px; cursor: pointer;
 }
 .rjump:hover { border-color: var(--accent); }
+
+/* **Centred on the window, not between the two clusters.** The same
+   reasoning `.rtitle` carried when it held the chapter's number: the
+   left and right groups are different widths, so a centred flex item
+   sits off centre by half their difference (windows/reader says so
+   too). Absolute and translated, so it is centred on the bar however
+   wide either side grows - and unlike the old label it is a control, so
+   it keeps its pointer events. */
+.rbar .rjump.rtitle {
+  position: absolute; left: 50%; right: auto;
+  transform: translateX(-50%);
+  font-weight: 600; text-align: left; padding: 6px 10px;
+  max-width: min(560px, calc(100% - 700px));
+  /* **It is a control now, so it takes the pointer.** The owner, 4
+     September 2026: "make the button in image 1 finger-pointing on
+     hover, and it does not press now!!!". `.rtitle` was a *label* -
+     the chapter's number, centred - and carried `pointer-events: none`
+     so it could never swallow a press meant for the bar behind it.
+     Re-using the class for the dropdown inherited that, which is
+     exactly one property away from a control that cannot be clicked at
+     all. Both halves of his report are this line. */
+  pointer-events: auto; cursor: pointer;
+}
 
 /* **A 30px gutter each side, the site's own.** Madara's reading page
    draws its pages in `.container{max-width:100%;padding:0 30px}`, so a
@@ -381,7 +427,27 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .rbtn.go { background: var(--accent); color: #062521; border-color: var(--accent);
            font-weight: 600; }
 .rbtn.go:hover:not(:disabled) { background: #3fd0bb; color: #062521; }
+/* **The same containment the grid's cards have.** The owner, 4
+   September 2026: "make the scrolling in the reader view exactly the
+   same as in the movies page EXACTLY."
+
+   `.gc` has carried `content-visibility: auto` with `contain: layout
+   paint style` since web_grid was written, and its note says why:
+   without it the compositor re-rasterises everything in the scroller on
+   every frame. A reader page is far larger than a card - a chapter is
+   twenty images 1100 CSS wide and 1600 tall - and it had no containment
+   at all, so every frame of a scroll was re-rasterising pages nobody
+   was looking at. This is that mechanism, on the page instead of the
+   card.
+
+   No `contain-intrinsic-size` is needed: the element already has an
+   explicit width and an `aspect-ratio` below, so its box is determinate
+   without laying its contents out, which is precisely the condition
+   `content-visibility: auto` needs to skip work without the scrollbar
+   jumping. */
 .reader .rpage {
+  content-visibility: auto;
+  contain: layout paint style;
   /* The width is set per page by openChapter.sizePage, from the scan's
      own CSS px capped to this column - this is only the box a page
      occupies before it has arrived, capped the same way (100% is the
@@ -533,6 +599,27 @@ header p.ptitle { margin: 0 0 22px; }
 .selcount { color: var(--dim); font-size: 12.5px; flex: 1; }
 .selall { display: flex; align-items: center; gap: 6px; font-size: 12.5px;
           cursor: pointer; }
+/* **Select All wears the app's checkbox, not Windows'.** The owner, 4
+   September 2026: "make the select all box when clicking select in the
+   games, apps and websites pages also has the same box design as the
+   filter check boxes". It was a bare <input type=checkbox>, so it drew
+   the platform's white square - the brightest thing on this ground, and
+   the exact complaint that took the genre ticks out of the paint on the
+   same day. Same three tokens, same 13px box, same longhand
+   `background-color` (the shorthand resets background-image with it and
+   Chromium keeps a checkbox's own rendering in that slot under
+   `appearance: none`), and the tick itself is the shared rule below. */
+.selall input {
+  appearance: none; -webkit-appearance: none;
+  width: 13px; height: 13px; margin: 0; flex: 0 0 auto;
+  border: 1px solid var(--border); border-radius: 4px;
+  background-color: var(--bg); position: relative; cursor: pointer;
+}
+.selall:hover input { border-color: var(--accent); }
+.selall input:checked {
+  background-color: var(--accent); border-color: var(--accent);
+}
+.selall input:focus-visible { outline: 1px solid var(--accent); }
 .binbtn {
   font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
   font-size: 13px; width: 34px; height: 30px; padding: 0; cursor: pointer;
@@ -578,12 +665,38 @@ header p.ptitle { margin: 0 0 22px; }
 .sc .smissing {
   color: #ff5470; font-weight: 700; font-size: 10.5px; margin-top: 2px;
 }
+/* **The same checkbox the filter uses, on the card's corner.** The
+   owner, 4 September 2026: "in the select mode when a card selected
+   make it also have the square checkbox on its corner and check mark
+   when selected (just like the check box on the filter)". It was a
+   round blob that filled with the accent and carried no tick at all,
+   so "selected" and "hovered" read alike at a glance.
+
+   Square with the same 4px-at-13px corner (6px at 20px), the same three
+   tokens, and the same tick - which is one rule shared with the genre
+   ticks above rather than a second copy of the geometry. Kept on a
+   translucent ground rather than the flat --bg, because this one sits
+   on a picture and has to stay legible over a light cover. */
+/* Dragging a card to reorder it - the one lifted and the one it is
+   about to land on. Faint on purpose: the grid is the thing being read,
+   and a heavy highlight on every dragover is noise. */
+.sc.dragging { opacity: .45; }
+.sc.dropinto .sart { outline: 2px dashed var(--accent); outline-offset: 2px; }
+
 .sc .spick {
   position: absolute; top: 12px; right: 12px; width: 20px; height: 20px;
-  border-radius: 10px; border: 2px solid var(--text);
+  border-radius: 6px; border: 1px solid var(--text);
   background: rgba(8, 11, 18, .55);
 }
 .sc .spick.on { background: var(--accent); border-color: var(--accent); }
+/* The card's tick is the same shape a size up - 20px of box against the
+   filter's 13px - so it is scaled by the same ratio the box was. */
+.sc .spick.on::after {
+  width: 4px; height: 9px; border-width: 0 2.5px 2.5px 0;
+}
+/* Selected reads as selected from across the grid, not only at the
+   corner: the same accent outline a hovered card wears. */
+.sc.picked .sart { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ---- Downloads ---------------------------------------------------- */
 .dlfolder { display: flex; align-items: center; gap: 10px; padding: 0 30px 12px; }
@@ -733,6 +846,23 @@ header p.ptitle { margin: 0 0 22px; }
 }
 .histclear:hover { background: var(--hover); border-color: var(--danger);
                    color: var(--danger); }
+/* **The history row's one-item right-click menu.** The owner, 4
+   September 2026: "make when I right click on any item in the history
+   show a Remove from History button and make it in red". Red is the
+   app's own --danger, the colour widgets' Danger button and the Clear
+   History hover already use - not a literal (theme.py owns the six). */
+.histmenu {
+  position: fixed; z-index: 60;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 5px; box-shadow: 0 12px 30px #0009;
+}
+.histforget {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  font: inherit; font-size: 13px; white-space: nowrap;
+  color: var(--danger); background: transparent; border: 0;
+  border-radius: 7px; padding: 9px 16px;
+}
+.histforget:hover { background: #ff547022; }
 .histlist { padding: 0 30px 24px; }
 .histrow {
   display: flex; align-items: center; gap: 14px;
@@ -769,4 +899,185 @@ header p.ptitle { margin: 0 0 22px; }
 .sc .sart.blank, .sc.square .sart.blank, .gc .p.blank,
 .histart.blank, .schedart.blank, .art img.blank {
   background: var(--hover); border: none;
+}
+
+/* ---- a way out of the genre and cast pages ------------------------
+   The owner, 3 September 2026: "in the same genere/ cast pages there is
+   no back button, add it". Those two routes are drawn inside
+   web_reader's shell, which covers the window whole - the app's own bar
+   is behind it - so this is the only door on screen.
+
+   Sized and shaped like the reader's own chevron (.rglyph, 34px) and
+   sitting on the page heading's line, indented to the grid's 42px so
+   its left edge lines up with the cards and the title under it. */
+header .pback {
+  display: block; width: 34px; height: 34px; margin: 0 0 10px;
+  border-radius: 9px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text);
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+header .pback:hover { border-color: var(--accent); background: var(--hover); }
+/* What the genre and cast pages say while their rows are being fetched -
+   the door above is drawn immediately and this stands in for the count
+   until there is one (see go()). */
+header .pwait { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
+
+/* ---- a face, not a poster -----------------------------------------
+   The Cast row on Discover and on a search (server._cast_section). A
+   person's TMDB portrait is 2:3 like a poster, so the card is the same
+   card - what changes is that the picture is a face, which reads as a
+   face when it is round. The name stays on two lines like every other
+   card's title so a row of faces lines up with the rows above it. */
+.strip.faces .card .art { border-radius: 50%; overflow: hidden; }
+.strip.faces .card img { border-radius: 50%; object-fit: cover; }
+
+/* **An empty number takes no room.** progressInto writes into `.cnum`,
+   `.histmeta` and `.schednum`, which now exist on every card whether or
+   not anything has been marked yet - a card drawn before the first mark
+   had no node to write into, so the first tick showed nothing until the
+   page was rebuilt. Empty, they are not in the layout at all, so an
+   unmarked card looks exactly as it did. */
+.card .cnum:empty, .histmeta:empty, .schednum:empty { display: none; }
+
+/* The Anime / Series / Movies tabs on a genre or cast page. Same pill
+   as the Watch/Read header tabs (.pill2), on their own row under the
+   page name so the count still reads as the line below them. */
+header .btabs { display: flex; gap: 8px; margin: 2px 0 10px; }
+
+/* The filter field on Watch and Read - one control, on the header row
+   opposite the page name, sized like the Sort box on a shelf. */
+.filterrow { display: flex; align-items: center; gap: 10px;
+             padding: 0 42px 10px; }
+.filterrow input {
+  flex: 0 1 320px; height: 32px; padding: 0 10px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px;
+}
+.filterrow input:focus { outline: none; border-color: var(--accent); }
+.filterrow .fcount { color: var(--dim); font-size: 11.5px; }
+
+/* **Sort and Clear All, on the right of the filter row.** The owner, 4
+   September 2026, asked for both: a list that changes the order, and one
+   press that unticks everything. `margin-left: auto` on the first of the
+   pair pushes them and everything after them to the right edge, so the
+   name box and the Saved pills keep the left. */
+.filterrow .sortpick {
+  display: flex; align-items: center; gap: 7px;
+  color: var(--dim); font-size: 11.5px; flex: 0 0 auto;
+}
+.filterrow .sortpick select {
+  background: var(--surface); color: var(--text); font: inherit;
+  font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; cursor: pointer;
+}
+.filterrow .sortpick select:hover { border-color: var(--accent); }
+/* Its own left margin rather than `auto`, so that a page with no Sort
+   control (the reading catalogues still get one, but a future page may
+   not) still finds this at the right-hand end. */
+/* Sort is the only thing on the right-hand end of the always-visible
+   row; Clear All Filters sits at the head of the panel the Filter
+   button opens, which is where its ticks are (the owner's order, 4
+   September 2026). */
+.filterrow .sortpick { margin-left: auto; }
+.filterrow .clearall { flex: 0 0 auto; }
+
+/* The genre ticks under the filter row. A wrapping run of small
+   checkboxes rather than a menu: the page holds a dozen or two, and a
+   reader picking "Romance" wants to see the others beside it. */
+.genrebox { display: flex; flex-wrap: wrap; gap: 6px 10px;
+            padding: 0 42px 12px; max-width: 1100px; }
+.genrebox .gpick {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px 3px 6px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--dim); font-size: 11.5px; cursor: pointer;
+  user-select: none;
+}
+.genrebox .gpick:hover { border-color: var(--accent); }
+.genrebox .gpick.on { color: var(--text); border-color: var(--accent); }
+/* **Drawn, not the platform's.** The owner, 4 September 2026: "make
+   the check box use a color matches the app theme not white."
+   `accent-color` only tints the tick's *fill* when it is on; the box
+   itself stays the system's white square, which on this ground is the
+   brightest thing on the page. So the native control is taken out of
+   the paint entirely (`appearance: none`) and the box is drawn from the
+   same three tokens everything else here uses. */
+.genrebox .gpick input {
+  appearance: none; -webkit-appearance: none;
+  width: 13px; height: 13px; margin: 0; flex: 0 0 auto;
+  border: 1px solid var(--border); border-radius: 4px;
+  /* Longhands, not the `background` shorthand. The shorthand resets
+     background-image with it, and Chromium keeps a checkbox's own
+     rendering in that slot even under `appearance: none` - so the
+     checked rule's shorthand was being applied and then losing the
+     colour again on the state change. Measured 4 September 2026: the
+     box matched `:checked`, `--accent` resolved on the element, and
+     the computed background stayed the ground colour even when set
+     inline. */
+  background-color: var(--bg); position: relative; cursor: pointer;
+}
+.genrebox .gpick:hover input { border-color: var(--accent); }
+.genrebox .gpick input:checked {
+  background-color: var(--accent); border-color: var(--accent);
+}
+/* The tick itself: two strokes of the ground colour, so it reads on the
+   accent whatever the accent is.
+
+   **Centred by construction, not by eye.** The owner, 4 September 2026:
+   "the icon is not in the center of the box in the filter". Measured on
+   the running window that day, the tick sat 3px/1px from the left and
+   right of the 16-device-px box and 5px/2px from its top and bottom -
+   because `left: 4px; top: 1px` places the *unrotated* box and a 45
+   degree tick's ink is nowhere near the middle of that box.
+
+   Where the ink actually is, worked out rather than nudged: for an
+   L-tick of content w by h with a border b, the ink is the right bar
+   (b by h+b) plus the bottom-left remainder (w by b), whose combined
+   centroid sits (dx, dy) from the box centre with dx = dy. Rotating
+   that offset by 45 degrees sends it straight down - the horizontal
+   halves cancel - by dx * sqrt(2). For 3x7 with a 2px border that is
+   1.24px below centre, which is 13.75% of the element's 9px height.
+   So the rotation centre goes that far above the middle: -50% - 13.75%
+   = **-64%**, and the number is the same at any size because the whole
+   construction scales. `content-box` because the file sets border-box
+   globally, and these numbers are content plus border. */
+.genrebox .gpick input:checked::after,
+.selall input:checked::after,
+.sc .spick.on::after {
+  content: ''; position: absolute; box-sizing: content-box;
+  left: 50%; top: 50%;
+  width: 3px; height: 7px; border: solid var(--bg);
+  border-width: 0 2px 2px 0;
+  transform: translate(-50%, -64%) rotate(45deg);
+}
+.genrebox .gpick input:focus-visible { outline: 1px solid var(--accent); }
+
+/* The banner's Save/Remove control carries a Fluent codepoint beside
+   its words, so the glyph needs the icon font while the words keep the
+   app's.
+
+   **Two elements, because one cannot have two fonts.** The owner, 4
+   September 2026: "the icons in the discover page banner are not
+   showing, it is showing some random square instead". This rule used to
+   read `font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", inherit`
+   - and `inherit` is a CSS-wide keyword, legal only as a declaration's
+   whole value. In a font list it makes the declaration invalid, so
+   Chromium threw the **entire rule** away and the button drew in Segoe
+   UI, where U+E710 is an unassigned private-use codepoint: a tofu box.
+   Photographed on the running window, which is the only way this was
+   ever going to be caught (rules/ui.md) - the CSS parses "successfully"
+   and the fallback chain looks reasonable in the file.
+
+   So the codepoint goes in its own span with the icon font on it, and
+   the button keeps the app's. */
+.hero .act .gi {
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 13px; line-height: 1; margin-right: 7px;
+}
+/* Saved and hovered: the press would remove it, and the button says so
+   in the one colour this app uses for that. */
+.hero .act.danger {
+  background: var(--danger); border-color: var(--danger); color: #2a0710;
+  font-weight: 600;
 }

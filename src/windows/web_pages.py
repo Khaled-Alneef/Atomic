@@ -84,6 +84,32 @@ def _suppress_all(on):
             _live_pages.remove(page)     # that page is gone
 
 
+# **Which route the next web page built should open on.** Set by
+# main._show_page immediately before it constructs the page, consumed by
+# the first _WebPage built after it, and cleared either way.
+#
+# It exists because the route is known before the page is and the view
+# is created inside __init__: without it a page whose route names a
+# section loaded its class default first (`series` for Watch, `manga`
+# for Read) and was then pointed at the real route by
+# set_active_section - two document loads for Movies, Anime, Manhwa and
+# Manhua, one for Series and Manga. PyQt refuses an instance attribute
+# assigned before QWidget.__init__ has run (windows/web_reader carries
+# the same note), which is why this is not simply passed in.
+_START_ROUTE = None
+
+
+def start_at(route):
+    global _START_ROUTE
+    _START_ROUTE = str(route or "") or None
+
+
+def _take_start_route():
+    global _START_ROUTE
+    route, _START_ROUTE = _START_ROUTE, None
+    return route
+
+
 def base_url():
     global _server, _base
     if _server is None:
@@ -110,6 +136,24 @@ class _WebPage(GlassPage):
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
+        # The route this page is being opened for, if the window named
+        # one - see start_at. Honoured only when this class actually
+        # serves that section, so a handoff meant for a tracker page
+        # cannot point Home at #movies.
+        wanted = _take_start_route()
+        if wanted:
+            try:
+                from helpers.nav_config import route_section
+                section = route_section(wanted)
+                # getattr, because only WebTrackerPage has sections -
+                # Home, Discover and the shelves simply ignore a handoff
+                # that is not theirs.
+                route = getattr(self, "SECTION_ROUTES", {}).get(
+                    str(section or ""), "")
+                if route:
+                    self.ROUTE = route
+            except Exception:
+                logs.exception("could not open a web page on its own route")
         # **Geometry, not a layout.** Measured 1 September 2026: on the
         # animated page swap the page itself came out (0, 0, 1714, 1001)
         # while the view inside it stayed 94x29 - main grabs a pixmap of
@@ -156,17 +200,35 @@ class _WebPage(GlassPage):
     # putting the view back at the top. That is "the watch and read
     # pages do not load when scrolling down", 2 September 2026, and it
     # was this timer undoing the load rather than the load failing.
-    _WATCHED_FILES = ("history.json",)
+    # **The three shelf files are here for Home's sake.** The owner, 4
+    # September 2026: "make the apps and games in the main pages when
+    # opened become the first in sort in the main page after ~1.5 sec".
+    # Launching writes `last_played`/`last_used` and Home now orders by
+    # it (server._recent_first); this is the half that makes the page
+    # notice, at the 150ms tick below. Still only Home redraws - the
+    # shelves override both of these with their own file and route, and
+    # every other page ignores them.
+    _WATCHED_FILES = ("history.json", "games.json", "apps.json",
+                      "websites.json")
+    # **What a card's *look* depends on, which is more than the marks.**
+    # The numbers come from history.json; the accent on a catalogue
+    # card's meta line comes from series.json/tracker.json (is this
+    # title in the library). Both are patched in place by the page, so
+    # unlike _WATCHED_FILES - which triggers a full redraw and therefore
+    # may only be history.json, see the note above it - watching these
+    # two costs nothing when a background lookup touches them: the page
+    # re-reads /api/progress, finds the same stamp, and stops.
+    _LIVE_FILES = ("history.json", "series.json", "tracker.json")
     # Which pages redraw themselves on a mark. Home is the one he named,
     # and the one with nothing to lose from a redraw - a catalogue page
     # holds pages of scrolled-in rows and a shelf holds a sort and a
     # selection.
     _WATCH_DATA_ROUTES = ("home",)
 
-    def _data_stamp(self):
-        """A cheap fingerprint of everything this page reads."""
+    def _data_stamp(self, files=None):
+        """A cheap fingerprint of the files named."""
         marks = []
-        for name in self._WATCHED_FILES:
+        for name in (files or self._WATCHED_FILES):
             try:
                 marks.append(int((storage.DATA_DIR / name).stat().st_mtime_ns))
             except OSError:
@@ -195,11 +257,60 @@ class _WebPage(GlassPage):
             # is nothing against the 150ms it already spends here.
             covered = (not self.isVisible() or overlay_open()
                        or _covered(self))
-            if not covered and str(self.ROUTE) in self._WATCH_DATA_ROUTES:
+            # **Told once whenever this page comes back into view, not
+            # only when a timestamp moved.** The owner, 3 September
+            # 2026: "number 9 is not showing live directly when I
+            # change". The stamp comparison alone cannot see it - this
+            # app *rebuilds the page behind an overlay* (the note at the
+            # top of this module measured the Home object changing
+            # identity across one card click), so the page that was
+            # watching when the reader wrote a mark is gone, and the one
+            # that replaces it takes its first stamp **after** the write
+            # and therefore sees no change at all.
+            #
+            # A push costs a fetch of /api/progress and, when nothing
+            # moved, one string comparison in the page (app.js
+            # progressInto returns on an unchanged stamp). So the edge
+            # into view is enough on its own.
+            was = getattr(self, "_was_covered", True)
+            self._was_covered = covered
+            if not covered and was:
+                # The live stamp is taken here so the push below does
+                # not immediately fire a second time. `_data_stamp_at`
+                # is deliberately *not* touched: Home still redraws for
+                # a mark written while it was covered, which is what
+                # changes which titles it lists and in what order.
+                self._live_stamp_at = self._data_stamp(self._LIVE_FILES)
+                self.view.tell({"marks": 1})
+            if not covered:
+                live = self._data_stamp(self._LIVE_FILES)
+                if live != getattr(self, "_live_stamp_at", None):
+                    self._live_stamp_at = live
+                    self.view.tell({"marks": 1})
                 stamp = self._data_stamp()
                 if stamp != self._data_stamp_at:
                     self._data_stamp_at = stamp
-                    self.reload()
+                    if str(self.ROUTE) in self._WATCH_DATA_ROUTES:
+                        self.reload()
+                    else:
+                        # **Every other page moves its numbers without
+                        # being redrawn.** The owner, 3 September 2026:
+                        # "make the ep and season / ch numbers change
+                        # immediately when marked as watched/unwatched
+                        # in home page, and saved and all pages that
+                        # shows progress."
+                        #
+                        # A redraw is what Home gets and what a
+                        # catalogue page must not get: it holds hundreds
+                        # of rows paged in a batch at a time and a shelf
+                        # holds a sort and a selection, and the note
+                        # above records what throwing those away looked
+                        # like. So the page is told the marks moved and
+                        # patches the four places a number is drawn
+                        # (app.js progressInto) - the scroll, the rows
+                        # and the selection all stay exactly as they
+                        # are.
+                        self.view.tell({"marks": 1})
             # **overlay_open() as well as the geometry test.** This tick
             # runs every 150ms and used to decide on its own, so an
             # overlay that registered with overlay_opened() was undone a
@@ -377,9 +488,33 @@ class _WebPage(GlassPage):
 
     # ---- what the page asks the app to do ---------------------------
     def reload(self):
-        """Draw this page again, after Qt has changed what it reads."""
+        """Draw this page again, after Qt has changed what it reads.
+
+        **A message, not a navigation, and that was the bug.** The
+        owner, 3 September 2026: *"in the history make it when I clear
+        the history it immediately clears not when I change pages or
+        tabs then come back!"*
+
+        This used to be `show_url(<the url the view is already on>)`,
+        and a URL identical to the current one - fragment included - is
+        a *same-document* navigation: Chromium fires no `hashchange`,
+        app.js's router never runs, and the document keeps every row it
+        already drew. So `history.clear()` emptied the file and the page
+        went on showing the list until something else changed the hash,
+        which is exactly "when I change pages or tabs then come back".
+        The same silence swallowed every other reload here - a shelf
+        after an add, a download folder change - whenever the route had
+        not moved.
+
+        `{"redraw": 1}` is answered by app.js's hostMessage with
+        `go(currentRoute())`, which re-fetches and redraws whatever is
+        showing. show_url stays as the fallback for a view that has not
+        finished starting, where `tell` cannot land.
+        """
         self._data_stamp_at = self._data_stamp()
         try:
+            if self.view.tell({"redraw": 1}):
+                return
             self.view.show_url(f"{base_url()}?embed=1#{self.ROUTE}")
         except RuntimeError:
             pass
@@ -409,10 +544,25 @@ class _WebPage(GlassPage):
             ack = getattr(self, "_fold_ack", None)
             if ack is not None and body.get("ok"):
                 self._fold_ack = None
+                # **The fold's own numbers, on his machine.** The page
+                # already measures them (app.js hostFold: how many cards
+                # it holds, how many it will slide, and what preparing
+                # the slide cost) and they were being dropped here. "The
+                # cards transition is a bit delayed" is a claim about
+                # exactly this, and a page that has been scrolled deep
+                # carries hundreds of cards - so the count belongs in
+                # the log beside the cost rather than only in a rig.
+                logs.info(f"fold {self.ROUTE}: cards={body.get('n')} "
+                          f"near={body.get('near')} "
+                          f"moved={body.get('moved')} "
+                          f"prep={body.get('cost')}ms")
                 ack()
             return
         if body.get("action") == "key":
             self._app_key(str(body.get("key") or ""))
+            return
+        if body.get("action") == "pagepress":
+            self._leave_search()
             return
         if body.get("action") == "diag":
             # The page reporting on itself - see app.js sweepLazy.
@@ -422,12 +572,27 @@ class _WebPage(GlassPage):
         if body.get("action") == "history":
             self._history_action(body)
             return
+        if body.get("action") == "saved":
+            self._saved_action(body)
+            return
+        if body.get("action") == "list":
+            self._list_action(body)
+            return
         if body.get("action") != "open":
             return
         kind = str(body.get("kind") or "title")
         entry_id = str(body.get("id") or "")
         title = str(body.get("title") or "")
 
+        if kind == "person":
+            # **A face opens that name's own page**, not a details page
+            # it has no entry for - the same page a cast chip on the
+            # details page opens (details._open_cast_browse), reached
+            # here because Discover, the search results and the search
+            # suggestions now carry faces too (the owner, 3 September
+            # 2026).
+            self._run(lambda: self._open_cast(title))
+            return
         if kind == "game":
             entry = _find_in("games.json", entry_id, title)
             if entry is not None:
@@ -447,11 +612,7 @@ class _WebPage(GlassPage):
             # carries everything it needs to show a title it has never
             # seen before.
             if title:
-                entry = {"title": title,
-                         "type": str(body.get("type") or "Series"),
-                         "url": str(body.get("url") or ""),
-                         "imdb_id": str(body.get("imdb") or ""),
-                         "cover_url": ""}
+                entry = _transient(body)
             else:
                 return
         if body.get("mode") == "continue":
@@ -463,15 +624,87 @@ class _WebPage(GlassPage):
             return
         self._open_overlay(entry)
 
+    def _open_cast(self, name):
+        """One cast member's titles, over this page."""
+        name = str(name or "").strip()
+        if not name:
+            return
+        from windows import web_reader
+        self.view.suppress(True)
+        page = web_reader.open_cast_browse(self.window(), name)
+        if page is None:
+            self.view.suppress(False)
+            return
+        overlay_opened(page)
+
+    def _list_action(self, body):
+        """Save the banner's title to the library, or take it out.
+
+        The owner, 3 September 2026: *"in the discovery page, instead of
+        the continue btn in the banner make it 'Save to My List' or
+        'Remove from My List'"*.
+
+        **The details page's own save, not a write of our own.** A saved
+        entry is not just a row: it belongs in series.json or
+        tracker.json depending on its medium, and it needs an id, a
+        status and two timestamps before anything else in the app counts
+        it as saved. All five were inside DetailsPage._save_entry, bound
+        to a page with a button to re-face; they are now
+        details.save_to_library / remove_from_library at module scope
+        and *that page calls them too*, so there is one implementation
+        rather than a copy here that would drift.
+
+        The saved row carries the banner's own `cover_url`, which is
+        what the cards then draw. It does not carry a `cover_path`: the
+        details page queues a download for that off its own signals, and
+        a save with no page open has nowhere for the answer to land -
+        the tracker's own cover backfill picks it up on its next visit.
+        """
+        entry = {"title": str(body.get("title") or "").strip(),
+                 "type": str(body.get("type") or "Series"),
+                 "url": str(body.get("url") or ""),
+                 "imdb_id": str(body.get("imdb") or ""),
+                 "cover_url": str(body.get("poster") or "")}
+        if not entry["title"]:
+            return
+        try:
+            from helpers.widgets import show_toast
+            from windows import details
+            want = bool(body.get("save"))
+            found = _find("", entry["title"], entry["type"])
+            if want:
+                if found is not None and found.get("id"):
+                    show_toast(self.window(), "Already In Your List")
+                    return
+                if not details.save_to_library(entry):
+                    show_toast(self.window(), "Could Not Save")
+                    return
+                show_toast(self.window(), "Saved To Your List")
+            else:
+                if found is None or not found.get("id"):
+                    show_toast(self.window(), "Not In Your List")
+                    return
+                _file, _at, removed = details.remove_from_library(found)
+                if removed is None:
+                    show_toast(self.window(), "Could Not Remove")
+                    return
+                show_toast(self.window(), "Removed From Your List")
+        except Exception:
+            logs.exception("Saving a banner title to the list failed")
+
     def _history_action(self, body):
-        """Clear History, asked from the page.
+        """Clear History, or forget one title, asked from the page.
 
         Behind the same confirmation the Qt page used, with the same
         words: the episode and chapter marks live in this file too, so
         emptying it is not only a list of names being forgotten. The
         marks on saved entries are elsewhere and are untouched.
         """
-        if str(body.get("do") or "") != "clear":
+        want = str(body.get("do") or "")
+        if want == "forget":
+            self._forget_one(body)
+            return
+        if want != "clear":
             return
         try:
             from helpers import history
@@ -487,6 +720,80 @@ class _WebPage(GlassPage):
             self.reload()
         except Exception:
             logs.exception("Could not clear the history")
+
+    def _saved_action(self, body):
+        """Remove several titles from the library at once.
+
+        The owner, 4 September 2026: "add a select button in saved to
+        select multi then delete!" - the page picks, this writes.
+
+        **Behind a question, unlike History's single row.** Removing a
+        saved entry takes its progress, its site and its artwork choices
+        with it and there is no undo here, so several at once is asked
+        about the way the shelves ask (games._delete_selected). The
+        marks in history.json are left alone: they are a record of what
+        was watched, not of what is in the library, and History still
+        lists the title afterwards as "Not saved".
+
+        Written with storage.save on a *fresh* read rather than a list
+        the page is holding - .claude/rules/ui.md's rule, and the reason
+        reordering a game once erased freshly imported ones.
+        """
+        if str(body.get("do") or "") != "delete":
+            return
+        ids = {str(i) for i in (body.get("ids") or []) if i}
+        if not ids:
+            return
+        name = ("tracker.json" if str(body.get("tab") or "") == "read"
+                else "series.json")
+        try:
+            from helpers import storage
+            from helpers.widgets import confirm, show_toast
+            rows = storage.load(name, [])
+            going = [r for r in rows
+                     if isinstance(r, dict) and str(r.get("id") or "") in ids]
+            if not going:
+                return
+            what = (going[0].get("title") or "this title"
+                    if len(going) == 1 else f"{len(going)} titles")
+            if not confirm(self.window(), "Remove From Saved",
+                           f"Remove {what} from your library? Their progress "
+                           "and settings go with them. History is untouched.",
+                           yes_text="Remove", danger=True):
+                return
+            storage.save(name, [r for r in rows
+                                if not (isinstance(r, dict)
+                                        and str(r.get("id") or "") in ids)])
+            show_toast(self.window(), "Removed From Saved")
+            self.reload()
+        except Exception:
+            logs.exception("Could not remove the picked saved entries")
+
+    def _forget_one(self, body):
+        """One title dropped out of History, from its right-click menu.
+
+        The owner, 4 September 2026: "make when I right click on any item
+        in the history show a Remove from History button ... and make it
+        remove it from history immediately!"
+
+        No confirmation, unlike Clear: one row is undoable by opening the
+        title again, and a question in front of a single deletion is what
+        he was asking to be rid of. The page has already taken the row
+        off screen (app.js histMenu) - this is only the write, and
+        `reload` is deliberately *not* called: redrawing here would take
+        the list back to the top of a page he is part-way down.
+        """
+        key = str(body.get("key") or "").strip()
+        if not key:
+            return
+        try:
+            from helpers import history
+            from helpers.widgets import show_toast
+            if history.forget(key):
+                self._data_stamp_at = self._data_stamp()   # not a redraw
+                show_toast(self.window(), "Removed From History")
+        except Exception:
+            logs.exception("Could not forget a history row")
 
     # What each forwarded name is, as Qt. Sent to the window as a real
     # key event rather than each being wired to the method it happens to
@@ -532,6 +839,62 @@ class _WebPage(GlassPage):
             QApplication.sendEvent(window, event)
         except Exception:
             logs.exception("Forwarding a key from a web page failed")
+
+    def _leave_search(self):
+        """A press on the page leaves the title bar's search field.
+
+        **The owner, 4 September 2026:** *"the global search box, when I
+        click anywhere outside it make it leave the search box"*. The
+        panel's own filter handles a press on a Qt widget, by way of the
+        field's focus (global_search_visual_patch._AnchorFilter) - but a
+        page is a WebView2 native child, and Windows hands it the click
+        without Qt ever hearing about it, so nothing there moves Qt's
+        focus at all. The page therefore says so itself: app.js sends
+        `pagepress` on any press that is not on a card.
+
+        Nothing happens unless a panel is actually open, so an ordinary
+        click on a page costs one dictionary lookup.
+        """
+        window = self.window()
+        if window is None:
+            return
+        panel = getattr(window, "_search_panel", None)
+        if panel is not None:
+            try:
+                from helpers import global_search_list_polish_patch as polish
+                polish._exit_search_field(panel)
+                return
+            except Exception:
+                try:
+                    panel.close()
+                except RuntimeError:
+                    pass
+                return
+        # **And with no panel there is still a field to leave.** The
+        # owner, 4 September 2026: "the search bar exit only when I click
+        # on the upper bar of the app, make it exit when I click anywhere
+        # in the whole app in any page!!!". A panel exists only while
+        # something is typed, so this returned early for an empty field -
+        # and a page is a WebView2 native child, so the application
+        # filter that handles the Qt side never sees the press either.
+        # The two halves together are why the title bar was the only
+        # place that worked.
+        try:
+            bar = getattr(window, "title_bar", None) or getattr(window, "_title_bar", None)
+            field = getattr(bar, "search", None) if bar is not None else None
+            if field is None:
+                # Whatever the bar is called on this window, the field is
+                # the one QLineEdit named TopSearch (window_chrome).
+                from PyQt6.QtWidgets import QLineEdit
+                for candidate in window.findChildren(QLineEdit):
+                    if candidate.objectName() == "TopSearch":
+                        field = candidate
+                        break
+            if field is not None and (field.hasFocus() or field.text()):
+                field.clear()
+                field.clearFocus()
+        except (RuntimeError, AttributeError, ImportError):
+            pass
 
     def _run(self, action):
         try:
@@ -686,6 +1049,29 @@ def _open_links(parent, entry):
     link_grid.open_link_entry(parent, entry)
 
 
+def _transient(body):
+    """A card that is not in the library, as an entry.
+
+    **Carrying its picture.** The owner, 3 September 2026: "when I press
+    on a card on the genre and cast pages, it shows me the ep list
+    correctly but the bg image and the logo are not loading." This used
+    to hardcode `cover_url: ""`, and the details page's ground is a blur
+    of the entry's own cover (details._seed_backdrop_from_cover walks
+    cover_path, then cover_url/poster) - so every title opened from a
+    catalogue, a genre or a cast page opened on flat black. The card the
+    user clicked had already downloaded that very file; `poster` is now
+    the picture's real address rather than this server's proxy token,
+    which is what helpers/images' cache is keyed by (web/server._row).
+    """
+    art = str((body or {}).get("poster") or "")
+    return {"title": str((body or {}).get("title") or ""),
+            "type": str((body or {}).get("type") or "Series"),
+            "url": str((body or {}).get("url") or ""),
+            "imdb_id": str((body or {}).get("imdb") or ""),
+            "cover_url": art if art.startswith("http") else "",
+            "cover_path": "" if art.startswith("http") else art}
+
+
 def _find_in(name, entry_id, title):
     """One entry from one file, by id and then by name."""
     wanted = title.strip().lower()
@@ -769,9 +1155,26 @@ class _WebShelfPage(_WebPage):
 
         Not built with the web page: GamesPage's constructor migrates
         records and backfills icons and launch commands, which is work
-        nobody asked for on a visit that only scrolls. Sized to this page
-        and left under the view, so its dialogs, menus and undo toasts
-        land where they would on the Qt page itself.
+        nobody asked for on a visit that only scrolls.
+
+        **Built, never shown.** The owner, 3 September 2026, with a
+        screenshot: *"in the games, apps and websites pages, when I
+        click right click on the cards or click refresh or any button in
+        the page, the page becomes like duplicated"* - and it was
+        literally two pages. This used to `show()` the Qt page under the
+        view so its dialogs would land where the Qt page's do, and the
+        web view is a native child that only covers `self.rect()` minus
+        `_reserved_top()`: in full screen that leaves a strip at the top
+        where the Qt page's own header - its "Games" title, its Sort
+        row, its refresh and + buttons - painted above the web page's
+        identical header. One right-click was enough to build it, and it
+        then stayed for the life of the page.
+        
+        Nothing needs it visible. A QMenu pops at a screen point, a
+        modal dialog centres on the window, and a toast is raised on
+        `self.window()` - none of them read the parent's visibility. So
+        it is parented here (for ownership and for `window()` to
+        resolve) and left hidden.
         """
         page = getattr(self, "_qt_page", None)
         if page is not None:
@@ -787,11 +1190,19 @@ class _WebShelfPage(_WebPage):
         if builder is None:
             return None
         try:
+            # **Parented to the window, not to this page.** The owner,
+            # 3 September 2026: "the games page shifts when pressing
+            # buttons or right click on the cards (only happened once
+            # with me then never again)". Building a full Qt page as a
+            # child of this one - even hidden - puts a widget with its
+            # own layout inside the widget the WebView2 is sized
+            # against, and the geometry pass that follows is what moves
+            # the view. The window is the right owner anyway: nothing
+            # about this page is drawn, only its dialogs and its menu,
+            # and both of those resolve their position from the window.
             page = builder(self.app)
-            page.setParent(self)
-            page.setGeometry(self.rect())
-            page.lower()
-            page.show()
+            page.setParent(self.window())
+            page.hide()          # see the docstring: never shown
         except Exception:
             logs.exception(f"Building the Qt {self.SHELF} page failed")
             return None
@@ -807,12 +1218,22 @@ class _WebShelfPage(_WebPage):
                 return row
         return None
 
-    def reload(self):
-        """Draw the shelf again after Qt has changed the file."""
-        try:
-            self.view.show_url(f"{base_url()}?embed=1#{self.ROUTE}")
-        except RuntimeError:
-            pass
+    # **No reload of its own.** The owner, 4 September 2026: "in the
+    # games app and webs pages when I remove item make it removed
+    # immediately not when I switch pages then come back, also when I
+    # refresh the games and it added new games make them show
+    # immediately".
+    #
+    # This class carried an override that did `show_url(<the url the
+    # view is already on>)` - which is the exact same-document
+    # navigation the base class's own docstring records as the bug it
+    # was written to fix: a URL identical to the current one, fragment
+    # included, fires no hashchange, so app.js's router never runs and
+    # the document keeps every card it had. So a delete, an add or an
+    # import wrote the file, this "reloaded", and nothing changed until
+    # the route moved - "when I switch pages then come back", to the
+    # word. The base sends `{"redraw": 1}` instead, which app.js answers
+    # by re-drawing the current route, and it keeps the scroll.
 
     def _from_page(self, body):
         if not isinstance(body, dict):
@@ -826,16 +1247,22 @@ class _WebShelfPage(_WebPage):
     def _shelf_action(self, action, body):
         try:
             if action == "reorder":
-                # The only one that does not need a dialog: storage owns
-                # the move, and move_entry re-reads and writes the file
-                # itself (see storage.move_entry).
+                # **Back at his word, 4 September 2026:** "in the games,
+                # apps and webs pages allow dragging the cards to sort
+                # them, and make the sort type auto change to custom
+                # order like in the Qt before!!". Removed earlier the
+                # same day and restored with the sort switch the page
+                # now makes on the drop (app.js shelfCard).
+                #
+                # The only shelf action that needs no dialog: storage
+                # owns the move, and move_entry re-reads and writes the
+                # file itself.
                 from helpers import storage
                 name = _SHELF_FILES.get(self.SHELF)
                 if name and storage.move_entry(name, body.get("moved"),
                                                body.get("target")):
                     self.reload()
                 return
-
             page = self._qt_shelf()
             if page is None:
                 return
@@ -906,16 +1333,22 @@ def _rows_for(shelf):
 class WebGamesPage(_WebShelfPage):
     ROUTE = "games"
     SHELF = "games"
+    _WATCHED_FILES = ("games.json",)
+    _WATCH_DATA_ROUTES = ("games",)
 
 
 class WebAppsPage(_WebShelfPage):
     ROUTE = "apps"
     SHELF = "apps"
+    _WATCHED_FILES = ("apps.json",)
+    _WATCH_DATA_ROUTES = ("apps",)
 
 
 class WebSitesPage(_WebShelfPage):
     ROUTE = "websites"
     SHELF = "websites"
+    _WATCHED_FILES = ("websites.json",)
+    _WATCH_DATA_ROUTES = ("websites",)
 
 
 class WebDownloadsPage(_WebPage):
@@ -994,6 +1427,30 @@ class WebTrackerPage(_WebPage):
     def set_active_section(self, section):
         route = self.SECTION_ROUTES.get(str(section or ""), "")
         if not route:
+            return
+        # **Already there is not a navigation.** main._show_page hands
+        # the route in before this page is built (web_pages.start_at),
+        # so the view is loading the right route by the time this is
+        # called and there is nothing to re-aim.
+        #
+        # **This is a simplification, not a measured speed-up, and the
+        # measurement said so.** The theory it was written for was that
+        # Movies, Anime, Manhwa and Manhua each paid a second document
+        # load (the class default first, then their own) while Series
+        # and Manga paid one - two of those four being the pages the
+        # owner called delayed. A control run of the source tree with
+        # the handoff switched off, counting the page's own render line
+        # (app.js sayRender), showed **one render per arrival either
+        # way**: navigating a view to the URL it is already on is a
+        # same-document navigation, so the old shape's second Navigate
+        # fired no hashchange and drew nothing. The redundant call is
+        # gone and the view is now pointed at the right route from its
+        # first byte, which is worth having on its own - but it is not
+        # what he is seeing.
+        #
+        # A later return to the same section from a *different* one
+        # still navigates, because ROUTE tracks where the view is.
+        if route == self.ROUTE:
             return
         self.ROUTE = route
         self.view.show_url(f"{base_url()}?embed=1#{route}")

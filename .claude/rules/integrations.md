@@ -350,3 +350,102 @@ harness pattern. Verify the real end-to-end flow (the actual dialog/
 save path), not just the resolver function in isolation - a resolver
 that's provably correct in isolation still shipped broken once because
 the UI raced it.
+
+## Covers, and the four ways one goes missing (3 September 2026)
+
+Measured on his own configured sites while fixing "in the searching page
+the readings images are not loading" and "the reading cover images from
+the 3asq site are not clear at all".
+
+- **A Madara search endpoint returns no art at all.** "solo leveling"
+  comes back with thirteen rows and **3asq's carries no `cover_url`** -
+  titles and URLs only. `fetch_manga_details`' docstring has said so
+  since it was written; nothing was calling it for a *search* row, only
+  for the one entry the tracker saved. That is the whole of the blank
+  reading card. "kingdom" measured 16 rows of 55 without art.
+- **A site's own cover can be too small for a card.** Hunter X Hunter's
+  3asq cover is the file `cover_250x350.jpg` - 250px against a card that
+  draws 201 device pixels and a details page that draws more. Read off
+  the *file name* (`manga_sites.named_cover_width`), because probing
+  each cover's header is a request per row and a catalogue page is 41 to
+  900 of them.
+- **A cover URL that works can stop working.** Two of Manhwa's first
+  twenty-four cards ended blank on a cold cache: the URL 404s, the
+  window's error handler strips the src, and nothing asks for anything
+  better because the row *had* a cover.
+- **MangaDex refuses this server's default User-Agent.** `uploads.
+  mangadex.org` answers **400** to urllib's own UA and 200 with a
+  browser one (measured, 148,640 bytes). Its covers were the fallback
+  for every case above, so the fallback was silently dead - visible in
+  the log only as `image fetch failed for uploads.mangadex.org:
+  HTTPError`.
+
+**All four are answered by one route, `/api/cover`, asked by the card.**
+Filling covers *inside* the search was tried first and measured: three
+runs of `_search` went from a **1.33s median to 2.23s and 3.34s with a
+5.62s worst case**, because the chain is site round trips. Rule 7's
+answer is to draw the row at once and fill it in - so the card asks,
+the server walks the chain (the site's own card art, then MangaDex, then
+AniList), **fetches each candidate before offering it**, and caches the
+answer per (title, url). A replacement is also decoded in a detached
+`Image()` before it is swapped in, because the first version replaced a
+small-but-working cover with a 404 and left a blank tile.
+
+Results, cold: Hunter X Hunter 250x350 → **600x642**; "Nano machine" and
+"The Maid With a Child" (his two blank Manhwa tiles) → **512x742** and
+**460x658**; the 3asq row in a "solo leveling" search → **720x972**.
+
+## Warm a page's covers as it is answered
+
+A reading catalogue meets cold covers constantly - the sweep brings
+titles this machine has never seen - and a scanlation host takes
+0.2-3.0s. Measured on the first screenful of 24 cards, cold: **Movies
+94ms, Anime 154ms, Series 460ms, Manga 4.6s, Manhwa and Manhua over
+14s**. Warm, all of them are 31-1669ms, so the cost is entirely the
+first sight.
+
+`web/backend.warm` takes the tokens of whatever a route just answered
+and fetches them on four workers behind the response
+(`server._warm_covers`, called once for every `/api/` answer). Bounded
+to the first 200 and skipping anything already on disk. After it, cold
+Manhwa's whole first screenful is decoded by the time the grid first
+paints (993ms, 0 blanks).
+
+## A chapter page can be 20MB
+
+Every page of Kingdom (WAN) ch.886, fetched directly: twenty at 1.3-2.4MB
+and **page 20 at 21,386,176 bytes** (7659x5500). `web/backend`'s image
+cap was 16MB, so `net.read_bytes` raised "response body over the size
+cap", the proxy answered 404, and the chapter had a hole in its last
+page with nothing in the log to say why. The cap is 32MB, the wall clock
+25s, and a size drop now names the size.
+
+## A debrid stream keeps its info_hash and is not a torrent
+
+`streams._prepare_with_debrid` hands back `kind="direct"` with a plain
+HTTPS URL and **keeps `info_hash` for identity** - its own docstring
+says so. So anything deciding "is this served out of the piece store"
+must read `kind`/`engine`, never the hash: a guard that read the hash
+sent every debrid play down the slow resume path, and his log says
+`debrid: on - releases it has cached play over HTTPS`.
+
+## Cinemeta takes one genre per catalog, and "anime" is one of them
+
+`discover._KIND_TYPES` maps anime to the **series** content type, and what
+makes the anime section anime is asking for `genre=Anime` - the
+distinction exists only server-side (see `_video_catalog_urls`). So
+"anime AND romance" cannot be asked for at all.
+
+Asking `genre=Romance` on the series catalog and labelling the answer
+Anime is what the code did, and it is wrong in the way that is hardest to
+see: measured 4 September 2026 on the Anime page's Romance tick, **50
+rows, every one labelled Anime**, headed by Off Campus, My Life with the
+Walter Boys and Grey's Anatomy.
+
+The fix is to ask the anime catalog and apply the wanted genre to the
+**rows** (`local_genre` in `discover_video`), whose `genres` are real. One
+page of 49 holds few of any one genre - Romance answered 1 - so a bounded
+walk of further pages follows, and it needs a wall-clock budget of its
+own: unbounded it took **17.8s**, at 4s it returns 14 Romance anime and
+stops. A Cinemeta page is 0.3-10s depending on whether its CDN holds it,
+so any loop over pages must be timed, not counted.

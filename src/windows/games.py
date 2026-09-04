@@ -585,8 +585,9 @@ class GamesPage(GridSelection, GlassPage):
         except OSError as exc:
             inform(self, "Games", f"Couldn't launch this game:\n{exc}")
             return
-        game["last_played"] = storage.now_iso()
-        storage.update_entry(DATA_FILE, game.get("id"), {"last_played": game["last_played"]})
+        # The stamp is written by game_launch.run itself now - Home
+        # launches a game without ever reaching this method, which is why
+        # a game opened there did not move (see _stamp_played).
         if self.sort_box.currentText() == "Last Played":
             self._refresh_grid()
 

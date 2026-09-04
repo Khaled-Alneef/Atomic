@@ -2756,23 +2756,6 @@ def chosen_file_size(info_hash: str) -> int:
         return 0
 
 
-def file_index_for(info_hash: str, season, episode):
-    """The file in an already-held torrent whose name states this
-    episode, or None - None also when the torrent isn't held or has no
-    metadata. This is how the download queue asks "can the season pack I
-    already have serve the next episode" without paying another source
-    lookup; only a name match counts, because handing back the largest
-    file here would recreate the very copied-the-wrong-episode bug this
-    exists to avoid."""
-    torrent = _torrents.get((info_hash or "").lower())
-    if torrent is None:
-        return None
-    try:
-        return _episode_file_index(torrent.info, season, episode)
-    except Exception:
-        return None
-
-
 def raise_files(info_hash: str, indexes) -> bool:
     """Additionally want these files, keeping everything already wanted.
     The download queue calls this once per season job with every sibling
@@ -2798,7 +2781,7 @@ def raise_files(info_hash: str, indexes) -> bool:
         return False
 
 
-def file_index_for(info_hash: str, *, season=None, episode=None,
+def file_index_for(info_hash: str, season=None, episode=None,
                    title=None, file_index=None):
     """Which file in an added torrent holds this episode, **without
     moving anything**.
@@ -2808,7 +2791,22 @@ def file_index_for(info_hash: str, *, season=None, episode=None,
     is the pointer the stream server resolves `<hash>/0` through. So a
     download starting while an episode from the same pack was playing
     moved the picture to a different episode. See `add` for the log that
-    caught the prewarm doing exactly this."""
+    caught the prewarm doing exactly this.
+
+    **There were two of these, and the second silently ate the first.**
+    The owner, 4 September 2026, with a screenshot of a queue in which
+    every job read `Failed - file_index_for() takes 1 positional argument
+    but 3 were given`. This module defined `file_index_for` twice; the
+    later definition won, and it was keyword-only, while two of the three
+    call sites in helpers/downloads pass season and episode
+    *positionally* - so every download that had to ask which file it
+    wanted failed on the call itself. `season` and `episode` are ordinary
+    parameters again and the shadowed twin is gone.
+
+    Its body called `_episode_file_index`, which nothing reaches now.
+    That function was already unreachable before this change (the
+    shadowing is what made it so), so it is left where it is rather than
+    removed in passing - see CLAUDE.md rule 11."""
     torrent = _torrents.get((info_hash or "").lower())
     if torrent is None or torrent.info is None:
         return None

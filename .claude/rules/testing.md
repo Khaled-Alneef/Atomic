@@ -262,3 +262,50 @@ Nothing ever copies a temp dir back: the day after a long pass the live
 held the newer 2667 rows, which only a copy with a preserved
 timestamp can produce. If a harness must touch his files it says so
 before it runs, and the fix is left to him.
+
+## A screen metric can be measuring the network (3 September 2026)
+
+Chasing "in manhwa and movies pages the cards transition is a bit
+delayed", three screen metrics were built and all three answered the
+wrong question. The record, so the same ground is not re-dug:
+
+- **"When does the picture stop changing?"** - a band of screen scored
+  against the last frame of the run. It put Manhwa at **3.56s** against
+  0.26-0.30s for its five neighbours, which looked like the bug. A
+  **control run of the same build gave 2.59s and then 3.58s**: the
+  number was whichever second the site sweep happened to answer in, and
+  it could not tell a code change from the weather.
+- **The lazy sweep's rectangle reads** - 0.6ms median for 900 pending
+  images with layout dirty. Not the cause.
+- **The fold's own preparation** - 4.0ms at 60 cards, 5.2ms at 930. Not
+  the cause. A control with the suspected double document load switched
+  off drew **one page per arrival either way**, because navigating a
+  view to the URL it is already on is a same-document navigation.
+
+What answered it was **making the page report itself**: app.js
+`sayRender`/`sayBatch` put "route drawn, route=manhwa, ms=12, rows=66"
+and "batch appended, ms=2956, rows=6" into atomic.log. Every one of the
+six pages renders in **8-22ms**; the difference was the first *sight* of
+a cover (a reading row's art comes from the scanlation site, 0.2-3.0s a
+host, against Cinemeta's CDN for a video row) - 24 covers on the first
+screenful took **94ms on Movies and over 14s on Manhwa**, cold.
+
+Two rules out of it:
+
+1. **Where a screen number moves on its own, instrument instead.** A
+   line the app writes on his machine beats a rig that only runs here,
+   and it keeps answering after the pass is over.
+2. **Run the control before believing the delta.** Two runs of
+   *unchanged* code, every time - testing.md has said this since 21
+   August and it is the step that saved this one.
+
+### Validate the "done" test, not just the "changed" test
+
+The cover-fill metric waited for `loaded === onScreen` and reported
+`>14,000ms` for a page that had finished in about a second. Two of the
+twenty-four images had **failed**: the window's own capture-phase error
+handler hides an `<img>` and strips its `src` (app.js, top of file), so
+they were `complete === true`, `naturalWidth === 0`, `src === ""` and
+could never satisfy the test. A settle test must count *resolved*
+(decoded **or** given up on), not decoded - and the two blank tiles it
+accidentally found were a real bug worth fixing.

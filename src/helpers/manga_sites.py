@@ -1335,3 +1335,43 @@ def upgrade_cover_url(url):
     if "olympustaff.com" in url:
         url = _TEAMX_THUMBNAIL_PREFIX_RE.sub("/", url, count=1)
     return url
+
+
+# **The width a card actually needs, and the floor below which a site's
+# own cover is not good enough.** Measured 3 September 2026 on the
+# owner's Manga page: the grid draws a cover 201x262 *device* pixels
+# (160 CSS px at his DPR of 1.25), the server serves it at `?w=200`, and
+# every 3asq cover in his discover cache is 764-3024px wide - except
+# Hunter X Hunter's, which is the file 3asq literally named
+# `cover_250x350.jpg` and is 250x350.
+#
+# 480 rather than 200: it is the smallest original that still has pixels
+# to spare for the details page (which draws a cover larger than a card)
+# and for a DPR above 1.25, and it sits below every real cover any of
+# these sites publishes - so a site's own art is preferred in every case
+# that is not genuinely small.
+CARD_COVER_MIN_WIDTH = 480
+
+# A width written into the file's own name. Two shapes seen on these
+# sites, measured the same day: WordPress's size-suffixed crop
+# (`-193x278.jpg`, which _strip_wp_size_suffix removes) and 3asq's
+# literal upload name (`cover_250x350.jpg`, which is the whole file and
+# cannot be stripped - the unsuffixed name does not exist). The second
+# is why a named width is worth reading: it says the picture is small
+# without asking the host anything, which is what lets a catalogue page
+# flag a thin cover and still draw inside a second (web/server._thin_cover).
+#
+# **Probing the header instead was written, measured and removed.** It
+# answered exactly (250 for that file, 1304 for One Piece's) at the cost
+# of a request per row, and the rows are 41 on Manhwa and hundreds once
+# the page has been scrolled - so the page would have waited on the
+# network to decide how to draw a card. The replacement art is fetched
+# by the card itself now (server._card_cover), where being slow costs
+# nothing on screen.
+_NAMED_SIZE_RE = re.compile(r"(\d{2,4})\s*[x×]\s*(\d{2,4})(?=\.\w+$)")
+
+
+def named_cover_width(url):
+    """The width the file's own name claims, or 0 if it names none."""
+    match = _NAMED_SIZE_RE.search(str(url or ""))
+    return int(match.group(1)) if match else 0

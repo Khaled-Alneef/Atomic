@@ -99,6 +99,46 @@ def grid_columns(page) -> int:
 # resolves.
 
 
+def _stamp_used(entry):
+    """Record that this entry was just opened.
+
+    **Here, not in the page that called.** The owner, 4 September 2026:
+    *"the apps and websites in the main page when I open one it does not
+    come 1st after 1.5 sec!"* - games did and apps and websites did not,
+    and the difference was that only `LinkGridPage._open_entry` wrote
+    `last_used`. Home is a web page now, and its click goes
+    web_pages._open_links -> `open_link_entry` without ever touching
+    that method, so nothing was stamped and server._recent_first had
+    nothing to sort by.
+
+    So the stamp belongs to the launch itself, which is the one thing
+    every caller shares. `web_pages._WATCHED_FILES` already watches
+    apps.json and websites.json at 150ms, so writing it here is what
+    makes Home re-order inside his ~1.5s.
+
+    One field on one entry through storage.update_entry - never the
+    whole list back, which is the defect that once erased freshly
+    imported games (rules/ui.md).
+    """
+    entry_id = entry.get("id")
+    if not entry_id:
+        return
+    kind = ("websites.json"
+            if any(str(t.get("type") or "") != "app"
+                   for t in (entry.get("targets") or []))
+            else "apps.json")
+    stamp = storage.now_iso()
+    entry["last_used"] = stamp
+    # The entry may live in either file - an id is unique across both,
+    # so writing the wrong one is a no-op rather than a wrong row.
+    for name in (kind, "apps.json" if kind != "apps.json" else "websites.json"):
+        try:
+            if storage.update_entry(name, entry_id, {"last_used": stamp}):
+                return
+        except Exception:
+            return          # a launch must never fail on bookkeeping
+
+
 def open_link_entry(parent, entry, label="Links"):
     """Launch every target (site/app) attached to a Websites/Apps entry.
     Shared by LinkGridPage and the Home dashboard's preview lists.
@@ -115,6 +155,7 @@ def open_link_entry(parent, entry, label="Links"):
     a toast, and toasts carry no title; the parameter stays so the two
     call sites (this page's and Home's) don't have to change together.
     """
+    _stamp_used(entry)
     missing = set(missing_app_targets(entry))
     launched = 0
     failures = []
@@ -654,11 +695,11 @@ class LinkGridPage(GridSelection, GlassPage):
         return next((i for i, e in enumerate(entries) if e.get("id") == entry.get("id")), None)
 
     def _open_entry(self, entry):
+        # The stamp is written by open_link_entry itself now - one field
+        # on one entry, so no whole-list write and no redraw of cards
+        # the user is still looking at - because Home opens an entry
+        # without ever reaching this method (see _stamp_used).
         open_link_entry(self, entry, self.TITLE)
-        entry["last_used"] = storage.now_iso()
-        # One field on one entry, so no whole-list write and no redraw of
-        # cards the user is still looking at.
-        storage.update_entry(self.DATA_FILE, entry.get("id"), {"last_used": entry["last_used"]})
         if self.sort_box.currentText() == "Last Used":
             self._refresh_grid()
 

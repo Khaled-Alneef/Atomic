@@ -710,9 +710,9 @@ def _fetch_upcoming_calendar():
     the same arithmetic _load_discover_cache uses), so the next visit's
     _cached_upcoming_calendar still says "not fresh" and AniList is
     re-asked then - shown-but-stale, never shown-and-final."""
-    rows = []
+    anime, series = [], []
     try:
-        rows += anilist.fetch_upcoming_airing(hours=168, limit=40) or []
+        anime = anilist.fetch_upcoming_airing(hours=168, limit=40) or []
     except Exception:
         pass        # AniList's half; TVmaze's below may still answer
     # **Series too, not just anime** - the owner's ask, 25 August 2026.
@@ -720,11 +720,31 @@ def _fetch_upcoming_calendar():
     # take the other's rows with it, which is exactly what a single
     # try/except around both would do.
     try:
-        rows += tvmaze.fetch_upcoming_schedule(limit=40) or []
+        series = tvmaze.fetch_upcoming_schedule(limit=40) or []
     except Exception:
         pass
-    rows.sort(key=lambda row: row.get("at"))
-    rows = rows[:SCHEDULE_UPCOMING_LIMIT]
+    # **And a share each, because the soonest forty are not a mixture.**
+    # The owner, 4 September 2026: "why in the scheduled watch only shows
+    # anime? make it also show series."
+    #
+    # Both halves were already being fetched - measured on his own
+    # schedule_cache.json, 28 Anime against 12 Series - and then merged,
+    # sorted by time and cut to forty. Anime air daily and a television
+    # series weekly, so the soonest forty of a two-day window are almost
+    # all anime, and on a busier week they are *all* anime. Sorting alone
+    # cannot be fair here.
+    #
+    # So each source gets at least half the room, and whatever the other
+    # cannot fill goes back to it - a quiet week for one still fills the
+    # list rather than leaving it short.
+    at = lambda row: row.get("at") or ""            # noqa: E731
+    anime.sort(key=at)
+    series.sort(key=at)
+    half = SCHEDULE_UPCOMING_LIMIT // 2
+    take_anime = min(len(anime), max(half, SCHEDULE_UPCOMING_LIMIT - len(series)))
+    take_series = min(len(series), SCHEDULE_UPCOMING_LIMIT - take_anime)
+    rows = anime[:take_anime] + series[:take_series]
+    rows.sort(key=at)
     if rows:
         _stamp_cached_covers(rows)
         _SCHEDULE_UPCOMING_CACHE["upcoming"] = (time.monotonic(), rows)
@@ -1023,6 +1043,39 @@ def _entry_medium(entry) -> str:
     return release_schedule.MEDIUM_SERIES
 
 
+def _progress_is_newer(on_disk, mine) -> bool:
+    """Whether the stored row's progress was written after this page's.
+
+    Compared on `updated_at`, which every progress write stamps
+    (_write_progress and details._clear_video_progress both do). A
+    missing or unreadable stamp counts as older, so a page that has
+    genuinely just written something is never overruled by a row that
+    cannot say when it changed.
+    """
+    theirs = str((on_disk or {}).get("updated_at") or "")
+    ours = str((mine or {}).get("updated_at") or "")
+    return bool(theirs) and theirs > ours
+
+
+def _stored_entry(entry):
+    """This entry as it is on disk right now, or None.
+
+    A page's in-memory copy is only as fresh as the moment it was built,
+    and the details page writes progress from an overlay above it - see
+    _on_progress_synced for the report this exists to answer.
+    """
+    try:
+        wanted = str((entry or {}).get("id") or "")
+        if not wanted:
+            return None
+        for row in storage.load(_progress_data_file(entry), []):
+            if isinstance(row, dict) and str(row.get("id") or "") == wanted:
+                return row
+    except Exception:
+        return None
+    return None
+
+
 def correct_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
     """Set progress to an exact number, including a lower one.
 
@@ -1211,6 +1264,10 @@ def _write_progress(entry, *, season=None, episode=None, chapter=None,
                   "progress_source": SOURCE_IN_APP}
 
     fields["updated_at"] = storage.now_iso()
+    # Anything actually written here supersedes a previous "I have
+    # watched nothing" - see details._clear_video_progress, and
+    # _on_progress_synced which is what that mark holds off.
+    fields["progress_cleared_at"] = ""
     entry.update(fields)
     return storage.update_entry(_progress_data_file(entry), entry["id"], fields)
 
@@ -4676,6 +4733,30 @@ class TrackerPage(GlassPage):
                             total_episode, silent, reason="", source=""):
         entry = next((e for e in self.entries if e["id"] == entry_id), None)
         if entry:
+            # **The stored row, not this page's copy of it.** The owner,
+            # 4 September 2026, on Naruto: saved it, marked episode 1
+            # watched (S01E02, right), unmarked it - and got a number he
+            # had never seen, with "random episodes marked" in the list
+            # behind it.
+            #
+            # This page holds every entry in memory from when it was
+            # built. The details page is an overlay *over* it and writes
+            # its clear straight to disk, so by the time a sync answers,
+            # `entry` here is the row as it was **before** the clear -
+            # carrying the old number and no progress_cleared_at. The
+            # guard below then saw nothing to respect, and _save_entries
+            # wrote this page's stale copy back over the file: the
+            # clear undone and every episode up to that number painted
+            # WATCHED again, which is the list he opened from History.
+            #
+            # Re-reading the one row costs a file read per synced entry
+            # and is the only way this page can know what actually
+            # happened while it was not looking.
+            stored = _stored_entry(entry)
+            if stored is not None:
+                for field in ("progress", "progress_verified",
+                              "progress_source", "progress_cleared_at"):
+                    entry[field] = stored.get(field, entry.get(field))
             snapshot = self._refresh_before.get(entry_id)
             before = (snapshot[1:] if snapshot
                       else (entry.get("progress"), entry.get("latest_available")))
@@ -4687,10 +4768,21 @@ class TrackerPage(GlassPage):
             # the "editing fights the sync" problem with the winner
             # reversed. Nothing is lost the other way: a genuinely higher
             # Stremio number still lands.
+            # **A deliberate "nothing watched" is not moved by a sync.**
+            # The owner, 4 September 2026: unmarking episode 1 of season 1
+            # says he has watched none of it, and forward-only means any
+            # number at all is forward of the empty string this leaves -
+            # so the next sync put 51 back, verified, seconds later.
+            # details._clear_video_progress writes progress_cleared_at
+            # for exactly this, and _write_progress drops it again the
+            # moment he plays or marks something here.
+            if found and entry.get("progress_cleared_at"):
+                found = False
             if found and progress_moves_forward(entry, season, episode):
                 entry["progress"] = format_episode_progress(season, episode)
                 entry["progress_verified"] = True
                 entry["progress_source"] = source
+                entry["progress_cleared_at"] = ""
                 entry["updated_at"] = storage.now_iso()
             if total_season or total_episode:
                 entry["latest_available"] = format_episode_progress(total_season, total_episode)
@@ -4784,6 +4876,23 @@ class TrackerPage(GlassPage):
         merged = []
         for entry in self.entries:
             if entry.get("type") in self.ENTRY_TYPES:
+                # **Except the progress fields, which the details page
+                # writes from an overlay above this one.** The owner, 4
+                # September 2026, on Naruto: he unmarked episode 1 and
+                # the number came back with "random episodes marked" in
+                # the list behind it. This page's copy of an entry is as
+                # old as the moment it was built, so "this page's copy
+                # wins" wrote the pre-clear number back over the file on
+                # the next save of anything at all - a reorder, a save, a
+                # sync. Everything else here still belongs to this page;
+                # only the four fields it does not own come from disk.
+                newer = fresh.get(entry.get("id"))
+                if newer is not None and _progress_is_newer(newer, entry):
+                    for field in ("progress", "progress_verified",
+                                  "progress_source", "progress_cleared_at",
+                                  "last_watched_chapter"):
+                        if field in newer:
+                            entry[field] = newer[field]
                 merged.append(entry)          # mine - this page's copy wins
                 continue
             other_pages_copy = fresh.get(entry.get("id"))

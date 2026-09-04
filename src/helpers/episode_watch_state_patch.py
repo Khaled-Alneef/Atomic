@@ -78,7 +78,30 @@ def _patch(details):
         return tile
 
     def _episode_pairs(self):
-        """Every real episode known to this page, in playback order."""
+        """Every real episode known to this page, in playback order.
+
+        **Season 0 is not part of that order.** The owner, 4 September
+        2026, on Naruto and before that on Jujutsu Kaisen: marking
+        episode 1 of season 1 as watched read S01E02, correctly - and
+        unmarking it produced a number he had never seen, with "random
+        episodes marked" in the list behind it.
+
+        Cinemeta files specials as season 0, and this list is what the
+        menu below uses for "everything before the one you clicked".
+        Sorted, (0, 8) is before (1, 1) - so marking episode 1 ticked
+        Jujutsu Kaisen's **eight specials** as watched, and unmarking it
+        took `earlier[-1]` = (0, 8) as where he had got to.
+        tracker._write_progress then filled the missing season in from
+        the entry's own and stored **S01E08**. Measured on his own data,
+        end to end: history left holding `0:1 0:2 0:3 0:4 0:6 0:7 0:8`
+        and series.json holding S01E08 with progress_verified True.
+
+        A special is not the episode before episode 1 in any watch
+        order, and a mark with no season cannot be placed against one
+        that has a season (web/server._last_mark drops them for the same
+        reason). So they are not in this list at all: they still draw and
+        still play, they simply do not decide where watching stands.
+        """
         pairs = set()
         for video in getattr(self, "_videos", ()) or ():
             try:
@@ -86,7 +109,7 @@ def _patch(details):
                 episode = int(video.get("number") or video.get("episode") or 0)
             except (AttributeError, TypeError, ValueError):
                 continue
-            if episode > 0:
+            if episode > 0 and season > 0:
                 pairs.add((season, episode))
         return sorted(pairs)
 
@@ -150,7 +173,7 @@ def _patch(details):
             return
 
         pairs = _episode_pairs(self)
-        if clicked not in pairs and episode > 0:
+        if clicked not in pairs and episode > 0 and season > 0:
             pairs = sorted(set(pairs + [clicked]))
 
         target = None
@@ -185,6 +208,13 @@ def _patch(details):
         self._mark_history(
             [details.history.episode_key(s, e) for s, e in affected], watched)
 
+        # **A special never sets the number.** Ticking one is real and is
+        # written above; but "season 0, episode 3" is not a position in
+        # the run, and tracker._write_progress would fill the missing
+        # season in from the entry's own - turning a special into
+        # S01E03. See _episode_pairs for the whole of this.
+        if target is not None and target[0] <= 0 < target[1]:
+            target = None
         if self.entry.get("id") and target is not None:
             if target[1] <= 0:
                 self._clear_video_progress()

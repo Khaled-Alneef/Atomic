@@ -209,6 +209,48 @@ def _art_worker(module, query, token, url, logical_size,
         _art_signals.ready.emit(query, token, path)
 
 
+def _seed_from_cache(search, query):
+    """Fill the panel from the discover cache before the network answers.
+
+    **The instant half existed and was never running.** The owner, 4
+    September 2026: "the search results and the search suggestions takes
+    too long to appear". `global_search.set_query` has called
+    `_cached_outside` since it was written - its own comment says "the
+    panel is never empty while the network thinks" - but *this* module
+    replaces `set_query` outright, and so does the visual patch before
+    it, and neither replacement carried that line. So the cache was dead
+    code and every keystroke waited on the socket.
+
+    That is `.claude/rules/ui.md`'s "the second patch wins", in the one
+    place it costs seconds: measured on the frozen build that day, typing
+    "solo" showed "Searching..." and nothing else for **2.2 to 2.7
+    seconds**, while `_cached_outside` for the same query answers in
+    **0.00s** off a file this machine already holds.
+
+    Seeded through `_on_discover_ready` rather than a second row builder,
+    so a cached row is built exactly like a live one and the panel's own
+    `_seen` set drops it when the real answer repeats it. The searching
+    state is put back afterwards, because that method ends by declaring
+    the search settled and it is not - the network half is still out.
+    """
+    if not str(query or "").strip():
+        return
+    try:
+        from helpers import global_search as _gs
+        rows = _gs._cached_outside(query) or []
+    except Exception:
+        return
+    if not rows:
+        return
+    try:
+        search._on_discover_ready(query, rows)
+        if query == getattr(search, "_query", None):
+            search._visual_status.setText("Searching…")
+            search._relayout(searching=True)
+    except (AttributeError, RuntimeError):
+        pass
+
+
 def _exit_search_field(search):
     """Close suggestions and leave the persistent search field cleanly."""
     anchor = getattr(search, "_anchor", None)
@@ -310,7 +352,9 @@ def install():
         hover = getattr(self, "_atomic_suggestion_hover", None)
         if hover is not None:
             hover.reset()
-        return old_set_query(self, query)
+        result = old_set_query(self, query)
+        _seed_from_cache(self, query)
+        return result
 
     def on_discover_ready(self, query, rows):
         """Insert remote rows and own their image delivery exactly once."""
@@ -325,6 +369,16 @@ def install():
             entry_type = str(
                 row.get("_atomic_entry_type") or row.get("type") or "Series"
             )
+            # A face is not a title: it opens that name's own page, so
+            # it carries a different payload and a different meta line.
+            # visual.add_face_row is the one implementation of it, and
+            # it lives there because *this* method replaces the one in
+            # that module - see its docstring.
+            if entry_type == "Person":
+                from helpers import global_search as _gs
+                visual.add_face_row(self, _gs, query, row,
+                                    self._atomic_add_visual_item)
+                continue
             route = visual._route_for_entry_type(entry_type)
             key = (route, title.lower())
             if not title or key in self._seen:

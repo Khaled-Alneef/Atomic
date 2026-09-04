@@ -208,19 +208,57 @@ def heal_missing_art(entry, file=None, inline_icon=False):
         _attempted.add(key)
 
     if file == "apps.json":
-        if resolve_art_path(entry.get("image")):
+        # **The store artwork is the picture; the exe icon is the
+        # stand-in.** The owner, 3 September 2026: "make sure that you
+        # will take it from an API for the good quality like it was in
+        # Qt". windows/link_grid._backfill_app_art is the Qt half of
+        # this and asks app_art for every entry without `art`; this
+        # never did, so an app with no `art` (Stremio, on his machine)
+        # was left with a 64x64 .exe icon for ever - or, when even that
+        # file had gone, with nothing.
+        #
+        # Both halves run: the icon is extracted inline where it is
+        # wanted (`inline_icon`, milliseconds, so the very first render
+        # is not blank) *and* the API lookup is queued, which writes
+        # `art` back and wins on the next build because cover_url now
+        # prefers it.
+        name = str(entry.get("name") or entry.get("title") or "").strip()
+        want_art = name and not resolve_art_path(entry.get("art"))
+        icon = ""
+        if not resolve_art_path(entry.get("image")):
+            exe = _first_target(entry, "app")
+            if exe and os.path.isfile(exe) and inline_icon:
+                icon = extract_exe_icon(exe)
+                if icon:
+                    entry["image"] = icon
+                    _finish(key, file, entry_id, "image", icon)
+        if not want_art:
+            if icon:
+                return icon
+            if resolve_art_path(entry.get("image")):
+                return ""
+            exe = _first_target(entry, "app")
+            if not exe or not os.path.isfile(exe):
+                return ""
+            fetch = lambda: extract_exe_icon(exe)           # noqa: E731
+            field = "image"
+            with _lock:
+                _pending.add(key)
+            lookup_pool.submit_cover(_heal_worker, key, file, entry_id,
+                                     field, fetch)
             return ""
-        exe = _first_target(entry, "app")
-        if not exe or not os.path.isfile(exe):
-            return ""
-        if inline_icon:
-            path = extract_exe_icon(exe)
-            if path:
-                entry["image"] = path
-                _finish(key, file, entry_id, "image", path)
-            return path
-        fetch = lambda: extract_exe_icon(exe)               # noqa: E731
-        field = "image"
+
+        def fetch():
+            from . import app_art               # pulls images, so lazy
+            return app_art.fetch_art(name)
+        field = "art"
+        with _lock:
+            _pending.add(key)
+        lookup_pool.submit_cover(_heal_worker, key, file, entry_id, field,
+                                 fetch)
+        # The icon made above, so this render has something to draw
+        # while the artwork is on its way.
+        return icon
     elif file == "games.json":
         if resolve_art_path(entry.get("cover")):
             return ""

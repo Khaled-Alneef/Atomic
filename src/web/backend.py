@@ -142,11 +142,40 @@ def cover_url(entry):
     # other machine - measured 2 September 2026 with those paths hidden,
     # games 0/10 and apps 0/5 resolved. The same file name under the
     # live cache is looked for before giving up.
-    for key in ("cover_path", "cover", "icon", "image", "art"):
+    # **`art` before `image` and `icon`, and that ordering is the whole
+    # of the owner's report of 3 September 2026:** *"the apps images are
+    # being taken from the app icon now, it is not good at all, make
+    # sure that you will take it from an API for the good quality like
+    # it was in Qt!"*
+    #
+    # Measured that day on his own apps.json. Every app carries both:
+    # `image`, a **64x64** icon prised out of the .exe
+    # (art_paths.extract_exe_icon), and `art`, the **512x512** store
+    # artwork helpers/app_art fetches from Apple's iTunes Search API.
+    # `image` came first in this list, so the 64px icon won every time
+    # and a 160px tile drew it four times its own size. The Qt page has
+    # never done that - windows/link_grid line 556 reads `entry["art"]`
+    # and backfills it through app_art.fetch_art, which is exactly the
+    # "like it was in Qt" being asked for.
+    #
+    # `art` is API artwork by construction: only app_art and game_art
+    # write that field, and both write a store original. `image` and
+    # `icon` are the local extractions, so they are the fallback for an
+    # entry the API has nothing for - and art_paths.heal_missing_art now
+    # queues that lookup rather than settling for the icon for ever.
+    for key in ("cover_path", "art", "cover", "icon", "image"):
         found = local_url(art_paths.resolve_art_path(entry.get(key)))
         if found:
+            # **Still ask for the store artwork when only the icon is
+            # here.** An app with a working 64px .exe icon and no `art`
+            # resolved on the line above and never reached the healer at
+            # the foot of this function, so it drew the icon for ever.
+            # heal_missing_art is a no-op for anything whose own field
+            # is already on disk and runs once per entry per process.
+            if key in ("icon", "image"):
+                art_paths.heal_missing_art(entry)
             return found
-    for key in ("cover_url", "poster", "cover", "image"):
+    for key in ("art", "cover_url", "poster", "cover", "image"):
         value = str(entry.get(key) or "")
         if value.startswith("http"):
             return remote_url(value)
@@ -195,7 +224,35 @@ def hero_for(entry):
         # - built here so the page only has to join them.
         "bullets": _bullets(entry),
         "id": str(entry.get("id") or entry.get("entry_id") or ""),
+        # **What the cards use to ask for a better cover.** The owner, 4
+        # September 2026: "the 3asq readings cover image in the banners
+        # home and discover pages are not clear (blurry)."
+        #
+        # A grid card has asked `/api/cover` for a bigger picture since 3
+        # September, and that is why a 3asq row on Manga is sharp: its
+        # `cover_250x350.jpg` is replaced by the catalogue's 720x972.
+        # The banner draws the same entry three times larger - a 196x264
+        # CSS cover is 245x330 real pixels - and never asked, so it kept
+        # the small file. These two fields are what askForCover needs
+        # (the page url to ask the site, and whether the name says the
+        # file is small); the page does the rest.
+        "url": str(entry.get("url") or ""),
+        "thin": _thin_banner_cover(entry),
     }
+
+
+def _thin_banner_cover(entry):
+    """server._thin_cover, asked from here without importing the server.
+
+    The banner is built in this module and that test lives in the other
+    one; a plain import would be a cycle, so it is resolved at call time
+    and answers False if it cannot be (which only costs the upgrade).
+    """
+    try:
+        from web import server
+        return bool(server._thin_cover(entry))
+    except Exception:
+        return False
 
 
 def _bullets(entry):
@@ -239,7 +296,27 @@ def _bullets(entry):
 
 
 # See fetch_image: the largest picture the proxy will carry.
-IMAGE_MAX_BYTES = 16 * 1024 * 1024
+#
+# **32MB, and 16 was measured throwing a chapter page away.** The
+# owner, 3 September 2026: "the 3asq readings are still not loading".
+# Measured that day, every page of Kingdom (WAN) chapter 886 fetched
+# directly: twenty pages at 1.3-2.4MB and **page 20 at 21,386,176
+# bytes** - a fifth of a megabyte over 20MB, against a 16MB cap. So
+# `net.read_bytes` raised "response body over the size cap", fetch_image
+# answered None, the proxy answered 404 and the chapter had a hole in
+# its last page. Nothing about it was slow or refused; it was
+# discarded here.
+#
+# The cap is not decoration - a runaway response must still be bounded -
+# so it is raised to where the largest real page has room rather than
+# removed, and the drop now names the size (see fetch_image) so the next
+# one over it arrives with its cause attached.
+IMAGE_MAX_BYTES = 32 * 1024 * 1024
+# The wall clock a picture gets. Scaled with the cap above: 12s was
+# fine for a 2MB cover and is not enough for a 20MB page on a slow
+# minute - a transfer cut by the deadline is the same hole in the
+# chapter as one cut by the cap.
+IMAGE_DEADLINE_S = 25.0
 
 
 def fetch_image(token):
@@ -273,7 +350,7 @@ def fetch_image(token):
         return None, None
     try:
         request = urllib.request.Request(net.ascii_url(where), headers=headers)
-        deadline = net.deadline_in(12.0)
+        deadline = net.deadline_in(IMAGE_DEADLINE_S)
         with net.urlopen(request, timeout=12.0) as response:
             # **A picture's own cap, above net's default.** Three of the
             # Manga page's 3asq covers are 5.9-6.6MB uploads (measured 3
@@ -295,9 +372,16 @@ def fetch_image(token):
         # September 2026.)
         try:
             from helpers import logs
+            # **The size when that is what went wrong.** A page dropped
+            # for being over the cap read as an ordinary ValueError and
+            # said nothing about how far over it was, which is why a
+            # 20.4MB chapter page took a measurement to find rather
+            # than a log line (see IMAGE_MAX_BYTES).
+            said = str(error)[:60] if isinstance(error, ValueError) else ""
             logs.info(f"image fetch failed for "
                       f"{urllib.parse.urlsplit(where).netloc}: "
-                      f"{type(error).__name__}")
+                      f"{type(error).__name__}"
+                      + (f" ({said})" if said else ""))
         except Exception:
             pass
         return None, None
@@ -309,6 +393,89 @@ def fetch_image(token):
     except OSError:
         pass                                 # a cold cache, never a lost page
     return blob, _kind(blob[:8])
+
+
+# **Fetching a page's pictures before the page asks for them.**
+#
+# The owner, 3 September 2026: *"in manhwa and movies pages the cards
+# transition is a bit delayed than the other watch and read pages"*.
+# Measured that day in a Chromium at his own window size, against his
+# own data, timing how long until every cover on the first screenful of
+# 24 cards was actually decoded:
+#
+#     cold cache   movies 94ms   anime 154ms   series 460ms
+#                  manga 4,604ms   manhwa >14,000ms   manhua >14,000ms
+#     warm cache   movies 31ms    manga 31ms    manhua 63ms
+#                  manhwa 1,669ms
+#
+# So the difference is not the page - it renders in 8-22ms on every one
+# of the six (app.js sayRender, read out of atomic.log on the frozen
+# build) - and it is not this proxy either: 24 already-fetched covers
+# come back in 0.08-0.79s of wall. It is the **first** sight of a cover.
+# A video row's art is Cinemeta's CDN; a reading row's is the scanlation
+# site itself (3asq, olympustaff, lavascans, meshmanga), and those hosts
+# take 0.2-3.0s each. A reading catalogue also churns - the sweep brings
+# titles this machine has never seen - so the reading pages meet cold
+# covers over and over while the video pages do not.
+#
+# Three earlier theories were measured and refuted before this one, and
+# they are written down so the same ground is not re-dug: the lazy
+# sweep's rect reads (0.6ms for 900 pending), the fold's own preparation
+# (4.0ms at 60 cards, 5.2ms at 930), and a second document load per
+# arrival (a control run of the same tree drew one page per arrival
+# either way). A fourth - that a background sweep starves the server -
+# measured /api/series at 3ms *while* a sweep and four cover streams
+# were in flight.
+#
+# The fix is to stop paying for the first sight at the moment he is
+# looking: the route hands its covers here as it is answered and they
+# are fetched behind it, so the disk cache is warm before the browser
+# gets round to asking. Four workers, because these are four different
+# hosts and one of them being slow must not hold the rest; and a bounded
+# head, because a catalogue page scrolled deep is hundreds of rows and
+# the ones below the fold can wait for the scroll that reaches them.
+_WARM_WORKERS = 4
+_WARM_HEAD = 200
+_warm_pool = None
+_warming = set()
+
+
+def warm(tokens):
+    """Fetch these pictures now, in the background. Never raises."""
+    global _warm_pool
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with _lock:
+            if _warm_pool is None:
+                _warm_pool = ThreadPoolExecutor(
+                    max_workers=_WARM_WORKERS,
+                    thread_name_prefix="cover-warm")
+            fresh = []
+            for token in list(tokens)[:_WARM_HEAD]:
+                token = str(token or "").strip()
+                if not token or token in _warming:
+                    continue
+                where, headers = _sources.get(token, (None, None))
+                if headers is None:
+                    continue          # a file already on this machine
+                if (COVERS / ("web_" + token)).exists():
+                    continue          # already paid for
+                _warming.add(token)
+                fresh.append(token)
+        for token in fresh:
+            _warm_pool.submit(_warm_one, token)
+    except Exception:
+        pass                          # a cold cache, never a lost page
+
+
+def _warm_one(token):
+    try:
+        fetch_image(token)
+    except Exception:
+        pass
+    finally:
+        with _lock:
+            _warming.discard(token)
 
 
 def _kind(head):
