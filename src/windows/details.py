@@ -693,11 +693,29 @@ def _chapters_worker(signals, run, entry, refresh=False, drawn=None,
         if drawn is None:
             signals.chapters.emit(run, list(found or []))
 
+    # **The one line that says what this did.** The owner, 4 September
+    # 2026, with a screenshot of a chapter panel reading "Loading...":
+    # "why is it showing no chapters???" - and nothing in his log to
+    # answer it, because this path had never written anything. Host,
+    # milliseconds and count, so the next report arrives with its cause
+    # attached; never the URL, which can carry a token.
+    started = time.perf_counter()
+    host = ""
+    try:
+        from urllib.parse import urlsplit
+        host = urlsplit(str(entry.get("url") or "")).netloc
+    except Exception:
+        host = ""
     try:
         chapters = chapter_source.list_chapters(
             entry, deadline=net.deadline_in(CHAPTER_LIST_TIMEOUT),
             refresh=refresh, on_partial=partial)
+        logs.info(f"chapter list: host={host or '-'} "
+                  f"ms={int((time.perf_counter() - started) * 1000)} "
+                  f"found={len(chapters or [])} refresh={bool(refresh)}")
     except Exception:
+        logs.info(f"chapter list: host={host or '-'} "
+                  f"ms={int((time.perf_counter() - started) * 1000)} failed")
         logs.exception("details chapter listing failed")
         if drawn is not None:
             return

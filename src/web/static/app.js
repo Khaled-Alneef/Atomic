@@ -2250,12 +2250,23 @@ function statusCard(row) {
     const picked = savedState.picked.has(row.id);
     if (picked) card.classList.add('picked');
     const sheet = el('div', 'spickover');
-    sheet.appendChild(el('div', 'spick' + (picked ? ' on' : '')));
+    const mark = el('div', 'spick' + (picked ? ' on' : ''));
+    sheet.appendChild(mark);
+    /* **Picked in place, never redrawn.** The owner, 4 September 2026:
+       "when I select a card or unselect it in the selection mode in
+       saved it takes me to the top of the page". `go()` rebuilds the
+       page element, so the scroll position went with it - on a library
+       that is two screens deep, every tick threw him back to the top.
+       A pick changes two classes and the bar's three numbers; nothing
+       else on the page moves, so nothing else is touched. */
     sheet.addEventListener('click', function (e) {
       e.stopPropagation();
-      if (savedState.picked.has(row.id)) savedState.picked.delete(row.id);
+      const on = savedState.picked.has(row.id);
+      if (on) savedState.picked.delete(row.id);
       else savedState.picked.add(row.id);
-      go(currentRoute());
+      card.classList.toggle('picked', !on);
+      mark.classList.toggle('on', !on);
+      if (page && page._savedSync) page._savedSync();
     });
     card.appendChild(sheet);
   } else {
@@ -2494,6 +2505,9 @@ let shelfState = { sort: 'Custom Order', selecting: false, picked: new Set() };
 
 function shelfCard(row, shelf) {
   const card = el('div', 'sc' + (row.shape === 'square' ? ' square' : ''));
+  // Its id on the node, so Select All can repaint the marks without
+  // redrawing the grid - see the tick's handler in shelfInto.
+  card.dataset.pid = row.id || '';
   card.title = row.missing_paths
     ? 'No longer on disk:\n' + row.missing_paths.join('\n')
     : (row.name || '');
@@ -2514,10 +2528,18 @@ function shelfCard(row, shelf) {
     const mark = el('div', 'spick' + (picked ? ' on' : ''));
     if (picked) card.classList.add('picked');
     card.appendChild(mark);
+    /* **The marks change, the page does not.** The owner, 4 September
+       2026, about Saved and "any page that has selection": `go()`
+       rebuilds the page element and the scroll goes with it, so every
+       tick threw him back to the top of the grid. A pick is two classes
+       and the bar's three numbers. */
     card.addEventListener('click', function () {
-      if (shelfState.picked.has(row.id)) shelfState.picked.delete(row.id);
+      const on = shelfState.picked.has(row.id);
+      if (on) shelfState.picked.delete(row.id);
       else shelfState.picked.add(row.id);
-      go(shelf);                       // redraw with the new marks
+      card.classList.toggle('picked', !on);
+      mark.classList.toggle('on', !on);
+      if (page && page._shelfSync) page._shelfSync();
     });
   } else {
     card.addEventListener('click', function () {
@@ -2645,16 +2667,30 @@ function shelfInto(parent, data) {
     const bar = el('div', 'selbar');
     const noun = data.noun || ['item', 'items'];
     const n = shelfState.picked.size;
-    bar.appendChild(el('span', 'selcount',
-                       n + ' ' + (n === 1 ? noun[0] : noun[1])));
+    const count = el('span', 'selcount',
+                     n + ' ' + (n === 1 ? noun[0] : noun[1]));
+    bar.appendChild(count);
     const all = el('label', 'selall');
     const tick = el('input');
     tick.type = 'checkbox';
     tick.checked = n > 0 && n === rows.length;
+    const sync = function () {
+      const size = shelfState.picked.size;
+      count.textContent = size + ' ' + (size === 1 ? noun[0] : noun[1]);
+      bin.disabled = size === 0;
+      tick.checked = size > 0 && size === rows.length;
+    };
+    parent._shelfSync = sync;
     tick.addEventListener('change', function () {
       shelfState.picked = tick.checked
         ? new Set(rows.map(function (r) { return r.id; })) : new Set();
-      go(shelf);
+      parent.querySelectorAll('.sc').forEach(function (card) {
+        const on = shelfState.picked.has(card.dataset.pid);
+        card.classList.toggle('picked', on);
+        const box = card.querySelector('.spick');
+        if (box) box.classList.toggle('on', on);
+      });
+      sync();
     });
     all.appendChild(tick);
     all.appendChild(el('span', null, 'Select All'));
@@ -3116,8 +3152,9 @@ function savedSelectInto(parent, data) {
 
   const strip = el('div', 'selbar');
   const n = savedState.picked.size;
-  strip.appendChild(el('span', 'selcount',
-                       n + ' ' + (n === 1 ? 'title' : 'titles')));
+  const count = el('span', 'selcount',
+                   n + ' ' + (n === 1 ? 'title' : 'titles'));
+  strip.appendChild(count);
   const all = el('label', 'selall');
   const tick = el('input');
   tick.type = 'checkbox';
@@ -3128,14 +3165,25 @@ function savedSelectInto(parent, data) {
      an empty page. */
   const settle = function () {
     const showing = onScreen();
+    const size = savedState.picked.size;
+    count.textContent = size + ' ' + (size === 1 ? 'title' : 'titles');
+    bin.disabled = size === 0;
     tick.checked = showing.length > 0
       && showing.every(function (id) { return savedState.picked.has(id); });
   };
   parent._savedTick = settle;      // applyFilter calls it when the page changes
+  parent._savedSync = settle;      // and every pick, which redraws nothing
   setTimeout(settle, 0);
   tick.addEventListener('change', function () {
     savedState.picked = tick.checked ? new Set(onScreen()) : new Set();
-    go(currentRoute());
+    // Same reason as a single pick: repaint the marks, keep the scroll.
+    parent.querySelectorAll('[data-pid]').forEach(function (card) {
+      const on = savedState.picked.has(card.dataset.pid);
+      card.classList.toggle('picked', on);
+      const box = card.querySelector('.spick');
+      if (box) box.classList.toggle('on', on);
+    });
+    settle();
   });
   all.appendChild(tick);
   all.appendChild(el('span', null, 'Select All'));

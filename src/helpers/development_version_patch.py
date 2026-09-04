@@ -1311,7 +1311,7 @@ def install():
     #     (0-7% dead frames against 100%, one native resize per fold);
     #   * "Download in Browser" hands a direct/debrid link to the system
     #     browser; chapters fetch six pages at once.
-    updater.APP_VERSION = "1.10.233"
+    updater.APP_VERSION = "1.10.234"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
