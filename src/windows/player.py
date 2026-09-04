@@ -1055,8 +1055,17 @@ def clear_resume(entry, season, episode):
         if record.get("id") not in keys:
             kept.append(record)
             continue
+        # **The subtitle preferences are worth keeping too.** The owner,
+        # 4 September 2026: "I want you to save the subtitles selected
+        # and delay and font size and position of the same ep so that
+        # when I enter the ep all loads auto as I set before" - which
+        # save_sub_prefs has done since 28 August, onto this very
+        # record. Finishing the episode then deleted it whole whenever
+        # there was no release to keep - a debrid or direct play has
+        # none - so the one thing that guaranteed the settings were lost
+        # was watching the episode to the end.
         release = record.get("release")
-        if not release:
+        if not release and not record.get(SUB_PREF_FIELD):
             changed = True
             continue        # nothing worth keeping - drop it as before
         trimmed = dict(record)
@@ -1102,8 +1111,12 @@ def clear_entry_resume(entry):
         if not float(record.get("position") or 0.0):
             kept.append(record)     # already offers nothing - no churn
             continue
+        # Same as clear_resume: this record may be the only place this
+        # episode's subtitle delay, size, position and chosen track are
+        # written, and a progress correction is not a reason to forget
+        # how the person likes to read it.
         release = record.get("release")
-        if not release:
+        if not release and not record.get(SUB_PREF_FIELD):
             changed = True
             continue                # nothing worth keeping - drop whole
         trimmed = dict(record)
