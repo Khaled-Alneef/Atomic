@@ -134,25 +134,47 @@ def default_options() -> dict:
         # default. Removed rather than swapped, so the renderer is
         # whatever this build of mpv would have chosen on its own.
         "hwdec": "auto-safe",
-        # **No video-sync override: mpv's own default.** The owner's
-        # instruction, 27 August 2026, and the honest state of the
-        # evidence - "that conclusion is no longer established because
-        # the user STILL sees the problem".
+        # **display-resample, on the strength of a count of what the
+        # screen actually showed** - 4 September 2026, the owner's
+        # "strange fps or stutter or after image trace while the video
+        # is moving, more clearly on anime (AoT S01EP02)".
         #
-        # What the old note here claimed, and what it actually showed,
-        # had drifted apart. It was measured on a 144Hz panel where
-        # 144 / 23.976 = 6.006 and display-resample locked at exactly
-        # 6.000 - which is real, and is not the machine this is running
-        # on any more, nor a demonstration that pans look right. The
-        # judder was reported again on 240Hz with vsync-ratio reading a
-        # healthy 10.01, so whatever remains is not something this
-        # setting was shown to fix. Presenting it as the fix made it the
-        # thing nobody re-examined.
+        # This option was removed on 27 August 2026 ("that conclusion is
+        # no longer established because the user STILL sees the
+        # problem") because its only evidence was a 144Hz vsync-ratio
+        # and he still saw judder on 240Hz with the ratio reading 10.01.
+        # That measurement read mpv's *average*; it never counted the
+        # frames. So this time a separate process BitBlt-sampled the
+        # centre of the picture at every refresh of the 240Hz panel
+        # (4.17ms - the screen-DC blit is the vblank wait) and counted
+        # how many refreshes each frame stayed up, AoT S01E02 at
+        # 23.976fps from Real-Debrid, same 320-350s segment each run:
         #
-        # So the baseline is now what standalone mpv does with no
-        # options: mpv picks the sync mode, nothing here overrides it,
-        # and any future change has to beat that on a measurement rather
-        # than inherit its place from an older one.
+        #   video-sync=audio (mpv's default), maximised   466 x10, 80 x9/11  14.6% uneven
+        #   video-sync=audio, the app's full screen       246 x10, 37 x9/11  13.1%
+        #   display-resample                              564 x10,  6 x9/11   1.0%
+        #   display-resample, control run                 544 x10,  1 x9      0.2%
+        #   display-resample, the frozen exe (AV1, RD)    329 x10,  3 x6-9    0.9%
+        #
+        # Under display-resample mpv's own counters agree: vsync-ratio
+        # 10.0 flat, vsync-jitter 0.0002, video-speed-correction 1.001,
+        # audio 0.99975, 0 dropped. The audio-clock mode holds a frame
+        # for 9 or 11 refreshes one time in seven; on a tracked pan that
+        # displaces the frame by a tenth of its motion against the eye,
+        # which on black line art reads as a doubled edge - the "after
+        # image trace" - rather than as a dropped frame. 24.000fps
+        # content (Money Heist, a local file) showed 6 of 467 uneven in
+        # audio mode, which is why live action looked fine and anime
+        # did not.
+        #
+        # What the same run ruled out, so it is not re-dug: every
+        # captured frame is a single decoded source frame (no blending;
+        # interpolation is off below), and the panel's kernel vblank
+        # (D3DKMTWaitForVerticalBlankEvent) stayed at 4.17ms in both
+        # window states, so VRR never engaged - the KTC 27GS950 is a
+        # Fast HVA panel with a 48-242Hz range, and anything still seen
+        # after this is its overdrive, not these pixels.
+        "video_sync": "display-resample",
         # **No interpolation, and no control that turns it on.** The
         # owner, 27 August 2026: "remove the smoothing in the vid player
         # and the cadence lock entirely from the app, they are useless!"
