@@ -2661,6 +2661,7 @@ class PlayerPage(GlassPage):
         # One embedded-Arabic auto-select per episode - see
         # _auto_select_arabic_track.
         self._arabic_track_done = False
+        self._remembered_track_done = False
         self._panel = None
         # What the download panel is currently set to. Held on the page,
         # not in the panel: the panel is rebuilt from scratch on every
@@ -4169,6 +4170,7 @@ class PlayerPage(GlassPage):
         self._spawn(self._fetch_logo_worker, self._run)
         self._marked_watched = False
         self._arabic_track_done = False
+        self._remembered_track_done = False
         self._prefetched = False
         # The warm-up done for *this* episode has served its purpose (or
         # not); either way the next one owns the question now. Nothing is
@@ -4968,6 +4970,57 @@ class PlayerPage(GlassPage):
     # in the wrong language.
     _AUDIO_AVOID_WORDS = ("commentary", "description", "descriptive",
                           "narration")
+
+    def _apply_remembered_track(self):
+        """Re-select the muxed subtitle track this episode was watched
+        with, the moment the file lists its tracks.
+
+        The owner, 4 September 2026: "when I close the app it saves the
+        position delay and the size but does not load the subtitle was
+        selected!". _apply_remembered_subtitle answers the same question
+        for a *downloaded* subtitle and cannot answer this one - it
+        returns immediately when there are no search results, and an
+        embedded track needs none.
+
+        Matched on language and title rather than on the stored `sid`:
+        mpv numbers tracks per file, so the id means nothing if the next
+        play of this episode picks a different release. A release with
+        two Arabic tracks (signs and full) is told apart by the title,
+        which is why _remember_embedded_sub carries it; with no title to
+        go on, the first track of that language is the answer.
+
+        Once per file, and never over a hand pick made in the meantime.
+        """
+        if self._closing or self._sub_auto_done or self._remembered_track_done:
+            return
+        if not self._tracks:
+            return
+        self._remembered_track_done = True
+        try:
+            stored = (load_sub_prefs(self.entry, self.season,
+                                     self.episode) or {}).get("choice") or {}
+        except Exception:
+            return
+        if str(stored.get("kind") or "") != "embedded":
+            return
+        want_lang = str(stored.get("lang") or "").lower()
+        want_title = str(stored.get("title") or "").strip().lower()
+        subs = [t for t in self._tracks if t.get("type") == "sub"]
+        same_lang = [t for t in subs
+                     if str(t.get("lang") or "").lower() == want_lang]
+        track = None
+        if want_title:
+            track = next((t for t in same_lang
+                          if str(t.get("title") or "").strip().lower()
+                          == want_title), None)
+        track = track or (same_lang[0] if same_lang else None)
+        if track is None:
+            return          # this release does not carry it - leave it alone
+        if track.get("selected"):
+            self._sub_auto_done = True
+            return
+        self._sub_auto_done = True
+        self._pick_track("sid", track)
 
     def _auto_select_arabic_track(self):
         """Select an embedded Arabic subtitle track the moment the file
@@ -6615,6 +6668,7 @@ class PlayerPage(GlassPage):
             # actually going to be playing rather than the one mpv
             # opened on and is about to be moved off.
             self._apply_audio_default()
+            self._apply_remembered_track()
             self._auto_select_arabic_track()
             self._update_audio_pill()
             # An open tracks panel follows mpv's own answer: the pick
@@ -7166,7 +7220,7 @@ class PlayerPage(GlassPage):
                     continue
                 panel.add_row(self._track_label(track), "embedded",
                               lambda checked=False, t=track:
-                                  self._pick_track("sid", t),
+                                  self._pick_embedded_sub(t),
                               selected=bool(track.get("selected")),
                               dot=bool(track.get("selected")),
                               into=variant_col)
@@ -7559,7 +7613,7 @@ class PlayerPage(GlassPage):
             for track in subs:
                 panel.track_rows[("sid", track.get("id"))] = panel.add_row(
                     self._track_label(track), track.get("codec") or "",
-                    lambda checked=False, t=track: self._pick_track("sid", t),
+                    lambda checked=False, t=track: self._pick_embedded_sub(t),
                     selected=bool(track.get("selected")))
         panel.finish()
         self._show_panel(panel)
@@ -7678,6 +7732,51 @@ class PlayerPage(GlassPage):
                  str(track.get("lang") or "").strip()]
         text = " · ".join(p for p in parts if p)
         return text or f"Track {track.get('id')}"
+
+    def _pick_embedded_sub(self, track):
+        """Select a muxed subtitle track *and* remember it - the two
+        halves of what a person means by picking one."""
+        self._sub_auto_done = True      # a hand pick owns this episode
+        self._pick_track("sid", track)
+        self._remember_embedded_sub(track)
+
+    def _remember_embedded_sub(self, track):
+        """File an embedded subtitle pick the way an external one is.
+
+        The owner, 4 September 2026: "when I close the app it saves the
+        position delay and the size but does not load the subtitle was
+        selected!". The three levers are written by _remember_sub_prefs
+        on every nudge; the *track* was written only by
+        _remember_subtitle_choice, and that runs on one path - after
+        `sub_add` succeeds, which is a downloaded file. A track already
+        muxed into the release is chosen with `sid` and nothing recorded
+        it, so the delay and the size came back on the next open and the
+        subtitle did not.
+
+        Filed in the same shape a downloaded one is, with `kind`
+        naming which sort it is - see _match_subtitle_choice, which
+        selects on that. `title` is carried because a release can hold
+        two tracks of one language (signs and full), and the id alone
+        is not stable: mpv numbers tracks per file, and the next play of
+        this episode may be a different release.
+        """
+        if track is None:
+            return
+        try:
+            recipe = {"kind": "embedded",
+                      "lang": str(track.get("lang") or "").lower(),
+                      "title": str(track.get("title") or ""),
+                      "sid": int(track.get("id") or 0),
+                      "source": "", "provider": None,
+                      "label": self._track_label(track)}
+            save_subtitle_choice(self.entry, **{
+                k: v for k, v in recipe.items()
+                if k in ("lang", "source", "provider", "label")})
+            save_sub_prefs(self.entry, self.season, self.episode,
+                           self._sub_delay, self._sub_size,
+                           self._sub_pos_offset, choice=recipe)
+        except Exception:
+            logs.exception("Could not remember the embedded subtitle")
 
     def _pick_track(self, prop, track):
         if self.handle is None:

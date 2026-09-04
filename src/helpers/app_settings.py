@@ -500,14 +500,44 @@ def get_tmdb_key() -> str:
     return get_api_key("tmdb")
 
 
+def clean_api_key(value: str) -> str:
+    """A pasted key with the things a paste picks up taken out.
+
+    The owner, 4 September 2026, with a screenshot: "AI Translation
+    Failed - Anthropic failed (UnicodeEncodeError)". A key travels as an
+    HTTP header, and http.client encodes header values as **latin-1** -
+    so one character outside it anywhere in the key raises before the
+    request is even sent. Measured on that exact call: an ASCII key and
+    a key with a non-breaking space both send; a key carrying a smart
+    quote (U+2018) or an Arabic letter raises UnicodeEncodeError.
+
+    Copying a key out of a web page is how those get in - a curly quote
+    from surrounding prose, a zero-width space, a bidi mark from an
+    Arabic-language page, the BOM from a text file. None of them are
+    part of the key, so they are removed rather than the paste being
+    refused.
+    """
+    text = str(value or "").strip()
+    # Compared by code point rather than written out: a source
+    # file holding the literal zero-width characters is a file
+    # nobody can read or safely edit.
+    invisible = {0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0xFEFF}
+    return "".join(ch for ch in text
+                   if ord(ch) not in invisible and not ch.isspace())
+
+
 def get_api_key(name: str) -> str:
-    """One of API_KEYS, or "" when the user has not supplied it."""
-    return str(_load().get(f"{name}_api_key") or "")
+    """One of API_KEYS, or "" when the user has not supplied it.
+
+    Cleaned on the way out as well as on the way in, so a key stored by
+    an older build - before clean_api_key existed - is usable without
+    being re-pasted."""
+    return clean_api_key(_load().get(f"{name}_api_key"))
 
 
 def set_api_key(name: str, value: str):
     data = _load()
-    data[f"{name}_api_key"] = (value or "").strip()
+    data[f"{name}_api_key"] = clean_api_key(value)
     storage.save(SETTINGS_FILE, data)
 
 

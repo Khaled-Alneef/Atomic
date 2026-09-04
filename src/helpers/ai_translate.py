@@ -159,6 +159,18 @@ def _reason_for(provider, error) -> str:
         if error.code >= 500:
             return f"{name} is down ({error.code})"
         return f"{name} refused the request ({error.code})"
+    if isinstance(error, UnicodeEncodeError):
+        # **The key itself could not be put in a header.** The owner, 4
+        # September 2026, with a screenshot reading "Anthropic failed
+        # (UnicodeEncodeError)". http.client encodes header values as
+        # latin-1, so one character outside it anywhere in the key
+        # raises before the request is sent - measured on that exact
+        # call: an ASCII key sends, a key carrying a smart quote
+        # (U+2018) or an Arabic letter does not. app_settings.
+        # clean_api_key now takes out what a paste picks up invisibly;
+        # a visible character it cannot judge is left alone and says
+        # this instead of a type name nobody can act on.
+        return f"{name}'s key has a character it cannot send - re-paste it"
     if isinstance(error, urllib.error.URLError):
         return f"{name} could not be reached"
     return f"{name} failed ({type(error).__name__})"
