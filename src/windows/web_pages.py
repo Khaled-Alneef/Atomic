@@ -739,7 +739,11 @@ class _WebPage(GlassPage):
         the page is holding - .claude/rules/ui.md's rule, and the reason
         reordering a game once erased freshly imported ones.
         """
-        if str(body.get("do") or "") != "delete":
+        want = str(body.get("do") or "")
+        if want == "menu":
+            self._saved_menu(body)
+            return
+        if want != "delete":
             return
         ids = {str(i) for i in (body.get("ids") or []) if i}
         if not ids:
@@ -768,6 +772,70 @@ class _WebPage(GlassPage):
             self.reload()
         except Exception:
             logs.exception("Could not remove the picked saved entries")
+
+    def _saved_menu(self, body):
+        """Right-click on a saved card: move it to another status.
+
+        The owner, 4 September 2026: "add some way to change from
+        watching to other status like right click on the card in the
+        saved page, then change status or something."
+
+        The list is the one for that entry's own type - you watch an
+        anime and read a manga, so the wording differs
+        (tracker.STATUSES_BY_TYPE). The current one is ticked and does
+        nothing when chosen. One field on one entry, so
+        storage.update_entry rather than a list written back
+        (.claude/rules/ui.md).
+        """
+        entry_id = str(body.get("id") or "").strip()
+        if not entry_id:
+            return
+        try:
+            from PyQt6.QtCore import QPoint
+            from PyQt6.QtWidgets import QMenu
+            from helpers import storage
+            from helpers.widgets import show_toast
+            from windows.tracker import STATUSES_BY_TYPE, _WATCHING_STATUSES
+
+            found = name = None
+            for file_name in ("series.json", "tracker.json"):
+                for row in storage.load(file_name, []):
+                    if isinstance(row, dict) and str(row.get("id") or "") == entry_id:
+                        found, name = row, file_name
+                        break
+                if found is not None:
+                    break
+            if found is None:
+                return
+
+            statuses = STATUSES_BY_TYPE.get(found.get("type"),
+                                            _WATCHING_STATUSES)
+            now = str(found.get("status") or "").strip() or statuses[0]
+            menu = QMenu(self)
+            actions = {}
+            for status in statuses:
+                act = menu.addAction(status)
+                act.setCheckable(True)
+                act.setChecked(status == now)
+                actions[act] = status
+            # The page's coordinates are its own, so they are offset by
+            # where this page sits - never mapToGlobal, which divides by
+            # the other screen's factor on a mixed-DPI desktop.
+            window = self.window()
+            here = self.mapTo(window, self.rect().topLeft())
+            frame = window.geometry()
+            chosen = menu.exec(QPoint(
+                frame.x() + here.x() + int(float(body.get("x") or 0)),
+                frame.y() + here.y() + int(float(body.get("y") or 0))))
+            picked = actions.get(chosen)
+            if not picked or picked == now:
+                return
+            if storage.update_entry(name, entry_id, {
+                    "status": picked, "updated_at": storage.now_iso()}):
+                show_toast(self.window(), f"Moved to {picked}")
+                self.reload()
+        except Exception:
+            logs.exception("Could not change a saved entry's status")
 
     def _forget_one(self, body):
         """One title dropped out of History, from its right-click menu.

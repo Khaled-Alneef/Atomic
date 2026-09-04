@@ -198,6 +198,16 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
    is set only while picking, so a card outside select mode keeps the
    containing block it has always had. */
 .card.picking { position: relative; }
+/* **Nothing hovers while picking.** The owner, 4 September 2026: "in
+   select mode, do not make the image blur and the resume btn appear on
+   the cards in the saved page". The frost (`.art::after`) and the ring
+   are both keyed on `.card:hover`, and the sheet laid over the card is
+   a descendant - so hovering it still lit both, offering a Continue that
+   cannot be pressed and blurring the cover behind a tick. The tick and
+   the accent outline are what say "picked"; nothing else needs to move. */
+.card.picking:hover { background: transparent; border-color: transparent; }
+.card.picking:hover .art:not(.plain)::after { opacity: 0; }
+.card.picking:hover .ring { opacity: 0; }
 /* The sheet that takes the click while picking - see statusCard for why
    the card underneath is left wired rather than replaced. */
 .card.picking .spickover { position: absolute; inset: 0; z-index: 3; }

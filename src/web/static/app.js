@@ -2258,6 +2258,23 @@ function statusCard(row) {
       go(currentRoute());
     });
     card.appendChild(sheet);
+  } else {
+    /* **Right-click sets the status.** The owner, 4 September 2026:
+       "add some way to change from watching to other status like right
+       click on the card in the saved page, then change status or
+       something."
+
+       Qt owns the menu, as it does for a shelf card (shelfCard): the
+       statuses differ by side, the write is storage's, and a native
+       menu is what the Qt page offered. Not while picking - a click
+       there means "pick this one" and a menu over it would be a second
+       meaning for the same card. */
+    card.addEventListener('contextmenu', function (e) {
+      e.preventDefault();
+      tellHost({ action: 'saved', do: 'menu', id: row.id || '',
+                 title: row.title || '', status: row.status || '',
+                 x: Math.round(e.clientX), y: Math.round(e.clientY) });
+    });
   }
   // The status under the title and the number under that, in accent -
   // the only colour on a tracker card and the thing being looked for.
@@ -2992,6 +3009,10 @@ function applyFilter(host) {
     card.hidden = !ok;
     if (ok) shown += 1;
   });
+  // Saved's Select All box means "everything showing", so what is
+  // showing has just changed under it - see savedSelectInto.
+  const settle = (host || page)._savedTick;
+  if (settle) settle();
   // A section whose every row is hidden goes with them, or the page is
   // a column of headings over nothing.
   (host || page).querySelectorAll('.row, .schedblock').forEach(function (block) {
@@ -3064,12 +3085,24 @@ function applySort(host) {
 function savedSelectInto(parent, data) {
   const bar = parent.querySelector('.filterrow');
   if (!bar) return;
-  const ids = [];
-  (data.sections || []).forEach(function (sec) {
-    (sec.rows || []).forEach(function (row) {
-      if (row.id) ids.push(row.id);
+  /* **What Select All means is what is on screen.** The owner, 4
+     September 2026: "when I put a filter on Watching in the saved page
+     and check the select all box make it only select all appearing on
+     the filter (Watching)."
+
+     Read from the DOM at the moment the box is ticked, not from the
+     payload: the filter hides cards with `hidden` (applyFilter) and the
+     payload knows nothing about it, so ticking the box picked every
+     saved title including the ones the filter had just taken off the
+     page. The cards are drawn after this runs, which is why it is a
+     function rather than a list. */
+  const onScreen = function () {
+    const out = [];
+    parent.querySelectorAll('[data-pid]:not([hidden])').forEach(function (card) {
+      if (card.dataset.pid) out.push(card.dataset.pid);
     });
-  });
+    return out;
+  };
   const pick = el('button', 'selbtn' + (savedState.selecting ? ' on' : ''),
                   savedState.selecting ? 'Done' : 'Select');
   pick.title = 'Pick several titles to remove';
@@ -3088,9 +3121,20 @@ function savedSelectInto(parent, data) {
   const all = el('label', 'selall');
   const tick = el('input');
   tick.type = 'checkbox';
-  tick.checked = n > 0 && n === ids.length;
+  /* Ticked only when everything *showing* is picked - the same rule the
+     box acts on, so it cannot say "all" about a page it did not fill.
+     Read after this turn: the sections are drawn after this bar is, and
+     applyFilter sets `hidden` after that again, so asking now would ask
+     an empty page. */
+  const settle = function () {
+    const showing = onScreen();
+    tick.checked = showing.length > 0
+      && showing.every(function (id) { return savedState.picked.has(id); });
+  };
+  parent._savedTick = settle;      // applyFilter calls it when the page changes
+  setTimeout(settle, 0);
   tick.addEventListener('change', function () {
-    savedState.picked = tick.checked ? new Set(ids) : new Set();
+    savedState.picked = tick.checked ? new Set(onScreen()) : new Set();
     go(currentRoute());
   });
   all.appendChild(tick);
