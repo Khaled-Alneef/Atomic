@@ -840,28 +840,48 @@ def hero_meta(entry_id):
 def featured_art(title, imdb="", kind=""):
     """A discover title's wide still and title treatment.
 
-    The same three calls tracker._featured_backdrop_worker makes: the
-    small backdrop first because it is there in a moment, then the
-    full-resolution one, then the logo. A discover row has no saved
-    entry, so everything is found by name (and by IMDb id where the row
-    carries one).
+    The same calls tracker._featured_backdrop_worker makes, through the
+    one implementation both now use (artwork.deliver, which carries the
+    measurement). A discover row has no saved entry, so everything is
+    found by name (and by IMDb id where the row carries one).
+
+    **This route is what Home's hero and the Discover banners draw**, and
+    it had the worst shape of the five: `backdrop_path(...) or
+    backdrop_fast_path(...)` asks for the full-resolution original
+    *first* and only falls back to the small copy, so the answer always
+    paid a multi-MB download - and then fetched the logo after it. One
+    route has to answer with both, so both are fetched at once and the
+    route returns when the slower finishes rather than when their sum
+    does. The owner's ask, 4 September 2026: "fix also in all pages
+    including the home and the discover banners ... ALL pages".
+
+    The small copy is kept when the original does not arrive: `deliver`
+    hands over the w780 first and the original over it, so `backdrop`
+    below simply holds whichever got furthest.
     """
     title = str(title or "").strip()
     if not title:
         return {"backdrop": "", "logo": ""}
     probe = {"title": title, "imdb_id": str(imdb or ""),
              "type": str(kind or "")}
-    backdrop = logo = ""
+    found = {"backdrop": "", "logo": ""}
+
+    def keep(slot):
+        def note(path):
+            if path:
+                found[slot] = local_url(path) or found[slot]
+        return note
+
     try:
         from helpers import artwork
-        found = artwork.backdrop_path(probe) or artwork.backdrop_fast_path(probe)
-        backdrop = local_url(found) if found else ""
+        artwork.deliver(probe, on_backdrop=keep("backdrop"),
+                        on_logo=keep("logo"))
+        if not found["logo"]:
+            # A discover row TMDB carries no title treatment for may
+            # still be an anime whose franchise has one - the strict
+            # by-name match, same as the reading pages use.
+            by_title = artwork.logo_path_by_title(title)
+            found["logo"] = local_url(by_title) if by_title else ""
     except Exception:
         pass
-    try:
-        from helpers import artwork
-        found = artwork.logo_path(probe) or artwork.logo_path_by_title(title)
-        logo = local_url(found) if found else ""
-    except Exception:
-        pass
-    return {"backdrop": backdrop, "logo": logo}
+    return {"backdrop": found["backdrop"], "logo": found["logo"]}

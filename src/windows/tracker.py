@@ -7271,21 +7271,24 @@ class TrackerPage(GlassPage):
                 return
             probe = {"imdb_id": item.get("imdb_id"),
                      "title": item.get("title") or ""}
-            # Small copy first, then the full-resolution original - the
-            # details page's pattern. Taking the small one with `or`
-            # (what this did) meant the original was never fetched and a
-            # banner far wider than 780px was drawn from a 780px image.
-            quick = artwork.backdrop_fast_path(probe)
-            if quick:
-                self._discover_signals.featured_backdrop.emit(str(quick), run)
-            full = artwork.backdrop_path(probe)
-            if full:
-                self._discover_signals.featured_backdrop.emit(str(full), run)
-            # The video logo (TMDB title treatment) in place of the typed
-            # title; fails soft to text when the title has none.
-            logo = artwork.logo_path(probe)
-            self._discover_signals.featured_overlay.emit(
-                str(logo or ""), bool(logo), run)
+            # Small copy first, then the full-resolution original, and
+            # **the logo beside them rather than behind them** -
+            # artwork.deliver, which carries the measurement. Taking the
+            # small one with `or` (what this once did) meant the original
+            # was never fetched and a banner far wider than 780px was
+            # drawn from a 780px image; fetching the logo third meant it
+            # queued behind that original's 2.5MB, which is the owner's
+            # "the discover banners ... ALL pages", 4 September 2026.
+            #
+            # The video logo (TMDB title treatment) goes in place of the
+            # typed title; fails soft to text when the title has none.
+            artwork.deliver(
+                probe,
+                on_backdrop=lambda path:
+                    self._discover_signals.featured_backdrop.emit(path, run),
+                on_logo=lambda path:
+                    self._discover_signals.featured_overlay.emit(
+                        path, bool(path), run))
         except Exception:
             return          # no art just keeps the banner's flat panel
 

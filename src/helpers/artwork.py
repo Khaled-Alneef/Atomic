@@ -26,12 +26,14 @@ none of them is worth interrupting playback over.
 import hashlib
 import json
 import os
+import threading
 import time
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import app_settings, net, storage
+from . import app_settings, logs, net, storage
 
 API = "https://api.themoviedb.org/3"
 CDN = "https://image.tmdb.org/t/p"
@@ -51,9 +53,66 @@ DEFAULT_TIMEOUT = 8
 _UA = "Atomic/1.0"
 
 
+class Unreachable(Exception):
+    """TMDB could not be *asked* - a refused host, a reset handshake, a
+    timeout, a body that never arrived.
+
+    Deliberately distinct from "TMDB answered, and has no artwork for
+    this title", and that distinction is the whole point of this class:
+    only the second one may write a `.none` marker. Both were the same
+    answer - None - until 4 September 2026, when the owner's second
+    machine showed no logo on any watchable title and the blurred cover
+    where the backdrop belongs. helpers/net's own note records that
+    machine's network resetting api.themoviedb.org at the TLS handshake,
+    so every lookup there fails in transport; each failure was then
+    filed as "there is no logo for this title", which stands for six
+    hours (NEGATIVE_TTL_S) without asking again. One bad moment cost a
+    session; a blocked host cost every title, permanently.
+
+    A server that *answered* - 401, 404, 429 - is not this. It is
+    reachable and it said something, so `_get_json` re-raises the
+    HTTPError untouched and callers can still read `.code`."""
+
+
+# A blocked host fails on every title of every page, so the line naming
+# the cause is written once a minute per host - not forty times a page.
+_SAY_EVERY_S = 60.0
+_said = {}
+_said_lock = threading.Lock()
+
+
+def _say_once(key: str, message: str):
+    now = time.monotonic()
+    with _said_lock:
+        when = _said.get(key)
+        if when is not None and now - when < _SAY_EVERY_S:
+            return
+        _said[key] = now
+    logs.warning(message)
+
+
+def _safe_host(url) -> str:
+    """The host, and never the URL.
+
+    **A v3 key travels in the query string** (see `_get_json`), so a
+    logged URL would write the owner's key into the file he pastes into
+    a bug report. The host is the whole diagnostic anyway - what the log
+    has to answer is "did this machine reach TMDB at all"."""
+    return net._url_host(url) or "api.themoviedb.org"
+
+
 def _cache_dir():
     path = storage.DATA_DIR / "logo_cache"
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Every caller reaches this *before* its own try block, so an
+        # unwritable data directory used to leave the loading screen
+        # blank with nothing anywhere saying why - the same silence this
+        # whole pass exists to end.
+        _say_once("cache-dir", f"logo cache unusable at {path}: "
+                               f"{type(exc).__name__}")
+        raise
     return path
 
 
@@ -67,7 +126,17 @@ def _bundled_token() -> str:
     it and .gitignore keeps it out of the repo.
 
     Its whole purpose is that nobody running Atomic has to obtain a key
-    of their own."""
+    of their own.
+
+    **Verified in the shipped artefact, 4 September 2026**, after the
+    owner reported from a second machine that his key was "not correctly
+    embedded". It is: `Atomic.zip` -> `Atomic.exe` -> the PyInstaller
+    CArchive carries `tmdb_token.txt` at the bundle root, 32 bytes, and
+    those bytes are byte-identical to packaging/tmdb_token.txt, which
+    answers 200 live. So a machine showing no artwork is not a build
+    that lost the key - look for the `TMDB unreachable` line _get_json
+    now writes, which is what that machine's atomic.log had no way to
+    say before."""
     import sys
     roots = []
     meipass = getattr(sys, "_MEIPASS", None)
@@ -106,10 +175,21 @@ def _is_bearer(credential: str) -> bool:
 
 
 def _get_json(url, timeout):
-    # v4 bearer, not the v3 `api_key=` query parameter. The token this
-    # ships with is a read access token, and v3-style auth answers 401
-    # for it - which looks exactly like a bad key rather than the wrong
-    # auth scheme, so it is worth naming here.
+    # **Both credential shapes, decided per token, because the shipped
+    # one has changed shape since this was written.** The comment here
+    # used to say the bundled token was a v4 read token for which v3
+    # auth answers 401. Measured 4 September 2026, against the file
+    # actually committed at packaging/tmdb_token.txt: it is 32
+    # characters, no dots - a **v3 key** - and the three ways of asking
+    # come back
+    #
+    #     v3 key as ?api_key=      200, real JSON
+    #     v3 key as Bearer         401 "Invalid API key"
+    #     no credential            401
+    #
+    # so the branch below is not a nicety, it is the only one of the two
+    # that works for the token this build ships. `_is_bearer` routes it,
+    # and the same code keeps working if the owner ever pastes a v4 one.
     credential = token()
     headers = {"User-Agent": _UA, "Accept": "application/json"}
     if _is_bearer(credential):
@@ -127,14 +207,39 @@ def _get_json(url, timeout):
     # in one session - each one a cover or a rating waiting on a
     # connection that was never going to open. See net.host_refusing.
     if net.host_refusing(url):
-        raise ConnectionError(f"{net._url_host(url)} is refusing connections")
+        raise Unreachable(f"{_safe_host(url)} is refusing connections")
     deadline = net.deadline_in(timeout)
     try:
         with net.urlopen(request, timeout=timeout) as response:
             answer = json.loads(net.read_text(response, deadline))
-    except Exception:
-        net.note_host_failure(url)
+    except urllib.error.HTTPError as exc:
+        # **A status is not a refusal, and this used to count it as one.**
+        # `note_host_failure` on any exception meant two 404s - a title
+        # TMDB has unlinked is enough - wrote the whole host off for ten
+        # minutes (net.REFUSED_HOST_TTL_S), so every logo, backdrop,
+        # poster and episode rating in the app then failed without a
+        # request. A server that answered is alive; only transport
+        # counts. Re-raised untouched so callers keep `.code`.
+        net.note_host_success(url)
+        if exc.code in (401, 403):
+            # The one failure the owner has to be *told* about rather
+            # than shown as missing art: a revoked or rate-limited key
+            # looks exactly like a title with no logo, and the answer to
+            # it is a key pasted in Settings, not a rebuild.
+            _say_once(f"{_safe_host(url)}-auth",
+                      f"TMDB refused the key ({exc.code}) - artwork will be "
+                      f"missing until a working key is pasted in Settings")
+        else:
+            _say_once(f"{_safe_host(url)}-{exc.code}",
+                      f"TMDB answered {exc.code}")
         raise
+    except Exception as exc:
+        net.note_host_failure(url)
+        _say_once(f"{_safe_host(url)}-down",
+                  f"TMDB unreachable at {_safe_host(url)}: "
+                  f"{type(exc).__name__} - no logos or backdrops "
+                  f"while this lasts")
+        raise Unreachable(f"{_safe_host(url)}: {type(exc).__name__}") from exc
     net.note_host_success(url)
     return answer
 
@@ -233,6 +338,11 @@ def _tmdb_id(imdb_id: str, timeout, title: str = "", kind: str = ""):
             found = _get_json(
                 f"{API}/search/{media}?query={urllib.parse.quote(title)}",
                 timeout)
+        except Unreachable:
+            # Never swallowed: returning (None, None) here reads to the
+            # caller as "TMDB has never heard of this title" and earns a
+            # six-hour `.none` marker for a title whose logo is fine.
+            raise
         except Exception:
             continue
         # Every acceptable row on this list, then the best of them: an
@@ -360,11 +470,15 @@ def _search_logo(title: str, timeout):
         try:
             found = _get_json(
                 f"{API}/search/tv?query={urllib.parse.quote(query)}", timeout)
+        except Unreachable:
+            raise               # see the same clause in _tmdb_id
         except Exception:
             continue
         for row in (found.get("results") or [])[:3]:
             try:
                 images = _get_json(f"{API}/tv/{row['id']}/images", timeout)
+            except Unreachable:
+                raise
             except Exception:
                 continue
             path = _best_logo(images)
@@ -502,8 +616,16 @@ def logo_path(entry, timeout: int = DEFAULT_TIMEOUT):
             missing.touch()
             return None
         data = _download(f"/{LOGO_SIZE}{path}", timeout)
+    except (Unreachable, urllib.error.HTTPError):
+        # Fail soft, and crucially *without* a marker: the player shows
+        # text and the next episode asks again. Both are already named
+        # in the log once per host by _get_json, so no traceback here -
+        # forty heroes against a refused key would otherwise bury that
+        # one useful line under forty stacks.
+        return None
     except Exception:
-        return None                 # fail soft; the player shows text
+        logs.exception(f"tmdb logo lookup failed for {imdb_id}")
+        return None
 
     if not data:
         return None
@@ -543,6 +665,8 @@ def _search_anime_logo(title, timeout):
     try:
         found = _get_json(
             f"{API}/search/tv?query={urllib.parse.quote(title)}", timeout)
+    except Unreachable:
+        raise                   # see the same clause in _tmdb_id
     except Exception:
         return None
     best, best_pop = None, -1.0
@@ -559,6 +683,8 @@ def _search_anime_logo(title, timeout):
         return None
     try:
         images = _get_json(f"{API}/tv/{best['id']}/images", timeout)
+    except Unreachable:
+        raise
     except Exception:
         return None
     return _best_logo(images)
@@ -608,8 +734,11 @@ def logo_path_by_title(title, timeout: int = DEFAULT_TIMEOUT):
             missing.touch()
             return None
         data = _download(f"/{LOGO_SIZE}{path}", timeout)
-    except Exception:
+    except (Unreachable, urllib.error.HTTPError):
         return None                 # fail soft; the banner keeps its text
+    except Exception:
+        logs.exception(f"tmdb logo-by-title lookup failed for {title!r}")
+        return None
     if not data:
         return None
     try:
@@ -649,7 +778,10 @@ def backdrop_fast_path(entry, timeout: int = DEFAULT_TIMEOUT):
             missing.touch()
             return None
         data = _download(f"/w780{path}", timeout)
+    except (Unreachable, urllib.error.HTTPError):
+        return None
     except Exception:
+        logs.exception(f"tmdb quick backdrop lookup failed for {imdb_id}")
         return None
     if not data:
         return None
@@ -700,7 +832,10 @@ def backdrop_path(entry, timeout: int = DEFAULT_TIMEOUT):
             missing.touch()
             return None
         data = _download(f"/{BACKDROP_SIZE}{path}", timeout)
+    except (Unreachable, urllib.error.HTTPError):
+        return None
     except Exception:
+        logs.exception(f"tmdb backdrop lookup failed for {imdb_id}")
         return None
 
     if not data:
@@ -710,6 +845,75 @@ def backdrop_path(entry, timeout: int = DEFAULT_TIMEOUT):
     except OSError:
         return None
     return str(cached)
+
+
+def deliver(entry, on_backdrop=None, on_logo=None, timeout=DEFAULT_TIMEOUT):
+    """A title's artwork, handed over piece by piece as it lands.
+
+    **One implementation, because there were five and the logo was last
+    in every one of them.** The owner, 4 September 2026: "in the ep list
+    the logo does not show also the bg image is blurred in all watchable
+    ... the loading in the vid player does not show any logo!", then
+    "fix also in all pages including the home and the discover banners
+    ... ALL pages". Every caller - windows/details, windows/player,
+    windows/home's hero, windows/tracker's discover banner and
+    web/backend's featured route - fetched the same three things in the
+    same serial order, ending with the logo. The step in front of it is
+    `backdrop_path`, whose download is BACKDROP_SIZE "original": 2.5MB
+    on Attack on Titan. Measured cold, twice each:
+
+        serial (as shipped)   w780 0.77-0.84s   original 1.52-1.62s
+                              LOGO 1.75-1.88s
+        logo on its own       w780 0.39-1.01s   original 1.09-1.85s
+                              LOGO 0.34-1.00s
+
+    So the logo was 1.1-1.4s outside the CLAUDE.md rule 7 second, and
+    on a loading screen that is often over inside that gap it simply
+    never appeared. It is invisible on a machine that has been running
+    for weeks - logo_cache answers every ask with a `stat()` - which is
+    why it took a fresh install on his second device to surface, and why
+    reproducing it here meant deleting logo_cache first.
+
+    `on_backdrop(path)` may be called **twice**, the w780 copy and then
+    the full-resolution original, and that order is load-bearing: every
+    caller draws whatever arrives last, so a small copy landing after
+    the original would swap a sharp ground back for a soft one. That is
+    the whole reason the backdrops stay sequential while only the logo
+    moves.
+
+    `on_logo(path)` is called exactly once, with "" when there is none -
+    callers need the negative to decide whether to keep the typed title.
+    Callbacks run on worker threads. Never raises."""
+    def _logo():
+        found = None
+        try:
+            found = logo_path(entry, timeout)
+        except Exception:
+            logs.exception("logo fetch failed")
+        if on_logo is None:
+            return
+        try:
+            on_logo(str(found or ""))
+        except Exception:
+            logs.exception("logo callback failed")
+
+    thread = threading.Thread(target=_logo, daemon=True)
+    thread.start()
+    for fetch in (backdrop_fast_path, backdrop_path):
+        try:
+            found = fetch(entry, timeout)
+        except Exception:
+            logs.exception("backdrop fetch failed")
+            continue
+        if found and on_backdrop is not None:
+            try:
+                on_backdrop(str(found))
+            except Exception:
+                logs.exception("backdrop callback failed")
+    # Bounded: the fetches carry their own timeouts, and a caller that
+    # blocks on this (web/backend's route) must not be held by a thread
+    # that somehow outlives them.
+    thread.join(timeout * 3)
 
 
 def clear_cache():

@@ -957,25 +957,28 @@ class HomePage(GlassPage):
             # never fetched at all and a ~1200px-wide banner was drawn
             # from a 780px image. Now the small one fills the banner
             # immediately and the original replaces it when it lands.
-            quick = artwork.backdrop_fast_path(entry)
-            if quick:
+            # Both sizes in that order, and **the logo beside them, not
+            # behind them** - artwork.deliver, which carries the
+            # measurement. The owner's ask, 4 September 2026: "fix also
+            # in all pages including the home and the discover banners
+            # ... ALL pages". This hero had the identical shape the
+            # episode list did: the logo fetched last, queued behind a
+            # 2.5MB "original" backdrop, so a cold hero showed its typed
+            # name for the better part of two seconds.
+            def _backdrop(path):
                 # Decoded here, on this thread, so the slide change does
                 # not pay a JPEG on the GUI thread - see
                 # widgets.warm_backdrop for the 31-43ms it cost.
-                warm_backdrop(quick)
-                self._hero_signals.backdrop.emit(entry_id, str(quick))
-            full = artwork.backdrop_path(entry)
-            if full:
-                # Decoded here, on this thread, so the slide change does
-                # not pay a JPEG on the GUI thread - see
-                # widgets.warm_backdrop for the 31-43ms it cost.
-                warm_backdrop(full)
-                self._hero_signals.backdrop.emit(entry_id, str(full))
+                warm_backdrop(path)
+                self._hero_signals.backdrop.emit(entry_id, path)
+
             # The video logo (TMDB title treatment): shown in place of the
             # typed title. Fails soft to text when the title has none.
-            logo = artwork.logo_path(entry)
-            self._hero_signals.overlay.emit(entry_id, str(logo or ""),
-                                            bool(logo))
+            artwork.deliver(
+                entry,
+                on_backdrop=_backdrop,
+                on_logo=lambda path: self._hero_signals.overlay.emit(
+                    entry_id, path, bool(path)))
         except Exception:
             return          # no art anywhere just keeps the flat panel
 

@@ -417,16 +417,18 @@ def _art_worker(signals, run, entry):
     was a multi-MB original on a first visit. Runs on its own thread,
     not lookup_pool: that pool is four wide and shared with the
     tracker's page-load backfill, so this page's own artwork could sit
-    in a queue behind fifty schedule lookups."""
-    for kind, fetch in (("backdrop", artwork.backdrop_fast_path),
-                        ("backdrop", artwork.backdrop_path),
-                        ("logo", artwork.logo_path)):
-        try:
-            path = fetch(entry)
-        except Exception:
-            path = None
-        if path:
-            signals.art.emit(run, kind, path)
+    in a queue behind fifty schedule lookups.
+
+    **The logo runs beside the backdrops rather than behind them** -
+    artwork.deliver, which carries the measurement and is what every
+    page uses now. Reproduced for this page on the frozen build against
+    a copy of his data with logo_cache deleted: it opened on the blurred
+    cover seed with its typed title, and the logo and the sharp ground
+    appeared together seconds later."""
+    artwork.deliver(
+        entry,
+        on_backdrop=lambda path: signals.art.emit(run, "backdrop", path),
+        on_logo=lambda path: path and signals.art.emit(run, "logo", path))
 
 
 def _blurred_still(path):

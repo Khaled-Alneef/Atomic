@@ -4089,16 +4089,27 @@ class PlayerPage(GlassPage):
         Never raises: a dead worker here would be invisible, and the
         loading screen simply keeps its text. Both artwork lookups
         already fail soft to None for a missing key, an unknown title, or
-        a title TMDB has no artwork for."""
-        for kind, fetch in (("backdrop", artwork.backdrop_path),
-                            ("logo", artwork.logo_path)):
-            try:
-                path = fetch(self.entry)
-            except Exception:
-                logs.exception(f"{kind} lookup failed")
-                continue
+        a title TMDB has no artwork for.
+
+        **The logo is fetched beside the backdrop, and the backdrop now
+        starts small** - artwork.deliver, which carries the measurement
+        and is what every page uses. The owner, 4 September 2026: "the
+        loading in the vid player does not show any logo!", from a
+        machine whose logo_cache was empty. The two were serial with the
+        logo second, behind a 2.5MB "original" backdrop, and a loading
+        screen is often over inside that gap - which is why the logo
+        never appeared at all rather than appearing late.
+
+        The w780 copy now lands first for the same reason: the loading
+        screen wants *a* ground now, and `set_backdrop` takes the
+        original when it arrives a moment later."""
+        def send(kind, path):
             if path:
                 self._work.logo_ready.emit(f"{kind}:{path}", run)
+
+        artwork.deliver(self.entry,
+                        on_backdrop=lambda path: send("backdrop", path),
+                        on_logo=lambda path: send("logo", path))
 
     def _on_logo(self, payload, run):
         if run != self._run or self._closing:
