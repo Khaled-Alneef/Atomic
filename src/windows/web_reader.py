@@ -20,7 +20,7 @@ next/previous, and marking a chapter read all work.
 
 import os
 
-from PyQt6.QtCore import Qt, pyqtSignal as Signal
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal as Signal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
@@ -318,6 +318,15 @@ class WebReader(QWidget):
             webbrowser.open(url or str(entry.get("url") or ""))
         except Exception:
             logs.exception("Opening a chapter in the browser failed")
+
+    def event(self, event):
+        # The view is closed with the reader - see web_pages._WebPage.event.
+        try:
+            if event.type() == QEvent.Type.DeferredDelete:
+                self.view.dispose()
+        except Exception:
+            pass
+        return super().event(event)
 
     def close_reader(self):
         # The music goes with the reader, exactly as it does on the Qt

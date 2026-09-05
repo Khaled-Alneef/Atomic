@@ -3263,10 +3263,12 @@ class PlayerPage(GlassPage):
         has_episodes = bool(self.episode)
         self.prev_btn.setEnabled(has_episodes and self.episode > 1)
         # Bounded, not just "does this thing have episodes at all" - the
-        # last episode of a season must not offer a next one.
+        # last episode of a season offers a next one only when the next
+        # season exists (_next_season_start).
         self.next_btn.setEnabled(
-            has_episodes and int(self.episode or 0)
-            < self._season_episode_count(self.season))
+            has_episodes and (int(self.episode or 0)
+                              < self._season_episode_count(self.season)
+                              or self._next_season_start() is not None))
 
         self.mute_btn = _icon_button(ICON_VOLUME, "Mute (M)", size=40, font_pt=14)
         self.mute_btn.clicked.connect(self.toggle_mute)
@@ -6893,9 +6895,21 @@ class PlayerPage(GlassPage):
         if target < 1:
             return
         if delta > 0 and target > self._season_episode_count(self.season):
-            self._show_status(
-                "The episode you are looking for is not released yet.")
+            # Past the season's end: into the next season's first episode
+            # when there is one (see _next_season_start), else the
+            # honest "not yet".
+            following = self._next_season_start()
+            if following is None:
+                self._show_status(
+                    "The episode you are looking for is not released yet.")
+                self._sync_episode_buttons()
+                return
+            self._leave_playback("Loading the next season...")
+            self.season, self.episode = following
+            self._panel_season = self.season
+            self._given_streams = None
             self._sync_episode_buttons()
+            self._begin_episode()
             return
         self._leave_playback("Loading the next episode...")
         self.episode = target
@@ -6915,7 +6929,9 @@ class PlayerPage(GlassPage):
         if not episode:
             return
         self.prev_btn.setEnabled(episode > 1)
-        self.next_btn.setEnabled(episode < self._season_episode_count(self.season))
+        self.next_btn.setEnabled(
+            episode < self._season_episode_count(self.season)
+            or self._next_season_start() is not None)
 
     def toggle_fullscreen(self):
         window = self._window
@@ -10565,9 +10581,38 @@ class PlayerPage(GlassPage):
         if not self.episode:
             return False
         try:
-            return int(self.episode) + 1 <= self._season_episode_count(self.season)
+            if int(self.episode) + 1 <= self._season_episode_count(self.season):
+                return True
+            return self._next_season_start() is not None
         except Exception:
             return False
+
+    def _next_season_start(self):
+        """(season + 1, 1) when the season after this one exists with at
+        least one aired episode, else None.
+
+        **The owner, 5 September 2026:** *"make the next ep button also
+        shows on the last ep of the season and takes me to the next
+        season's ep (if exists)"*. The "if exists" is the whole care
+        here: _change_episode's own docstring records what stepping
+        past a season's end used to do - the numbering fallback found
+        the same episode number in season 1 and played that. So only
+        Cinemeta's list (`_meta_aired`) can say a season exists, and
+        before it has landed the one other honest sign is the tracker's
+        `latest_available` naming a later season. A guess
+        (DEFAULT_SEASON_EPISODES phantom rows) never crosses a season."""
+        season = int(getattr(self, "season", 0) or 0)
+        if not season:
+            return None
+        aired = getattr(self, "_meta_aired", None)
+        if aired:
+            if int(aired.get(season + 1) or 0) >= 1:
+                return (season + 1, 1)
+            return None
+        la_season, la_episode = self._latest_available()
+        if la_episode and int(la_season or 0) > season:
+            return (season + 1, 1)
+        return None
 
     def _refresh_skip_button(self):
         """Show, hide or retitle the button for where playback now is.

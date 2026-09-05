@@ -273,6 +273,62 @@ def _same_hit(title: str, year: int, hit) -> bool:
     return abs(int(year) - int(anime_year)) <= 3
 
 
+# How long the anime section waits for Cinemeta's metas when AniList is
+# refusing. Measured 5 September 2026 over the ten "kingdom" rows, cold:
+# the ones Cinemeta's CDN held answered in 0.5s, the rest in 3.7-6.0s
+# (the 2012 anime itself: 4.3s cold, 0.7s the next time, 7ms from the
+# disk cache fetch_meta_cached keeps). Five seconds keeps most of the
+# cold ones and every warm one; it is only ever paid while AniList is
+# down, and a right answer a few seconds late beats an empty section.
+ANIME_META_WAIT = 5.0
+
+
+def _anime_by_meta(rows: list) -> list:
+    """The rows whose own Cinemeta meta says anime - the second witness
+    for a search, used when AniList cannot be asked (see
+    _anime_confirmed). Each row's meta is one keyless request, cached on
+    disk by stremio.fetch_meta_cached, asked for all rows at once and
+    collected until ANIME_META_WAIT; a row whose meta has not answered
+    by then is dropped this time rather than guessed at. Never raises."""
+    try:
+        from . import logs, stremio
+        pairs = [(row, str(row.get("imdb_id") or "")) for row in rows]
+        pairs = [(row, imdb) for row, imdb in pairs if imdb.startswith("tt")]
+        if not pairs:
+            return []
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(8, len(pairs)),
+            thread_name_prefix="atomic-anime-meta")
+        jobs = {pool.submit(stremio.fetch_meta_cached, imdb, "series",
+                            int(ANIME_META_WAIT)): row
+                for row, imdb in pairs}
+        kept, answered = [], 0
+        try:
+            for done in concurrent.futures.as_completed(
+                    jobs, timeout=ANIME_META_WAIT):
+                answered += 1
+                try:
+                    meta = done.result()
+                except Exception:
+                    meta = None
+                if stremio.looks_anime(meta):
+                    kept.append(jobs[done])
+        except concurrent.futures.TimeoutError:
+            pass
+        # Not `with pool:` - that waits for the stragglers, which is the
+        # whole wait this bounds. They finish on their own and land in
+        # the disk cache for next time.
+        pool.shutdown(wait=False)
+        order = {id(row): n for n, row in enumerate(rows)}
+        kept.sort(key=lambda row: order[id(row)])
+        logs.info(f"anime search: AniList unavailable; Cinemeta's meta kept "
+                  f"{len(kept)} of {len(pairs)} rows ({answered} answered "
+                  f"inside {ANIME_META_WAIT:.0f}s)")
+        return kept
+    except Exception:
+        return []
+
+
 def _anime_confirmed(rows: list, query: str, witness=None) -> list:
     """Search rows narrowed to titles AniList also knows as anime.
 
@@ -285,11 +341,22 @@ def _anime_confirmed(rows: list, query: str, witness=None) -> list:
     same query - or when the row itself carries an animated genre, which
     a search row does not today but costs nothing to honour.
 
-    Fails soft to the *unfiltered* list: None from anime_name_sets means
-    AniList could not be asked (rate limit, timeout), and emptying the
-    section on silence would be worse than the mislabelling this fixes.
-    An empty name-set list, though, is a real answer - a search for a
-    live-action show correctly leaves the anime section empty.
+    **When AniList cannot be asked, Cinemeta's own meta is the witness
+    instead** (5 September 2026). The step before this one made a
+    refused AniList empty the section - a live "Kingdom" search had put
+    "Animal Kingdom" and "The Last Kingdom" under Anime while AniList was
+    answering 403 - and the owner's next report was the other half of
+    the same coin: "the Kingdom Anime is not showing at all when
+    searching". Measured that day: a raw AniList request still answered
+    403, Cinemeta's search rows carry `genres: null`, and Cinemeta's
+    per-title meta for the very same rows carries the truth -
+    tt2404499 `['Animation', 'Action', 'Drama']`, country Japan; the
+    Korean, American and 1994 Kingdoms none of it. So None from
+    anime_name_sets asks `_anime_by_meta`, which keeps exactly the rows
+    whose meta says animated and Japanese (stremio.looks_anime). Only
+    when that too has nothing is the section empty. An empty name-set
+    list is a different thing - a real answer, a search for a
+    live-action show correctly leaving the anime section empty.
 
     `witness` is an in-flight `_anime_witness` future when the caller
     started one beside its own request; without it the lookup runs here,
@@ -308,7 +375,7 @@ def _anime_confirmed(rows: list, query: str, witness=None) -> list:
         else:
             name_sets = anilist.anime_name_years(query)
         if name_sets is None:
-            return rows
+            return _anime_by_meta(rows)
         kept = []
         for row in rows:
             if _is_animated(row):
@@ -353,7 +420,7 @@ def _anime_confirmed(rows: list, query: str, witness=None) -> list:
                 out.append(row)
         return out
     except Exception:
-        return rows
+        return []
 
 
 def _video_row(meta: dict, label: str):
@@ -944,6 +1011,37 @@ def _classify(title: str, timeout: float = 8.0):
     with _MEDIUM_LOCK:
         if key in _MEDIUM_CACHE and key in _GENRE_CACHE:
             return _MEDIUM_CACHE[key], list(_GENRE_CACHE[key])
+        # **One request per title, however many sweeps ask.** A sweep
+        # returns before every title has a verdict (_classify_many) and
+        # the page asks again moments later, so the same title was about
+        # to be asked of MangaDex twice - behind the same 0.35s throttle
+        # that makes the first ask slow. The second asker waits on the
+        # first's answer instead.
+        waiting = _CLASSIFY_INFLIGHT.get(key)
+        mine = waiting is None
+        if mine:
+            waiting = _CLASSIFY_INFLIGHT[key] = concurrent.futures.Future()
+    if not mine:
+        try:
+            medium, genres = waiting.result(timeout=timeout * 2 + 2)
+            return medium, list(genres)
+        except Exception:
+            return "Other", []
+    try:
+        return _classify_now(title, key, timeout, waiting)
+    finally:
+        with _MEDIUM_LOCK:
+            _CLASSIFY_INFLIGHT.pop(key, None)
+        if not waiting.done():
+            waiting.set_result(("Other", []))
+
+
+_CLASSIFY_INFLIGHT = {}
+
+
+def _classify_now(title, key, timeout, waiting):
+    """The network half of _classify, once per title - see the dedupe
+    above. `waiting` is told the answer so the other askers wake."""
     medium, genres = "", None
     try:
         from . import title_match
@@ -980,6 +1078,7 @@ def _classify(title: str, timeout: float = 8.0):
     with _MEDIUM_LOCK:
         _MEDIUM_CACHE[key] = medium
         _GENRE_CACHE[key] = list(genres)
+    waiting.set_result((medium, list(genres)))
     return medium, list(genres)
 
 
@@ -1018,7 +1117,117 @@ def cached_genres(title: str) -> list:
         return [g for g in _GENRE_CACHE.get(key, []) if _allowed_genre(g)]
 
 
+# **One sweep at a time, and rows before every verdict** (5 September
+# 2026, the owner: "the grid loading in reading pages on other device is
+# super super slow"). Measured here, cold, from his own six sites:
+#
+#     browse   180 rows      2.9s
+#     probe    150 kept      0.8s
+#     classify 150 titles   53.2s  - 22 done by 8s, 56 by 20s, 150 by 60s
+#
+# so the first row of a fresh device's Manga page was a minute away on a
+# good connection, because reading_sites_by_medium_all classified every
+# browsed title before answering and MangaDex's own throttle
+# (mangadex._MIN_REQUEST_GAP, 0.35s, one lock for the whole process) caps
+# that at three titles a second whatever MEDIUM_WORKERS says. Worse, each
+# reading page visit fires two of these (app.js liveBrowse and the first
+# moreOnScroll pull), every re-visit fired two more, and until the views
+# were disposed with their pages (webview2_host._open) the abandoned
+# pages kept pulling - all of them queued on that one throttle, so each
+# took N times as long.
+#
+# Two rules now. Only one sweep runs at a time: a caller arriving while
+# one is in flight waits for that answer rather than starting its own.
+# And a sweep returns at CLASSIFY_BUDGET_S with whatever has a verdict
+# by then; the rest keep classifying on their own threads into the cache,
+# and the page's next pull (which server._more answers with `pending`, so
+# app.js does not count the wait as the source running dry) picks them
+# up. First rows at about nine seconds cold instead of a minute, and a
+# warm cache still answers everything at once.
+_SWEEP_LOCK = threading.Lock()
+_SWEEP_INFLIGHT = None
+_SWEEP_PENDING = 0
+CLASSIFY_BUDGET_S = 6.0
+
+
+def sweep_pending() -> int:
+    """How many browsed titles the last sweep left still classifying."""
+    return _SWEEP_PENDING
+
+
 def reading_sites_by_medium_all(limit: int = 30, deadline=None) -> dict:
+    """The four Read sections' rows - see _reading_sweep for the work
+    and the note above for why only one runs at a time. Never raises."""
+    global _SWEEP_INFLIGHT
+    if limit <= 0:
+        return {}
+    with _SWEEP_LOCK:
+        running = _SWEEP_INFLIGHT
+        if running is None or running.done():
+            future = concurrent.futures.Future()
+            _SWEEP_INFLIGHT = future
+        else:
+            future = None
+    if future is None:
+        wait = (net.step_timeout(deadline, READING_BUDGET)
+                if deadline is not None else READING_BUDGET) or 0.5
+        try:
+            found = running.result(timeout=wait)
+        except Exception:
+            return {}
+        return {name: list(rows) for name, rows in (found or {}).items()}
+    try:
+        found = _reading_sweep(limit, deadline)
+    except Exception:
+        found = {}
+    future.set_result(found)
+    return found
+
+
+def _classify_many(titles, budget_s):
+    """title -> medium for every title that has a verdict inside
+    `budget_s`; titles still being asked about are simply absent, and
+    counted in sweep_pending() for the page's sake."""
+    global _SWEEP_PENDING
+    unique = list(dict.fromkeys(t for t in titles if t))
+    verdicts, asking = {}, []
+    _load_reading_meta()
+    with _MEDIUM_LOCK:
+        for title in unique:
+            found = _MEDIUM_CACHE.get(title.lower())
+            if found:
+                verdicts[title] = found
+            else:
+                asking.append(title)
+    if asking:
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(MEDIUM_WORKERS, len(asking)),
+            thread_name_prefix="atomic-classify")
+        jobs = {pool.submit(classify_medium, title): title for title in asking}
+        try:
+            for done in concurrent.futures.as_completed(jobs, timeout=budget_s):
+                try:
+                    verdicts[jobs[done]] = done.result()
+                except Exception:
+                    verdicts[jobs[done]] = "Other"
+        except concurrent.futures.TimeoutError:
+            pass
+        # The stragglers run on; their answers land in _MEDIUM_CACHE and
+        # the next sweep reads them from there.
+        pool.shutdown(wait=False)
+    _SWEEP_PENDING = sum(1 for title in asking if title not in verdicts)
+    if _SWEEP_PENDING:
+        try:
+            from . import logs
+            logs.info(f"reading sweep: {len(verdicts)} of {len(unique)} titles "
+                      f"have a medium inside {budget_s:.0f}s; "
+                      f"{_SWEEP_PENDING} still classifying")
+        except Exception:
+            pass
+    return verdicts
+
+
+def _reading_sweep(limit: int = 30, deadline=None) -> dict:
     """**Every** medium's rows in one pass - the four Read category
     sections, browsed and classified once between them.
 
@@ -1048,15 +1257,13 @@ def reading_sites_by_medium_all(limit: int = 30, deadline=None) -> dict:
     if not rows:
         return empty
     titles = [row.get("title") or "" for row in rows]
-    verdicts = {}
-    with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(MEDIUM_WORKERS, max(1, len(titles)))) as pool:
-        for title, found in zip(titles, pool.map(classify_medium, titles)):
-            verdicts[title] = found
+    verdicts = _classify_many(titles, CLASSIFY_BUDGET_S)
     _save_reading_meta()
     out = dict(empty)
     for row in rows:
         medium = verdicts.get(row.get("title") or "")
+        if medium is None:
+            continue            # still classifying - next sweep's row
         if medium not in out or len(out[medium]) >= limit:
             continue
         row = dict(row)

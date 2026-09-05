@@ -892,6 +892,18 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
     # since 30 August answers those: TMDB by IMDb id, then the catalogue
     # by title, with the file landing in the same image_cache the rest of
     # the app reads.
+    # **A person is not a media title.** `askForCover` asks this route
+    # for any coverless card regardless of kind, and a face with no TMDB
+    # profile photo fell into the video/anime fallback below, which
+    # searches cover_fetch.resolve by *title* - so a person whose name
+    # happens to match a show (TMDB's own "Kingdom" person entry, known
+    # for "Icy Lake") got that show's poster on their card. Nothing here
+    # can tell a person's card from a video card except `kind`, so it is
+    # the one thing this route must trust before treating a title as a
+    # thing with a poster.
+    if kind == "person":
+        _CARD_COVERS[key] = ""
+        return {"cover": ""}
     if kind and kind not in READING_KINDS:
         found = ""
         try:
@@ -940,6 +952,26 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
                 return str(anilist.fetch_manga_cover(title, 5) or "") if title else ""
             except Exception:
                 return ""
+        # **catalogue_anilist is defined but deliberately left out of
+        # `order`** (5 September 2026, the day after it was added). Every
+        # AniList call goes through anilist._post's global throttle - one
+        # request per _MIN_REQUEST_GAP (0.7s), enforced by a lock held
+        # for the whole sleep - which is fine for the odd schedule or
+        # Crunchyroll lookup this module was built for, and is not fine
+        # for a catalogue page: a cold Manga/Manhwa/Manhua grid can have
+        # a couple dozen rows whose MangaDex cover is missing or a
+        # placeholder, and every one of them queued up behind that same
+        # 0.7s-apart lock. Measured live on a first-ever page: two covers
+        # in a row cost 19.5s and 27.6s, climbing as more rows joined the
+        # queue, on a page whose *rows* had already drawn in 14ms - "the
+        # grids take ages to load the first time, and going to another
+        # page and back fixes it" was this, not a data problem, because
+        # the second visit reads the resolved covers already sitting in
+        # _CARD_COVERS. Revisit only behind a bound that keeps it out of
+        # the live request path - a background/warm-pool enrichment that
+        # updates _CARD_COVERS after the fact, not another catalogue this
+        # function calls inline.
+        #
         # **Which one is asked first depends on why we are asking.** A
         # row with *no* art wants the site's own cover for this exact
         # slug before anybody else's art for a matching title - that is
@@ -951,8 +983,8 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
         # fall back to. Either way a candidate under the floor is
         # skipped while a better one is still untried, and nothing is
         # offered that could not be fetched.
-        order = ([catalogue_mangadex, catalogue_anilist, lambda: site] if thin
-                 else [lambda: site, catalogue_mangadex, catalogue_anilist])
+        order = ([catalogue_mangadex, lambda: site] if thin
+                 else [lambda: site, catalogue_mangadex])
         # **Two passes, not a running floor.** The first accepts only a
         # candidate big enough for a card; the second accepts whatever
         # can be fetched. So a thin row is never left with nothing when
@@ -1082,19 +1114,33 @@ COVER_PLACEHOLDERS_FILE = "cover_placeholders.json"
 _learned_placeholders = None
 
 
-def _ahash(blob):
+def _ahash(blob, image=None):
     """The picture's 16x16 average hash as 64 hex digits, or "" when it
-    does not decode. Robust to re-encoding and to the size variant."""
+    does not decode. Robust to re-encoding and to the size variant.
+
+    Takes an already-decoded `image` when the caller has one - see
+    _placeholder_reason, which used to decode the same blob twice (once
+    for the size check, once more in here) and so paid a full JPEG/PNG
+    decode - the expensive half of this check, measured ~3ms of the
+    ~4ms total - a second time for every single cover on every reading
+    page. Doubling the one cost this function cannot avoid is the whole
+    difference between "a few ms" and "a few ms twice", multiplied by
+    every card on the page."""
     try:
         from PyQt6.QtCore import Qt
         from PyQt6.QtGui import QImage
-        image = QImage.fromData(bytes(blob))
+        if image is None:
+            image = QImage.fromData(bytes(blob))
         if image.isNull():
             return ""
         grey = image.convertToFormat(QImage.Format.Format_Grayscale8).scaled(
             16, 16, Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.SmoothTransformation)
-        pixels = [grey.pixelColor(x, y).red() for y in range(16) for x in range(16)]
+        stride = grey.bytesPerLine()
+        buf = grey.constBits()
+        buf.setsize(stride * grey.height())
+        raw = bytes(buf)
+        pixels = [raw[y * stride + x] for y in range(16) for x in range(16)]
         mean = sum(pixels) / 256.0
         bits = "".join("1" if p >= mean else "0" for p in pixels)
         return f"{int(bits, 2):064x}"
@@ -1158,6 +1204,7 @@ def _placeholder_reason(url, blob, title):
         head = bytes(blob[:32]).lstrip()
         if head[:1] == b"<" or head[:5].lower() == b"<!doc":
             return "not an image (a page was sent)"
+        image = None
         try:
             from PyQt6.QtGui import QImage
             image = QImage.fromData(bytes(blob))
@@ -1165,8 +1212,8 @@ def _placeholder_reason(url, blob, title):
                 if image.width() < COVER_MIN_EDGE or image.height() < COVER_MIN_EDGE:
                     return f"too small ({image.width()}x{image.height()})"
         except Exception:
-            pass
-        digest = _ahash(blob)
+            image = None
+        digest = _ahash(blob, image)
         if not digest:
             return ""
         known = _known_placeholder(digest)
@@ -2694,10 +2741,15 @@ def _more(route, have, skip):
         return {"rows": [], "skip": skip}
     try:
         from helpers import discover
+        pending = 0
         if kind.startswith("medium:"):
             medium = kind.split(":", 1)[1]
             found = discover.reading_sites_by_medium_all(limit=have + MORE_LIMIT)
             rows = (found or {}).get(medium) or []
+            # Titles the sweep is still classifying - the page keeps
+            # asking while this is non-zero instead of calling an empty
+            # batch "dry" (discover.CLASSIFY_BUDGET_S).
+            pending = int(discover.sweep_pending() or 0)
         else:
             video = "movie" if route == "movies" else route
             rows = discover.discover_video(video, query="", limit=MORE_LIMIT,
@@ -2707,7 +2759,7 @@ def _more(route, have, skip):
     rows = [r for r in (rows or []) if isinstance(r, dict) and r.get("title")]
     saved = _saved_sides()
     return {"rows": [_grid_row(r, saved) for r in rows],
-            "skip": skip + len(rows)}
+            "skip": skip + len(rows), "pending": pending}
 
 
 # One Cinemeta genre page is 50 rows (measured 2 September 2026: a
@@ -3365,6 +3417,7 @@ class _Handler(BaseHTTPRequestHandler):
             # empty surface with nothing in atomic.log (review, 3
             # September 2026). Logged, and answered with an error the
             # page can show.
+            began = time.monotonic()
             try:
                 # Warmed here rather than inside each route: every
                 # answer goes through this one place, and the warming
@@ -3374,6 +3427,17 @@ class _Handler(BaseHTTPRequestHandler):
                 # under way when the browser starts asking.
                 body = json.dumps(_warm_covers(answer(path[5:], query)),
                                   ensure_ascii=False)
+                # **A slow answer says so in his log.** The page reports
+                # when it drew (app.js sayRender) and nothing reported
+                # the wait before it, so an empty page waiting on a
+                # route could not be told from a page that never loaded
+                # (5 September 2026, a log from another device with
+                # empty pages and no line to explain them). One second
+                # is rule 7's bound; the reading sweeps are the routes
+                # expected here, with their time.
+                took = time.monotonic() - began
+                if took >= 1.0:
+                    _say(f"web route slow: {path}?{raw[:60]} ms={int(took * 1000)}")
             except Exception as error:
                 try:
                     from helpers import logs

@@ -486,6 +486,20 @@ class _WebPage(GlassPage):
         except RuntimeError:
             pass
 
+    def event(self, event):
+        # **The view dies with the page, and before it.** main._show_page
+        # deleteLater()s the outgoing page; the DeferredDelete arrives
+        # here first, while this widget and its native window still
+        # exist, which is when WebView2 wants its controller closed. The
+        # alternative - nothing - left Edge's document running behind
+        # every page ever visited (helpers/webview2_host._open).
+        try:
+            if event.type() == QEvent.Type.DeferredDelete:
+                self.view.dispose()
+        except Exception:
+            pass
+        return super().event(event)
+
     # ---- what the page asks the app to do ---------------------------
     def reload(self):
         """Draw this page again, after Qt has changed what it reads.

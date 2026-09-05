@@ -3766,7 +3766,12 @@ function moreOnScroll(data, host, grid, stamp) {
           seen.add(key);
           return true;
         });
-        if (!fresh.length) { dry += 1; return; }
+        // A reading sweep answers before every title has a medium and
+        // says how many are still being classified (server._more
+        // `pending`); a batch with nothing new is only "dry" once that
+        // count is zero, or a cold device's page would stop asking two
+        // batches into a minute-long classification.
+        if (!fresh.length) { if (!batch.pending) dry += 1; return; }
         dry = 0;
         const frag = document.createDocumentFragment();
         fresh.forEach(function (r) { frag.appendChild(gridCard(r)); });

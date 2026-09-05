@@ -340,3 +340,35 @@ the page logs `route=`); and `Stop-Process -Name Atomic` leaves a
 source-run `python.exe` alive with its window, so the rig drives the
 old instance - stop by command line, and read `src/data/atomic.log`,
 which is where a source run logs.
+
+## A web view dies with its page, and before it (5 September 2026)
+
+His report, with a log from another device: *"the pages becomes empty
+for no reason no buttons no grid nothing at ALL"*. Nothing disposed a
+`WebView2Page`'s WinForms form or its control when the Qt page was
+deleted - and a page is rebuilt on every visit - so every visit left
+Edge's document running behind the one on screen. His log proved it:
+`wrapped C/C++ object of type WebView2Page has been deleted` raised
+inside `_got_message`, a dead page's document still posting. Measured
+here on his build, sixteen sidebar switches in 21s: Edge renderer
+processes **7 -> 14**, their memory **476MB -> 1105MB**, six of those
+errors, and **9 of 18 arrivals drew**. The orphans keep their pull
+loops (`moreOnScroll`) and share the renderer with the live page, which
+is what an empty page waiting on its fetch looks like on a machine with
+less to share.
+
+`webview2_host._open` holds every undisposed pair; `_WebPage.event` and
+`WebReader.event` call `view.dispose()` on `DeferredDelete`, before the
+native window goes, and the `destroyed` signal is the fallback. After:
+renderers **6 -> 6**, 445MB, every arrival drew, `WebView2: disposed,
+live=1` in the log. A navigation that does not arrive now logs its
+`WebErrorStatus` and is retried `NAV_RETRIES` times, not forever and not
+silently, and `web route slow:` in the log names any `/api/` answer over
+a second.
+
+Two rig traps paid for on the way: an exe copy run from a **new path**
+raises the Windows firewall prompt, which takes the keyboard (the cold
+"before" run's Ctrl+6 never arrived - run the old build from the repo
+root path, which already has a rule, and never touch that dialog); and
+`rig.find()` only accepts a process named `Atomic.exe`, so a copy called
+anything else finds no window.

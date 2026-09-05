@@ -34,7 +34,7 @@ import pathlib
 import sys
 import time
 
-from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QWidget
 
 from . import logs
@@ -45,6 +45,11 @@ from . import logs
 _forms = None
 _control = None
 _load_error = ""
+# A one-element box rather than a second `global` name: _load() sets it
+# and __init__ reads it, and a plain module global reassigned from a
+# nested scope needs its own `global` declaration anyway - this needs
+# none.
+_creation_properties = [None]
 
 
 def _lib_dir():
@@ -97,6 +102,10 @@ def _lib_dir():
 # simply scrolls as it did before.
 _BROWSER_ARGS = "--disable-smooth-scrolling"
 
+# How many times a navigation that did not arrive is asked for again
+# before the view gives up and says so - see _navigated.
+NAV_RETRIES = 3
+
 
 def _load():
     global _forms, _control, _load_error
@@ -113,8 +122,10 @@ def _load():
                      "Microsoft.Web.WebView2.WinForms"):
             clr.AddReference(str(_lib_dir() / name))
         import System.Windows.Forms as winforms
-        from Microsoft.Web.WebView2.WinForms import WebView2
+        from Microsoft.Web.WebView2.WinForms import (
+            WebView2, CoreWebView2CreationProperties)
         _forms, _control = winforms, WebView2
+        _creation_properties[0] = CoreWebView2CreationProperties
     except Exception as error:
         _load_error = str(error)
         logs.info(f"webview2_host unavailable: {_load_error[:160]}")
@@ -165,6 +176,59 @@ SWP_NOSIZE = 0x0001
 
 _pump_timer = None
 _burst_timer = None
+
+# **Every WinForms form and WebView2 control built here and not yet
+# disposed**, keyed by the Qt widget's id. Nothing disposed them before
+# 5 September 2026: a page is rebuilt from scratch on every visit
+# (.claude/rules/ui.md) and the old page's Qt widget was deleted, but the
+# .NET control and Edge's document under it lived on - the owner's log
+# from another device proved it, with "wrapped C/C++ object of type
+# WebView2Page has been deleted" raised inside _got_message: a document
+# whose page had been deleted was still running its scripts and still
+# posting messages. Thirteen views were built in twenty seconds of
+# sidebar clicks there, every one of them orphaned, every one still
+# fetching catalogue sweeps (app.js moreOnScroll keeps pulling until the
+# source is dry) and still sharing Edge's renderer with the page he was
+# actually looking at. That is where "the pages become empty, no buttons
+# no grid nothing" came from: a live page whose go() had cleared the
+# document and was waiting on a fetch, starved behind a dozen dead ones.
+#
+# So a view is disposed the moment its page is scheduled for deletion
+# (event(), on DeferredDelete - before the HWND goes, which is the order
+# WebView2 documents) and, failing that, when the Qt object is destroyed
+# (the `destroyed` fallback below, which reaches the .NET objects through
+# this table rather than through a wrapper Qt has already torn down).
+_open = {}
+
+
+def _dispose_handles(key):
+    """Close and release one view's .NET objects. Idempotent: whichever
+    of the two hooks gets here first does the work, the other finds
+    nothing to do. Returns whether anything was disposed."""
+    pair = _open.pop(key, None)
+    if pair is None:
+        return False
+    form, view = pair
+    try:
+        if view is not None:
+            try:
+                view.Dispose()          # closes the CoreWebView2Controller
+            except Exception:
+                logs.exception("WebView2: the view could not be disposed")
+        if form is not None:
+            try:
+                form.Dispose()
+            except Exception:
+                logs.exception("WebView2: the host form could not be disposed")
+    finally:
+        logs.info(f"WebView2: disposed, live={len(_open)}")
+    return True
+
+
+def live_views() -> int:
+    """How many views exist right now - one per page on screen or
+    scheduled behind an overlay; anything above that is a leak."""
+    return len(_open)
 
 
 def pump_burst(ms=60):
@@ -277,6 +341,24 @@ class WebView2Page(QWidget):
             # be built against it, and a visible one here would flash.
             self._form.SetBounds(-32000, -32000, 900, 700)
             self._view = _control()
+            # **Into %APPDATA%\Atomic, not beside the exe.** Left unset,
+            # WebView2 creates its "EBWebView" profile folder next to
+            # whatever launched it - the repo root for a source run, the
+            # install directory for the frozen exe - which is where the
+            # owner found it (25 September 2026 wasn't a real date, but
+            # the ask was: keep every local file in one place, next to
+            # settings.json and the caches). storage.DATA_DIR is that
+            # place, already created before this ever runs.
+            properties_cls = _creation_properties[0]
+            if properties_cls is not None:
+                try:
+                    from . import storage
+                    properties = properties_cls()
+                    properties.UserDataFolder = str(
+                        storage.DATA_DIR / "WebView2")
+                    self._view.CreationProperties = properties
+                except Exception:
+                    logs.exception("WebView2 user data folder not set")
             self._view.Dock = _forms.DockStyle.Fill
             self._form.Controls.Add(self._view)
 
@@ -299,6 +381,14 @@ class WebView2Page(QWidget):
 
             self._view.CoreWebView2InitializationCompleted += self._ready
             self._view.EnsureCoreWebView2Async(None)
+            # Registered only now, so a control that failed to build is
+            # never "live". The fallback hook closes over the key, not
+            # over self: by the time `destroyed` fires the Python wrapper
+            # is already a dead object.
+            self._key = id(self)
+            _open[self._key] = (self._form, self._view)
+            key = self._key
+            self.destroyed.connect(lambda *_args: _dispose_handles(key))
         except Exception:
             logs.exception("Creating the WebView2 page failed")
             self._form = self._view = None
@@ -306,6 +396,33 @@ class WebView2Page(QWidget):
 
     def ok(self) -> bool:
         return bool(self._child)
+
+    def dispose(self):
+        """Close Edge's document and release the .NET control now.
+
+        Called by the page that owns this view when that page is
+        scheduled for deletion (windows/web_pages and web_reader override
+        event() for DeferredDelete), which is before Qt destroys the
+        native window the control is parented into - the order WebView2
+        asks for. See `_open` for what happened when nothing called it.
+        """
+        self._child = 0
+        self._loaded = False
+        self._view = self._form = None
+        key = getattr(self, "_key", None)
+        if key is not None:
+            _dispose_handles(key)
+
+    def event(self, event):
+        # A view deleted on its own (deleteLater on the view itself) is
+        # disposed here; one deleted with its page is disposed by the
+        # page's own hook, which fires first.
+        try:
+            if event.type() == QEvent.Type.DeferredDelete:
+                self.dispose()
+        except Exception:
+            pass
+        return super().event(event)
 
     def set_child_visible(self, visible: bool):
         """Show or hide the native child window itself.
@@ -443,8 +560,8 @@ class WebView2Page(QWidget):
             return True
 
     def _ready(self, _sender, args):
-        if not self._alive():
-            return
+        if not self._alive() or self._view is None:
+            return                  # deleted, or disposed, before Edge answered
         # **Ask whether it worked.** The event fires on failure too, and
         # CoreWebView2 is then None - which surfaced as
         # "'NoneType' object has no attribute 'WebMessageReceived'" and
@@ -492,6 +609,23 @@ class WebView2Page(QWidget):
                 logs.info("WebView2: accelerator keys unavailable")
             core.NavigationCompleted += self._navigated
             core.WebMessageReceived += self._got_message
+            # **A crashed renderer was never noticed, let alone recovered
+            # from** (5 September 2026, chasing "the app goes to empty
+            # pages" - not on first launch only, and not reproduced on
+            # this machine). WebView2 exposes exactly this as
+            # ProcessFailed and nothing in this file was listening for
+            # it - a render-process crash (a GPU driver fault is the
+            # common real-world cause, and a laptop's hybrid graphics is
+            # exactly where those show up) left the native child painting
+            # nothing, forever, with no error and no way back short of
+            # restarting Atomic. The sidebar and window chrome kept
+            # working throughout, because they are Qt, not this control -
+            # which is why the report was "empty pages", not "the app
+            # froze".
+            try:
+                core.ProcessFailed += self._process_failed
+            except Exception:
+                logs.exception("WebView2 ProcessFailed unavailable")
             # Nothing in these pages needs a context menu, a browser
             # zoom, or dev tools; leaving them on is how an embedded view
             # stops looking like part of the app.
@@ -503,6 +637,41 @@ class WebView2Page(QWidget):
                 core.Navigate(self._url)
         except Exception:
             logs.exception("Preparing the WebView2 page failed")
+
+    def _process_failed(self, _sender, args):
+        """A WebView2-owned process died. Said out loud - the kind names
+        which one (RenderProcessExited is the everyday crash; a GPU
+        driver fault is the common real cause) - and recovered where
+        recovery is a single documented call.
+
+        `Reload()` is Microsoft's own answer for a dead renderer or an
+        unresponsive one: the controller and its CoreWebView2 survive,
+        only the content process is gone, and Reload() gets a fresh one
+        and re-navigates to what was showing. A dead *browser* process
+        (BrowserProcessExited) takes the controller down with it - this
+        widget's next `show_url` will find CoreWebView2 gone and fail
+        quietly, same as before this existed. Rebuilding the whole
+        control for that case is real surgery on a path nothing here has
+        exercised against an actual crash; logging it plainly is the
+        honest half of this fix until it is."""
+        try:
+            kind = str(getattr(args, "ProcessFailedKind", ""))
+            reason = str(getattr(args, "Reason", ""))
+            exit_code = getattr(args, "ExitCode", "")
+            description = str(getattr(args, "ProcessDescription", ""))[:200]
+            logs.info(f"WebView2 process failed: kind={kind} reason={reason} "
+                      f"exit_code={exit_code} process={description}")
+        except Exception:
+            logs.exception("WebView2 ProcessFailed handler itself failed")
+            kind = ""
+        if not self._alive() or self._view is None:
+            return
+        if "RenderProcess" in kind:   # Exited or Unresponsive
+            try:
+                self._view.CoreWebView2.Reload()
+                logs.info("WebView2: reloaded after a render process failure")
+            except Exception:
+                logs.exception("WebView2 reload after process failure failed")
 
     # Keys that belong to the window rather than to the page. F11 is
     # full screen and Escape leaves it; both are the app's, everywhere
@@ -582,14 +751,35 @@ class WebView2Page(QWidget):
         except Exception:
             pass
         if not ok:
+            # **Said out loud, and not retried forever.** A failed
+            # arrival used to re-navigate silently, every time, so a
+            # page that could not load left nothing in atomic.log and a
+            # view that never showed - exactly what an empty page looks
+            # like from the other side of the glass (5 September 2026,
+            # the owner's log from another device had nothing to say).
+            # The status is Edge's own word for why; the cap stops a
+            # dead server from being asked at full tilt for the rest of
+            # the session.
+            status = ""
             try:
-                core = self._view.CoreWebView2
+                status = str(args.WebErrorStatus)
+            except Exception:
+                pass
+            self._nav_failures = getattr(self, "_nav_failures", 0) + 1
+            logs.info(f"WebView2: navigation failed ({status or 'no status'}), "
+                      f"attempt {self._nav_failures} of {NAV_RETRIES + 1} "
+                      f"for #{self._url.rpartition('#')[2][:40]}")
+            if self._nav_failures > NAV_RETRIES:
+                return
+            try:
+                core = self._view.CoreWebView2 if self._view is not None else None
                 if core is not None and self._url:
                     core.Navigate(self._url)
             except Exception:
                 logs.exception("Could not retry the page")
             return
 
+        self._nav_failures = 0
         self._loaded = True
         if self._suppressed:
             return              # an overlay is up; stay hidden
@@ -640,6 +830,11 @@ class WebView2Page(QWidget):
 
     def _got_message(self, _sender, args):
         """A click in the page. Never trusted as anything but data."""
+        if not self._alive():
+            # A document outliving its page - see `_open`. Dropped, not
+            # raised: the emit below on a deleted widget is the
+            # "wrapped C/C++ object ... has been deleted" his log showed.
+            return
         try:
             raw = args.TryGetWebMessageAsString()
             body = json.loads(raw)

@@ -653,3 +653,39 @@ and AniList as two candidates so a refused MangaDex cover falls to
 AniList's rather than back to the thin file. Lava Scans serves four
 covers at 160-190px (real, and `thin` handles them) and Azora lists 33
 rows with no art at all, which the chain already fills.
+
+## A reading sweep answers with the rows it has (5 September 2026)
+
+His report: *"the grid loading in reading pages on other device is super
+super slow"*. Measured cold from his six sites: browse 180 rows 2.9s,
+probe 0.8s, **classify 150 titles 53.2s** (22 by 8s, 56 by 20s) - the
+MangaDex throttle (`_MIN_REQUEST_GAP` 0.35s, one lock) caps it at three
+titles a second whatever `MEDIUM_WORKERS` says, and
+`reading_sites_by_medium_all` returned nothing until every title had a
+verdict. On the frozen build the cold Manga page's first batch never
+came inside 70s. Every visit fired two sweeps (`liveBrowse` and the
+first `moreOnScroll` pull) and the undisposed pages kept firing more.
+
+Now one sweep runs at a time (`_SWEEP_INFLIGHT`; a second caller waits
+for the running one), it returns at `CLASSIFY_BUDGET_S` (6s) with the
+titles that have a medium while the rest keep classifying into the
+cache, `_classify` asks MangaDex once per title however many sweeps
+overlap (`_CLASSIFY_INFLIGHT`), and `server._more` answers `pending` so
+app.js keeps pulling instead of calling an empty batch dry. Measured
+after: first Manga batch at **8.6s** cold, 16 cards by 30s, and the log
+says `reading sweep: 16 of 149 titles have a medium inside 6s; 133 still
+classifying`.
+
+## The anime search's second witness is Cinemeta's own meta (5 September 2026)
+
+AniList answered 403 all evening, and `_anime_confirmed` had just been
+changed to empty the section on that - which was "the Kingdom Anime is
+not showing at all when searching". Cinemeta's search rows carry no
+genres, but each row's meta does (`tt2404499`: Animation, Japan; the
+Korean, American and 1994 Kingdoms none of it), so `_anime_by_meta` asks
+`stremio.fetch_meta_cached` for every row at once, keeps `looks_anime`
+rows, and waits `ANIME_META_WAIT` (5s: cold CDN misses answered in
+3.7-6.0s, warm ones 0.5s, the disk cache 7ms). Only when that too has
+nothing is the section empty. On the frozen build: `Cinemeta's meta kept
+1 of 12 rows (12 answered inside 5s)` and the Anime section shows the
+2012 Kingdom while AniList still refuses.

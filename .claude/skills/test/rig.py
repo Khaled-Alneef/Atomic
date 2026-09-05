@@ -24,6 +24,31 @@ u.IsWindowVisible.argtypes = [w.HWND]
 u.GetWindowRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
 u.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
 
+k32 = ctypes.windll.kernel32
+k32.OpenProcess.restype = w.HANDLE
+k32.QueryFullProcessImageNameW.argtypes = [
+    w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD)]
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+def _owning_exe_name(hwnd):
+    """The lowercase image name (no path) of the process that owns this
+    window, or "" if it cannot be read."""
+    pid = w.DWORD(0)
+    u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        size = w.DWORD(260)
+        if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return os.path.basename(buf.value).lower()
+    finally:
+        k32.CloseHandle(handle)
+
 def find():
     found = []
     @ctypes.WINFUNCTYPE(ctypes.c_bool, w.HWND, w.LPARAM)
@@ -37,8 +62,17 @@ def find():
         u.GetWindowTextW(h, buf, n + 1)
         # Exactly the app's title. "Atomic - File Explorer" (the repo folder
         # open in Explorer) matched a startswith test once and took the
-        # clicks meant for the app.
+        # clicks meant for the app. Title alone is not enough any more:
+        # the Claude Code desktop app titles its own window after the open
+        # project, so on this repo its window is *also* exactly "Atomic" -
+        # measured 5 September 2026, a screenshot meant for the test build
+        # came back showing the chat transcript instead. Filtering by the
+        # owning process (Atomic.exe, or py/python for a source run) is
+        # what a title match alone cannot do.
         if buf.value.strip() == "Atomic":
+            exe = _owning_exe_name(h)
+            if exe not in ("atomic.exe", "python.exe", "py.exe", "pythonw.exe"):
+                return True
             r = w.RECT(); u.GetWindowRect(h, ctypes.byref(r))
             if r.right - r.left > 400 and r.bottom - r.top > 300:
                 found.append((h, (r.left, r.top, r.right, r.bottom), buf.value))

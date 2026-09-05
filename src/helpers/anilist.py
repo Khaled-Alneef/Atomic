@@ -39,6 +39,21 @@ _MIN_REQUEST_GAP = 0.7
 _throttle_lock = threading.Lock()
 _last_request_at = 0.0
 
+# **Once AniList says no, stop asking for a while** (5 September 2026,
+# chasing a live "Kingdom" search showing the live-action series under
+# Anime). `_anime_confirmed` fails soft to the unfiltered list exactly
+# whenever AniList cannot be asked - by design, so a rate-limited AniList
+# does not empty the section - but every search still *tried* the
+# request first, paying its own timeout and, worse, adding one more hit
+# to a host already answering 403. Measured live that day: a direct
+# `_post` call answered 403 outright. Once seen, every call within
+# _RATE_LIMIT_COOLDOWN_S raises RateLimited immediately - no socket, no
+# throttle sleep - so a search fails soft at once instead of after
+# paying for a doomed request, and the host is given the quiet it needs
+# to lift the limit rather than being asked again every few seconds.
+_RATE_LIMIT_COOLDOWN_S = 120.0
+_rate_limited_until = 0.0
+
 # How close a catalog title has to be to the tracker's own before its
 # schedule is trusted (see title_match.similarity).
 _MATCH_THRESHOLD = 0.8
@@ -194,7 +209,9 @@ _RATE_LIMIT_CODES = (403, 429)
 
 
 def _post(query: str, variables: dict, timeout: int):
-    global _last_request_at
+    global _last_request_at, _rate_limited_until
+    if time.monotonic() < _rate_limited_until:
+        raise RateLimited("AniList still cooling down from a recent 403/429")
     payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
     req = urllib.request.Request(API_URL, data=payload, headers={
         "Content-Type": "application/json",
@@ -214,6 +231,7 @@ def _post(query: str, variables: dict, timeout: int):
             return json.loads(net.read_text(resp, deadline))
     except urllib.error.HTTPError as exc:
         if exc.code in _RATE_LIMIT_CODES:
+            _rate_limited_until = time.monotonic() + _RATE_LIMIT_COOLDOWN_S
             raise RateLimited(f"AniList answered {exc.code}") from exc
         raise
 
