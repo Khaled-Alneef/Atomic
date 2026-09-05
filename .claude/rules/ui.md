@@ -372,3 +372,25 @@ raises the Windows firewall prompt, which takes the keyboard (the cold
 root path, which already has a rule, and never touch that dialog); and
 `rig.find()` only accepts a process named `Atomic.exe`, so a copy called
 anything else finds no window.
+
+## A manga spread is drawn at the column's width (5 September 2026)
+
+His ask: *"make the double pages in the Manga fit in width and make sure
+it works in all resolutions monitors! (ONLY IN MANGA, and keep the
+single pages as is)"*. Under the site's rule (`targetFor`, min of the
+scan and the column) a spread wider than the column already filled it
+and a narrower one did not: measured through the app's own pages route,
+Kingdom (WAN) ch.886 opens on a 2760x1917 spread and ch.885 ends on a
+1205x880 one beside 1327px singles, and the second drew at 60% of the
+1991px column on his panel. app.js `sizePage` now gives a spread the
+live column (`fillSpreads`, manga only, the same medium test `paged`
+uses), zoom still multiplies, singles keep the site's rule, and the
+reader logs `reader spread` with scan, column and drawn once per real
+change. Measured on the frozen build, ch.885's spread: column 1991 ->
+drawn 1991; a 1920x1080 window -> 1464 of 1464; 1366x768 -> 1022 of
+1022; the singles' own line unchanged at 1327.
+
+Rig trap paid for: the window comes back at whatever size it was closed
+at, and its frame ignores SW_MAXIMIZE - set the maximised rect with
+SetWindowPos *after* the app has applied its saved geometry (about four
+seconds in), and check `rig.find()`'s rect before clicking.

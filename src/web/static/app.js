@@ -1290,6 +1290,8 @@ async function openChapter(id, index) {
   // manhua strip is one continuous image cut into pieces, and a gap
   // there would draw a line through the artwork.
   if (data.medium === 'manga') strip.classList.add('paged');
+  // **And only manga fills a spread to the column** - see sizePage.
+  const fillSpreads = data.medium === 'manga';
   readerState.key = data.key || '';
   readerState.total = data.total || 0;
 
@@ -1574,9 +1576,35 @@ async function openChapter(id, index) {
        stretch, and "exactly like the site" is the ask. `single` keeps
        its other job: the size of the box a page occupies before it has
        arrived (--pagew), so the strip does not jump as it fills. */
-    const want = natW;
+    /* **A manga spread is drawn at the column's width, whatever the
+       scan's.** The owner, 5 September 2026: "make the double pages in
+       the Manga fit in width and make sure it works in all resolutions
+       monitors! (ONLY IN MANGA, and keep the single pages as is)".
+
+       Measured that night on his Kingdom (WAN), through the app's own
+       pages route: ch.886 opens on a 2760x1917 spread and ch.885 holds
+       a 1205x880 one beside 1327px singles. Under the site's rule above
+       the first took the whole 1991px column of his panel and the second
+       took 60% of it - the same kind of page at two sizes, and the
+       smaller one drawn at the width of a single page, which is what a
+       spread is not. So a spread's target is the column itself, read
+       live (availableWidth) so every window and monitor gets its own,
+       and zoom still multiplies it; a single page keeps the site's rule
+       untouched. Only manga, by the same medium test `paged` uses: a
+       manhwa or manhua strip is never a spread. The enlargement is the
+       proxy's LANCZOS pass (askForExact), as for any small scan. */
+    const spread = fillSpreads && isSpread(img);
+    const want = spread ? availableWidth() : natW;
     const drawn = pageWidth(want, availableWidth(), readerState.zoom);
     img.style.width = drawn + 'px';
+    if (spread && Math.abs((img._spreadAt || 0) - drawn) / drawn > 0.02) {
+      // Once per real change of size, so his log carries the number.
+      img._spreadAt = drawn;
+      const [, natH] = natural(img);
+      tellHost({ action: 'diag', what: 'reader spread', scan: natW + 'x' + natH,
+                 column: Math.round(availableWidth()), drawn: drawn,
+                 zoom: Math.round(readerState.zoom * 100) });
+    }
     askForExact(img, drawn);        // in image pixels: drawn * DPR
   }
 

@@ -1316,7 +1316,9 @@ def install():
     #     with the rows it has instead of after every verdict;
     #   * Next Episode on a season's last episode steps into the next
     #     season's first, when Cinemeta lists one.
-    updater.APP_VERSION = "1.10.257"
+    #   * a manga spread is drawn at the column's width on every monitor;
+    #     single pages keep the site's own size.
+    updater.APP_VERSION = "1.10.258"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
