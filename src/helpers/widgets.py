@@ -1486,12 +1486,6 @@ class HeroBanner(QFrame):
         self._resize_settle.timeout.connect(self._resmooth)
         use_hover_cursor(self)
 
-    def set_ground(self, colour):
-        """Change the page colour the corners are cut back to, for a
-        caller that moves the banner between grounds."""
-        self._ground = QColor(colour)
-        self.update()
-
     def _on_fade(self, value):
         self._mix = float(value)
         self.update()
@@ -2581,7 +2575,6 @@ _DEVICE_QUANTUM = {}
 # ramp starting at exactly one notch is not a coincidence - 120px is
 # what a wheel notch scrolls on Windows (3 lines x 40px), so the curve
 # is built around a single notch being the slowest case.
-CHROMIUM_NOTCH_PX = 120.0
 _CHROMIUM_MIN_UNITS = 6.0
 _CHROMIUM_MAX_UNITS = 12.0
 _CHROMIUM_SLOPE = -1.0 / 60.0
@@ -3583,7 +3576,6 @@ class _Momentum(QObject):
     # covered is identical.
     MAX_SPEED = math.inf
     # superseded - see above; kept so the next reader knows it was tried
-    _OLD_MAX_SPEED_NOTE = "7000 then 4500"
     # Below this the remaining distance (speed/FRICTION) is ~2px: snap
     # it and stop, rather than ticking sub-pixel amounts into round().
     # Below this the remaining distance (speed/FRICTION) is ~2px: snap
@@ -3598,7 +3590,6 @@ class _Momentum(QObject):
     # gentle scroll speed to refuse to render. Measured at friction 16 it
     # made things far worse (65.6% dead refreshes) by stopping and
     # restarting the motion continuously. Left at 30.
-    STOP_SPEED = 30.0
     # An impulse is not applied in one tick: it is handed over at this
     # rate (1/s), so ~63% of a notch's speed has arrived after 14ms and
     # ~90% after 33ms. Measured without it: velocity 313 px/s 25ms before
@@ -3615,7 +3606,6 @@ class _Momentum(QObject):
     # than arriving through RAMP. Enough that the first frame after the
     # wheel already moves a visible pixel or two; small enough that the
     # start still reads as a push. See kick for the measurement.
-    IMMEDIATE_SHARE = 0.34
     # Cadence acceleration: notches inside this window count, and the
     # impulse scales from 1x for a lone notch to ACCEL_MAX once
     # ACCEL_NOTCHES have landed in the window. Modest on purpose - the
@@ -3905,7 +3895,6 @@ class _Momentum(QObject):
     # arriving; once one interval and a half has passed with none, the
     # curve switches to RATE_STOP and the view settles promptly. The
     # floor of 90ms keeps a fast burst from tripping it between notches.
-    RATE_STOP = 48.0
     RATE_MIN = 16.0
     RATE_MAX = 60.0
 
@@ -3935,9 +3924,6 @@ class _Momentum(QObject):
     # Bounds are the cadences a hand actually produces - measured on the
     # ramp harness, a slow deliberate turn is ~260ms between notches and
     # a hard spin is ~30ms. Between them the factor is linear.
-    SPEED_ACCEL_MAX = 2.6
-    SPEED_GAP_FAST = 0.045
-    SPEED_GAP_SLOW = 0.220
 
     def _track_cadence(self, now):
         previous = getattr(self, "_prev_kick", None)
@@ -3982,53 +3968,6 @@ class _Momentum(QObject):
         if interval <= 0.0:
             return self.RATE_MAX
         return max(self.RATE_MIN, min(self.RATE_MAX, 4.9 / interval))
-
-    _SPEED_ATTR = "_speed"
-
-    def _advance(self, span, dt, when) -> float:
-        """How far to travel this frame.
-
-        **Flat while the wheel is turning, easing only into the stop.**
-        Two profiles, because one cannot do both jobs. An exponential
-        everywhere means every notch is a decelerating pulse - fast at
-        its start, crawling at its end - and at a slow, deliberate wheel
-        that pulse *is* the whole motion. See poster_grid.FrameMotion._advance. Measured: a linear
-        travel at the same speed would leave 0% of mid-travel frames
-        under half a pixel, and the exponential left **35%**. That is the
-        "ticks jump" of 31 August coming back in another form.
-
-        So while notches are still arriving the view runs at a constant
-        speed chosen to deliver what is queued in about the time until
-        the next notch is due - continuous, flat, no pulse. Once the hand
-        stops, and only then, it eases exponentially into rest, which is
-        what makes it settle promptly instead of running at full speed
-        and halting in one frame.
-        """
-        gap = getattr(self, "_kick_gap", 0.0) or 0.0
-        last = getattr(self, "_last_kick", None)
-        # **The window has to outlast his own cadence.** Capped at
-        # 0.13s it was shorter than a slow, deliberate wheel (260ms
-        # apart), so every notch dropped out of the flat profile
-        # half-delivered and eased to a stop before the next arrived -
-        # measured as 45% of mid-travel frames standing still in the slow
-        # band. Tracking 1.3x the measured gap keeps slow scrolling
-        # continuous; a fast wheel has a small gap and so still eases
-        # within a frame or two of the hand stopping (92ms, measured).
-        # The 0.35s ceiling is the longest coast worth allowing at all.
-        quiet = min(0.35, max(0.06, 1.3 * gap))
-        turning = last is not None and (when - last) <= quiet
-        if turning:
-            # **The held speed, not one recomputed from what is left.**
-            # Dividing the *shrinking* distance by a fixed delivery time
-            # is an exponential wearing a different name - it decays by
-            # construction, and the first cut of this did exactly that:
-            # the slow band still measured 40% of mid-travel frames under
-            # half a pixel. The speed is fixed when the notch lands (see
-            # _glide_speed) and held until the wheel stops.
-            move = getattr(self, self._SPEED_ATTR, 0.0) * dt
-        else:
-            move = span * (1.0 - math.exp(-self.RATE_STOP * dt))
-        return min(move, self.MAX_STEP_PX)
 
     def _glide_speed(self, remaining: float) -> float:
         if remaining <= 0.0:
@@ -4250,7 +4189,6 @@ class _Momentum(QObject):
     #
     # Same travel to the pixel (1053 against 1050 over three seconds);
     # this changes when the distance is delivered, never how much.
-    FOLLOW_TAU_S = 0.012        # kept: the value that was measured wrong
     FOLLOW_SETTLE_PX = 0.4
     # Bounds on the estimated interval between pointer steps - a mouse
     # sample at the bottom, and at the top the point past which a step is
@@ -4697,7 +4635,6 @@ class _SmoothWheel(QObject):
     # rather than "jump". Retargeting keeps it responsive - a second
     # notch re-aims from where the view is now, so spinning the wheel
     # never queues 220ms of backlog.
-    DURATION_MS = 220
     # Distance per notch, as a fraction of the viewport, and the floor
     # under it for a short one.
     #

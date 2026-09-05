@@ -184,6 +184,20 @@ def fetch_meta_cached(imdb_id: str, content_type: str = "series",
     return meta
 
 
+def cached_meta(imdb_id: str, content_type: str = "series"):
+    """The Cinemeta meta on disk for a title, at any age, or None.
+    Never fetches - for a reader that wants the title's own season split
+    (anime_identity) and must not spend a network round trip on it."""
+    name = _meta_cache_name(imdb_id, content_type)
+    try:
+        stored = storage.load(name, None)
+        if isinstance(stored, dict) and isinstance(stored.get("meta"), dict):
+            return stored["meta"]
+    except Exception:
+        pass
+    return None
+
+
 def looks_anime(meta) -> bool:
     """Whether a Cinemeta record describes anime: the Animation genre
     *and* Japan among its countries.

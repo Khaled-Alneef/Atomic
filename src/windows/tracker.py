@@ -120,27 +120,6 @@ def shows_last_watched(entry) -> bool:
     return True if stored is None else bool(stored)
 
 
-def last_watched_is_editable(entry) -> bool:
-    """Whether that number was yours to set by hand.
-
-    Nothing in the UI sets progress by hand any more - the +/- on the
-    card and the last-watched spinners in Add/Edit are gone, and
-    record_progress writes what you actually open instead. This is kept
-    only because windows/player.py still gates on it while it is being
-    moved over to record_progress; once it is, this has no callers left
-    and should go with them.
-
-    The rule it encodes: Stremio owns the number on a Stremio-backed
-    entry (site_id None) and overwrites it on the next sync, so setting
-    it there fought the sync and lost. An entry pinned to Netflix or
-    Crunchyroll has no source that can ever fill it in, and Manga has
-    none whatsoever."""
-    if not shows_last_watched(entry):
-        return False
-    if entry.get("type") in MANGA_TYPES:
-        return True
-    return entry.get("site_id") is not None
-
 # Older saves used one shared "Watching/Reading"-style status list; this
 # maps those legacy values onto the new per-type wording during migration.
 _LEGACY_STATUS_MAP = {
@@ -2877,42 +2856,6 @@ class TrackerPage(GlassPage):
         app_settings.set_last_auto_sync(self.DATA_FILE, now)
         self._sync_all_progress()
 
-    def _refresh_everything(self):
-        """Re-check everything on this page - progress and release dates
-        - and say how it went. Kept for anything that asks for a full
-        refresh explicitly; the page itself uses _auto_refresh.
-
-        Says so while it works, and says how it went when it's finished
-        (see _refresh_step_done) - every lookup runs on its own background
-        thread, so without that it reads as doing nothing at all for
-        however long the slowest source takes to answer."""
-        if self._refresh_toast is not None:
-            return  # already running - let it finish rather than double it
-        self._refresh_run += 1
-        self._refresh_changed = False
-        # What every entry says right now, to judge the results against.
-        # Against this rather than against whatever is stored by the time
-        # a result lands: the same lookups fire on their own when a page
-        # opens, so one of those finishing first would have already
-        # absorbed the news, and the run would then compare the answer
-        # with itself and report nothing new.
-        self._refresh_before = {
-            entry["id"]: (_release_content(entry.get("next_release")),
-                          entry.get("progress"), entry.get("latest_available"))
-            for entry in self.entries if entry["type"] in self.ENTRY_TYPES
-        }
-        # Starts at one and is released at the end: the lookups below
-        # report back through the event loop, so they cannot land before
-        # this method returns - but a page with nothing to look up would
-        # otherwise sit at zero pending and never report at all.
-        self._refresh_pending = 1
-        self._refresh_toast = show_toast(self, "Updating...", duration_ms=None)
-
-        self._refresh_schedules(force=True)
-        if self.SUPPORTS_PROGRESS_SYNC:
-            self._sync_all_progress()
-        self._refresh_step_done(self._refresh_run)
-
     def _refresh_step_started(self):
         """Count one more background lookup into the running refresh and
         return which run it belongs to, for it to report back with. 0 when
@@ -4640,12 +4583,6 @@ class TrackerPage(GlassPage):
                 "pressed play on one through Stremio itself, not just added "
                 "it to your library. You can still set your progress by hand "
                 "in Edit.")
-
-    def _entry_provider(self, entry):
-        """The unreadable-service name for this entry, or None. Read here
-        on the UI thread rather than in the worker - it reads the saved
-        sites file."""
-        return anime_sites.streaming_provider(entry.get("site_id"))
 
     def _sync_progress(self, entry):
         """Re-fetch this one entry's *real* progress from your connected

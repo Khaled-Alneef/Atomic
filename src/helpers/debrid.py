@@ -270,8 +270,26 @@ def _note_http_error(code, auth_matters=True):
     global _cooldown_until
     if code in (401, 403) and auth_matters:
         _cooldown_until = time.monotonic() + AUTH_COOLDOWN_S
+        _say(f"debrid: HTTP {code} - not asked again for "
+             f"{AUTH_COOLDOWN_S:.0f}s")
     elif code in (429, 509):
         _cooldown_until = time.monotonic() + RATE_COOLDOWN_S
+        _say(f"debrid: HTTP {code} - not asked again for "
+             f"{RATE_COOLDOWN_S:.0f}s; releases play from the swarm "
+             f"until then")
+
+
+def _say(message):
+    """One line in the log. This module used to fail in silence - a
+    429 put it to sleep for a cooldown and every play that followed went
+    to the swarm with nothing saying why; the owner's "the series are
+    super slow to load" (5 September 2026) was a release debrid resolves
+    in 0.6s, served instead by a 16MB-piece swarm at 13-19s to a url."""
+    try:
+        from . import logs
+        logs.info(message)
+    except Exception:
+        pass
 
 
 def _api(path, *, deadline, data=None, method=None, auth_matters=True):
@@ -586,6 +604,23 @@ def cached_hashes(hashes, deadline=None) -> set:
     return found
 
 
+def known_cached(hashes) -> set:
+    """Which of these hashes are *already known* to be cached - from the
+    library read most recently kept, without a request. For flagging a
+    partial source list (streams.find_streams' on_partial): the full
+    check costs up to DEBRID_CHECK_BUDGET_S and is asked once, on the
+    final list; a partial is drawn and *played* before that, so a row
+    the library already answered for is marked from memory and the
+    ranking can put it first. Empty when nothing is known yet, which is
+    the same as before this existed."""
+    wanted = {str(h or "").strip().lower() for h in (hashes or ())}
+    if not wanted:
+        return set()
+    with _library_lock:
+        _stamp, known = _library
+    return set(known) & wanted
+
+
 def _library_hashes(deadline) -> set:
     """Every hash the account holds complete, read at most once per
     LIBRARY_TTL_S. A failed read keeps the previous answer rather than
@@ -656,12 +691,17 @@ def playable_url(info_hash, season=None, episode=None, deadline=None,
     makes the next episode of the same pack, and any re-watch, answer
     from the library check instantly."""
     info_hash = str(info_hash or "").strip().lower()
-    if not _HASH_RE.fullmatch(info_hash) or not available():
+    if not _HASH_RE.fullmatch(info_hash):
+        return None
+    if not available():
+        _say(f"debrid: {info_hash[:8]} not asked - "
+             f"{'cooling down' if time.monotonic() < _cooldown_until else 'no key'}")
         return None
     # Already refused once - see REFUSED_FILE. Costs nothing and, more to
     # the point, spends none of the per-minute budget that a 429 comes out
     # of, so the lane moves straight on to a release that might answer.
     if info_hash in refused_hashes():
+        _say(f"debrid: {info_hash[:8]} refused before (451); skipped")
         return None
     if deadline is None:
         deadline = net.deadline_in(DEFAULT_BUDGET_S)
@@ -674,6 +714,8 @@ def playable_url(info_hash, season=None, episode=None, deadline=None,
             # "infringing_file" - a verdict about this release, not about
             # the account or the connection, and it does not change.
             _remember_refused(info_hash)
+        _say(f"debrid: {info_hash[:8]} addMagnet answered nothing "
+             f"(HTTP {getattr(_last_status, 'value', None)})")
         return None
 
     result, status = None, ""
@@ -682,6 +724,9 @@ def playable_url(info_hash, season=None, episode=None, deadline=None,
                                   title)
     except Exception:
         result, status = None, ""
+    if result is None:
+        _say(f"debrid: {info_hash[:8]} not served - status "
+             f"{status or '?'} (HTTP {getattr(_last_status, 'value', None)})")
     if result is None and status != "downloaded":
         # Never delete a torrent seen complete: addMagnet may have
         # landed on something already in the owner's library

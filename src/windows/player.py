@@ -713,6 +713,26 @@ def _prime_kwargs(function, seat):
     return {"start_at": float(start_at), "duration": float(duration)}
 
 
+def _runtime_kwargs(function, runtime_s) -> dict:
+    """`runtime_s=` for streams.prepare_fastest when this build's copy
+    takes it - the same signature filter _prime_kwargs applies, for the
+    same reason: the race judges a lane against the bitrate the file
+    needs, and the runtime is half of that number."""
+    try:
+        runtime_s = float(runtime_s or 0.0)
+    except (TypeError, ValueError):
+        return {}
+    if runtime_s <= 0:
+        return {}
+    try:
+        params = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return {}
+    if "runtime_s" not in params:
+        return {}
+    return {"runtime_s": runtime_s}
+
+
 def _format_time(seconds) -> str:
     if seconds is None:
         return "--:--"
@@ -944,7 +964,11 @@ def load_subtitle_choice(entry):
     return None
 
 
-def save_subtitle_choice(entry, lang, source, provider, label):
+def save_subtitle_choice(entry, lang, source, provider, label,
+                         url="", release=""):
+    """File the title-level choice. `url`/`release` name the individual
+    row - see PlayerPage._remember_subtitle_choice for why the source is
+    not enough on its own."""
     keys = _subtitle_pref_keys(entry)
     if not keys:
         return
@@ -953,6 +977,7 @@ def save_subtitle_choice(entry, lang, source, provider, label):
     # half-watched episode with no season and no position.
     _put_record(keys[0], {"lang": lang, "source": source,
                           "provider": provider, "label": label,
+                          "url": url, "release": release,
                           "updated_at": storage.now_iso()})
 
 
@@ -1605,6 +1630,24 @@ class _MpvBridge(QObject):
     host_lost = Signal()            # the video process went away unasked
 
 
+def _say_sub_failure(result, message):
+    """Put a subtitle failure in the log as well as in the toast.
+
+    Every one of these was toast-only, so a pick that fetched nothing
+    left `atomic.log` completely silent - which is how "the subtitle I
+    choose did not auto load" arrived on 5 September 2026 with the
+    auto-apply visibly firing, the row matching, and no way at all to
+    tell what happened next. .claude/rules/testing.md: let the log find
+    the next bug."""
+    try:
+        row = result or {}
+        logs.warning(f"subtitle: {message} - {row.get('source')} "
+                     f"{row.get('lang')} {str(row.get('format') or '')} "
+                     f"{str(row.get('release') or '')[:60]}")
+    except Exception:
+        pass
+
+
 class _WorkBridge(QObject):
     """Background lookups -> Qt. Every signal carries the run number it
     was fired for, so an answer from a superseded episode cannot be
@@ -1615,7 +1658,7 @@ class _WorkBridge(QObject):
     # playable source was found", and only a partial may be held back
     # waiting for a better resolution.
     streams_ready = Signal(object, int, bool)
-    subs_ready = Signal(object, int)        # list
+    subs_ready = Signal(object, int, bool)  # list, run, final
     # Skip intervals for this episode (AniSkip / TheIntroDB); the
     # file's own chapters need no thread and never come through here.
     skips_ready = Signal(object, int)       # list, run
@@ -2632,6 +2675,16 @@ class PlayerPage(GlassPage):
         # Whether this episode's subtitle search has been fired - see
         # _ensure_subtitle_search for when that is allowed to happen.
         self._subs_search_started = False
+        # And whether it has reported its *last* batch - the flag
+        # _match_subtitle_choice reads before it will accept a source
+        # other than the remembered one.
+        self._subs_search_done = False
+        # Rows an automatic pick has already tried and failed on, so the
+        # retry in _on_failed walks forward instead of round in a circle.
+        self._sub_auto_failed = set()
+        # The url of an automatic pick still in flight - "" for a hand
+        # pick, which is never retried behind the user's back.
+        self._sub_auto_url = ""
         # The pick currently in flight, held until mpv confirms it loaded
         # so that only a subtitle that actually worked is remembered.
         self._pending_sub_choice = None
@@ -4172,6 +4225,9 @@ class PlayerPage(GlassPage):
         # And its own search, deferred to the first frame - see
         # _ensure_subtitle_search.
         self._subs_search_started = False
+        self._subs_search_done = False
+        self._sub_auto_failed = set()
+        self._sub_auto_url = ""
         # Fetched per episode rather than once per page: it is cached on
         # disk by title after the first call, so this costs nothing
         # after the first episode and still works when the page was
@@ -4338,7 +4394,7 @@ class PlayerPage(GlassPage):
             # for the measurement). Every batch is the full ranked list
             # so far, so the panel just redraws.
             if not self._closing and run == self._run:
-                self._work.subs_ready.emit(list(found or []), run)
+                self._work.subs_ready.emit(list(found or []), run, False)
 
         try:
             found = subtitles_module.search(
@@ -4346,10 +4402,10 @@ class PlayerPage(GlassPage):
                 season=self.season, episode=self.episode, imdb_id=imdb_id,
                 kind=kind, deadline=net.deadline_in(SUBTITLE_BUDGET_S),
                 on_partial=partial, release=self._playing_release())
-            self._work.subs_ready.emit(list(found or []), run)
+            self._work.subs_ready.emit(list(found or []), run, True)
         except Exception:
             logs.exception("Subtitle search failed")
-            self._work.subs_ready.emit([], run)
+            self._work.subs_ready.emit([], run, True)
 
     def _release_record(self):
         """What is playing, in the shape the resume file stores - see
@@ -4513,6 +4569,7 @@ class PlayerPage(GlassPage):
                 text = mkv_subs.extract_srt(getattr(self, "_playing_path", ""),
                                             track)
                 if not text:
+                    _say_sub_failure(result, "the track could not be read from the file")
                     self._work.failed.emit(
                         "That Track Could Not Be Read From The File", run)
                     return
@@ -4520,6 +4577,7 @@ class PlayerPage(GlassPage):
                 text = subtitles_module.fetch(
                     result, net.deadline_in(SUBTITLE_BUDGET_S))
             if not text:
+                _say_sub_failure(result, "nothing came back from the download")
                 self._work.failed.emit("That Subtitle Could Not Be Downloaded", run)
                 return
             fmt = result.get("format") or "srt"
@@ -4550,6 +4608,7 @@ class PlayerPage(GlassPage):
                     # None, and the untranslated file used to sail
                     # through. See subtitles._parse_ass for how a real
                     # file parses to nothing.
+                    _say_sub_failure(result, "no readable lines to translate")
                     self._work.failed.emit(
                         "That Subtitle Had No Readable Lines To Translate", run)
                     return
@@ -4594,6 +4653,7 @@ class PlayerPage(GlassPage):
             self._work.sub_file_ready.emit(path, label, run)
         except Exception:
             logs.exception("Subtitle download failed")
+            _say_sub_failure(result, "the download raised")
             self._work.failed.emit("That Subtitle Could Not Be Downloaded", run)
 
     def _write_subtitle(self, text, fmt):
@@ -4657,6 +4717,10 @@ class PlayerPage(GlassPage):
         # A list handed in by the details page is a source the user
         # picked by hand, with their choice at index 0 - start that
         # one alone rather than racing five others against it.
+        # Only that is *his* pick for the purpose of saying so when it is
+        # replaced (_why_replaced); a remembered release is Atomic's.
+        self._hand_pick_index = 0 if self._given_streams is not None else None
+        self._replaced_pick = None
         self._play_stream(0, solo=(self._given_streams is not None
                                    or self._resumed_release_first))
 
@@ -4705,10 +4769,11 @@ class PlayerPage(GlassPage):
         if self._panel is not None and getattr(self._panel, "kind", "") == "streams":
             self._open_streams_panel(rebuild=True)
 
-    def _on_subtitles(self, found, run):
+    def _on_subtitles(self, found, run, final=False):
         if self._closing or run != self._run:
             return
         self._subtitles = _name_subtitles(found or [])
+        self._subs_search_done = bool(final)
         self._set_subtitle_count(len([s for s in self._subtitles
                                       if str(s.get("lang", "")).lower().startswith("ar")]))
         if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
@@ -4759,7 +4824,15 @@ class PlayerPage(GlassPage):
             return          # a later batch may still carry it
         result, provider, label = match
         self._sub_auto_done = True
-        self._pick_subtitle(result, provider=provider, label=label)
+        logs.info(
+            f"subtitle: auto-applying the remembered pick "
+            f"({stored.get('source') or 'embedded'} {stored.get('lang') or '?'} "
+            f"{stored.get('release') or stored.get('label') or '?'}) as "
+            f"{result.get('source')} {result.get('lang')} "
+            f"{result.get('release') or result.get('name') or '?'}"
+            f"{'' if not stored.get('release') else (' - SAME ROW' if str(result.get('release') or '').strip().lower() == str(stored.get('release')).strip().lower() else ' - A DIFFERENT ROW')}")
+        self._pick_subtitle(result, provider=provider, label=label,
+                            automatic=True)
 
     def _match_subtitle_choice(self, stored):
         """`(result, provider, label)` for a remembered choice, or None.
@@ -4768,7 +4841,37 @@ class PlayerPage(GlassPage):
         url: `_name_subtitles` numbers rows by their position in *this*
         search ("Arabic 2 SubDL"), so the same subtitle is called
         something different whenever a source answers in a different
-        order, and the urls are temporaries."""
+        order, and the urls are temporaries.
+
+        **A source other than the remembered one is only ever accepted
+        once the search is finished, and that is the whole of the
+        owner's report of 5 September 2026** - "when I select a subtitle
+        then close the app and reopen the same ep it is supposed to load
+        the same subtitle but it does not", sent together with "make the
+        Opensubtitle ... the auto loaded not the SubDL".
+
+        `subtitles.search` reports each source as it lands
+        (`on_partial`), so this runs several times per episode with a
+        growing list, and the fallback below - "any row in the right
+        language" - used to fire on the *first* batch that carried one.
+        Measured cold on his own titles: the four sources answer between
+        0.15s and 4.2s apart, so which one is in that first batch is a
+        race. Whichever won it was taken, `_sub_auto_done` was set in the
+        same breath, and the subtitle he had actually chosen - still in
+        flight - could never be applied afterwards. Both halves of his
+        report are that one line: the remembered pick was not loaded,
+        and what was loaded was whoever answered first.
+
+        Waiting costs nothing here. Returning None simply lets the next
+        batch ask again, and the last batch always arrives (the worker
+        emits a final one even when the search raises), so the fallback
+        is reached in every case it used to be - just against the whole
+        list rather than a fifth of it, and the whole list is ordered
+        with OpenSubtitles at its head (subtitles.SOURCE_PRIORITY)."""
+        final = bool(getattr(self, "_subs_search_done", False))
+        dead = getattr(self, "_sub_auto_failed", set())
+        rows = [s for s in self._subtitles
+                if str(s.get("url") or "") not in dead]
         want_lang = str(stored.get("lang") or "").lower()
         want_source = str(stored.get("source") or "").lower()
         provider = stored.get("provider") or None
@@ -4786,11 +4889,13 @@ class PlayerPage(GlassPage):
             except Exception:
                 self._sub_auto_done = True
                 return None
-            feedstock = [s for s in self._subtitles
+            feedstock = [s for s in rows
                          if not str(s.get("lang", "")).lower().startswith("ar")]
             best = next((s for s in feedstock
                          if str(s.get("source") or "").lower() == want_source),
-                        None) or (feedstock[0] if feedstock else None)
+                        None)
+            if best is None and final:
+                best = feedstock[0] if feedstock else None
             if best is None:
                 return None
             translator = ai_translate.label(provider)
@@ -4799,13 +4904,46 @@ class PlayerPage(GlassPage):
             # highlight lands back on it (see _open_subtitle_panel).
             return best, provider, f"Arabic (AI) {index} {translator}"
 
-        same_lang = [s for s in self._subtitles
+        same_lang = [s for s in rows
                      if str(s.get("lang") or "").lower() == want_lang]
         if not same_lang:
             return None
-        best = next((s for s in same_lang
-                     if str(s.get("source") or "").lower() == want_source),
-                    same_lang[0])
+
+        # **Which row, then which source, in that order.** A source
+        # answers with several subtitles for one episode - his Reacher
+        # S01E03 has three Arabic OpenSubtitles rows - so matching on the
+        # source alone always took the first of them, whichever one he
+        # had actually chosen. Measured over two searches a minute apart:
+        # all three came back with identical urls and identical release
+        # ids in identical order, so the row has a stable name and the
+        # only reason it was not being used is that it was never stored.
+        #
+        # Four rungs, most specific first, and the bottom two are exactly
+        # what this did before - so a record written by an older build
+        # (no url, no release) behaves as it always has.
+        want_url = str(stored.get("url") or "")
+        want_release = str(stored.get("release") or "").strip().lower()
+        same_source = [s for s in same_lang
+                       if str(s.get("source") or "").lower() == want_source]
+
+        best = None
+        if want_url:
+            best = next((s for s in same_lang
+                         if str(s.get("url") or "") == want_url), None)
+        if best is None and want_release:
+            best = next((s for s in same_source
+                         if str(s.get("release") or s.get("name") or "")
+                         .strip().lower() == want_release), None)
+        if best is None and (want_url or want_release) and not final:
+            # The exact row is worth waiting the rest of the search for;
+            # settling for a sibling is what produced the wrong subtitle.
+            return None
+        if best is None:
+            best = same_source[0] if same_source else None
+        if best is None:
+            if not final:
+                return None     # the remembered source may still answer
+            best = same_lang[0]
         return best, None, (best.get("display_name") or best.get("release")
                             or "Subtitle")
 
@@ -4842,15 +4980,80 @@ class PlayerPage(GlassPage):
         # said "Subtitle Loaded", moved its highlight, and the picture
         # kept showing whatever was there before - which from the chair
         # reads as "the delay does nothing on this one".
-        if not self._external_sub_selected(path):
-            logs.warning(f"mpv did not select the loaded subtitle {path}")
-            self._finish_sub_toast("That Subtitle Could Not Be Read")
-            return
+        #
+        # **Asked a moment later, not in the same breath.** Both commands
+        # above are `command_async`, so this used to read the track list
+        # in the microsecond after posting them - before mpv could
+        # possibly have published the new track - and its own "a track
+        # list mpv has not published yet is treated as success" default
+        # then reported every load as loaded. Measured 5 September 2026
+        # against his own cached Reacher S01E03 with a seek in flight:
+        # the external track appears immediately but is `selected` only
+        # by +0.2s, so the answer this gave was whichever side of that
+        # gap it happened to land on - a coin flip standing in for a
+        # check. `_confirm_subtitle_loaded` polls instead, and re-issues
+        # the add once before giving up, so "it did not load" becomes
+        # either a subtitle or a sentence saying why.
         self._subtitle_label = label
-        self._remember_subtitle_choice()
-        self._finish_sub_toast("Subtitle Loaded")
-        if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
-            self._open_subtitle_panel(rebuild=True)
+        self._confirm_subtitle_loaded(path, label, run)
+        return
+
+    # How long mpv is given to publish a freshly added subtitle track,
+    # and how often it is asked. 2.0s is eight times the 0.2s measured
+    # above, which leaves room for a core parked on a torrent read.
+    SUB_CONFIRM_MS = 120
+    SUB_CONFIRM_S = 2.0
+
+    def _confirm_subtitle_loaded(self, path, label, run, retried=False):
+        """Watch for mpv to actually take the file, then say so.
+
+        Runs on a timer rather than in line: the answer does not exist
+        yet at the moment sub-add is posted (see _on_subtitle_file), and
+        blocking the UI thread to wait for it is exactly what the async
+        commands were introduced to avoid."""
+        deadline = time.monotonic() + self.SUB_CONFIRM_S
+
+        def check():
+            if self._closing or run != self._run or self.handle is None:
+                timer.stop()
+                return
+            state = self._external_sub_state(path)
+            if state is True:
+                timer.stop()
+                self._finish_sub_toast("Subtitle Loaded")
+                self._remember_subtitle_choice()
+                if self._panel is not None                         and getattr(self._panel, "kind", "") == "subs":
+                    self._open_subtitle_panel(rebuild=True)
+                return
+            if time.monotonic() < deadline:
+                return                  # not published yet; ask again
+            timer.stop()
+            if not retried:
+                # One more go. mpv refuses a sub-add outright while its
+                # core is mid-reconfigure, and that is precisely when
+                # this fires - the seat's seek lands 0.3s earlier (see
+                # his log of 5 September 2026).
+                logs.warning("subtitle: mpv had not taken the track after "
+                             f"{self.SUB_CONFIRM_S:.0f}s; adding it again")
+                try:
+                    self.handle.command_async("sub-add", str(path), "select")
+                    self.handle.command_async("set", "sub-visibility", "yes")
+                    self._apply_sub_style()
+                    self._apply_sub_delay()
+                except Exception:
+                    logs.exception("the second sub-add failed")
+                self._confirm_subtitle_loaded(path, label, run, retried=True)
+                return
+            logs.warning(f"subtitle: mpv would not select {os.path.basename(path)} "
+                         f"({label})")
+            self._finish_sub_toast("That Subtitle Could Not Be Read")
+
+        timer = QTimer(self)
+        timer.setInterval(self.SUB_CONFIRM_MS)
+        timer.timeout.connect(check)
+        timer.start()
+        self._sub_confirm_timer = timer
+
 
     def _remember_subtitle_choice(self):
         """File the pick that just loaded, so the next episode and the
@@ -4860,10 +5063,29 @@ class PlayerPage(GlassPage):
             return
         result, provider, label = choice
         try:
+            # **The row, not just its source.** `source` alone was the
+            # whole identity, and a source answers with several rows: his
+            # Reacher S01E03 has *three* Arabic OpenSubtitles subtitles,
+            # so picking the second or the third and re-opening the
+            # episode loaded the first - "still loads the wrong
+            # subtitle", 5 September 2026.
+            #
+            # `url` and `release` are both stored because they fail
+            # differently. Measured over two searches the same minute,
+            # OpenSubtitles' three rows came back with identical urls
+            # (`.../src-api/file/1957535672`) and identical release ids
+            # in identical order - so for that source the url *is* a
+            # stable name, contrary to the assumption written into
+            # load_subtitle_choice. It is not for all of them, which is
+            # why the release name is kept beside it and why
+            # _match_subtitle_choice still falls back to the source.
             recipe = {"lang": str((result or {}).get("lang") or "").lower(),
                       "source": str((result or {}).get("source") or ""),
+                      "url": str((result or {}).get("url") or ""),
+                      "release": str((result or {}).get("release")
+                                     or (result or {}).get("name") or ""),
                       "provider": provider, "label": label}
-            save_subtitle_choice(self.entry, **recipe)
+            save_subtitle_choice(self.entry, **recipe)   # url/release ride along
             # **And against this episode**, beside its delay, size and
             # position. The title-level record above is what carries a
             # choice *forward* to the next episode; this one is what
@@ -4877,22 +5099,24 @@ class PlayerPage(GlassPage):
             # Never fatal: the subtitle is loaded and playing either way.
             logs.exception("Could not remember the subtitle choice")
 
-    def _external_sub_selected(self, path) -> bool:
-        """Is the file just handed to sub_add the primary sub track?
+    def _external_sub_state(self, path):
+        """Has mpv taken the file handed to sub-add?
 
-        Answered from mpv's own track list rather than from the fact that
-        sub_add returned - measured on mpv v0.41, `sub-add <file> select`
-        is what selects it, and its silent failure mode is a track list
-        that never gained the file. A track list mpv has not published
-        yet is treated as success: refusing on a race would be a false
-        alarm on every fast machine."""
+        Three answers, not two, and that is the point: True (it is in the
+        track list and selected), False (listed but not selected - mpv
+        parsed nothing usable), and **None for "it has not said yet"**,
+        which is the state that used to be reported as success.
+
+        `_external_sub_selected` returned a bare bool and treated an
+        unpublished track list as loaded, on the reasoning that refusing
+        on a race would be a false alarm on every fast machine. That is
+        true, and the fix is to ask again rather than to guess - see
+        _confirm_subtitle_loaded, which is the only caller."""
         try:
             tracks = list(self.handle.track_list or [])
         except Exception:
-            return True
+            return None
         subs = [t for t in tracks if t.get("type") == "sub"]
-        if not subs:
-            return True
         target = os.path.normcase(os.path.abspath(str(path)))
         for track in subs:
             name = track.get("external-filename")
@@ -4900,11 +5124,30 @@ class PlayerPage(GlassPage):
                 continue
             if os.path.normcase(os.path.abspath(str(name))) == target:
                 return bool(track.get("selected"))
-        return True
+        return None                 # not in the list yet
 
     def _on_failed(self, message, run):
         if self._closing or run != self._run:
             return
+        # **An automatic pick that failed must not end the episode's
+        # subtitles.** `_pick_subtitle` sets `_sub_auto_done` before the
+        # row is known to work, so one unfetchable row - a url a source
+        # has since expired, a host refusing this connection - left the
+        # episode with no subtitle at all and nothing to retry it, which
+        # is indistinguishable from the auto-apply never having run. The
+        # row is written off, the door re-opens, and the next best match
+        # in the same search is tried; when there is none, this settles
+        # exactly where it used to.
+        failed_url, self._sub_auto_url = getattr(self, "_sub_auto_url", ""), ""
+        if failed_url:
+            self._sub_auto_failed.add(failed_url)
+            self._sub_auto_done = False
+            self._pending_sub_choice = None
+            logs.warning(f"subtitle: the remembered pick failed ({message}); "
+                         f"trying the next match")
+            self._auto_apply_subtitle()
+            if self._sub_auto_done:
+                return      # a replacement is loading; its toast owns the box
         # A subtitle pick's sticky toast is the one box the user is
         # already watching, so a failure goes *into* it rather than
         # beside it - otherwise "Loading Subtitle..." sits there for its
@@ -5119,7 +5362,17 @@ class PlayerPage(GlassPage):
         if self._closing or self._arabic_track_done:
             return
         try:
-            stored = load_subtitle_choice(self.entry)
+            # **This episode's record as well as the title's.** They can
+            # disagree: `_subtitles_off` deletes the title-level record
+            # (Off has to stick for the *next* episode) and leaves the
+            # episode's own `choice` where it is. Reading only the title
+            # then let an embedded Arabic track claim the episode -
+            # `_sub_auto_done` - seconds before the subtitle search that
+            # would have restored the remembered pick had even started,
+            # since track-list arrives long before the first frame.
+            stored = ((load_sub_prefs(self.entry, self.season,
+                                      self.episode) or {}).get("choice")
+                      or load_subtitle_choice(self.entry))
         except Exception:
             stored = None
         if stored:
@@ -5338,6 +5591,36 @@ class PlayerPage(GlassPage):
         except Exception:
             return False
 
+    # How long an episode or a film runs when nothing has said: what the
+    # race divides a release's size by to know the rate playback needs
+    # (streams.playable_rate). Anime episodes are 24 minutes; a live-
+    # action series episode 45; a film about 105. Over-estimating the
+    # runtime under-estimates the bitrate and lets a too-slow lane win,
+    # so each is on the short side of its kind.
+    RUNTIME_GUESS_S = {"anime": 24 * 60, "series": 45 * 60, "movie": 105 * 60}
+
+    def _runtime_hint(self, prime=(None, None)):
+        """Seconds this title runs, best known: the file already open
+        (a switch mid-episode), the resume record's duration, or the
+        kind's usual length."""
+        try:
+            if float(self._duration or 0.0) > 0:
+                return float(self._duration)
+        except (TypeError, ValueError):
+            pass
+        try:
+            total = float((prime or (None, None))[1] or 0.0)
+            if total > 0:
+                return total
+        except (TypeError, ValueError, IndexError):
+            pass
+        kind = str((self.entry or {}).get("type") or "").strip().lower()
+        if kind == "movie":
+            return float(self.RUNTIME_GUESS_S["movie"])
+        if kind == "anime":
+            return float(self.RUNTIME_GUESS_S["anime"])
+        return float(self.RUNTIME_GUESS_S["series"])
+
     def _prime_seat(self, resume_at):
         """`(seconds, total)` the engine should fetch first, or
         `(None, None)`.
@@ -5437,11 +5720,16 @@ class PlayerPage(GlassPage):
                 #
                 # What makes this affordable now is that the reason for
                 # racing it has largely gone: the debrid lane resolves a
-                # cached release in about a second, and SOLO_METADATA_
-                # TIMEOUT/SOLO_DATA_WAIT bound a dead pick at 4s + 4s
-                # before _try_next_source races the rest of the list
-                # anyway. So a live pick plays, and a dead one costs 8s
-                # and then behaves exactly as before.
+                # cached release in about a second, and a dead pick is
+                # bounded by the engine's own verdict (dead in ~3.5s,
+                # connected-but-silent at data_wait_max, delivering up
+                # to DELIVERING_CAP_S) before _try_next_source races
+                # the rest of the list anyway. Not by SOLO_METADATA_
+                # TIMEOUT + SOLO_DATA_WAIT: streams.prepare used to give
+                # up on that sum (8s) while its engine arm was still
+                # legitimately waiting, and the hand pick was replaced
+                # by whatever the race behind it found - the owner's
+                # Obsession report, 5 September 2026.
                 stream = streams_module.prepare(
                     chosen, season=self.season, episode=self.episode,
                     title=wanted_title,
@@ -5466,7 +5754,9 @@ class PlayerPage(GlassPage):
                 stream = streams_module.prepare_fastest(
                     [chosen] + others, season=self.season, episode=self.episode,
                     title=wanted_title, failed=failed,
-                    **_prime_kwargs(streams_module.prepare_fastest, prime))
+                    **_prime_kwargs(streams_module.prepare_fastest, prime),
+                    **_runtime_kwargs(streams_module.prepare_fastest,
+                                      self._runtime_hint(prime)))
             else:
                 # The last candidate, alone, on the same bounded budget.
                 stream = streams_module.prepare(
@@ -5490,6 +5780,16 @@ class PlayerPage(GlassPage):
             return
         if not stream or not stream.get("url"):
             reason = (stream or {}).get("reason") or ""
+            # Said in the log: the owner's "connecting to source takes a
+            # while, then buffering, then connecting to source again" (5
+            # September 2026) arrived with nothing at all between the
+            # hand-pick's pick_file line and the race that replaced it.
+            try:
+                failed = self._streams[index] if 0 <= index < len(self._streams) else {}
+                logs.info(f"source {index} did not start ({reason or 'no reason'}): "
+                          f"{str(failed.get('title') or '')[:90]!r}")
+            except Exception:
+                pass
             if reason == "no-engine":
                 # Not a dead swarm and not worth walking the list for:
                 # this build has no torrent engine at all, so every
@@ -5506,7 +5806,7 @@ class PlayerPage(GlassPage):
             # one down starts in under a second. Walking the list is what
             # a person would do by hand, so do it for them rather than
             # stopping on the first dud.
-            if self._try_next_source(index, resume_at=resume_at):
+            if self._try_next_source(index, resume_at=resume_at, reason=reason):
                 return
             self._finish_working("No Source Would Start")
             self._show_status(
@@ -5605,7 +5905,41 @@ class PlayerPage(GlassPage):
         stale = [s for s in streams if self._is_dead_hash(s)]
         return fresh + stale
 
-    def _try_next_source(self, failed_index, resume_at=None) -> bool:
+    # What the player says a source did, by the engine's verdict on it -
+    # see _why_replaced. (sentence for the loading frame, Title Case for
+    # a toast.) The keys are streams.prepare's `reason` values plus the
+    # seat watchdog's "stalled".
+    _WHY_WORDS = {
+        "no-peers": ("had no peers", "Had No Peers"),
+        "no-metadata": ("never answered", "Never Answered"),
+        "timeout": ("took too long to start", "Took Too Long To Start"),
+        "wrong-episode": ("did not hold this episode",
+                          "Did Not Hold This Episode"),
+        "tiny-file": ("was not a real file", "Was Not A Real File"),
+        "engine-failed": ("could not be served", "Could Not Be Served"),
+        "stalled": ("stalled before its first frame",
+                    "Stalled Before Its First Frame"),
+    }
+
+    def _why_replaced(self, failed_index, reason):
+        """`(sentence, title)` saying whose source failed and how.
+
+        The owner, 5 September 2026: "say why in the player when a hand
+        pick was replaced or a source dropped" - his Obsession report
+        ("the source I select did not play, instead played some 6 seeds
+        source") was a hand pick walked past with one line in the log
+        and nothing on screen. The verdict is the engine's own reason
+        (streams.prepare), the subject is whether the row was his
+        (_hand_pick_index, set by _switch_stream and a details-page
+        pick) or Atomic's."""
+        mine = (failed_index is not None
+                and failed_index == getattr(self, "_hand_pick_index", None))
+        who = ("Your pick", "Your Pick") if mine else ("That source", "That Source")
+        what = self._WHY_WORDS.get(str(reason or ""),
+                                   ("did not start", "Did Not Start"))
+        return f"{who[0]} {what[0]}", f"{who[1]} {what[1]}"
+
+    def _try_next_source(self, failed_index, resume_at=None, reason=None) -> bool:
         """Move to the next untried source after one failed to start.
 
         **`resume_at` is carried, and dropping it was the owner's "when
@@ -5645,7 +5979,13 @@ class PlayerPage(GlassPage):
         # and the switch looked like it had done nothing (see
         # _switch_stream).
         wanted = getattr(self, "_requested_quality", None)
-        if self._start_next_at(wanted, resume_at):
+        why = self._why_replaced(failed_index, reason)
+        if failed_index == getattr(self, "_hand_pick_index", None):
+            # Said again when the replacement's first frame lands, so
+            # the answer to "what am I watching now?" is on screen at the
+            # moment the question is asked - see _on_property.
+            self._replaced_pick = why[1]
+        if self._start_next_at(wanted, resume_at, why=why):
             return True
         if wanted is None or self._quality_given_up:
             return False
@@ -5666,14 +6006,20 @@ class PlayerPage(GlassPage):
             note=f"No {'4K' if wanted == '2160p' else wanted.upper()} Source "
                  f"Would Start - Trying Another Resolution")
 
-    def _start_next_at(self, wanted, resume_at, note=None) -> bool:
+    def _start_next_at(self, wanted, resume_at, note=None, why=None) -> bool:
         """Start the best untried source, optionally held to one
         resolution. The walk itself; see _try_next_source for the policy
         around it.
 
         `note` replaces the usual "had no peers" line and is said whether
         or not a toast is already up - it carries news the user has to
-        have (his chosen resolution is gone), not a progress note."""
+        have (his chosen resolution is gone), not a progress note.
+
+        `why` is `(sentence, title)` from _why_replaced: what the source
+        being walked past actually did, and whose it was. It used to say
+        "had no peers" for every reason there is, and only on the loading
+        frame - which a running picture hides - so a hand pick replaced
+        mid-episode was replaced in silence."""
         retry = []
         fallback = False
         order = list(range(len(self._streams)))
@@ -5700,15 +6046,23 @@ class PlayerPage(GlassPage):
                 # one more try rather than being written off.
                 retry.append(index)
                 continue
-            self._show_loading("That source had no peers. Trying the next one...")
+            sentence, title = why or ("That source had no peers",
+                                      "That Source Had No Peers")
+            self._show_loading(f"{sentence}. Trying the next one...")
             # Said in the toast as well, not only through _show_loading:
             # over a running picture the loading frame is suppressed on
             # purpose (_show_backdrop), so on a switch this line was
-            # written to a surface nobody could see.
+            # written to a surface nobody could see. Whenever a picture
+            # is up, then, not only when a switch toast already is.
             if note is not None:
                 self._say_working(note)
-            elif self._work_toast is not None:
-                self._say_working("That Source Had No Peers - Trying The Next One")
+            elif self._work_toast is not None or not self._awaiting_first_frame:
+                self._say_working(f"{title} - Trying The Next One")
+            try:
+                logs.info(f"{sentence}; trying source {index}: "
+                          f"{str(self._streams[index].get('title') or '')[:90]!r}")
+            except Exception:
+                pass
             self._play_stream(index, resume_at=self._seat_now(resume_at))
             return True
         return False
@@ -5980,6 +6334,7 @@ class PlayerPage(GlassPage):
             else:
                 self.handle.play(url)
             self.handle["pause"] = False
+            self._paused_at_seek = False    # a fresh file is meant to play
         except Exception:
             logs.exception("Starting playback failed")
             self._show_status("That source could not be opened. Try another one.")
@@ -6036,7 +6391,8 @@ class PlayerPage(GlassPage):
                 # walk to the next release instead, seat kept - the
                 # same move a failed prepare already makes.
                 self._say_working("That Source Stalled - Trying Another...")
-                if self._try_next_source(self._stream_index, resume_at=seat):
+                if self._try_next_source(self._stream_index, resume_at=seat,
+                                         reason="stalled"):
                     return
                 self._finish_working()
                 self._show_status(
@@ -6081,6 +6437,11 @@ class PlayerPage(GlassPage):
         if self.handle is None:
             return
         target = max(0.0, float(seconds))
+        # Whether the viewer had playback paused when this seek was
+        # asked for - the state a seek must land back in. See
+        # _ensure_playing_after_seat, which lifts only the pauses mpv
+        # takes by itself on the way there.
+        self._paused_at_seek = bool(self._paused)
         # **Nothing has played yet, so this is a start position, not a
         # seek.** The owner, 27 August 2026: "when I use the arrow +/-
         # 10 sec, while it is just started the ep (still loading), it
@@ -6128,6 +6489,20 @@ class PlayerPage(GlassPage):
         needs_seat = (not resuming and self._duration
                       and target > here + 0.5
                       and target > buffered - SEEK_BUFFER_MARGIN_S)
+        # **And any jump into pieces the swarm has not sent yet, the
+        # engine being asked rather than the buffer guessed.** The rule
+        # above only knows mpv's forward cache, so a jump *back* into a
+        # part of the episode never fetched - resumed at 30:00, dragged
+        # to 10:00 - took no seat: no narration, nothing primed, torn
+        # frames until the pieces arrived. The container's index maps
+        # the target to a byte (Cues, or the MP4 sample tables since 5
+        # September 2026) and `have()` says whether it is here. Only a
+        # definite "no" takes the seat; "cannot tell" keeps the rule
+        # above, which is what every seek got before.
+        if (not needs_seat and not resuming and self._duration
+                and abs(target - here) > SEEK_BUFFER_MARGIN_S
+                and self._engine_has_seat(target) is False):
+            needs_seat = True
         # **Where the user asked to be, remembered until mpv agrees.**
         # `_position` only moves when mpv reports time-pos, and after a
         # seek that report lags - on a torrent, by seconds, while the
@@ -6259,10 +6634,73 @@ class PlayerPage(GlassPage):
     def toggle_pause(self):
         if self.handle is None:
             return
+        # When the viewer last asked for a pause, so a pause mpv takes on
+        # its own during a seek can be told from a deliberate one - see
+        # _ensure_playing_after_seat.
+        self._pause_pressed_at = time.monotonic()
         try:
             self.handle["pause"] = not self._paused
         except Exception:
             logs.exception("Pause toggle failed")
+
+    # How long after a deliberate pause a pause is still taken to be
+    # the viewer's own. mpv's confirmation arrives a beat after the key;
+    # anything later than this during a seek wait is mpv's doing.
+    PAUSE_INTENT_S = 1.5
+
+    def _ensure_playing_after_seat(self, why=""):
+        """Un-pause a picture mpv stopped on its own while a seek was
+        being waited for, so the viewer never has to press play to get
+        past a seek. Never overrides a pause the viewer asked for.
+
+        The owner, 5 September 2026: "seeking on the swarm path: make
+        sure the user is comfortable and not pressing any buttons to
+        play each time". The root cause is fixed where it lived - the
+        engine stream handed mpv a false end-of-file whenever the local
+        server ended a response early, and under `keep-open=yes` mpv
+        pauses at EOF (player_seekable_stream_patch._EngineStream.read
+        has the measurement). This is the second lock: a pause that
+        arrives from mpv while a seat is owed, or is still in place when
+        the seat lands, and that no key of his explains, is lifted, and
+        the log says so - so a third cause, if there is one, arrives with
+        a line beside it."""
+        if self.handle is None or not self._paused:
+            return
+        if time.monotonic() - getattr(self, "_pause_pressed_at", 0.0) < self.PAUSE_INTENT_S:
+            return
+        # A viewer who paused and *then* seeked expects to stay paused -
+        # mpv keeps a pause across a seek, and so does this.
+        if getattr(self, "_paused_at_seek", False):
+            return
+        logs.info(f"seek: mpv paused on its own {why}; resuming playback")
+        try:
+            if hasattr(self.handle, "command_async"):
+                self.handle.command_async("set", "pause", "no")
+            else:
+                self.handle["pause"] = False
+        except Exception:
+            logs.exception("Could not resume after a seek")
+
+    def _engine_has_seat(self, target):
+        """Whether the bytes a seek to `target` reads are already on
+        disk, when this is an engine stream whose index can say - True,
+        False, or None for "cannot tell / not an engine stream"."""
+        try:
+            stream = (self._streams or [])[self._stream_index] or {}
+        except (IndexError, TypeError):
+            return None
+        kind = str(stream.get("kind") or "").strip().lower()
+        engine = str(stream.get("engine") or "").strip().lower()
+        if kind != "torrent" and engine != "atomic":
+            return None
+        info_hash = str(stream.get("info_hash") or "").strip().lower()
+        if not info_hash:
+            return None
+        try:
+            from helpers import torrent_engine
+            return torrent_engine.seat_on_disk(info_hash, float(target))
+        except Exception:
+            return None
 
     def toggle_mute(self):
         if self.handle is None:
@@ -6660,7 +7098,18 @@ class PlayerPage(GlassPage):
                 # A switch that was announced is now finished - unless
                 # it still owes a seat, in which case the toast keeps
                 # saying so until the picture is there.
-                if self._work_toast is not None and self._resume_target is None:
+                # **A hand pick that was walked past is named here**, at
+                # the moment the replacement is on screen, whether or not
+                # a switch toast was up - see _why_replaced.
+                replaced = getattr(self, "_replaced_pick", None)
+                if replaced and self._resume_target is None:
+                    self._replaced_pick = None
+                    if self._work_toast is not None:
+                        self._finish_working(f"{replaced} - Playing Another Source")
+                    else:
+                        show_toast(self._toast_anchor(),
+                                   f"{replaced} - Playing Another Source")
+                elif self._work_toast is not None and self._resume_target is None:
                     self._finish_working("Source Loaded")
                 # The picture is up: only now is the connection's slack
                 # spent on anything else. The subtitle search used to
@@ -6685,6 +7134,9 @@ class PlayerPage(GlassPage):
                 # honest position of the new file, not on a promise.
                 seat = self._resume_target
                 self._clear_seat()
+                # The picture is at the seat; if mpv stopped on the way
+                # there, it goes again without a press.
+                self._ensure_playing_after_seat("when the seat landed")
                 if self._work_toast is not None:
                     self._finish_working(f"Resumed From {_format_time(seat)}")
                 else:
@@ -6730,6 +7182,10 @@ class PlayerPage(GlassPage):
             self.play_btn.set_paused(self._paused)
             if self._paused:
                 self._wake_controls()
+                # A pause mpv took by itself while a seat is still owed
+                # is not the viewer's - see _ensure_playing_after_seat.
+                if self._resume_target is not None:
+                    self._ensure_playing_after_seat("while a seek was pending")
         elif name == "volume" and value is not None:
             self._volume = int(value)
             self.volume_slider.blockSignals(True)
@@ -7449,7 +7905,7 @@ class PlayerPage(GlassPage):
         # panel under the press would look like the click missed.
         self._open_subtitle_panel(rebuild=True)
 
-    def _pick_subtitle(self, result, provider=None, label=None):
+    def _pick_subtitle(self, result, provider=None, label=None, automatic=False):
         """Load one subtitle, saying so until it has actually loaded.
 
         `provider` names the AI translator the picked row promised, and
@@ -7470,7 +7926,9 @@ class PlayerPage(GlassPage):
         if subtitles_module is None:
             return
         # Any pick, by hand or automatic, closes the door on this
-        # episode's auto-apply - see _auto_apply_subtitle.
+        # episode's auto-apply - see _auto_apply_subtitle. An automatic
+        # one re-opens it if the row turns out not to work (_on_failed).
+        self._sub_auto_url = str((result or {}).get("url") or "") if automatic else ""
         self._sub_auto_done = True
         # Remembered only once it has actually loaded (_on_subtitle_file):
         # a row that turns out to be unfetchable, unparseable or refused
@@ -7907,8 +8365,29 @@ class PlayerPage(GlassPage):
         # In place, always: rows are added or removed to match the track
         # list and then repainted. A rebuild is only for a change the
         # panel structurally cannot absorb (see _sync_track_rows).
-        if not (self._sync_track_rows() and self._highlight_tracks()):
-            self._open_tracks_panel(rebuild=True)
+        #
+        # **Only while a tracks panel is actually up.** The owner, 5
+        # September 2026: "the player opens with the Audio and Subtitle
+        # Tracks panel showing after some picks". `_sync_track_rows`
+        # answers False for "no tracks panel is open" as well as for "the
+        # open one cannot absorb this", and the rebuild below then built
+        # one - `_new_panel(rebuild=True)` creates a panel when there is
+        # none. Every *automatic* pick comes through here with no panel
+        # up: `_apply_audio_default` moving a film to English,
+        # `_apply_remembered_track` restoring last time's muxed subtitle,
+        # `_auto_select_arabic_track` taking an Arabic track. Measured
+        # offscreen with the real unbound methods on a stub page: all
+        # three, and a plain `_pick_track` with no panel, ended with a
+        # visible tracks panel; picking a muxed subtitle from the
+        # Subtitles panel replaced *that* panel with the tracks one. With
+        # this guard every one of them leaves the panels exactly as they
+        # were, and the control (tracks panel open, pick a row) still
+        # repaints in place. Nothing is lost for the closed case: mpv's
+        # own track-list confirmation lands in _on_property, which is
+        # already guarded the same way.
+        if self._panel is not None and getattr(self._panel, "kind", "") == "tracks":
+            if not (self._sync_track_rows() and self._highlight_tracks()):
+                self._open_tracks_panel(rebuild=True)
 
     # How often the connection panel re-reads the swarm. The numbers
     # move constantly and nobody reads them faster than this; a second
@@ -8936,6 +9415,11 @@ class PlayerPage(GlassPage):
         self._say_working(f"Loading Source{f' ({quality})' if quality else ''}...")
         # Picked by hand from the sources panel - same rule as a
         # pick off the details page (see _prepare_stream_worker).
+        # Remembered as *his* pick, so if it is walked past the player
+        # can say "Your Pick ..." rather than "That Source ..." - see
+        # _why_replaced.
+        self._hand_pick_index = index
+        self._replaced_pick = None
         self._play_stream(index, resume_at=seat, solo=True)
 
     # ---- what the player says while it is busy over a live picture ----

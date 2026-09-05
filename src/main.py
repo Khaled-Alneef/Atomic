@@ -5506,29 +5506,6 @@ class MainWindow(QMainWindow):
                 return box
         return None
 
-    def open_global_search(self, initial=""):
-        """Focus the window's search bar - what Ctrl+F, the search icon
-        and Discover's "search everything" all call.
-
-        Named for the shortcut that used to open it; Ctrl+K was unbound
-        on 28 August 2026 (see keyPressEvent) and the name is left alone
-        rather than renaming a method four callers use.
-
-        It used to navigate to Home and land in the field there, because
-        that was where the one search box lived. The box is in the
-        window's own bar now (the owner's ask, 25 August 2026), so this
-        no longer moves the user off the page they were on to search -
-        which was always the odd part of it."""
-        field = getattr(self, "top_search", None)
-        if field is None:
-            return
-        field.setFocus(Qt.FocusReason.ShortcutFocusReason)
-        if initial:
-            field.setText(initial)
-            self._on_top_search(initial)
-        else:
-            field.selectAll()
-
     def go_back(self):
         if self._history_index > 0:
             current = self._history[self._history_index]
@@ -6019,6 +5996,15 @@ def main():
         # Shrink the backlog of oversized files first, then enforce the
         # cap on whatever is left - both budgeted, both off the UI thread.
         try:
+            # Before the shrink: clear, once, the chapter pages that pass
+            # re-encoded to 1200px tall while it still read the web
+            # proxy's files as covers - see web/backend.heal_shrunk_pages
+            # (5 September 2026).
+            try:
+                from web import backend as web_backend
+                web_backend.heal_shrunk_pages()
+            except Exception:
+                logs.exception("page cache heal failed")
             images.shrink_existing()
             images.trim_cache()
         except Exception:

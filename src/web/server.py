@@ -920,8 +920,26 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
         site = (str((manga_sites.fetch_manga_details(
                     page_url, timeout=5, title=title) or {}).get("cover_url")
                     or "") if page_url else "")
-        catalogue = (lambda: str(manga_sites._external_cover(title, 5) or "")
-                     ) if title else (lambda: "")
+        # **The two catalogues as two candidates, not one.** The chain
+        # used to ask manga_sites._external_cover, which answers with
+        # MangaDex's cover and asks AniList only when MangaDex has none -
+        # so when MangaDex's cover is a stand-in (Hunter X Hunter, see
+        # _placeholder_reason) there was nowhere further to go and the
+        # card kept the site's 250x350 file. AniList is asked for its own
+        # picture once MangaDex's is refused.
+        from helpers import mangadex, anilist
+
+        def catalogue_mangadex():
+            try:
+                return str(mangadex.fetch_cover_url(title, 5) or "") if title else ""
+            except Exception:
+                return ""
+
+        def catalogue_anilist():
+            try:
+                return str(anilist.fetch_manga_cover(title, 5) or "") if title else ""
+            except Exception:
+                return ""
         # **Which one is asked first depends on why we are asking.** A
         # row with *no* art wants the site's own cover for this exact
         # slug before anybody else's art for a matching title - that is
@@ -933,8 +951,8 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
         # fall back to. Either way a candidate under the floor is
         # skipped while a better one is still untried, and nothing is
         # offered that could not be fetched.
-        order = ([catalogue, lambda: site] if thin
-                 else [lambda: site, catalogue])
+        order = ([catalogue_mangadex, catalogue_anilist, lambda: site] if thin
+                 else [lambda: site, catalogue_mangadex, catalogue_anilist])
         # **Two passes, not a running floor.** The first accepts only a
         # candidate big enough for a card; the second accepts whatever
         # can be fetched. So a thin row is never left with nothing when
@@ -962,6 +980,15 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
                     continue
                 blob, _kind = backend.fetch_image(path[len("/img/"):])
                 if blob:
+                    # **A picture that is not this title's cover is no
+                    # cover** - see _placeholder_reason. The chain then
+                    # goes on to the catalogue, as it does for no art.
+                    why = _placeholder_reason(candidate, blob, title)
+                    if why:
+                        _say(f"cover: placeholder rejected for "
+                             f"{title[:40]!r}: {why}")
+                        dead.add(candidate)
+                        continue
                     answer_url = path
                     break
                 dead.add(candidate)   # proven unfetchable; do not retry
@@ -976,6 +1003,190 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
             break
     _CARD_COVERS[key] = answer_url
     return {"cover": answer_url}
+
+
+# **A site's stand-in art is not a cover, and the chain must not stop on
+# it** (5 September 2026, "placeholder-aware covers"). A scanlation host
+# can answer a card's art request with something that is not this
+# title's picture at all: a "no image" default, a lazy-loader's blank, a
+# site logo, an error page with an image type on it. `_card_cover` used
+# to accept anything that fetched, so a placeholder counted as "has a
+# cover" and the catalogue was never asked. Measured on his six sites
+# the same day (cover_census over browse and search rows): 3asq 21 rows,
+# TeamX 57, Lava Scans 82, SWAT 60, Mangalek 30, Azora 70 - no cover URL
+# repeated across titles, no two rows with the same bytes, no
+# placeholder-named file, so none of them is doing it *today*; the
+# guard is for the day one does, and it says so in the log when it
+# fires. Four tells, each cheap because the bytes are already in hand:
+#
+#   * the file is named like a stand-in (placeholder, no-image, logo...);
+#   * the body is not an image at all (an HTML error page);
+#   * it is too small to be a cover - under COVER_MIN_EDGE on a side;
+#     a real small cover (Lava Scans serves some at 160x229) is well
+#     above this and is handled by the `thin` path, not here;
+#   * the same bytes were already accepted as another title's cover -
+#     one picture standing for two different titles is a stand-in.
+#     Remembered per process (_COVER_BLOBS), never on disk.
+def _say(message):
+    """One line in atomic.log, and never a failure: this module reaches
+    helpers lazily (see the route handlers), and a log line inside the
+    cover chain's own try/except must not be the thing that empties a
+    card."""
+    try:
+        from helpers import logs
+        logs.info(message)
+    except Exception:
+        pass
+
+
+_PLACEHOLDER_NAME_RE = re.compile(
+    r"(placeholder|no[-_]?image|no[-_]?cover|nocover|noimg|no[-_]?thumb"
+    r"|default[-_]?(cover|image|thumb|poster)|missing|blank\.|spinner"
+    r"|loading\.|/logo[s]?[./_-]|[-_]logo\.)", re.I)
+COVER_MIN_EDGE = 80
+_COVER_BLOBS = {}
+_COVER_BLOBS_CAP = 4000
+# **A stand-in this app has seen with its own eyes, by its bytes.** The
+# fifth tell, and the one that fired first: photographed on the frozen
+# build the day the guard was written, his Manga page drew Hunter X
+# Hunter's card as MangaDex's "You can read this at MANGADEX" picture.
+# MangaDex files that image as the title's cover art (512x807, a
+# perfectly portrait JPEG - no name, size, shape or colour rule tells it
+# from a real cover; measured: 369 distinct colours against 16-291 for
+# real covers), its API marks the title as ordinary (13 languages, a
+# latest chapter), and the chain took it because the site's own cover
+# was a thin 250x350. Berserk, Naruto and Bleach on MangaDex carry real
+# covers, so it is per title, not per catalogue. **By what it looks
+# like, not by its bytes**: an exact hash was tried first and never
+# fired - the proxy hands the chain a re-encoding out of its own cache
+# (59,480 bytes for a 148,640-byte CDN file, measured through
+# backend.fetch_image), so no byte hash of the CDN file could match. A
+# 16x16 average hash of the decoded picture (_ahash) is the same for all
+# three size variants MangaDex serves (distance 0) and 72 bits from the
+# nearest of 300 real pictures in his cache (median 119), so
+# PLACEHOLDER_AHASH_MAX 16 refuses it on first sight, re-encoded or not,
+# with room to spare. Anything the duplicate rule catches later joins
+# the list on disk (COVER_PLACEHOLDERS_FILE) and stays refused across
+# restarts.
+KNOWN_PLACEHOLDER_AHASH = {
+    # MangaDex's "You can read this at MANGADEX" cover, 5 September 2026,
+    # in the two renditions seen that day: the 512x807 the CDN serves for
+    # the URL now, and the 600x642 (cat logos in the corners) the proxy's
+    # cache still held for the same URL from an earlier fetch - 110 bits
+    # apart, which is why both are listed.
+    "fffff81df80ff81ffbdff81ff007e0078001c003a0079f1780018001ffffffff",
+    "1ff81ff8bffdfffffffff81ffc3ff01ff81ffffff00fffffffff3ffc1ff81ffc",
+}
+PLACEHOLDER_AHASH_MAX = 16
+COVER_PLACEHOLDERS_FILE = "cover_placeholders.json"
+_learned_placeholders = None
+
+
+def _ahash(blob):
+    """The picture's 16x16 average hash as 64 hex digits, or "" when it
+    does not decode. Robust to re-encoding and to the size variant."""
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QImage
+        image = QImage.fromData(bytes(blob))
+        if image.isNull():
+            return ""
+        grey = image.convertToFormat(QImage.Format.Format_Grayscale8).scaled(
+            16, 16, Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
+        pixels = [grey.pixelColor(x, y).red() for y in range(16) for x in range(16)]
+        mean = sum(pixels) / 256.0
+        bits = "".join("1" if p >= mean else "0" for p in pixels)
+        return f"{int(bits, 2):064x}"
+    except Exception:
+        return ""
+
+
+def _ahash_distance(a, b) -> int:
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1")
+    except (TypeError, ValueError):
+        return 256
+
+
+def _placeholder_hashes():
+    """The known stand-ins: the seeded ones plus every hash the duplicate
+    rule has proved on this machine, read once from disk."""
+    global _learned_placeholders
+    if _learned_placeholders is None:
+        learned = set()
+        try:
+            from helpers import storage
+            stored = storage.load(COVER_PLACEHOLDERS_FILE, [])
+            learned = {str(h) for h in (stored or [])
+                       if isinstance(h, str) and len(h) == 64}
+        except Exception:
+            learned = set()
+        _learned_placeholders = learned
+    return KNOWN_PLACEHOLDER_AHASH | _learned_placeholders
+
+
+def _known_placeholder(digest):
+    """The known stand-in this picture is within PLACEHOLDER_AHASH_MAX
+    of, or ""."""
+    if not digest:
+        return ""
+    for known in _placeholder_hashes():
+        if _ahash_distance(digest, known) <= PLACEHOLDER_AHASH_MAX:
+            return known
+    return ""
+
+
+def _remember_placeholder(digest):
+    if not digest or _known_placeholder(digest):
+        return
+    _placeholder_hashes()
+    _learned_placeholders.add(digest)
+    try:
+        from helpers import storage
+        storage.save(COVER_PLACEHOLDERS_FILE, sorted(_learned_placeholders))
+    except Exception:
+        pass
+
+
+def _placeholder_reason(url, blob, title):
+    """Why `blob`, fetched for `url`, is not `title`'s cover - or ""."""
+    try:
+        path = urllib.parse.urlsplit(str(url or "")).path
+        if _PLACEHOLDER_NAME_RE.search(path):
+            return f"named like a stand-in ({path.rsplit('/', 1)[-1][:40]})"
+        head = bytes(blob[:32]).lstrip()
+        if head[:1] == b"<" or head[:5].lower() == b"<!doc":
+            return "not an image (a page was sent)"
+        try:
+            from PyQt6.QtGui import QImage
+            image = QImage.fromData(bytes(blob))
+            if not image.isNull():
+                if image.width() < COVER_MIN_EDGE or image.height() < COVER_MIN_EDGE:
+                    return f"too small ({image.width()}x{image.height()})"
+        except Exception:
+            pass
+        digest = _ahash(blob)
+        if not digest:
+            return ""
+        known = _known_placeholder(digest)
+        if known:
+            return f"a known stand-in ({known[:12]})"
+        owner = str(title or "").strip().lower()
+        seen = _COVER_BLOBS.get(digest)
+        if seen and owner and seen != owner:
+            _remember_placeholder(digest)
+            return f"the same picture already stands for {seen[:40]!r}"
+        if owner and seen is None:
+            while len(_COVER_BLOBS) >= _COVER_BLOBS_CAP:
+                try:
+                    del _COVER_BLOBS[next(iter(_COVER_BLOBS))]
+                except (StopIteration, KeyError, RuntimeError):
+                    break
+            _COVER_BLOBS[digest] = owner
+    except Exception:
+        return ""
+    return ""
 
 
 # What a cover host wants to be asked with. urllib's default User-Agent
@@ -1704,7 +1915,6 @@ BROWSE_CACHE = {
     "manga": "medium:Manga", "manhwa": "medium:Manhwa",
     "manhua": "medium:Manhua",
 }
-BROWSE_LIMIT = 60
 
 
 def _cached_browse(key):
@@ -2637,9 +2847,28 @@ def _more_browse(route, have, skip):
                 # No cursor at the reading end: the sweep is re-run wider
                 # and the page drops what it already shows by title,
                 # exactly as _more does for the medium pages.
+                #
+                # **From the caches first** (5 September 2026, the
+                # owner: "in the watch and read pages, when I apply a
+                # filter like romance it takes ages to load the cards").
+                # The first page already answers from disk
+                # (reading_genre_cached, 0.01s for 35 Romance rows on his
+                # machine); this continuation went straight to the live
+                # sweep, measured at **18.5s** - 3.0s browsing his six
+                # sites, 0.7s probing them, and 16.0s classifying 150
+                # titles against MangaDex - and pullGenre asks for it
+                # up to four times. The sweep is only worth paying when
+                # the caches have nothing beyond what is on screen.
                 from helpers import discover
-                rows = discover.reading_genre_sites(body,
-                                                    limit=have + MORE_LIMIT)
+                wanted = have + MORE_LIMIT
+                rows = []
+                try:
+                    rows = list(discover.reading_genre_cached(
+                        body, limit=wanted) or [])
+                except Exception:
+                    rows = []
+                if len(rows) <= max(0, skip):
+                    rows = discover.reading_genre_sites(body, limit=wanted)
                 skip = skip + len(rows)
             else:
                 rows, skip = _genre_video(body, skip, GENRE_PAGE)
@@ -2857,6 +3086,22 @@ _SCALED = {}
 _SCALED_CAP = 400
 
 
+def _image_width(blob) -> int:
+    """The pixel width of an encoded picture from its header alone -
+    QImageReader reads the size without decoding the pixels - or 0."""
+    try:
+        from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+        from PyQt6.QtGui import QImageReader
+        store = QByteArray(bytes(blob))
+        buffer = QBuffer(store)
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        size = QImageReader(buffer).size()
+        buffer.close()
+        return max(0, int(size.width())) if size.isValid() else 0
+    except Exception:
+        return 0
+
+
 def _wanted_width(query):
     """The `w=` a card or a page asks for, in device pixels, or 0.
 
@@ -2921,6 +3166,18 @@ def _enlarged(blob, width):
         return None
 
 
+# The largest edge a browser will hold as a single texture. 16384 on
+# every desktop GPU Chromium runs on; past it the image is downsampled to
+# fit, silently, however it was produced. See _scaled for the measurement
+# that made this matter - a 800x17103 strip enlarged to 1000x21379.
+MAX_IMAGE_EDGE = 16384
+# How tall, relative to its width, a page has to be to be a long strip
+# rather than a printed page. Same threshold and same reasoning as
+# windows/reader.STRIP_ASPECT_MIN - a paged scan is 1.4-1.5, a strip is
+# 15-20.
+STRIP_ASPECT_MIN = 3.0
+
+
 def _scaled(blob, kind, width, exact=False):
     """`blob` resampled to `width` device pixels, or as it came.
 
@@ -2970,6 +3227,48 @@ def _scaled(blob, kind, width, exact=False):
         if not exact and image.width() <= width * 1.15:
             # Already about the right size - scaling it would only cost
             # a decode and lose a little.
+            _remember_scaled(key, (blob, kind))
+            return blob, kind
+        # **Never hand the browser a picture it cannot hold.** The
+        # owner, 5 September 2026: "the eternal supreme ch 550 is the one
+        # that has the quality issue!". Measured on that chapter, every
+        # page, against a 1.25 display:
+        #
+        #     source        asked  served         over 16384?
+        #     800 x 17103    1000  1000 x 21379   source and served
+        #     800 x 13465    1000  1000 x 16831   served
+        #     800 x 15275    1000  1000 x 19094   served
+        #     800 x 16000    1000  1000 x 20000   served
+        #
+        # A long strip is 13,000-17,000px tall to begin with, the reader
+        # lays it out at its own width in *CSS* px, and askForExact then
+        # multiplies by the device ratio - so an 800px scan was enlarged
+        # to 1000 and every page came out past the 16,384-pixel edge a
+        # browser can texture. Chromium answers that by downsampling the
+        # whole image to fit, which is the softness he is looking at, and
+        # it lands on the strips only: a manga page is 1920px tall and
+        # never comes near it.
+        #
+        # So the width is clamped to whatever keeps the height inside the
+        # limit. It is a ceiling, not a target - a page that already fits
+        # is untouched - and it is applied before the enlarge/reduce
+        # decision below so neither branch can produce an image the
+        # renderer will then quietly ruin.
+        if image.height() > 0:
+            fits = int(image.width() * MAX_IMAGE_EDGE / image.height())
+            width = max(1, min(int(width), max(1, fits)))
+            if image.width() == int(width):
+                _remember_scaled(key, (blob, kind))
+                return blob, kind
+        # **A long strip is never enlarged.** 800px is the format these
+        # sites publish, not a scan that came out small: measured the
+        # same day, his manhwa and manhua sources are 800px on every page
+        # of every chapter, and lavascans' own unsuffixed variant is
+        # *smaller* at 690px. `_enlarged` exists for a manga chapter
+        # scanned narrow (One Piece ch906, 890-921px against a 1100
+        # target) - inventing pixels for a strip buys nothing and was
+        # what pushed these pages over the edge above.
+        if exact and image.height() >= image.width() * STRIP_ASPECT_MIN                 and width > image.width():
             _remember_scaled(key, (blob, kind))
             return blob, kind
         if exact and width > image.width():
@@ -3112,8 +3411,28 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             # `exact=1` is the reader asking for the page at the size it
             # will actually be drawn - see _scaled.
-            blob, kind = _scaled(blob, kind, _wanted_width(query),
-                                 exact=(query.get("exact") or [""])[0] == "1")
+            exact = (query.get("exact") or [""])[0] == "1"
+            wanted = _wanted_width(query)
+            # **A cached page smaller than the reader asks for is
+            # re-fetched once before it is enlarged.** The launch-time
+            # shrink pass (helpers/images.shrink_existing) re-encoded
+            # chapter pages in this cache to 1200px tall until 5
+            # September 2026, so the file on disk can be a third of what
+            # the host serves; enlarging it would draw the damage. The
+            # host is asked again, once per token, and only when the
+            # reader wants more pixels than the file has - a scan that is
+            # genuinely small pays one fetch a session, and a shrunk one
+            # is replaced on disk by the original it should have kept.
+            if exact and wanted > 0:
+                have = _image_width(blob)
+                if 0 < have < wanted:
+                    fresh, fresh_kind = backend.fetch_image(path[5:], refresh=True)
+                    if fresh and _image_width(fresh) > have:
+                        _say(f"page cache: {path[5:]} was {have}px wide, "
+                             f"the host serves {_image_width(fresh)}px; "
+                             f"replaced")
+                        blob, kind = fresh, fresh_kind
+            blob, kind = _scaled(blob, kind, wanted, exact=exact)
             self._send(blob, kind, cache=True)
             return
 

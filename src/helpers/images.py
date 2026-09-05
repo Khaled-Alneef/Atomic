@@ -433,6 +433,23 @@ def shrink_existing(budget_s: float = 6.0) -> int:
         rows = []
         for entry in os.scandir(CACHE_DIR):
             if entry.is_file() and not entry.name.endswith(".part"):
+                # **Never the web proxy's files.** `web_<token>` is what
+                # web/backend.fetch_image keeps: the *original* bytes of
+                # every picture the WebView2 pages ask for, chapter pages
+                # included, and server._scaled cuts the sizes the cards
+                # draw from that original on demand. This pass read those
+                # as covers and re-encoded every chapter page to 1200px
+                # tall - the owner's "the pages have different sizes in
+                # ch 883", 5 September 2026, photographed: his cache held
+                # 269 pages at 816-829x1200 that 3asq serves at
+                # 1306-1326x1920 (883's page 1 spread at 2560x1778 for a
+                # 2760x1917 file, LANDSCAPE_MAX_W to the pixel), and the
+                # reader, drawing each page at the size of the file it is
+                # handed, showed the shrunk ones a third smaller than the
+                # ones fetched after the pass ran. The bounds are for
+                # covers, which is all this pass was written for.
+                if entry.name.startswith("web_"):
+                    continue
                 try:
                     st = entry.stat()
                 except OSError:

@@ -48,6 +48,8 @@ import json
 import re
 import sys
 import threading
+import time
+import urllib.error
 import urllib.request
 
 _INSTALLED = False
@@ -80,6 +82,20 @@ OPEN_TIMEOUT_S = 10.0
 # first; this is the backstop for a server that cannot.
 READ_SILENCE_S = 75.0
 
+# **How long a read may go on reopening a response that keeps ending
+# with nothing in it before the stream is genuinely ended** - see
+# _EngineStream.read. Two whole server patiences (PIECE_WAIT_S is 45s a
+# piece), so a swarm that is merely slow at a seek target is waited for
+# through the server ending the response and the reader opening it
+# again, while a swarm that has died is not waited for for ever. Longer
+# than the player's own SEAT_GIVE_UP_S (45s), so the player says "Playing
+# From Here" before this ever has to speak.
+REOPEN_SILENCE_S = 100.0
+# Between two reopens. A server that ends a response the instant it is
+# opened (nothing to send, reader not yet re-aimed) would otherwise be
+# asked in a tight loop; a quarter second is invisible against a piece.
+REOPEN_PAUSE_S = 0.25
+
 
 class _EngineStream:
     """One mpv-facing stream over the local torrent server."""
@@ -102,57 +118,93 @@ class _EngineStream:
         return urllib.request.urlopen(request, timeout=READ_SILENCE_S)
 
     def read(self, length):
+        """Bytes at the current position - and b"" only for a cancelled
+        stream or the end of the file, never for a gap in delivery.
+
+        **b"" is EOF to mpv, not "wait", and the server ends responses
+        on purpose.** torrent_engine._serve returns early whenever the
+        piece a read is blocked on has not arrived inside PIECE_WAIT_S,
+        or nothing was sent for STREAM_STALL_S - by design, so the reader
+        reopens from where it stopped and the engine re-aims at that
+        offset. urllib does not raise for that: a body announced as N
+        bytes and closed after fewer answers `read()` with b"" and no
+        exception (measured 5 September 2026 against a local server that
+        declared 100 bytes and sent 10: b'0123456789', then b'', then
+        b''). The previous version reopened only on an *exception*, so a
+        tidily ended response was handed to mpv as end-of-file. With
+        `keep-open=yes` (video_backend) mpv then pauses on its last
+        frame - which is the owner's "seeking on the swarm path ... not
+        pressing any buttons to play each time": every seek that waited
+        past the server's patience ended with the picture stopped until
+        he pressed play, and pressing play at an EOF mpv believes in
+        restarts from the head.
+
+        So an empty read before `size` is a dropped connection, whatever
+        caused it: the response is closed and a new Range is opened from
+        the same offset, as many times as it takes, until the stream is
+        cancelled, the file genuinely ends, the server says the torrent
+        is gone (404 - a released torrent, which is a real stop), or the
+        swarm has sent nothing at all for REOPEN_SILENCE_S. mpv sits in
+        `paused-for-cache` for the wait, which the player narrates as
+        Buffering, and resumes on its own when the bytes land - no press
+        needed. A short sleep between reopens keeps a server answering
+        instantly with nothing from being asked in a tight loop."""
         with self._lock:
             if self._cancelled or self._pos >= self.size:
                 return b""
             resp = self._resp
-        try:
-            if resp is None:
-                resp = self._open_from(self._pos)
+        silent_since = time.monotonic()
+        reopens = 0
+        while True:
+            data = b""
+            gone = False
+            try:
+                if resp is None:
+                    resp = self._open_from(self._pos)
+                    with self._lock:
+                        if self._cancelled:
+                            try:
+                                resp.close()
+                            except Exception:
+                                pass
+                            return b""
+                        self._resp = resp
+                data = resp.read(max(1, int(length)))
+            except urllib.error.HTTPError as error:
+                # The torrent is no longer served at this address - a
+                # switch or a close released it. That is a stop, not a
+                # stall, and retrying would only delay the next source.
+                gone = getattr(error, "code", 0) == 404
+            except Exception:
+                pass
+            if data:
                 with self._lock:
-                    if self._cancelled:
-                        try:
-                            resp.close()
-                        except Exception:
-                            pass
-                        return b""
-                    self._resp = resp
-            data = resp.read(max(1, int(length)))
-        except Exception:
-            # **b"" is EOF to mpv, not "wait".** A closed socket mid-read
-            # is usually cancel() or the torrent being released, and both
-            # mean stop - but it is also what a connection dropped while
-            # the swarm was re-seeking looks like, and answering EOF
-            # there hands the decoder a truncated file. That is the
-            # smeared, blocky picture in the owner's recording of 31
-            # August 2026 (issue.mp4, frame 3: macroblock garbage right
-            # after a seek).
-            #
-            # So one reopen from the same offset first, exactly as
-            # _DirectReader already does, and only then EOF. Cancel is
-            # checked in between, so a real stop still stops at once
-            # rather than retrying into a released torrent.
+                    self._pos += len(data)
+                return data
+            # Nothing came: the response is finished for us, whether it
+            # ended tidily or died. Reopen from where we are.
             with self._lock:
                 self._resp = None
-                if self._cancelled:
-                    return b""
-            try:
-                resp = self._open_from(self._pos)
-                with self._lock:
-                    if self._cancelled:
-                        try:
-                            resp.close()
-                        except Exception:
-                            pass
-                        return b""
-                    self._resp = resp
-                data = resp.read(max(1, int(length)))
-            except Exception:
+                cancelled = self._cancelled or self._pos >= self.size
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                resp = None
+            if cancelled or gone:
                 return b""
-        if data:
-            with self._lock:
-                self._pos += len(data)
-        return data
+            reopens += 1
+            if time.monotonic() - silent_since > REOPEN_SILENCE_S:
+                try:
+                    from . import logs
+                    logs.info(f"engine stream: nothing arrived at byte "
+                              f"{self._pos} in {REOPEN_SILENCE_S:.0f}s over "
+                              f"{reopens} reopens - ending the stream")
+                except Exception:
+                    pass
+                return b""
+            time.sleep(REOPEN_PAUSE_S)
 
     def seek(self, pos):
         pos = max(0, min(int(pos), self.size))
@@ -206,6 +258,9 @@ def _open(uri):
 DIRECT_SCHEME = "atomicd"
 DIRECT_PROBE_TIMEOUT_S = 8.0
 DIRECT_READ_TIMEOUT_S = 30.0
+# How many times a direct read reopens a connection that answered
+# nothing before believing the file has ended - see _DirectReader.read.
+DIRECT_REOPENS = 3
 
 _UA = "Mozilla/5.0 PC-App/1.0"
 
@@ -238,37 +293,49 @@ class _DirectReader:
             if self.size is not None and self._pos >= self.size:
                 return b""
             resp = self._resp
-        try:
-            if resp is None:
-                resp = self._open_from(self._pos)
-                with self._lock:
-                    if self._cancelled:
-                        try:
-                            resp.close()
-                        except Exception:
-                            pass
-                        return b""
-                    self._resp = resp
-            data = resp.read(max(1, int(length)))
-        except Exception:
-            # One retry from the current position: debrid hosts drop
-            # idle connections, and a paused player's next read used to
-            # be the whole failure.
-            with self._lock:
-                self._resp = None
-                if self._cancelled:
-                    return b""
+        # Retries from the current position: debrid hosts drop idle
+        # connections, and a paused player's next read used to be the
+        # whole failure. **An empty read counts as a drop too**, not only
+        # an exception - urllib answers b"" and raises nothing for a body
+        # cut short (see _EngineStream.read for the measurement), and
+        # b"" is EOF to mpv, which then pauses under keep-open. A remote
+        # host can genuinely end early, so the reopens are counted rather
+        # than timed: DIRECT_REOPENS, then the honest EOF.
+        reopens = 0
+        while True:
+            data = b""
             try:
-                resp = self._open_from(self._pos)
-                with self._lock:
-                    self._resp = resp
+                if resp is None:
+                    resp = self._open_from(self._pos)
+                    with self._lock:
+                        if self._cancelled:
+                            try:
+                                resp.close()
+                            except Exception:
+                                pass
+                            return b""
+                        self._resp = resp
                 data = resp.read(max(1, int(length)))
             except Exception:
-                return b""
-        if data:
+                pass
+            if data:
+                with self._lock:
+                    self._pos += len(data)
+                return data
             with self._lock:
-                self._pos += len(data)
-        return data
+                self._resp = None
+                cancelled = self._cancelled or (
+                    self.size is not None and self._pos >= self.size)
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                resp = None
+            if cancelled or reopens >= DIRECT_REOPENS:
+                return b""
+            reopens += 1
+            time.sleep(REOPEN_PAUSE_S)
 
     def cancel(self):
         with self._lock:

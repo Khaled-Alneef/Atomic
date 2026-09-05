@@ -522,9 +522,27 @@ function take(img) {
   if (ask) { img._askCover = null; ask(); }
 }
 
+let sweepTold = 0;
 function sweepLazy() {
   lazySweepQueued = false;
   if (!lazyPending.size) return;
+  const sweepAt = performance.now();
+  const pendingAt = lazyPending.size;
+  try { sweepLazyInner(); } finally {
+    // **A sweep that costs a frame says so.** It runs on every scroll
+    // event, and on a laptop mid-flick with pictures decoding it is the
+    // one piece of this file's work on the scroll path; a line here is
+    // how his machine reports what this one cannot reproduce.
+    const took = performance.now() - sweepAt;
+    if (took > 8 && sweepAt - sweepTold > 5000) {
+      sweepTold = sweepAt;
+      tellHost({ action: 'diag', what: 'lazy sweep slow', ms: Math.round(took),
+                 pending: pendingAt, route: location.hash });
+    }
+  }
+}
+
+function sweepLazyInner() {
   const box = page.getBoundingClientRect();
   // **A render that still has no pictures after four seconds says so.**
   // Blank cards have been reported three times and reproduced none of
@@ -1393,12 +1411,6 @@ async function openChapter(id, index) {
      Unknown media keep their own width, capped to the column, because
      that is what Qt does when MEDIUM_TARGET_WIDTH has no row: it never
      sets a base scale at all. */
-  // **Only the placeholder box uses these now** - see targetFor, which
-  // draws every page at its own resolution. Kept because a page's slot
-  // has to be reserved before the scan has arrived and these are the
-  // best guess there is for it.
-  const MEDIUM_TARGET_WIDTH = {manga: 1100, manhwa: 762, manhua: 762};
-  const STRIP_TARGET_WIDTH = 762;
   const DPR = window.devicePixelRatio || 1;
   let single = 0;          // this chapter's page width, in image pixels
 
@@ -1449,16 +1461,41 @@ async function openChapter(id, index) {
      proxy upscaling it *and* re-encoding it and the browser then drawing
      that. Two resamples and a JPEG round trip is what "the quality is
      bad in all readings" was. */
+  /* **The site's rule, and nothing else - 5 September 2026.** The owner:
+     "3asq manga page size and sharpness: make it like the source site
+     exactly on size and quality, also the other sites like TeamX and
+     others". Measured that day on his own three reading hosts, each
+     site's reader page fetched with its stylesheets and one chapter's
+     images:
+
+       3asq (Madara)       page 1325x1920, `.reading-content img
+                           {max-width:100%}` in a `.container{max-width:
+                           100%;padding:0 30px}` - drawn at its natural
+                           width, capped to the column (1327 of a 1638px
+                           viewport, read off the live page)
+       TeamX/olympustaff   page 760x12945, `.manga-chapter-img` in a
+                           `.reading-content{padding:0}` column - natural
+       Lava Scans          page 800x14995, `.reader-area{max-width:800px}
+                           .reader-area img{width:100%}` - 800, which is
+                           the natural width of every page it serves
+
+     So every site draws a page at its own width in CSS px, capped to
+     the column, and the medium floors this function used to apply
+     (manga 1100, strips 762) are what made the app differ: an 829px
+     3asq chapter drew at 1100 - a 1.33x enlargement the site does not
+     make, which is the "sharpness" in his report - and a 800px strip
+     drew at 762, 5% under the site. His earlier ask to make narrow
+     scans bigger (4 September) is superseded by this one, and said so
+     here rather than silently.
+
+     Quality follows from size: a page drawn at its natural CSS width on
+     a 125% display is enlarged 1.25x by *some* resampler either way;
+     the site leaves that to the browser's bilinear stretch, the app asks
+     the proxy for the device pixels once (askForExact, server._scaled's
+     LANCZOS + unsharp, measured 13.53 against 10.18 for the stretch) and
+     draws them 1:1. Same size, at least the site's sharpness. */
   function targetFor(naturalWidth, naturalHeight, available) {
-    const aspect = naturalHeight / Math.max(1, naturalWidth);
-    const want = (aspect >= STRIP_ASPECT) ? STRIP_TARGET_WIDTH
-      : MEDIUM_TARGET_WIDTH[(data.medium || '').toLowerCase()];
-    // No row for this medium: the scan's own width, as Qt does when
-    // MEDIUM_TARGET_WIDTH has no entry - it never sets a base scale.
-    if (!want) return Math.min(naturalWidth, available);
-    // Wider than the target keeps its own resolution; narrower is
-    // brought up to it. Either way the column is the ceiling.
-    return Math.min(Math.max(naturalWidth, want), available);
+    return Math.min(naturalWidth, available);
   }
   /* **The target is a width on the page, not a count of image pixels.**
      The owner, 4 September 2026, with the app beside the site the same
@@ -1529,7 +1566,15 @@ async function openChapter(id, index) {
        with LANCZOS and an unsharp mask instead of handing the job to
        the compositor, measured at 13.53 against 10.18 for the browser's
        own stretch on that page. See askForExact. */
-    const want = (single && !isSpread(img)) ? single : natW;
+    /* **Each page at its own width now, as the site draws it** (5
+       September 2026 - see targetFor). The chapter-wide `single` above
+       stretched every narrower page to the first page's width, which on
+       a 3asq chapter mixing 829 and 1325 is a 1.6x enlargement of some
+       pages beside neighbours drawn 1:1 - the site makes no such
+       stretch, and "exactly like the site" is the ask. `single` keeps
+       its other job: the size of the box a page occupies before it has
+       arrived (--pagew), so the strip does not jump as it fills. */
+    const want = natW;
     const drawn = pageWidth(want, availableWidth(), readerState.zoom);
     img.style.width = drawn + 'px';
     askForExact(img, drawn);        // in image pixels: drawn * DPR
@@ -1605,6 +1650,33 @@ async function openChapter(id, index) {
        sharpen and the file is only getting heavier - a 200px thumbnail
        blown to a full page is a different problem from a small scan. */
     if (want > natW * 2.5) {
+      if (img._exactAt) {
+        img._exactAt = 0;
+        if (img.getAttribute('src') !== img._rawSrc) img.src = img._rawSrc;
+      }
+      return;
+    }
+    /* **A long strip is never asked to be enlarged.** The owner, 5
+       September 2026: "the eternal supreme ch 550 is the one that has
+       the quality issue!".
+
+       800px is what these sites publish for a strip, not a scan that
+       came out small - measured that day, his manhwa and manhua sources
+       are 800px on every page, and lavascans' own unsuffixed variant is
+       690px, smaller than what it already serves. So there is nothing to
+       recover by enlarging, and enlarging costs something real here: a
+       strip is 13,000-17,000px tall, so the 1.25x his display asks for
+       made every page of ch.550 16,831 to 21,379 pixels tall - past the
+       16,384-pixel edge a browser can texture, whereupon it downsamples
+       the whole page to fit. That is the softness, and it lands only on
+       the strips because a manga page is 1920px tall.
+
+       server._scaled refuses the same enlargement and clamps to the
+       edge limit, which is the invariant; this is the round trip that no
+       longer has to happen at all. A *reduction* is still asked for
+       normally - that is the zoomed-out case, and it is real work. */
+    const [, natHeight] = natural(img);
+    if (natHeight && natHeight >= natW * 3 && want > natW) {
       if (img._exactAt) {
         img._exactAt = 0;
         if (img.getAttribute('src') !== img._rawSrc) img.src = img._rawSrc;
@@ -2175,9 +2247,20 @@ const GLIDE_MS = 130;
 let glideTo = null;
 let glideFrom = 0;
 let glideAt = 0;
+/* **The glide reports itself.** Measured 5 September 2026 on the frozen
+   build: five notches on Movies were 130 eased frames on a fresh launch
+   and five single jumps once the reader had been opened and closed.
+   Nothing in the log could say which half of the machinery had stopped
+   - the frames, or the handler - so a finished glide writes how many
+   frames it got, how far apart they were, and whether the document
+   thought it was visible. Rate-limited to one line a second. */
+let glideFrames = 0, glideLastNow = 0, glideGapMax = 0, glideTold = 0;
 
 function glideStep(now) {
   if (glideTo === null) return;
+  glideFrames++;
+  if (glideLastNow) glideGapMax = Math.max(glideGapMax, now - glideLastNow);
+  glideLastNow = now;
   const t = Math.min(1, (now - glideAt) / GLIDE_MS);
   // Chromium's own ease-out, the curve its scroll animation uses.
   const eased = 1 - Math.pow(1 - t, 3);
@@ -2186,23 +2269,53 @@ function glideStep(now) {
     requestAnimationFrame(glideStep);
   } else {
     glideTo = null;
+    if (now - glideTold > 1000) {
+      glideTold = now;
+      tellHost({ action: 'diag', what: 'glide', frames: glideFrames,
+                 ms: Math.round(now - glideAt), gapMax: Math.round(glideGapMax),
+                 visible: document.visibilityState, hasFocus: document.hasFocus(),
+                 route: location.hash });
+    }
+    glideFrames = 0; glideLastNow = 0; glideGapMax = 0;
   }
 }
 
+/* **A finger is told by its cadence as well as its size.** The owner,
+   5 September 2026, on his laptop: "when I scroll using the touch pad
+   with 2 fingers the scroll stutters especially while cards are
+   loading". A precision touchpad streams wheel events at 60-120Hz and a
+   flick's deltas run well past NOTCH_MIN_PX, so the size test alone
+   let every larger delta of a fast flick through to the glide - a new
+   130ms ease re-aimed on each of them, a few milliseconds apart, on the
+   main thread while the cards' pictures were decoding. Chromium's own
+   compositor path, which the small deltas were already taking, is what
+   the touchpad should have all along. A mouse notch cannot follow a
+   finger's stream: it arrives alone, or at 30ms+ from the last notch. */
+const FINGER_GAP_MS = 40;
+let lastWheelAt = 0, lastWasFinger = false;
 addEventListener('wheel', function (e) {
-  // The reader is the one surface this must not take: a chapter is one
-  // long strip and its scrolling is the whole experience, already the
-  // browser's own and already smooth (windows/web_reader's note). A
-  // 130ms glide on top of it would be a second animation over the first.
-  if (page.querySelector('.reader')) return;
   if (e.ctrlKey || e.shiftKey || e.deltaMode !== 0) return;
-  if (Math.abs(e.deltaY) < NOTCH_MIN_PX) return;      // a finger
+  const now = performance.now();
+  const finger = Math.abs(e.deltaY) < NOTCH_MIN_PX
+                 || (lastWasFinger && now - lastWheelAt < FINGER_GAP_MS);
+  lastWheelAt = now; lastWasFinger = finger;
+  if (finger) return;                                   // the browser's own
+  /* **The reader too - 5 September 2026.** It used to be the one
+     surface this did not take, on the note that its scrolling was
+     "already the browser's own and already smooth"; with Chromium's
+     wheel animation off (webview2_host._BROWSER_ARGS) the browser's own
+     is one 100px jump per notch, and that is what the owner measured
+     against Movies: "make the scrolling in the reader smooth exactly
+     like the scrolling in movies page". Sampled at 240Hz on the frozen
+     build: Movies 33 eased frames a notch, the reader one frame of
+     125px. Same page element scrolls in both, same curve now. */
   e.preventDefault();
   const limit = page.scrollHeight - page.clientHeight;
   const from = glideTo === null ? page.scrollTop : glideTo;
   glideTo = Math.max(0, Math.min(limit, from + e.deltaY));
   glideFrom = page.scrollTop;
   glideAt = performance.now();
+  if (glideFrames === 0) { glideLastNow = 0; glideGapMax = 0; }
   requestAnimationFrame(glideStep);
 }, { passive: false });
 

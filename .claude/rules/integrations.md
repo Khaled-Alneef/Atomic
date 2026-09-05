@@ -281,6 +281,111 @@ set the threshold: asking Anime Tosho for "Bleach: Thousand-Year Blood
 War 05" returns "[BlackRabbit] Bleach (2004) - S05" in **first place**.
 Don't loosen either check to raise the hit rate.
 
+## A franchise's season split is the entry's, not TMDB's (5 September 2026)
+
+His report: *"in JJK S01E01 it plays an ep from another season in
+almost all sources!!!!!"* Measured on his Jujutsu Kaisen (tt12343534)
+at S01E01: 68 rows, and **the head of the list was `[Erai-raws] Jujutsu
+Kaisen: Shimetsu Kaiyuu - Zenpen - 01` at 687 seeders** - season 3, no
+season number in its name, so `indexers.stated_seasons` saw nothing and
+only the arc map (`anime_identity`) could have caught it. It could not:
+the map was built on **TMDB's** season split, and TMDB files the whole
+show as one 59-episode Season 1, so the AniList works for seasons 2
+(2023-07) and 3 (2026-01) had no season to attach to and the stored map
+was `{1: [jujutsu, kaisen]}` - the franchise's own name as season 1's
+arc words, matching every release of every season.
+
+Cinemeta's meta (`meta-series-<imdb>.json`, the file the details page
+keeps) has S1 (24), S2 (23), S3 (12) with air dates that line up with
+AniList's exactly, and that is the numbering the addons are asked in.
+`anime_identity._entry_seasons` now reads the split from there, TMDB is
+the fallback, both TMDB's English names and AniList's romaji are attached
+to a season **by air date, never by number**, and the entry's own title
+words can never be arc tokens. Rebuilt: S3 = shimetsu/kaiyuu/zenpen/
+culling/game, the Erai-raws row dropped, every S01 row kept; Demon
+Slayer's five arcs and Bleach TYBW's S17 rows unchanged. `_CACHE_VERSION`
+is 2 so every v1 map on disk is rebuilt.
+
+Two locks behind it, both in `streams.py`: `_promote_seeded_head` may no
+longer move a row that states less about the season than the ranked head
+does (it was what put the 687-seeder row above the S01 head), and an
+arc season counts as in range whatever the numeric bound says.
+
+## A big swarm starves the first piece (5 September 2026)
+
+His report: *"the connecting to source takes a while then the buffering
+then it goes to connecting to source again."* Measured with the real
+solo `streams.prepare` on the release he hand-picked and the Judas S01
+batch: **112 peers, 18MB/s, 153MB of the chosen file on disk in 14s, and
+its first piece still missing** - so `await_start` returned `no-peers`
+at the 12s cap and the player raced the rest ("connecting again"). Every
+piece of the file outside the two head pieces sat at priority 1, and
+libtorrent hands each block of a piece to one peer, so a hundred peers
+filled the file while the head crawled. `torrent_engine.WARMING_FILL_
+PRIORITY` (0 while the first piece is missing) and `close_redundant_
+connections` off carry the numbers: first piece 12.6-21.1s -> 5.0-7.5s,
+peers held through warming. A lane that is delivering bytes is no longer
+cut at the cap either (`DELIVERING_CAP_S`).
+
+## A hand pick is waited for, not budgeted (5 September 2026)
+
+His report: *"when I played Obsession the source I select did not play,
+instead played some 6 seeds source"*. His log had `pick_file` and then
+`source 0 did not start (timeout)` 6.6s later, twice, on a 70-seeder and
+an 11,451-seeder release. Traced on the real path: `streams.prepare`
+slept `SOLO_METADATA_TIMEOUT + SOLO_DATA_WAIT` (2.5s each after
+`requested_fixes_patch`) plus a 3s grace and returned `timeout` at
+8.05s, while the engine arm it had started - allowed `data_wait_max`
+12s, `DELIVERING_CAP_S` while bytes flow, and a resume's index and
+seat-band waits on top - handed back a playable url at 9.81s to nobody.
+The torrent stayed in the session at 68 peers and 11MB/s behind the
+row the walk played next. `prepare()` now sleeps until its arms have
+spoken (`_prepare_cap` is only a ceiling), releases the torrent if that
+ceiling ever fires, and a race lane that wins after the race returned
+gives its torrent back. Measured after: the same two picks return a
+url at 6.8s and 12.6s. `await_start` logs why a lane was given up on.
+
+## An .mp4 seat cannot be resolved, so it is seeked blind (5 September 2026)
+
+His report: *"when I stop at some point in the movie and come watch it
+again it starts from the beginning, not like the anime and series!"*
+`torrent_engine.resolve_start` maps a time to a byte through Matroska
+Cues and answers None for anything else - correctly - but the seat poll
+in `player_resume_latency_patch` read None as "not yet" and waited its
+whole 180s for a band that was never going to be armed, while the film
+played from 0:00. His film sources are .mp4 (`ftyp` + a 5.3GB `mdat`,
+the `moov` at the tail); anime and series are .mkv, which is the whole
+difference he saw. `_Torrent.seat_resolvable()` now tells "never" from
+"not yet" off the first 4KB, the poll seeks without a band in that case
+and the engine follows the demuxer's reads (`_serve` refocuses on the
+byte mpv asks for), and `await_start_band` stops charging an .mp4 resume
+RESUME_BAND_WAIT for nothing. Measured over the engine's own server: a
+ranged read at his seat answered in 15.5s cold and 5.8s with the swarm
+up - slower than an indexed seat, never instead of it. Parsing the MP4
+sample tables for an exact byte was the follow-up, and it landed the
+same day - see "An MP4 seat is exact now" below.
+
+## A genre tick walks its pages together, and reads its caches first (5 September 2026)
+
+His report: *"in the watch and read pages, when I apply a filter like
+romance it takes ages to load the cards!!!"* Two causes, one per side.
+
+**Watch.** Anime is Cinemeta's series catalog filtered by `genre=Anime`,
+so a second genre is applied to the rows and `discover_video` walks
+catalog pages to fill a batch - serially, four pages per batch, at
+0.3-10s a page cold, with 1-8 Romance anime in a page of 50. His log:
+batches at +5.9, +9.2, +12.3, +22.8, +24.5, +25.2, +31.1 and +42.6s.
+`LOCAL_GENRE_PAGES` (8) are now fetched together, so a batch scans 400
+rows for the cost of its slowest page.
+
+**Read.** The first `/api/genre` answers from disk (`reading_genre_
+cached`, 0.03s, 35 Romance rows), but every `/api/more` continuation went
+straight to `reading_genre_sites`: measured **19.1s** - 3.0s browsing
+his six sites, 0.7s probing them, 16.0s classifying 150 titles against
+MangaDex - and `pullGenre` asks up to four times. `_more_browse` now
+answers from the caches and only sweeps live when they hold nothing
+beyond what is on screen.
+
 ## Every source is asked at once
 
 `find_streams` fans its addons, the indexers and `resolve_page` out over
@@ -449,3 +554,102 @@ walk of further pages follows, and it needs a wall-clock budget of its
 own: unbounded it took **17.8s**, at 4s it returns 14 Romance anime and
 stops. A Cinemeta page is 0.3-10s depending on whether its CDN holds it,
 so any loop over pages must be timed, not counted.
+
+## An MP4 seat is exact now, and the index band is the container's (5 September 2026)
+
+The follow-up above is done. `torrent_engine._mp4_find_moov` walks the
+top-level atoms from the head (ftyp, then an mdat whose 64-bit size says
+where a tail moov starts - his Obsession release: `moov` at
+5,314,433,909, 6,784,467 bytes, ten tracks), `_mp4_parse_moov` reads the
+first video track's stts/stss/stsc/stsz/stco tables, and
+`_mp4_seat_for` answers the byte of the last sync sample at or before
+the seat. Validated against ffprobe's packet positions on a 217MB test
+file in both layouts: 10 of 10 timestamps equal the keyframe's `pos`.
+`seat_resolvable` is the same tri-state for MP4 as for Matroska (None
+while the moov's header is not on disk), and `_index_pieces` wants the
+whole moov at the index's priority - **the 4MB tail band never covered a
+6.78MB moov**, which is why an MP4 open blocked on pieces nothing had
+prioritised.
+
+**Found on the way: `_apply_windows` read a name no line ever bound.**
+`for index, piece in enumerate(reversed(tail))` - `tail` was never
+assigned, in the committed file too; the NameError landed in the
+function's outer `except Exception: pass`, so the index deadlines and
+the resume band's deadlines after it had never once been applied. Both
+bands still arrived, on priority alone. Proved with `ast` (the name is
+in no Store and no argument list), fixed by binding `tail` to the index
+band. When a measured ordering "does nothing", check the function's
+names before its numbers.
+
+## A race lane is judged by its rate, not its first byte (5 September 2026)
+
+`prepare_fastest` used to play whichever lane completed a first piece
+first. His Obsession trace: an 11,451-seeder lane at 2.0-2.6MB/s won
+three seconds ahead of a 390-seeder lane at 3.4-4.3MB/s, on a 3.1MB/s
+film, and stalled. A lane now reports `torrent_engine.payload_rate` at
+its first byte against `_playable_rate` (the chosen file's size over the
+runtime the player passes, `runtime_s`, times PLAYABLE_RATE_MARGIN 1.5).
+Fast enough wins at once; too slow is held as *provisional* for
+RACE_SETTLE_S (3s) while a better lane may replace it, and plays if none
+does. A debrid answer outranks any provisional lane. Without a size or a
+runtime the threshold is zero and the first byte wins as before. Every
+decision is one `race:` line in the log. Harnessed with mocked lanes
+(scratch `race_harness.py`): fast-second beats slow-first at 1.2s, a
+healthy first lane wins at 0.4s with no settle paid, a lone slow lane
+is kept.
+
+## The engine stream handed mpv a false end-of-file (5 September 2026)
+
+His "seeking on the swarm path ... not pressing any buttons to play each
+time". `_serve` ends a response on purpose when a piece does not arrive
+inside PIECE_WAIT_S, expecting the reader to reopen. urllib answers a
+body cut short with b"" and no exception (measured: 100 bytes declared,
+10 sent -> b'0123456789', b'', b''), and `_EngineStream.read` reopened
+only on an exception - so a tidily ended response reached mpv as EOF,
+and under `keep-open=yes` mpv paused on its last frame until he pressed
+play. The read now reopens from its offset on any empty read short of
+the file's end (REOPEN_SILENCE_S bounds a dead swarm; a 404 is a real
+stop); measured against a server that ends every response after 10
+bytes, 1024 bytes came back identical over 104 reopens. Two locks in
+the player behind it: `_ensure_playing_after_seat` lifts a pause mpv
+took by itself while a seat was owed (never one the viewer pressed, and
+never when the viewer was paused when they seeked - `_paused_at_seek`),
+and `_seek_absolute` asks `torrent_engine.seat_on_disk` so a jump
+*backwards* into never-fetched pieces takes a seat too.
+
+## The cached debrid row leads its group (5 September 2026)
+
+`_default_pick_key` sorts `debrid_cached` after `arabic` and before the
+seeders, `_promote_seeded_head` leaves a cached head alone, and partials
+are flagged from the library already in memory (`debrid.known_cached`,
+no request) and ranked with the season term - they were ranked without
+it, so a wrong-season row could lead a partial the player then started
+on. The hand pick and the race's debrid lane are unchanged.
+
+## Placeholder-aware covers, and what the census found (5 September 2026)
+
+`server._placeholder_reason` rejects a fetched candidate that is named
+like a stand-in, is not an image, is under COVER_MIN_EDGE (80px) on a
+side, or is byte-identical to another title's accepted cover; the chain
+then continues to the catalogue and the log says why. Measured first
+over his six sites (browse and search rows, `cover_census.py`): 3asq 21
+rows, TeamX 57, Lava Scans 82, SWAT 60, Mangalek 30, Azora 70 - no
+repeated cover URL, no duplicated bytes, no placeholder-named file -
+none of the *sites* does it. **The catalogue does.** Photographed on the
+frozen build the same day: his Manga page drew Hunter X Hunter's card
+as MangaDex's "You can read this at MANGADEX" picture, filed by
+MangaDex as the title's cover art - 512x807, portrait, 369 distinct
+colours, an ordinary title to the API - taken because the site's own
+cover was a thin 250x350. No rule but its picture tells it from a real
+cover - and not its bytes either: the proxy serves a re-encoding out
+of its cache (59,480 bytes for the 148,640-byte CDN file), so a byte
+hash never fired. A 16x16 average hash (`server._ahash`) is identical
+across the three size variants and 72 bits from the nearest of 300 real
+cached pictures; the two renditions seen (512x807 on the CDN, 600x642
+in his cache, 110 bits apart) are seeded in
+`server.KNOWN_PLACEHOLDER_AHASH`, hashes the duplicate rule proves later
+are kept in `cover_placeholders.json`, and the chain now asks MangaDex
+and AniList as two candidates so a refused MangaDex cover falls to
+AniList's rather than back to the thin file. Lava Scans serves four
+covers at 160-190px (real, and `thin` handles them) and Azora lists 33
+rows with no art at all, which the chain already fills.

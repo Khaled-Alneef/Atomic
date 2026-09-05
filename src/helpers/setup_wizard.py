@@ -30,9 +30,6 @@ SHOW_DELAY_MS = 400
 STEPS = 4
 
 # The step pager's pills, matching Home's hero dashes.
-DOT_HEIGHT = 6
-DOT_WIDTH = 18
-DOT_WIDTH_ACTIVE = 30
 LOGO_HEIGHT = 96
 
 # Same column width as Settings' API Keys page, for the same reason it

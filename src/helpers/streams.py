@@ -169,37 +169,6 @@ def _load() -> list:
     return [a for a in storage.load(SITES_FILE, []) if usable_addon(a)]
 
 
-def add_addon(url: str, timeout: int = DEFAULT_TIMEOUT):
-    """Add an addon by URL, validating it by reading its manifest.
-
-    Validated rather than trusted: an addon that does not answer a
-    manifest will not answer a stream either, and finding that out at
-    playback time means an empty list with nothing saying why."""
-    base = _normalize_addon(url)
-    if not base:
-        return None
-    try:
-        manifest = _get_json(base + "/manifest.json", timeout)
-    except Exception:
-        return None
-    if not isinstance(manifest, dict) or "id" not in manifest:
-        return None
-    addons = _load()
-    for existing in addons:
-        if existing.get("base_url") == base:
-            return existing
-    addon = {
-        "id": uuid.uuid4().hex[:12],
-        "name": manifest.get("name") or base,
-        "base_url": base,
-        "types": manifest.get("types") or [],
-        "from_account": False,
-    }
-    addons.append(addon)
-    storage.save(SITES_FILE, addons)
-    return addon
-
-
 # Public, keyless addons that answer /stream, each measured against a
 # real anime episode (Bleach TYBW S1E1) before being put here - the same
 # rule the subtitle sources follow. Nothing goes in this table that was
@@ -491,6 +460,38 @@ QUEUED_DATA_WAIT = 6.0
 RACE_WIDTH = 8
 RACE_TIMEOUT = 45.0
 
+# **A lane is judged by its rate, not by its first byte** (5 September
+# 2026). The race used to play whichever lane completed its first piece
+# first, and a first piece says nothing about what follows: the owner's
+# "connecting to source takes a while then the buffering then it goes to
+# connecting to source again" is a lane that won on its first byte and
+# then could not keep up. Measured the day before on his Obsession film
+# (24.79Mbps, i.e. 3.1MB/s of picture), lane by lane:
+#
+#     row 0   11,451 seeders   first piece 7.5s    2.0-2.6 MB/s after it
+#     row 12     390 seeders   first piece 10.5s   3.4-4.3 MB/s after it
+#
+# Row 0 wins on the old rule, three seconds ahead, and stalls: below the
+# film's own bitrate. Row 12 is the one that plays.
+#
+# So a lane that reaches its first byte reports the swarm's payload rate
+# (torrent_engine.payload_rate) and is judged against what the file
+# needs - its size over its runtime, times PLAYABLE_RATE_MARGIN because a
+# swarm's rate wanders and a lane at exactly the bitrate stalls on the
+# first dip. Fast enough wins at once, as before; the one-second rule is
+# never paid on a healthy swarm. Not fast enough becomes the
+# *provisional* winner and the race stays open RACE_SETTLE_S more, during
+# which a lane arriving with a better rate replaces it (the replaced
+# torrent is released) and a lane arriving fast enough ends the wait.
+# When the window closes, the best provisional plays: it was going to be
+# waited on anyway, and its swarm has spent those seconds filling the
+# buffer rather than idle. The runtime comes from the player (the open
+# file's duration, the resume record's, or the kind's usual length);
+# without a size or a runtime the threshold is zero and the first byte
+# still wins, which is the whole of the old behaviour.
+RACE_SETTLE_S = 3.0
+PLAYABLE_RATE_MARGIN = 1.5
+
 # **What a source the *user* picked by hand is allowed to cost before
 # the rest are tried anyway.**
 #
@@ -515,11 +516,6 @@ RACE_TIMEOUT = 45.0
 # just no longer allowed to spend half a minute failing.
 SOLO_METADATA_TIMEOUT = 4.0
 SOLO_DATA_WAIT = 4.0
-# How long prepare() waits for its engine arm's own verdict after the
-# race budget expires - the arm is bounded by the same metadata/data
-# waits the budget was made of, so this is normally a few milliseconds
-# and three seconds is the ceiling for a slow unwind.
-ENGINE_VERDICT_GRACE_S = 3.0
 
 # ---- debrid budgets ---------------------------------------------------
 #
@@ -679,32 +675,42 @@ def prepare(stream: dict, *, season=None, episode=None, title=None,
     engine_said = {}
     done = threading.Event()
     lock = threading.Lock()
+    pending = [2]               # arms still to speak - see run()
 
     def run(name, fn):
         try:
             got = fn()
         except Exception:
             got = None
-        if name == "engine":
-            # Kept even when it carries no url: it is the only thing that
-            # knows *why* (a dead swarm, or a build with no engine at
-            # all), and the player prints that reason. Without this the
-            # verdict below had to re-run the whole engine wait to learn
-            # something that had already been established.
+        try:
+            if name == "engine":
+                # Kept even when it carries no url: it is the only thing
+                # that knows *why* (a dead swarm, or a build with no
+                # engine at all), and the player prints that reason.
+                with lock:
+                    engine_said["result"] = got
+            # Only a stream with a url counts as a win: the engine
+            # answers with a url-less stream for a dead release, and
+            # treating that as an answer would cancel a debrid arm
+            # still in flight.
+            if got and got.get("url"):
+                with lock:
+                    if winner:
+                        if name == "engine":
+                            _release_quietly(info_hash)
+                        return
+                    winner.update(got)
+                done.set()
+        finally:
+            # **The last arm out wakes the waiter, whatever it found.**
+            # A url-less verdict used to wake nobody, so the wait below
+            # ran to its budget regardless - and the budget was the
+            # wrong number (see below).
             with lock:
-                engine_said["result"] = got
-        # Only a stream with a url counts as a win: the engine answers
-        # with a url-less stream for a dead release, and treating that
-        # as an answer would cancel a debrid arm still in flight.
-        if not got or not got.get("url"):
-            return
-        with lock:
-            if winner:
-                if name == "engine":
-                    _release_quietly(info_hash)
-                return
-            winner.update(got)
-        done.set()
+                pending[0] -= 1
+                spent = pending[0] <= 0
+            if spent:
+                done.set()
 
     arms = [threading.Thread(target=run, args=("debrid", lambda: (
                 _prepare_with_debrid(stream, info_hash, season, episode,
@@ -712,38 +718,42 @@ def prepare(stream: dict, *, season=None, episode=None, title=None,
             threading.Thread(target=run, args=("engine", _engine), daemon=True)]
     for arm in arms:
         arm.start()
-    budget = max(1.0, float(metadata_timeout or METADATA_TIMEOUT)
-                 + float(data_wait or DATA_WAIT))
-    done.wait(budget)
-    # **The engine arm's verdict is waited for, not guessed.** Its own
-    # waits (metadata_timeout + data_wait) are what `budget` was built
-    # from, so at this point it is finishing; a short join collects its
-    # answer rather than inventing one. Before this, a budget that
-    # expired with the engine arm still running fell through to
-    # reason="no-engine" - and the player prints that as "This build has
-    # no torrent engine", which is what the owner saw on a film whose
-    # hand-picked source was merely dead for eight seconds (24 August
-    # 2026). The engine was there the whole time; the race just had not
-    # heard back from it.
+    # **Wait for the arms, not for a budget - and this is the owner's
+    # "when I played Obsession the source I select did not play, instead
+    # played some 6 seeds source" (5 September 2026).** The wait here
+    # used to be `metadata_timeout + data_wait`, then a 3s grace: with
+    # the solo waits at 2.5s each (requested_fixes_patch) that is 8.05s
+    # for a hand pick, while the engine arm it had started is allowed
+    # `data_wait_max` (12s), DELIVERING_CAP_S when bytes are flowing,
+    # and on a resume the index and seat-band waits on top. Traced on
+    # his 11,451-seeder pick: Event.wait(5.0), join(3.0), `timeout` at
+    # 8.05s - and the engine arm handed back a playable url at 9.81s to
+    # nobody, its torrent left in the session at 68 peers and 11MB/s
+    # behind whatever the walk played next. His log has the same shape
+    # twice: `pick_file` then `did not start (timeout)` 6.6s later.
+    #
+    # So the waiter sleeps until every arm has spoken (run() wakes it),
+    # and the cap below is only what the arms' own bounds add up to - a
+    # ceiling for a lane that has stopped obeying them, not the wait.
+    cap = _prepare_cap(metadata_timeout, data_wait, data_wait_max,
+                       resume_at is not None)
+    done.wait(cap)
     for arm in arms:
         arm.join(timeout=0.05)
     with lock:
         if winner:
             return dict(winner)
         verdict = engine_said.get("result")
-    if verdict is None and arms[1].is_alive():
-        arms[1].join(timeout=ENGINE_VERDICT_GRACE_S)
-        with lock:
-            if winner:
-                return dict(winner)
-            verdict = engine_said.get("result")
     if verdict is not None:
         return verdict
+    # The cap expired with the engine arm still running. It is not
+    # going to be waited on any longer, so its torrent must not go on
+    # downloading behind the next source - which is exactly what the
+    # 8s version left behind.
+    _release_quietly(info_hash)
     stream["url"] = None
-    # "no-engine" only when there is no engine. A release that produced
-    # no answer at all inside the grace is a dead release, and the
-    # player walks to the next source on that - exactly what it does for
-    # "no-peers".
+    # "no-engine" only when there is no engine; the player walks to the
+    # next source on "timeout" exactly as it does for "no-peers".
     try:
         from . import torrent_engine
         has_engine = torrent_engine.available()
@@ -751,6 +761,25 @@ def prepare(stream: dict, *, season=None, episode=None, title=None,
         has_engine = False
     stream["reason"] = "timeout" if has_engine else "no-engine"
     return stream
+
+
+def _prepare_cap(metadata_timeout, data_wait, data_wait_max, resuming) -> float:
+    """The most the engine arm may legitimately take, from its own
+    bounds: metadata, then the longest data wait it can be granted
+    (the hard cap, or DELIVERING_CAP_S while bytes flow), then the index
+    and seat-band waits a resume adds. See prepare() for why the wait
+    is not this number but the arms themselves."""
+    try:
+        from . import torrent_engine as engine
+        delivering = float(getattr(engine, "DELIVERING_CAP_S", 45.0))
+        index = float(getattr(engine, "RESUME_INDEX_WAIT", 6.0) if resuming
+                      else getattr(engine, "INDEX_WAIT", 3.0))
+        band = float(getattr(engine, "RESUME_BAND_WAIT", 3.0)) if resuming else 0.0
+    except Exception:
+        delivering, index, band = 45.0, 6.0, 3.0
+    data = max(float(data_wait or DATA_WAIT), float(data_wait_max or 0.0),
+               delivering)
+    return float(metadata_timeout or METADATA_TIMEOUT) + data + index + band + 2.0
 
 
 def _prepare_with_debrid(stream, info_hash, season, episode, deadline=None,
@@ -1045,9 +1074,44 @@ def _remember_dead(proved_dead, winner_hash=None):
         pass
 
 
+def _playable_rate(info_hash, runtime_s) -> float:
+    """Bytes a second playback of this release needs, with the margin -
+    its chosen file's size over the runtime - or 0 when either half is
+    unknown, which makes the first byte win as it always did. See
+    RACE_SETTLE_S."""
+    try:
+        runtime_s = float(runtime_s or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if runtime_s <= 0:
+        return 0.0
+    try:
+        from . import torrent_engine
+        size = int(torrent_engine.chosen_file_size(info_hash) or 0)
+    except Exception:
+        size = 0
+    if size <= 0:
+        return 0.0
+    return size / runtime_s * PLAYABLE_RATE_MARGIN
+
+
+def _lane_rate(got):
+    """The swarm's payload rate behind a lane's url, or None for a lane
+    that has no swarm to judge - a debrid link, a file already on
+    disk - which is instant by construction."""
+    if not got or got.get("engine") != "atomic" or got.get("local_file"):
+        return None
+    try:
+        from . import torrent_engine
+        return float(torrent_engine.payload_rate(got.get("info_hash") or ""))
+    except Exception:
+        return None
+
+
 def prepare_fastest(candidates, *, season=None, episode=None, title=None,
                     width: int = RACE_WIDTH, timeout: float = RACE_TIMEOUT,
-                    failed=None, start_at=None, duration=None):
+                    failed=None, start_at=None, duration=None,
+                    runtime_s=None):
     """Start several releases at once; play whichever delivers data
     first, and keep replacing the failures until one does.
 
@@ -1126,6 +1190,71 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
     lock = threading.Lock()
     cursor = [0]
     deadline = time.monotonic() + timeout
+    # Set once the caller has stopped listening (below). A lane that
+    # only then produces a url has nobody to hand it to, and its torrent
+    # would otherwise stay in the session for the rest of the run -
+    # more likely now that a delivering lane may wait past the race's
+    # own timeout (torrent_engine.DELIVERING_CAP_S).
+    race_over = [False]
+    # The lane that reached its first byte too slowly to be sure of, held
+    # while the race stays open for a better one - see RACE_SETTLE_S.
+    provisional = {"got": None, "rate": 0.0, "need": 0.0, "since": 0.0}
+
+    def _say(message):
+        try:
+            logs.info("race: " + message)
+        except Exception:
+            pass
+
+    def _declare(got, rate=None, need=0.0):
+        """Under `lock`: make `got` the winner, releasing a provisional
+        torrent it supersedes. Returns False when there already is one."""
+        if winner:
+            return False
+        held = provisional["got"]
+        if held is not None and held is not got:
+            _release_quietly(held.get("info_hash"))
+            _say(f"{str(held.get('info_hash') or '')[:8]} provisional at "
+                 f"{provisional['rate'] / 1e6:.2f}MB/s replaced")
+        provisional["got"] = None
+        winner.update(got)
+        who = str(got.get("info_hash") or "")[:8]
+        if rate is None:
+            _say(f"{who} won ({'debrid' if got.get('kind') == 'direct' else 'on disk'})")
+        else:
+            _say(f"{who} won at {rate / 1e6:.2f}MB/s"
+                 + (f" (needs {need / 1e6:.2f})" if need else ""))
+        return True
+
+    def _judge(candidate, got):
+        """A lane has a url. Under `lock`: win, hold, or give it back."""
+        info_hash = candidate.get("info_hash")
+        if winner or race_over[0]:
+            _release_quietly(info_hash)
+            return
+        rate = _lane_rate(got)
+        need = _playable_rate(info_hash, runtime_s) if rate is not None else 0.0
+        if rate is None or need <= 0 or rate >= need:
+            _declare(got, rate, need)
+            done.set()
+            return
+        held = provisional["got"]
+        if held is None:
+            provisional.update(got=got, rate=rate, need=need,
+                               since=time.monotonic())
+            _say(f"{str(info_hash or '')[:8]} first byte at {rate / 1e6:.2f}MB/s, "
+                 f"needs {need / 1e6:.2f} - held {RACE_SETTLE_S:g}s for a faster lane")
+            return
+        if rate > provisional["rate"]:
+            _release_quietly(held.get("info_hash"))
+            _say(f"{str(held.get('info_hash') or '')[:8]} at "
+                 f"{provisional['rate'] / 1e6:.2f}MB/s let go for "
+                 f"{str(info_hash or '')[:8]} at {rate / 1e6:.2f}MB/s")
+            provisional.update(got=got, rate=rate, need=need)
+        else:
+            _release_quietly(info_hash)
+            _say(f"{str(info_hash or '')[:8]} at {rate / 1e6:.2f}MB/s let go: "
+                 f"slower than the lane held")
 
     def worker():
         try:
@@ -1189,12 +1318,11 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
                                         got.get("reason")))
                 continue
             with lock:
-                if winner:
-                    # Someone else already won; give the swarm back.
-                    _release_quietly(candidate.get("info_hash"))
-                    return
-                winner.update(got)
-            done.set()
+                # Win, or be held as provisional while a faster lane is
+                # given RACE_SETTLE_S to arrive - see _judge. Either way
+                # this lane is finished; a held lane's torrent stays in
+                # the session until the race decides.
+                _judge(candidate, got)
             return
 
     # **One debrid lane rides beside the torrent lanes.** A cached
@@ -1242,9 +1370,10 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
             if not got or not got.get("url"):
                 continue
             with lock:
-                if winner:
+                # A debrid answer is instant by construction and outranks
+                # any provisional torrent lane - _declare releases it.
+                if not _declare(got):
                     return
-                winner.update(got)
             done.set()
             return
 
@@ -1274,8 +1403,39 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
         threads.append(threading.Thread(target=debrid_worker, daemon=True))
     for thread in threads:
         thread.start()
-    done.wait(timeout)
+    # Wake often enough to close a provisional winner's settle window;
+    # `done` still ends the wait the moment a lane wins outright or the
+    # last lane is spent.
+    end = time.monotonic() + timeout
+    while not done.is_set():
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        if done.wait(min(remaining, 0.1)):
+            break
+        with lock:
+            held = provisional["got"]
+            if (held is not None and not winner
+                    and time.monotonic() - provisional["since"] >= RACE_SETTLE_S):
+                # Nothing faster came inside the window: the held lane
+                # plays, its swarm having spent the wait filling ahead.
+                rate = _lane_rate(held)
+                _say(f"{str(held.get('info_hash') or '')[:8]} kept after "
+                     f"{RACE_SETTLE_S:g}s, now "
+                     f"{(rate or provisional['rate']) / 1e6:.2f}MB/s")
+                provisional["got"] = None
+                winner.update(held)
+                done.set()
     with lock:
+        held = provisional["got"]
+        if held is not None and not winner:
+            # Every lane spent (or the clock ran out) with a held lane
+            # still waiting for a better one that never came.
+            provisional["got"] = None
+            winner.update(held)
+            _say(f"{str(held.get('info_hash') or '')[:8]} kept - no other "
+                 f"lane answered")
+        race_over[0] = True
         result = dict(winner) if winner else None
         attempted = list(started)
         verdicts = list(proved_dead)
@@ -1541,13 +1701,26 @@ def _default_pick_key(stream, preferred, season=None):
     side = _side_content_rank(stream)
     # See states_season: right episode before nicest episode.
     stated = _season_rank(stream, season)
+    # **A release the debrid service already holds leads its group** (5
+    # September 2026). It plays over HTTPS in one or two round trips -
+    # his own log says `debrid: on - releases it has cached play over
+    # HTTPS`, and the measurement behind DEBRID_PREPARE_BUDGET_S is
+    # 3-4 round trips against swarm medians of 3.3-16.7s - so among rows
+    # that are equally right for the episode and equally Arabic, the
+    # cached one is the fastest start there is, whatever its seeder
+    # count says. Below `arabic` on purpose: "ALWAYS auto select the
+    # source that has AR embedded translation" is his standing rule and
+    # a faster start does not outrank it; above the seeders, because a
+    # cached release does not need a swarm at all. _promote_seeded_head
+    # leaves a cached head alone for the same reason.
+    instant = 0 if stream.get("debrid_cached") else 1
     if preferred != "best" and quality == preferred:
         size = int(stream.get("size_bytes") or 0)
         size_key = size if size >= _MIN_REAL_SIZE else float("inf")
-        return (drm, resolvable, side, 0, stated, arabic, -raw_seeders,
-                size_key)
+        return (drm, resolvable, side, 0, stated, arabic, instant,
+                -raw_seeders, size_key)
     return (drm, resolvable, side, 1, -_quality_rank(quality), stated,
-            arabic, -seeders)
+            arabic, instant, -seeders)
 
 
 def _stream_from_addon(item: dict, addon_name: str):
@@ -1992,8 +2165,14 @@ def _drop_wrong_season(rows, season, episode, entry=None, arc_map=None) -> list:
             # about *which* season; the rest are another numbering. Arc
             # seasons are TMDB's, i.e. this entry's own, so they are
             # always in range.
-            in_range = {s for s in (seasons | arc_seasons)
-                        if s <= bound + NEAR_SEASON_MARGIN}
+            # An arc season is always in range: it was read against the
+            # entry's own season split (anime_identity._entry_seasons),
+            # so it cannot be somebody else's numbering. Filtering it by
+            # the bound - as this did, against its own docstring - let a
+            # season-3 arc row through whenever no other row happened to
+            # mention season 2.
+            in_range = ({s for s in seasons if s <= bound + NEAR_SEASON_MARGIN}
+                        | set(arc_seasons))
             # **A season the name states outright beats an arc guess.**
             # The owner, 27 August 2026: The Angel Next Door S01E06
             # played S02E06. Measured on his own entry, the arc map for
@@ -2336,7 +2515,20 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
     before = list(results)
 
     def on_result(accumulated):
-        on_partial(_rank(before + list(accumulated)))
+        rows = before + list(accumulated)
+        # **Two things the partials used to lack that the final list
+        # had, both of which decide what plays** - because the player
+        # starts on the first partial carrying the preferred resolution
+        # (player._on_streams), not on the final list. The season term
+        # (`_rank(..., season)` - it was called without one here, so a
+        # row stating the wrong season could lead a partial that a
+        # moment later ranked it last), and the debrid flag, which
+        # _flag_instant only writes on the final list because the check
+        # costs a request; a partial takes what the library already
+        # answered, for free (debrid.known_cached), so a release it holds
+        # leads from the first batch.
+        _flag_known_instant(rows)
+        on_partial(_rank(rows, season))
 
     results.extend(_run_all(jobs, fanout_deadline,
                             on_result=None if on_partial is None else on_result))
@@ -2442,6 +2634,31 @@ def find_streams(entry, *, season=None, episode=None, deadline=None,
     return ranked
 
 
+def _flag_known_instant(results):
+    """The offline half of _flag_instant: mark rows the debrid library
+    is already known to hold, without a request. For partial lists,
+    which are drawn and played before the real check has run."""
+    if debrid is None:
+        return
+    try:
+        hashes = {s.get("info_hash") for s in results
+                  if s.get("info_hash") and s.get("kind") == "torrent"
+                  and not s.get("debrid_cached")}
+        if not hashes:
+            return
+        known = debrid.known_cached(hashes)
+        if not known:
+            return
+        for stream in results:
+            if stream.get("info_hash") in known:
+                stream["debrid_cached"] = True
+                title = stream.get("title") or ""
+                if not title.startswith("Instant · "):
+                    stream["title"] = f"Instant · {title}".strip(" ·")
+    except Exception:
+        pass
+
+
 def _flag_instant(results, deadline):
     """Mark every row whose release the debrid service holds cached.
 
@@ -2498,7 +2715,7 @@ def _flag_instant(results, deadline):
 SEEDER_SHORTLIST = 5
 
 
-def _promote_seeded_head(ranked: list, preferred: str) -> list:
+def _promote_seeded_head(ranked: list, preferred: str, season=None) -> list:
     """Put the biggest swarm first when the ranked head is not among the
     healthiest few - see SEEDER_SHORTLIST.
 
@@ -2513,6 +2730,10 @@ def _promote_seeded_head(ranked: list, preferred: str) -> list:
     if len(playable) < 2:
         return ranked
     head = playable[0]
+    # A cached debrid row at the head is not judged by seeders at all -
+    # it never touches the swarm. See `instant` in _default_pick_key.
+    if head.get("debrid_cached"):
+        return ranked
 
     def quality_of(row):
         value = (row.get("quality") or "").lower()
@@ -2522,6 +2743,18 @@ def _promote_seeded_head(ranked: list, preferred: str) -> list:
     if preferred != "best" and any(quality_of(r) == preferred for r in playable):
         wanted = preferred
     group = [row for row in playable if quality_of(row) == wanted]
+    # **Never past a release that says less about the season than the
+    # head does.** `_season_rank` sorts "states S01" ahead of "states
+    # nothing" for exactly the reason states_season gives - right
+    # episode before nicest episode - and this promotion used to undo
+    # it: measured 5 September 2026 on the owner's Jujutsu Kaisen
+    # S01E01, the ranked head stated S01 at 55 seeders and this moved
+    # "[Erai-raws] Jujutsu Kaisen: Shimetsu Kaiyuu - Zenpen - 01" (687
+    # seeders, no season in its name, season 3 in fact) in front of it.
+    # The arc map now drops that row before ranking (anime_identity);
+    # this is the second lock, for the day the map is cold.
+    group = [row for row in group
+             if _season_rank(row, season) <= _season_rank(head, season)]
     if len(group) < 2 or head not in group:
         return ranked
     by_seeders = sorted(group, key=lambda r: -int(r.get("seeders") or 0))
@@ -2557,7 +2790,7 @@ def _rank(streams: list, season=None) -> list:
             continue
         seen.add(marker)
         unique.append(stream)
-    return _promote_seeded_head(unique, preferred)
+    return _promote_seeded_head(unique, preferred, season)
 
 
 def stream_key(stream):

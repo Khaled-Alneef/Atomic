@@ -176,7 +176,6 @@ SEARCH_MAX_WIDTH = 760
 # now (see set_fullscreen_search_width). Kept as the record of what the
 # wider ceiling was, since removing it would lose the number the change
 # was measured against.
-SEARCH_MAX_WIDTH_FULLSCREEN = 1100
 # How much of the page's width the field takes in full screen,
 # before the cap above applies. 0.58 rather than 0.60 so folding
 # the rail makes a difference you can see: at 0.60 both widths

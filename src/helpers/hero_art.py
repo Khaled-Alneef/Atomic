@@ -98,11 +98,9 @@ GROUND_W, GROUND_H = 1900, 400
 # history here because "add a feather" is the obvious instinct when a
 # pasted panel looks hard-edged, and it has now been tried and rejected
 # by the person looking at it.
-_PANEL_RIGHT_INSET = 0.18
 # A landscape source contained at full height would smother the ground -
 # cap the panel at half the composed width (no-op for every portrait
 # cover; a 460x624 cover lands at 295px).
-_PANEL_MAX_WIDTH = 0.5
 
 # Bumped whenever the composition above changes shape, and written into
 # the cached filename: wide_ground's disk cache is keyed on the *source*
@@ -143,31 +141,6 @@ def _ground_from(cover: Image.Image) -> Image.Image:
         Image.Resampling.LANCZOS)
     return _cover_to(small.resize((cover.width, cover.height),
                                   Image.Resampling.BICUBIC), GROUND_W, GROUND_H)
-
-
-def _panel_from(cover: Image.Image) -> Image.Image:
-    # The whole cover, *contained* - scaled to fit inside the composed
-    # height at its own aspect, never cropped. A portrait cover fills the
-    # height exactly; anything squarer is capped by _PANEL_MAX_WIDTH and
-    # letterboxed against the blur by wide_ground's vertical centring.
-    scale = min(GROUND_H / cover.height,
-                GROUND_W * _PANEL_MAX_WIDTH / cover.width)
-    panel = cover.resize((max(1, round(cover.width * scale)),
-                          max(1, round(cover.height * scale))),
-                         Image.Resampling.LANCZOS).convert("RGBA")
-    # **No fade on the left edge - the owner's ask, 23 August 2026:** "you
-    # are making the left side of the image uses fade, do not make it use
-    # fade make it the same as the right side". The panel used to carry a
-    # horizontal alpha ramp so its left edge dissolved into the blur; both
-    # vertical edges are now hard, so the cover reads as one whole picture
-    # sitting on the ground rather than as something half-melted into it.
-    #
-    # The feather was there to hide the seam of a *cropped, widened* panel
-    # (see the pre-23-August design). It buys nothing now that the whole
-    # cover is contained at its own aspect: what it actually did was eat
-    # the left quarter of real artwork - measured on the owner's covers,
-    # a fade of 0.25 of the panel width.
-    return panel
 
 
 def _composed_path(cover_path: Path) -> Path:

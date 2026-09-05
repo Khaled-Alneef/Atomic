@@ -46,11 +46,6 @@ def note_vblank():
         counters["vblank"] += 1
 
 
-def note_paint():
-    if ENABLED:
-        counters["paint"] += 1
-
-
 def reset():
     for key in counters:
         counters[key] = 0

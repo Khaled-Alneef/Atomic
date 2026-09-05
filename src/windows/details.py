@@ -200,7 +200,6 @@ ICON_BACK = "\ue76b"                  # ChevronLeft - the sidebar's own
                                       # "back" everywhere (owner's ask)
 ICON_FULLSCREEN = "\ue740"
 ICON_EXIT_FULLSCREEN = "\ue73f"
-ICON_SEARCH = "\ue721"
 # The list panel's re-ask button - the same Refresh glyph the reader's
 # top bar carries, so "look again" is one shape across the app.
 ICON_REFRESH = "\ue72c"
@@ -548,81 +547,6 @@ def _reading_logo_worker(signals, run, entry):
         path = None
     if path:
         signals.art.emit(run, "logo", str(path))
-
-
-def _reading_art_worker(signals, run, entry):
-    """The reading page's ground: AniList's banner (or cover) for the
-    title, downloaded into the app's one image cache.
-
-    Reading entries carry no IMDb id, so TMDB - the video pages' source -
-    can never answer for them; before this, every manga details page sat
-    on the flat dark ground. AniList is keyless, already a dependency,
-    and its banner is landscape art cut for exactly this use. Fails soft
-    like every art lookup: no match or no network just keeps the dark
-    ground."""
-    title = (entry.get("title") or "").strip()
-    path = None
-    # **Three catalogues, in the order of how good their answer is** -
-    # the owner's ask: "use MangaDex and AniList and MangaUpdates to load
-    # the ch list bg image for all". They are not interchangeable, and
-    # measured 21 August 2026 over the owner's own titles:
-    #
-    #   AniList banner   1900x400 landscape, cut for exactly this -
-    #                    One Piece, Kingdom (WAN), Hunter x Hunter, Rise
-    #                    of the Fallen Kingdom's all have one
-    #   AniList cover    460x652 portrait, when there is no banner
-    #                    (Celebrity Lady)
-    #   MangaDex         portrait, and knows titles AniList does not
-    #   MangaUpdates     portrait, a scanlation database first - it had
-    #                    One Piece and Solo Leveling; it is the rung that
-    #                    catches what the other two miss
-    #
-    # 3 of 9 of the owner's titles had **no AniList match at all**, which
-    # is why the chain exists rather than one source with a fallback to
-    # nothing. A portrait answer is still a good answer here: paintEvent
-    # turns one into a blurred ground instead of stretching it, which is
-    # what "wrong size" was.
-    for source in ("anilist", "mangadex", "mangaupdates"):
-        if path or not title:
-            break
-        try:
-            if source == "anilist":
-                from helpers import anilist
-                url = anilist.fetch_manga_artwork(title)
-            elif source == "mangadex":
-                from helpers import mangadex
-                url = mangadex.fetch_cover_url(title)
-            else:
-                from helpers import mangaupdates
-                url = mangaupdates.fetch_cover_url(title)
-            path = images.download(url) if url else None
-        except Exception:
-            logs.exception(f"details manga artwork via {source} failed")
-            path = None
-    if not path:
-        # **AniList does not know every title, and the ones it misses are
-        # exactly the ones the owner reads.** Measured 21 August 2026
-        # over their own list plus a Recently Released sample: 3 of 9 had
-        # no AniList match at all ("2072267132 Gods Of All People...",
-        # "I Can Snatch 999 Types Of Abilities", "I Will Try To Raise The
-        # Villainess") - scanlation titles that no catalogue files under
-        # the name the site prints. Those pages sat on the flat dark
-        # ground with no art whatever.
-        #
-        # The entry's own cover always exists, because the site it came
-        # from named it. It is portrait, so it lands on the blurred
-        # ground in paintEvent rather than being stretched - which is the
-        # whole reason that branch is there.
-        try:
-            local = entry.get("cover_path")
-            if local and Path(local).exists():
-                path = local
-            elif entry.get("cover_url"):
-                path = images.download(entry["cover_url"])
-        except Exception:
-            path = None
-    if path:
-        signals.art.emit(run, "backdrop", str(path))
 
 
 def _reading_genres_worker(signals, run, title):
@@ -4497,9 +4421,6 @@ _BROWSE_POSTER_SIZE = (160, 216)
 # 1716px of cards, and on the owner's 1873px window the sidebar leaves
 # about 1633px - so the last column sat off the right edge and the page
 # could only be read by scrolling sideways (their report).
-_BROWSE_COLUMNS = 9
-_BROWSE_MIN_COLUMNS = 2
-_BROWSE_GRID_SPACING = 12
 # Enough to fill those rows rather than leave the last one ragged.
 _BROWSE_LIMIT = 36
 

@@ -619,9 +619,6 @@ class WebPosterGrid(QWebEngineView):
     def set_scroll_offset(self, value):
         self._run(f"window.scrollTo(0, {float(value):.1f})")
 
-    def reset_scroll(self):
-        self.set_scroll_offset(0)
-
     # ---- talking to the page ----------------------------------------
     def _on_ready(self, ok):
         self._ready = bool(ok)

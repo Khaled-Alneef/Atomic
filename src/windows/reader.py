@@ -281,6 +281,41 @@ MEDIUM_TARGET_WIDTH = {"manga": 1100, "manhwa": 762, "manhua": 762}
 # whole series at the wrong size.
 STRIP_ASPECT_MIN = 3.0
 STRIP_TARGET_WIDTH = 762
+
+# **When a double-page spread is cut in half and read as two pages.**
+#
+# The owner, 5 September 2026, on a 24" 1080p monitor: *"the double pages
+# in the manga took the same size as the single pages why??"* - and they
+# did, exactly. Two rules meet on a narrow screen. A single page opens at
+# its own resolution *up to the window* (his ask of 24 August, "why does
+# the ch appear in less resolution than the original"), and _show fits a
+# spread *down* to the window. So once the window is narrower than the
+# scan's own page width - One Piece is cut at 1644px - the single page
+# has already grown to fill it and the spread cannot exceed it. Both land
+# on the viewport width and each page inside the spread is drawn at half
+# the size of a normal one.
+#
+# Measured, driving _on_page_width on his own scans (One Piece 1644px
+# single, Kingdom 2760x1917 spread):
+#
+#     screen                  dpr  viewport  single  spread  ratio  half
+#     his panel 2048x1152    1.25      1598    1259    1598   1.27   63%
+#     1080p 24in maximized   1.00      1880    1644    1880   1.14   57%
+#     1080p 24in windowed    1.00      1360    1336    1360   1.02   51%
+#     1600x900 laptop        1.00      1560    1536    1560   1.02   51%
+#     4K 27in at 150%        1.50      1666    1096    1666   1.52   76%
+#
+# His 2048 panel hides it because it runs at 125%: the single page is
+# divided by the device ratio down to 1259 logical while the spread comes
+# back at the full 1598. At 100% there is no headroom left at all.
+#
+# So a spread whose halves cannot be drawn at about a normal page's width
+# is split down the middle and stacked, right half first for right-to-
+# left manga - each page then reads at exactly the single-page width. A
+# screen with genuine room keeps the spread whole, which is the layout
+# the artwork was drawn for: 0.95 rather than 1.0 so a spread a few
+# pixels short of fitting is not cut for nothing.
+SPREAD_SPLIT_MARGIN = 0.95
 # A source this far off the target is not a page cut for reading - a
 # thumbnail, a banner, a spread - and forcing it to the target would
 # blow it up past any use. Outside this the medium's plain multiplier
@@ -343,7 +378,6 @@ BOTTOM_CONTROL_HEIGHT = 34
 # Where the door button lands, for the reader and the player alike -
 # the owner's ask, replacing "back to whatever page this was opened
 # from". main.PAGES' key, not a title.
-HOME_PAGE = "home"
 
 BOTTOM_STEP_WIDTH = 170
 CHAPTER_BOX_WIDTH = 460     # wide on purpose - chapter names are long
@@ -1728,6 +1762,12 @@ class _StripView(QScrollArea):
         # See eventFilter: re-entrancy guard for the scrollbar wheel
         # forwarding, not state anything else reads.
         self._forwarding_wheel = False
+        # Which way this series reads, for splitting a spread into its
+        # two pages in the right order - see _split_spread. Set by
+        # ReaderPage alongside its own copy; "rtl" is the manga default
+        # and the one this reader is built around (see the module
+        # docstring on where the Next Chapter button sits).
+        self.direction = "rtl"
         # The width the last decoded page came out at, in logical px.
         # Pages inside one chapter are cut to the same width, so the
         # first one that lands makes every later placeholder right.
@@ -2066,6 +2106,52 @@ class _StripView(QScrollArea):
                 slot.loaded = False
         self._store.set_keep(keep)
 
+    def _split_spread(self, pixmap, width, ratio):
+        """A double-page spread as its two pages, stacked in one slot.
+
+        **One slot, not two, and that is the whole reason this is
+        affordable.** The page list, the scroll positions, the prefetch
+        window and the cache are all keyed by page index, and a spread
+        that became two indexes would have to renumber every one of them.
+        Stacking inside the slot changes nothing but the slot's height,
+        which `_resize_slot` already handles for pages of any height at
+        all - a webtoon slot is 13,607px tall.
+
+        Display-only, like the fit it replaces: the cache keeps the
+        decode untouched, so changing the window or the zoom re-lays this
+        out without re-fetching anything.
+
+        Right half first for right-to-left, which is how a printed manga
+        spread reads - the left half is the *later* page. Getting this
+        backwards would silently reverse two pages in every chapter that
+        has a spread, which is why the direction is carried down from
+        ReaderPage rather than assumed here."""
+        half_w = max(1, pixmap.width() // 2)
+        left = pixmap.copy(0, 0, half_w, pixmap.height())
+        right = pixmap.copy(pixmap.width() - half_w, 0, half_w,
+                            pixmap.height())
+        first, second = ((right, left) if str(self.direction).lower() == "rtl"
+                         else (left, right))
+
+        target = max(1, int(width))
+        mode = Qt.TransformationMode.SmoothTransformation
+        first = first.scaledToWidth(target, mode)
+        second = second.scaledToWidth(target, mode)
+        # The same gap the strip draws between two ordinary manga pages,
+        # so a split spread joins its neighbours evenly rather than
+        # announcing itself - see MANGA_PAGE_GAP_PX.
+        gap = max(0, int(round(self._column.spacing() * ratio)))
+
+        out = QPixmap(target, first.height() + gap + second.height())
+        out.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(out)
+        try:
+            painter.drawPixmap(0, 0, first)
+            painter.drawPixmap(0, first.height() + gap, second)
+        finally:
+            painter.end()
+        return out
+
     def _show(self, slot, pixmap, ratio):
         # A landscape page is a double-page spread (manga pages are cut
         # portrait; only a spread comes out wider than tall), and at the
@@ -2080,7 +2166,16 @@ class _StripView(QScrollArea):
         is_spread = pixmap.width() > pixmap.height()
         if is_spread:
             fit = self.viewport().width() * ratio
-            if 0 < fit < shown.width():
+            # A normal page of this chapter, in the same device pixels
+            # the fit is measured in - _typical_width is logical and
+            # already tracks the zoom, so this is what the page above
+            # and the page below are actually drawn at.
+            single = max(1.0, self._typical_width * ratio)
+            if 0 < fit < single * 2 * SPREAD_SPLIT_MARGIN:
+                # No room to show both halves at a readable size, so read
+                # it as the two pages it is - see SPREAD_SPLIT_MARGIN.
+                shown = self._split_spread(pixmap, min(single, fit), ratio)
+            elif 0 < fit < shown.width():
                 shown = shown.scaledToWidth(
                     int(fit), Qt.TransformationMode.SmoothTransformation)
         slot.natural = shown.size()
@@ -3304,6 +3399,8 @@ class ReaderPage(GlassPage):
                 "been removed, or the site changed its reader.")
             return
         self.direction = (payload.get("direction") or "rtl").lower()
+        if self._strip_view is not None:
+            self._strip_view.direction = self.direction
         self._page_headers = dict(payload.get("headers") or {})
         self._store.configure(pages, self._page_headers)
         # Every chapter that actually opens is read history - stepping
@@ -3508,7 +3605,62 @@ class ReaderPage(GlassPage):
         # See STRIP_ASPECT_MIN for why the declared type cannot be
         # trusted here.
         if aspect >= STRIP_ASPECT_MIN:
-            target = STRIP_TARGET_WIDTH
+            # **A strip is drawn at its own pixels, not resampled to
+            # 762.** The owner, 5 September 2026, with a screenshot:
+            # *"the manga is perfect, but the other readings!!!!!! their
+            # quality"*.
+            #
+            # Measured the same day, fetching one real chapter from each
+            # of his own entries and reading the pixel size off every
+            # page:
+            #
+            #     Kingdom (WAN), 3asq          1325 x 1920   manga
+            #     The Beginning After The End   800 x 14430  manhwa
+            #     The Eternal Supreme, lavascans 800 x 14995 manhua
+            #
+            # So his manga source carries 1325px and his two strip
+            # sources carry 800px, and *that* is most of the difference
+            # he is looking at - a strip has 60% of the pixels of a manga
+            # page across the same column and no setting can add the
+            # rest. The larger variant does not exist either: lavascans
+            # names its files `002_w-64.webp`, and the unsuffixed
+            # `002.webp` and `002.jpg` are **690px**, smaller than what
+            # is already served. 800 is the ceiling.
+            #
+            # What was ours to fix is that 762 *resamples* it. The number
+            # was chosen on 22 August against a 760px source ("760 -> 762
+            # is 1.00x, untouched"), but his sites serve 800, so every
+            # page has been going through a 0.953 non-integer downscale
+            # since - which is exactly the resample that softens line art
+            # (see rules/ui.md on who does the resampling). Native up to
+            # the window is the rule manga already uses and it costs
+            # nothing here: 800 is only 5% over the 762 he asked for, so
+            # the "40% smaller" ask of 22 August still holds, and a
+            # source *narrower* than the target is no longer blown up to
+            # meet it.
+            viewport = (self._strip_view.viewport().width() - 24
+                        if self._strip_view is not None else 0)
+            target = min(source_width, max(STRIP_TARGET_WIDTH, viewport))
+        # **The site's rule, in CSS pixels, from 5 September 2026** -
+        # the owner: "make it like the source site exactly on size and
+        # quality". This reader is the fallback for a machine without
+        # WebView2 (see open_reader), and it follows the rule the web
+        # reader now applies (app.js targetFor, with the measurement):
+        # every one of his sites draws a page at its own width in CSS
+        # px, capped to the column. This function's targets are *image*
+        # pixels drawn 1:1 (rules/ui.md), so the site's CSS width is
+        # multiplied by the device ratio - a 1325px scan on his 125%
+        # panel is 1325 logical px wide, i.e. 1656 device px, and the
+        # proxy is asked for those (the enlargement happens once, in
+        # server._scaled). The medium floors below (manga 1100, strips
+        # 762) are superseded by this; kept for a strip whose width is
+        # unknown, which is what they were written for.
+        # Off the screen, not the widget - see _screen_ratio.
+        ratio = float(_screen_ratio(self._strip_view) or 1.0)
+        column = ((self._strip_view.viewport().width() - 24)
+                  if self._strip_view is not None else 0)
+        if source_width > 0 and column > 0:
+            target = int(round(min(source_width, column) * ratio))
         elif target and source_width > target:
             # **A paged scan opens at its own resolution, up to the
             # window - the owner, 24 August 2026: "why does the ch

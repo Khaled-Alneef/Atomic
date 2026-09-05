@@ -24,6 +24,7 @@ import re
 import pathlib
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -79,6 +80,10 @@ COVERS = DATA_DIR / "image_cache"
 # on-disk ones both land here so the page has one kind of image URL.
 _sources = {}
 _lock = threading.Lock()
+# Tokens re-fetched past their file on disk this process - see
+# fetch_image(refresh=True); once each, so a genuinely small picture is
+# not asked for on every request.
+_refreshed = set()
 
 
 def _token(key):
@@ -319,12 +324,22 @@ IMAGE_MAX_BYTES = 32 * 1024 * 1024
 IMAGE_DEADLINE_S = 25.0
 
 
-def fetch_image(token):
+def fetch_image(token, refresh=False):
     """One picture: read off disk, or fetched with the headers it needs.
 
     Through net.urlopen/read_bytes, never resp.read(): urlopen's timeout
     bounds one socket operation and not the transfer, so a host sending a
     byte a second holds the connection open forever.
+
+    `refresh=True` goes past the file on disk to the host and, when the
+    host answers, writes what it sent over the file. Once per token per
+    process (`_refreshed`): it exists for a cache that holds a smaller
+    picture than the host serves - the launch-time shrink pass in
+    helpers/images re-encoded chapter pages to 1200px tall for four days
+    before it was stopped (5 September 2026), and 269 of them are still
+    on the owner's disk - so server's image route re-asks when the
+    reader wants more pixels than the file has, and a scan that is
+    genuinely small costs one extra fetch a session.
     """
     with _lock:
         found = _sources.get(token)
@@ -340,7 +355,13 @@ def fetch_image(token):
         return blob, _kind(blob[:8])
 
     disk = COVERS / ("web_" + token)
-    if disk.exists():
+    if refresh:
+        with _lock:
+            if token in _refreshed:
+                refresh = False
+            else:
+                _refreshed.add(token)
+    if disk.exists() and not refresh:
         try:
             blob = disk.read_bytes()
             return blob, _kind(blob[:8])
@@ -438,6 +459,92 @@ _WARM_WORKERS = 4
 _WARM_HEAD = 200
 _warm_pool = None
 _warming = set()
+
+
+# The bounds helpers/images.shrink_existing re-encoded to, which is the
+# signature of a page it damaged - see heal_shrunk_pages.
+_SHRUNK_PORTRAIT_H = 1200
+_SHRUNK_LANDSCAPE_W = 2560
+_HEALED_MARK = ".pages-healed-1"
+
+
+def _dims(blob):
+    """(width, height) off a picture's header, or (0, 0)."""
+    try:
+        from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+        from PyQt6.QtGui import QImageReader
+        store = QByteArray(bytes(blob))
+        buffer = QBuffer(store)
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        size = QImageReader(buffer).size()
+        buffer.close()
+        return (int(size.width()), int(size.height())) if size.isValid() else (0, 0)
+    except Exception:
+        return (0, 0)
+
+
+def heal_shrunk_pages(budget_s: float = 4.0) -> int:
+    """Delete, once, every proxied picture the launch-time shrink pass
+    re-encoded, so the next request fetches the host's original.
+
+    helpers/images.shrink_existing re-encoded every `web_` file over
+    300KB to the cover bounds - portrait to exactly 1200 tall, landscape
+    to exactly 2560 wide - until 5 September 2026, and chapter pages
+    live in this cache: the owner's disk held 269 pages at 816-829x1200
+    that their sites serve at 1306-1326x1920 (883's 2760x1917 spread at
+    2560x1778, to the pixel). The image route re-fetches such a page when
+    the reader asks for more pixels, but a page the reader has already
+    decoded from the shrunk file keeps that size until the chapter is
+    reopened - so the damaged files are cleared before they are read
+    again. Exactly those bounds, and only files big enough to have been
+    through the pass (SHRINK_MIN_BYTES is the pass's own floor, and its
+    output is a quality-86 JPEG that stays well above it for a page); a
+    site that genuinely serves 1200-tall pages pays one re-fetch, once.
+    Marked done in the cache directory so it never runs twice; bounded so
+    a slow disk cannot hold a launch. Never raises."""
+    try:
+        mark = COVERS / _HEALED_MARK
+        if mark.exists():
+            return 0
+        COVERS.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        removed = 0
+        floor = 200_000
+        for entry in os.scandir(COVERS):
+            if time.monotonic() - started > budget_s:
+                # Out of time: no mark, so the rest is done next launch.
+                return removed
+            if not entry.is_file() or not entry.name.startswith("web_"):
+                continue
+            try:
+                if entry.stat().st_size < floor:
+                    continue
+                with open(entry.path, "rb") as fh:
+                    head = fh.read(256 * 1024)
+                width, height = _dims(head)
+                if width <= 0 or height <= 0:
+                    continue
+                shrunk = ((height >= width and height == _SHRUNK_PORTRAIT_H)
+                          or (width > height and width == _SHRUNK_LANDSCAPE_W))
+                if shrunk:
+                    os.remove(entry.path)
+                    removed += 1
+            except OSError:
+                continue
+        try:
+            mark.write_text("1", encoding="utf-8")
+        except OSError:
+            pass
+        if removed:
+            try:
+                from helpers import logs
+                logs.info(f"page cache: cleared {removed} pictures the "
+                          f"cover shrinker had re-encoded")
+            except Exception:
+                pass
+        return removed
+    except Exception:
+        return 0
 
 
 def warm(tokens):

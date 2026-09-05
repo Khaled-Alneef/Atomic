@@ -42,7 +42,6 @@ BG_ALT = "#10151f"       # secondary background (page panels)
 # The two lobes of the nebula the page backdrop paints in from its right
 # edge (widgets.GlassPage): a teal core with a blue bloom off it.
 GLOW = "#14515a"         # deep teal core of the backdrop glow
-GLOW_ALT = "#16375f"     # ...and the blue bloom beside it
 SIDEBAR = "#070a11"      # sidebar column
 SIDEBAR_SHEEN = "#121824"  # subtle highlight at the sidebar's top edge
 SIDEBAR_DEEP = "#05070c"   # ...fading darker toward its bottom
@@ -91,7 +90,6 @@ DANGER_HOVER = "#ff7285"
 # 41). Against the teal accent that collision is gone - #f5b342 sits at
 # hue 38, 134 deg from ACCENT and 48 deg from DANGER's pink (computed
 # 25 August 2026), so it reads as its own color beside both.
-WARNING = "#f5b342"
 
 def mix(base: str, other: str, amount: float) -> str:
     """`base` blended `amount` (0..1) of the way toward `other`, as a
@@ -169,7 +167,6 @@ def accent_gradient(x1=0, y1=0, x2=0, y2=1, hover=False):
 
 
 ACCENT_GRADIENT = accent_gradient()
-ACCENT_GRADIENT_HOVER = accent_gradient(hover=True)
 
 # The quiet half of the accent language: the reference's CONTINUE
 # WATCHING chip is *not* a bright accent pill with dark ink on it - it
@@ -287,7 +284,6 @@ def glass_fill(top=SURFACE_SHEEN, body=SURFACE, foot=None):
 PANEL_FILL = glass_fill()
 
 FONT_FAMILY = "Segoe UI"
-FONT_FAMILY_EMOJI = "Segoe UI Emoji"
 # Sidebar nav list. Bahnschrift is the DIN-derived technical face that
 # ships with Windows 10/11 - geometric and a little industrial, which
 # suits the app's "atomic" styling better than the very condensed,

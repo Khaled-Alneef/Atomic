@@ -56,7 +56,6 @@ BASE_SCHEDULE_COVER = (96, 130)
 # How much of the extra width goes into the card. 0.35 is what puts a
 # 2048-wide screen at 1.06 and a 3840-wide one at 1.35 - see the table
 # in the module docstring.
-SCALE_SHARE = 0.35
 SCALE_MAX = 1.35
 
 # **How much bigger Home's own cards are than every other page's** - the

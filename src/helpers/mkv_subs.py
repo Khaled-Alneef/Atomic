@@ -48,7 +48,6 @@ _BLOCK = 0xA1
 _BLOCK_DURATION = 0x9B
 
 # The containers this walks into rather than skipping over.
-_MASTERS = {_SEGMENT, _INFO, _TRACKS, _TRACK_ENTRY, _CLUSTER, _BLOCK_GROUP}
 
 _SUBTITLE_TRACK = 0x11
 

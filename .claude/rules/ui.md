@@ -232,3 +232,111 @@ the tick's fill when the box is on; the box itself stays the platform's
 white square, which on this ground is the brightest thing on the page.
 The owner asked for the theme colour and that property does not give it -
 the control has to be taken out of the paint and drawn.
+
+## The reader draws a page exactly as its site does (5 September 2026)
+
+His ask: *"3asq manga page size and sharpness: make it like the source
+site exactly on size and quality, also the other sites like TeamX and
+others"*. Measured on each of his hosts, reader page plus stylesheets
+plus one chapter's images, and the live 3asq page in a 1638px viewport
+(1327 of 1638 for a 1327px scan): **every site draws a page at its own
+width in CSS px, capped to the column** - Madara's `.reading-content img
+{max-width:100%}`, olympustaff's natural `.manga-chapter-img`, Lava's
+`.reader-area{max-width:800px} img{width:100%}` on 800px pages. app.js
+`targetFor` is now exactly `min(naturalWidth, column)` and `sizePage`
+draws each page at its own width; the medium floors (manga 1100, strips
+762) that made the app differ are gone - an 829px 3asq chapter drew at
+1100, a 1.33x enlargement the site never makes, and that enlargement
+was the "sharpness". His 4 September ask to enlarge narrow scans is
+superseded by this one and the code says so. `askForExact` still asks
+the proxy for the device pixels once (LANCZOS + unsharp, measured 13.53
+against the browser stretch's 10.18), so the app is the site's size and
+at least its sharpness. The Qt fallback reader follows the same rule in
+device pixels (`_on_page_width`). Remember his primary panel is
+2560x1440 at 125% (2048x1152 logical - `QScreen.geometry()` is
+logical), which is why his reader log says `column=1976` at `dpr=1.25`.
+
+## A programmatic track pick must not open the tracks panel (5 September 2026)
+
+`_pick_track` fell back to `_open_tracks_panel(rebuild=True)` whenever
+`_sync_track_rows` answered False - which it also does for "no tracks
+panel is open" - and `_new_panel(rebuild=True)` creates one. Every
+automatic pick (`_apply_audio_default`, `_apply_remembered_track`,
+`_auto_select_arabic_track`) therefore opened the Audio and Subtitle
+Tracks panel, and a muxed pick from the Subtitles panel replaced that
+panel with it. Reproduced offscreen with the real unbound methods on a
+stub page (`tracks_panel_harness.py`); guarded on an open tracks panel,
+all five cases leave the panels as they were and the open-panel control
+still repaints in place.
+
+## Two page sizes in one chapter were the cover shrinker, not the reader (5 September 2026)
+
+His picture of Kingdom 883: one page a third narrower than the next.
+Measured: 3asq serves every single page of 883 at 1326x1920 and 884 at
+1306x1920 (and the same bytes to the app's request, a browser's, and
+one with no Referer); his image cache held 269 chapter pages at
+816-829x1200, 883's pages 3-10 among them, written in one burst two
+minutes before pages 2 and 11 arrived at full size. The writer is
+`helpers/images.shrink_existing`, the launch-time pass that re-encodes
+any cache file over 300KB to the *cover* bounds (PORTRAIT_MAX_H 1200,
+LANDSCAPE_MAX_W 2560 - the 2760x1917 spread was on disk at 2560x1778,
+to the pixel). It had already destroyed the Qt reader's pages once (the
+note above PAGES_DIR) and was moved off them; the web proxy's `web_`
+files stayed in its path. The old chapter-wide width stretched shrunk
+pages back up, softly, which hid it; drawing each page at its own file's
+size showed it.
+
+Three fixes: the pass skips `web_` files; the image route re-fetches a
+cached page once when the reader asks for more pixels than the file
+has (backend.fetch_image(refresh=True)) and replaces the shrunk file
+with the host's original - seven such lines on the frozen build as 883
+was read; and because a page already decoded from a shrunk file keeps
+its pinned width until the chapter is reopened, a one-off launch pass
+(backend.heal_shrunk_pages) deletes every `web_` file that carries the
+shrinker's exact signature - portrait at 1200 tall or landscape at 2560
+wide, over 200KB - and marks the cache so it never runs twice. Harnessed:
+a planted 816px page came back 1306px on the first exact request and
+was not re-asked; the pass left a 1326px `web_` page alone and shrank a
+cover to 829px; the heal removed the two signature files and kept the
+real page, a small cover and a Qt cover.
+
+## Wheel, touchpad and the reader, measured from the screen (5 September 2026)
+
+His asks: touchpad two-finger scrolling stutters on Watch and Read while
+cards load (laptop), and "make the scrolling in the reader smooth exactly
+like the scrolling in movies page". Measured with `.claude/skills/test/
+scrollmeasure.py` (sampler.py at 240Hz over a band of the window, the
+band's vertical shift per distinct frame) on the frozen build:
+
+    Movies, 5 notches   130 frames, steps 1-27px (median 4), 0 dead
+    reader, 5 notches   5 frames, 125px each - one jump per notch
+
+The page's own line says the rest: `web page: what=glide, frames=33,
+ms=133, gapMax=10` per notch on Movies, nothing in the reader, because
+app.js's wheel glide returned early for the reader on a note that its
+scrolling was "already smooth" - with Chromium's wheel animation off
+(webview2_host._BROWSER_ARGS) the browser's own is one 100px jump. The
+exclusion is gone; the reader logs the same 33-frame glide now (73
+frames for 3 notches, sampled).
+
+**The touchpad tell is cadence as well as size.** A precision touchpad
+streams wheel events at 60-120Hz, and a flick's deltas pass NOTCH_MIN_PX
+(50), so the size test alone handed every larger delta of a flick to the
+130ms glide, re-aimed a few milliseconds apart on the main thread while
+pictures decoded. An event under 40ms after a finger event is a finger
+now (FINGER_GAP_MS); a stream of 40 events at 12ms measured 40 native
+frames of 31px and no glide line. `sweepLazy` reports itself when it
+costs over 8ms (`lazy sweep slow`), so his laptop can say what this
+machine cannot reproduce.
+
+Three rig traps paid for on the way, all now in rig.py: SendInput's
+wheel goes to the keyboard-focus window and dies in the Qt host once
+focus has left a page - post WM_MOUSEWHEEL to the window under the
+pointer instead (`wheelto`); the reader's back chevron is under a bar
+that hides, so a click there without a hover lands on the page and the
+reader stays open (which is how a "throttled after the reader" theory
+was born and then killed - measure which document received the event:
+the page logs `route=`); and `Stop-Process -Name Atomic` leaves a
+source-run `python.exe` alive with its window, so the rig drives the
+old instance - stop by command line, and read `src/data/atomic.log`,
+which is where a source run logs.

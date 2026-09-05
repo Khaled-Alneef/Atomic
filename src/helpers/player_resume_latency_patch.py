@@ -67,6 +67,20 @@ SEAT_GIVE_UP_S = 180.0
 SEAT_WATCHDOG_S = 12.0
 
 
+def _log(message):
+    """Say what the seat did, on his machine, in his log.
+
+    Every decision in this module used to be silent except the watchdog,
+    so "it started the whole ep from the beginning" arrived with no way
+    to tell which of four paths had been taken - see
+    .claude/rules/testing.md, "let the log find the next bug"."""
+    try:
+        from . import logs
+        logs.info(message)
+    except Exception:
+        pass
+
+
 def _patch(module):
     key = ("resume-latency", id(module))
     if key in _PATCHED:
@@ -115,11 +129,36 @@ def _patch(module):
             return True
         try:
             if getattr(torrent, "start_offset", None) is None:
-                # The Cues have not been read yet, so the seat is not a
-                # byte yet. arm_start_band owns its own retry; this only
-                # asks again next tick.
-                return False
+                # **"Not yet" or "never"?** The Cues not read yet is
+                # "not yet": arm_start_band owns its own retry and this
+                # asks again next tick. A container the engine cannot
+                # index at all - an .mp4, which is what his film sources
+                # are - is "never", and waiting on it is the owner's
+                # "it starts from the beginning": the poll sat out its
+                # whole 180s for a band that could not be armed while
+                # the film played from 0:00. There is nothing to wait
+                # for, so the seek goes out blind and the engine
+                # follows the demuxer's reads (_serve refocuses on the
+                # byte mpv asks for) - measured on his Obsession .mp4
+                # over the engine's own server, a ranged read at his
+                # seat answered in 15.5s cold and 5.8s once the swarm
+                # was up. Slower than an indexed seat, never instead of
+                # it.
+                return _seat_blind(self, stream)
             return not torrent._start_pieces()
+        except Exception:
+            return False
+
+    def _seat_blind(self, stream):
+        """True when this stream's seat can never be resolved to a byte
+        (see torrent_engine.seat_resolvable), so a seek must go out
+        without a band."""
+        info_hash = str((stream or {}).get("info_hash") or "").strip().lower()
+        if not info_hash:
+            return False
+        try:
+            from helpers import torrent_engine
+            return torrent_engine.seat_resolvable(info_hash) is False
         except Exception:
             return False
 
@@ -246,6 +285,45 @@ def _patch(module):
             except Exception:
                 pass
             _load_from_head(self, stream, resume_at)
+            _arm_head_watchdog(self, resume_at)
+
+        timer.timeout.connect(bite)
+        self._atomic_seat_watchdog = timer
+        timer.start()
+
+    def _arm_head_watchdog(self, resume_at):
+        """After the seat watchdog has reopened a source from the head,
+        the source gets SEAT_WATCHDOG_S more to draw anything at all;
+        then it is a dead source and the walk moves on.
+
+        **The owner's 68.8s start, 5 September 2026.** His log: a race
+        of three lanes died at 12s; the walk then landed on a row with a
+        direct url, which opened "proven" at the seat and drew nothing;
+        the watchdog above reopened it from the head at 12s; and the
+        player's own 45s seat give-up was what finally called it stalled
+        and moved to the next source - which then played in 8s. A source
+        that produces no frame from the head either is not a seat
+        problem, it is a dead source, and the walk already knows what to
+        do with one of those."""
+        run = self._run
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(int(SEAT_WATCHDOG_S * 1000))
+
+        def bite():
+            if getattr(self, "_closing", False) or self._run != run:
+                return
+            if not getattr(self, "_awaiting_first_frame", True):
+                return
+            _stop_poll(self)
+            _log(f"seat: no picture from the head either in "
+                 f"{SEAT_WATCHDOG_S:.0f}s; giving up on this source")
+            try:
+                if not self._try_next_source(self._stream_index,
+                                             resume_at=resume_at):
+                    self._finish_working("No Source Would Start")
+            except Exception:
+                pass
 
         timer.timeout.connect(bite)
         self._atomic_seat_watchdog = timer
@@ -262,6 +340,7 @@ def _patch(module):
 
     def _load_from_head(self, stream, resume_at):
         """The slow path, taken deliberately: open unseated and poll."""
+        _cancel_watchdog(self)
         try:
             seat = self._prime_seat(resume_at)[0]
         except Exception:
@@ -325,14 +404,42 @@ def _patch(module):
                 position = float(getattr(self, "_position", 0.0) or 0.0)
                 if position >= target - module.RESUME_LANDED_TOLERANCE_S:
                     _stop_poll(self)      # playback got there on its own
+                    _log(f"seat: playback reached {target:.1f}s on its own")
                     return
                 if time.monotonic() > current["deadline"]:
                     _stop_poll(self)
+                    _log(f"seat: gave up on {target:.1f}s after "
+                         f"{SEAT_GIVE_UP_S:.0f}s - its data never landed")
                     return
                 if not _seat_data_ready(self, current["stream"], target):
+                    # **Ask the engine again, every couple of seconds,
+                    # while the seat is not a byte yet.** Its own retry
+                    # used to stop after 8s and nothing re-asked: on a
+                    # 16MB-piece release the Cues landed 20-30s after the
+                    # url, so the band was never armed and this poll sat
+                    # out its 180s - the owner's "do not resume" (5
+                    # September 2026). arm_start_band runs one retry per
+                    # torrent at a time, so asking is cheap.
+                    now = time.monotonic()
+                    if now - current.get("rearmed_at", 0.0) >= 2.0:
+                        current["rearmed_at"] = now
+                        info_hash = str(current["stream"].get("info_hash")
+                                        or "").strip().lower()
+                        if info_hash:
+                            try:
+                                from helpers import torrent_engine
+                                torrent_engine.arm_start_band(info_hash)
+                            except Exception:
+                                pass
                     return
 
                 _stop_poll(self)
+                if _seat_blind(self, current["stream"]):
+                    _log(f"seat: no index the engine can read in this "
+                         f"container; seeking blind to {target:.1f}s")
+                else:
+                    _log(f"seat: data for {target:.1f}s has landed; "
+                         f"skipping to it")
                 # From here it is the ordinary skip path, and it owns the
                 # promise/watchdog bookkeeping (_seat_timer, _resume_target)
                 # exactly as a manual jump does.
@@ -404,9 +511,21 @@ def _patch(module):
         # file opens from the head and the seat is applied when it lands.
         if _seat_reachable_now(self, stream, seat):
             _stop_poll(self)
+            _log(f"seat: opening at {seat:.1f}s - the bytes there are proven")
             result = old_load(self, stream, resume_at)
             _arm_seat_watchdog(self, stream, resume_at)
             return result
+
+        # **A watchdog armed by the load before this one is cancelled
+        # here too.** It only used to be cancelled on the fast path, so a
+        # source switch taken while one was still counting left a
+        # single-shot timer holding the *previous* stream: it bit twelve
+        # seconds later, saw `_awaiting_first_frame` still true (the new
+        # source was still connecting) and re-opened the release that had
+        # just been switched away from.
+        _cancel_watchdog(self)
+        _log(f"seat: opening from the head; {seat:.1f}s will be taken when "
+             f"its data lands")
 
         # `old_load` reads the seat back out of `_prime_seat` to decide
         # whether to open with mpv's blocking `start=`. Suppress that one

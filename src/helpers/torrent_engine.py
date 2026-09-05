@@ -31,10 +31,14 @@ Nothing here raises into the UI: every entry point returns None or an
 error string, and the player says so.
 """
 
+import bisect
 import os
 import re
+import select
 import shutil
+import socket
 import socketserver
+import struct
 import tempfile
 import threading
 import time
@@ -277,6 +281,59 @@ LISTEN_PORT = 47600
 # mpv wants the container header and the first frames; 12MB covers the
 # moov atom of a big mp4 and a comfortable read-ahead on an mkv.
 HEAD_BYTES = 12 * 1024 * 1024
+# **What the rest of the chosen file is set to while its first piece is
+# still missing** (`_Torrent.warming`): nothing, so every peer works on
+# the piece playback is blocked on.
+#
+# Measured 5 September 2026 on the owner's Jujutsu Kaisen S01E01, after
+# "the connecting to source takes a while then the buffering then it
+# goes to connecting to source again". The hand-picked `[Judas] ...
+# (Season 1)` batch (374 seeders, 8MB pieces) was prepared solo: 112
+# peers, 18MB/s, **153MB of the chosen file downloaded in 14 seconds, and
+# the first piece of it still not complete** - so `await_start` gave a
+# healthy swarm the `no-peers` verdict at its hard cap, and the player
+# moved on ("connecting again") to whatever won the race behind it. With
+# the rest of the file merely *wanted* (priority 1), the two head pieces
+# at 7 are spread over a handful of peers and a hundred others fill the
+# file from all over; libtorrent hands each block of a piece to one peer,
+# so the head lands at the pace of the slowest of those few.
+#
+# Time to the first piece, cold, alternated on the same swarm:
+#
+#     rest at 1 (this used to be it):   12.6s   19.0s   21.1s   20.0s
+#     rest at 0 while warming:           7.5s    7.5s    6.5s
+#     ... and with redundant connections kept (see _make_session):
+#                                        6.0s    5.0s
+#
+# Only while warming. After the first piece the rest goes back to 1, for
+# the 25 August reason in _apply_windows (a peer holding nothing wanted
+# is dropped), and that drop is why `close_redundant_connections` is off
+# in _make_session: at 0 alone one run of three reached the first piece
+# with **0 peers** and spent ten seconds rebuilding the swarm.
+WARMING_FILL_PRIORITY = 0
+# **...and after it as well.** The rest of the file outside the reader's
+# window is not wanted either - this supersedes the 25 August 2026 "rest
+# stays wanted at priority 1" in _apply_windows, whose reason (a peer
+# holding nothing wanted is dropped, and a 701-seeder swarm collapsed to
+# 2 peers) is now answered by close_redundant_connections being off.
+#
+# Measured 5 September 2026 on the owner's Obsession .mp4 (5.3GB, 4MB
+# pieces), a ranged read at a fresh offset held for 20s, alternated on
+# the same swarm - first the frozen build's own picture: 212 peers,
+# 26.45MB/s downloading, and mpv "stream starved" at the seat with a
+# 0.0s buffer on a 24.79Mbps film. Then the split:
+#
+#                        first byte    served to reader   downloaded
+#     rest at 1:          9.8s 10.4s    2.59  2.76 MB/s   12.0 17.5 MB/s
+#     rest at 0:          5.9s  3.6s    8.07 11.81 MB/s   ~14  15.8 MB/s
+#
+# With the rest at 1 the window's few pieces were requested from a few
+# peers and a hundred others filled the file from all over, so the
+# reader got a fifth of the bandwidth - under the film's own bitrate.
+# At 0 every peer works on the window; peers held (43-171) because they
+# are no longer dropped for being uninteresting, and once the window is
+# on disk the swarm idles for a tick until the reader advances it.
+STREAM_FILL_PRIORITY = 0
 # Kept ready ahead of wherever playback currently is.
 READAHEAD_BYTES = 24 * 1024 * 1024
 
@@ -323,6 +380,10 @@ STREAM_REFOCUS_BYTES = 8 * 1024 * 1024
 # progress at all (see _serve). A minute of frozen picture is already
 # far too long; the point of the number is that it is finite.
 STREAM_STALL_S = 60.0
+# How long one read may wait for the piece it is blocked on before the
+# response is ended and the client reopens - _Torrent.wait_for's own
+# default, now waited in slices so the client hanging up is noticed.
+PIECE_WAIT_S = 45.0
 
 # The window that belongs to nobody in particular - what add(),
 # set_start_seconds() and a bare focus() move. Every live HTTP read
@@ -463,6 +524,18 @@ def _make_session():
         "seed_time_limit": 0,
         "share_ratio_limit": 1,
         "strict_end_game_mode": False,
+        # **A peer that holds nothing wanted right now is kept, not
+        # dropped.** Streaming wants a few pieces at a time and moves
+        # on; libtorrent's default closes every connection that is not
+        # interesting *and* not interested, which for a narrow window is
+        # most of the swarm - the 25 August collapse of a 701-seeder
+        # release to 2 peers, and, measured 5 September 2026 with the
+        # warming window at WARMING_FILL_PRIORITY 0, a first piece
+        # reached with 0 peers and ten seconds of rebuilding. With the
+        # setting off the same runs held 69 and 58 peers at that moment
+        # and were at 16-20MB/s ten seconds later. connections_limit
+        # above still bounds the total.
+        "close_redundant_connections": False,
         "user_agent": "Atomic/1.0 libtorrent/2.1",
     }
     # Built from last run's saved state so the DHT table starts warm -
@@ -856,6 +929,13 @@ class _Torrent:
         # (_serve); the band anchors to the first *missing* piece, so a
         # narrowed window can never go empty and idle the swarm.
         self.warming = True
+        # The container's seek index, once parsed: for an .mp4 the
+        # first video track's sample tables (see _mp4_parse_moov), keyed
+        # by where the moov was found so a re-added torrent cannot reuse
+        # another file's. Parsing a 6.78MB moov is tens of milliseconds
+        # and the seat poll asks every couple of seconds.
+        self._index_tables = None
+        self._index_key = None
 
     # -- geometry -----------------------------------------------------
     @property
@@ -898,6 +978,79 @@ class _Torrent:
             return [p for p in range(first, last + 1) if not self.have(p)]
         except Exception:
             return []
+
+    def container_kind(self):
+        """"mkv", "mp4", "other", or None while the file's first bytes
+        are not on disk to tell. Off the first 16 bytes: an EBML header
+        for Matroska/WebM, an ISO-BMFF atom type at bytes 4-8 for MP4
+        (`ftyp` on every real file; the other top-level types are
+        accepted so a file that skips ftyp is not misread as "other")."""
+        try:
+            head = self.read_present(0, 16)
+        except Exception:
+            head = None
+        if not head or len(head) < 8:
+            return None
+        if head[:4] == b"\x1a\x45\xdf\xa3":
+            return "mkv"
+        if head[4:8] in _MP4_TOP_ATOMS:
+            return "mp4"
+        return "other"
+
+    def _moov_span(self):
+        """(offset, length) of an .mp4's moov atom, header included; None
+        while the bytes needed to locate it are not on disk; False when
+        this file has no reachable moov (see _mp4_find_moov)."""
+        try:
+            found = _mp4_find_moov(self.read_present, self.file_size())
+        except Exception:
+            return None
+        if not found:
+            return found
+        body_at, body_size = found
+        header = 16 if body_at >= 16 else 8
+        return body_at - header, body_size + header
+
+    def _index_pieces(self, critical: bool = False):
+        """The pieces of the container's seek index still missing.
+
+        **Matroska's index is in the tail; an MP4's is wherever its moov
+        is, and for the owner's film releases that is a 6.78MB moov at
+        the very end of a 5.3GB file** (measured 5 September 2026 on his
+        Obsession .mp4: `moov` at 5,314,433,909, 6,784,467 bytes). The
+        tail band alone (TAIL_BYTES, 4MB) never covered it, so the
+        demuxer's open blocked on pieces nothing had prioritised, and the
+        seat could never be resolved because the tables it needs were not
+        on disk. Once the head has landed and the moov is located, the
+        whole of it is the index band - `critical` or not, because an
+        MP4 demuxer reads all of it before frame one - and a moov at the
+        head of a faststart file is inside the head band anyway.
+
+        Until the head is on disk the tail is the best guess, exactly as
+        before; `critical` then means the last INDEX_CRITICAL_BYTES, as
+        await_start has always asked."""
+        try:
+            if self.container_kind() == "mp4":
+                span = self._moov_span()
+                if span:
+                    offset, length = span
+                    length = min(length, MOOV_INDEX_CAP)
+                    first = self.piece_at(offset)
+                    last = self.piece_at(offset + length - 1)
+                    return [p for p in range(first, last + 1)
+                            if not self.have(p)]
+        except Exception:
+            pass
+        return self._tail_pieces(INDEX_CRITICAL_BYTES if critical else None)
+
+    def _index_reads_forward(self) -> bool:
+        """Which way the demuxer walks the index band: an MP4 reads its
+        moov front to back, Matroska's Cues are asked for from the end
+        of the file (see the deadline order in _apply_windows)."""
+        try:
+            return self.container_kind() == "mp4" and bool(self._moov_span())
+        except Exception:
+            return False
 
     def _start_pieces(self):
         """The pieces holding the resume band, minus whatever is already
@@ -1020,13 +1173,57 @@ class _Torrent:
         except Exception:
             return None
 
+    def seat_resolvable(self):
+        """Whether resolve_start can ever answer for this file: True for
+        a Matroska file (the Cues map time to bytes), False for anything
+        else, None while the head is not on disk to tell.
+
+        **This is the owner's "when I stop at some point in the movie
+        and come watch it again it starts from the beginning, not like
+        the anime and series" (5 September 2026).** Anime and series
+        releases are .mkv; his film sources were .mp4 (`ftyp` then a
+        5.3GB `mdat`, the `moov` at the tail). resolve_start answers
+        None for those, correctly - but the player's seat poll read
+        None as "not yet" and waited its whole 180s for a band that
+        was never going to be armed, while the film played from 0:00.
+        Telling "never" from "not yet" is what lets the poll seek
+        without a band instead (player_resume_latency_patch).
+
+        **And True for an .mp4 whose moov can be located, from 5
+        September 2026** - the "follow-up that would make it instant"
+        the note above ended on. _mp4_find_moov walks the top-level
+        atoms from the head (ftyp, then an mdat whose 64-bit size says
+        where the tail moov starts) and answers None while the bytes to
+        tell are not on disk, which is the same "not yet" the Cues have:
+        the seat poll keeps asking and the band is armed when the moov
+        lands. False only for a container with no index path at all - a
+        fragmented MP4, an .avi, a .ts."""
+        kind = self.container_kind()
+        if kind is None:
+            return None
+        if kind == "mkv":
+            return True
+        if kind == "mp4":
+            span = self._moov_span()
+            if span is None:
+                return None
+            return bool(span)
+        return False
+
     def resolve_start(self, seconds):
         """Turn a resume *time* into the byte the demuxer will read.
 
-        Answers None unless it is certain: not Matroska, no Cues, or the
-        bytes holding them not on disk yet all mean "prime nothing",
-        because a wrong offset costs bandwidth the first frame needs and
-        buys nothing (see the measurement above _matroska_layout)."""
+        Answers None unless it is certain: no index this code can read,
+        or the bytes holding it not on disk yet, both mean "prime
+        nothing", because a wrong offset costs bandwidth the first frame
+        needs and buys nothing (see the measurement above
+        _matroska_layout). Matroska through the Cues; MP4 through the
+        moov's sample tables (_mp4_seat_for) - measured against ffprobe
+        on a 217MB test file with the moov at either end, the byte for
+        1s, 5s, 8.5s, 30s and 61.7s is the keyframe's own `pos` every
+        time (499, 499, 499, 11075272, 27139413)."""
+        if self.container_kind() == "mp4":
+            return self._resolve_mp4_start(seconds)
         head = self.read_present(0, 256 * 1024)
         if not head:
             return None
@@ -1051,6 +1248,50 @@ class _Torrent:
         if not cues:
             return None
         return _cue_byte_for(head, cues, segment_start, scale, seconds)
+
+    def _resolve_mp4_start(self, seconds):
+        """The MP4 half of resolve_start: the byte of the last sync
+        sample at or before `seconds` on the first video track, or None
+        while the moov is not on disk or cannot be read."""
+        span = self._moov_span()
+        if not span:
+            return None
+        try:
+            body_at, body_size = _mp4_find_moov(self.read_present,
+                                                self.file_size())
+        except Exception:
+            return None
+        key = (body_at, body_size)
+        tables = self._index_tables if self._index_key == key else None
+        if tables is None:
+            moov = self.read_present(body_at, body_size)
+            if not moov:
+                return None
+            tables = _mp4_parse_moov(moov)
+            if not tables:
+                return None
+            self._index_tables, self._index_key = tables, key
+        return _mp4_seat_for(tables, seconds)
+
+    def seat_on_disk(self, seconds):
+        """Whether the bytes a seek to `seconds` will read are already
+        here: True/False when the index can say, None when it cannot
+        (no index on disk yet, a container without one). Two pieces,
+        not one - a demuxer needs a run past the offset, the same test
+        player_resume_latency_patch applies before opening at a seat."""
+        try:
+            offset = self.resolve_start(seconds)
+        except Exception:
+            offset = None
+        if offset is None:
+            return None
+        try:
+            first = self.piece_at(int(offset))
+            last = self.piece_at(min(int(offset) + self.piece_length(),
+                                     max(self.file_size() - 1, 0)))
+            return all(self.have(p) for p in range(first, last + 1))
+        except Exception:
+            return None
 
     def set_start_seconds(self, seconds):
         """Say where playback will begin, in seconds into the file.
@@ -1343,8 +1584,12 @@ class _Torrent:
             # handed over, so the remainder is readahead for a seek
             # nobody has asked for yet - it stays wanted (4, above the
             # ordinary fill) and stops competing with the picture.
-            critical = set(self._tail_pieces(INDEX_CRITICAL_BYTES))
-            for piece in self._tail_pieces():
+            # **The index band is the container's, not always the
+            # tail's** - see _index_pieces for the 6.78MB moov at the end
+            # of his film releases that the 4MB tail never covered.
+            critical = set(self._index_pieces(critical=True))
+            tail = self._index_pieces()
+            for piece in tail:
                 if 0 <= piece < total_pieces:
                     priorities[piece] = (7 if piece in critical
                                          else max(priorities[piece], 4))
@@ -1393,10 +1638,20 @@ class _Torrent:
             # 28-episode pack does not drag the other 27 down with it,
             # and this must not undo that: the loop is bounded to this
             # file's own pieces.
+            # **Except that it is 0 now, warming or not** - see
+            # STREAM_FILL_PRIORITY for the seek measurement that ended the
+            # priority-1 fill, and WARMING_FILL_PRIORITY for the first-piece
+            # one. The paragraph above is kept as the record of why 1 was
+            # tried. Measured 5 September 2026 (see
+            # WARMING_FILL_PRIORITY): with the rest at 1 a 112-peer swarm
+            # put 153MB of the file on disk in 14s around a first piece
+            # that never completed. Until that piece exists, wanting the
+            # rest of the file costs the one thing playback is blocked on.
+            fill = WARMING_FILL_PRIORITY if self.warming else STREAM_FILL_PRIORITY
             for piece in range(max(0, file_first),
                                min(total_pieces - 1, file_last) + 1):
                 if priorities[piece] == 0:
-                    priorities[piece] = 1
+                    priorities[piece] = fill
             handle.prioritize_pieces(priorities)
 
             # **Clear the old deadlines before writing the new ones -
@@ -1469,7 +1724,22 @@ class _Torrent:
             # a byte at all (start_offset stayed None) and the seat band
             # was never armed. Reversed, the piece the check is waiting
             # for is the first one asked for.
-            for index, piece in enumerate(reversed(tail)):
+            #
+            # **`tail` was never bound here, from the day this was
+            # written until 5 September 2026.** The loop below read a
+            # name no line assigned, the NameError landed in the
+            # function's outer `except Exception: pass`, and everything
+            # after it - these index deadlines and the resume band's
+            # below - was silently skipped on every focus(). Both bands
+            # still arrived, on priority alone; what the measurement
+            # above records as fixed had in fact never run. Found by
+            # reading the function's names with `ast` while wiring the
+            # MP4 index in; `tail` is now the index band computed above.
+            # **Forward for an MP4**, whose demuxer walks the moov front
+            # to back, and back to front for Matroska as measured.
+            ordered = (list(tail) if self._index_reads_forward()
+                       else list(reversed(tail)))
+            for index, piece in enumerate(ordered):
                 try:
                     handle.set_piece_deadline(piece, 300 + index * 120)
                 except Exception:
@@ -1707,6 +1977,316 @@ def _cue_byte_for(head: bytes, cues: bytes, segment_start: int, scale: int,
             if cue_time * scale <= target_ns:
                 best = max(best or 0, segment_start + cluster)
         return best
+    except Exception:
+        return None
+
+
+# ------------------------------------------------- reading the moov
+#
+# **The MP4 counterpart of the Cues, written 5 September 2026** - the
+# "follow-up that would make it instant" from the day before, when the
+# seat on his film releases was found to be seeked blind because
+# resolve_start could only read Matroska. An MP4's index is its `moov`
+# atom: per track, the sample tables that map a time to a sample
+# (stts), a sample to its sync frame (stss), a sample to its chunk
+# (stsc), a chunk to a byte (stco/co64) and a sample to its size (stsz).
+# The demuxer lands on the last sync sample at or before the target,
+# and that sample's byte is exactly what mpv's first read after the seek
+# asks for - so it is the byte to prime, a fact rather than a guess, the
+# same way the Cues are.
+#
+# Where the moov sits is the whole difficulty. A faststart file keeps it
+# at the head; his releases keep it at the tail, behind a 5.3GB mdat -
+# measured on his Obsession .mp4: `moov` at 5,314,433,909, 6,784,467
+# bytes (one video, one E-AC3 and eight mov_text tracks; the video
+# track's stsz/stco/stts are most of it). Walking the top-level atoms
+# from byte 0 finds it either way: ftyp, then an mdat whose 64-bit
+# "largesize" says where the next atom starts. That walk needs sixteen
+# bytes at each atom boundary and nothing else, so it can be answered
+# off the head alone, and `_index_pieces` then wants the whole moov at
+# the index's priority.
+#
+# Validated against ffprobe's own packet positions on a 217MB test file
+# in both layouts: the byte for 1s, 5s, 8.5s, 30s and 61.7s equals the
+# keyframe's `pos` in every case (499, 499, 499, 11075272, 27139413 on
+# the tail-moov copy; 266353 higher on the faststart copy, which is the
+# moov now sitting in front of the mdat). Parsing that moov is 1.5ms;
+# a film's is tens of milliseconds and is cached on the torrent.
+#
+# Everything here answers None (or False) rather than raising: a
+# fragmented MP4 (moof), a broken size field, a track without the four
+# tables - all of them mean "prime nothing", as the Cues do.
+
+_MP4_TOP_ATOMS = (b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide",
+                  b"uuid", b"meta", b"sidx", b"styp", b"pdin", b"junk",
+                  b"pnot", b"moof")
+# A moov past this is a broken size field, not a film's index: a 2h
+# 1080p film with ten tracks measured 6.78MB. And the most of it that
+# is put on the index band's priority - the rest of a pathological one
+# would be fetched when the demuxer asks, like any other read.
+MOOV_CAP = 64 * 1024 * 1024
+MOOV_INDEX_CAP = 32 * 1024 * 1024
+# Top-level atoms walked before giving up on finding a moov. A real file
+# is a handful; a fragmented one is stopped at its first moof anyway.
+_MP4_MAX_TOP_ATOMS = 32
+
+
+def _mp4_atom_header(data, pos, file_size):
+    """(size, type, header_len) of the atom whose header `data` holds
+    (up to 16 bytes from `pos`). Raises ValueError on garbage."""
+    if len(data) < 8:
+        raise ValueError("short atom header")
+    size, kind = struct.unpack_from(">I4s", data, 0)
+    header = 8
+    if size == 1:
+        if len(data) < 16:
+            raise ValueError("short largesize header")
+        size = struct.unpack_from(">Q", data, 8)[0]
+        header = 16
+    elif size == 0:
+        size = file_size - pos              # "to the end of the file"
+    if size < header:
+        raise ValueError("atom size below its header")
+    return size, kind, header
+
+
+def _mp4_find_moov(read, file_size):
+    """(moov_body_offset, moov_body_size) - the atom's contents, header
+    excluded, so `read(offset, size)` is exactly what _mp4_parse_moov
+    wants. None when a header needed to tell is not on disk yet; False
+    when the walk proves there is no moov to find (not an ISO-BMFF
+    file, fragmented, or walked off the end).
+
+    `read(offset, length)` is _Torrent.read_present: bytes when every
+    piece under them is on disk, None otherwise - which is what makes
+    the None/False split honest."""
+    pos = 0
+    for _ in range(_MP4_MAX_TOP_ATOMS):
+        if pos >= file_size:
+            return False
+        head = read(pos, 16)
+        if head is None:
+            return None
+        try:
+            size, kind, header = _mp4_atom_header(head, pos, file_size)
+        except ValueError:
+            return False
+        if pos == 0 and kind not in _MP4_TOP_ATOMS:
+            return False                    # not an ISO-BMFF file at all
+        if kind == b"moov":
+            body = size - header
+            if body <= 0 or body > MOOV_CAP:
+                return False
+            return pos + header, body
+        if kind == b"moof":
+            return False                    # fragmented: no moov index
+        pos += size
+    return False
+
+
+def _mp4_children(data, pos, end):
+    """Yield (type, body_start, body_end) for the atoms in [pos, end)."""
+    while pos + 8 <= end:
+        size, kind = struct.unpack_from(">I4s", data, pos)
+        header = 8
+        if size == 1:
+            if pos + 16 > end:
+                return
+            size = struct.unpack_from(">Q", data, pos + 8)[0]
+            header = 16
+        elif size == 0:
+            size = end - pos
+        if size < header:
+            return
+        stop = min(pos + size, end)
+        yield kind, pos + header, stop
+        pos = stop
+
+
+def _mp4_find(data, pos, end, kind):
+    for found, start, stop in _mp4_children(data, pos, end):
+        if found == kind:
+            return start, stop
+    return None
+
+
+def _mp4_parse_track(moov, trak_start, trak_end, movie_timescale):
+    """The seek tables of one trak, or None unless it is a video track
+    with samples: timescale, edit_offset (media ticks to add to a
+    presentation time), dts (per sample, cumulative), sync (sorted
+    0-based sync samples, or None for "every sample"), sizes (a list, or
+    one constant), stsc rows (first_chunk0, per_chunk), chunk_offsets."""
+    mdia = _mp4_find(moov, trak_start, trak_end, b"mdia")
+    if not mdia:
+        return None
+    hdlr = _mp4_find(moov, mdia[0], mdia[1], b"hdlr")
+    if not hdlr or moov[hdlr[0] + 8:hdlr[0] + 12] != b"vide":
+        return None
+    mdhd = _mp4_find(moov, mdia[0], mdia[1], b"mdhd")
+    if not mdhd:
+        return None
+    version = moov[mdhd[0]]
+    timescale = struct.unpack_from(
+        ">I", moov, mdhd[0] + (20 if version == 1 else 12))[0]
+    if not timescale:
+        return None
+    minf = _mp4_find(moov, mdia[0], mdia[1], b"minf")
+    stbl = minf and _mp4_find(moov, minf[0], minf[1], b"stbl")
+    if not stbl:
+        return None
+
+    # The edit list: presentation 0 is media `media_time` of the first
+    # non-empty edit, and a leading empty edit delays the whole track.
+    edit_offset = 0
+    edts = _mp4_find(moov, trak_start, trak_end, b"edts")
+    elst = edts and _mp4_find(moov, edts[0], edts[1], b"elst")
+    if elst:
+        version = moov[elst[0]]
+        count = struct.unpack_from(">I", moov, elst[0] + 4)[0]
+        pos = elst[0] + 8
+        delay_movie = 0
+        for _ in range(count):
+            if version == 1:
+                seg_dur, media_time = struct.unpack_from(">Qq", moov, pos)
+                pos += 20
+            else:
+                seg_dur, media_time = struct.unpack_from(">Ii", moov, pos)
+                pos += 12
+            if media_time == -1:
+                delay_movie += seg_dur
+                continue
+            edit_offset = media_time - (
+                delay_movie * timescale // max(movie_timescale, 1))
+            break
+
+    def table(kind):
+        return _mp4_find(moov, stbl[0], stbl[1], kind)
+
+    stts, stsc = table(b"stts"), table(b"stsc")
+    stco = table(b"stco") or table(b"co64")
+    stsz = table(b"stsz") or table(b"stz2")
+    if not (stts and stsc and stco and stsz):
+        return None
+
+    # stts -> every sample's decode time, cumulative.
+    count = struct.unpack_from(">I", moov, stts[0] + 4)[0]
+    pairs = struct.unpack_from(">%dI" % (2 * count), moov, stts[0] + 8)
+    dts = []
+    tick = 0
+    for i in range(count):
+        run, delta = pairs[2 * i], pairs[2 * i + 1]
+        if delta:
+            dts.extend(range(tick, tick + run * delta, delta))
+        else:
+            dts.extend([tick] * run)
+        tick += run * delta
+    if not dts:
+        return None
+
+    # stss -> sorted 0-based sync samples; absent means every sample.
+    sync = None
+    stss = table(b"stss")
+    if stss:
+        count = struct.unpack_from(">I", moov, stss[0] + 4)[0]
+        sync = [s - 1 for s in struct.unpack_from(">%dI" % count, moov,
+                                                  stss[0] + 8)]
+
+    # stsz / stz2 -> sizes. The atom's type is the four bytes before its
+    # body (the size field is the four before those).
+    if moov[stsz[0] - 4:stsz[0]] == b"stsz":
+        default, count = struct.unpack_from(">II", moov, stsz[0] + 4)
+        sizes = default if default else list(
+            struct.unpack_from(">%dI" % count, moov, stsz[0] + 12))
+    else:
+        field, count = struct.unpack_from(">xxxBI", moov, stsz[0] + 4)
+        raw = moov[stsz[0] + 12:stsz[0] + 12 + (count * field + 7) // 8]
+        if field == 4:
+            sizes = []
+            for byte in raw:
+                sizes.append(byte >> 4)
+                sizes.append(byte & 15)
+            sizes = sizes[:count]
+        elif field == 8:
+            sizes = list(raw[:count])
+        else:
+            sizes = list(struct.unpack_from(">%dH" % count, raw, 0))
+
+    # stsc -> (first_chunk0, samples_per_chunk) runs.
+    count = struct.unpack_from(">I", moov, stsc[0] + 4)[0]
+    triples = struct.unpack_from(">%dI" % (3 * count), moov, stsc[0] + 8)
+    stsc_rows = [(triples[3 * i] - 1, triples[3 * i + 1])
+                 for i in range(count)]
+
+    # stco / co64 -> chunk offsets, absolute in the file.
+    count = struct.unpack_from(">I", moov, stco[0] + 4)[0]
+    if moov[stco[0] - 4:stco[0]] == b"co64":
+        offsets = list(struct.unpack_from(">%dQ" % count, moov, stco[0] + 8))
+    else:
+        offsets = list(struct.unpack_from(">%dI" % count, moov, stco[0] + 8))
+
+    return {"timescale": timescale, "edit_offset": edit_offset, "dts": dts,
+            "sync": sync, "sizes": sizes, "stsc": stsc_rows,
+            "chunk_offsets": offsets}
+
+
+def _mp4_parse_moov(moov):
+    """The first video track's tables, or None."""
+    try:
+        mvhd = _mp4_find(moov, 0, len(moov), b"mvhd")
+        movie_timescale = 1000
+        if mvhd:
+            version = moov[mvhd[0]]
+            movie_timescale = struct.unpack_from(
+                ">I", moov, mvhd[0] + (20 if version == 1 else 12))[0] or 1000
+        for kind, start, stop in _mp4_children(moov, 0, len(moov)):
+            if kind != b"trak":
+                continue
+            track = _mp4_parse_track(moov, start, stop, movie_timescale)
+            if track:
+                return track
+    except Exception:
+        return None
+    return None
+
+
+def _mp4_sample_offset(track, sample):
+    """Absolute byte of 0-based `sample`: its chunk's offset plus the
+    sizes of the samples before it in that chunk."""
+    rows = track["stsc"]
+    offsets = track["chunk_offsets"]
+    sizes = track["sizes"]
+    seen = 0
+    for i, (first_chunk, per_chunk) in enumerate(rows):
+        last_chunk = rows[i + 1][0] if i + 1 < len(rows) else len(offsets)
+        run = (last_chunk - first_chunk) * max(per_chunk, 1)
+        if sample < seen + run or i + 1 == len(rows):
+            within = sample - seen
+            chunk = first_chunk + within // max(per_chunk, 1)
+            first_in_chunk = sample - within % max(per_chunk, 1)
+            if chunk >= len(offsets):
+                return None
+            base = offsets[chunk]
+            if isinstance(sizes, int):
+                return base + sizes * (sample - first_in_chunk)
+            return base + sum(sizes[first_in_chunk:sample])
+        seen += run
+    return None
+
+
+def _mp4_seat_for(track, seconds):
+    """The byte a seek to `seconds` reads first - the last sync sample at
+    or before it, where the demuxer lands - or None."""
+    try:
+        media = int(float(seconds) * track["timescale"]) + track["edit_offset"]
+        dts = track["dts"]
+        index = bisect.bisect_right(dts, media) - 1
+        if index < 0:
+            index = 0
+        sync = track["sync"]
+        if sync:
+            k = bisect.bisect_right(sync, index) - 1
+            index = sync[max(k, 0)]
+        return _mp4_sample_offset(track, index)
     except Exception:
         return None
 
@@ -2058,16 +2638,6 @@ def _identify_episode_file(info, season, episode, title=None):
         if _names_episode(stem, season, episode):
             return index, "loose"
     return None, None
-
-
-def _episode_file_index(info, season, episode, title=None):
-    """The file that holds this episode, or None - see
-    `_identify_episode_file`, which is this plus how sure it is.
-
-    Deliberately no largest-file fallback: callers asking "does this
-    pack hold episode N" must get an honest no, not the biggest file
-    wearing N's number (see file_index_for)."""
-    return _identify_episode_file(info, season, episode, title)[0]
 
 
 def movie_file_index(info, title):
@@ -2873,16 +3443,31 @@ def stats(info_hash: str) -> dict:
         return {}
 
 
-def has_data(info_hash: str, wait: float = 20.0) -> bool:
-    """Whether the opening of the file is actually arriving.
+def payload_rate(info_hash: str) -> int:
+    """Bytes of *payload* a second this swarm is delivering right now -
+    libtorrent's own smoothed figure, protocol chatter excluded. 0 for a
+    torrent the engine does not hold. What streams.prepare_fastest judges
+    a race lane by (see RACE_SETTLE_S there)."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return 0
+    try:
+        return int(torrent.handle.status().download_payload_rate)
+    except Exception:
+        return 0
 
-    Peers alone are not proof - a swarm can connect and never unchoke -
-    so this waits for the first piece of the chosen file, which is the
-    thing playback genuinely needs."""
-    torrent = _torrents.get(info_hash)
-    if torrent is None or torrent.file_index is None:
-        return False
-    return torrent.wait_for(torrent.piece_at(0), timeout=wait)
+
+def seat_on_disk(info_hash: str, seconds):
+    """_Torrent.seat_on_disk for a hash: True/False when the container's
+    index can say whether the bytes a seek to `seconds` reads are here,
+    None when it cannot (or the engine does not hold the torrent). The
+    player asks before a seek so a jump into pieces the swarm has not
+    sent yet - backwards as well as forwards - is narrated and primed
+    rather than left to tear."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return None
+    return torrent.seat_on_disk(seconds)
 
 
 # How long to spend fetching the container's seek index before the
@@ -2908,9 +3493,19 @@ INDEX_WAIT = 3.0
 INDEX_CRITICAL_BYTES = 1024 * 1024
 
 # How long to keep trying to read the Cues for a resume point. Off the
-# critical path - the player already has its url by then - and short
-# enough that it cannot outlive the seek it exists to serve.
-ARM_RETRY_S = 8.0
+# critical path - the player already has its url by then.
+#
+# **60s, not 8 (5 September 2026).** The owner: "the series are super
+# slow to load and do not resume". Measured on his Reacher S1E3 resume
+# (the Ghost BluRay pack, **16MB pieces**): the url was handed over at
+# 13-19s and the piece holding the Cues landed 20-30s after it - and in
+# one run of four the seat was never armed at all in 75s while the swarm
+# ran at 24MB/s, because this retry had given up at 8s and nothing ever
+# asked again. The player's seat poll then waited its whole 180s on a
+# band that was never going to exist, which is "do not resume". The poll
+# now re-asks as well (player_resume_latency_patch), and only one retry
+# runs per torrent at a time (see arm_start_band).
+ARM_RETRY_S = 60.0
 
 # **How a dead swarm is recognised before its budget runs out.** The
 # early-out proposed in streams.py's phase comment - "zero peers and
@@ -2954,6 +3549,18 @@ DELIVERED_MIN_BYTES = 16 * 1024
 # should lose its lane.
 EXTEND_WINDOW_S = 2.0
 EXTEND_MIN_BYTES = 512 * 1024
+# How long a lane that is *delivering* payload may be waited on before it
+# is called dead anyway - past `data_wait_max`, which stays the bound for
+# a lane that merely has peers connected. Measured 5 September 2026: the
+# owner's hand-picked Jujutsu Kaisen release was receiving 18MB/s at its
+# 12s cap and was declared `no-peers` (see WARMING_FILL_PRIORITY for why
+# the head had not landed). Killing a lane that is receiving bytes only
+# hands the wait to the next candidate, which starts from zero; the
+# player is showing "Buffering the first seconds..." for exactly this
+# lane, and switching away under that message is the report. 45s is the
+# race's own RACE_TIMEOUT - at EXTEND_MIN_BYTES per window (256KB/s) it
+# is enough for a 9MB head and index, and nothing slower is a stream.
+DELIVERING_CAP_S = 45.0
 
 # **Resuming waits for the index rather than hoping for it.** The resume
 # offset is read out of the Cues, so nothing can be primed until they
@@ -2998,9 +3605,35 @@ def arm_start_band(info_hash: str):
         offset = torrent.resolve_start(torrent.start_seconds)
         if offset is None:
             return False
+        # The one line that says a seat became a byte, and through which
+        # index - the MP4 path had nothing in the log to prove itself by.
+        # Once per offset: the seat poll re-arms every two seconds until
+        # the band lands, and each re-arm resolves the same byte again
+        # (measured: a line every 2s for the whole wait).
+        if torrent.start_offset != int(offset) or not torrent.start_armed:
+            try:
+                logs.info(f"seat band armed: {torrent.info_hash[:8]} "
+                          f"{float(torrent.start_seconds):.1f}s -> byte "
+                          f"{int(offset)} ({torrent.container_kind() or '?'})")
+            except Exception:
+                pass
         torrent.start_offset = int(offset)
         torrent.start_armed = True
-        torrent.focus(0, HEAD_BYTES)    # rewrite the array with it in
+        # Rewrite the priority array with the band in. **Through the
+        # windows as they are, not a fresh head window**: this used to
+        # call focus(0, HEAD_BYTES), which files a new PRIMARY window at
+        # the head with the newest sequence number - and "newest read
+        # first" then hands the head the best deadlines over whatever a
+        # live reader is actually blocked on. Harmless inside the 8s the
+        # retry used to last; with the retry now outliving playback's
+        # first frames (ARM_RETRY_S), it would have re-aimed a playing
+        # torrent at 12 pieces of its opening.
+        with torrent.lock:
+            live = [k for k in torrent.readers if k != PRIMARY_READER]
+        if live:
+            torrent.refresh_windows()
+        else:
+            torrent.focus(0, HEAD_BYTES)
         return True
 
     if arm():
@@ -3013,17 +3646,37 @@ def arm_start_band(info_hash: str):
     # nothing: it is off the critical path by construction (the player
     # already has its url) and the tail band is priority 7, so the bytes
     # are on their way.
-    def keep_trying():
-        deadline = time.time() + ARM_RETRY_S
-        while time.time() < deadline:
-            if _torrents.get(torrent.info_hash) is not torrent:
-                return
-            if arm():
-                return
-            time.sleep(0.25)
-    threading.Thread(target=keep_trying, daemon=True,
-                     name="atomic-torrent-arm").start()
+    #
+    # One retry per torrent at a time: the seat poll may call this
+    # every couple of seconds now, and several retries racing one
+    # another was the reason it used to be forbidden to.
+    with torrent.lock:
+        running = getattr(torrent, "_arm_thread", None)
+        if running is not None and running.is_alive():
+            return None
+
+        def keep_trying():
+            deadline = time.time() + ARM_RETRY_S
+            while time.time() < deadline:
+                if _torrents.get(torrent.info_hash) is not torrent:
+                    return
+                if arm():
+                    return
+                time.sleep(0.25)
+        thread = threading.Thread(target=keep_trying, daemon=True,
+                                  name="atomic-torrent-arm")
+        torrent._arm_thread = thread
+        thread.start()
     return None
+
+
+def seat_resolvable(info_hash: str):
+    """_Torrent.seat_resolvable for a hash, or None when the engine
+    does not hold it."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return None
+    return torrent.seat_resolvable()
 
 
 def await_start_band(info_hash: str, wait: float = None) -> bool:
@@ -3031,9 +3684,13 @@ def await_start_band(info_hash: str, wait: float = None) -> bool:
 
     Only makes sense after arm_start_band has resolved an offset. Fails
     soft: over budget hands the url over anyway and the band keeps
-    arriving at priority 7."""
+    arriving at priority 7. Not waited at all for a file whose seat can
+    never be resolved (see seat_resolvable) - that was RESUME_BAND_WAIT
+    of loading screen bought for nothing on every mp4 resume."""
     torrent = _torrents.get((info_hash or "").lower())
     if torrent is None or torrent.start_seconds is None:
+        return False
+    if torrent.seat_resolvable() is False:
         return False
     if wait is None:
         wait = RESUME_BAND_WAIT
@@ -3057,6 +3714,19 @@ def await_start_band(info_hash: str, wait: float = None) -> bool:
             return False
         time.sleep(0.05)
     return torrent.have(piece)
+
+
+def _say_gave_up(info_hash, why, started, peers, payload_now, payload_base):
+    """One log line per lane given up on - which rule ended it, when,
+    and what the swarm had done by then. The owner's reports arrive as
+    "it went back to connecting"; this is the line that says why."""
+    try:
+        from . import logs
+        logs.info(f"await_start {str(info_hash)[:8]}: gave up ({why}) at "
+                  f"{time.time() - started:.1f}s - peers {peers}, payload "
+                  f"{max(0, int(payload_now) - int(payload_base or 0)) // 1024}KB")
+    except Exception:
+        pass
 
 
 def await_start(info_hash: str, data_wait: float = 20.0,
@@ -3121,7 +3791,7 @@ def await_start(info_hash: str, data_wait: float = 20.0,
                 # window back out so the swarm builds real readahead.
                 torrent.warming = False
         if not got_index:
-            got_index = not torrent._tail_pieces(INDEX_CRITICAL_BYTES)
+            got_index = not torrent._index_pieces(critical=True)
         if got_data and got_index:
             # Record the verified state now: this is the first moment it
             # is worth anything, and a viewer who watches two minutes
@@ -3163,6 +3833,8 @@ def await_start(info_hash: str, data_wait: float = 20.0,
             # DEAD_GRACE_S above).
             if (not delivered and now - started >= DEAD_GRACE_S
                     and now - last_alive >= DEAD_QUIET_S):
+                _say_gave_up(info_hash, "dead", started, peers_connected,
+                             payload_now, payload_base)
                 break
             if now >= data_deadline:
                 # Still flowing at the soft deadline? Keep the lane, up
@@ -3179,11 +3851,19 @@ def await_start(info_hash: str, data_wait: float = 20.0,
                 # owner, 30 August 2026). Peers on the wire at the soft
                 # deadline are evidence the swarm is real; the hard cap
                 # still bounds how long that faith lasts.
-                flowing = (hard_deadline > now
-                           and ((recent and payload_now - recent[0][1]
-                                 >= EXTEND_MIN_BYTES)
-                                or peers_connected > 0))
+                delivering = bool(recent and payload_now - recent[0][1]
+                                  >= EXTEND_MIN_BYTES)
+                flowing = ((hard_deadline > now
+                            and (delivering or peers_connected > 0))
+                           # Past the cap, only bytes on the wire keep
+                           # the lane - see DELIVERING_CAP_S.
+                           or (delivering
+                               and now - started < DELIVERING_CAP_S))
                 if not flowing:
+                    _say_gave_up(info_hash, ("capped" if delivering
+                                             else "not delivering"),
+                                 started, peers_connected, payload_now,
+                                 payload_base)
                     break
         if got_data and now >= index_deadline:
             break
@@ -3206,6 +3886,23 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):        # silence; this is not a web server
         pass
+
+    def _client_gone(self) -> bool:
+        """Whether the reader on the other end has closed its side.
+
+        A zero-length peek is the one honest question: a client that is
+        merely waiting has nothing readable, one that has hung up reads
+        as end-of-stream. Never raises - a socket that cannot be asked is
+        treated as gone, which ends a wait nobody could be served from
+        anyway."""
+        try:
+            sock = self.connection
+            ready, _, _ = select.select([sock], [], [], 0)
+            if not ready:
+                return False
+            return sock.recv(1, socket.MSG_PEEK) == b""
+        except Exception:
+            return True
 
     def _torrent(self):
         parts = [p for p in self.path.split("?")[0].split("/") if p]
@@ -3310,7 +4007,50 @@ class _Handler(BaseHTTPRequestHandler):
                 if not torrent.have(piece):
                     focused_at = offset
                     torrent.focus(offset, reader=reader)
-                    if not torrent.wait_for(piece):
+                    # **In slices, so a reader that has hung up is noticed.**
+                    # mpv drops its connection the moment it seeks, but
+                    # this handler used to sit in a 45s piece wait and
+                    # never look - and mpv cannot issue the new Range
+                    # until the read it is blocked in returns. Measured 5
+                    # September 2026 on the owner's "super slow when I
+                    # move forward on the seek bar": clicked 70% in at
+                    # 04:54:30, the old read was waiting for piece 62 and
+                    # got it at :39, and only then did the seek's own
+                    # piece get asked for (3.9s more on that swarm) -
+                    # nine of the thirteen seconds were the wait for a
+                    # piece nobody wanted any more. A peek at the socket
+                    # every half second is what tells "still reading"
+                    # from "gone", and the window the dead reader held
+                    # is given back with it (end_read, below).
+                    waited_from = time.monotonic()
+                    served_ok = gone = False
+                    while True:
+                        if torrent.wait_for(piece, timeout=0.5):
+                            served_ok = True
+                            break
+                        if _torrents.get(torrent.info_hash) is not torrent:
+                            break
+                        if self._client_gone():
+                            gone = True
+                            break
+                        if time.monotonic() - waited_from >= PIECE_WAIT_S:
+                            break
+                    waited = time.monotonic() - waited_from
+                    if waited >= 1.0:
+                        # The owner's "super slow when I move forward on
+                        # the seek bar" (5 September 2026) arrived with
+                        # no line for a seek anywhere in the log; this
+                        # is the wait a seek actually costs, per piece.
+                        try:
+                            logs.info(f"serve {torrent.info_hash[:8]}: waited "
+                                      f"{waited:.1f}s for piece {piece} at "
+                                      f"{offset // (1024 * 1024)}MB "
+                                      + ("(got it)" if served_ok else
+                                         "(reader hung up)" if gone else
+                                         "(gave up)"))
+                        except Exception:
+                            pass
+                    if not served_ok:
                         return          # client sees a short read; mpv retries
                     stalled_since = time.monotonic()   # the piece arrived
                 # Read no further than the end of the piece we know is

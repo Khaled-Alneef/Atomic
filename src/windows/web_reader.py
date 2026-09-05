@@ -282,6 +282,15 @@ class WebReader(QWidget):
         would only add a frame to each.
         """
         window = self.window()
+        # **Escape, forwarded by the page, closes the reader.** The page
+        # takes the key (app.js `preventDefault`s it and sends it here),
+        # so the QShortcut above never sees it while the view has focus
+        # - which it always has once a page has been clicked or
+        # scrolled. Measured 5 September 2026 driving the frozen build:
+        # two Escapes after a PgDn left the reader exactly where it was.
+        if name == "Escape":
+            self.close_reader()
+            return
         if name in ("F11", "F") and hasattr(window, "toggle_fullscreen"):
             try:
                 window.toggle_fullscreen()

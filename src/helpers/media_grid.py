@@ -212,9 +212,6 @@ class MediaGridModel(QAbstractListModel):
         row = index.row() if hasattr(index, "row") else int(index)
         return self._items[row] if 0 <= row < len(self._items) else None
 
-    def row_for_id(self, item_id) -> int:
-        return self._rows_by_id.get(item_id, -1)
-
     # -- writing -----------------------------------------------------------
     def set_items(self, items):
         """Replace everything. The one operation that legitimately resets
@@ -313,10 +310,6 @@ class MediaCardDelegate(QStyledItemDelegate):
         setFixedSize; this gets it right by not having the information in
         the first place."""
         m = self._metrics_for(option)
-        return QSize(self._card_w, m["card_h"])
-
-    def card_size(self, view) -> QSize:
-        m = self._metrics_for(view)
         return QSize(self._card_w, m["card_h"])
 
     def _metrics_for(self, source):

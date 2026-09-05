@@ -70,9 +70,17 @@ _MANGADEX_MAX_LIMIT = 100
 # _video_catalog_urls) - but the card still has to say "Anime".
 _KIND_TYPES = {"anime": "series", "series": "series", "movie": "movie"}
 # How many extra catalog pages a genre applied to the *rows* may walk -
-# see discover_video's `local_genre`. Four pages is 200 rows scanned,
-# which on the owner's connection is about a second.
-LOCAL_GENRE_PAGES = 4
+# see discover_video's `local_genre`. **Fetched together, not one after
+# another** (5 September 2026, the owner: "when I apply a filter like
+# romance it takes ages to load the cards"). His log for a Romance tick
+# on the Anime page: batches landing at +5.9, +9.2, +12.3, +22.8, +24.5,
+# +25.2, +31.1 and +42.6s. Each batch walked four pages *serially*, a
+# cold Cinemeta page is 0.3-10s, and one page of 50 holds 1-8 Romance
+# anime - so thirty matching cards were sixteen sequential page fetches
+# away. Eight pages in parallel is 400 rows for the cost of the slowest
+# page: measured warm, one batch answers what four sequential batches
+# (15/15/25/10 Romance anime, 2.1/1.5/3.1/2.8s) used to.
+LOCAL_GENRE_PAGES = 8
 # ...and how long that walk may take, whatever it has found. Measured 4
 # September 2026 on the owner's connection: Romance walked all four
 # pages and the whole genre answer took **17.8s**, which is nothing like
@@ -150,7 +158,6 @@ def _is_animated(meta: dict) -> bool:
 # before the anime section will claim it. The same bar anilist.py's own
 # schedule matching uses (_MATCH_THRESHOLD) - identity matching, where
 # inheriting a different franchise's row is the failure to avoid.
-_ANIME_CONFIRM_THRESHOLD = 0.8
 
 # How long the anime section will hold for AniList's verdict once its own
 # rows are in hand. It is started beside the Cinemeta request (see
@@ -501,24 +508,37 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
             # is walked until there are enough or the catalog runs out -
             # bounded, because this is a tick the user just pressed and a
             # thin answer is better than a slow one.
-            page = skip
-            walk_until = time.monotonic() + LOCAL_GENRE_BUDGET_S
-            for _ in range(LOCAL_GENRE_PAGES):
-                _note_reached(reached, page + (len(metas) or 50))
-                if len(rows) >= limit or time.monotonic() > walk_until:
-                    break
-                if net.step_timeout(deadline, 1.0) is None:
-                    break
-                page += len(metas) or 50
-                more = _get_json(
-                    (url[:-5] + f"&skip={page}.json" if "/top/" in url
-                     else url[:-5] + f"/skip={page}.json"),
-                    deadline, VIDEO_TIMEOUT)
-                metas = (more or {}).get("metas") or []
-                if not metas:
-                    break
-                rows += _wanted(
-                    [r for r in (_video_row(m, label) for m in metas) if r])
+            page_size = len(metas) or 50
+            _note_reached(reached, skip + page_size)
+            if len(rows) < limit and net.step_timeout(deadline, 1.0) is not None:
+                # All LOCAL_GENRE_PAGES at once - see the constant. Each
+                # page is bounded by the walk budget on its own, and
+                # `reached` advances only over the *contiguous* run of
+                # pages that answered, so a page that timed out is read
+                # again by the next batch rather than skipped.
+                walk_deadline = min(deadline, net.deadline_in(LOCAL_GENRE_BUDGET_S))
+                pages = [skip + page_size * (n + 1)
+                         for n in range(LOCAL_GENRE_PAGES)]
+
+                def _fetch(page):
+                    if net.step_timeout(walk_deadline, 0.5) is None:
+                        return page, None
+                    more = _get_json(
+                        (url[:-5] + f"&skip={page}.json" if "/top/" in url
+                         else url[:-5] + f"/skip={page}.json"),
+                        walk_deadline, VIDEO_TIMEOUT)
+                    return page, ((more or {}).get("metas") or None)
+
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=len(pages)) as pool:
+                    answered = dict(pool.map(_fetch, pages))
+                for page in pages:
+                    got = answered.get(page)
+                    if not got:
+                        break
+                    _note_reached(reached, page + len(got))
+                    rows += _wanted(
+                        [r for r in (_video_row(m, label) for m in got) if r])
         # A searched anime section is a plain series search (see the
         # docstring), so a second witness separates anime from the
         # live-action rows sharing the results - see _anime_confirmed.
@@ -1278,27 +1298,6 @@ def discover_reading_sites(query: str = "", limit: int = 30,
 _reading_tags = None
 
 
-def _reading_tag_ids():
-    global _reading_tags
-    if _reading_tags is not None:
-        return _reading_tags
-    try:
-        body = mangadex._get(f"{mangadex.BASE_URL}/manga/tag",
-                             READING_TIMEOUT)
-        tags = {}
-        for row in (body or {}).get("data") or []:
-            name = ((row.get("attributes") or {}).get("name") or {}).get("en")
-            if name and row.get("id"):
-                tags[str(name).strip().lower()] = str(row["id"])
-        # Only a real answer is remembered - a flaky minute must not
-        # blank every genre button for the rest of the session.
-        if tags:
-            _reading_tags = tags
-        return tags
-    except Exception:
-        return {}
-
-
 def reading_genres(title: str, limit: int = 6) -> list:
     """The genre tags MangaDex files this title under, or []. What the
     reading details page shows as its genre buttons - the video pages
@@ -1342,27 +1341,3 @@ def reading_genres(title: str, limit: int = 6) -> list:
         return []
 
 
-def discover_reading_genre(genre: str, limit: int = 30, deadline=None) -> list:
-    """The most-followed manga filed under one genre tag - what a
-    reading genre button opens. Same row shape as discover_reading;
-    [] for an unknown tag or any failure."""
-    tag_id = _reading_tag_ids().get((genre or "").strip().lower())
-    if not tag_id or limit <= 0:
-        return []
-    if deadline is None:
-        deadline = net.deadline_in(READING_BUDGET)
-    step = net.step_timeout(deadline, READING_TIMEOUT)
-    if step is None:
-        return []
-    count = min(int(limit), _MANGADEX_MAX_LIMIT)
-    url = (f"{mangadex.BASE_URL}/manga?limit={count}&includes[]=cover_art"
-           f"&order[followedCount]=desc"
-           f"&includedTags[]={urllib.parse.quote(tag_id)}"
-           + _BROWSE_RATINGS)
-    try:
-        body = mangadex._get(url, step)
-    except Exception:
-        return []
-    rows = [row for row in (_reading_row(m)
-                            for m in (body or {}).get("data") or []) if row]
-    return rows[:limit]

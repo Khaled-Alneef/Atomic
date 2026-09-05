@@ -694,6 +694,18 @@ def search(title, *, year=None, season=None, episode=None, imdb_id=None,
 # OpenSubtitles' English rows over real Arabic from SubDL or AnimeTosho,
 # which reverses the standing rule that English exists here only as
 # feedstock for the translator.
+#
+# **And above the timeline term, from 5 September 2026** - the owner,
+# asking for the second time: "make the Opensubtitle always on the top of
+# the list and the auto loaded not the SubDL." It was already at index 0
+# here and still did not lead the panel, because `_rank` sorted
+# `_timeline_rank` first: a SubDL row whose release name happened to
+# share a tag with the file being played scored 0 or 1 against an
+# OpenSubtitles row's 2, and won on a term that had had its say before
+# the source was ever consulted. "Always" is what he asked for twice, so
+# the source now leads and the timeline orders *within* it - which is
+# where it still earns its keep, since two OpenSubtitles rows for one
+# episode are exactly the case it was written for.
 SOURCE_PRIORITY = {"OpenSubtitles": 0, "SubDL": 1,
                    "SubtitleCat": 2, "AnimeTosho": 3}
 
@@ -745,14 +757,17 @@ def _timeline_rank(name: str, playing: str) -> int:
 
 
 def _rank(results, query) -> list:
-    """Arabic before anything else, then the release it is timed to,
-    then exact episode match, then a real translation over a machine
-    one, then whatever the source rated it.
+    """Arabic before anything else, then the source, then the release it
+    is timed to, then exact episode match, then a real translation over a
+    machine one, then whatever the source rated it.
 
     Language leads because English results exist here only as feedstock
     for the AI translator - useful, but never ahead of actual Arabic.
-    The timeline comes next because a subtitle for the wrong cut is
-    unusable however well the source rates it - see `_timeline_rank`."""
+    The source comes next because the owner asked for it twice and
+    "always" admits no tie-breaker above it - see SOURCE_PRIORITY, which
+    also records what the old order did to him. The timeline orders the
+    rows *within* a source, which is the comparison it was written to
+    make - see `_timeline_rank`."""
     wanted = ""
     if query.get("episode"):
         wanted = f"s{int(query.get('season') or 1):02d}e{int(query['episode']):02d}"
@@ -761,8 +776,8 @@ def _rank(results, query) -> list:
     def key(item):
         name = (item.get("release") or item.get("name") or "").lower()
         return (0 if is_arabic_code(item.get("lang")) else 1,
-                _timeline_rank(name, playing),
                 SOURCE_PRIORITY.get(item.get("source"), 90),
+                _timeline_rank(name, playing),
                 0 if wanted and wanted in name else 1,
                 1 if item.get("translated") else 0,
                 -int(item.get("rating") or 0))
@@ -804,13 +819,3 @@ def fetch(entry: dict, deadline=None) -> str:
     return text
 
 
-def load_local(path: str) -> str:
-    """A subtitle file the user already has, decoded the same way.
-
-    Present because it is the one path that always works - no source,
-    no network, no coverage question."""
-    try:
-        with open(path, "rb") as handle:
-            return decode(_unpack(handle.read(MAX_SUBTITLE_BYTES), path))
-    except Exception:
-        return None

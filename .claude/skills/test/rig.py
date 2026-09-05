@@ -7,6 +7,7 @@ usage: python rig.py launch <exe> <appdata_dir>   start detached, wait for windo
        python rig.py move <x> <y>                 hover
        python rig.py key <keys>                   e.g. "ctrl+3", "escape", "f11", "r"
        python rig.py type <text>
+       python rig.py wheel <delta> [count] [interval_ms] [x y]   120 = one notch down is -120
        python rig.py rect                         print window rect
        python rig.py close                        kill Atomic
 """
@@ -114,6 +115,81 @@ def key(spec):
     for c in codes: u.keybd_event(c, 0, 0, 0); time.sleep(0.02)
     for c in reversed(codes): u.keybd_event(c, 0, 2, 0); time.sleep(0.02)
 
+def wheel(delta, count=1, interval_ms=0.0, x=None, y=None):
+    """Mouse wheel through SendInput, at the pointer (or x,y window px):
+    `delta` per event in WHEEL_DELTA units (120 = one notch; 20-40 at a
+    high rate imitates a precision touchpad's stream), `count` events,
+    `interval_ms` apart."""
+    f = find()
+    if not f:
+        print("no window"); return
+    h, rect, _ = f
+    u.SetForegroundWindow(h); time.sleep(0.05)
+    u.ClipCursor(None)
+    if x is not None and y is not None:
+        # The Claude desktop app re-clips the cursor to its own monitor
+        # on every click, so a SetCursorPos can land at x=-1; release,
+        # move, and read back until the pointer is where the wheel must
+        # be delivered (SendInput's wheel goes to the window under it).
+        want = (rect[0] + int(x), rect[1] + int(y))
+        pt = w.POINT()
+        for _ in range(5):
+            u.ClipCursor(None)
+            u.SetCursorPos(*want); time.sleep(0.03)
+            u.GetCursorPos(ctypes.byref(pt))
+            if (pt.x, pt.y) == want:
+                break
+        print("pointer at", (pt.x, pt.y), "wanted", want)
+    class MI(ctypes.Structure):
+        _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_uint32),
+                    ("dwFlags", ctypes.c_uint32), ("time", ctypes.c_uint32), ("dwExtraInfo", ctypes.c_void_p)]
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_uint32), ("mi", MI), ("pad", ctypes.c_uint64 * 2)]
+    inp = INPUT(); inp.type = 0; inp.mi.dwFlags = 0x0800; inp.mi.mouseData = ctypes.c_uint32(int(delta) & 0xFFFFFFFF)
+    t0 = time.perf_counter()
+    for i in range(int(count)):
+        u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        due = t0 + (i + 1) * interval_ms / 1000.0
+        while time.perf_counter() < due:
+            pass
+    print("wheel:", count, "events of", delta, "at", interval_ms, "ms")
+
+def wheelto(delta, count=1, interval_ms=0.0, x=None, y=None):
+    """WM_MOUSEWHEEL posted straight to the window under the pointer -
+    what Windows' own hover routing does for a real mouse. SendInput's
+    wheel goes to the keyboard-focus window, which after the web reader
+    closes is the Qt main window, whose host widget does not forward a
+    wheel to the native WebView2 child (measured 5 September 2026: 3
+    notches moved Home right after launch and nothing afterwards)."""
+    f = find()
+    if not f:
+        print("no window"); return
+    h, rect, _ = f
+    u.SetForegroundWindow(h); time.sleep(0.05)
+    want = (rect[0] + int(x), rect[1] + int(y)) if x is not None else None
+    pt = w.POINT()
+    for _ in range(5):
+        u.ClipCursor(None)
+        if want: u.SetCursorPos(*want)
+        time.sleep(0.03)
+        u.GetCursorPos(ctypes.byref(pt))
+        if not want or (pt.x, pt.y) == want:
+            break
+    u.WindowFromPoint.restype = w.HWND
+    target = u.WindowFromPoint(pt)
+    buf = ctypes.create_unicode_buffer(64); u.GetClassNameW(target, buf, 64)
+    print("pointer at", (pt.x, pt.y), "-> window", target, buf.value)
+    u.PostMessageW.argtypes = [w.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+    lparam = (pt.y << 16) | (pt.x & 0xFFFF)
+    t0 = time.perf_counter()
+    for i in range(int(count)):
+        wparam = ((int(delta) & 0xFFFF) << 16)
+        u.PostMessageW(target, 0x020A, wparam, lparam)
+        due = t0 + (i + 1) * interval_ms / 1000.0
+        while time.perf_counter() < due:
+            pass
+    print("wheelto:", count, "events of", delta, "at", interval_ms, "ms")
+
 def typetext(text):
     for ch in text:
         vk = u.VkKeyScanW(ord(ch)) & 0xFF
@@ -153,6 +229,8 @@ if __name__ == "__main__":
     elif cmd == "move": move(int(sys.argv[2]), int(sys.argv[3]))
     elif cmd == "key": key(sys.argv[2])
     elif cmd == "type": typetext(sys.argv[2])
+    elif cmd == "wheelto": wheelto(int(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 1, float(sys.argv[4]) if len(sys.argv) > 4 else 0.0, int(sys.argv[5]) if len(sys.argv) > 6 else None, int(sys.argv[6]) if len(sys.argv) > 6 else None)
+    elif cmd == "wheel": wheel(int(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 1, float(sys.argv[4]) if len(sys.argv) > 4 else 0.0, int(sys.argv[5]) if len(sys.argv) > 6 else None, int(sys.argv[6]) if len(sys.argv) > 6 else None)
     elif cmd == "rect": print(find())
     elif cmd == "close": close()
     elif cmd == "sleep": time.sleep(float(sys.argv[2]))

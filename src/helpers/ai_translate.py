@@ -185,16 +185,6 @@ def available() -> bool:
     return bool(providers_available())
 
 
-def default_provider() -> str:
-    """Whichever configured provider comes first in PROVIDERS order.
-
-    Order is deliberate rather than alphabetical: the first two are the
-    cheapest per token for this job, so a user with several keys is not
-    billed for the dearest by accident."""
-    found = providers_available()
-    return found[0] if found else ""
-
-
 def label(provider: str) -> str:
     return (PROVIDERS.get(provider) or {}).get("label", provider)
 

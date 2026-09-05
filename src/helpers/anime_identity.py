@@ -23,15 +23,20 @@ besides.
 correct season + episode". Two sources, each supplying the half the
 other lacks, measured 22 August 2026:
 
-  * **TMDB is the authority on the numbering**, because it *is* the
-    numbering the app uses - the entry's `latest_available` "S05E08"
-    is TMDB's, and `/tv/{id}` lists the seasons the same way the card
-    does. For tt9335498 it returns S01 "Unwavering Resolve Arc" /
-    S02 "Mugen Train Arc" / S03 "Entertainment District Arc" /
-    S04 "Swordsmith Village Arc" / S05 "Hashira Training Arc", air dates
-    and all. No other source's ordering can be trusted to match the
-    card's, which is the whole risk in this - AniList files each cour as
-    its own work and does not number them the way TMDB splits them.
+  * **The entry's own Cinemeta meta is the authority on the numbering**
+    (since 5 September 2026 - see _entry_seasons), because it *is* the
+    numbering the sources are asked in: `tt12343534:1:1`. TMDB was
+    taken to be the same numbering and for Demon Slayer it is - for
+    tt9335498 it returns S01 "Unwavering Resolve Arc" / S02 "Mugen Train
+    Arc" / S03 "Entertainment District Arc" / S04 "Swordsmith Village
+    Arc" / S05 "Hashira Training Arc", air dates and all - but for
+    Jujutsu Kaisen TMDB has one 59-episode season where Cinemeta has
+    four, and a map built on TMDB's split had nowhere to put "Shimetsu
+    Kaiyuu". TMDB is now the fallback split (no meta on disk) and the
+    source of the English arc names, attached to a season by air date.
+    No source's ordering can be trusted to match the card's by number,
+    which is the whole risk in this - AniList files each cour as its
+    own work and does not number them the way either splits them.
   * **AniList supplies the romaji** the releases actually use. TMDB says
     "Mugen Train Arc"; the release says "Mugen Ressha-hen". "Mugen" and
     "train" are shared, so TMDB's English alone catches that one, but
@@ -78,7 +83,7 @@ import threading
 import time
 import urllib.error
 
-from . import artwork, logs, net, storage
+from . import artwork, logs, net, storage, stremio
 
 # Franchise facts change about never; thirty days is already generous,
 # and a title re-asked sooner than that is served from memory anyway.
@@ -103,7 +108,11 @@ _TTL = 30 * 24 * 3600.0
 # point of marking a map partial is to pick the romaji up shortly after
 # it does rather than running degraded for the rest of the day.
 _PARTIAL_TTL = 45 * 60.0
-_CACHE_VERSION = 1
+# 2 since 5 September 2026: version 1 records were built on TMDB's season
+# split alone, and for a title TMDB does not split (Jujutsu Kaisen, one
+# 59-episode season there against Cinemeta's four) they hold no arc at
+# all - see _entry_seasons. A stored v1 map is a miss, not a stale hit.
+_CACHE_VERSION = 2
 _TIMEOUT = 8
 
 _memory = {}
@@ -237,69 +246,161 @@ def _months(year, month) -> int:
     return int(year) * 12 + int(month or 1)
 
 
+def _entry_seasons(entry):
+    """The entry's own season split - `([(number, [air_month, ...]), ...],
+    name)`, read from the Cinemeta meta the details page keeps on disk
+    (`stremio.cached_meta`) - or `([], "")` when there is none.
+
+    **This is the numbering the app actually asks the sources in, and
+    TMDB's is not always the same numbering.** The module docstring took
+    TMDB to be the app's own; measured 5 September 2026 on the owner's
+    Jujutsu Kaisen (tt12343534), TMDB files the whole show as one
+    59-episode "Season 1" while Cinemeta - whose ids the addons are
+    asked with, `tt12343534:1:1` - has S1 (24 episodes, 2020-10), S2
+    (23, 2023-07) and S3 (12, 2026-01). AniList knows all three TV
+    seasons with exactly those start dates, so with TMDB's split there
+    was nowhere to hang seasons 2 and 3 and the map came out as
+    `{1: [jujutsu, kaisen]}`: not one arc word, and the franchise's own
+    name filed as season 1's. "[Erai-raws] Jujutsu Kaisen: Shimetsu
+    Kaiyuu - Zenpen - 01" - season 3, 687 seeders, no season number in
+    its name - then headed the S01E01 list and was what played.
+
+    Every episode's month, not only the first: a cour split airs months
+    after its season's first episode and AniList files it as its own
+    work, so it is matched to a season by whichever episode it aired
+    beside (_season_beside)."""
+    imdb_id = (entry or {}).get("imdb_id")
+    if not imdb_id:
+        return [], ""
+    try:
+        meta = stremio.cached_meta(imdb_id, "series") or {}
+    except Exception:
+        meta = {}
+    by_season = {}
+    for video in meta.get("videos") or []:
+        try:
+            number = int(video.get("season") or 0)
+            released = str(video.get("released") or video.get("firstAired")
+                           or "")
+            if number < 1 or len(released) < 7:
+                continue
+            by_season.setdefault(number, set()).add(
+                _months(int(released[:4]), int(released[5:7])))
+        except (TypeError, ValueError):
+            continue
+    seasons = sorted((number, sorted(months))
+                     for number, months in by_season.items())
+    return seasons, str(meta.get("name") or "")
+
+
+def _season_beside(begun, seasons, tolerance: int = 2):
+    """Which of `seasons` ([(number, [months])]) something that started
+    in month `begun` aired beside - the one with an episode within
+    `tolerance` months of it, closest first - or None."""
+    best, best_gap = None, tolerance + 1
+    for number, months in seasons:
+        for month in months:
+            gap = abs(begun - month)
+            if gap < best_gap:
+                best_gap, best = gap, number
+    return best
+
+
 def _build(entry):
     """Resolve the `{season -> [tokens]}` map for one entry, live.
 
-    TMDB gives the season split and its English arc names; AniList, matched
-    to each season by air date, gives the romaji. A token surviving into
-    the map is one that names exactly one of those seasons.
+    The season split is the entry's own (Cinemeta's, see
+    _entry_seasons), with TMDB's as the fallback when no meta is on disk.
+    TMDB supplies the English arc names and AniList the romaji, each
+    attached to a season by air date - never by number, because the two
+    numberings are not always the same. A token surviving into the map is
+    one that names exactly one of those seasons and is not a word of the
+    franchise's own title.
 
     Returns `(arcs, anilist_ok)` - the second flag is False when AniList
     gave nothing, so the caller can re-check a TMDB-English-only map soon
     rather than trusting it for a month (see _resolve_and_store)."""
     imdb_id = (entry or {}).get("imdb_id")
     title = (entry or {}).get("title") or ""
-    if not imdb_id or not artwork.available():
+    if not imdb_id:
         return {}, True
-    try:
-        media_type, tmdb_id = artwork.tmdb_id(imdb_id, _TIMEOUT)
-    except Exception:
-        return {}, True
-    if media_type != "tv" or not tmdb_id:
-        return {}, True                 # a film has no seasons to confuse
-    try:
-        show = artwork.get_json(f"{artwork.API}/tv/{tmdb_id}", _TIMEOUT)
-    except Exception:
-        return {}, True
-    seasons = [s for s in (show or {}).get("seasons", [])
-               if (s.get("season_number") or 0) >= 1 and s.get("air_date")]
-    if not seasons:
-        return {}, True
+    seasons, meta_name = _entry_seasons(entry)
+    source = "meta"
 
-    media = _anilist_media(title)
-
-    # Candidate words per season: TMDB's own arc name (unless it is the
-    # generic "Season N", which says nothing), plus the romaji and English
-    # of whichever AniList cour aired closest to that season.
-    raw = {}
-    for season in seasons:
-        number = season["season_number"]
-        name = season.get("name") or ""
-        tokens = set() if re.search(r"season\s*\d", name, re.I) else _words(name)
+    # TMDB's seasons, `[(number, air_month, name)]`: the fallback split,
+    # and the English arc names either way.
+    tmdb_seasons = []
+    if artwork.available():
         try:
-            air = _months(int(season["air_date"][:4]), int(season["air_date"][5:7]))
-        except (ValueError, IndexError):
-            air = None
-        if air is not None and media:
-            best, best_gap = None, 99
-            for candidate in media:
-                start = candidate["startDate"]
-                gap = abs(air - _months(start["year"], start.get("month")))
-                if gap < best_gap:
-                    best_gap, best = gap, candidate
-            if best is not None and best_gap <= 2:
-                tokens |= _words(best["title"].get("romaji"))
-                tokens |= _words(best["title"].get("english"))
-        raw[number] = tokens
+            media_type, tmdb_id = artwork.tmdb_id(imdb_id, _TIMEOUT)
+            if media_type == "tv" and tmdb_id:
+                show = artwork.get_json(f"{artwork.API}/tv/{tmdb_id}",
+                                        _TIMEOUT)
+                for season in (show or {}).get("seasons", []):
+                    number = int(season.get("season_number") or 0)
+                    air = str(season.get("air_date") or "")
+                    if number >= 1 and len(air) >= 7:
+                        tmdb_seasons.append(
+                            (number, _months(int(air[:4]), int(air[5:7])),
+                             season.get("name") or ""))
+        except Exception:
+            tmdb_seasons = []
+    if not seasons:
+        if not tmdb_seasons:
+            return {}, True             # a film, or a title nobody splits
+        seasons = [(number, [air]) for number, air, _name in tmdb_seasons]
+        source = "tmdb"
+
+    media = _anilist_media(title or meta_name)
+
+    raw = {number: set() for number, _months_ in seasons}
+    # TMDB's own arc name - "Swordsmith Village Arc" - goes to the season
+    # it aired beside, unless it is the generic "Season N", which says
+    # nothing.
+    for _number, air, name in tmdb_seasons:
+        if re.search(r"season\s*\d", name, re.I):
+            continue
+        beside = _season_beside(air, seasons)
+        if beside is not None:
+            raw[beside] |= _words(name)
+    # Each AniList work - a season, a cour, a recap ONA - goes to the
+    # season it aired beside, and brings its romaji and English.
+    for candidate in media:
+        start = candidate.get("startDate") or {}
+        try:
+            begun = _months(start["year"], start.get("month"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        beside = _season_beside(begun, seasons)
+        if beside is None:
+            continue
+        titles = candidate.get("title") or {}
+        raw[beside] |= _words(titles.get("romaji"))
+        raw[beside] |= _words(titles.get("english"))
 
     # The franchise name is in every season's title; the one-season-only
-    # rule is what removes it and leaves the arc words behind.
+    # rule is what removes it and leaves the arc words behind. **And the
+    # entry's own title words are removed outright**, because the rule
+    # cannot fire when only one season carries any tokens at all - which
+    # is how "rotten" (The Angel Next Door Spoils Me Rotten, 27 August
+    # 2026) and "jujutsu"/"kaisen" (above) became season-1 arc words that
+    # every release of every season matched.
+    franchise = _words(title) | _words(meta_name)
     seen = {}
     for tokens in raw.values():
         for word in tokens:
             seen[word] = seen.get(word, 0) + 1
-    arcs = {number: sorted(word for word in tokens if seen[word] == 1)
+    arcs = {number: sorted(word for word in tokens
+                           if seen[word] == 1 and word not in franchise)
             for number, tokens in raw.items()}
+    try:
+        logs.info(f"anime_identity: {title or meta_name}: "
+                  f"{len(seasons)} seasons from {source}, anilist "
+                  f"{len(media)} -> "
+                  + ", ".join(f"S{n}:{'/'.join(t) or '-'}"
+                              for n, t in sorted(arcs.items())))
+    except Exception:
+        pass
     return arcs, bool(media)
 
 

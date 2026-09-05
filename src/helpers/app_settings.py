@@ -487,10 +487,6 @@ def get_debrid_key() -> str:
     return get_api_key("debrid")
 
 
-def set_debrid_key(value: str):
-    set_api_key("debrid", value)
-
-
 def get_tmdb_key() -> str:
     """The owner's TMDB API key, or "" when they have not pasted one.
 
