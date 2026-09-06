@@ -1350,7 +1350,9 @@ def install():
     #     strips that changed, in place.
     #   * The log says what every wheel event asked and what the page did
     #     outside a glide (his laptop's reversal, 1.10.271: moved=0).
-    updater.APP_VERSION = "1.10.272"
+    #   * The glide never steps backwards on a notch's first frame (his
+    #     laptop's creep: 1506, 1503, 1500, 1494 while wheeling down).
+    updater.APP_VERSION = "1.10.273"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

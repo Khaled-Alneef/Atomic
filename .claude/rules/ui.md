@@ -561,3 +561,25 @@ travels its distance, a notch mid-glide re-aims from the current view
 plus what is still owed, one frame chain at a time (`glideOn`). The
 glide line now carries `moved` and `movedMax`: how far something else
 moved the page under it, so his log names the trigger on his machine.
+
+## The frame's timestamp is older than the handler that scheduled it (6 September 2026)
+
+His laptop log on 1.10.272, wheeling down on Movies, the position each
+notch found: **1506, 1503, 1500, 1494, 1490, 1478**, then 2206 when the
+burst ended - *"it is taking me up while I scroll down, so there is not
+a big move in pixels but it feels disgusting"*. The relative glide's
+clock starts in the wheel handler with `performance.now()`; the
+animation-frame callback that follows carries the frame's *start*
+timestamp, which lies before that (MDN's own note: compared against a
+`performance.now()` taken just ahead of it, the frame time is in the
+past). So the first frame after every notch computed a negative time,
+the ease-out went negative, and the frame applied a step backwards -
+which the old absolute glide overwrote a frame later and the relative
+one kept, while a burst of notches restarted the curve before it could
+recover. At 60Hz the lag reaches a whole frame; at 165Hz here the same
+bursts measured monotonic, which is why this never reproduced on this
+machine and the instrument (`wheel=` on the glide line) is what found
+it. `t` is clamped at zero. What other apps on the engine do: VS Code
+animates its own wheel scrolling in script as this does; plain Electron
+apps take Chromium's compositor curve, which was measured here on 1
+September as a 660ms dribble and turned off (webview2_host).

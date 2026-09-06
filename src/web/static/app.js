@@ -2509,7 +2509,22 @@ function glideStep(now) {
       glideMovedMax = Math.max(glideMovedMax, Math.abs(drift));
     }
   }
-  const t = Math.min(1, (now - glideAt) / GLIDE_MS);
+  /* **Never before the start.** `now` is the frame's own timestamp, taken
+     when the frame began; `glideAt` was taken by the wheel handler that
+     ran inside that same frame, so the first frame after a notch can
+     find `now` *earlier* than `glideAt`. Unclamped, a negative t makes
+     the ease-out negative and the increment below a step backwards -
+     one that the old absolute glide overwrote a frame later and this
+     one keeps. The owner's laptop log, 1.10.272, 6 September 2026,
+     wheeling down on Movies: the positions each notch found were
+     1506, 1503, 1500, 1494, 1490, 1478 - a creep upwards of a few
+     pixels per notch under a burst - and then 2206 when the burst
+     ended. "it is taking me up while I scroll down, so there is not a
+     big move in pixels but it feels disgusting". At 60Hz the frame
+     timestamp lags the handler by up to a whole frame; at 165Hz here
+     the same bursts measured monotonic, which is why it never
+     reproduced on this machine. */
+  const t = Math.max(0, Math.min(1, (now - glideAt) / GLIDE_MS));
   // Chromium's own ease-out, the curve its scroll animation uses.
   const eased = 1 - Math.pow(1 - t, 3);
   const target = glideStart * eased;
