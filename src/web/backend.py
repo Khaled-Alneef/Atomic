@@ -217,19 +217,28 @@ def hero_for(entry):
     # still has nothing to draw.
     poster = ""
     if not backdrop:
-        poster = cover_url(entry)
-        if not poster:
+        # **And an entry with no cover of its own is still a banner**
+        # (6 September 2026, the same device, the same empty page after
+        # the cover fallback). A library imported from another machine
+        # can carry cover_path into that machine's cache and nothing
+        # else; its cards still draw, because a card asks /api/cover
+        # for its picture (app.js askForCover). The banner now asks the
+        # same way: `poster` marks it, the ground and cover start empty,
+        # and the page fills both. Only a title with no title is
+        # nothing to draw.
+        if not str(entry.get("title") or "").strip():
             return None
-        backdrop = poster
+        poster = cover_url(entry) or "-"
+        backdrop = "" if poster == "-" else poster
     return {
         "title": str(entry.get("title") or ""),
         "backdrop": backdrop,
         "logo": local_url(entry.get("hero_logo")),
-        "poster": bool(poster),
-        "imdb": str(entry.get("imdb_id") or ""),
         # The entry's own cover, beside the wide art. The banner had
         # only the backdrop and the owner asked for the cover on it.
         "cover": cover_url(entry),
+        "poster": bool(poster),
+        "imdb": str(entry.get("imdb_id") or ""),
         # The medium decides the second button's wording - View
         # Chapters, View Episodes or View Details - exactly as
         # home._hero_open does.

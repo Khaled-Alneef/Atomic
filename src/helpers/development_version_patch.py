@@ -1330,7 +1330,8 @@ def install():
     #     does, from the same map on disk.
     #   * Home's banner draws from the cover when no wide art has been
     #     written yet, so a fresh device has a banner too.
-    updater.APP_VERSION = "1.10.263"
+    #   * a banner with no cover on the entry asks for one, as a card does.
+    updater.APP_VERSION = "1.10.264"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

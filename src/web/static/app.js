@@ -818,12 +818,29 @@ function heroFor(hero) {
   // widgets.HeroBanner has (300px tall, 28px corners, inset) - rather
   // than an image behind everything.
   const art_el = el('img', 'hart');
-  art_el.src = hero.backdrop; art_el.alt = ''; art_el.decoding = 'async';
+  if (hero.backdrop) art_el.src = hero.backdrop;
+  art_el.alt = ''; art_el.decoding = 'async';
   box.appendChild(art_el);
   const inner = el('div', 'inner');
-  if (hero.cover) {
+  if (hero.cover || (hero.poster && hero.title)) {
     const art = el('img', 'herocover');
-    art.src = hero.cover; art.alt = ''; art.decoding = 'async';
+    if (hero.cover) art.src = hero.cover;
+    art.alt = ''; art.decoding = 'async';
+    /* **A banner with no cover at all asks for one, as a card does.**
+       The owner, 6 September 2026, from the other device: no banner,
+       twice. That library's entries carry no picture the server can
+       hand over (cover paths into another machine's cache), and the
+       banner was dropped for it while every card drew - a card asks
+       /api/cover for its picture. So the cover is asked for the same
+       way, kept hidden until it has decoded, and the blurred ground
+       takes it too until TMDB's wide art arrives. */
+    if (!hero.cover) {
+      art.hidden = true;
+      art.addEventListener('load', function () {
+        art.hidden = false;
+        if (!art_el.getAttribute('src')) art_el.src = art.src;
+      });
+    }
     /* **And ask for a better one, as a card does.** The owner, 4
        September 2026: "the 3asq readings cover image in the banners home
        and discover pages are not clear (blurry)". A grid card has asked

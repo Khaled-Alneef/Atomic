@@ -472,3 +472,16 @@ banner is built (`poster: True`, the cover as ground and cover, the IMDb
 id carried so app.js `heroFor` asks `/api/featured` for TMDB's wide art
 and logo). Photographed on the frozen build against the stripped copy at
 2560 and 1920 wide: the banner is there, with the wide art in.
+
+Second report from the same device after the cover fallback: still no
+banner. A library brought over from another machine can carry
+`cover_path` into that machine's cache and nothing else, so
+`cover_url(entry)` is empty there while every card still draws (a card
+asks `/api/cover` for its picture). `hero_for` now returns a banner for
+any titled entry (`poster: True`, ground and cover empty), and app.js
+`heroFor` asks `/api/cover` for the banner's cover the way a card does,
+keeps it hidden until it has decoded, and lets the blurred ground take
+it until `/api/featured` brings TMDB's wide art. Reproduced and
+photographed on a copy with every art field stripped and no image cache
+(the closest this machine can get to his other device): the banner is
+there at 2560 and 1920 wide, with the wide art, logo and cover in.
