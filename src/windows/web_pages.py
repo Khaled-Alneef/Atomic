@@ -227,7 +227,16 @@ class _WebPage(GlassPage):
     # Pages that are lists of what is saved or done, and so redraw on a
     # user change (helpers/changes); every other route holds scrolled
     # rows and is patched in place instead.
-    _RELOAD_ON_CHANGE = ("home", "discover", "saved", "history", "schedule")
+    # **Not Discover.** The owner, 6 September 2026: "when I press the
+    # add to save btn in the discover banner it reloads the page do not
+    # make it reload!!!!!" A save from the banner bumps the counter like
+    # any other write, and Discover reloading on it threw the banner,
+    # the strips and the scroll away for a change that touched one
+    # word. Its rows are the catalogue and never change on a save; the
+    # banner relabels itself on the press (app.js heroFor) and the
+    # cards' saved colour is patched in place by the `marks` push below
+    # (progressInto), which is all a save changes on that page.
+    _RELOAD_ON_CHANGE = ("home", "saved", "history", "schedule")
 
     def _data_stamp(self, files=None):
         """A cheap fingerprint of the files named."""

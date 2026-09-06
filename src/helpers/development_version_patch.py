@@ -1343,7 +1343,8 @@ def install():
     #   * Discover reads its cache again (a missing import had emptied it
     #     since 1.10.268), fills in while on screen, and the grid's
     #     "Looking around..." is centred.
-    updater.APP_VERSION = "1.10.270"
+    #   * A save from the Discover banner no longer reloads the page.
+    updater.APP_VERSION = "1.10.271"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
