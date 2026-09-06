@@ -1352,7 +1352,11 @@ def install():
     #     outside a glide (his laptop's reversal, 1.10.271: moved=0).
     #   * The glide never steps backwards on a notch's first frame (his
     #     laptop's creep: 1506, 1503, 1500, 1494 while wheeling down).
-    updater.APP_VERSION = "1.10.273"
+    #   * A web view stays parked until its document has loaded, and
+    #     paints the app's ground rather than white before its first
+    #     frame: the reader no longer flashes white and dark on entry
+    #     (his "black stutter" in the 3asq readings).
+    updater.APP_VERSION = "1.10.274"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

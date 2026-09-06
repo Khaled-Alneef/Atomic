@@ -173,6 +173,7 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_DEFERERASE = 0x2000
 SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
 
 _pump_timer = None
 _burst_timer = None
@@ -340,6 +341,7 @@ class WebView2Page(QWidget):
             # _ready. It has to be a *shown* window for the controller to
             # be built against it, and a visible one here would flash.
             self._form.SetBounds(-32000, -32000, 900, 700)
+            self._parked = True          # off screen until _navigated reveals it
             self._view = _control()
             # **Into %APPDATA%\Atomic, not beside the exe.** Left unset,
             # WebView2 creates its "EBWebView" profile folder next to
@@ -360,6 +362,17 @@ class WebView2Page(QWidget):
                 except Exception:
                     logs.exception("WebView2 user data folder not set")
             self._view.Dock = _forms.DockStyle.Fill
+            # **The control's own colour before anything is drawn.** A
+            # WebView2 paints white until its first document paints -
+            # the 25ms white frame measured above, and the same white
+            # any resize or navigation shows for a frame. This is the
+            # colour WebView2 documents for exactly that gap; the app's
+            # ground, the same the form wears.
+            try:
+                from System.Drawing import Color
+                self._view.DefaultBackgroundColor = Color.FromArgb(10, 14, 22)
+            except Exception:
+                logs.exception("WebView2 default background not set")
             self._form.Controls.Add(self._view)
 
             # **Shown without taking the foreground.** Form.Show()
@@ -487,6 +500,7 @@ class WebView2Page(QWidget):
                 _u.SetWindowPos(child, None, -32000, -32000, 0, 0,
                                 SWP_NOZORDER | SWP_NOACTIVATE
                                 | SWP_DEFERERASE | SWP_NOSIZE)
+                self._parked = True
                 self._sized = (0, 0)
         except Exception:
             return
@@ -944,7 +958,8 @@ class WebView2Page(QWidget):
             box = w.RECT()
             if _u.GetClientRect(self._child, ctypes.byref(box)):
                 if ((box.right - box.left, box.bottom - box.top)
-                        == (width, height)):
+                        == (width, height)
+                        and not (getattr(self, "_parked", False) and self._loaded)):
                     return      # the fold sends many resizes per frame
         self._sized = (width, height)
         # NOACTIVATE and DEFERERASE as well as NOZORDER: the sidebar fold
@@ -952,5 +967,23 @@ class WebView2Page(QWidget):
         # flags make Windows erase the background and re-activate on
         # each one - work that is thrown away 60+ times a second and is
         # felt as the cards stuttering as the rail opens.
-        _u.SetWindowPos(self._child, None, 0, 0, width, height,
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_DEFERERASE)
+        # **A child with no document yet is sized where it is parked.**
+        # The owner, 6 September 2026: "while I am scrolling in the 3asq
+        # readings there is a black stutter". Sampled at the screen's
+        # rate on a chapter entered a second time: the reader widget's
+        # ground for 57ms, then a pure white frame for 25ms, then the
+        # form's ground, then the details page showing through again,
+        # then a fade to dark - all before the document had navigated.
+        # The form is created parked at -32000 and _navigated reveals it
+        # (set_child_visible, "kept hidden until here"), but the reader's
+        # follow() resizes the widget first, and this call sized the
+        # child *at 0,0* - which dragged the empty control on screen a
+        # third of a second early. Until the document has loaded the
+        # size is applied with the position left alone; the reveal's
+        # forced fit moves it back as it always did.
+        flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_DEFERERASE
+        if not self._loaded and not force:
+            flags |= SWP_NOMOVE
+        _u.SetWindowPos(self._child, None, 0, 0, width, height, flags)
+        if not flags & SWP_NOMOVE:
+            self._parked = False

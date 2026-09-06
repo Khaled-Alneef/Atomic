@@ -583,3 +583,43 @@ it. `t` is clamped at zero. What other apps on the engine do: VS Code
 animates its own wheel scrolling in script as this does; plain Electron
 apps take Chromium's compositor curve, which was measured here on 1
 September as a 660ms dribble and turned off (webview2_host).
+
+## A web view is revealed once, dark, with its document (6 September 2026)
+
+His report: *"while I am scrolling in the 3asq readings there is a
+black stutter"* - with the trigger, once asked: leave the chapter, enter
+it again, scroll fast. Sampled at the screen's rate (`sampler.py`) on
+Kingdom (WAN) 886, the frames of a re-entry, no wheel at all: the
+details page, the reader widget's ground for 57ms, **a pure white frame
+for 25ms**, the WinForms form's ground for 67ms, the details page
+showing through again for 85ms, a 100ms fade to dark, a dark hold of
+840ms, then the pages. Two greys told the layers apart - 14 is the
+form's back colour, 19 the document's ground - and a trace on the Qt
+side placed the white frame 200ms *before* the document had navigated:
+`WebView2Page` creates its form parked at -32000 and `_navigated`
+reveals it, but the reader's `follow()` resizes the widget first and
+`_fit` sized the child at 0,0, dragging the empty control on screen
+early. Two changes in webview2_host: a child with no document is sized
+where it is parked (`SWP_NOMOVE`, a `_parked` flag so the reveal's fit
+still moves it even at an unchanged size - the first version of that
+left the reader off screen for good), and the control's
+`DefaultBackgroundColor` is the app's ground, the colour WebView2 shows
+before a first paint and for a frame on any resize. After: the details
+page, one dark hold of about 400ms, the pages, and they arrive at 0.64s
+after the click against 0.9s.
+
+Under a fast wheel two more things showed as page-sized ground frames
+mid-scroll: the reader's pictures were asked for only 800px ahead, less
+than one screen (`LAZY_MARGIN_READER_PX`, four screens now), and the
+exact-size copy replaced a visible page before it was decoded
+(`askForExact` decodes the probe first). Ground frames per re-entry at
+25 notches a second, source tree: 5, 2, 1 before; 1, 2, 0 with the
+look-ahead; 0, 1, 0 with both. The bench is `drive_flash.py` beside
+`rig.py`; it targets only the window its own launch created, so an
+instance he has open is left alone.
+
+What measured as *not* it, so it is not re-dug: the exact-size swap
+alone (switched off: same three entry frames), the spread's box getting
+its width a frame before its shape (real, a 1547px jolt of the strip on
+entry, fixed in `sizePage` - but not the flicker), and any large scroll
+step (the steps around every ground frame were 40-70px).

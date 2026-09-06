@@ -473,6 +473,21 @@ function artURL(src, cssWidth) {
    purpose: it is the difference between a card arriving before it is
    looked at and arriving after. */
 const LAZY_MARGIN_PX = 800;
+/* **A chapter's pages are asked for four screens ahead.** The owner, 6
+   September 2026: "while I am scrolling in the 3asq readings there is a
+   black stutter". Sampled at the screen's rate on Kingdom (WAN) 886
+   entered a second time and wheeled at 25 notches a second: page-sized
+   frames of the reader's ground mid-scroll, at 1.9s, 3.1s and 5.5-6.8s
+   after entry - the wheel reaching pages whose picture the 800px
+   look-ahead above (less than one screen here) had not asked for yet,
+   drawn as their ground box until the picture decoded. A grid holds
+   hundreds of covers and needs that budget; a chapter is twenty pages
+   the reader exists to show, so a page is fetched well before the
+   wheel can reach it. */
+const LAZY_MARGIN_READER_PX = 4500;
+function lazyMargin() {
+  return readerState.id ? LAZY_MARGIN_READER_PX : LAZY_MARGIN_PX;
+}
 
 const lazyPending = new Set();
 let lazySweepQueued = false;
@@ -580,8 +595,9 @@ function sweepLazyInner() {
     setTimeout(queueLazySweep, 60);
     return;
   }
-  const top = box.top - LAZY_MARGIN_PX;
-  const bottom = box.bottom + LAZY_MARGIN_PX;
+  const margin = lazyMargin();
+  const top = box.top - margin;
+  const bottom = box.bottom + margin;
   lazyPending.forEach(function (img) {
     if (!img.isConnected) { lazyPending.delete(img); return; }
     /* **The card's rectangle, not the picture's.** A `.gc` carries
@@ -1600,8 +1616,24 @@ async function openChapter(id, index) {
     return h > 0 && w / h > 1.2;
   }
   function sizePage(img) {
-    const [natW] = natural(img);
+    const [natW, natH] = natural(img);
     if (!natW) return;
+    /* **The shape lands with the width, never a frame behind it.** The
+       owner, 6 September 2026: "while I am scrolling in the 3asq
+       readings there is a black stutter". Traced frame by frame on
+       Kingdom (WAN) 886, which opens on a 2760x1917 spread, entered a
+       second time: a cached picture's natural size is known the moment
+       `src` is set, so this sized the spread to the column, 2051px, in
+       the first frame - while its aspect ratio still came from the
+       placeholder until `learn` ran on the load event two frames later.
+       The box was 2051x2972 and then 2051x1425; the strip went 32090 ->
+       34163 -> 32616px tall inside 50ms, every page below jolted down
+       1400px and up 1547px, and the compositor rastered the strip anew
+       each time - sampled at the screen's rate, a whole frame of the
+       reader's ground under a fast wheel, exactly where he saw it.
+       Shaping the box here, from the same natural size, keeps the two
+       together. `learn` still sets the same value on load. */
+    if (natH && !img.style.aspectRatio) img.style.aspectRatio = natW + ' / ' + natH;
     /* **The chapter's width, but never past this page's own pixels.**
        The owner, 4 September 2026: "in the reading viewer some pages
        load in perfect quality and some in bad quality in 3asq
@@ -1786,11 +1818,32 @@ async function openChapter(id, index) {
     img._exactAt = want;
     const url = img._rawSrc + (img._rawSrc.indexOf('?') >= 0 ? '&' : '?')
               + 'w=' + want + '&exact=1';
+    /* **Decoded before it is shown, not merely loaded.** `load` fires
+       when the bytes are in; with `decoding = 'async'` on the page, the
+       frame that swaps `src` paints nothing until the new file has been
+       decoded, and a page is taller than the view. The owner, 6
+       September 2026: "while I am scrolling in the 3asq readings there
+       is a black stutter". Measured on the source tree with the reader's
+       entry flicker already fixed (webview2_host) and its look-ahead at
+       LAZY_MARGIN_READER_PX, Kingdom (WAN) 886 entered again and wheeled
+       at 25 notches a second, ground frames per run sampled at the
+       screen's rate: 1, 2, 0 without this, 0, 1, 0 with it - the one
+       left being the reveal frame itself. `decode()` finishes the work
+       on the probe first, so the swap paints in the same frame; a file
+       that refuses to decode is left alone, the way a failed load was. */
     const probe = new Image();
-    probe.onload = function () {
+    probe.decoding = 'async';
+    const swap = function () {
       // Only if this is still the size it wants - a zoom mid-fetch
       // makes the answer stale, and the newer request will land.
       if (img._exactAt === want && img.isConnected) img.src = probe.src;
+    };
+    probe.onload = function () {
+      if (typeof probe.decode === 'function') {
+        probe.decode().then(swap, function () { /* undecodable: keep what is shown */ });
+      } else {
+        swap();
+      }
     };
     probe.src = url;
   }
