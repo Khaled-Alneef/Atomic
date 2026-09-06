@@ -534,3 +534,30 @@ and `PageSlide` kept both reachable through the closure cycle its
 `on_done` makes with the `slide` variable in main._show_page, so the
 pixel data waited on a generational collection. `_finish` now drops the
 callback and both pictures the moment the slide lands.
+
+## The glide moves the page by a distance, never to a position (6 September 2026)
+
+His report on 1.10.270: *"the page started to move opposite side when I
+scroll for the first ticks"*, then *"the issue of scrolling happens in
+all pages!!!!"*. app.js's wheel glide wrote an absolute `scrollTop`
+each frame from where the notch found the view, so anything that moved
+the page inside its 130ms was undone by the next frame - and the
+undoing is what the eye sees, a page going the wrong way for a tick.
+Measured on the frozen build with a continuous wheel-down at four
+notches a second over a Discover page still filling: **376px and 164px
+jumps up**, exactly at the two batches, because the first fill threw
+every strip away and rebuilt them (one frame of a page with no strips,
+scroll clamped to it). On a slow device the same thing happens on every
+catalogue page: the first live batch adds the filter ticks above the
+grid during the user's first ticks, Chromium's scroll anchoring moves
+the page to keep the grid in place, and the glide moved it back.
+
+Two changes. `pullDiscover` swaps only the blocks whose titles changed,
+in place (a strip's height does not depend on its cards), appends new
+sections, and compensates `scrollTop` by the banner's height when the
+banner arrives. And the glide applies the *increment* of its eased curve
+to wherever the page is - a move from elsewhere is kept, the notch still
+travels its distance, a notch mid-glide re-aims from the current view
+plus what is still owed, one frame chain at a time (`glideOn`). The
+glide line now carries `moved` and `movedMax`: how far something else
+moved the page under it, so his log names the trigger on his machine.

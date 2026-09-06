@@ -405,3 +405,18 @@ name, assert the name at module level** (`hasattr(module, "storage")`
 in the harness is one line), and **a page's row count is part of its
 screenshot** - "route drawn, rows=20" on a Discover that used to draw
 hundreds is the finding, not the picture.
+
+## Scroll faster, and reject the frames that are not a scroll (6 September 2026)
+
+His instruction while the reversal above was being chased: *"you must
+scroll faster to see the issue!"* One notch every 1.2s never overlaps a
+130ms glide with the batch that moves the page, so the slow driver saw
+nothing; a continuous wheel at four notches a second over the window in
+which batches land (`drive_scroll_fast.py`) caught both jumps in one
+run. The band correlator that measures the shift between grabs reads a
+content change (covers decoding, the page slide, a banner rotation) as
+an arbitrary large shift, so `drive_scroll_page.py` keeps each step's
+residual and rejects frames whose best match is still three times worse
+than the median glide frame - before that, every run reported a
+"reversal" at 0.27s that was the page slide. And the control was run:
+1.10.268 measured the same three pages with the same driver.

@@ -1344,6 +1344,10 @@ def install():
     #     since 1.10.268), fills in while on screen, and the grid's
     #     "Looking around..." is centred.
     #   * A save from the Discover banner no longer reloads the page.
+    #   * The wheel glide moves the page by its distance, not to a
+    #     position, so a batch or a layout change under it no longer
+    #     throws the page the other way; Discover's fill swaps only the
+    #     strips that changed, in place.
     updater.APP_VERSION = "1.10.271"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"

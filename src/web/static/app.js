@@ -2345,7 +2345,80 @@ function pullDiscover(page, mine, first) {
   function countRows(d) {
     return (d.sections || []).reduce(function (n, s) { return n + (s.rows || []).length; }, 0);
   }
-  let drawn = countRows(first);
+  /* **Only the blocks that changed, swapped where they stand.** The
+     first version of this threw every section block away and built
+     them all again on each batch - and a section block is a strip of
+     fixed height, so for one frame the page was a header and nothing
+     else, the scroll offset clamped to that, and the wheel glide that
+     was running found itself far above where it started. The owner, 6
+     September 2026: "the page started to move opposite side when I
+     scroll for the first ticks". A strip's height does not depend on
+     how many cards it holds, so replacing a block in place moves
+     nothing above or below it; a new section is appended, a section
+     whose titles have not changed is left alone, and the banner - the
+     one thing that does add height - is compensated for in scrollTop
+     the moment it is inserted. */
+  const keyOf = function (title) {
+    return String(title || '').replace(/\s*\(\d+\)\s*$/, '').trim();
+  };
+  const sigOf = function (section) {
+    return (section.rows || []).map(function (r) { return r.title || r.id || ''; }).join('\u001f');
+  };
+  const blocks = function () {
+    const found = {};
+    page.querySelectorAll(':scope > .row').forEach(function (b) {
+      const h2 = b.querySelector('h2');
+      if (h2) found[keyOf(h2.textContent)] = b;
+    });
+    return found;
+  };
+  (function stampFirst() {
+    const have = blocks();
+    (first.sections || []).forEach(function (s) {
+      const b = have[keyOf(s.title)];
+      if (b) b.dataset.sig = sigOf(s);
+    });
+  })();
+  function apply(fresh) {
+    const top = page.scrollTop;
+    const have = blocks();
+    const empty = page.querySelector(':scope > .empty');
+    let changed = 0;
+    (fresh.sections || []).forEach(function (s) {
+      if (!s.rows || !s.rows.length) return;
+      const key = keyOf(s.title), sig = sigOf(s);
+      const old = have[key];
+      if (old && old.dataset.sig === sig) return;
+      const tmp = el('div');
+      tmp.dataset.cardstyle = page.dataset.cardstyle || '';
+      sectionsInto(tmp, [s]);
+      const block = tmp.firstChild;
+      if (!block) return;
+      block.dataset.sig = sig;
+      if (old) page.replaceChild(block, old);
+      else if (empty && empty.parentNode === page) page.insertBefore(block, empty);
+      else page.appendChild(block);
+      changed += 1;
+    });
+    if (empty && (fresh.sections || []).some(function (s) { return s.rows && s.rows.length; })) {
+      empty.remove();
+    }
+    let grew = 0;
+    const heroes = fresh.heroes || (fresh.hero ? [fresh.hero] : []);
+    if (heroes.length && !page.querySelector('.herobox')) {
+      const box = heroCarousel(heroes);
+      page.insertBefore(box, page.firstChild);
+      grew = box.offsetHeight;
+      changed += 1;
+    }
+    if (!changed) return;
+    refreshGenres(page);
+    applyFilter(page);
+    const note = page.querySelector('header p');
+    if (note) note.textContent = fresh.note || '';
+    page.scrollTop = top + grew;
+    sayBatch('discover', performance.now() - routeAt, countRows(fresh), 'pending');
+  }
   function tick() {
     if (mine !== token || currentRoute() !== 'discover') return;
     if (Date.now() - started > DISCOVER_PENDING_BUDGET_MS) return;
@@ -2353,23 +2426,7 @@ function pullDiscover(page, mine, first) {
       .then(function (r) { return r.json(); })
       .then(function (fresh) {
         if (mine !== token || currentRoute() !== 'discover') return;
-        const n = countRows(fresh);
-        if (n > drawn) {
-          drawn = n;
-          page.querySelectorAll(':scope > .row').forEach(function (b) { b.remove(); });
-          const empty = page.querySelector(':scope > .empty');
-          if (empty) empty.remove();
-          const heroes = fresh.heroes || (fresh.hero ? [fresh.hero] : []);
-          if (heroes.length && !page.querySelector('.herobox')) {
-            page.insertBefore(heroCarousel(heroes), page.firstChild);
-          }
-          sectionsInto(page, fresh.sections || []);
-          refreshGenres(page);
-          applyFilter(page);
-          const note = page.querySelector('header p');
-          if (note) note.textContent = fresh.note || '';
-          sayBatch('discover', performance.now() - routeAt, n, 'pending');
-        }
+        apply(fresh);
         if (fresh.pending) setTimeout(tick, DISCOVER_PULL_MS);
       })
       .catch(function () { setTimeout(tick, DISCOVER_PULL_MS); });
@@ -2403,9 +2460,27 @@ function pullDiscover(page, mine, first) {
 const NOTCH_MIN_PX = 50;      // below this it is a finger, not a notch
 const GLIDE_MS = 130;
 
-let glideTo = null;
-let glideFrom = 0;
+/* **The glide moves the page by its distance, never to a position.**
+   The owner, 6 September 2026: "the page started to move opposite side
+   when I scroll for the first ticks" - on every page. The first version
+   wrote an absolute scrollTop each frame from where the notch found the
+   view, so anything else that moved the page inside those 130ms - a
+   batch that rebuilt Discover's strips (measured: 376px and 164px
+   jumps up under a wheel-down, exactly at the two batches), Chromium's
+   scroll anchoring when content above the viewport grows, a restore -
+   was undone by the next frame, and the undoing is what the eye saw:
+   a page going the wrong way for a tick or two. Each frame now applies
+   the *increment* of the eased curve to wherever the page is, so a
+   move from elsewhere is kept and the notch still travels its full
+   distance; a second notch mid-glide re-aims from the current view plus
+   what is still owed, which is the retargeting the note above
+   describes. One frame chain at a time (glideOn) - a chain per notch
+   would apply the increments twice. */
+let glideRemain = 0;      // the distance still owed, signed
+let glideStart = 0;       // what the current curve set out to travel
+let glideApplied = 0;     // how much of it has been applied so far
 let glideAt = 0;
+let glideOn = false;
 /* **The glide reports itself.** Measured 5 September 2026 on the frozen
    build: five notches on Movies were 130 eased frames on a fresh launch
    and five single jumps once the reader had been opened and closed.
@@ -2415,27 +2490,48 @@ let glideAt = 0;
    thought it was visible. Rate-limited to one line a second. */
 let glideFrames = 0, glideLastNow = 0, glideGapMax = 0, glideTold = 0;
 
+/* What moved the page under the glide, if anything: the frame keeps
+   what it last wrote and sums any difference it finds into the glide
+   line as `moved` (and the largest single one as `movedMax`), so his log
+   says how far and on which page - the increment above keeps it, this
+   names it. */
+let glideWrote = null, glideMoved = 0, glideMovedMax = 0;
 function glideStep(now) {
-  if (glideTo === null) return;
+  if (!glideOn) return;
   glideFrames++;
   if (glideLastNow) glideGapMax = Math.max(glideGapMax, now - glideLastNow);
   glideLastNow = now;
+  if (glideWrote !== null) {
+    const drift = page.scrollTop - glideWrote;
+    if (Math.abs(drift) > 1) {
+      glideMoved += drift;
+      glideMovedMax = Math.max(glideMovedMax, Math.abs(drift));
+    }
+  }
   const t = Math.min(1, (now - glideAt) / GLIDE_MS);
   // Chromium's own ease-out, the curve its scroll animation uses.
   const eased = 1 - Math.pow(1 - t, 3);
-  page.scrollTop = glideFrom + (glideTo - glideFrom) * eased;
+  const target = glideStart * eased;
+  page.scrollTop = page.scrollTop + (target - glideApplied);
+  glideApplied = target;
+  glideRemain = glideStart - glideApplied;
+  glideWrote = page.scrollTop;
   if (t < 1) {
     requestAnimationFrame(glideStep);
   } else {
-    glideTo = null;
-    if (now - glideTold > 1000) {
+    glideOn = false;
+    glideRemain = 0;
+    glideWrote = null;
+    if (now - glideTold > 1000 || glideMovedMax > 1) {
       glideTold = now;
       tellHost({ action: 'diag', what: 'glide', frames: glideFrames,
                  ms: Math.round(now - glideAt), gapMax: Math.round(glideGapMax),
+                 moved: Math.round(glideMoved), movedMax: Math.round(glideMovedMax),
+                 top: Math.round(page.scrollTop),
                  visible: document.visibilityState, hasFocus: document.hasFocus(),
                  route: location.hash });
     }
-    glideFrames = 0; glideLastNow = 0; glideGapMax = 0;
+    glideFrames = 0; glideLastNow = 0; glideGapMax = 0; glideMoved = 0; glideMovedMax = 0;
   }
 }
 
@@ -2470,12 +2566,18 @@ addEventListener('wheel', function (e) {
      125px. Same page element scrolls in both, same curve now. */
   e.preventDefault();
   const limit = page.scrollHeight - page.clientHeight;
-  const from = glideTo === null ? page.scrollTop : glideTo;
-  glideTo = Math.max(0, Math.min(limit, from + e.deltaY));
-  glideFrom = page.scrollTop;
+  const here = page.scrollTop;
+  const want = Math.max(0, Math.min(limit, here + glideRemain + e.deltaY));
+  glideStart = want - here;
+  glideApplied = 0;
+  glideRemain = glideStart;
   glideAt = performance.now();
   if (glideFrames === 0) { glideLastNow = 0; glideGapMax = 0; }
-  requestAnimationFrame(glideStep);
+  if (!glideOn) {
+    glideOn = true;
+    glideWrote = null;
+    requestAnimationFrame(glideStep);
+  }
 }, { passive: false });
 
 
