@@ -1348,7 +1348,9 @@ def install():
     #     position, so a batch or a layout change under it no longer
     #     throws the page the other way; Discover's fill swaps only the
     #     strips that changed, in place.
-    updater.APP_VERSION = "1.10.271"
+    #   * The log says what every wheel event asked and what the page did
+    #     outside a glide (his laptop's reversal, 1.10.271: moved=0).
+    updater.APP_VERSION = "1.10.272"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

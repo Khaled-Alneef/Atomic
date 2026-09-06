@@ -2496,6 +2496,7 @@ let glideFrames = 0, glideLastNow = 0, glideGapMax = 0, glideTold = 0;
    says how far and on which page - the increment above keeps it, this
    names it. */
 let glideWrote = null, glideMoved = 0, glideMovedMax = 0;
+let glideChainFrom = 0, glideChainDelta = 0;
 function glideStep(now) {
   if (!glideOn) return;
   glideFrames++;
@@ -2522,16 +2523,22 @@ function glideStep(now) {
     glideOn = false;
     glideRemain = 0;
     glideWrote = null;
-    if (now - glideTold > 1000 || glideMovedMax > 1) {
+    const went = Math.round(page.scrollTop) - glideChainFrom;
+    const reversed = glideChainDelta !== 0 && went !== 0
+                     && (went < 0) !== (glideChainDelta < 0);
+    if (now - glideTold > 1000 || glideMovedMax > 1 || reversed) {
       glideTold = now;
       tellHost({ action: 'diag', what: 'glide', frames: glideFrames,
                  ms: Math.round(now - glideAt), gapMax: Math.round(glideGapMax),
                  moved: Math.round(glideMoved), movedMax: Math.round(glideMovedMax),
-                 top: Math.round(page.scrollTop),
+                 from: glideChainFrom, top: Math.round(page.scrollTop),
+                 asked: glideChainDelta, reversed: reversed ? 1 : 0,
+                 wheel: trailText(),
                  visible: document.visibilityState, hasFocus: document.hasFocus(),
                  route: location.hash });
     }
     glideFrames = 0; glideLastNow = 0; glideGapMax = 0; glideMoved = 0; glideMovedMax = 0;
+    glideChainDelta = 0;
   }
 }
 
@@ -2548,12 +2555,44 @@ function glideStep(now) {
    finger's stream: it arrives alone, or at 30ms+ from the last notch. */
 const FINGER_GAP_MS = 40;
 let lastWheelAt = 0, lastWasFinger = false;
+/* **What the wheel asked for, and what the page did outside a glide.**
+   The owner's laptop log of 6 September 2026 (1.10.271): every glide
+   line said moved=0, and yet the page went the other way for the first
+   ticks, and one line's `top` sat 1600px above the one before it. So
+   the glide was not what moved it. Every wheel event goes into a short
+   trail (delta, finger or notch, the position it found), a finished
+   glide says where the chain started and ended and flags a reversal
+   against the deltas it was given, and a scroll that lands while no
+   glide is running - the browser's own, a restore, a clamp when the
+   document shrank - is written with the page's height and limit at
+   that moment and the wheel events just before it. */
+const wheelTrail = [];
+let trailTop = 0, trailTold = 0;
+function trailText() {
+  return wheelTrail.map(function (w) { return (w.f ? 'f' : 'n') + w.d + '@' + w.top; }).join(' ');
+}
+addEventListener('scroll', function () {
+  const top = Math.round(page.scrollTop);
+  const was = trailTop;
+  trailTop = top;
+  if (glideOn) return;
+  const now = performance.now();
+  const recent = wheelTrail.length ? now - wheelTrail[wheelTrail.length - 1].t : 1e9;
+  if (Math.abs(top - was) < 2 || recent > 600 || now - trailTold < 250) return;
+  trailTold = now;
+  tellHost({ action: 'diag', what: 'scroll outside glide', from: was, to: top,
+             height: page.scrollHeight, client: page.clientHeight,
+             wheel: trailText(), route: location.hash });
+}, true);
 addEventListener('wheel', function (e) {
   if (e.ctrlKey || e.shiftKey || e.deltaMode !== 0) return;
   const now = performance.now();
   const finger = Math.abs(e.deltaY) < NOTCH_MIN_PX
                  || (lastWasFinger && now - lastWheelAt < FINGER_GAP_MS);
   lastWheelAt = now; lastWasFinger = finger;
+  wheelTrail.push({ t: now, d: Math.round(e.deltaY), f: finger ? 1 : 0,
+                    top: Math.round(page.scrollTop) });
+  if (wheelTrail.length > 12) wheelTrail.shift();
   if (finger) return;                                   // the browser's own
   /* **The reader too - 5 September 2026.** It used to be the one
      surface this did not take, on the note that its scrolling was
@@ -2573,9 +2612,11 @@ addEventListener('wheel', function (e) {
   glideRemain = glideStart;
   glideAt = performance.now();
   if (glideFrames === 0) { glideLastNow = 0; glideGapMax = 0; }
+  glideChainDelta += Math.round(e.deltaY);
   if (!glideOn) {
     glideOn = true;
     glideWrote = null;
+    glideChainFrom = Math.round(here);
     requestAnimationFrame(glideStep);
   }
 }, { passive: false });
