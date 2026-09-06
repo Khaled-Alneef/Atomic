@@ -1328,7 +1328,9 @@ def install():
     #     with Cinemeta's map read from disk before anything is decided.
     #   * a card's number steps into the next season the way the player
     #     does, from the same map on disk.
-    updater.APP_VERSION = "1.10.262"
+    #   * Home's banner draws from the cover when no wide art has been
+    #     written yet, so a fresh device has a banner too.
+    updater.APP_VERSION = "1.10.263"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

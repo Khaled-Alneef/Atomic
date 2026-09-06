@@ -203,12 +203,30 @@ def hero_for(entry):
     if not isinstance(entry, dict):
         return None
     backdrop = local_url(entry.get("hero_backdrop"))
+    # **A device that never ran the Qt Home has no hero_backdrop on any
+    # entry, and had no banner at all.** The owner, 6 September 2026,
+    # with a screenshot from his other device: Home opening straight on
+    # "Watching". hero_backdrop is written by windows/home's
+    # _hero_backdrop_worker - the Qt page - and the Home on screen has
+    # been the web page since 31 August, so a fresh install never gets
+    # it; this machine had the art only from the Qt days. Without it the
+    # banner is what a Discover row's is: the cover, blurred and blown up
+    # as the ground and sharp as the cover, and the page asks
+    # /api/featured for TMDB's wide art and logo by title and IMDb id
+    # (app.js heroFor's `poster` branch). An entry with no cover either
+    # still has nothing to draw.
+    poster = ""
     if not backdrop:
-        return None
+        poster = cover_url(entry)
+        if not poster:
+            return None
+        backdrop = poster
     return {
         "title": str(entry.get("title") or ""),
         "backdrop": backdrop,
         "logo": local_url(entry.get("hero_logo")),
+        "poster": bool(poster),
+        "imdb": str(entry.get("imdb_id") or ""),
         # The entry's own cover, beside the wide art. The banner had
         # only the backdrop and the owner asked for the cover on it.
         "cover": cover_url(entry),

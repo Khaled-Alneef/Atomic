@@ -457,3 +457,18 @@ mtime-keyed cache). The player seeds `_meta_aired` from
 `stremio.cached_meta` before anything is decided. Harnessed
 (`h_resume.py`, `h_label.py`) and photographed: Reacher stored S01E08,
 the Home card reads S02E01, the ring opens S02E01.
+
+## Home's banner art was written by a page that no longer runs (6 September 2026)
+
+His screenshot from the other device: Home opening straight on
+"Watching", no banner. `backend.hero_for` drew only an entry carrying
+`hero_backdrop`, and that field is written by `windows/home`'s
+`_hero_backdrop_worker` - the Qt Home - while the Home on screen has
+been the web page since 31 August. A fresh install therefore never gets
+the field; this machine had it from the Qt days, which is why it never
+reproduced here until the art was stripped from a copy (16 fields).
+`hero_for` now falls back to the entry's cover the way a Discover row's
+banner is built (`poster: True`, the cover as ground and cover, the IMDb
+id carried so app.js `heroFor` asks `/api/featured` for TMDB's wide art
+and logo). Photographed on the frozen build against the stripped copy at
+2560 and 1920 wide: the banner is there, with the wide art in.
