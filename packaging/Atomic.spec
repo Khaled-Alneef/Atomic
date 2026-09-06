@@ -235,7 +235,19 @@ a = Analysis(
     # taking the whole build down with it. Excluding it changes nothing in
     # the bundle: the released 1.9 exe carries zero numpy entries, because
     # the analysis discarded it as unused anyway.
-    excludes=['numpy'],
+    # **QtWebEngine is not shipped** (6 September 2026). Measured on the
+    # 1.10.268 archive: 539MB unpacked, 507MB of it written to %TEMP% by
+    # the onefile bootloader on every launch in 2.88s, before the first
+    # line of app code runs - and Qt6WebEngineCore.dll alone is 203MB of
+    # that, with icudtl.dat, the resource .pak files and
+    # QtWebEngineProcess.exe behind it. Every page on screen has been
+    # WebView2 since 31 August (windows/web_pages), helpers/__init__
+    # imports the engine inside a try that already says "no web engine
+    # in this build - web_grid falls back", and the Qt pages keep their
+    # painted grids for a machine without the WebView2 runtime. The
+    # owner's ask that day: "improve app launching time".
+    excludes=['numpy', 'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets',
+              'PyQt6.QtWebEngineQuick'],
     noarchive=False,
     optimize=0,
 )
@@ -287,7 +299,8 @@ if os.path.isfile(RD_TOKEN_FILE):
 # needs it is one whose drivers cannot give Qt a GL context - exactly the
 # machine this cannot be tested on. 20MB is not worth a blank window
 # somebody else gets.
-_DEAD_WEIGHT = ("/pil/_avif", "/qt6pdf.dll", "/imageformats/qpdf.dll")
+_DEAD_WEIGHT = ("/pil/_avif", "/qt6pdf.dll", "/imageformats/qpdf.dll",
+                "/qt6webengine", "/qtwebengine", "/qt6/resources/icudtl.dat")
 a.binaries = [entry for entry in a.binaries
               if not any(dead in "/" + entry[0].lower().replace("\\", "/")
                          for dead in _DEAD_WEIGHT)]
@@ -308,7 +321,7 @@ a.binaries = [entry for entry in a.binaries
 #
 # Datas rather than binaries: these arrive through PyQt6's hook as data
 # files, which `excludes=` cannot reach either.
-_DEAD_DATA = ("qtwebengine_devtools_resources", "/qt6/translations/")
+_DEAD_DATA = ("qtwebengine", "/qt6/translations/", "/qt6/resources/icudtl.dat")
 a.datas = [entry for entry in a.datas
            if not any(dead in "/" + entry[0].lower().replace("\\", "/")
                       for dead in _DEAD_DATA)]

@@ -731,3 +731,21 @@ now, `server._genre`/`_more_browse` answer `pending`, and app.js
 Romance rows on screen 12s after the tick on a cold Manga page. The
 video genre pages are Cinemeta's own speed (1-5s a batch here) and are
 untouched.
+
+## A chapter with no pages says why, and is not marked read (6 September 2026)
+
+Found by the aggressive reader pass: two of ten chapters opened a reader
+that showed nothing and said nothing. Lava Scans lists its **paid
+chapters** in the same list as the free ones (the "30" in a row's title
+is the coin price, "مجاني" marks a free one) plus an "احدث فصل" ("latest
+chapter") placeholder row, and answers **200 with no `<img>`** for any of
+them. `chapter_source.chapter_pages` now says why when it has no pages
+(`reason`: `locked` when the page carries purchase wording - "buy",
+"purchase", the Arabic for coins - which measured present on both locked
+pages and absent from the free chapter 211 of the same title; `empty`
+otherwise; `unreachable` when the fetch failed), `backend.pages` logs
+`chapter has no pages: host=... label=... reason=...`, and app.js
+`openChapter` draws the reason with an "Open on the site" button and
+**skips the read mark** - the pass had marked c174 and c214 read on two
+blank readers. Photographed on the frozen build: row 173 of The Holy
+Power Of Modern Medicine shows the message; row 168 reads and marks.

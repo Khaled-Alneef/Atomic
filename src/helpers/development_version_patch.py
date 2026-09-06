@@ -1338,7 +1338,9 @@ def install():
     #   * a landed page slide lets go of its two pictures (45MB a switch).
     #   * a save is not lost to a reader (the rename is retried, readers
     #     take the writer's lock); ATOMIC_MEMTRACE=1 measures memory.
-    updater.APP_VERSION = "1.10.268"
+    #   * QtWebEngine is no longer shipped: 230MB less to unpack on every
+    #     launch (every page is WebView2; the Qt pages keep their grids).
+    updater.APP_VERSION = "1.10.269"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

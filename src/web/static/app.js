@@ -1278,6 +1278,30 @@ async function openChapter(id, index) {
     strip.appendChild(el('div', 'empty', data.error));
     return;
   }
+  // **A chapter with no pages says so.** Found by the aggressive reader
+  // pass of 6 September 2026: two of ten chapters opened blank and
+  // silent - Lava Scans lists its paid chapters (the "30" in the row is
+  // the coin price) and a "latest chapter" placeholder beside the free
+  // ones, and answers 200 with no <img> for them. The reader drew
+  // nothing, said nothing, and marked the chapter read. The bars, the
+  // previous/next buttons and the browser button below are still wired,
+  // so the reader is left, not abandoned.
+  const noPages = !(data.pages && data.pages.length);
+  if (noPages) {
+    const box = el('div', 'empty rnopages');
+    box.appendChild(el('div', 'rnopages-head', 'This chapter has no pages here'));
+    box.appendChild(el('div', 'rnopages-why', data.reason === 'locked'
+      ? 'The site lists it as a paid or locked chapter.'
+      : (data.reason === 'unreachable'
+          ? 'The site did not answer for it.'
+          : 'The site shows no pages for it yet.')));
+    const onSite = el('button', 'rbtn', 'Open on the site');
+    onSite.addEventListener('click', function () {
+      tellHost({ action: 'browser', id: id, i: index });
+    });
+    box.appendChild(onSite);
+    strip.appendChild(box);
+  }
 
   /* reader.MEDIUM_TARGET_WIDTH, kept for one job only: the size of the
      box a page occupies *before* it has arrived, so nothing below jumps
@@ -2004,8 +2028,10 @@ async function openChapter(id, index) {
     strip.appendChild(img);
   });
 
-  // Marked read on open, which is what the Qt reader records too.
-  if (readerState.key) {
+  // Marked read on open, which is what the Qt reader records too - never
+  // for a chapter that showed nothing (see noPages above: the pass that
+  // found it had marked two blank chapters read).
+  if (readerState.key && !noPages) {
     fetch('/api/mark?id=' + encodeURIComponent(id) +
           '&key=' + encodeURIComponent(readerState.key))
       .catch(function () {});

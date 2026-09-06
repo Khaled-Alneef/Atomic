@@ -870,6 +870,21 @@ def pages(entry_id, index):
     head = dict(answer.get("headers") or {})
     urls = [remote_url(u, head) for u in (answer.get("pages") or [])]
     row = _chapter_row(chapter, index)
+    reason = ""
+    if not urls:
+        # Found by the aggressive reader pass of 6 September 2026: two
+        # of ten chapters opened a reader that showed nothing and said
+        # nothing - Lava Scans' paid chapters and its "latest chapter"
+        # placeholder row. The line here is what names the next one.
+        reason = str(answer.get("reason") or "empty")
+        try:
+            from helpers import logs
+            from urllib.parse import urlparse
+            host = urlparse(str(chapter.get("url") or "")).netloc or "?"
+            logs.info(f"chapter has no pages: host={host} "
+                      f"label={row['label']!r} reason={reason}")
+        except Exception:
+            pass
     # The medium decides how wide a page is drawn - reader.py's
     # MEDIUM_TARGET_WIDTH, manga 1100 against manhwa/manhua 762. It is
     # the difference between a page and a vertical strip, and reading
@@ -878,7 +893,7 @@ def pages(entry_id, index):
     return {"pages": urls, "count": len(urls), "label": row["label"],
             "key": row["key"], "index": index, "total": len(found),
             "medium": medium if medium in READING else "manga",
-            "title": str(entry.get("title") or "")}
+            "title": str(entry.get("title") or ""), "reason": reason}
 
 
 def mark_read(entry_id, key, read=True):

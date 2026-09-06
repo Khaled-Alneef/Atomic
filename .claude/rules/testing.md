@@ -344,3 +344,48 @@ first page switch and then only oscillated by the 22MB a slide holds
 until it lands. A one-time step in shared, file-backed pages (the .NET
 host and WebView2 mappings the first web page touches), not a leak.
 Read private bytes, not the working set, before calling growth a leak.
+
+## The aggressive pass, and what its driver got wrong first (6 September 2026)
+
+His ask: *"do an aggressive test for the video player and the reader by
+going next/prev, select random sources from all different qualities ...
+at least 10 diff items on watch and 10 on read"*. The drivers are
+`drive_player_stress.py` and `drive_reader_stress.py` beside `rig.py`
+(`stress_common.py` launches the exe against a copy and reads the log by
+segment). What they measured on 1.10.269: 12 watch titles, 30 opens
+through Next and Previous, every one loading a file in mpv, 15 resume
+records, no `could not open` / `falling back` / `stopped mid`; 10 read
+titles, 24 chapters, and the two blank ones below.
+
+Four things the driver got wrong before the app did, so the next pass
+does not pay for them again:
+
+- **A resume record exists only after 30s of playback** (`RESUME_MIN_S`),
+  saved every 5s after that. A "did the position advance" check that
+  starts 30s after the pick sees no record at all and reads it as
+  stalled. Read the `chapter markers` line (mpv loaded the file) and the
+  record's `updated_at` over a window longer than 30s, or watch the
+  screen (`playwatch.py`).
+- **A film's one row sits at y=372, an episode row at 485+112k**, in the
+  maximised window's physical pixels. Two films were "no sources" until
+  the click moved up.
+- **A random row can overrun its group.** The 480p group had two rows and
+  the driver clicked the third, which was the next heading. Bound the
+  row by the `source group ...: opened rows=N` line.
+- **Titles are identified by what they write**, not by the scan sizes in
+  `reader sized` lines: the marks History gained (`c214`, `c147`) are the
+  chapters that opened, and they are what the tracking check compares.
+
+The pass found one thing: a **chapter with no pages opened a blank,
+silent reader and was marked read** (the fix is in `integrations.md`).
+
+A fifth rig trap from the same day: **a key sent while the reading
+music's visible press is up goes to the browser.** On a machine where
+the music never becomes audible, `reader._start_music_minimized` falls
+through autoplay and the media key to the visible press (the log says
+`music: still silent; falling back to the visible press`), which puts
+the owner's browser window in the foreground for a second or two to
+press `k`. `GetGUIThreadInfo` measured the focus window as
+`Chrome_WidgetWin_1` titled with the YouTube track at that moment, and
+an Escape sent then closed nothing; the next one did. Read the music
+lines before calling a lost key a reader bug.

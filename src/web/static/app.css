@@ -301,6 +301,11 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .strip .card { flex: 0 0 auto; width: 176px; }
 
 .empty { padding: 60px 28px; color: var(--dim); }
+/* A chapter with no pages - see app.js openChapter's noPages. */
+.rnopages { text-align: center; padding: 120px 28px; }
+.rnopages-head { color: var(--text); font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+.rnopages-why { margin-bottom: 22px; }
+.rnopages .rbtn { display: inline-block; }
 
 /* ---- the reader ---------------------------------------------------
    The Qt reader's own numbers, from windows/reader.py: BAR_HEIGHT 48,

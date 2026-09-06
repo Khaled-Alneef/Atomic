@@ -893,6 +893,12 @@ def _image_urls(body: str, page_url: str) -> list:
     return largest if len(largest) > 1 else found
 
 
+# What a scanlation site's page says where it wants payment for a chapter
+# - see chapter_pages. Site-wide legends mention coins on every page, so
+# the test is only ever applied to a page with no images.
+_PAID_MARKERS = ("purchase", "buy", "\u0643\u0648\u064a\u0646", "\u0634\u0631\u0627\u0621")
+
+
 def chapter_pages(chapter, deadline=None) -> dict:
     """The page images of one chapter, plus the headers they need.
 
@@ -917,14 +923,27 @@ def chapter_pages(chapter, deadline=None) -> dict:
     url = chapter.get("url") or ""
     timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
     if not url.startswith("http") or timeout is None:
-        return {"pages": [], "headers": {}, "direction": direction}
+        return {"pages": [], "headers": {}, "direction": direction,
+                "reason": "empty"}
     try:
         body = _get(url, timeout)
     except Exception:
-        return {"pages": [], "headers": {}, "direction": direction}
-    return {"pages": _image_urls(body, url),
-            "headers": _headers(url),
-            "direction": direction}
+        return {"pages": [], "headers": {}, "direction": direction,
+                "reason": "unreachable"}
+    pages = _image_urls(body, url)
+    # **Why there are no pages, when there are none.** Measured 6
+    # September 2026 on Lava Scans: a paid chapter (the "30" in its row
+    # is the coin price) and the site's "latest chapter" placeholder row
+    # both answer 200 with no <img> at all, and the words "buy",
+    # "purchase" and the Arabic for coins appear on those pages and on
+    # no free one (chapter 211 of the same title: 13 pages, none of the
+    # words). The reader shows the reason instead of a blank strip.
+    reason = ""
+    if not pages:
+        low = body.lower()
+        reason = "locked" if any(m in low for m in _PAID_MARKERS) else "empty"
+    return {"pages": pages, "headers": _headers(url),
+            "direction": direction, "reason": reason}
 
 
 def _mangadex_pages(chapter, deadline) -> list:
