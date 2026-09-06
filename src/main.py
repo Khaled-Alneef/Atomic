@@ -5604,7 +5604,9 @@ class MainWindow(QMainWindow):
                 _web.start_at(route_section(page_name) and page_name)
             except Exception:
                 pass
+        logs.memtrace_mark(f"before building {page_name}")
         new_page = PAGES[_page_name(page_name)](self)
+        logs.memtrace_mark(f"built {page_name}")
         self._apply_route_section(new_page, page_name)
         new_page.setParent(self.container)
         self._current_page = new_page
@@ -5674,6 +5676,7 @@ class MainWindow(QMainWindow):
             self._bind_page_scroll()
             self._position_fullscreen_bar()
             previous.deleteLater()
+            logs.memtrace_mark("previous page scheduled for deletion")
 
         slide = PageSlide(self.container, old_shot, new_shot,
                           1 if direction == "down" else -1,
@@ -6021,6 +6024,10 @@ def main():
         tracker_module.prewarm_discover()
     except Exception:
         logs.exception("Could not prewarm the Discover rows")
+    try:
+        logs.start_memtrace()          # only with ATOMIC_MEMTRACE set
+    except Exception:
+        pass
     # The arc-name season maps for tracked anime, warmed here for one
     # reason: **AniList is what supplies the romaji, and AniList goes
     # away.** Measured 23 August 2026, mid-session, it began answering

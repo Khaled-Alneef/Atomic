@@ -321,6 +321,15 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
   transition: transform .16s ease-out;
 }
 .rreach:hover ~ .rbar, .rbar:hover { transform: translateY(0); }
+/* **The bar's empty parts move the window** (the owner, 6 September
+   2026), through WebView2's non-client regions (webview2_host._ready):
+   the controls stay controls, and in full screen there is nothing to
+   move - app.js marks the document `fs` from its own size. */
+.rbar { app-region: drag; -webkit-app-region: drag; }
+.rbar button, .rbar select, .rbar .rjump, .rbar .rzoom {
+  app-region: no-drag; -webkit-app-region: no-drag;
+}
+body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
 .rbtn {
   background: var(--surface); color: var(--text); cursor: pointer;
   border: 1px solid var(--border); border-radius: 8px;

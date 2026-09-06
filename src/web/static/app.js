@@ -4045,6 +4045,16 @@ function currentRoute() {
 }
 
 addEventListener('hashchange', function () { go(currentRoute()); });
+/* Full screen, as the page can tell it: the document is exactly the
+   screen. A maximised window is shorter by the taskbar. Read on every
+   resize, so the reader's drag region (app.css .rbar) switches off and
+   on with F11. */
+function markFullscreen() {
+  const fs = Math.abs(innerWidth - screen.width) < 2 && Math.abs(innerHeight - screen.height) < 2;
+  document.body.classList.toggle('fs', fs);
+}
+addEventListener('resize', markFullscreen);
+markFullscreen();
 go(currentRoute());
 
 /* Embedded, the window says when the marks moved - it is already

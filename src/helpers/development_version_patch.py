@@ -1334,7 +1334,11 @@ def install():
     #   * a change the user makes shows on every page at once
     #     (helpers/changes), and a resolution group folds in place with
     #     an animation instead of rebuilding the list.
-    updater.APP_VERSION = "1.10.265"
+    #   * the reader's top bar moves the window outside full screen.
+    #   * a landed page slide lets go of its two pictures (45MB a switch).
+    #   * a save is not lost to a reader (the rename is retried, readers
+    #     take the writer's lock); ATOMIC_MEMTRACE=1 measures memory.
+    updater.APP_VERSION = "1.10.268"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

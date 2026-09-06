@@ -509,3 +509,28 @@ animation now starts one event-loop turn later. A late batch of sources
 still rebuilds the panel (`_on_sources`) and `_open_source_groups` is
 what survives it. See CLAUDE.md rule 13 for the refresh rule landed the
 same day (helpers/changes).
+
+## The reader's bar moves the window; a landed slide lets go of its pictures (6 September 2026)
+
+His ask: *"make the window draggable from the upper bar in the reader
+mode while in not fullscreen"*. The reader covers the window's own bar
+and its bar is inside Edge, where a press never reaches Qt. WebView2's
+non-client region support (`IsNonClientRegionSupportEnabled`, set in
+`webview2_host._ready`; SDK 1.0.3856 and runtime 152 both carry it)
+treats an element styled `app-region: drag` as the host window's
+caption, so Windows runs its own move loop - the same thing
+`window_chrome.begin_window_drag` gets from `startSystemMove`. app.css
+marks `.rbar` and excludes its controls; app.js marks the document `fs`
+when it is exactly the screen's size, and `body.fs .rbar` is not a drag
+region. Measured on the frozen build in a 1600x900 window: a press on
+the bar's empty part dragged by (+300,+160) moved the window by exactly
+(300,160); a press on the chapter dropdown moved it 0; in full screen
+the same drag moved it 0.
+
+The other finding from last night's switch measurement, Atomic's own
+process 256MB -> 676MB over sixteen sidebar switches: a page grab at his
+window and device ratio is 3222x1747 pixels, 22.5MB, two per switch,
+and `PageSlide` kept both reachable through the closure cycle its
+`on_done` makes with the `slide` variable in main._show_page, so the
+pixel data waited on a generational collection. `_finish` now drops the
+callback and both pictures the moment the slide lands.

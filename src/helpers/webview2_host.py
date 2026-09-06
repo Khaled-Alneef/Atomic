@@ -633,6 +633,23 @@ class WebView2Page(QWidget):
             core.Settings.AreDevToolsEnabled = False
             core.Settings.IsZoomControlEnabled = False
             core.Settings.IsStatusBarEnabled = False
+            # **A page region can move the window.** The owner, 6
+            # September 2026: "make the window draggable from the upper
+            # bar in the reader mode while in not fullscreen". The reader
+            # covers the window's own bar (main.immersive_host), and the
+            # bar it draws is inside Edge, where a press never reaches
+            # Qt. WebView2's non-client region support is Microsoft's
+            # answer: an element styled `app-region: drag` is treated as
+            # the host window's caption and Windows runs its own move
+            # loop, snap and all - the same thing window_chrome.
+            # begin_window_drag gets from startSystemMove. Measured
+            # present here: SDK 1.0.3856, runtime 152. A runtime without
+            # it says so once and the bar simply does not drag.
+            try:
+                core.Settings.IsNonClientRegionSupportEnabled = True
+            except Exception:
+                logs.info("WebView2: non-client regions unavailable; "
+                          "the reader's bar will not move the window")
             if self._url:
                 core.Navigate(self._url)
         except Exception:

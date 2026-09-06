@@ -3029,8 +3029,30 @@ class PageSlide(QWidget):
         self.update()
 
     def _finish(self):
-        if self._on_done is not None:
-            self._on_done()
+        done, self._on_done = self._on_done, None
+        if done is not None:
+            done()
+        # **Let go of the pictures the moment the slide has landed.** The
+        # owner's log of 5 September 2026 - "Atomic 256MB -> 676MB over
+        # sixteen sidebar switches" - and the arithmetic: a page grab at
+        # his 2578x1398 window and 1.25 device ratio is 3222x1747 pixels,
+        # 22.5MB, two of them a switch. main._show_page deletes this
+        # widget with deleteLater, but the Python side kept both pixmaps
+        # reachable through a cycle - this object's `on_done` is a
+        # closure over the very `slide` variable it was handed to - so
+        # 45MB a switch waited for a generational collection that rarely
+        # came. Dropping the references here frees the pixel data at
+        # once; the cycle is broken with the callback above.
+        try:
+            logs.memtrace_mark("slide landed, pictures held")
+        except Exception:
+            pass
+        self._old = None
+        self._new = None
+        try:
+            logs.memtrace_mark("slide landed, pictures dropped")
+        except Exception:
+            pass
 
     def stop(self):
         """Abandon the slide - a second navigation arriving mid-flight.

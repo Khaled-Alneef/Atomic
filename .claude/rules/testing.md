@@ -309,3 +309,38 @@ they were `complete === true`, `naturalWidth === 0`, `src === ""` and
 could never satisfy the test. A settle test must count *resolved*
 (decoded **or** given up on), not decoded - and the two blank tiles it
 accidentally found were a real bug worth fixing.
+
+## A save can be lost to a reader, and the rename says so (6 September 2026)
+
+His log carried `Could not save the resume position ... PermissionError:
+[WinError 32] The process cannot access the file because it is being
+used by another process: player_state.json.tmp -> player_state.json`,
+twice. `storage.save` writes a temp file and `os.replace`s it over the
+target; Windows refuses that rename while any handle is open on the
+target, and a server thread reading the same file for a page draw holds
+one for a few hundred microseconds. Measured (`h_storage_race.py`):
+three threads reading in a loop while another saved 300 times lost
+**294 saves**, and 25 reads landed in the moment the target did not
+exist (MoveFileEx with replace is not atomic for an existing target).
+`storage.load` takes the writer's RLock now, so a reader through it
+never overlaps a rename (0 errors in the same race); `save` retries the
+rename for up to 400ms for the direct readers that remain (0 of 300
+lost at a realistic thousand reads a second); the server's four direct
+reads of discover_cache.json go through `load`. A direct `read_text` of
+a file the app also writes is a race - route it through `storage.load`.
+
+`ATOMIC_MEMTRACE=1` turns on `logs.start_memtrace`: the process's
+working set and Python's eight biggest allocation sites every ten
+seconds, plus `logs.memtrace_mark` lines from the page slide and
+`_show_page`. Measured with it: Python's own objects grew 11MB -> 16MB
+over sixteen switches, so a process growth is native; and the frozen
+build's 255MB -> 681MB was two processes summed by name until the
+bootloader (8MB) was listed apart from the app (248MB -> 616MB).
+
+The conclusion of that measurement, 6 September 2026: over sixteen
+switches on the frozen build the process's **private** bytes held at
+170-223MB while the working set stepped once from 263MB to 624MB at the
+first page switch and then only oscillated by the 22MB a slide holds
+until it lands. A one-time step in shared, file-backed pages (the .NET
+host and WebView2 mappings the first web page touches), not a leak.
+Read private bytes, not the working set, before calling growth a leak.

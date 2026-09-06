@@ -1660,8 +1660,7 @@ def _banner_pick(pools):
 
 def _discover():
     try:
-        cached = json.loads(
-            (DATA / "discover_cache.json").read_text(encoding="utf-8-sig"))
+        cached = storage.load("discover_cache.json", {})
     except Exception:
         cached = {}
     if not isinstance(cached, dict):
@@ -1767,8 +1766,7 @@ def _cached_posters():
     """Every reading poster the discover cache holds, by lowercased title."""
     found = {}
     try:
-        cached = json.loads(
-            (DATA / "discover_cache.json").read_text(encoding="utf-8-sig"))
+        cached = storage.load("discover_cache.json", {})
     except Exception:
         return found
     if not isinstance(cached, dict):
@@ -2034,8 +2032,7 @@ BROWSE_CACHE = {
 
 def _cached_browse(key):
     try:
-        cached = json.loads(
-            (DATA / "discover_cache.json").read_text(encoding="utf-8-sig"))
+        cached = storage.load("discover_cache.json", {})
     except Exception:
         return []
     block = cached.get(key) if isinstance(cached, dict) else None
@@ -2562,8 +2559,7 @@ def _released_rows():
     (tracker._fetch_released_rows shares its cache entry). No dates:
     nobody announces a scanlation, so these are what has *landed*."""
     try:
-        cached = json.loads(
-            (DATA / "discover_cache.json").read_text(encoding="utf-8-sig"))
+        cached = storage.load("discover_cache.json", {})
     except Exception:
         return []
     block = cached.get("reading_latest") if isinstance(cached, dict) else None

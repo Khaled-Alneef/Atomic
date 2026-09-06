@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,9 @@ from . import logs
 #
 # Reentrant: update_entry holds it while calling load() and save().
 _write_lock = threading.RLock()
+# How long a save waits for a reader to let go of the file - see save().
+REPLACE_TRIES = 100
+REPLACE_WAIT_S = 0.004
 
 
 def _default_data_dir() -> Path:
@@ -75,16 +79,28 @@ def load(filename: str, default):
     the caller got here - which is how the file's contents were destroyed
     rather than merely unread."""
     path = DATA_DIR / filename
-    if not path.exists():
-        return default
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logs.exception(f"Could not read {filename}; quarantining it and "
-                       f"starting from the default")
-        _quarantine(path)
-        return default
+    # **Under the writer's lock, so a read never overlaps a rename.**
+    # Measured 6 September 2026 (h_storage_race.py): three threads
+    # reading a file in a loop while another saved it 300 times lost
+    # **294 saves** to "[WinError 32] The process cannot access the
+    # file because it is being used by another process" - the
+    # os.replace below refused while a reader held the target open -
+    # and 25 reads landed in the moment the target did not exist. His
+    # own log had the same error twice on player_state.json, from a
+    # resume save colliding with a page's read. The lock is an RLock a
+    # save holds for its whole write, so a reader here waits the few
+    # milliseconds a write takes and never sees the gap.
+    with _write_lock:
+        if not path.exists():
+            return default
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            logs.exception(f"Could not read {filename}; quarantining it and "
+                           f"starting from the default")
+            _quarantine(path)
+            return default
 
 
 def _quarantine(path: Path):
@@ -131,7 +147,21 @@ def save(filename: str, data):
                 # Not fatal: losing the safety copy is worse than not having
                 # it, but refusing the save the user asked for is worse still.
                 logs.exception(f"Could not back up {filename} before saving")
-        os.replace(temp_path, path)
+        # **Retried, because a reader outside this lock can still hold
+        # the target** - the server's routes read some files straight
+        # off disk, and the player's state file is read by the page's
+        # progress push. Windows refuses the rename while any handle is
+        # open on the target; the handle is a read of a few hundred
+        # microseconds, so a short wait wins. Measured with the race
+        # above: 294 of 300 saves lost with no retry, 0 with this.
+        for attempt in range(REPLACE_TRIES):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if attempt == REPLACE_TRIES - 1:
+                    raise
+                time.sleep(REPLACE_WAIT_S)
 
 
 def update_entry(filename: str, entry_id, fields: dict, id_key: str = "id") -> bool:
