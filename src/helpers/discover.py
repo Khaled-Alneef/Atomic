@@ -1213,19 +1213,43 @@ def reading_sites_by_medium_all(limit: int = 30, deadline=None) -> dict:
     return found
 
 
+def _browsed_rows(wanted, deadline):
+    """The sites' rows for a sweep, and the classification budget that
+    goes with them: the browse kept from the last SWEEP_ROWS_TTL_S when
+    it can still answer, else a fresh browse and probe. Shared by the
+    medium sweep and the genre sweep, which are the same browse."""
+    global _SWEEP_ROWS
+    cached = _SWEEP_ROWS
+    if (cached is not None and time.monotonic() - cached[0] < SWEEP_ROWS_TTL_S
+            and (len(cached[1]) >= wanted or _SWEEP_PENDING > 0)):
+        return list(cached[1]), CLASSIFY_PULL_BUDGET_S
+    rows = discover_reading_sites(query="", limit=wanted, deadline=deadline)
+    rows = _serving_sites_only(rows, deadline)
+    if rows:
+        _SWEEP_ROWS = (time.monotonic(), list(rows))
+    return rows, CLASSIFY_BUDGET_S
+
+
 def _classify_many(titles, budget_s):
     """title -> medium for every title that has a verdict inside
     `budget_s`; titles still being asked about are simply absent, and
     counted in sweep_pending() for the page's sake."""
+    return {title: pair[0] for title, pair in _classify_pairs(titles, budget_s).items()}
+
+
+def _classify_pairs(titles, budget_s):
+    """title -> (medium, genres) for every title that has both inside
+    `budget_s` - the medium sweep and the genre sweep read the same
+    answer, and _classify asks MangaDex once for both."""
     global _SWEEP_PENDING
     unique = list(dict.fromkeys(t for t in titles if t))
     verdicts, asking = {}, []
     _load_reading_meta()
     with _MEDIUM_LOCK:
         for title in unique:
-            found = _MEDIUM_CACHE.get(title.lower())
-            if found:
-                verdicts[title] = found
+            key = title.lower()
+            if key in _MEDIUM_CACHE and key in _GENRE_CACHE:
+                verdicts[title] = (_MEDIUM_CACHE[key], list(_GENRE_CACHE[key]))
             else:
                 asking.append(title)
     if asking and len(verdicts) >= len(asking):
@@ -1241,13 +1265,14 @@ def _classify_many(titles, budget_s):
         pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(MEDIUM_WORKERS, len(asking)),
             thread_name_prefix="atomic-classify")
-        jobs = {pool.submit(classify_medium, title): title for title in asking}
+        jobs = {pool.submit(_classify, title): title for title in asking}
         try:
             for done in concurrent.futures.as_completed(jobs, timeout=budget_s):
                 try:
-                    verdicts[jobs[done]] = done.result()
+                    medium, tags = done.result()
+                    verdicts[jobs[done]] = (medium, list(tags or []))
                 except Exception:
-                    verdicts[jobs[done]] = "Other"
+                    verdicts[jobs[done]] = ("Other", [])
         except concurrent.futures.TimeoutError:
             pass
         # The stragglers run on; their answers land in _MEDIUM_CACHE and
@@ -1286,24 +1311,12 @@ def _reading_sweep(limit: int = 30, deadline=None) -> dict:
     global _SWEEP_ROWS
     names = list(MEDIUM_LANGUAGES) + ["Other"]
     empty = {name: [] for name in names}
-    wanted = max(limit * 6, 60)
-    cached = _SWEEP_ROWS
-    reuse = (cached is not None
-             and time.monotonic() - cached[0] < SWEEP_ROWS_TTL_S
-             and (len(cached[1]) >= wanted or _SWEEP_PENDING > 0))
-    if reuse:
-        rows, budget = list(cached[1]), CLASSIFY_PULL_BUDGET_S
-    else:
-        rows = discover_reading_sites(query="", limit=wanted, deadline=deadline)
-        # Same rule as Recently Released: a card that cannot open a
-        # chapter list has no business being offered. Mangalek browses
-        # and searches perfectly and 403s every series page it
-        # publishes, so without this it fills these sections with rows
-        # that open to nothing.
-        rows = _serving_sites_only(rows, deadline)
-        if rows:
-            _SWEEP_ROWS = (time.monotonic(), list(rows))
-        budget = CLASSIFY_BUDGET_S
+    # Same rule as Recently Released inside _browsed_rows: a card that
+    # cannot open a chapter list has no business being offered. Mangalek
+    # browses and searches perfectly and 403s every series page it
+    # publishes, so without the probe it fills these sections with rows
+    # that open to nothing.
+    rows, budget = _browsed_rows(max(limit * 6, 60), deadline)
     if not rows:
         return empty
     titles = [row.get("title") or "" for row in rows]
@@ -1413,26 +1426,31 @@ def reading_genre_sites(genre: str, limit: int = 30, deadline=None) -> list:
     wanted = (genre or "").strip().lower()
     if not wanted or limit <= 0:
         return []
-    rows = discover_reading_sites(query="", limit=max(limit * 6, 60),
-                                  deadline=deadline)
-    rows = _serving_sites_only(rows, deadline)
+    # **The medium sweep's browse and its budget** (6 September 2026, the
+    # owner: "when I apply the filter in the other device it takes ages
+    # to load the grid"). Measured on a cold copy: 23.6s for the first
+    # Romance page, and 17.6s for the continuation past the cache on a
+    # warm one - every browsed title classified before a row was
+    # answered, and the six sites browsed again for every batch. The
+    # rows come from the same browse the sections keep for 90s, the
+    # verdicts from _classify_pairs under the same budget, and the page
+    # keeps pulling while sweep_pending() is above zero.
+    rows, budget = _browsed_rows(max(limit * 6, 60), deadline)
     if not rows:
         return []
     titles = [row.get("title") or "" for row in rows]
-    tagged = {}
-    with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(MEDIUM_WORKERS, max(1, len(titles)))) as pool:
-        for title, found in zip(titles, pool.map(classify_genres, titles)):
-            tagged[title] = {str(name).strip().lower() for name in found or []}
+    pairs = _classify_pairs(titles, budget)
     _save_reading_meta()
     kept = []
     for row in rows:
-        if wanted not in tagged.get(row.get("title") or "", ()):
+        pair = pairs.get(row.get("title") or "")
+        if pair is None:
+            continue                    # still classifying - next pull's row
+        medium, tags = pair
+        if wanted not in {str(name).strip().lower() for name in tags or []}:
             continue
         row = dict(row)
-        row["type"] = classify_medium(row.get("title") or "")
-        if row["type"] not in MEDIUM_LANGUAGES:
-            row["type"] = "Manga"
+        row["type"] = medium if medium in MEDIUM_LANGUAGES else "Manga"
         kept.append(row)
         if len(kept) >= limit:
             break

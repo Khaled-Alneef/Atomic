@@ -412,3 +412,31 @@ build, Kingdom (WAN) ch.885: `reader sized ... scan=1327x1920,
 target=1128, drawn=1128`, and at 70% zoom `reader spread ...
 scan=1205x880, column=1991, drawn=1991, zoom=70` - the single beside it
 at 790, the spread edge to edge.
+
+## The player steps forward only on a known season end (6 September 2026)
+
+His report: *"why is Reacher showing me S01E09 while the E08 is the last
+ep of the season"* - after the same press had stepped to S02E01 here.
+`_fetch_meta_worker` asked the network for Cinemeta's episode list on
+every open and never the disk file the details page had just written
+(`meta-series-<id>.json`, stremio.fetch_meta_cached), so on a device
+where Cinemeta was slow or refused `_meta_aired` stayed None and the
+season's length was `DEFAULT_SEASON_EPISODES`'s guess of 12. The disk
+answers first now, and `_change_episode` steps forward only past a
+`_known_season_end` (the aired list, or `latest_available` naming this
+season); while Cinemeta has not answered the press says "Checking the
+season's episode list..." and asks again, and a title Cinemeta has no
+list for keeps the guesses as before (`_meta_answered`). Harnessed on
+the real unbound methods (`h_nextseason2.py`), and S01E08 -> S02E01
+photographed again on the frozen build.
+
+The manga reader has no side gutter now (`.reader.paged` padding 0,
+`availableWidth` reads the computed padding): his zoomed-in single pages
+had stopped at the same width as the spreads, 30px short of the window
+each side. Measured: column 1991 -> 2051 on his panel (the scrollbar's
+12px is what remains).
+
+A title saved after it was watched starts at History's position
+(`details._seed_progress_from_history`): the player and reader write
+`history.touch(progress=...)` for unsaved titles too, and a save was
+throwing it away - "it says S01E01 until something is watched".

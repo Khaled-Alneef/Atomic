@@ -2864,6 +2864,12 @@ class PlayerPage(GlassPage):
         # half-second.
         self._meta_aired = None       # {season: highest aired episode}
         self._meta_videos = None      # Cinemeta's raw rows, for the list
+        # Whether Cinemeta has answered at all this run - with or without
+        # an episode list. Read by _change_episode: a season end that is
+        # unknown because the answer has not landed is waited for; one
+        # that is unknown because Cinemeta has no list falls back to the
+        # guesses.
+        self._meta_answered = False
         # None until Cinemeta has answered; then whether stremio.looks_anime
         # says this title is anime. Read by _audio_language_preference.
         self._anime_hint = None
@@ -3444,15 +3450,26 @@ class PlayerPage(GlassPage):
         except Exception:
             imdb_id = self.entry.get("imdb_id")
         if not imdb_id:
+            self._meta_answered = True      # nothing to ask; the guesses stand
             return
         try:
             from helpers import stremio
-            meta = stremio.fetch_meta(
+            # **The disk first.** The details page he just came from
+            # writes this very file (meta-series-<id>.json), and this
+            # asked the network every time instead - so on a device where
+            # Cinemeta was slow or refused, _meta_aired stayed None and
+            # the season's length was a guess of DEFAULT_SEASON_EPISODES.
+            # The owner, 6 September 2026: "why is Reacher showing me
+            # S01E09 while the E08 is the last ep of the season". The
+            # file answers in milliseconds; the network only when there
+            # is no file.
+            meta = stremio.fetch_meta_cached(
                 imdb_id, "movie" if self.entry.get("type") == "Movie"
                 else "series")
         except Exception:
             logs.exception("episode-map lookup failed")
             meta = None
+        self._meta_answered = True
         if meta and not self._closing:
             self._work.meta_facts.emit({"genres": meta.get("genres") or meta.get("genre") or [],
                                         "country": meta.get("country") or ""})
@@ -6894,7 +6911,24 @@ class PlayerPage(GlassPage):
         target = self.episode + delta
         if target < 1:
             return
-        if delta > 0 and target > self._season_episode_count(self.season):
+        # **Forward only on a known season end.** The count below is a
+        # guess (DEFAULT_SEASON_EPISODES) until Cinemeta's list lands or
+        # latest_available names this season, and stepping past a real
+        # season's end on that guess is how S01E08 became "S01E09" on
+        # his other device (6 September 2026). While the answer is still
+        # on its way the press waits for it, out loud; a title Cinemeta
+        # has no list for keeps the guess, as before.
+        if delta > 0:
+            end = self._known_season_end(self.season)
+            if end is None and not getattr(self, "_meta_answered", False):
+                self._show_status("Checking the season's episode list...")
+                self._spawn(self._fetch_meta_worker)
+                return
+            if end is None:
+                end = self._season_episode_count(self.season)
+        else:
+            end = self._season_episode_count(self.season)
+        if delta > 0 and target > end:
             # Past the season's end: into the next season's first episode
             # when there is one (see _next_season_start), else the
             # honest "not yet".
@@ -10586,6 +10620,22 @@ class PlayerPage(GlassPage):
             return self._next_season_start() is not None
         except Exception:
             return False
+
+    def _known_season_end(self, season):
+        """The last episode of `season` that is known to exist, or None
+        when nothing but a guess is available: Cinemeta's aired list
+        when it has landed, else latest_available when it names this
+        very season (the episode being played always counts)."""
+        season = int(season or 0)
+        playing = int(getattr(self, "episode", 0) or 0) \
+            if int(getattr(self, "season", 0) or 0) == season else 0
+        aired = getattr(self, "_meta_aired", None)
+        if aired:
+            return max(int(aired.get(season) or 0), playing)
+        la_season, la_episode = self._latest_available()
+        if la_episode and int(la_season or 0) == season:
+            return max(int(la_episode), playing)
+        return None
 
     def _next_season_start(self):
         """(season + 1, 1) when the season after this one exists with at

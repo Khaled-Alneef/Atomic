@@ -713,3 +713,21 @@ Measured on the frozen build, cold copy (no reading cache, no
 verdicts): first Manga batch **25 rows** at 8.6s with the 6s budget
 (the night before: 3 rows), then 3s pulls with no browse - `149 of
 178`, `161`, `174` - and a full grid on screen at 12s.
+
+## A reading genre tick answers early too (6 September 2026)
+
+His report: *"when I apply the filter in the other device it takes ages
+to load the grid in the watch and read pages"*. Measured through
+`server.answer` on a cold copy: `/api/genre?name=Romance&reading=1`
+**23.6s**, and on a warm copy the continuation past the cache
+(`/api/more` for `genre:Romance:1:all`) **17.6s** - `reading_genre_sites`
+browsed the six sites again and classified every title before answering
+a row. It shares the medium sweep's browse (`_browsed_rows`, kept 90s)
+and budget (`_classify_pairs`, the same verdict the medium sweep reads)
+now, `server._genre`/`_more_browse` answer `pending`, and app.js
+`pullGenre` keeps walking while that is above zero
+(GENRE_PENDING_BUDGET_MS) instead of calling an empty batch dry. After:
+4.7s cold for the first page, 0.01s for the continuations, and 21
+Romance rows on screen 12s after the tick on a cold Manga page. The
+video genre pages are Cinemeta's own speed (1-5s a batch here) and are
+untouched.

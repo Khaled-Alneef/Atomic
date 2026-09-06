@@ -2919,8 +2919,10 @@ def _more_browse(route, have, skip):
                         body, limit=wanted) or [])
                 except Exception:
                     rows = []
+                pending = 0
                 if len(rows) <= max(0, skip):
                     rows = discover.reading_genre_sites(body, limit=wanted)
+                    pending = int(discover.sweep_pending() or 0)
                 skip = skip + len(rows)
             else:
                 rows, skip = _genre_video(body, skip, GENRE_PAGE)
@@ -2930,7 +2932,8 @@ def _more_browse(route, have, skip):
     if not route.startswith("cast:"):
         rows = _tab_rows(rows, tab)
     saved = _saved_sides()
-    return {"rows": [_grid_row(r, saved) for r in rows], "skip": skip}
+    return {"rows": [_grid_row(r, saved) for r in rows], "skip": skip,
+            "pending": int(locals().get("pending") or 0)}
 
 
 def _cast(name, tab="all"):
@@ -2989,7 +2992,7 @@ def _genre(name, reading, tab="all"):
     if not name:
         return {"kind": "grid", "rows": [], "title": "", "note": "",
                 "back": True}
-    rows, skip = [], 0
+    rows, skip, pending = [], 0, 0
     try:
         from helpers import discover
         if reading:
@@ -2999,6 +3002,7 @@ def _genre(name, reading, tab="all"):
                 rows = []
             if not rows:
                 rows = list(discover.reading_genre_sites(name, limit=120) or [])
+                pending = int(discover.sweep_pending() or 0)
         else:
             rows, skip = _genre_video(name, 0, GENRE_PAGE)
     except Exception as error:
@@ -3022,6 +3026,7 @@ def _genre(name, reading, tab="all"):
             "browsetabs": [] if reading else tabs, "browsetab": tab,
             "back": True,                      # see _cast
             "note": f"{len(rows)} titles" if rows else "nothing under this one",
+            "pending": pending,
             "rows": [_grid_row(r, saved) for r in rows]}
 
 

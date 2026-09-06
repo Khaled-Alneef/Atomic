@@ -1279,7 +1279,14 @@ async function openChapter(id, index) {
     // clientWidth counts the padding; the column a page may fill is what
     // is left inside it. Read live rather than once: the scrollbar
     // arrives after the first pages do and takes 12px off the strip.
-    return Math.max(1, strip.clientWidth - 2 * STRIP_PAD);
+    // The padding is read off the strip too, not assumed: a manga strip
+    // has none (app.css .reader.paged), everything else keeps the 30px.
+    let pad = 2 * STRIP_PAD;
+    try {
+      const cs = getComputedStyle(strip);
+      pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    } catch (err) { /* the constant stands */ }
+    return Math.max(1, strip.clientWidth - pad);
   }
   // reader.STRIP_ASPECT_MIN - a page shaped like a strip is one whatever
   // the entry's type says, which is what decides the gap below.
@@ -3573,6 +3580,7 @@ function refreshGenres(host) {
 const GENRE_WANT = 30;
 const GENRE_PULL_BATCHES = 4;
 const GENRE_PULL_BUDGET_MS = 14000;
+const GENRE_PENDING_BUDGET_MS = 20000;
 
 function pullGenre(host, name) {
   const data = host._filterData || {};
@@ -3678,11 +3686,20 @@ function pullGenre(host, name) {
            says "there is no more" is the source answering *no rows at
            all*, or its cursor refusing to advance - both of which stop
            this loop below. */
-        if ((found.rows || []).length && matching() < GENRE_WANT
-            && batches < GENRE_PULL_BATCHES
-            && Date.now() < until && next > skip) {
+        /* **A reading batch still classifying is not dry either.** The
+           genre sweep answers early now (discover.reading_genre_sites,
+           the same budget the medium sweep has) and says how many
+           titles are still being asked about; while that is above zero
+           an empty batch, a stalled cursor and the batch cap all mean
+           "not yet", and only the wall clock - a longer one, since the
+           verdicts arrive at MangaDex's pace - ends the walk. */
+        const pending = found.pending || 0;
+        if (pending) until = Math.max(until, Date.now() + GENRE_PENDING_BUDGET_MS);
+        if (matching() < GENRE_WANT && Date.now() < until
+            && (pending || ((found.rows || []).length
+                            && batches < GENRE_PULL_BATCHES && next > skip))) {
           say('looking for more ' + name + '...');
-          step(next);
+          step(Math.max(next, skip));
           return;
         }
         say('');

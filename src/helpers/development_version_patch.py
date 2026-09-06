@@ -1321,7 +1321,10 @@ def install():
     #   * a manga spread is the column whatever the zoom, manga single
     #     pages draw at 85%, and a cold reading grid starts from shipped
     #     verdicts with pulls that no longer re-browse the sites.
-    updater.APP_VERSION = "1.10.259"
+    #   * the player reads the season's episode list from disk first and
+    #     never steps past a season's end on a guess; the manga reader
+    #     has no side gutter; a reading genre tick answers early.
+    updater.APP_VERSION = "1.10.260"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

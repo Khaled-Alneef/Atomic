@@ -4820,6 +4820,32 @@ def open_details(window, entry, host=None):
 # history.link_entry - the five things that make a dict a saved entry.
 
 
+def _seed_progress_from_history(entry, reading):
+    """Copy History's position onto a fresh entry, when it has one and
+    the entry does not. Never raises."""
+    try:
+        record = history.get(entry) or {}
+        shown = str(record.get("progress") or "").strip()
+        if not shown:
+            return
+        if reading:
+            if entry.get("last_watched_chapter"):
+                return
+            number = shown[3:] if shown.lower().startswith("ch ") else shown
+            entry["last_watched_chapter"] = float(number)
+        else:
+            if entry.get("progress"):
+                return
+            from windows.tracker import parse_episode_progress
+            season, episode = parse_episode_progress(shown)
+            if not episode:
+                return
+            entry["progress"] = shown
+            entry["progress_verified"] = True
+    except Exception:
+        logs.exception("could not seed a saved entry's progress from History")
+
+
 def save_to_library(entry):
     """Write `entry` into its tracker file. Returns the file it landed
     in, or "" if it could not be written.
@@ -4842,6 +4868,16 @@ def save_to_library(entry):
         entry.setdefault("status", "Reading" if reading else "Watching")
         entry["added_at"] = stamp
         entry["updated_at"] = stamp
+        # **What History already knows about this title is the entry's
+        # starting point.** The owner, 6 September 2026: "when I watch
+        # any watchable and reach e.g. ep 9 THEN add to saved, it says
+        # S01E01 until something is watched or marked". The player, the
+        # reader and the tracker all write the position to
+        # history.touch(progress=...) whether or not the title is saved,
+        # so a save that started from nothing was throwing that away.
+        # Verified, because it is what was actually watched - never the
+        # tracker's guess at the latest episode out.
+        _seed_progress_from_history(entry, reading)
         # A plain append of a fresh read: update_entry cannot create,
         # and any tracker page open behind an overlay re-reads the file
         # the moment the overlay closes.
