@@ -865,6 +865,122 @@ def _glyph_tile(glyph, size, radius, point_size=12.0, accent=True) -> QLabel:
     return label
 
 
+class _GroupBody(QWidget):
+    """One resolution's releases under their heading, folded by height.
+
+    Built on the first open, never rebuilt on a fold: forty-one cards
+    made once is a cost paid once. The fold animates maximumHeight over
+    GROUP_FOLD_MS on the sidebar's own curve (widgets.ease_out_cubic is
+    what OutCubic is) and says in the log what it cost - the build in
+    milliseconds and the frames the animation actually got, which on a
+    165Hz panel should read near 165 x GROUP_FOLD_MS / 1000."""
+
+    def __init__(self, quality, streams, page):
+        super().__init__()
+        self.quality = quality
+        self._streams = list(streams)
+        self._page = page
+        self._built = False
+        self._tween = None
+        self._frames = 0
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(self._page._rows.spacing()
+                                if hasattr(self._page, "_rows") else 6)
+
+    def build(self):
+        if self._built:
+            return 0.0
+        started = time.perf_counter()
+        try:
+            from helpers import streams as streams_helper
+        except Exception:                               # pragma: no cover
+            streams_helper = None
+        for stream in self._streams:
+            seeders = int(stream.get("seeders") or 0)
+            size = ""
+            if streams_helper:
+                size = streams_helper.format_size(stream.get("size_bytes"))
+            detail = SEPARATOR.join(
+                p for p in (size, (stream.get("title") or "").strip()[:70])
+                if p)
+            self._layout.addWidget(self._page._source_card(
+                stream.get("source") or "Source",
+                _quality_label(stream.get("quality")), seeders, detail,
+                lambda s=stream: self._page._play_stream_choice(s)))
+        self._built = True
+        return (time.perf_counter() - started) * 1000.0
+
+    def fold(self, opening):
+        """Open or close, animated at the screen's rate.
+
+        **Measured on the frozen build, 6 September 2026, Reacher's 1080P
+        group of forty-one releases**, with the first version of this
+        (a QPropertyAnimation started straight after build()):
+
+            opened  built=37ms  frames=0   over 260ms
+            closed  built=0ms   frames=13  over 225ms
+            opened  built=0ms   frames=14  over 226ms
+
+        Zero frames on the first open: the forty-one new cards are
+        polished and laid out by the event loop *after* build() returns,
+        on the UI thread, and the animation's clock ran out underneath
+        that work - the group simply appeared, which is the jump he
+        recorded. So the first animation now starts one event-loop turn
+        later, once the polish has happened. And 13-14 frames over 220ms
+        is Qt's own 60Hz animation tick; the sidebar's fold runs on
+        widgets.SmoothTween at the panel's refresh instead, so this does
+        too, and the two motions read as one."""
+        from helpers.widgets import SmoothTween
+        built_ms = self.build() if opening else 0.0
+        if self._tween is not None:
+            self._tween.stop()
+        start = self.maximumHeight() if self.maximumHeight() < QWIDGETSIZE_MAX else self.height()
+        end = self._layout.sizeHint().height() if opening else 0
+        self._frames = 0
+        began = [0.0]
+
+        def apply(value):
+            self._frames += 1
+            self.setMaximumHeight(max(0, int(round(value))))
+
+        def done():
+            if opening:
+                self.setMaximumHeight(QWIDGETSIZE_MAX)
+            try:
+                logs.info(f"source group {self.quality or 'other'}: "
+                          f"{'opened' if opening else 'closed'} rows="
+                          f"{len(self._streams)} built={built_ms:.0f}ms "
+                          f"frames={self._frames} over "
+                          f"{(time.perf_counter() - began[0]) * 1000:.0f}ms")
+            except Exception:
+                pass
+
+        tween = SmoothTween(self, apply, GROUP_FOLD_MS, on_done=done)
+        self._tween = tween
+
+        def go():
+            if self._tween is not tween:
+                return          # re-aimed before it started
+            began[0] = time.perf_counter()
+            tween.start(start, end)
+
+        if built_ms:
+            # A fresh body: let the event loop polish the new cards
+            # before a single frame is owed. Measured above.
+            self.setMaximumHeight(0)
+            QTimer.singleShot(0, go)
+        else:
+            go()
+
+
+# One resolution group's unfold, in milliseconds - the sidebar's own
+# 220ms, so the two motions in the app read as one.
+GROUP_FOLD_MS = 220
+QWIDGETSIZE_MAX = 16777215
+
+
 class _PanelNote(QLabel):
     """The status note centred over the list panel's viewport.
 
@@ -2838,9 +2954,13 @@ class DetailsPage(GlassPage):
         # rather than signal - four folded headings each carrying an
         # accent chip is four things claiming attention and none of them
         # meaning anything.
-        row.addWidget(_glyph_tile(
+        caret = _glyph_tile(
             ICON_CHEVRON_DOWN if open_now else ICON_CHEVRON_RIGHT,
-            (26, 26), theme.RADIUS_SM, point_size=9.5, accent=open_now))
+            (26, 26), theme.RADIUS_SM, point_size=9.5, accent=open_now)
+        row.addWidget(caret)
+        # Kept on the card so a fold can restyle the heading in place
+        # rather than rebuilding the list - see _toggle_source_group.
+        card._caret = caret
         name = QLabel(str(label))
         name.setStyleSheet(
             f"color: {theme.TEXT}; font-weight: 800; font-size: 12pt;"
@@ -2852,6 +2972,25 @@ class DetailsPage(GlassPage):
             row.addWidget(_pill(f"{seeders} seeders", accent=True))
         card.clicked.connect(on_click)
         return card
+
+    def _style_group_card(self, card, open_now):
+        """The heading's open or closed look, applied in place."""
+        try:
+            card.setStyleSheet(self._row_sheet(
+                background=(theme.ACCENT_SOFT if open_now
+                            else theme.rgba(theme.SURFACE_HOVER, 110)),
+                border=(theme.rgba(theme.ACCENT, 120) if open_now
+                        else theme.rgba(theme.BORDER, 150))))
+            caret = getattr(card, "_caret", None)
+            if caret is not None:
+                caret.setText(ICON_CHEVRON_DOWN if open_now else ICON_CHEVRON_RIGHT)
+                caret.setStyleSheet(
+                    f"color: {theme.ACCENT if open_now else theme.TEXT_MUTED};"
+                    f" background: {theme.ACCENT_SOFT if open_now else theme.SURFACE_HOVER};"
+                    f" border: none; border-radius: {theme.RADIUS_SM}px;"
+                    f" font-family: {theme.FONT_STACK_ICONS}; font-size: 9.5pt;")
+        except RuntimeError:
+            pass
 
     def _source_card(self, source, quality, seeders, meta_text, on_click):
         """One release under a heading.
@@ -3081,25 +3220,33 @@ class DetailsPage(GlassPage):
                      else (quality or "Other").upper())
             open_now = bool(wanted) or quality in self._open_source_groups
             best = max((int(v.get("seeders") or 0) for v in visible), default=0)
-            self._rows.insertWidget(shown, self._group_card(
+            heading = self._group_card(
                 label, len(visible), best, open_now,
-                (lambda q=quality: self._toggle_source_group(q))))
+                (lambda q=quality: self._toggle_source_group(q)))
+            self._rows.insertWidget(shown, heading)
             shown += 1
-            if not open_now:
-                continue
-            for stream in visible:
-                seeders = int(stream.get("seeders") or 0)
-                size = ""
-                if streams_helper:
-                    size = streams_helper.format_size(stream.get("size_bytes"))
-                detail = SEPARATOR.join(
-                    p for p in (size, (stream.get("title") or "").strip()[:70])
-                    if p)
-                self._rows.insertWidget(shown, self._source_card(
-                    stream.get("source") or "Source",
-                    _quality_label(stream.get("quality")), seeders, detail,
-                    lambda s=stream: self._play_stream_choice(s)))
-                shown += 1
+            # **The group's releases live in a body of their own, and
+            # the fold is that body's height.** The owner, 6 September
+            # 2026, with a recording: "the folding and unfolding of the
+            # resolution sources in the ep list page is not smooth at
+            # all". A heading click used to call _fill_rows, which
+            # throws every row in the panel away and builds every row
+            # again - a 1080P group of forty-one releases is forty-one
+            # cards, each with its stylesheet and pills, made on the UI
+            # thread while nothing moves, and then the list jumps to its
+            # new length. Now a body holds a group's rows, is built once
+            # on the first open, and the fold animates its maximumHeight
+            # (see _toggle_source_group); the heading is restyled in
+            # place. A late batch of sources still rebuilds the panel
+            # (_on_sources), and _open_source_groups is what survives it.
+            body = _GroupBody(quality, visible, self)
+            self._rows.insertWidget(shown, body)
+            shown += 1
+            if open_now:
+                body.build()
+                body.setMaximumHeight(QWIDGETSIZE_MAX)
+            else:
+                body.setMaximumHeight(0)
         if shown > 1 and pick.get("looking"):
             # Say that the list is still growing. Not the panel note -
             # that is centred over the viewport and would sit on top of
@@ -3125,11 +3272,27 @@ class DetailsPage(GlassPage):
         _on_sources) - a fold kept on a row would be lost on the next
         batch, which is the one moment someone is definitely reading
         it."""
-        if quality in self._open_source_groups:
-            self._open_source_groups.discard(quality)
-        else:
+        opening = quality not in self._open_source_groups
+        if opening:
             self._open_source_groups.add(quality)
-        self._fill_rows()
+        else:
+            self._open_source_groups.discard(quality)
+        # In place, not a rebuild - see the note in _fill_source_rows.
+        heading = body = None
+        for index in range(self._rows.count()):
+            item = self._rows.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if isinstance(widget, _GroupBody) and widget.quality == quality:
+                body = widget
+                previous = self._rows.itemAt(index - 1)
+                heading = previous.widget() if previous is not None else None
+                break
+        if body is None:
+            self._fill_rows()
+            return
+        if heading is not None:
+            self._style_group_card(heading, opening)
+        body.fold(opening)
 
     def _play_stream_choice(self, stream):
         """Play exactly the chosen source. The rest of the list rides
@@ -4820,6 +4983,15 @@ def open_details(window, entry, host=None):
 # history.link_entry - the five things that make a dict a saved entry.
 
 
+def _note_change():
+    """Every page that is looking redraws - helpers/changes."""
+    try:
+        from helpers import changes
+        changes.bump()
+    except Exception:
+        pass
+
+
 def _seed_progress_from_history(entry, reading):
     """Copy History's position onto a fresh entry, when it has one and
     the entry does not. Never raises."""
@@ -4892,6 +5064,7 @@ def save_to_library(entry):
     # already in History gains the new entry's id rather than sitting
     # there looking unsaved forever.
     history.link_entry(entry)
+    _note_change()
     return data_file
 
 
@@ -4925,6 +5098,7 @@ def remove_from_library(entry):
     except Exception:
         logs.exception("could not remove an entry from the library")
         return None, None, None
+    _note_change()
     entry.pop("id", None)
     # link_entry writes `entry.get("id") or None`, so calling it with the
     # id gone is what unlinks the History row - History and the tracker

@@ -1331,7 +1331,10 @@ def install():
     #   * Home's banner draws from the cover when no wide art has been
     #     written yet, so a fresh device has a banner too.
     #   * a banner with no cover on the entry asks for one, as a card does.
-    updater.APP_VERSION = "1.10.264"
+    #   * a change the user makes shows on every page at once
+    #     (helpers/changes), and a resolution group folds in place with
+    #     an animation instead of rebuilding the list.
+    updater.APP_VERSION = "1.10.265"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

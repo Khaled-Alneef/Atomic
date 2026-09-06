@@ -353,3 +353,25 @@ reported every frame broken in both the broken and fixed case, a
 Crunchyroll resolver that was correct in isolation while the real save
 dialog raced it. Check what can be checked; say plainly what you
 couldn't.
+
+13. **A change the user makes shows everywhere at once.** His rule, 6
+    September 2026: *"make any changes the user make like un-saving the
+    watch or read from the main page, make the effect appear
+    immediately in the main page no need to switch pages to refresh!!!!
+    make this a rule and implement it in the whole app!"*
+
+    The mechanism is `helpers/changes.py`: every write the user makes
+    (a save, a removal, a status, a mark, a history edit) calls
+    `changes.bump()` **at the write itself**, never at the surface that
+    asked for it, so every surface is covered by construction. Each web
+    page's 150ms tick reads `changes.version()`: a list page (Home,
+    Discover, Saved, History, Schedule) redraws, a catalogue grid
+    patches its numbers and saved marks in place, and a page behind an
+    overlay does it the moment the overlay closes. The tracker's
+    background lookups never bump it - that is why it is a counter and
+    not a file mtime, and why the file watch could not do this job.
+
+    So a new write the user can make gets a `bump()` beside it, and a
+    new page reads the counter in its tick. Photographed on the frozen
+    build: Reacher removed on its details page, and Home behind it
+    without the card two seconds later, no page switch.

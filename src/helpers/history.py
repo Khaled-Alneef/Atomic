@@ -197,9 +197,20 @@ def set_watched(entry, marks, watched: bool = True) -> bool:
             row["watched"] = sorted(updated)
             row["updated_at"] = storage.now_iso()
             _save(rows)
+            _bump()
             return True
     except Exception:
         return False
+
+
+def _bump():
+    """The user changed History - every page that is looking redraws
+    (helpers/changes). Never raises."""
+    try:
+        from . import changes
+        changes.bump()
+    except Exception:
+        pass
 
 
 def recent(types=(), limit: int = 60) -> list:
@@ -229,6 +240,7 @@ def forget(key: str) -> bool:
             if len(remaining) == len(rows):
                 return False
             _save(remaining)
+            _bump()
             return True
     except Exception:
         return False
@@ -238,6 +250,7 @@ def clear() -> bool:
     try:
         with _lock:
             _save([])
+            _bump()
             return True
     except Exception:
         return False

@@ -485,3 +485,27 @@ it until `/api/featured` brings TMDB's wide art. Reproduced and
 photographed on a copy with every art field stripped and no image cache
 (the closest this machine can get to his other device): the banner is
 there at 2560 and 1920 wide, with the wide art, logo and cover in.
+
+## A resolution group folds in place (6 September 2026)
+
+His recording: *"the folding and unfolding of the resolution sources in
+the ep list page is not smooth at all"*. A heading click called
+`_fill_rows`, which threw every row in the panel away and built every
+row again - Reacher's 1080P group is forty-one cards - and then the list
+jumped to its new length. `details._GroupBody` holds a group's rows
+now, built once on the first open, and the fold animates its
+maximumHeight on `widgets.SmoothTween`, the sidebar's own tween at the
+panel's refresh; the heading is restyled in place. Measured on the
+frozen build, from the log line each fold writes:
+
+    first version   opened built=37ms frames=0 over 260ms   (a jump)
+                    closed frames=13 over 225ms             (Qt's 60Hz tick)
+    now             opened built=17ms frames=56 over 224ms
+                    closed frames=43 over 220ms, opened frames=44 over 220ms
+
+The zero was the forty-one new cards being polished by the event loop
+after `build()` returned, under the animation's clock; the first
+animation now starts one event-loop turn later. A late batch of sources
+still rebuilds the panel (`_on_sources`) and `_open_source_groups` is
+what survives it. See CLAUDE.md rule 13 for the refresh rule landed the
+same day (helpers/changes).

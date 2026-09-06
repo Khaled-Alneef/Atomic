@@ -1248,7 +1248,14 @@ def _write_progress(entry, *, season=None, episode=None, chapter=None,
     # _on_progress_synced which is what that mark holds off.
     fields["progress_cleared_at"] = ""
     entry.update(fields)
-    return storage.update_entry(_progress_data_file(entry), entry["id"], fields)
+    written = storage.update_entry(_progress_data_file(entry), entry["id"], fields)
+    if written:
+        try:
+            from helpers import changes
+            changes.bump()          # the numbers on every card move now
+        except Exception:
+            pass
+    return written
 
 
 def _top_window(widget):

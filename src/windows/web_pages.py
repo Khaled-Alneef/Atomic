@@ -30,7 +30,7 @@ from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QApplication, QWidget
 
-from helpers import logs, storage, webview2_host
+from helpers import changes, logs, storage, webview2_host
 from helpers.widgets import GlassPage
 from web import server as web_server
 
@@ -224,6 +224,10 @@ class _WebPage(GlassPage):
     # holds pages of scrolled-in rows and a shelf holds a sort and a
     # selection.
     _WATCH_DATA_ROUTES = ("home",)
+    # Pages that are lists of what is saved or done, and so redraw on a
+    # user change (helpers/changes); every other route holds scrolled
+    # rows and is patched in place instead.
+    _RELOAD_ON_CHANGE = ("home", "discover", "saved", "history", "schedule")
 
     def _data_stamp(self, files=None):
         """A cheap fingerprint of the files named."""
@@ -274,6 +278,28 @@ class _WebPage(GlassPage):
             # into view is enough on its own.
             was = getattr(self, "_was_covered", True)
             self._was_covered = covered
+            # **A change the user made shows at once - the owner's rule
+            # of 6 September 2026 (helpers/changes).** The counter moves
+            # on every user write; this page acts on it the first tick
+            # it is on screen and uncovered: a list page redraws, a
+            # catalogue grid patches its numbers and saved marks in
+            # place, and a page behind an overlay does it the moment
+            # the overlay closes. The background lookups never bump it,
+            # so this cannot become the redraw storm the file watch did.
+            changed = changes.version()
+            if changed != getattr(self, "_change_seen", None):
+                if getattr(self, "_change_seen", None) is not None:
+                    self._change_pending = True
+                self._change_seen = changed
+            if not covered and getattr(self, "_change_pending", False):
+                self._change_pending = False
+                if str(self.ROUTE).split("/")[0] in self._RELOAD_ON_CHANGE:
+                    self._data_stamp_at = self._data_stamp()
+                    self._live_stamp_at = self._data_stamp(self._LIVE_FILES)
+                    self.reload()
+                    return
+                self._live_stamp_at = self._data_stamp(self._LIVE_FILES)
+                self.view.tell({"marks": 1})
             if not covered and was:
                 # The live stamp is taken here so the push below does
                 # not immediately fire a second time. `_data_stamp_at`
