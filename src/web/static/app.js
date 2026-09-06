@@ -1292,6 +1292,19 @@ async function openChapter(id, index) {
   if (data.medium === 'manga') strip.classList.add('paged');
   // **And only manga fills a spread to the column** - see sizePage.
   const fillSpreads = data.medium === 'manga';
+  /* **A manga single page at 85% of the site's size.** The owner, 6
+     September 2026: "decrease the Manga ONLY SINGLE PAGES width by 15%
+     keeping the good quality". Only a paged manga scan - a spread fills
+     the column (sizePage) and a strip-shaped page is a strip whatever
+     the entry is typed (STRIP_ASPECT) - and the quality is askForExact's
+     job as before: the proxy resamples the scan once to the device
+     pixels actually drawn. */
+  const MANGA_SINGLE_SCALE = 0.85;
+  function singleWant(natW, natH) {
+    if (!fillSpreads || !natW) return natW;
+    if (natH && natH / natW >= STRIP_ASPECT) return natW;
+    return Math.round(natW * MANGA_SINGLE_SCALE);
+  }
   readerState.key = data.key || '';
   readerState.total = data.total || 0;
 
@@ -1594,8 +1607,18 @@ async function openChapter(id, index) {
        manhwa or manhua strip is never a spread. The enlargement is the
        proxy's LANCZOS pass (askForExact), as for any small scan. */
     const spread = fillSpreads && isSpread(img);
-    const want = spread ? availableWidth() : natW;
-    const drawn = pageWidth(want, availableWidth(), readerState.zoom);
+    /* **A spread is the column, whatever the zoom.** The owner, 6
+       September 2026: "the manga double page still does not fill the
+       width!!!!" - after the column rule above had been measured filling
+       it here at three window sizes. The zoom is remembered between
+       sessions (atomic.reader.zoom), and a reader zoomed out by hand
+       drew the spread at column x zoom along with everything else: a
+       70% zoom is a double page at 70% of the width. "Fit in width" is
+       absolute, so the zoom multiplies single pages only. */
+    const [, natH0] = natural(img);
+    const want = spread ? availableWidth() : singleWant(natW, natH0);
+    const drawn = spread ? Math.max(1, Math.round(availableWidth()))
+                         : pageWidth(want, availableWidth(), readerState.zoom);
     img.style.width = drawn + 'px';
     if (spread && Math.abs((img._spreadAt || 0) - drawn) / drawn > 0.02) {
       // Once per real change of size, so his log carries the number.
@@ -1893,7 +1916,7 @@ async function openChapter(id, index) {
     strip.dataset.est = 'single';
     // The chapter's one width, decided by the first ordinary page the
     // way reader._on_page_width decides it - see targetFor.
-    single = targetFor(natW, natH, availableWidth());
+    single = targetFor(singleWant(natW, natH), natH, availableWidth());
     /* **The reader says what it decided.** Three rounds of "the sizes
        and the quality are wrong" were argued from words alone, because
        nothing on either side of the conversation carried a number. This

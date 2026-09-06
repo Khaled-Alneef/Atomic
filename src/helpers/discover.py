@@ -807,6 +807,22 @@ def _load_reading_meta():
         if isinstance(genres, list):
             _GENRE_CACHE.setdefault(str(title),
                                     [str(name) for name in genres])
+    # **A fresh install starts with the verdicts this app has already
+    # paid for** (6 September 2026). Classification is the whole cost of
+    # a cold reading grid - three titles a second behind MangaDex's
+    # throttle, a minute for one sweep - and the six sites list the same
+    # titles on every machine, so the 936 verdicts one machine had
+    # collected are shipped as helpers/reading_seed (title -> medium,
+    # and the genre tags) and read under the file: what the file says
+    # wins, and only a title the seed does not know is asked about.
+    try:
+        from . import reading_seed
+        for title, medium in reading_seed.MEDIUM.items():
+            _MEDIUM_CACHE.setdefault(str(title), str(medium))
+        for title, genres in reading_seed.GENRES.items():
+            _GENRE_CACHE.setdefault(str(title), list(genres))
+    except Exception:
+        pass
     # Site verdicts keep their own age: a site that was refusing may have
     # been fixed, so these expire where the medium answers never do.
     now = time.time()
@@ -1148,6 +1164,19 @@ _SWEEP_LOCK = threading.Lock()
 _SWEEP_INFLIGHT = None
 _SWEEP_PENDING = 0
 CLASSIFY_BUDGET_S = 6.0
+# **A pull does not browse the sites again** (6 September 2026, the
+# owner: "the loading of the grids in the reading pages is super slow in
+# the other device!"). The page pulls every few seconds while titles are
+# still classifying, and every pull re-ran the six-site browse and the
+# probe before it could wait on a single verdict - 2.9s here, and the
+# slow half of the cost on a slow connection. The browsed rows are kept
+# for SWEEP_ROWS_TTL_S and a pull that they can still answer (the
+# cache holds enough rows, or verdicts are still pending among them)
+# pays only CLASSIFY_PULL_BUDGET_S for the next batch.
+SWEEP_ROWS_TTL_S = 90.0
+CLASSIFY_PULL_BUDGET_S = 3.0
+CLASSIFY_KNOWN_BUDGET_S = 1.5
+_SWEEP_ROWS = None            # (monotonic, rows) of the last browse
 
 
 def sweep_pending() -> int:
@@ -1199,6 +1228,15 @@ def _classify_many(titles, budget_s):
                 verdicts[title] = found
             else:
                 asking.append(title)
+    if asking and len(verdicts) >= len(asking):
+        # **Mostly known already: do not hold what is known for what is
+        # not.** Measured 6 September 2026 on a cold copy with the seed:
+        # 137 of 178 titles had a medium at once and the sweep still
+        # waited its full 6s for the other 41, so the first batch landed
+        # at 8.6s carrying 25 rows it had held for six of them. The
+        # stragglers keep classifying and the page's next pull (3s, no
+        # browse) collects them.
+        budget_s = min(budget_s, CLASSIFY_KNOWN_BUDGET_S)
     if asking:
         pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=min(MEDIUM_WORKERS, len(asking)),
@@ -1245,19 +1283,31 @@ def _reading_sweep(limit: int = 30, deadline=None) -> dict:
     Never raises; a medium nothing was found for comes back as []."""
     if limit <= 0:
         return {}
+    global _SWEEP_ROWS
     names = list(MEDIUM_LANGUAGES) + ["Other"]
     empty = {name: [] for name in names}
-    rows = discover_reading_sites(query="", limit=max(limit * 6, 60),
-                                  deadline=deadline)
-    # Same rule as Recently Released: a card that cannot open a chapter
-    # list has no business being offered. Mangalek browses and searches
-    # perfectly and 403s every series page it publishes, so without this
-    # it fills these sections with rows that open to nothing.
-    rows = _serving_sites_only(rows, deadline)
+    wanted = max(limit * 6, 60)
+    cached = _SWEEP_ROWS
+    reuse = (cached is not None
+             and time.monotonic() - cached[0] < SWEEP_ROWS_TTL_S
+             and (len(cached[1]) >= wanted or _SWEEP_PENDING > 0))
+    if reuse:
+        rows, budget = list(cached[1]), CLASSIFY_PULL_BUDGET_S
+    else:
+        rows = discover_reading_sites(query="", limit=wanted, deadline=deadline)
+        # Same rule as Recently Released: a card that cannot open a
+        # chapter list has no business being offered. Mangalek browses
+        # and searches perfectly and 403s every series page it
+        # publishes, so without this it fills these sections with rows
+        # that open to nothing.
+        rows = _serving_sites_only(rows, deadline)
+        if rows:
+            _SWEEP_ROWS = (time.monotonic(), list(rows))
+        budget = CLASSIFY_BUDGET_S
     if not rows:
         return empty
     titles = [row.get("title") or "" for row in rows]
-    verdicts = _classify_many(titles, CLASSIFY_BUDGET_S)
+    verdicts = _classify_many(titles, budget)
     _save_reading_meta()
     out = dict(empty)
     for row in rows:

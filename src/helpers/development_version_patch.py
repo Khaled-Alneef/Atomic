@@ -1318,7 +1318,10 @@ def install():
     #     season's first, when Cinemeta lists one.
     #   * a manga spread is drawn at the column's width on every monitor;
     #     single pages keep the site's own size.
-    updater.APP_VERSION = "1.10.258"
+    #   * a manga spread is the column whatever the zoom, manga single
+    #     pages draw at 85%, and a cold reading grid starts from shipped
+    #     verdicts with pulls that no longer re-browse the sites.
+    updater.APP_VERSION = "1.10.259"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

@@ -689,3 +689,27 @@ rows, and waits `ANIME_META_WAIT` (5s: cold CDN misses answered in
 nothing is the section empty. On the frozen build: `Cinemeta's meta kept
 1 of 12 rows (12 answered inside 5s)` and the Anime section shows the
 2012 Kingdom while AniList still refuses.
+
+## A pull does not browse again, and a fresh install starts warm (6 September 2026)
+
+His report the morning after the sweep learned to answer early: *"the
+loading of the grids in the reading pages is super slow in the other
+device!"*. Two costs a cold device still paid. Every pull re-ran the
+six-site browse and the probe before waiting on a verdict (2.9s here,
+the slow half on a slow connection): the browsed rows are kept for
+`SWEEP_ROWS_TTL_S` (90s) and a pull they can still answer pays only
+`CLASSIFY_PULL_BUDGET_S` (3s). And every verdict was paid from nothing:
+the 936 title -> medium/genre verdicts this machine had collected from
+the same six sites ship as `helpers/reading_seed` (a Python module, so
+no spec change; regenerate, never edit) and are read under
+`reading_meta.json` - the file wins, only unknown titles are asked.
+`mangadex._MIN_REQUEST_GAP` is 0.25s (four a second, a fifth under the
+documented five). When the cache already answers at least as many
+titles as are being asked, the first budget is
+`CLASSIFY_KNOWN_BUDGET_S` (1.5s) - measured, the seeded first sweep
+knew 137 of 178 titles and still waited 6s for the rest.
+
+Measured on the frozen build, cold copy (no reading cache, no
+verdicts): first Manga batch **25 rows** at 8.6s with the 6s budget
+(the night before: 3 rows), then 3s pulls with no browse - `149 of
+178`, `161`, `174` - and a full grid on screen at 12s.

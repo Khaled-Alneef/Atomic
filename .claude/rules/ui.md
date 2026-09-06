@@ -394,3 +394,21 @@ Rig trap paid for: the window comes back at whatever size it was closed
 at, and its frame ignores SW_MAXIMIZE - set the maximised rect with
 SetWindowPos *after* the app has applied its saved geometry (about four
 seconds in), and check `rig.find()`'s rect before clicking.
+
+## A spread ignores the zoom; manga singles are 85% (6 September 2026)
+
+His morning report on the column rule above: *"the manga double page
+still does not fill the width!!!!"*, beside *"decrease the Manga ONLY
+SINGLE PAGES width by 15% keeping the good quality"*. The reader's zoom
+is remembered between sessions (`atomic.reader.zoom`), and a spread was
+drawn at column x zoom along with everything else - a reader zoomed out
+by hand (which is what a smaller single page looks like when done by
+hand) shrank the double page too. `sizePage` now draws a spread at the
+live column whatever the zoom; the zoom multiplies single pages only.
+A paged manga scan is drawn at `MANGA_SINGLE_SCALE` (0.85) of its own
+width; spreads and strip-shaped pages are untouched, and the proxy's
+one resample (askForExact) is the quality. Measured on the frozen
+build, Kingdom (WAN) ch.885: `reader sized ... scan=1327x1920,
+target=1128, drawn=1128`, and at 70% zoom `reader spread ...
+scan=1205x880, column=1991, drawn=1991, zoom=70` - the single beside it
+at 790, the spread edge to edge.

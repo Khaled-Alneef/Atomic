@@ -46,7 +46,10 @@ COVERS_URL = "https://uploads.mangadex.org/covers"
 # MangaDex allows ~5 requests/second globally and resets connections on a
 # burst; the tracker fires one lookup per entry in its own thread, so
 # these are spaced out and retried once rather than dropped.
-_MIN_REQUEST_GAP = 0.35
+# 0.35 until 6 September 2026; a cold reading sweep classifies one title
+# per request and this gap is its ceiling (measured: 150 titles in 53.2s
+# at 0.35). Four a second keeps a fifth of the documented limit in hand.
+_MIN_REQUEST_GAP = 0.25
 _throttle_lock = threading.Lock()
 _last_request_at = 0.0
 
