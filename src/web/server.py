@@ -108,7 +108,74 @@ def _marks():
     return _MARKS["index"]
 
 
-def _last_mark(marks, kind="", said=""):
+# **The episode after (season, number), across a season boundary when
+# the map on disk says the season ended.** The owner, 6 September 2026:
+# "the cards in the main page and the history still show S01E09" - the
+# builders below wrote E+1 inside the season because, as their notes
+# said, nothing stored knew how long a season was. Cinemeta's map does,
+# and it is on disk (meta-series-<id>.json, written by the details page
+# and the player), so the card reads it the way player._starting_episode
+# now does: the next episode while the season has it, the next season's
+# first when it has not and there is one, the watched episode itself
+# when the last season is done, and the old E+1 only when no map exists.
+_AIRED_CACHE = {}
+
+
+def _aired_map(entry):
+    """{season: highest aired episode} from the meta file on disk, or
+    None. Cached per title against the file's mtime: Home and History
+    ask for dozens of cards per draw."""
+    imdb = str((entry or {}).get("imdb_id") or "").strip().lower()
+    if not imdb.startswith("tt"):
+        return None
+    path = DATA / f"meta-series-{re.sub(r'[^a-z0-9]', '', imdb)}.json"
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    hit = _AIRED_CACHE.get(imdb)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    aired = {}
+    try:
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        body = json.loads(path.read_text(encoding="utf-8-sig"))
+        for video in (body.get("meta") or {}).get("videos") or []:
+            if not isinstance(video, dict):
+                continue
+            season = int(video.get("season") or 0)
+            number = int(video.get("number") or video.get("episode") or 0)
+            if season < 1 or number < 1:
+                continue
+            stamp_text = str(video.get("firstAired") or video.get("released") or "")
+            try:
+                when = _dt.datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
+            except ValueError:
+                when = None
+            if when is not None and when > now:
+                continue
+            aired[season] = max(aired.get(season, 0), number)
+    except Exception:
+        aired = {}
+    _AIRED_CACHE[imdb] = (stamp, aired or None)
+    return aired or None
+
+
+def _season_step(entry, season, number):
+    """The label for the episode after (season, number) - see _AIRED_CACHE."""
+    following = f"S{season:02d}E{number + 1:02d}"
+    aired = _aired_map(entry)
+    if not aired or season not in aired:
+        return following
+    if number + 1 <= int(aired[season]):
+        return following
+    if int(aired.get(season + 1) or 0) >= 1:
+        return f"S{season + 1:02d}E01"
+    return f"S{season:02d}E{number:02d}"
+
+
+def _last_mark(marks, kind="", said="", entry=None):
     """**The episode or chapter he is on, not the one he finished.**
 
     The owner, 3 September 2026: *"make the ep and season number on the
@@ -208,7 +275,7 @@ def _last_mark(marks, kind="", said=""):
         # with is worse than the entry's own answer, so `said` wins when
         # it has one; a row with no progress of its own still gets the
         # episode, which is all there is to give.
-        return f"S{season:02d}E{number + 1:02d}"
+        return _season_step(entry, season, number)
     if chapters and (reading or not kind):
         # ":g" so 1185.0 reads "1186" and a half chapter (1185.5) reads
         # "1186.5" rather than being rounded into a chapter that is not
@@ -234,7 +301,8 @@ def _marked_progress(entry):
             # The entry's own progress, if it has one, else the history
             # row's - either is an answer a season-0 mark must beat.
             found = _last_mark(marks, kind,
-                               str(entry.get("progress") or "").strip() or said)
+                               str(entry.get("progress") or "").strip() or said,
+                               entry=entry)
             if found:
                 return found
     return ""
@@ -243,7 +311,7 @@ def _marked_progress(entry):
 _SAID_RE = re.compile(r"^[Ss](\d+)[Ee](\d+)$")
 
 
-def _one_on(said, reading):
+def _one_on(said, reading, entry=None):
     """The number a card shows, given the furthest **finished** one.
 
     Two facts that were not lined up before, and the whole of "readings
@@ -294,7 +362,7 @@ def _one_on(said, reading):
     season, number = int(found.group(1)), int(found.group(2))
     if season <= 0 or number <= 0:
         return ""
-    return f"S{season:02d}E{number + 1:02d}"
+    return _season_step(entry, season, number)
 
 
 def _starts_at_one(entry):
@@ -436,14 +504,14 @@ def _progress_text(entry):
             # entry keeps the site's release count bare ("884").
             raw = str(entry.get("progress") or "").strip()
             said = raw if raw[:1].lower() == "c" else ""
-        return _one_on(said, True) or _marked_progress(entry)
+        return _one_on(said, True, entry) or _marked_progress(entry)
 
     # Video. Only a *confirmed* number counts, and it counts as finished,
     # so the card says the one after it - which is the one Continue
     # opens. Everything else is S01E01, for the same reason: that is what
     # player._starting_episode plays when there is nothing confirmed.
     if entry.get("progress_verified"):
-        found = _one_on(str(entry.get("progress") or "").strip(), False)
+        found = _one_on(str(entry.get("progress") or "").strip(), False, entry)
         if found:
             return found
     elif not entry.get("id"):

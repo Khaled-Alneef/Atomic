@@ -1324,7 +1324,11 @@ def install():
     #   * the player reads the season's episode list from disk first and
     #     never steps past a season's end on a guess; the manga reader
     #     has no side gutter; a reading genre tick answers early.
-    updater.APP_VERSION = "1.10.260"
+    #   * a resume after a season's last episode starts the next season,
+    #     with Cinemeta's map read from disk before anything is decided.
+    #   * a card's number steps into the next season the way the player
+    #     does, from the same map on disk.
+    updater.APP_VERSION = "1.10.262"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

@@ -440,3 +440,20 @@ A title saved after it was watched starts at History's position
 (`details._seed_progress_from_history`): the player and reader write
 `history.touch(progress=...)` for unsaved titles too, and a save was
 throwing it away - "it says S01E01 until something is watched".
+
+## Every "next" is season-aware, from the map on disk (6 September 2026)
+
+His two follow-ups on Reacher: *"Reacher still shows S01E09"* (the
+resume), then *"the resume button takes me to the correct ep now, but
+the cards in the main page and the history still show S01E09"*. Three
+more places computed episode + 1 inside the season: `_starting_episode`
+(ran in the constructor before the map was even requested, so a resume
+after E08 asked for E09 and `_apply_meta_bounds` then clamped it back,
+never forward - that clamp now rolls into season+1 when the map has
+one), `_prefetch_next_episode` / `_maybe_prewarm_next` (one
+`_next_target` now), and server's card labels (`_last_mark`, `_one_on`
+-> `_season_step`, which reads `meta-series-<id>.json` through an
+mtime-keyed cache). The player seeds `_meta_aired` from
+`stremio.cached_meta` before anything is decided. Harnessed
+(`h_resume.py`, `h_label.py`) and photographed: Reacher stored S01E08,
+the Home card reads S02E01, the ring opens S02E01.

@@ -2641,6 +2641,16 @@ class PlayerPage(GlassPage):
         self._closing = False
         self._run = 0
 
+        # **Cinemeta's list from disk before anything is decided.** The
+        # owner, 6 September 2026, twice: "Reacher still shows S01E09".
+        # Not the Next button that time: a resume after the season's
+        # last episode. _starting_episode ran here with the map still
+        # None, took the guess of DEFAULT_SEASON_EPISODES, asked for
+        # E09, and when the map arrived _apply_meta_bounds clamped it
+        # back to E08 - never forward. The details page has usually
+        # written the file already; reading it costs milliseconds.
+        self._meta_aired = self._aired_from_disk()
+        self._rolled_from = None
         self.season, self.episode = self._starting_episode(season, episode)
         self._given_streams = list(streams) if streams else None
 
@@ -2862,7 +2872,7 @@ class PlayerPage(GlassPage):
         # answer from instead of guessing off latest_available. None
         # until then - the guesses below hold the fort for the first
         # half-second.
-        self._meta_aired = None       # {season: highest aired episode}
+        self._meta_aired = getattr(self, "_meta_aired", None)   # seeded above
         self._meta_videos = None      # Cinemeta's raw rows, for the list
         # Whether Cinemeta has answered at all this run - with or without
         # an episode list. Read by _change_episode: a season end that is
@@ -3079,12 +3089,21 @@ class PlayerPage(GlassPage):
         if self.entry.get("progress_verified") and stored_episode:
             season = stored_season or 1
             wanted = stored_episode + 1
-            # Clamped, never rolled into season+1: the next season's
-            # episode 1 is a guess at what the user meant, and playing an
-            # unasked-for episode is the failure this whole guard exists
-            # to prevent.
             last = max(1, self._season_episode_count(season))
             if wanted > last:
+                # **Into the next season when the map says there is
+                # one.** This used to clamp and never roll, on the
+                # reasoning that season+1's episode 1 was a guess at what
+                # the user meant; the owner said what he meant, 6
+                # September 2026: "it is supposed to show S02E01". Only
+                # on the real map (read from disk above): a guessed end
+                # must not send a resume into a season that may not
+                # exist.
+                following = (self._next_season_start(season)
+                             if getattr(self, "_meta_aired", None) else None)
+                if following is not None:
+                    self._rolled_from = season
+                    return following
                 self._clamped_from = wanted
                 return season, last
             return season, wanted
@@ -3501,11 +3520,10 @@ class PlayerPage(GlassPage):
         self._audio_default_done = False
         self._apply_audio_default()
 
-    def _on_meta(self, videos):
-        """Fold Cinemeta's list into {season: highest aired episode} and
-        correct the current request if it points past what exists."""
-        if self._closing:
-            return
+    @staticmethod
+    def _fold_aired(videos):
+        """Cinemeta's rows as {season: highest aired episode}: specials
+        stay out, and so does anything dated after now."""
         import datetime as _dt
         now = _dt.datetime.now(_dt.timezone.utc)
         aired = {}
@@ -3524,6 +3542,34 @@ class PlayerPage(GlassPage):
             if when is not None and when > now:
                 continue
             aired[season] = max(aired.get(season, 0), number)
+        return aired
+
+    def _aired_from_disk(self):
+        """The map from the meta file on disk, or None - never a request
+        (stremio.cached_meta); the network answer follows in
+        _fetch_meta_worker and replaces it."""
+        try:
+            from helpers import stremio
+            try:
+                from windows import tracker
+                imdb_id = tracker._entry_imdb_id(self.entry)
+            except Exception:
+                imdb_id = self.entry.get("imdb_id")
+            if not imdb_id:
+                return None
+            meta = stremio.cached_meta(
+                imdb_id, "movie" if self.entry.get("type") == "Movie" else "series")
+            aired = self._fold_aired((meta or {}).get("videos") or [])
+            return aired or None
+        except Exception:
+            return None
+
+    def _on_meta(self, videos):
+        """Fold Cinemeta's list into {season: highest aired episode} and
+        correct the current request if it points past what exists."""
+        if self._closing:
+            return
+        aired = self._fold_aired(videos)
         if not aired:
             return
         self._meta_aired = aired
@@ -3558,18 +3604,25 @@ class PlayerPage(GlassPage):
                                default=top_season)
             target = (clamp_season, aired[clamp_season])
         elif episode > aired[season]:
-            # The season exists but this episode is past its end - never
-            # rolled into season+1, which would be playing something
-            # nobody asked for.
-            target = (season, aired[season])
+            # The season exists but this episode is past its end: into
+            # the next season's first when there is one (the resume
+            # after a season's last episode, asked for before the map
+            # arrived), else back to the last that exists. The owner, 6
+            # September 2026: "it is supposed to show S02E01".
+            if int(aired.get(season + 1) or 0) >= 1:
+                target = (season + 1, 1)
+            else:
+                target = (season, aired[season])
         if target is None or target == (season, episode):
             return
         self.season, self.episode = target
         self._panel_season = self.season
         self._given_streams = None
         show_toast(self._toast_anchor(),
-                   f"S{season:02d}E{episode:02d} Is Not Out - Playing "
-                   f"S{self.season:02d}E{self.episode:02d}")
+                   (f"Season {season} Watched - Playing "
+                    if self.season > season else
+                    f"S{season:02d}E{episode:02d} Is Not Out - Playing ")
+                   + f"S{self.season:02d}E{self.episode:02d}")
         self._begin_episode()
 
     def _build_episode_bar(self):
@@ -4033,6 +4086,11 @@ class PlayerPage(GlassPage):
                        f"Episode {self._clamped_from} Is Not Out Yet - "
                        f"Playing Episode {self.episode}")
             self._clamped_from = None
+        if getattr(self, "_rolled_from", None):
+            show_toast(self._toast_anchor(),
+                       f"Season {self._rolled_from} Watched - Playing "
+                       f"S{int(self.season or 1):02d}E{int(self.episode or 1):02d}")
+            self._rolled_from = None
 
     def _handle_dead(self) -> bool:
         """A handle whose video process has gone. Only the proxy knows
@@ -7313,10 +7371,10 @@ class PlayerPage(GlassPage):
         if self._prefetched or not self.episode or streams_module is None:
             return
         self._prefetched = True
-        target = int(self.episode) + 1
-        if target > self._season_episode_count(self.season):
+        following = self._next_target()
+        if following is None:
             return
-        season = self.season
+        season, target = following
 
         def worker():
             try:
@@ -7386,15 +7444,17 @@ class PlayerPage(GlassPage):
         # Next - the part that does not get better with a good swarm. So
         # it is safe to pay while something is playing, and it is most of
         # what "goes smoothly" means.
+        following = self._next_target()
+        if following is None:
+            return
         if not self._meta_prewarm_asked:
             self._meta_prewarm_asked = True
-            self._spawn(self._prewarm_metadata_worker, self.season,
-                        int(self.episode) + 1, self._run)
+            self._spawn(self._prewarm_metadata_worker, following[0],
+                        following[1], self._run)
         if not self._playing_file_complete():
             return
         self._prewarm_asked = True
-        self._spawn(self._prewarm_worker, self.season,
-                    int(self.episode) + 1, self._run)
+        self._spawn(self._prewarm_worker, following[0], following[1], self._run)
 
     def _playing_file_complete(self) -> bool:
         """Whether the episode on screen still needs the connection.
@@ -10637,7 +10697,20 @@ class PlayerPage(GlassPage):
             return max(int(la_episode), playing)
         return None
 
-    def _next_season_start(self):
+    def _next_target(self):
+        """(season, episode) Next would play - the episode after this one
+        while the season has it, else the next season's first - or None
+        when there is nothing to play next."""
+        if not self.episode:
+            return None
+        end = self._known_season_end(self.season)
+        if end is None:
+            end = self._season_episode_count(self.season)
+        if int(self.episode) + 1 <= end:
+            return int(self.season or 1), int(self.episode) + 1
+        return self._next_season_start()
+
+    def _next_season_start(self, season=None):
         """(season + 1, 1) when the season after this one exists with at
         least one aired episode, else None.
 
@@ -10651,7 +10724,8 @@ class PlayerPage(GlassPage):
         before it has landed the one other honest sign is the tracker's
         `latest_available` naming a later season. A guess
         (DEFAULT_SEASON_EPISODES phantom rows) never crosses a season."""
-        season = int(getattr(self, "season", 0) or 0)
+        season = int((season if season is not None
+                      else getattr(self, "season", 0)) or 0)
         if not season:
             return None
         aired = getattr(self, "_meta_aired", None)
