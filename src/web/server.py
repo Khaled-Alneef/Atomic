@@ -21,6 +21,15 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import backend
+# **Imported at module level on purpose.** The storage-race fix of 5
+# September 2026 turned four direct reads of discover_cache.json into
+# storage.load(...) calls, and the script that did it looked for "import
+# storage" before adding this line, found it in a function-local import
+# below, and added nothing - so every one of the four raised NameError
+# inside its own try/except and the Discover page answered from an empty
+# cache on every device from 1.10.268 on. The owner's "the discover page
+# in the other device is only showing cast", 6 September 2026, was this.
+from helpers import storage
 
 DATA = backend.DATA_DIR
 COVERS = DATA / "image_cache"
@@ -1757,9 +1766,52 @@ def _discover():
     if newest:
         age = (time.time() - newest) / 3600.0
         note += f", found {age:.0f}h ago" if age >= 1 else ", found just now"
-    if not sections:
+    # **Still filling, and the page keeps asking.** Reproduced on the
+    # frozen build against a copy with no discover cache, 6 September
+    # 2026: the sections above come from disk and the cache is written
+    # by the launch prewarm (tracker.prewarm_discover) over the first
+    # 10-70s, so a cold device's Discover drew the cast row alone and
+    # stayed that way until the page was rebuilt by a switch - the
+    # owner's "only showing cast" and "loads even when I am in the
+    # page". `pending` is true while the prewarm is still answering, and
+    # a section missing with nothing in flight asks for one more warm at
+    # most once per DISCOVER_KICK_S; app.js pullDiscover re-asks this
+    # route while pending and redraws the sections in place.
+    pending = _discover_pending(cached)
+    if pending and not total:
+        note = "Looking around..."
+    elif not sections:
         note = "nothing cached - run a discover in the app first"
-    return {"kind": "rows", "sections": sections, "note": note, "hero": banner}
+    return {"kind": "rows", "sections": sections, "note": note,
+            "hero": banner, "pending": pending}
+
+
+# The sections the launch prewarm fills - the reading mediums arrive from
+# one sweep, so any one of them missing means the sweep is owed.
+_PREWARMED_SECTIONS = ("anime", "series", "movie", "reading",
+                       "reading_latest", "medium:Manga")
+DISCOVER_KICK_S = 600.0
+_DISCOVER_KICKED_AT = 0.0
+
+
+def _discover_pending(cached) -> bool:
+    global _DISCOVER_KICKED_AT
+    missing = [key for key in _PREWARMED_SECTIONS
+               if not ((cached.get(key) or {}).get("rows")
+                       if isinstance(cached.get(key), dict) else None)]
+    if not missing:
+        return False
+    try:
+        from windows import tracker
+        if tracker.discover_warming():
+            return True
+        if time.time() - _DISCOVER_KICKED_AT >= DISCOVER_KICK_S:
+            _DISCOVER_KICKED_AT = time.time()
+            tracker.prewarm_discover()
+            return tracker.discover_warming()
+    except Exception:
+        return False
+    return False
 
 
 def _cached_posters():

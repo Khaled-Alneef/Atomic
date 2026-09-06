@@ -372,6 +372,40 @@ def _load_discover_cache():
         return
 
 
+# **The browse kinds queued by prewarm_discover and not yet answered.**
+# web/server._discover reports `pending` off this while the page is on
+# screen, so a cold device's Discover fills in where it stands instead of
+# showing the one section that needs no network (the cast) until the
+# page is rebuilt by a switch. The owner, 6 September 2026: "the discover
+# page in the other device is only showing cast" and "make the Discover
+# page loads even when I am in the page". Kept in the tracker because the
+# warm itself lives here; a kind is added at the moment it is queued and
+# discarded when its fetch returns, whatever it returned.
+_DISCOVER_WARMING = set()
+_DISCOVER_WARMING_LOCK = threading.Lock()
+
+
+def discover_warming() -> bool:
+    """True while a browse kind queued by prewarm_discover has not
+    answered yet."""
+    with _DISCOVER_WARMING_LOCK:
+        return bool(_DISCOVER_WARMING)
+
+
+def _warm_browse_rows(kind):
+    """prewarm_discover's job: the fetch, and the warming set kept true
+    to it. One medium sweep fills every medium: key, so all four leave
+    the set together."""
+    try:
+        return _fetch_browse_rows(kind)
+    finally:
+        with _DISCOVER_WARMING_LOCK:
+            _DISCOVER_WARMING.discard(kind)
+            if kind.startswith("medium:"):
+                for name in _MEDIUM_KINDS:
+                    _DISCOVER_WARMING.discard(name)
+
+
 def _save_discover_row(kind, rows):
     """Write one browse row through to disk. Best-effort; a cache that
     cannot be written is a convenience lost, never an error."""
@@ -538,7 +572,14 @@ def prewarm_discover():
         cached = _DISCOVER_CACHE.get((kind, ""))
         if cached and now - cached[0] < _DISCOVER_CACHE_TTL_S:
             continue
-        lookup_pool.submit_browse(_fetch_browse_rows, kind)
+        # A kind already on the queue is not queued twice: the Discover
+        # page asks for a warm while it is waiting (server._discover),
+        # and a second sweep behind the first would only delay it.
+        with _DISCOVER_WARMING_LOCK:
+            if kind in _DISCOVER_WARMING:
+                continue
+            _DISCOVER_WARMING.add(kind)
+        lookup_pool.submit_browse(_warm_browse_rows, kind)
 
 
 # The Watch Schedule's airing calendar, module-side like _DISCOVER_CACHE

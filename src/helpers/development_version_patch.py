@@ -1340,7 +1340,10 @@ def install():
     #     take the writer's lock); ATOMIC_MEMTRACE=1 measures memory.
     #   * QtWebEngine is no longer shipped: 230MB less to unpack on every
     #     launch (every page is WebView2; the Qt pages keep their grids).
-    updater.APP_VERSION = "1.10.269"
+    #   * Discover reads its cache again (a missing import had emptied it
+    #     since 1.10.268), fills in while on screen, and the grid's
+    #     "Looking around..." is centred.
+    updater.APP_VERSION = "1.10.270"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

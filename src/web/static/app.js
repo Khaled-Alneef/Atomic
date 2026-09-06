@@ -2294,7 +2294,10 @@ async function go(route) {
     (data.rows || []).forEach(function (row) { grid.appendChild(gridCard(row)); });
     page.appendChild(grid);
     if (!(data.rows || []).length) {
-      page.appendChild(el('div', 'empty', 'Looking around...'));
+      // Centred - the owner, 6 September 2026, with a picture of it at
+      // the left edge of an empty Manhwa page: "make the looking around
+      // in the mid, not left!" (app.css .empty.looking).
+      page.appendChild(el('div', 'empty looking', 'Looking around...'));
     }
     sayRender(route, performance.now() - routeAt, (data.rows || []).length);
     // The ticks are built from the cards, so they can only be built once
@@ -2312,11 +2315,66 @@ async function go(route) {
   refreshGenres(page);
   applyFilter(page);
   if (!(data.sections || []).some(function (s) { return s.rows.length; })) {
-    page.appendChild(el('div', 'empty', 'Nothing here yet.'));
+    page.appendChild(el('div', 'empty looking',
+                        data.pending ? 'Looking around...' : 'Nothing here yet.'));
   }
   sayRender(route, performance.now() - routeAt,
             (data.sections || []).reduce(function (n, s) {
               return n + (s.rows || []).length; }, 0));
+  if (data.pending && early === 'discover') pullDiscover(page, mine, data);
+}
+
+/* **Discover fills in where it stands.** The owner, 6 September 2026:
+   "the discover page in the other device is only showing cast" and
+   "make the Discover page loads even when I am in the page so that I do
+   not need to switch page then come back". Reproduced on the frozen
+   build against a copy with no discover cache: the route answers from
+   disk, the launch prewarm writes the disk over its first 10-70s, and a
+   page drawn in that window showed the cast row alone until a switch
+   rebuilt it. While the answer says `pending`, this asks again every
+   DISCOVER_PULL_MS and, when more rows have arrived, replaces the
+   section blocks in place - the header and the banner stay, the banner
+   is added if the first draw had none - bounded by
+   DISCOVER_PENDING_BUDGET_MS so a device the catalogue never answers on
+   stops asking. */
+const DISCOVER_PULL_MS = 2500;
+const DISCOVER_PENDING_BUDGET_MS = 180000;
+
+function pullDiscover(page, mine, first) {
+  const started = Date.now();
+  function countRows(d) {
+    return (d.sections || []).reduce(function (n, s) { return n + (s.rows || []).length; }, 0);
+  }
+  let drawn = countRows(first);
+  function tick() {
+    if (mine !== token || currentRoute() !== 'discover') return;
+    if (Date.now() - started > DISCOVER_PENDING_BUDGET_MS) return;
+    fetch('/api/discover')
+      .then(function (r) { return r.json(); })
+      .then(function (fresh) {
+        if (mine !== token || currentRoute() !== 'discover') return;
+        const n = countRows(fresh);
+        if (n > drawn) {
+          drawn = n;
+          page.querySelectorAll(':scope > .row').forEach(function (b) { b.remove(); });
+          const empty = page.querySelector(':scope > .empty');
+          if (empty) empty.remove();
+          const heroes = fresh.heroes || (fresh.hero ? [fresh.hero] : []);
+          if (heroes.length && !page.querySelector('.herobox')) {
+            page.insertBefore(heroCarousel(heroes), page.firstChild);
+          }
+          sectionsInto(page, fresh.sections || []);
+          refreshGenres(page);
+          applyFilter(page);
+          const note = page.querySelector('header p');
+          if (note) note.textContent = fresh.note || '';
+          sayBatch('discover', performance.now() - routeAt, n, 'pending');
+        }
+        if (fresh.pending) setTimeout(tick, DISCOVER_PULL_MS);
+      })
+      .catch(function () { setTimeout(tick, DISCOVER_PULL_MS); });
+  }
+  setTimeout(tick, DISCOVER_PULL_MS);
 }
 
 

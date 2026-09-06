@@ -301,6 +301,9 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .strip .card { flex: 0 0 auto; width: 176px; }
 
 .empty { padding: 60px 28px; color: var(--dim); }
+/* The page-wide "Looking around..." - in the middle of the page, not at
+   its left edge (the owner, 6 September 2026). */
+.empty.looking { text-align: center; padding: 160px 28px 40px; }
 /* A chapter with no pages - see app.js openChapter's noPages. */
 .rnopages { text-align: center; padding: 120px 28px; }
 .rnopages-head { color: var(--text); font-size: 18px; font-weight: 700; margin-bottom: 8px; }

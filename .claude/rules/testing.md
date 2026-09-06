@@ -389,3 +389,19 @@ press `k`. `GetGUIThreadInfo` measured the focus window as
 `Chrome_WidgetWin_1` titled with the YouTube track at that moment, and
 an Escape sent then closed nothing; the next one did. Read the music
 lines before calling a lost key a reader bug.
+
+## An edit script's guard is a claim too (6 September 2026)
+
+The storage-race fix turned four direct reads of discover_cache.json in
+web/server.py into `storage.load(...)` and added the module import only
+`if "import storage" not in src` - which matched a function-local
+`from helpers import storage` further down the file, so nothing was
+added. Every one of the four calls then raised NameError inside its own
+`try/except`, `_discover` answered from an empty cache on every device
+from 1.10.268 on, and the page drew the one section that needs no cache
+(the cast). Two builds were photographed with Discover on screen and
+nobody looked at the section count. So: **after an edit that adds a
+name, assert the name at module level** (`hasattr(module, "storage")`
+in the harness is one line), and **a page's row count is part of its
+screenshot** - "route drawn, rows=20" on a Discover that used to draw
+hundreds is the finding, not the picture.
