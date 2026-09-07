@@ -1111,7 +1111,7 @@ def _lane_rate(got):
 def prepare_fastest(candidates, *, season=None, episode=None, title=None,
                     width: int = RACE_WIDTH, timeout: float = RACE_TIMEOUT,
                     failed=None, start_at=None, duration=None,
-                    runtime_s=None):
+                    runtime_s=None, should_stop=None):
     """Start several releases at once; play whichever delivers data
     first, and keep replacing the failures until one does.
 
@@ -1133,6 +1133,13 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
     The losers are released as soon as there is a winner - a torrent
     left added keeps announcing and keeps taking bandwidth from the one
     actually playing.
+
+    `should_stop`, when given, is asked every 100ms; True ends the race
+    with no winner and every lane let go - a download cancelled or
+    paused while its race ran (7 September 2026: the race used to run
+    to its end and the queue then opened the winner for a job nobody
+    wanted). The lanes still inside `prepare` hand their torrents back
+    through `_judge` when they finish, as after a timeout.
 
     **A hand-picked release is raced too, and that is a reversal.**
     Picking one by hand used to skip this entirely (`solo`), so the
@@ -1407,11 +1414,15 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
     # `done` still ends the wait the moment a lane wins outright or the
     # last lane is spent.
     end = time.monotonic() + timeout
+    stopped = False
     while not done.is_set():
         remaining = end - time.monotonic()
         if remaining <= 0:
             break
         if done.wait(min(remaining, 0.1)):
+            break
+        if should_stop is not None and should_stop():
+            stopped = True
             break
         with lock:
             held = provisional["got"]
@@ -1428,7 +1439,11 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
                 done.set()
     with lock:
         held = provisional["got"]
-        if held is not None and not winner:
+        if stopped:
+            provisional["got"] = None
+            winner.clear()
+            done.set()
+        elif held is not None and not winner:
             # Every lane spent (or the clock ran out) with a held lane
             # still waiting for a better one that never came.
             provisional["got"] = None
@@ -1439,6 +1454,15 @@ def prepare_fastest(candidates, *, season=None, episode=None, title=None,
         result = dict(winner) if winner else None
         attempted = list(started)
         verdicts = list(proved_dead)
+    if stopped:
+        _say(f"stopped by the caller after "
+             f"{time.monotonic() - (end - timeout):.1f}s; "
+             f"{len(attempted)} lane(s) let go")
+        for info_hash in attempted:
+            _release_quietly(info_hash)
+        if verdicts:
+            _remember_dead(verdicts, None)
+        return None
     # Which engine-held torrent, if any, the winner actually is. A
     # debrid winner holds the same info_hash as a release a torrent
     # lane may have started - that lane's torrent is a loser like the

@@ -273,6 +273,46 @@ class WebReader(QWidget):
         except RuntimeError:
             pass
 
+    # Keys the page answers to, by the name a KeyboardEvent carries -
+    # forwarded from here whenever the Qt side holds the keyboard.
+    _PAGE_KEYS = {
+        Qt.Key.Key_Plus: "=", Qt.Key.Key_Equal: "=",
+        Qt.Key.Key_Minus: "-", Qt.Key.Key_Underscore: "-",
+        Qt.Key.Key_0: "0", Qt.Key.Key_R: "r",
+        Qt.Key.Key_Left: "ArrowLeft", Qt.Key.Key_Right: "ArrowRight",
+        Qt.Key.Key_PageDown: "PageDown", Qt.Key.Key_PageUp: "PageUp",
+        Qt.Key.Key_Home: "Home", Qt.Key.Key_End: "End",
+        Qt.Key.Key_Space: " ",
+    }
+
+    def keyPressEvent(self, event):
+        """**The shortcuts work before any click** - the owner, 7
+        September 2026: "the shortcuts do not work until I click on the
+        screen inside the reader". The page handles its keys itself
+        once the WebView2 control holds the keyboard, and
+        webview2_host.focus_view hands it over when the document is up
+        - but Qt takes it back whenever the window is re-activated (the
+        reading music's visible press, a Ctrl+digit, any other window
+        in between), and then the page hears nothing. So whatever the
+        Qt side receives is sent to the page as the key it would have
+        been (app.js hostMessage dispatches it), and F goes straight to
+        full screen. Measured on the source tree: with the keyboard on
+        the Qt window, "=" zoomed 100 -> 110 through this path."""
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.AltModifier):
+            return super().keyPressEvent(event)
+        key = event.key()
+        if key == Qt.Key.Key_F:
+            self._app_key("F")
+            event.accept()
+            return
+        name = self._PAGE_KEYS.get(key)
+        if name is not None and self.view.tell({"key": name}):
+            logs.info(f"web reader: key forwarded to the page ({name!r})")
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _app_key(self, name):
         """Full screen, from the reader's own bar or its F key.
 
@@ -415,10 +455,12 @@ def open_reader(window, entry, chapter_index=None):
                     if hasattr(window, "centralWidget") else window)
         host = host if host is not None else getattr(window, "container", window)
         page = WebReader(base_url(), entry, chapter_index, host)
+        page.view.want_focus = True      # the keys work before any click
         page.follow(host)
         page.show()
         page.raise_()
         page.setFocus()
+        page.view.focus_view()           # already loaded: take it now
         # Registered app-wide so Home's and Discover's views stay down
         # while this is up - including one rebuilt underneath it. See
         # web_pages._overlay_depth for why per-page suppression cannot

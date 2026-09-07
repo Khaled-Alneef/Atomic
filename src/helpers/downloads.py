@@ -83,9 +83,13 @@ def _save():
 
 
 def list_jobs() -> list:
-    """Every job, newest first - what a Downloads page renders."""
+    """Every job, oldest first - the order the worker takes them in, and
+    what a Downloads page renders. The owner's ask, 7 September 2026:
+    "make the downloads latest on the bottom, so if I download from ep1
+    to ep5 then 1 will be at top and load first". It was newest first,
+    so a season read E05 down to E01 while the worker ran E01."""
     with _lock:
-        return [dict(job) for job in reversed(_load())]
+        return [dict(job) for job in _load()]
 
 
 # Progress moves constantly; the *state* of a job changes a handful of
@@ -115,6 +119,19 @@ def _update(job_id, **fields):
         target = None
         for job in _load():
             if job.get("id") == job_id:
+                # **A row that is no longer queued or running keeps its
+                # text.** The worker goes on writing for a moment after a
+                # Cancel or a Pause - measured 7 September 2026: a row
+                # reading "Cancelled · Connecting to peers...", because
+                # the service poll it was in ended 40s after the press
+                # and the swarm step wrote over it. A write carrying a
+                # state goes through whole, and so does anything else on
+                # the row - the pull's `parts`, which a resume reads.
+                if "state" not in fields and job.get("state") not in (QUEUED, RUNNING):
+                    fields = {k: v for k, v in fields.items()
+                              if k not in ("detail", "progress")}
+                    if not fields:
+                        return dict(job)
                 job.update(fields)
                 target = dict(job)
                 break
@@ -172,9 +189,28 @@ def pause_all():
 
 
 def resume_all():
-    for job in list_jobs():
-        if job.get("state") == PAUSED:
-            resume(job["id"])
+    """Every paused job back in the queue, oldest first - the owner's
+    ask, 7 September 2026: "when I resume all make sure to start from
+    the top ep 1"."""
+    _resume_many(lambda job: job.get("state") == PAUSED)
+
+
+def _resume_many(wanted):
+    """Queue every matching paused job, then wake the worker once.
+
+    Resuming them one at a time through resume() woke the worker on the
+    first job touched, and the worker takes the first *queued* job in
+    file order at that instant - so with the list newest first, Resume
+    All on E01-E05 started E05 while E01-E04 were still being marked.
+    Queue them all under the lock first and the worker's first look
+    finds E01."""
+    with _lock:
+        ids = [job["id"] for job in _load() if wanted(job)]
+        for job_id in ids:
+            _paused.discard(job_id)
+            _update(job_id, state=QUEUED)
+    if ids:
+        _ensure_worker()
 
 
 def cancel_all():
@@ -192,9 +228,8 @@ def pause_group(group_id):
 
 
 def resume_group(group_id):
-    for job in list_jobs():
-        if job.get("group") == group_id and job.get("state") == PAUSED:
-            resume(job["id"])
+    _resume_many(lambda job: job.get("group") == group_id
+                 and job.get("state") == PAUSED)
 
 
 def resume_pending():
@@ -901,6 +936,7 @@ def _fetch_ranged(job, url, size, target) -> str:
         _update(job_id, progress=round(have / size, 4),
                 detail=f"{rate / 1e6:.1f} MB/s · "
                        f"{len(threads)} connection{'s' if len(threads) > 1 else ''}",
+                bytes_done=int(have), bytes_total=int(size),
                 parts=kept)
     for thread in threads:
         thread.join(timeout=10)
@@ -965,6 +1001,31 @@ def _run_video(job) -> str:
         _update(job_id, detail="Connecting...")
         return _fetch_ranged(job, url, int(size or 0), stem + extension)
 
+    def halted():
+        """Cancelled or paused since the last look. Read between every
+        step and inside the two long waits (`should_stop` on the service
+        poll and the race), because a press is noticed only where
+        something reads it. Measured before this, 7 September 2026: a
+        Cancel during the service poll was read 46s later, after the
+        swarm step had opened a torrent for the cancelled job (pick_file
+        at 17:53:55 for a Cancel at 17:53:09) - the check that would
+        have stopped it between the service and the swarm did not
+        exist, and neither wait could be interrupted."""
+        return job_id in _cancelled or job_id in _paused
+
+    def let_go(ready):
+        """The race answered after a press landed: a cancel lets the
+        torrent go, a pause keeps it and remembers the pack the way the
+        progress loop does, so the resume continues from its pieces."""
+        found_hash = (ready or {}).get("info_hash")
+        if not found_hash or ready.get("kind") == "direct":
+            return
+        if job_id in _paused and job_id not in _cancelled:
+            if season and episode:
+                _season_packs[pack_key] = found_hash
+            return
+        torrent_engine.release(found_hash, force=True)
+
     pack_key = (entry.get("id") or entry.get("title"), season,
                 job.get("audio"), job.get("quality"))
     info_hash = _season_packs.get(pack_key)
@@ -975,6 +1036,8 @@ def _run_video(job) -> str:
         _update(job_id, detail="Looking for a source...")
         found = list(streams.find_streams(entry, season=season, episode=episode,
                                           deadline=net.deadline_in(40)) or [])
+        if halted():
+            return ""
         wanted = job.get("quality")
         ordered = streams.matching_quality(found, wanted) if wanted else []
         candidates = [s for s in (ordered or found) if s.get("info_hash")]
@@ -999,7 +1062,8 @@ def _run_video(job) -> str:
                                            episode=episode,
                                            deadline=net.deadline_in(SERVICE_BUDGET_S),
                                            title=entry.get("title"),
-                                           on_progress=progress)
+                                           on_progress=progress,
+                                           should_stop=halted)
                 except Exception:
                     logs.exception("The service fetch for a download failed")
                     got = None
@@ -1010,17 +1074,22 @@ def _run_video(job) -> str:
                         return finish(target)
                     if job_id in _cancelled or job_id in _paused:
                         return ""
+        if halted():
+            return ""
         # 2. The swarm.
         _update(job_id, detail="Connecting to peers...")
         preferred, rest = _split_by_audio(candidates, job.get("audio"))
         ready = None
         if preferred:
             ready = streams.prepare_fastest(preferred, season=season,
-                                            episode=episode)
-        if (not ready or not ready.get("info_hash")) and rest:
+                                            episode=episode, should_stop=halted)
+        if (not ready or not ready.get("info_hash")) and rest and not halted():
             ready = streams.prepare_fastest(rest, season=season,
-                                            episode=episode)
+                                            episode=episode, should_stop=halted)
         if not ready:
+            return ""
+        if halted():
+            let_go(ready)
             return ""
         ready_url = str(ready.get("url") or "")
         if ready.get("kind") == "direct" and ready_url.startswith("http"):
@@ -1059,8 +1128,12 @@ def _run_video(job) -> str:
         rate = float(state.get("rate") or 0)
         if rate >= SWARM_STALL_RATE:
             moving_since = time.monotonic()
+        # bytes_done/bytes_total ride beside the fraction so the page can
+        # say "123 MB / 456 MB" - the owner's ask, 7 September 2026.
         _update(job_id, progress=round(state.get("fraction") or 0.0, 4),
-                detail=f"{rate/1e6:.1f} MB/s · {state.get('peers', 0)} peers")
+                detail=f"{rate/1e6:.1f} MB/s · {state.get('peers', 0)} peers",
+                bytes_done=int(state.get("done") or 0),
+                bytes_total=int(state.get("total") or 0))
         if state.get("finished"):
             break
         if time.monotonic() - moving_since >= SWARM_STALL_S:
@@ -1074,9 +1147,12 @@ def _run_video(job) -> str:
                 try:
                     got = debrid.fetch_url(info_hash, season=season, episode=episode,
                                            deadline=net.deadline_in(60.0),
-                                           title=entry.get("title"))
+                                           title=entry.get("title"),
+                                           should_stop=halted)
                 except Exception:
                     got = None
+                if halted():
+                    continue          # the loop's head releases or keeps it
                 url = str((got or {}).get("url") or "")
                 if url.startswith("http"):
                     # The stalled swarm is kept until the link has
@@ -1097,7 +1173,10 @@ def _run_video(job) -> str:
                     for other in others[:6]:
                         tried.add((other.get("info_hash") or "").lower())
                     ready = streams.prepare_fastest(others[:6], season=season,
-                                                    episode=episode)
+                                                    episode=episode, should_stop=halted)
+                    if halted():
+                        let_go(ready)
+                        continue
                     ready_url = str((ready or {}).get("url") or "")
                     if ready and ready.get("kind") == "direct" and ready_url.startswith("http"):
                         target = pull(ready_url, ready.get("size"), ready.get("name"))

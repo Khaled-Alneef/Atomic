@@ -65,13 +65,15 @@ from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
                          QLinearGradient, QPainter, QPen, QPixmap,
                          QPolygonF, QRegion, QRegularExpressionValidator)
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QMenu,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
 from helpers import (skiptimes, app_settings, artwork, downloads, logs,
                      mkv_subs, net, storage, theme, video_backend,
                      window_chrome)
+from helpers import drawn_icons
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
                              PickCombo,
                              confirm, finish_toast, freeze_covered,
@@ -480,6 +482,9 @@ BAR_ALPHA = 180
 # ~78% still read solid on the near-black fill; below ~180 they start
 # going grey again, which is where this journey began.
 CONTROLS_VEIL_ALPHA = 200
+# The statistics grid's name column, wide enough for "Loaded Time" at
+# 10.5pt with room to spare, so the values line up in one column.
+STATS_NAME_WIDTH = 104
 # **The top bar alone is opaque, and that is the owner's ask, 30 August
 # 2026: "make the upper bar while the video playing exactly the same as
 # when the video is still loading (logo is showing)."**
@@ -626,15 +631,9 @@ ICON_DOWNLOAD = "\ue896"
 # mark rather than "the audio and subtitle tracks inside this file" -
 # a speaker is the symbol asked for. Distinct from the mute button's
 # E767 so the two controls never read as the same one twice.
-ICON_EMBEDDED = "\ue9d9"    # Audio wave - the owner asked for a
-                            # pulse: this button opens the release's
-                            # own audio and subtitle tracks, so an
-                            # audio mark says more than a translate
-                            # one (which now marks the subtitle
-                            # search below).
-# The globe, for the settings button - the owner's ask. E774 is the
-# same glyph the reader's open-in-browser button carries.
-ICON_SETTINGS_GLOBE = "\ue774"
+# The audio button and the settings globe are drawn by hand now
+# (helpers/drawn_icons): the waveform and the sidebar's globe he asked
+# for on 7 September 2026, in place of the E9D9 and E774 glyphs.
 
 # WiFi bars - the owner asked for this button by its icon (24 August
 # 2026, with a screenshot of the numbers it should open). An escape
@@ -1485,7 +1484,27 @@ def _hard_edge_font(point_size, bold=False) -> QFont:
     return font
 
 
-def _icon_button(glyph, tooltip, size=44, font_pt=16):
+def _icon_button_style(font_pt, family=None):
+    """The bar button's look: no ground until hovered, no border.
+
+    padding:0 - the app-wide QPushButton rule is `padding: 8px 16px`,
+    which on a fixed 44px button leaves 12px of content width for a
+    glyph whose ink is ~28px across, so it renders sliced. That is
+    what "the exit icon looks scratched" was: not a missing glyph
+    (U+F3B1 measures 233 ink px, bbox 28x26, in a real window) but
+    a clipped one. `family` is for a button carrying text rather than
+    a glyph (the speed button's "1x"), which the icon face has no
+    letters for."""
+    face = f'"{family}"' if family else theme.FONT_STACK_ICONS
+    return (f"QPushButton {{ background: transparent; border: none; padding: 0px;"
+            f" color: {theme.TEXT}; font-family: {face};"
+            f" font-size: {font_pt}pt; border-radius: {theme.RADIUS_SM}px; }}"
+            f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}"
+            f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}")
+
+
+def _icon_button(glyph, tooltip, size=44, font_pt=16, family=None):
     button = QPushButton(glyph)
     button.setObjectName("Flat")
     button.setToolTip(tooltip)
@@ -1493,20 +1512,21 @@ def _icon_button(glyph, tooltip, size=44, font_pt=16):
     # Every clickable shows the hand - the owner's ask, 24 August 2026,
     # and this factory is where most of the player's buttons come from.
     use_hover_cursor(button)
-    button.setStyleSheet(
-        # padding:0 - the app-wide QPushButton rule is `padding: 8px 16px`,
-        # which on a fixed 44px button leaves 12px of content width for a
-        # glyph whose ink is ~28px across, so it renders sliced. That is
-        # what "the exit icon looks scratched" was: not a missing glyph
-        # (U+F3B1 measures 233 ink px, bbox 28x26, in a real window) but
-        # a clipped one. PlayPauseButton and _season_arrow already carry
-        # this; _icon_button is where it was missed.
-        f"QPushButton {{ background: transparent; border: none; padding: 0px;"
-        f" color: {theme.TEXT}; font-family: {theme.FONT_STACK_ICONS};"
-        f" font-size: {font_pt}pt; border-radius: {theme.RADIUS_SM}px; }}"
-        f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
-        f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}"
-        f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}")
+    button.setStyleSheet(_icon_button_style(font_pt, family))
+    return button
+
+
+def _drawn_button(paint, tooltip, size=40, icon_px=24):
+    """A bar button whose picture `paint` draws (helpers/drawn_icons) on
+    the same ground as _icon_button's. A QIcon on the button came out
+    soft and clipped at the edges on the owner's 125% panel ("the Audio
+    is blurred ... it seems truncated", 7 September 2026); painting in
+    the button's own paintEvent is crisp at any ratio."""
+    button = drawn_icons.IconButton(paint, icon_px)
+    button.setObjectName("Flat")
+    button.setToolTip(tooltip)
+    button.setFixedSize(size, size)
+    button.setStyleSheet(_icon_button_style(14))
     use_hover_cursor(button)
     return button
 
@@ -1980,14 +2000,16 @@ class SeekBar(QWidget):
         rect = QRectF(left, top, span, self.BAR_HEIGHT)
         radius = self.BAR_HEIGHT / 2
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(theme.SURFACE_HOVER))
+        # Very light grey for what is not yet played - the owner's ask,
+        # 7 September 2026, against the near-black it used to be.
+        painter.setBrush(QColor(theme.SEEK_REST))
         painter.drawRoundedRect(rect, radius, radius)
 
         if self._duration > 0:
             buffered = min(1.0, max(0.0, self._buffered / self._duration))
             played = min(1.0, max(0.0, self._position / self._duration))
             if buffered > played:
-                painter.setBrush(QColor(theme.BORDER))
+                painter.setBrush(QColor(theme.SEEK_BUFFERED))
                 painter.drawRoundedRect(
                     QRectF(left, top, span * buffered, self.BAR_HEIGHT),
                     radius, radius)
@@ -2474,10 +2496,15 @@ class OverlayPanel(QFrame):
         pattern = r"-?\d*\.?\d*" if signed else r"\d*\.?\d*"
         value.setValidator(QRegularExpressionValidator(
             QRegularExpression(f"^{pattern}$"), value))
+        # Lighter than the panel and framed, so it reads as a field that
+        # takes typing - the owner, 7 September 2026: "make the text
+        # entry box a lighter colour than the window's colour".
         value.setStyleSheet(
-            f"color: {theme.TEXT}; font-size: 12pt; font-weight: 700;"
-            f" background: transparent; border: none;"
-            f" selection-background-color: {theme.ACCENT};")
+            f"QLineEdit {{ color: {theme.TEXT}; font-size: 12pt; font-weight: 700;"
+            f" background: {theme.INPUT_BG}; border: 1px solid {theme.BORDER};"
+            f" border-radius: 6px; padding: 2px 6px;"
+            f" selection-background-color: {theme.ACCENT}; }}"
+            f"QLineEdit:focus {{ border: 1px solid {theme.ACCENT}; }}")
         if on_typed is None:
             value.setReadOnly(True)
         else:
@@ -3178,7 +3205,7 @@ class PlayerPage(GlassPage):
 
         # Audio-language pill - the current audio track's language, opens
         # the tracks panel. Hidden until a file with audio tracks loads.
-        self.audio_pill = _pill_button("AUDIO", "Audio & subtitle tracks")
+        self.audio_pill = _pill_button("AUDIO", "Audio tracks")
         self.audio_pill.clicked.connect(self._open_tracks_panel)
         self.audio_pill.setVisible(False)
         layout.addWidget(self.audio_pill)
@@ -3298,8 +3325,11 @@ class PlayerPage(GlassPage):
         self.volume_slider.setRange(0, VOLUME_MAX)
         self.volume_slider.setValue(VOLUME_DEFAULT)
         self.volume_slider.setFixedWidth(140)
+        # No dark frame behind it, and the groove's rest is the seek
+        # strip's light grey - the owner, 7 September 2026.
         self.volume_slider.setStyleSheet(
-            f"QSlider::groove:horizontal {{ height: 5px; background: {theme.SURFACE_HOVER};"
+            f"QSlider {{ background: transparent; border: none; }}"
+            f"QSlider::groove:horizontal {{ height: 5px; background: {theme.SEEK_REST};"
             f" border-radius: 2px; }}"
             f"QSlider::sub-page:horizontal {{ background: {theme.ACCENT}; border-radius: 2px; }}"
             f"QSlider::handle:horizontal {{ background: {theme.TEXT}; width: 14px;"
@@ -3314,7 +3344,7 @@ class PlayerPage(GlassPage):
         # fixed. Right-aligned against the slider.
         self.volume_label.setFixedWidth(42)
         self.volume_label.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-size: 10.5pt; font-weight: 600;"
+            f"color: {theme.TEXT_OVER_MEDIA}; font-size: 10.5pt; font-weight: 600;"
             f" background: transparent;")
         row.addWidget(self.volume_label)
         # The middle is empty air now that the seek strip has its own
@@ -3324,7 +3354,13 @@ class PlayerPage(GlassPage):
         # Opens the speed panel (slider + presets) rather than cycling
         # through a fixed ring: cycling meant six clicks past 2x to get
         # back to 1x, and there was no way to land between the stops.
-        self.speed_btn = _text_button("1x", "Playback speed")
+        # No border, and the same 40px ground and 14pt as the icons
+        # beside it - the owner, 7 September 2026: "remove the border
+        # from the speed button, and make the 1x size exactly the same
+        # as other icons in the same bar". The app's own face, because
+        # the icon face has no letters.
+        self.speed_btn = _icon_button("1x", "Playback speed", size=40,
+                                      font_pt=14, family=theme.FONT_FAMILY)
         self.speed_btn.clicked.connect(self._open_speed_panel)
         row.addWidget(self.speed_btn)
 
@@ -3350,8 +3386,10 @@ class PlayerPage(GlassPage):
         # on screen", so the two doors sit together. This lived as a row
         # in the settings panel for one revision and was impossible to
         # find there.
-        self.embedded_btn = _icon_button(ICON_EMBEDDED, "Embedded translation",
-                                         size=40, font_pt=14)
+        # The waveform he sent (drawn_icons.waveform) rather than a font
+        # glyph, and the button is "Audio" now - the panel it opens holds
+        # the file's audio tracks and nothing else (7 September 2026).
+        self.embedded_btn = _drawn_button(drawn_icons.paint_waveform, "Audio")
         self.embedded_btn.clicked.connect(self._open_tracks_panel)
         row.addWidget(self.embedded_btn)
 
@@ -3370,8 +3408,9 @@ class PlayerPage(GlassPage):
         self.stats_btn.clicked.connect(self._open_stats_panel)
         row.addWidget(self.stats_btn)
 
-        self.settings_btn = _icon_button(ICON_SETTINGS_GLOBE, "Settings",
-                                         size=40, font_pt=14)
+        # The sidebar's globe (drawn_icons.globe), the one picture for
+        # every globe in the app - his ask, 7 September 2026.
+        self.settings_btn = _drawn_button(drawn_icons.paint_globe, "Settings")
         self.settings_btn.clicked.connect(self._open_settings_panel)
         row.addWidget(self.settings_btn)
 
@@ -7585,7 +7624,14 @@ class PlayerPage(GlassPage):
 
     def _update_time_label(self):
         self.pos_label.setText(_format_time(self._position))
-        self.dur_label.setText(_format_time(self._duration))
+        # **What is left, not the whole** - the owner, 7 September 2026:
+        # "make the time in the right side of the seek bar show the time
+        # remaining, not the total ep time". A leading minus, the way
+        # every player that shows it does; dashes until a duration is
+        # known.
+        remaining = self._duration - self._position
+        self.dur_label.setText(f"-{_format_time(max(0.0, remaining))}"
+                               if self._duration > 0 else "--:--")
 
     def _check_watched(self, force=False):
         if self._marked_watched or not self._duration:
@@ -8229,39 +8275,27 @@ class PlayerPage(GlassPage):
             pass
 
     def _open_tracks_panel(self, rebuild=False):
-        panel = self._new_panel("Audio and Subtitle Tracks", "tracks",
-                                rebuild)
+        # **Audio only.** The owner, 7 September 2026: "remove the
+        # Subtitles in this file section from the embedded translation
+        # window since they already appear in the subtitles window, and
+        # rename the window as Audio". The file's subtitle tracks are
+        # rows of the Subtitles panel (_embedded_feedstock, "in this
+        # file"), so this panel held them twice.
+        panel = self._new_panel("Audio", "tracks", rebuild)
         if panel is None:
             return          # the same button closed it
         audio = [t for t in self._tracks if t.get("type") == "audio"]
-        subs = [t for t in self._tracks if t.get("type") == "sub"]
         # Row cards by (property, track id), so a later pick moves the
         # highlight through card.set_selected instead of rebuilding the
         # whole panel - see _sync_track_rows/_highlight_tracks.
         panel.track_rows = {}
-        if not audio and not subs:
-            panel.add_message("This source has no selectable tracks.")
-        if audio:
-            panel.add_group("AUDIO")
-            for track in audio:
-                panel.track_rows[("aid", track.get("id"))] = panel.add_row(
-                    self._track_label(track), track.get("codec") or "",
-                    lambda checked=False, t=track: self._pick_track("aid", t),
-                    selected=bool(track.get("selected")))
-        if subs:
-            panel.add_group("SUBTITLES IN THIS FILE")
-            # `selected=` was missing here, so Off was the one row that
-            # could never light up - the owner's report. "No sub track
-            # chosen" is exactly what Off means, so it is selected when
-            # nothing else in this group is.
-            panel.track_rows[("sid", None)] = panel.add_row(
-                "Off", "", lambda: self._pick_track("sid", None),
-                selected=not any(t.get("selected") for t in subs))
-            for track in subs:
-                panel.track_rows[("sid", track.get("id"))] = panel.add_row(
-                    self._track_label(track), track.get("codec") or "",
-                    lambda checked=False, t=track: self._pick_embedded_sub(t),
-                    selected=bool(track.get("selected")))
+        if not audio:
+            panel.add_message("This source has no selectable audio tracks.")
+        for track in audio:
+            panel.track_rows[("aid", track.get("id"))] = panel.add_row(
+                self._track_label(track), track.get("codec") or "",
+                lambda checked=False, t=track: self._pick_track("aid", t),
+                selected=bool(track.get("selected")))
         panel.finish()
         self._show_panel(panel)
 
@@ -8289,11 +8323,13 @@ class PlayerPage(GlassPage):
         rows = getattr(panel, "track_rows", None) if panel is not None else None
         if rows is None or getattr(panel, "kind", "") != "tracks":
             return False
-        current = {("aid" if t.get("type") == "audio" else "sid", t.get("id")): t
-                   for t in self._tracks if t.get("type") in ("audio", "sub")}
+        # Audio rows only, since the panel became Audio (7 September
+        # 2026): a subtitle track joining or leaving is the Subtitles
+        # panel's business and must not rebuild this one.
+        current = {("aid", t.get("id")): t
+                   for t in self._tracks if t.get("type") == "audio"}
         added = [key for key in current if key not in rows]
-        gone = [key for key in rows
-                if key != ("sid", None) and key not in current]
+        gone = [key for key in rows if key not in current]
         if not added and not gone:
             return True
         try:
@@ -8747,88 +8783,69 @@ class PlayerPage(GlassPage):
         # the loading gauge is showing, which is the only honest answer
         # to "what is it doing" at that moment - and the one worth
         # having, because it names *which* step is slow.
-        panel.add_group("Startup")
-        setters["startup"] = panel.add_stat("Doing", "-")
-        # **The swarm rows are always drawn, and the hash is re-read on
-        # every tick.** The owner's ask, 28 August 2026: "make sure to
-        # show the speed in the statistics in the vid player even before
-        # the vid starts (while sourcing and before if possible)".
+        # **A grid: one column of names, one of values, two facts a
+        # row.** The owner, 7 September 2026, with a picture of "Doing"
+        # at one edge and "Playing" adrift in the middle: "there are
+        # some weird spaces between the labels ... make it super
+        # comfortable to look at it!" add_stat's label-beside-value
+        # blocks each sized themselves, so nothing lined up from one row
+        # to the next; a QGridLayout with a fixed name column puts every
+        # value under the one above it.
         #
-        # They used to be built only if a release had already been
-        # chosen when the panel was opened - which during sourcing is
-        # exactly when it has not - so opening Statistics while the
-        # loading screen was up got the flat "not streaming from a
-        # torrent" message and then kept it for the rest of the episode,
-        # however the release turned out. Reading `_playing_info_hash`
-        # inside `refresh` instead means the numbers fill themselves in
-        # the moment the engine has a handle, which is the moment the
-        # download actually starts and the one worth watching.
-        #
-        # A title that really is a direct URL or a debrid link says so
-        # in the rows rather than in a paragraph - the rows have to exist
-        # either way, and a sentence that cannot be updated is what got
-        # this wrong the first time.
-        panel.add_group("Source")
-        row = QHBoxLayout()
-        row.setSpacing(26)
-        columns = QWidget()
-        columns.setStyleSheet("background: transparent; border: none;")
-        columns.setLayout(row)
-        setters["peers"] = panel.add_stat("Peers", "-", into=row)
-        # **"swarm_speed", not "speed"** - and that one word is why the
-        # Speed row had never once shown a number. The Playback group
-        # below carries a stat of its own keyed "speed" (mpv's
-        # "Speed correction"), it is built *after* this one, and
-        # `setters` is a plain dict - so the later row silently took the
-        # name and every tick wrote the download rate into
-        # "Speed correction" while this row sat on the "-" it was created
-        # with. The owner's screenshot of 28 August 2026 is exactly that:
-        # Peers 139, Completed 60.28%, Speed "-", all three read from the
-        # same dict in the same breath.
-        #
-        # Two stats had the same key and nothing said so, which is what
-        # `_assert_unique_stat_keys` below now refuses to let happen
-        # again.
-        setters["swarm_speed"] = panel.add_stat("Speed", "-", into=row)
-        setters["done"] = panel.add_stat("Completed", "-", into=row)
-        row.addStretch(1)
-        panel.body_layout.addWidget(columns)
-        setters["source_note"] = panel.add_stat("Source", "Looking...")
-
-        panel.add_group("Playback")
-        # Two stats to a line rather than six across one: the panel is a
-        # fixed-width column, and the same crowding add_stepper records
-        # for the subtitle panel applies to any row that tries to hold
-        # more than a couple of value pairs.
-        for pairs in ((("resolution", "Resolution"), ("fps", "Video FPS")),
-                      (("display", "Display"), ("vsync", "Refreshes per frame")),
-                      (("video", "Video"), ("audio", "Audio")),
-                      (("hwdec", "Decode"), ("bitrate", "Bitrate")),
-                      (("dropped", "Dropped"), ("buffer", "Buffer")),
-                      (("cadence", "Frame cadence"), ("avsync", "A/V sync")),
-                      (("mistimed", "Mistimed"), ("jitter", "VSync jitter")),
-                      (("sync_mode", "Sync mode"),
-                       ("interpolation", "Interpolation")),
-                      (("vo", "Output"), ("gpu", "GPU")),
-                      (("speed", "Speed correction"),
-                       ("container_fps", "Container FPS"))):
-            line = QHBoxLayout()
-            line.setSpacing(26)
+        # Two things older revisions learned stay true here. The swarm
+        # rows are always built and the hash re-read on every tick (his
+        # ask of 28 August 2026: the numbers while sourcing), and two
+        # stats must never share a key - "swarm_speed", not "speed", is
+        # why the Speed row once sat on "-" for good.
+        def group(title):
+            panel.add_group(title)
             holder = QWidget()
             holder.setStyleSheet("background: transparent; border: none;")
-            holder.setLayout(line)
-            for key, label in pairs:
-                if key in setters:
-                    # A second stat under a name already taken would
-                    # quietly steal it, which is the defect above. Loud
-                    # here rather than silent on screen: this is a
-                    # programming mistake with a fix, not a runtime
-                    # condition to survive, and the last one cost a stat
-                    # that never worked.
-                    logs.warning(f"statistics: duplicate stat key {key!r}")
-                setters[key] = panel.add_stat(label, "-", into=line)
-            line.addStretch(1)
+            grid = QGridLayout(holder)
+            grid.setContentsMargins(0, 2, 0, 8)
+            grid.setHorizontalSpacing(14)
+            grid.setVerticalSpacing(9)
+            for column in (0, 2):
+                grid.setColumnMinimumWidth(column, STATS_NAME_WIDTH)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(3, 1)
             panel.body_layout.addWidget(holder)
+            return grid
+
+        def stat(grid, row, column, key, label):
+            if key in setters:
+                logs.warning(f"statistics: duplicate stat key {key!r}")
+            name = QLabel(label)
+            name.setStyleSheet(
+                f"color: {theme.TEXT_MUTED}; font-size: 10.5pt;"
+                f" background: transparent; border: none;")
+            value = QLabel("-")
+            value.setStyleSheet(
+                f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 700;"
+                f" background: transparent; border: none;")
+            align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            grid.addWidget(name, row, column * 2, align)
+            grid.addWidget(value, row, column * 2 + 1, align)
+            setters[key] = value.setText
+
+        startup = group("Startup")
+        stat(startup, 0, 0, "startup", "Doing")
+        source = group("Source")
+        stat(source, 0, 0, "peers", "Peers")
+        stat(source, 0, 1, "swarm_speed", "Speed")
+        stat(source, 1, 0, "done", "Completed")
+        stat(source, 1, 1, "source_note", "Source")
+        playback = group("Playback")
+        # Six facts - the owner's own list, 7 September 2026 ("remove all
+        # and just keep these"). The decode, bitrate, drop, cadence and
+        # sync rows are gone from the panel, not from _playback_stats,
+        # which the harnesses and the log still read.
+        stat(playback, 0, 0, "resolution", "Resolution")
+        stat(playback, 0, 1, "fps", "Video FPS")
+        stat(playback, 1, 0, "display", "Display")
+        stat(playback, 1, 1, "video", "Video")
+        stat(playback, 2, 0, "audio", "Audio")
+        stat(playback, 2, 1, "buffer", "Loaded Time")
 
         def refresh():
             if self._awaiting_first_frame:
@@ -8877,67 +8894,10 @@ class PlayerPage(GlassPage):
             setters["resolution"](live["resolution"])
             setters["fps"](live["fps"])
             setters["display"](live["display"])
-            setters["vsync"](live["vsync"])
             setters["video"](live["video"])
             setters["audio"](live["audio"])
-            setters["hwdec"](live["hwdec"])
-            bitrate = live["bitrate"]
-            setters["bitrate"](f"{bitrate / 1_000_000:.2f} Mbps"
-                               if bitrate else "-")
-            dropped, delayed = live["dropped"], live["delayed"]
-            # Dropped and delayed together: a frame mpv threw away and a
-            # frame it showed late are different faults with the same
-            # symptom, and reading only the first says "nothing is
-            # wrong" for the second.
-            #
-            # **And a rate beside the totals, because the totals only
-            # ever go up.** Both of these are cumulative since the file
-            # opened, so watching them is watching a number that rises
-            # forever even on perfect playback - which reads as "late
-            # frames are accumulating" and cannot be told apart from
-            # pacing that is genuinely falling behind *now*. The
-            # per-second figure is the one that answers that: a healthy
-            # stream settles at 0.0/s with a total of whatever it
-            # collected during startup, and a real problem keeps a
-            # non-zero rate for as long as it lasts.
-            rate = 0.0
-            if delayed is not None:
-                now = time.monotonic()
-                last = getattr(self, "_late_sample", None)
-                if last is not None and now > last[0]:
-                    rate = max(0.0, (int(delayed) - last[1]) / (now - last[0]))
-                self._late_sample = (now, int(delayed))
-            setters["dropped"](
-                "-" if dropped is None
-                else f"{int(dropped)} ({int(delayed or 0)} late, {rate:.1f}/s)")
             buffer_s = live["buffer"]
             setters["buffer"]("-" if buffer_s is None else f"{buffer_s:.1f} s")
-
-            def number(key, fmt, suffix=""):
-                value = live.get(key)
-                return "N/A" if value is None else format(value, fmt) + suffix
-
-            setters["cadence"](self._cadence_text(live))
-            setters["avsync"](number("avsync", "+.4f", " s"))
-            mistimed, decoder_dropped = live["mistimed"], live["decoder_dropped"]
-            # Mistimed beside the decoder's own drops: the two failures
-            # this panel could not previously tell apart. A frame the
-            # decoder never produced and a frame shown at the wrong
-            # moment both read as a stutter.
-            setters["mistimed"](
-                "N/A" if mistimed is None
-                else f"{int(mistimed)} ({'N/A' if decoder_dropped is None else int(decoder_dropped)} dec)")
-            setters["jitter"](number("jitter", ".5f"))
-            setters["sync_mode"](live["sync_mode"])
-            setters["interpolation"](live["interpolation"])
-            setters["vo"](live["vo"])
-            setters["gpu"](f"{live['gpu_api']} / {live['gpu_context']}")
-            video_speed, audio_speed = live["video_speed"], live["audio_speed"]
-            setters["speed"](
-                "N/A" if video_speed is None
-                else f"v {video_speed:.5f} / a "
-                     f"{'N/A' if audio_speed is None else format(audio_speed, '.5f')}")
-            setters["container_fps"](number("container_fps", ".3f"))
 
         refresh()
         timer = QTimer(panel)

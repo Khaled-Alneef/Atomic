@@ -762,14 +762,17 @@ def _none_reason(deadline) -> str:
 
 
 def fetch_url(info_hash, season=None, episode=None, deadline=None,
-              title=None, on_progress=None):
+              title=None, on_progress=None, should_stop=None):
     """A direct HTTPS URL for this release's right file, waiting for the
     service to fetch the release when it does not hold it yet.
 
     The same addMagnet -> selectFiles -> link shape as playable_url,
     with the one difference a download affords: a status of queued or
     downloading is polled, not abandoned, up to the deadline, and
-    `on_progress` hears the percentage as it climbs. The torrent is left
+    `on_progress` hears the percentage as it climbs; `should_stop`, when
+    given, is asked once a poll and ends the wait with None when it
+    answers True (a download cancelled or paused mid-fetch, 7 September
+    2026 - the poll used to run its whole budget first). The torrent is left
     in the account whatever happens - a fetch that ran past the deadline
     finishes on its own there, and the next ask finds it downloaded.
 
@@ -799,7 +802,7 @@ def fetch_url(info_hash, season=None, episode=None, deadline=None,
         _say(f"debrid fetch: {info_hash[:8]} addMagnet answered nothing "
              f"({_none_reason(deadline)})")
         return None
-    info = _await_files(torrent_id, deadline)
+    info = _await_files(torrent_id, deadline, should_stop)
     files = (info or {}).get("files") or []
     status = str((info or {}).get("status") or "")
     if not files or status in _GONE_STATUSES:
@@ -843,6 +846,10 @@ def fetch_url(info_hash, season=None, episode=None, deadline=None,
         if net.step_timeout(deadline, FETCH_POLL_S) is None:
             _say(f"debrid fetch: {info_hash[:8]} still {status} at {percent}% "
                  f"after {time.monotonic() - started:.0f}s - left to finish there")
+            return None
+        if should_stop is not None and should_stop():
+            _say(f"debrid fetch: {info_hash[:8]} still {status} at {percent}% - "
+                 f"the job was cancelled or paused; left to finish there")
             return None
         time.sleep(FETCH_POLL_S)
     link = _link_for(info.get("files") or files, info.get("links") or [], picked)
@@ -916,7 +923,7 @@ def _resolve(torrent_id, season, episode, deadline, title=None):
                     int(picked.get("bytes") or 0)}, status
 
 
-def _await_files(torrent_id, deadline):
+def _await_files(torrent_id, deadline, should_stop=None):
     """The torrent's info once its file list exists. addMagnet answers
     before the magnet is converted; a hash the service knows converts in
     well under a second, and one it does not is given up on at the
@@ -930,6 +937,8 @@ def _await_files(torrent_id, deadline):
             return info
         if net.step_timeout(deadline, POLL_S) is None:
             return info
+        if should_stop is not None and should_stop():
+            return None
         time.sleep(POLL_S)
 
 

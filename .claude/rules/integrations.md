@@ -845,3 +845,65 @@ job cancelled during the service's poll runs on to the swarm for a few
 seconds (`pick_file` at 17:53:55 for a job cancelled at 17:53:09) before
 the loop's first check releases it - `_cancelled` is read between
 candidates and at the loop's head, as before this change.
+
+## A press is noticed where the worker stands; the queue runs top to bottom (7 September 2026)
+
+His asks, in the evening: *"fix the cancelled job running on to the
+swarm"*, then *"make the downloads latest on the bottom, so if I
+download from ep1 to ep5 then 1 will be at top and load first! also
+when I resume all make sure to start from the top ep 1"*.
+
+**The cancel.** Cancel and Pause flip the row's state and put the id
+in a set; the worker read that set between service candidates, after a
+pull and at the top of each progress tick - and nowhere between the
+service step and the swarm step. Measured before the fix
+(`h_cancel.py`, the real `fetch_url` over a mocked `_api` answering
+"downloading" for ever, the real `prepare_fastest` over a mocked lane,
+a 5s service budget standing in for the 150s one): a Cancel 0.5s into
+the service poll was honoured **4.02s** later, after the race had run,
+the winner had been opened in the engine (`download_whole`,
+`sequential`) and "Connecting to peers..." had been written onto the
+cancelled row; a Cancel 0.5s into the race, 2.50s later with the
+winner opened; a Pause the same as the Cancel. On the frozen build the
+night before: `pick_file` at 17:53:55 for a Cancel at 17:53:09.
+
+Now `_run_video` has `halted()` (cancelled or paused), read after
+`find_streams`, after the service pass, after the race and after the
+stall block's re-ask and re-race, and handed to both long waits as
+`should_stop`: `debrid.fetch_url` asks it once a poll (`FETCH_POLL_S`)
+and returns None with `the job was cancelled or paused; left to finish
+there`; `streams.prepare_fastest` asks it every 100ms, and True ends
+the race with no winner and every started lane let go (`race: stopped
+by the caller after Ns; N lane(s) let go` - the lanes still inside
+`prepare` hand theirs back through `_judge`, as after a timeout). A
+race that has already answered when the press is read is `let_go`: a
+cancel releases the torrent, a pause keeps it and remembers the pack
+the way the progress loop does. `_update` drops `detail` and
+`progress` on a row no longer queued or running unless the write
+carries a state, so the row keeps the text it had at the press; a
+paused row still takes its `parts`, which the resume reads.
+
+Measured after: the Cancel in the service poll honoured in **0.11s**,
+no race, nothing in the engine, no write; the Cancel in the race at
+the next 100ms tick, winner never opened, the lanes' torrents released
+at once and again when the lanes finished; the Pause 0.11s. A Cancel
+during `find_streams` still waits for the search (up to 40s, no hook
+there) and then stops before the service. Frozen build, S04E02 resumed
+into the service's poll and cancelled: the redraw at 18:29:59.177, the
+poll's own line 0.25s later, nothing in the following fifty seconds,
+the row reading "Cancelled · Real-Debrid is fetching it...".
+
+**The order.** `list_jobs` reversed the file, so the page read newest
+first while the worker (`_next_queued`, file order) ran the oldest;
+it is file order now, oldest at the top, newest at the bottom. And
+Resume All resumed one job at a time through `resume()`, which wakes
+the worker on the first job touched - the worker takes the first
+*queued* job at that instant, so with the list newest first, Resume
+All on E01-E05 started E05 while the rest were still being marked
+(`h_order.py` records the old wake order as e5, e4, e3, e2).
+`_resume_many` queues every matching paused job under the lock and
+wakes the worker once; its first look finds the oldest. Frozen build:
+a range E01-E04 queued reads E01, E02, E03, E04 at the bottom of the
+list with E01 running; Pause All at E02 52%, Resume All, and the
+worker took the top-most paused row - his older S04E03, above the
+range - not E04.

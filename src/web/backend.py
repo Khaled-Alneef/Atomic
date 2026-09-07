@@ -482,7 +482,11 @@ def fetch_image(token, refresh=False):
 # hosts and one of them being slow must not hold the rest; and a bounded
 # head, because a catalogue page scrolled deep is hundreds of rows and
 # the ones below the fold can wait for the scroll that reaches them.
-_WARM_WORKERS = 4
+# Eight, from four - measured 7 September 2026 on a cast page's first
+# 24 covers, cold, from TMDB: 1.19s of wall at four workers, 0.49s at
+# twelve, 0.13s a cover either way; the scanlation hosts are what keep
+# this from going wider.
+_WARM_WORKERS = 8
 _WARM_HEAD = 200
 _warm_pool = None
 _warming = set()

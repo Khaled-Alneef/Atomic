@@ -1,4 +1,5 @@
-"""The playing-state upper bar: bare glyphs and text over the video.
+"""The playing-state bars - the upper one and, since 7 September 2026,
+the lower one too: bare glyphs, text and the seek strip over the video.
 
 The owner, four sessions running, most recently with a screenshot of
 what the mask version produced: *"remove the black bg for each button
@@ -133,11 +134,26 @@ def _clean_controls(player, page) -> None:
         pass
 
 
-def _compose(page):
+def _bars(page):
+    """The strips composed over the video: the top bar, and the controls
+    bar since the owner's ask of 7 September 2026 ("make the lower bar
+    ... fully transparent (even when paused), but keep all items like
+    buttons, seek bar and all the same crystal clear") - the same
+    per-pixel composition, so the seek strip, the times and the buttons
+    are drawn at full strength and every other pixel is the video."""
+    found = []
+    for name in ("top_bar", "controls"):
+        bar = getattr(page, name, None)
+        if bar is not None:
+            found.append(bar)
+    return found
+
+
+def _compose(page, bar=None):
     """Render the bar's children over transparency and push the result
     through UpdateLayeredWindow. Returns False when the window cannot
     take it (no HWND yet, zero size) - never raises."""
-    bar = getattr(page, "top_bar", None)
+    bar = getattr(page, "top_bar", None) if bar is None else bar
     if bar is None:
         return False
     try:
@@ -213,18 +229,33 @@ def _compose(page):
         return False
 
 
-def _set_layered(page, on: bool) -> None:
-    bar = getattr(page, "top_bar", None)
+def _set_layered(page, on: bool, bar=None) -> None:
+    bar = getattr(page, "top_bar", None) if bar is None else bar
     if bar is None:
         return
     try:
         hwnd = int(bar.winId())
         style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        if on and not (style & WS_EX_LAYERED):
-            _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
-        elif not on and (style & WS_EX_LAYERED):
+        veiled = getattr(page, "_veiled", None)
+        if on:
+            # **The controls bar arrives in the veil's mode.** _veil put
+            # it under SetLayeredWindowAttributes (one alpha for the whole
+            # window), and UpdateLayeredWindow will not take a window in
+            # that mode: the style bit is cleared and set again, once,
+            # and the veil's record dropped so the veil is not laid back
+            # over the composition. "Record present" is how that mode is
+            # told from this one - the style bit alone looks the same.
+            if (isinstance(veiled, dict) and veiled.pop(id(bar), None) is not None
+                    and (style & WS_EX_LAYERED)):
+                _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED)
+                style &= ~WS_EX_LAYERED
+            if not (style & WS_EX_LAYERED):
+                _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
+        elif style & WS_EX_LAYERED:
             _user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
                                    style & ~WS_EX_LAYERED)
+            if isinstance(veiled, dict):
+                veiled.pop(id(bar), None)     # the next wake veils it again
             try:
                 bar.update()
             except RuntimeError:
@@ -233,8 +264,8 @@ def _set_layered(page, on: bool) -> None:
         pass
 
 
-def _bar_is_layered(page) -> bool:
-    bar = getattr(page, "top_bar", None)
+def _bar_is_layered(page, bar=None) -> bool:
+    bar = getattr(page, "top_bar", None) if bar is None else bar
     if bar is None:
         return False
     try:
@@ -256,12 +287,19 @@ def refresh_live_bar(player, page) -> None:
     frame has actually arrived."""
     live = (getattr(page, "_streams_started", False)
             and not getattr(page, "_awaiting_first_frame", True))
-    if not live:
-        _set_layered(page, False)
-        page._atomic_bar_layered = False
-        return
-    _set_layered(page, True)
-    page._atomic_bar_layered = bool(_compose(page))
+    # **The controls bar is composed from the start** - the owner, 7
+    # September 2026: "make the lower bar also transparent when the vid
+    # is still loading before it plays". Only the top bar keeps the
+    # loading look until a frame is live.
+    controls = getattr(page, "controls", None)
+    composed = True
+    for bar in _bars(page):
+        if live or bar is controls:
+            _set_layered(page, True, bar)
+            composed = _compose(page, bar) and composed
+        else:
+            _set_layered(page, False, bar)
+    page._atomic_bar_layered = bool(live and composed)
 
 
 class _VolumeOsd:
@@ -270,7 +308,7 @@ class _VolumeOsd:
     the same UpdateLayeredWindow plumbing as the bar, because it too
     must sit over mpv's native child without a rectangle around it."""
 
-    WIDTH, HEIGHT = 220, 200
+    WIDTH, HEIGHT = 220, 220
     HIDE_MS = 1100
     # Softer corners and a see-through frame, both his asks of 30 August
     # 2026. 26 is a visible round on a 220px panel; 150/255 leaves the
@@ -323,53 +361,57 @@ class _VolumeOsd:
                                 self.RADIUS, self.RADIUS)
         white = QColor(theme.TEXT_OVER_MEDIA if hasattr(
             theme, "TEXT_OVER_MEDIA") else "#ffffff")
-        # The speaker: body, cone, and two arcs (none when muted).
-        pen = QPen(white, 7.0)
+        # **His picture, 7 September 2026** ("make the vol small window
+        # ... shows like 4th image exactly Icon and Bar"): an outline
+        # speaker with three waves, and a bar whose reached part is white
+        # and whose rest is warm (theme.VOLUME_OSD_REST), a round white
+        # knob between the two. The frame's alpha above is unchanged.
+        from PyQt6.QtGui import QPolygonF
+        pen = QPen(white, 5.0)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
-        painter.setBrush(white)
-        cx, cy = self.WIDTH / 2 - 18, 86.0
-        painter.drawRect(QRectF(cx - 26, cy - 12, 14, 24))
-        cone = [QPointF(cx - 12, cy - 12), QPointF(cx + 6, cy - 28),
-                QPointF(cx + 6, cy + 28), QPointF(cx - 12, cy + 12)]
-        from PyQt6.QtGui import QPolygonF
-        painter.drawPolygon(QPolygonF(cone))
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        cx, cy = self.WIDTH / 2 - 10, 88.0
+        body = [QPointF(cx - 30, cy - 12), QPointF(cx - 14, cy - 12),
+                QPointF(cx + 6, cy - 30), QPointF(cx + 6, cy + 30),
+                QPointF(cx - 14, cy + 12), QPointF(cx - 30, cy + 12)]
+        painter.drawPolygon(QPolygonF(body))
         top_v = float(getattr(self._player, "VOLUME_MAX", 200) or 200)
         loud = max(0.0, min(1.0, float(volume) / top_v))
         if not muted and volume > 0:
-            painter.drawArc(QRectF(cx + 10, cy - 16, 22, 32), -60 * 16,
-                            120 * 16)
-            # Both arcs from a quarter of the range up, so the ordinary
-            # 100% (the middle of 0-200) reads as the full icon.
-            if loud > 0.25:
-                painter.drawArc(QRectF(cx + 18, cy - 26, 34, 52), -60 * 16,
-                                120 * 16)
-        # The level bar.
-        track_y = 152.0
-        left, right = 36.0, self.WIDTH - 36.0
-        painter.setPen(QPen(QColor(255, 255, 255, 90), 6.0,
-                            Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap))
-        painter.drawLine(QPointF(left, track_y), QPointF(right, track_y))
-        span = right - left
-        # **Against the player's real range, so 100% sits in the middle**
-        # - the owner's ask, and a bug this fixes rather than a
-        # preference: VOLUME_MAX is 200 (mpv can amplify), so mapping
-        # the dot against 100 pinned every volume from 100 up to the far
-        # right and made the whole upper half of the range invisible.
-        top = float(getattr(self._player, "VOLUME_MAX", 200) or 200)
-        level = max(0.0, min(1.0, float(volume) / top))
-        if level > 0:
-            painter.setPen(QPen(QColor(theme.ACCENT), 6.0,
-                                Qt.PenStyle.SolidLine,
-                                Qt.PenCapStyle.RoundCap))
-            painter.drawLine(QPointF(left, track_y),
-                             QPointF(left + span * level, track_y))
+            # Three waves from the cone's tip; the ordinary 100% (the
+            # middle of 0-200) shows all three, a whisper the first.
+            for radius, floor in ((14.0, 0.0), (26.0, 0.2), (38.0, 0.4)):
+                if loud >= floor:
+                    painter.drawArc(
+                        QRectF(cx + 10 - radius, cy - radius,
+                               2 * radius, 2 * radius), -40 * 16, 80 * 16)
+        # **The bar's colours do not move with the knob** - the owner, 7
+        # September 2026: "do not make the right side of the dot
+        # orange!! make the colour fixed ... its idea is to show the
+        # levels of vol after the 100% (yellow orange red in a smooth
+        # way)". White to the middle (100% of the 0-200 range, VOLUME_MAX
+        # - mpv can amplify), then theme.VOLUME_OSD_GAIN to the end; the
+        # knob rides over the gradient at the level.
+        from PyQt6.QtGui import QLinearGradient
+        track_y = 170.0
+        left, right = 34.0, self.WIDTH - 34.0
+        at = left + (right - left) * loud
+        gradient = QLinearGradient(QPointF(left, track_y), QPointF(right, track_y))
+        gradient.setColorAt(0.0, white)
+        gradient.setColorAt(0.5, white)
+        yellow, orange, red = theme.VOLUME_OSD_GAIN
+        gradient.setColorAt(0.66, QColor(yellow))
+        gradient.setColorAt(0.83, QColor(orange))
+        gradient.setColorAt(1.0, QColor(red))
         painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(QRectF(left - 2.5, track_y - 2.5,
+                                       right - left + 5.0, 5.0), 2.5, 2.5)
+        painter.setPen(QPen(QColor(theme.VOLUME_OSD_KNOB_RING), 1.5))
         painter.setBrush(white)
-        painter.drawEllipse(QPointF(left + span * level, track_y), 8.0, 8.0)
+        painter.drawEllipse(QPointF(at, track_y), 9.0, 9.0)
         painter.end()
 
         widget.show()
@@ -456,6 +498,11 @@ def _patch(player) -> None:
         KINDS = (QEvent.Type.Enter, QEvent.Type.Leave,
                  QEvent.Type.MouseButtonPress,
                  QEvent.Type.MouseButtonRelease)
+        # A drag on the seek strip moves its knob under the pointer, so
+        # a held-button move recomposes too; a bare hover is left to the
+        # timer and the Enter/Leave pair - one composition per pointer
+        # event over a 2560px strip would be most of a core.
+        DRAG = QEvent.Type.MouseMove
 
         def __init__(self, page):
             super().__init__(page)
@@ -470,7 +517,10 @@ def _patch(player) -> None:
                 pass
 
         def eventFilter(self, obj, event):
-            if event.type() in self.KINDS and not self._pending:
+            kind = event.type()
+            wanted = kind in self.KINDS or (
+                kind == self.DRAG and bool(event.buttons()))
+            if wanted and not self._pending:
                 self._pending = True
                 QTimer.singleShot(0, self._fire)
             return False
@@ -496,9 +546,28 @@ def _patch(player) -> None:
                 child.installEventFilter(relay)
         refresh_live_bar(player, self)
 
+    def _relay_controls(self):
+        """The controls bar is built after the top bar, so its relay is
+        installed on the first layout instead of at build time."""
+        if getattr(self, "_atomic_controls_relayed", False):
+            return
+        relay = getattr(self, "_atomic_bar_relay", None)
+        bar = getattr(self, "controls", None)
+        if relay is None or bar is None:
+            return
+        try:
+            from PyQt6.QtWidgets import QWidget
+            bar.installEventFilter(relay)
+            for child in bar.findChildren(QWidget):
+                child.installEventFilter(relay)
+            self._atomic_controls_relayed = True
+        except RuntimeError:
+            pass
+
     def layout_overlays(self):
         result = old_layout(self)
         _clean_controls(player, self)
+        _relay_controls(self)
         refresh_live_bar(player, self)
         return result
 
@@ -514,8 +583,11 @@ def _patch(player) -> None:
         # caught. Guarded by the WINDOW'S OWN style, not this patch's
         # bookkeeping - the style is the truth whatever order the wake,
         # the load and the composition happened in.
-        if (widget is getattr(self, "top_bar", None)
-                and _bar_is_layered(self)):
+        # Per-pixel mode is "the bit is set and the veil holds no record
+        # for this window" - the veil's own SLWA mode sets the same bit,
+        # and re-veiling a veiled window is harmless.
+        if (widget in _bars(self) and _bar_is_layered(self, widget)
+                and id(widget) not in getattr(self, "_veiled", {})):
             return
         return old_veil(self, widget, alpha)
 

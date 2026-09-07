@@ -301,6 +301,10 @@ class WebView2Page(QWidget):
         self._sized = (0, 0)
         self._suppressed = False
         self._loaded = False
+        # Set by a page that must take the keyboard the moment its
+        # document is up (the reader: its shortcuts used to wait for a
+        # click, 7 September 2026) - see _navigated.
+        self.want_focus = False
         self._last_fit = 0.0
         self._url = url
 
@@ -815,6 +819,37 @@ class WebView2Page(QWidget):
         if self._suppressed:
             return              # an overlay is up; stay hidden
         self.set_child_visible(True)
+        if self.want_focus:
+            self.focus_view()
+
+    def focus_view(self):
+        """Give the WinForms control the keyboard. A Qt setFocus on the
+        host widget does not reach the native child, so a page opened
+        over the app answered no key until it was clicked - the owner,
+        7 September 2026: "the shortcuts do not work until I click on
+        the screen inside the reader"."""
+        try:
+            if self._view is None or not self._loaded:
+                return
+            import ctypes
+            handle = int(self._view.Handle.ToInt64())
+            took = bool(self._view.Focus())
+            if not took:
+                # WinForms declines while its form is not the active
+                # window - it never is, parented into Qt's - so the
+                # control's own handle is asked the way a click would.
+                ctypes.windll.user32.SetFocus(ctypes.c_void_p(handle))
+            user32 = ctypes.windll.user32
+            user32.GetFocus.restype = ctypes.c_void_p
+            held = int(user32.GetFocus() or 0) == handle
+            # Measured on the source tree, 7 September 2026: neither call
+            # moved the keyboard off the Qt window while the reader was
+            # opening, which is why web_reader.keyPressEvent forwards the
+            # keys from the Qt side as well - this is the cheap half.
+            logs.info(f"WebView2: keyboard {'taken' if held else 'declined'} "
+                      f"(Focus={took})")
+        except Exception:
+            logs.exception("The web view could not take the keyboard")
 
     def tell(self, body) -> bool:
         """Post `body` (a dict) into the page - window.chrome.webview's

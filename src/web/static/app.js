@@ -353,6 +353,14 @@ function goFold(f) {
   tellHost({ action: 'fold', seq: f.seq, went: 1, gone: gone });
 }
 
+/* The owner's globe (helpers/drawn_icons GLOBE_PNG_B64, the same bytes)
+   for the reader's site button: a CSS mask of its alpha, filled with
+   the text colour. His ask of 7 September 2026, the one picture for
+   every globe in the app. */
+const GLOBE_MASK = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACMAAAAjCAYAAAAe2bNZAAADpUlEQVR42u2Yz29VRRTHP6/6N7iTR2l04caIRqVCCD8M6EqFaNRgJJq4IIEQ0VSBlgQi1QUmRhcmNKgloWiMe7VNqUVMSFwaQ19pS/0r2vf6dfO9cDKde99t7YKFk5y8mTlnZr73nDPnnHkNSdwvrYf7qD24jjVPAA8DzwLPuV+0eWABmAamgJk17SypLj0paVhSJ1C7C92WtK/uGY2aPvMpcCKZWwBGAQFN4BBwzf3Niexl4DPgr/+imackTQdNzEk6m8jssRYueTwoqSVpKKOld6vO62aWaJKzGZkCyFCY6zUYJG1JQN2WdGY9YOYDkP0Z/m4fsDvD+1XSzjB+RNKs5VsJryuYqQDkhRKZtk2S4w1KOpXMbQkaaknaXAfMsQBktOSwXySNV2h1Vwn/7QDoYh0w85JW/Jvy9vqr25KaFWD6gt+kdDFoZ1cVmOO61w4kvGshtox3AXLJctFZmwFIO7dPutF1A7mSzB9NblbH17QvA2YiObAlacT90/aVwcBbBaYpaVPQylWPC/4Vz6+UROCWr22rJBJPJMAfDbw9xXxPiKavhlh4E2g499zw7x3PAVwHHgAeNx0BhoHFsEcj0CIwG3i3gN/M25GLwNFfkHTB/RtW7QmPX67wl9GMOTv2tzLZb1PNADwErDjjTgMHgPeBbc7GHWAM+Kkiu3zuXJXSJmAOOO+sf1cXzmWr6pllM7f54CZwIfCfrpFQm1b9mMdjXnfQQLf7Y7YmZlxlpsPBqcpMcL7CRAet9iMedyRtzcgNO4YVUf5yzkyzNtNKiRbmrLVcewW4ChwHvrJDA/yZkf0R+MeXgqiZnqRKK9r2zCazNl/aPgF+AI4BX3iuH/i+BPhN4GgY/5EDcweYdP/5zCYdl5gjQB+wD2gDrwMvAV8G2X5f/7LWH/pTZcXVgKQlSX9nbL1kisHsXEVGf6zCv4rU8l23RLkU6Jakn01pVN1fkbHbFUBeDPHnvcjLPVVGQv8bq3ExI7dQYoI3vK6sfeAQMgV8XacGLjQzE+beCUlwouLLZyS9WcKLSXRv3UrvGYNZdiGVq1VOZ9a95TW5PUcCkKG11sADFWXiTs8fylSAH2X2Gi+rYeqCwRtHQKdChXfSDj7gcb+1GdefTJx+ZCMecTN+mDUciSf9YNsBHAYmQiSdBHo9H8uJM8C5jXrefpiJNctJKCj8LNLHdc9YC5iCXnPciQemYKL52Oi3Nl1Ce6/NB/D7ejdq/P9nUUn7F/xue1Le9VOcAAAAAElFTkSuQmCC';
+const ZOOM_STEP = 0.1;
+let readerWheel = null;
+
 function hostMessage(ev) {
   let m = ev.data;
   if (typeof m === 'string') {
@@ -363,8 +371,19 @@ function hostMessage(ev) {
   // A key the host wants the page to act on as if pressed - the reader's
   // ArrowRight for mouse button 5 (web_reader.go_forward).
   if (m.key) {
-    try { dispatchEvent(new KeyboardEvent('keydown', { key: String(m.key) })); }
-    catch (err) { /* an old engine without the constructor: nothing to do */ }
+    // A synthetic keydown reaches the handlers but scrolls nothing, so
+    // the scrolling keys the Qt side forwards (web_reader.keyPressEvent)
+    // are scrolled here by hand, a screen or a page at a time.
+    const scroller = document.scrollingElement || document.documentElement;
+    const screen = innerHeight;
+    const scrolls = { PageDown: screen * 0.9, ' ': screen * 0.9, PageUp: -screen * 0.9 };
+    if (m.key in scrolls) scroller.scrollBy({ top: scrolls[m.key], behavior: 'smooth' });
+    else if (m.key === 'Home') scroller.scrollTo({ top: 0, behavior: 'smooth' });
+    else if (m.key === 'End') scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+    else {
+      try { dispatchEvent(new KeyboardEvent('keydown', { key: String(m.key) })); }
+      catch (err) { /* an old engine without the constructor: nothing to do */ }
+    }
   }
   /* **Draw this route again, now.** The owner, 3 September 2026: "in
      the history make it when I clear the history it immediately clears
@@ -1143,10 +1162,59 @@ function heroCarousel(heroes) {
   return box;
 }
 
+/* **The late sources of a search arrive into place.** The server answers
+   with the sources that are in after 1.5s and says how many are still
+   running (`pending`, server._search); this asks again with more=1 until
+   none are, and a section that was not drawn yet is inserted where its
+   order puts it (Anime, Series, Movies, Reading, Cast), never at the
+   end. The owner, 7 September 2026: "the searching ... takes too long to
+   load" - 5.9s measured, of which every fast source was in by 1.1s. */
+const SEARCH_PULL_MS = 650;
+const SEARCH_PULL_BUDGET_MS = 20000;
+async function pullSearch(term, mine, noteEl) {
+  const started = performance.now();
+  while (mine === token && performance.now() - started < SEARCH_PULL_BUDGET_MS) {
+    await new Promise(function (r) { setTimeout(r, SEARCH_PULL_MS); });
+    if (mine !== token) return;
+    let found;
+    try {
+      found = await (await fetch('/api/search?q=' + encodeURIComponent(term)
+                                 + '&more=1')).json();
+    } catch (err) { return; }
+    if (mine !== token) return;
+    const added = mergeSections(page, found.sections || []);
+    if (noteEl && found.note) noteEl.textContent = found.note;
+    if (added) sayBatch('search', performance.now() - routeAt, added, 'late');
+    if (!found.pending) return;
+  }
+}
+
+function mergeSections(parent, sections) {
+  let added = 0;
+  sections.forEach(function (section) {
+    if (!section.rows || !section.rows.length || !section.key) return;
+    if (parent.querySelector('.row[data-skey="' + section.key + '"]')) return;
+    const holder = document.createDocumentFragment();
+    sectionsInto(holder, [section]);
+    const block = holder.firstChild;
+    if (!block) return;
+    const mine = parseInt(block.dataset.sorder || '99', 10);
+    let before = null;
+    parent.querySelectorAll('.row[data-sorder]').forEach(function (other) {
+      if (!before && parseInt(other.dataset.sorder, 10) > mine) before = other;
+    });
+    parent.insertBefore(block, before);
+    added += section.rows.length;
+  });
+  return added;
+}
+
 function sectionsInto(parent, sections) {
   sections.forEach(function (section) {
     if (!section.rows || !section.rows.length) return;
     const block = el('div', 'row');
+    if (section.key) block.dataset.skey = section.key;
+    if (section.order !== undefined) block.dataset.sorder = String(section.order);
     block.appendChild(el('h2', null, section.title));
     if (section.style === 'list') {
       // **A panel, beside its neighbour.** home._build_quick_list makes
@@ -1256,7 +1324,11 @@ async function openChapter(id, index) {
   download.title = 'Download this chapter';
   const refresh = el('button', 'rglyph', '\ue72c');   // Refresh
   refresh.title = 'Reload the chapter (R)';
-  const browser = el('button', 'rglyph', '\ue774');   // Globe
+  const browser = el('button', 'rglyph');
+  const globe = el('span', 'rglobe');                   // the owner's globe
+  globe.style.webkitMaskImage = 'url(' + GLOBE_MASK + ')';
+  globe.style.maskImage = 'url(' + GLOBE_MASK + ')';
+  browser.appendChild(globe);
   browser.title = 'Open in browser';
   [full, zoomOut, zoomLabel, zoomIn, download, refresh, browser]
     .forEach(function (node) { right.appendChild(node); });
@@ -1892,8 +1964,10 @@ async function openChapter(id, index) {
     } catch (err) { readerState.zoom = 1; }
   }
   applyZoom();
-  zoomIn.addEventListener('click', function () { changeZoom(0.15); });
-  zoomOut.addEventListener('click', function () { changeZoom(-0.15); });
+  /* Ten percent a step everywhere - the bar's buttons, the +/- keys and
+     Ctrl+wheel - the owner, 7 September 2026. */
+  zoomIn.addEventListener('click', function () { changeZoom(ZOOM_STEP); });
+  zoomOut.addEventListener('click', function () { changeZoom(-ZOOM_STEP); });
   zoomLabel.addEventListener('click', function () {
     readerState.zoom = 1;
     try { localStorage.setItem('atomic.reader.zoom', '1'); } catch (err) {}
@@ -1957,8 +2031,8 @@ async function openChapter(id, index) {
     const k = e.key;
     if (k === 'ArrowRight') { if (!next.disabled) openChapter(id, index - 1); }
     else if (k === 'ArrowLeft') { if (!prev.disabled) openChapter(id, index + 1); }
-    else if (k === '+' || k === '=') changeZoom(0.15);
-    else if (k === '-' || k === '_') changeZoom(-0.15);
+    else if (k === '+' || k === '=') changeZoom(ZOOM_STEP);
+    else if (k === '-' || k === '_') changeZoom(-ZOOM_STEP);
     else if (k === '0') { readerState.zoom = 1; applyZoom(); }
     else if (k === 'r' || k === 'R') openChapter(id, index);
     else if (k === 'f' || k === 'F') tellHost({ action: 'key', key: 'F11' });
@@ -1966,6 +2040,17 @@ async function openChapter(id, index) {
     e.preventDefault();
   };
   addEventListener('keydown', readerKeys);
+  // Ctrl+wheel zooms the pages (the browser's own zoom is off in
+  // webview2_host, so the event reaches the page with ctrlKey set).
+  if (readerWheel) removeEventListener('wheel', readerWheel);
+  readerWheel = function (e) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    tellHost({ action: 'diag', what: 'reader wheel', dy: Math.round(e.deltaY),
+               zoom: Math.round(readerState.zoom * 100) });
+    if (e.deltaY) changeZoom(e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP);
+  };
+  addEventListener('wheel', readerWheel, { passive: false });
 
   let measured = false;
   function learn(img) {
@@ -2151,6 +2236,7 @@ async function go(route) {
       done.appendChild(el('p', null, found.note || ''));
       page.appendChild(done);
       sectionsInto(page, found.sections || []);
+      if (found.pending) pullSearch(term, mine, done.querySelector('p'));
     } catch (err) {
       page.appendChild(el('div', 'empty', 'the search could not finish'));
     }
@@ -3272,8 +3358,7 @@ function downloadsInto(parent, data) {
     row.dataset.dlid = String(job.id || '');
     const text = el('div', 'dlmain');
     text.appendChild(el('div', 'dltitle', job.title || ''));
-    text.appendChild(el('div', 'dldetail',
-                        job.state_text + (job.detail ? '  \u00b7  ' + job.detail : '')));
+    text.appendChild(el('div', 'dldetail', dlWords(job)));
     if (job.active) {
       const track = el('div', 'dlbar');
       const fill = el('div', 'dlfill');
@@ -3319,7 +3404,7 @@ function downloadsPatch(data) {
       title.textContent = job.title || '';
     }
     const detail = row.querySelector('.dldetail');
-    const words = job.state_text + (job.detail ? '  ·  ' + job.detail : '');
+    const words = dlWords(job);
     if (detail && detail.textContent !== words) detail.textContent = words;
     // The bar exists only while a job is running, so its arrival or
     // departure is a change of shape rather than of text.
@@ -3340,6 +3425,16 @@ function downloadsPatch(data) {
     folder.textContent = data.folder || '';
   }
   return true;
+}
+
+/* The state, the worker's own line, and how much of the file is here
+   ("123 MB / 456 MB · 27%", server._size_text) - the owner, 7 September
+   2026: "add (how much loaded MBs/total MBs), also a %". */
+function dlWords(job) {
+  let words = job.state_text || '';
+  if (job.detail) words += '  \u00b7  ' + job.detail;
+  if (job.size_text) words += '  \u00b7  ' + job.size_text;
+  return words;
 }
 
 function dlButton(label, id, what) {
@@ -4179,10 +4274,17 @@ function moreOnScroll(data, host, grid, stamp) {
                                              : (data.rows || []).length;
   let busy = false;
   let dry = 0;
+  // **A kind still running on the server is pulled without a scroll.**
+  // A video genre answers with series and movies while the anime kind
+  // walks its pages (server._genre_video), and says so in `pending`;
+  // the walk's rows then arrive here, on their own timer, wherever the
+  // page is scrolled to.
+  let pending = data.pending || 0;
 
   function pull() {
     if (busy || dry >= 2 || stamp !== token) return;
-    if (host.scrollHeight - host.scrollTop - host.clientHeight > MORE_MARGIN_PX) return;
+    if (!pending
+        && host.scrollHeight - host.scrollTop - host.clientHeight > MORE_MARGIN_PX) return;
     if (settling()) { setTimeout(pull, SETTLE_MS); return; }
     busy = true;
     // `have` is what the page is already showing, counted now - the
@@ -4195,6 +4297,7 @@ function moreOnScroll(data, host, grid, stamp) {
       .then(function (batch) {
         if (stamp !== token) return;
         skip = batch.skip || skip;
+        pending = batch.pending || 0;
         const seen = drawnTitles(host);
         const fresh = (batch.rows || []).filter(function (r) {
           const key = (r.title || '').trim().toLowerCase();
@@ -4226,8 +4329,9 @@ function moreOnScroll(data, host, grid, stamp) {
         // second, not 60ms: a reading batch is 94 cards and appending
         // them sixteen times a second is a grid re-laid out under the
         // pointer for as long as the sweep keeps answering (see
-        // SETTLE_MS above for the measurement).
-        setTimeout(pull, 200);
+        // SETTLE_MS above for the measurement). Slower while a kind is
+        // still running on the server: its rows land when they land.
+        setTimeout(pull, pending ? 700 : 200);
       });
   }
 

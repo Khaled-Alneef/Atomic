@@ -65,6 +65,8 @@ import webbrowser
 from collections import OrderedDict
 
 from PyQt6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer
+
+from helpers import drawn_icons
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QImage,
                          QPainter, QPixmap)
@@ -595,7 +597,7 @@ ICON_LEAVE = "\ue76b"                 # ChevronLeft - the sidebar's own
 ICON_CHAPTER_LIST = "\ue8fd"          # List - the same glyph the player's
                                       # episode list uses, so "the list of
                                       # things to open" is one icon in both
-ICON_BROWSER = "\ue774"               # Globe
+# The site button draws helpers/drawn_icons.globe, not a glyph.
 ICON_CHEVRON_DOWN = "\ue70d"          # ChevronDown - "this opens"
 ICON_DOWNLOAD = "\ue896"              # Download
 ICON_READ = "\ue73e"                  # CheckMark - a chapter already read
@@ -2655,8 +2657,12 @@ class ReaderPage(GlassPage):
         # take you *out* of the reader bracket the bar rather than
         # sitting next to each other where one gets pressed for the
         # other.
+        # The sidebar's globe (drawn_icons.globe) in place of the E774
+        # glyph - one picture for every globe, his ask of 7 September 2026.
         self._browser_btn = self._glyph_button(
-            ICON_BROWSER, "Open this chapter on its site")
+            "", "Open this chapter on its site")
+        self._browser_btn.setIcon(drawn_icons.globe(px=18))
+        self._browser_btn.setIconSize(QSize(18, 18))
         self._browser_btn.clicked.connect(self._open_in_browser)
         row.addWidget(self._browser_btn)
         return bar

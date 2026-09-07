@@ -61,6 +61,15 @@ TEXT_DIM = "#64718a"
 # bright frame. Not for text on the app's own surfaces - TEXT is
 # calibrated against those.
 TEXT_OVER_MEDIA = "#ffffff"
+VOLUME_OSD_KNOB_RING = "#c9ced6"
+# The seek strip's unplayed part and its buffered band, over video: "very
+# light gray, not the current colour" (7 September 2026). The bar's
+# volume groove takes the same rest colour.
+SEEK_REST = "#dfe3e9"
+SEEK_BUFFERED = "#aeb6c2"
+# A text entry inside a panel: lighter than the panel so it reads as a
+# field that can be typed into (the subtitle steppers, 7 September 2026).
+INPUT_BG = "#243044"
 
 ACCENT = "#2fb9a6"        # primary action - teal
 ACCENT_HOVER = "#48d2be"
@@ -85,6 +94,11 @@ ON_ACCENT = "#021815"
 SUCCESS = "#4ade80"
 DANGER = "#ff5470"
 DANGER_HOVER = "#ff7285"
+# The volume flyout's track is a fixed gradient - the owner, 7 September
+# 2026: "its idea is to show the levels of vol after the 100% (yellow
+# orange red in a smooth way)". White to the middle (100% of a 0-200
+# range), then these three to the end; the knob rides over it.
+VOLUME_OSD_GAIN = ("#f4d35e", "#ef6a2e", DANGER)
 # Back to a true amber: the gold palette had to shift warning toward
 # orange-red because amber was a near-twin of the gold accent (hue 43 vs
 # 41). Against the teal accent that collision is gone - #f5b342 sits at

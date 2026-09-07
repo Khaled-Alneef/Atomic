@@ -1899,10 +1899,9 @@ def _one_per_work(rows):
 # five round trips to five services and cannot be, so this is the point
 # at which a straggler stops being worth waiting for - measured against
 # an anime lookup that took 18.5s to answer with nothing.
-SEARCH_BUDGET_S = 6.0
 
 
-def _search(text):
+def _search(text, more=False):
     """Every source's results for one query, as sections.
 
     The window's search field sends Enter here through
@@ -1919,7 +1918,7 @@ def _search(text):
     if not text:
         return {"kind": "rows", "sections": [], "note": ""}
 
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, wait
     from helpers import discover as finder
 
     def video(kind):
@@ -2017,46 +2016,85 @@ def _search(text):
     # The pool is not waited on: a straggler finishes into a result
     # nobody reads, on a daemon-less worker that ends with it. Shutting
     # down with wait=True here would put the whole 18s back.
-    pool = ThreadPoolExecutor(max_workers=5)
-    jobs = {"Anime": pool.submit(video, "anime"),
-            "Series": pool.submit(video, "series"),
-            "Movies": pool.submit(video, "movie"),
-            "Reading": pool.submit(reading),
-            "Cast": pool.submit(faces)}
-    found = {}
-    limit = time.monotonic() + SEARCH_BUDGET_S
-    for name, job in jobs.items():
+    job = _search_job(text, video, reading, faces)
+    # **The first answer waits SEARCH_FIRST_WAIT_S, not for the slowest
+    # source.** Measured 7 September 2026 on "kingdom": every source but
+    # three had answered inside 1.1s, and the route took 5.9s because it
+    # waited for Cinemeta's movie search (4.6s, one CDN miss), 3asq
+    # (4.7s) and a mangalik timeout (4.5s). His log had the same route
+    # at 6.0s and 4.4s. So the sections that are in are drawn, the rest
+    # are counted as `pending`, and the page asks again with more=1
+    # (SEARCH_MORE_WAIT_S a pull) until nothing is pending - every source
+    # is still waited for, only not on screen. Rule 7's "show what it
+    # has so far"; not the race that once answered 22, 10, 16 rows.
+    wait(list(job["jobs"].values()),
+         timeout=SEARCH_MORE_WAIT_S if more else SEARCH_FIRST_WAIT_S)
+    found, pending = {}, []
+    for name, future in job["jobs"].items():
+        if not future.done():
+            pending.append(name)
+            continue
         try:
-            found[name] = job.result(timeout=max(0.0, limit - time.monotonic()))
+            found[name] = future.result()
         except Exception:
             found[name] = []
-    pool.shutdown(wait=False)
 
     sections, total = [], 0
     cast = [r for r in found.get("Cast") or [] if r.get("title")]
-    for name in ("Anime", "Series", "Movies", "Reading"):
+    for order, name in enumerate(("Anime", "Series", "Movies", "Reading")):
         rows = [r for r in found.get(name) or [] if isinstance(r, dict)
                 and r.get("title")]
-        # **Seasons collapse, sequels do not.** A trailing number on a
-        # film is another film - review, 3 September 2026, on this
-        # function's own key: "Iron Man 2" and "Iron Man 3" both became
-        # "iron man" and a search for the series kept only the first
-        # one Cinemeta returned. Only the Anime and Series sections list
-        # one work as many rows.
         if name in ("Anime", "Series"):
             rows = _one_per_work(rows)
         if not rows:
             continue
         total += len(rows)
-        sections.append({"title": f"{name}  ({len(rows)})",
-                         "rows": [_row(e) for e in rows]})
+        sections.append({"title": f"{name}  ({len(rows)})", "key": name.lower(),
+                         "order": order, "rows": [_row(e) for e in rows]})
     if cast:
         total += len(cast)
         sections.append({"title": f"Cast  ({len(cast)})", "style": "person",
+                         "key": "cast", "order": 4,
                          "rows": [_person_row(r) for r in cast]})
-    note = (f"{total} results for “{text}”" if total
-            else f"nothing found for “{text}”")
-    return {"kind": "rows", "sections": sections, "note": note, "hero": None}
+    if pending:
+        note = (f"{total} so far for “{text}” · still searching "
+                + ", ".join(pending).lower())
+    else:
+        note = (f"{total} results for “{text}”" if total
+                else f"nothing found for “{text}”")
+    return {"kind": "rows", "sections": sections, "note": note, "hero": None,
+            "pending": len(pending), "query": text}
+
+
+# One running search per query, kept SEARCH_JOB_TTL_S so the page's pulls
+# find the same futures the first answer left running.
+_SEARCH_JOBS = {}
+_SEARCH_LOCK = threading.Lock()
+SEARCH_FIRST_WAIT_S = 1.5
+SEARCH_MORE_WAIT_S = 0.6
+SEARCH_JOB_TTL_S = 120.0
+
+
+def _search_job(text, video, reading, faces):
+    from concurrent.futures import ThreadPoolExecutor
+    now = time.monotonic()
+    with _SEARCH_LOCK:
+        for key in [k for k, v in _SEARCH_JOBS.items()
+                    if now - v["at"] > SEARCH_JOB_TTL_S]:
+            _SEARCH_JOBS.pop(key, None)
+        job = _SEARCH_JOBS.get(text)
+        if job is not None:
+            return job
+        pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="search")
+        job = {"at": now,
+               "jobs": {"Anime": pool.submit(video, "anime"),
+                        "Series": pool.submit(video, "series"),
+                        "Movies": pool.submit(video, "movie"),
+                        "Reading": pool.submit(reading),
+                        "Cast": pool.submit(faces)}}
+        pool.shutdown(wait=False)
+        _SEARCH_JOBS[text] = job
+        return job
 
 
 
@@ -2290,6 +2328,25 @@ def _shelf(route):
             "note": ""}
 
 
+def _human_bytes(count) -> str:
+    count = float(count or 0)
+    if count >= 1000 * 1024 * 1024:
+        return f"{count / (1024 * 1024 * 1024):.2f} GB"
+    return f"{count / (1024 * 1024):.0f} MB"
+
+
+def _size_text(job) -> str:
+    """'123 MB / 456 MB · 27%' for a job that knows its size - the
+    owner's ask, 7 September 2026: "add (how much loaded MBs/total MBs),
+    also a %". The pull and the swarm both write bytes_done/bytes_total
+    beside the fraction; a chapter job counts pages and says nothing."""
+    total = int(job.get("bytes_total") or 0)
+    if total <= 0:
+        return ""
+    done = max(0, min(int(job.get("bytes_done") or 0), total))
+    return f"{_human_bytes(done)} / {_human_bytes(total)} · {100.0 * done / total:.0f}%"
+
+
 def _downloads():
     """The queue as it stands, for a page that asks again every second.
 
@@ -2302,7 +2359,7 @@ def _downloads():
     except Exception as error:
         return {"kind": "downloads", "rows": [], "error": str(error)[:120]}
     try:
-        jobs = list(queue.list_jobs() or [])          # newest first
+        jobs = list(queue.list_jobs() or [])          # oldest first, the worker's order
     except Exception as error:
         return {"kind": "downloads", "rows": [], "error": str(error)[:120]}
 
@@ -2326,6 +2383,7 @@ def _downloads():
             # percentage and nothing else should do that arithmetic.
             "percent": round(100.0 * float(job.get("progress") or 0.0), 1),
             "detail": str(job.get("detail") or "")[:160],
+            "size_text": _size_text(job) if state in active else "",
             "active": state in active,
             "can_pause": state in (queue.QUEUED, queue.RUNNING),
             "can_resume": state == queue.PAUSED,
@@ -2980,15 +3038,67 @@ def _genre_video(name, skip, limit):
     # anime catalog is the same call with a different kind - the Anime
     # page has always used it - and asking all three costs the slowest
     # of them rather than their sum, which is why this pool exists.
-    rows, advanced = [], 0
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        for batch in pool.map(_page, ("anime", "series", "movie")):
-            rows.extend(batch)
-            advanced = max(advanced, len(batch))
+    # **Answered as the kinds arrive.** Measured 7 September 2026 on
+    # Mystery: series and movies answered at once and the route took
+    # 18.7s, all of it the anime kind - Cinemeta files anime as series
+    # filtered by genre, so that kind walks eight catalog pages for the
+    # wanted genre (LOCAL_GENRE_PAGES) and each page took 4s to time out,
+    # one 9.9s to error, then the same again over genre=Animation. His
+    # log had the page at 12.6s and its continuations at 9.2s and 13.4s.
+    # The kinds that are in after GENRE_FIRST_WAIT_S are answered; a
+    # kind still running is left running, its future kept in
+    # _GENRE_LATE, and `pending` tells the page to pull `/api/more`,
+    # where _genre_late_rows hands the late rows over (server._more_browse).
+    from concurrent.futures import wait
+    pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="genre")
+    futures = {kind: pool.submit(_page, kind)
+               for kind in ("anime", "series", "movie")}
+    pool.shutdown(wait=False)
+    wait(list(futures.values()), timeout=GENRE_FIRST_WAIT_S)
+    rows, advanced, late = [], 0, 0
+    for kind, future in futures.items():
+        if not future.done():
+            with _GENRE_LOCK:
+                _GENRE_LATE.setdefault(name, {})[kind] = future
+            late += 1
+            continue
+        try:
+            batch = future.result() or []
+        except Exception:
+            batch = []
+        rows.extend(batch)
+        advanced = max(advanced, len(batch))
     # `progress` is shared by the three workers and only ever grows, so
     # the read is safe without a lock (see _note_reached).
     advanced = max(advanced, int(progress.get("skip") or 0) - skip)
-    return rows, skip + max(1, advanced)
+    return rows, skip + max(1, advanced), late
+
+
+GENRE_FIRST_WAIT_S = 2.0
+_GENRE_LATE = {}          # genre name -> {kind: Future still running}
+_GENRE_LOCK = threading.Lock()
+
+
+def _genre_late_rows(name):
+    """(rows, still running) from the kinds a genre answer left running,
+    or None when nothing was left running for this genre."""
+    with _GENRE_LOCK:
+        kinds = _GENRE_LATE.get(name)
+        if not kinds:
+            return None
+        rows, running = [], 0
+        for kind, future in list(kinds.items()):
+            if future.done():
+                del kinds[kind]
+                try:
+                    rows.extend(future.result() or [])
+                except Exception:
+                    pass
+            else:
+                running += 1
+        if not kinds:
+            _GENRE_LATE.pop(name, None)
+    return rows, running
 
 
 def _more_browse(route, have, skip):
@@ -3044,7 +3154,15 @@ def _more_browse(route, have, skip):
                     pending = int(discover.sweep_pending() or 0)
                 skip = skip + len(rows)
             else:
-                rows, skip = _genre_video(body, skip, GENRE_PAGE)
+                # A kind the first answer left running is handed over
+                # before the catalog is asked for more; while one is
+                # still running, no new batch is started - the anime
+                # walk is at most one in flight.
+                late = _genre_late_rows(body)
+                if late is not None and (late[0] or late[1]):
+                    rows, pending = late
+                else:
+                    rows, skip, pending = _genre_video(body, skip, GENRE_PAGE)
     except Exception as error:
         return {"rows": [], "skip": skip, "error": str(error)[:120]}
     rows = [r for r in (rows or []) if isinstance(r, dict) and r.get("title")]
@@ -3123,7 +3241,7 @@ def _genre(name, reading, tab="all"):
                 rows = list(discover.reading_genre_sites(name, limit=120) or [])
                 pending = int(discover.sweep_pending() or 0)
         else:
-            rows, skip = _genre_video(name, 0, GENRE_PAGE)
+            rows, skip, pending = _genre_video(name, 0, GENRE_PAGE)
     except Exception as error:
         return {"kind": "grid", "rows": [], "title": name,
                 "back": True, "note": str(error)[:120]}
@@ -3226,7 +3344,7 @@ def answer(route, query=None):
         return backend.featured_art(one("title"), one("imdb"),
                                     one("type"))
     if route == "search":
-        return _search(one("q"))
+        return _search(one("q"), more=one("more") == "1")
     if route == "settings":
         return backend.settings()
     if route == "hero":

@@ -1372,7 +1372,30 @@ def install():
     #     drawn again where it stood; a stalled swarm asks the service
     #     again and then the next release instead of sitting at 0.0 MB/s
     #     (his five asks, 7 September).
-    updater.APP_VERSION = "1.10.278"
+    #   * A Cancel or Pause is honoured where the worker stands - between
+    #     every step, inside the service poll and inside the race - and
+    #     a row that is no longer running keeps its text (7 September).
+    #   * Downloads say "123 MB / 456 MB · 27%"; the statistics window is
+    #     six facts on an aligned grid; the tracks panel is Audio; the
+    #     audio button is a waveform and every globe is the sidebar's;
+    #     the lower bar is composed per-pixel once a frame is live; the
+    #     volume flyout is his picture (his eight asks, 7 September).
+    #   * The seek strip's rest is light grey, the bar's volume groove
+    #     too and its number white; the waveform is crisp and wider and
+    #     the globe is his own picture everywhere; the speed button has
+    #     no border; the steppers' entries read as fields; the flyout's
+    #     bar is a fixed gradient; the lower bar is composed while
+    #     loading; the reader takes the keys at once and zooms by 10%,
+    #     Ctrl+wheel included (his nine asks, 7 September, evening).
+    #   * The sidebar's Websites icon is its own animated globe again -
+    #     "retrieve the websites Icon in the main sidebar ONLY IT" - the
+    #     bar and reader globes keep his picture (7 September, late).
+    #   * A search answers with the sources that are in after 1.5s and
+    #     the page pulls the rest into place; a video genre answers
+    #     series and movies while the anime walk runs on; the cover
+    #     warm is eight wide; back from a search lands on Discover
+    #     (7 September, late).
+    updater.APP_VERSION = "1.10.283"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

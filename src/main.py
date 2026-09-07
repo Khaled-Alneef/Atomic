@@ -4224,6 +4224,15 @@ class MainWindow(QMainWindow):
         takes the same one."""
         overlay = self._top_overlay()
         if overlay is None:
+            # A page may hold a route of its own to step out of first -
+            # Discover's search results (web_pages.WebDiscoverPage.back_within).
+            within = getattr(self._current_page, "back_within", None)
+            if callable(within):
+                try:
+                    if within():
+                        return
+                except Exception:
+                    logs.exception("The page could not step back within itself")
             self.go_back()
             return
         for name in ("go_back", "close_player", "leave"):

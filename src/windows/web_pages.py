@@ -1606,4 +1606,21 @@ class WebDiscoverPage(_WebPage):
             return
         import urllib.parse
         route = "search/" + urllib.parse.quote(text, safe="")
+        self._searching = True
         self.view.show_url(f"{base_url()}?embed=1#{route}")
+
+    def back_within(self) -> bool:
+        """Back from a search lands on Discover, not on the page before
+        it. The results are a route inside this page's own view, so the
+        window's history back stepped over them to wherever he had come
+        from - the Series page, in his report of 7 September 2026 ("when
+        I go back from the search page it takes me to series page!!").
+        main.navigate_back asks the page first; True means handled."""
+        if not getattr(self, "_searching", False):
+            return False
+        self._searching = False
+        try:
+            self.view.show_url(f"{base_url()}?embed=1#discover")
+        except Exception:
+            return False
+        return True

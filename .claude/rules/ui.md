@@ -674,3 +674,132 @@ a real job running ahead is what keeps a queued row's Pause up; and the
 Download Episodes button sits lower on a title with a two-line summary
 (y=1011 on Attack on Titan against 971 on Reacher, window-relative
 physical px).
+
+## Eight visible asks of 7 September 2026, and where each one lives
+
+His list, in his order, with the picture each was checked against on
+the frozen build (1.10.280, a copy of his data, 2578x1398):
+
+- **Downloads say how much is here.** `server._size_text` puts
+  "123 MB / 456 MB · 27%" after the worker's line; the pull and the
+  swarm write `bytes_done`/`bytes_total` beside the fraction, a chapter
+  job counts pages and says nothing. Photographed: "Downloading ·
+  9.0 MB/s · 4 connections · 30 MB / 200 MB · 15%".
+- **The statistics window is a grid.** `add_stat`'s label-beside-value
+  blocks each sized themselves, so "Doing" sat at one edge and
+  "Playing" adrift in the middle. `_open_stats_panel` builds a
+  QGridLayout per group now - a name column of `STATS_NAME_WIDTH`, a
+  value column, two facts a row - and Playback holds his six facts
+  (Resolution, Video FPS, Display, Video, Audio, Loaded Time - the old
+  Buffer). The decode, bitrate, drop, cadence and sync rows left the
+  panel, not `_playback_stats`. Photographed with every value under
+  the one above it.
+- **The tracks panel is Audio.** The file's subtitle tracks were rows
+  of the Subtitles panel already ("in this file"), so
+  `_open_tracks_panel` holds audio only, `_sync_track_rows` ignores
+  subtitle changes, and the bar button's tooltip and the pill's say
+  Audio. Photographed: "Audio" with the Japanese and English rows.
+- **Two drawn icons** (`helpers/drawn_icons`): the audio button is the
+  waveform he sent (seven bars), and every globe is the sidebar's
+  Websites globe - the player's settings button, the Qt reader's site
+  button, and the web reader's (inline SVG of the same paths in
+  app.js, `GLOBE_SVG`). The E9D9 and E774 glyph constants are gone.
+  Drawn at 1x to 2x so the strokes stay crisp on his panel;
+  photographed on the bar and on the reader's bar. Not touched: the
+  Subtitles button's translate glyph, which has a globe in it but is
+  a different picture.
+- **The lower bar is composed per-pixel once a frame is live**, the
+  way the top bar has been since 30 August: `player_top_bar_live_patch`
+  takes the controls bar through the same `_compose`/`_set_layered`
+  (`_bars`), a drag on the seek strip recomposes as it moves
+  (`_Recompose.DRAG`, held-button moves only - a bare hover would be a
+  composition per pointer event over a 2560px strip), and the relay is
+  installed on the controls at the first layout (`_relay_controls`),
+  since they are built after the top bar. **The veil and the
+  composition are exclusive modes of one window**: the controls arrive
+  in the veil's SetLayeredWindowAttributes mode, so `_set_layered`
+  clears and sets the style bit once and drops the veil's record, and
+  drops it again on the way out so the next load is veiled as before.
+  Photographed playing and paused: seek strip, times and buttons at
+  full strength, the video through every other pixel.
+- **The volume flyout is his picture**: an outline speaker with three
+  waves (one at a whisper), a bar whose reached part is white and whose
+  rest is `theme.VOLUME_OSD_REST`, a white knob ringed
+  `VOLUME_OSD_KNOB_RING`, on a 220px square. Rendered offscreen at 100,
+  30 and 0, then photographed on the frozen build.
+
+Rig traps paid for on the way: Ctrl+1 goes to the web page when it
+holds the keyboard, so use the sidebar's own item; the Watching row
+reorders after a playback, so photograph it before clicking a card;
+the lower bar hides itself about two seconds into playback, so the
+shot follows the pointer move by 0.15s or is taken paused.
+
+## Nine more, the same evening (7 September 2026)
+
+His second list after seeing 1.10.280, each against its picture on the
+frozen build (1.10.281) unless said otherwise:
+
+- **The seek strip's unplayed part is very light grey**
+  (`theme.SEEK_REST`, the buffered band `SEEK_BUFFERED`), and the bar's
+  volume groove takes the same rest with no frame behind it; the "100%"
+  beside it is white. Photographed live.
+- **The waveform is painted, not a QIcon.** A QIcon on the 40px button
+  came out soft and clipped at the edges on his 125% panel ("blurred
+  ... truncated"); `drawn_icons.IconButton` paints the picture in its
+  own paintEvent on the QSS ground `_icon_button_style` gives every bar
+  button, and the bars span the whole icon box. The speed button is
+  the same factory with the app's face ("1x" at 14pt, no border).
+- **The globe is his own picture.** The reference he sent is a globe
+  drawn as a network - curved lines with dots at their joints - and it
+  is in neither Segoe icon face: every glyph of both fonts was scored
+  against its ink (an IoU over dilated masks), and the nearest were
+  plain circles and E774. The image was recovered from the session's
+  own transcript and its white ink kept as a 35x35 alpha mask
+  (`drawn_icons.GLOBE_PNG_B64`), drawn tinted on the player's settings
+  button, the Qt reader's site button, the web reader's (a CSS mask of
+  the same bytes, app.js `GLOBE_MASK`) and the sidebar's Websites icon for
+  one build - he asked for that one back the same evening ("retrieve
+  the websites Icon in the main sidebar ONLY IT"), so rail_anim keeps
+  its own animated globe. Photographed on the bar, the reader's bar and
+  the sidebar.
+- **The flyout's track is a fixed gradient**: white to the middle
+  (100% of the 0-200 range), then `theme.VOLUME_OSD_GAIN` (yellow,
+  orange, DANGER's red) to the end, the knob riding over it - "its idea
+  is to show the levels of vol after the 100%". Rendered offscreen at
+  100, 30 and 0; photographed at 100.
+- **The steppers' entries read as fields**: `theme.INPUT_BG` on a
+  bordered rounded box, the accent border on focus. Photographed in
+  the Subtitles panel (Delay, Size, Vertical Position).
+- **The lower bar is composed from the start**, loading included; only
+  the top bar keeps the loading look until a frame is live
+  (`refresh_live_bar`). Photographed 2.5s after the click, over the
+  loading backdrop.
+- **The right time is what is left** ("-17:33" beside "6:37"), dashes
+  until a duration is known.
+- **The reader's keys work before any click, and zoom by 10%.**
+  Measured on the source tree with `GetGUIThreadInfo`: the keyboard
+  stays on the Qt window while the reader opens - the WinForms
+  `Focus()` declines and a `SetFocus` on the control's handle does not
+  move it either (`webview2_host.focus_view` says "declined") - so the
+  page heard nothing until a click. `WebReader.keyPressEvent` forwards
+  every reader key the Qt side receives to the page by its
+  KeyboardEvent name (`_PAGE_KEYS`, through `view.tell`, the path button
+  5 already used), app.js scrolls the PageUp/PageDown/Home/End/Space
+  ones by hand (a synthetic keydown scrolls nothing), and F goes
+  straight to full screen. Ctrl+wheel zooms (`readerWheel`, logged as
+  `reader wheel`), `ZOOM_STEP` is 0.1 for the keys, the bar's buttons
+  and the wheel. Source tree: "=" at +4s forwarded and zoomed 100 -> 110
+  with no click; a posted Ctrl+wheel 120 -> 130 -> 120.
+  Frozen build, the same with the label photographed with the bar up:
+  "=" at +4s with no click -> 110%, two posted Ctrl+wheels -> 130%
+  (the log's `reader wheel` lines at 110 and 120 as they arrived),
+  "-" -> 120%; the focus log read "keyboard declined (Focus=False)"
+  throughout, so every one of those went through the Qt side.
+
+Three rig traps paid for: the reading music's "visible press" lands
+about 8-11s after a chapter opens and takes the keyboard to the browser
+for two seconds - a key sent then tests nothing; `rig.key` cannot name
+the OEM keys, so "=" is virtual key 0xBB and "-" 0xBD (`d.py keyvk`);
+and a Ctrl+wheel is posted as WM_MOUSEWHEEL with MK_CONTROL to the
+window under the pointer (`ctrlwheelto`), since SendInput's wheel goes
+to the keyboard's window.
