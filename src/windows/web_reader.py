@@ -291,11 +291,40 @@ class WebReader(QWidget):
         if name == "Escape":
             self.close_reader()
             return
+        # **Mouse buttons 4 and 5.** The owner, 7 September 2026: "make
+        # the 4th and 5th buttons in the mouse work in all pages
+        # including reader and vid player". The page forwards them as
+        # Alt+Left/Alt+Right (app.js auxclick) and this handler took
+        # only Escape and F, so in the reader both were dropped - the
+        # one surface where they were, measured with real X-button
+        # input on the frozen build: the catalogue pages walked their
+        # history and the player unwound its layers, the reader did
+        # nothing. Back leaves the chapter; Forward is the next chapter,
+        # sent to the page as the ArrowRight it already answers to.
+        if name == "Alt+Left":
+            self.go_back()
+            return
+        if name == "Alt+Right":
+            self.go_forward()
+            return
         if name in ("F11", "F") and hasattr(window, "toggle_fullscreen"):
             try:
                 window.toggle_fullscreen()
             except Exception:
                 logs.exception("Full screen from the reader failed")
+
+    def go_back(self):
+        """Mouse button 4 and the window's navigate_back: leave the
+        chapter."""
+        self.close_reader()
+
+    def go_forward(self):
+        """Mouse button 5 and the window's navigate_forward: the next
+        chapter, by the page's own ArrowRight."""
+        try:
+            self.view.tell({"key": "ArrowRight"})
+        except Exception:
+            logs.exception("The reader could not step to the next chapter")
 
     def _open_in_browser(self, entry_id, index):
         """The chapter's own page, in the real browser - reader's globe.

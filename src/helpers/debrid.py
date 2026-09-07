@@ -749,6 +749,18 @@ FETCH_BUDGET_S = 150.0
 FETCH_POLL_S = 2.0
 
 
+def _none_reason(deadline) -> str:
+    """Why an _api call answered None, for a log line. Measured on the
+    frozen build, 7 September 2026: a job resumed at 17:51:16 logged
+    "info answered nothing (HTTP None)" at 17:53:48 - the 150s budget
+    running out on a torrent the service was still downloading, which
+    read like a failed request. _api gives up below a second of budget
+    (net.step_timeout), hence the margin."""
+    if deadline is not None and deadline - time.monotonic() < 1.5:
+        return "budget spent"
+    return f"HTTP {getattr(_last_status, 'value', None)}"
+
+
 def fetch_url(info_hash, season=None, episode=None, deadline=None,
               title=None, on_progress=None):
     """A direct HTTPS URL for this release's right file, waiting for the
@@ -763,9 +775,18 @@ def fetch_url(info_hash, season=None, episode=None, deadline=None,
 
     Returns {"url", "file_name", "size"} or None."""
     info_hash = str(info_hash or "").strip().lower()
-    if not _HASH_RE.fullmatch(info_hash) or not available():
+    if not _HASH_RE.fullmatch(info_hash):
+        return None
+    # Every None this function answers is named in the log now. The
+    # owner's queue file, 7 September 2026: two Attack on Titan episodes
+    # sat on a 0.0 MB/s swarm and nothing said why the service had not
+    # answered - each of these branches returned in silence.
+    if not available():
+        _say(f"debrid fetch: {info_hash[:8]} not asked - "
+             f"{'cooling down' if time.monotonic() < _cooldown_until else 'no key'}")
         return None
     if info_hash in refused_hashes():
+        _say(f"debrid fetch: {info_hash[:8]} refused before (451); skipped")
         return None
     if deadline is None:
         deadline = net.deadline_in(FETCH_BUDGET_S)
@@ -776,7 +797,7 @@ def fetch_url(info_hash, season=None, episode=None, deadline=None,
         if getattr(_last_status, "value", None) == 451:
             _remember_refused(info_hash)
         _say(f"debrid fetch: {info_hash[:8]} addMagnet answered nothing "
-             f"(HTTP {getattr(_last_status, 'value', None)})")
+             f"({_none_reason(deadline)})")
         return None
     info = _await_files(torrent_id, deadline)
     files = (info or {}).get("files") or []
@@ -792,12 +813,16 @@ def fetch_url(info_hash, season=None, episode=None, deadline=None,
     if status == "waiting_files_selection":
         if _api(f"/torrents/selectFiles/{torrent_id}", deadline=deadline,
                 data={"files": str(picked.get("id"))}) is None:
+            _say(f"debrid fetch: {info_hash[:8]} selectFiles answered nothing "
+                 f"({_none_reason(deadline)})")
             return None
     started = time.monotonic()
     said = -1
     while True:
         info = _api(f"/torrents/info/{torrent_id}", deadline=deadline)
         if not isinstance(info, dict):
+            _say(f"debrid fetch: {info_hash[:8]} info answered nothing "
+                 f"({_none_reason(deadline)})")
             return None
         status = str(info.get("status") or "")
         if status == "downloaded":
@@ -822,10 +847,13 @@ def fetch_url(info_hash, season=None, episode=None, deadline=None,
         time.sleep(FETCH_POLL_S)
     link = _link_for(info.get("files") or files, info.get("links") or [], picked)
     if not link:
+        _say(f"debrid fetch: {info_hash[:8]} downloaded but no link for the file")
         return None
     got = _api("/unrestrict/link", deadline=deadline, data={"link": link})
     url = str((got or {}).get("download") or "")
     if not url.startswith("http"):
+        _say(f"debrid fetch: {info_hash[:8]} unrestrict answered nothing "
+             f"({_none_reason(deadline)})")
         return None
     _say(f"debrid fetch: {info_hash[:8]} ready after "
          f"{time.monotonic() - started:.0f}s")

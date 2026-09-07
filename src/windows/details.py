@@ -3741,6 +3741,21 @@ class DetailsPage(GlassPage):
             audio_row.addWidget(audio_box, stretch=1)
             column.addLayout(audio_row)
 
+        # **Resolution** - the owner, 7 September 2026: "add a Resolution
+        # option in Download ep/ch window". The same strings the player's
+        # panel and streams.matching_quality speak; "Best Available"
+        # leaves the pick to the queue's own order.
+        res_box = PickCombo()
+        res_box.addItem("Best Available", None)
+        for label, value in (("4K (2160p)", "2160p"), ("1080p", "1080p"),
+                             ("720p", "720p"), ("480p", "480p")):
+            res_box.addItem(label, value)
+        use_hover_cursor(res_box)
+        res_row = QHBoxLayout()
+        res_row.addWidget(QLabel("Resolution:"))
+        res_row.addWidget(res_box, stretch=1)
+        column.addLayout(res_row)
+
         count_label = QLabel("", objectName="Muted")
         count_label.setWordWrap(True)
         column.addWidget(count_label)
@@ -3788,13 +3803,16 @@ class DetailsPage(GlassPage):
         def start():
             numbers = picked_numbers()
             audio = audio_box.currentData()
+            quality = res_box.currentData()
             try:
                 if is_movie:
                     downloads.queue_episode(self.entry, audio=audio,
+                                            quality=quality,
                                             folder=folder_of())
                 elif len(numbers) == 1:
                     downloads.queue_episode(self.entry, season=season,
                                             episode=numbers[0], audio=audio,
+                                            quality=quality,
                                             folder=folder_of())
                 else:
                     if not confirm(
@@ -3804,6 +3822,7 @@ class DetailsPage(GlassPage):
                         return
                     downloads.queue_season(self.entry, season=season,
                                            episodes=numbers, audio=audio,
+                                           quality=quality,
                                            folder=folder_of())
             except Exception:
                 logs.exception("details page could not queue a download")
@@ -3884,6 +3903,22 @@ class DetailsPage(GlassPage):
                      "would be refused.", objectName="Muted")
         why.setWordWrap(True)
         column.addWidget(why)
+        # **Page width** - the owner's "Resolution option" for a chapter.
+        # A page is saved as the site serves it unless a ceiling is
+        # chosen, and then anything wider is resampled once by Pillow
+        # (downloads._shrink_page): a 3asq scan is 1325-1644px wide,
+        # 1-2MB a page; a phone reads 900px.
+        width_box = PickCombo()
+        width_box.addItem("Original (as the site serves it)", None)
+        for label, value in (("Up to 1600 px wide", 1600),
+                             ("Up to 1200 px wide", 1200),
+                             ("Up to 900 px wide", 900)):
+            width_box.addItem(label, value)
+        use_hover_cursor(width_box)
+        width_row = QHBoxLayout()
+        width_row.addWidget(QLabel("Page width:"))
+        width_row.addWidget(width_box, stretch=1)
+        column.addLayout(width_row)
         folder_of = self._folder_row(column, dialog)
 
         def picked():
@@ -3918,7 +3953,8 @@ class DetailsPage(GlassPage):
                 return
             try:
                 downloads.queue_chapters(self.entry, chapters,
-                                         folder=folder_of())
+                                         folder=folder_of(),
+                                         max_width=width_box.currentData())
             except Exception:
                 logs.exception("details page could not queue chapters")
                 show_toast(self, "Could Not Queue Those Chapters")

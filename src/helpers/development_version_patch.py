@@ -1366,7 +1366,13 @@ def install():
     #   * Only the in-app download, as fast as the line: the queue asks the
     #     service first and pulls a direct link over four connections; the
     #     browser download is gone (his ask, 7 September).
-    updater.APP_VERSION = "1.10.277"
+    #   * A Resolution pick in the episode download dialog and a page
+    #     width in the chapter one; mouse buttons 4 and 5 in the reader;
+    #     Pause All, Resume All and Cancel All on Downloads, which is
+    #     drawn again where it stood; a stalled swarm asks the service
+    #     again and then the next release instead of sitting at 0.0 MB/s
+    #     (his five asks, 7 September).
+    updater.APP_VERSION = "1.10.278"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

@@ -1495,6 +1495,16 @@ class WebDownloadsPage(_WebPage):
                 queue.resume(job_id)
             elif what == "cancel" and job_id:
                 queue.cancel(job_id)
+            elif what == "pause_all":
+                queue.pause_all()
+            elif what == "resume_all":
+                queue.resume_all()
+            elif what == "cancel_all":
+                from helpers.widgets import confirm
+                if confirm(self.window(), "Cancel All Downloads",
+                           "Stop every download that is queued, running or "
+                           "paused? Finished ones are kept."):
+                    queue.cancel_all()
             elif what == "clear":
                 queue.clear_finished()
             elif what == "folder":

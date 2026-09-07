@@ -623,3 +623,54 @@ alone (switched off: same three entry frames), the spread's box getting
 its width a frame before its shape (real, a 1547px jolt of the strip on
 entry, fixed in `sizePage` - but not the flicker), and any large scroll
 step (the steps around every ground frame were 40-70px).
+
+## Mouse buttons 4 and 5 reach the reader; Downloads is drawn again where it stood (7 September 2026)
+
+His asks: *"make the 4th and 5th buttons in the mouse work in all pages
+including reader and vid player"*, *"when I press cancel or pause or the
+ep load finish in the download page, do not make it take me to the page
+top when it reloads!!!"*, *"add cancel all and pause all buttons in
+downloads page"*, and a Resolution option in the download dialogs.
+
+**The reader.** app.js forwards the X buttons as `Alt+Left`/`Alt+Right`
+(`auxclick`), and `WebReader._app_key` took only Escape and F, so the
+reader was the one surface that dropped them. `go_back` closes the
+chapter; `go_forward` sends the page `{key: "ArrowRight"}` through
+`view.tell`, and `hostMessage` dispatches it as a keydown - the next
+chapter by the key the reader already answers to. Frozen build, Kingdom
+(WAN) 885 open: button 5 drew 886 (`reader sized ... scan=1325x1920`,
+photographed with the chapter's title page), button 4 logged
+`WebView2: disposed` and the details page was back.
+
+**Downloads.** Every row button and Clear Finished went through
+`go('downloads')`, which empties the page and builds it at scrollTop 0.
+`redrawDownloads` reads the offset, rebuilds, and puts it back on the
+next frame, and logs `web page: what=downloads redrawn, at=N, now=N` so
+his log names what happened on his machine. Measured on the frozen
+build with a padded 34-row queue scrolled to 1000: Resume on a row
+below the fold `at=1000, now=1000`, Pause on the same row `at=1000,
+now=1000`, and the title column of the screenshot after the Pause is
+pixel-identical to the one before it (0 of 749,280 px differ). Pause
+All / Resume All / Cancel All sit in the header and each is drawn only
+when it has something to act on - with nothing running the header shows
+Resume All, Cancel All and Clear Finished, and after Cancel All only
+Clear Finished (photographed). Cancel All confirms first, on the Qt side
+(`web_pages._queue_action`, `widgets.confirm`): 11 cancelled, 23 done
+and 1 failed kept.
+
+**The dialogs.** The episode dialog's Resolution row (Best Available,
+4K, 1080p, 720p, 480p) is `queue_episode(quality=)`, the strings
+`streams.matching_quality` already speaks; the chapter dialog's Page
+width row (Original, 1600, 1200, 900) is `queue_chapters(max_width=)`,
+applied once per page by `downloads._shrink_page` (LANCZOS, JPEG q90;
+an image already narrow enough is written untouched). Both photographed
+on the frozen build, and both picks read back off the queue file.
+
+Three rig traps paid for: a card's cover **resumes playback** and its
+title line opens the details - a double-click on the cover opened the
+player; a junk queued row fails within 0.1s (`find_streams` answers
+`0 rows | nothing answered`), so a Pause aimed at it lands on nothing -
+a real job running ahead is what keeps a queued row's Pause up; and the
+Download Episodes button sits lower on a title with a two-line summary
+(y=1011 on Attack on Titan against 971 on Reacher, window-relative
+physical px).

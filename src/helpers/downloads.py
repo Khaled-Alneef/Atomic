@@ -28,6 +28,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -160,6 +161,28 @@ def resume(job_id):
     _paused.discard(job_id)
     _update(job_id, state=QUEUED)
     _ensure_worker()
+
+
+def pause_all():
+    """Every queued or running job held - the owner's ask, 7 September
+    2026: "add cancel all and pause all buttons in downloads page"."""
+    for job in list_jobs():
+        if job.get("state") in (QUEUED, RUNNING):
+            pause(job["id"])
+
+
+def resume_all():
+    for job in list_jobs():
+        if job.get("state") == PAUSED:
+            resume(job["id"])
+
+
+def cancel_all():
+    """Every job still queued, running or paused - never a finished one,
+    for the reason cancel_group gives."""
+    for job in list_jobs():
+        if job.get("state") in (QUEUED, RUNNING, PAUSED):
+            cancel(job["id"])
 
 
 def pause_group(group_id):
@@ -519,8 +542,9 @@ def active_progress():
             "label": rows[0].get("label") or ""}
 
 
-def queue_chapters(entry, chapters, *, folder=None) -> list:
-    """One .cbz per chapter."""
+def queue_chapters(entry, chapters, *, folder=None, max_width=None) -> list:
+    """One .cbz per chapter. `max_width` caps a page's width in pixels
+    (the dialog's "Page width"); None keeps every page as served."""
     jobs = []
     for chapter in chapters or []:
         number = chapter.get("number")
@@ -531,8 +555,29 @@ def queue_chapters(entry, chapters, *, folder=None) -> list:
             "entry": {k: entry.get(k) for k in ("id", "title", "type", "url")},
             "chapter": chapter,
             "folder": folder or default_folder(),
+            "max_width": int(max_width) if max_width else None,
         }))
     return jobs
+
+
+def _shrink_page(data: bytes, max_width: int):
+    """(bytes, extension) of a page no wider than `max_width` - the
+    original untouched when it already fits or cannot be decoded, a
+    LANCZOS resample saved as JPEG when it is wider."""
+    try:
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(data)) as picture:
+            if picture.width <= max_width:
+                return data, None
+            height = max(1, round(picture.height * max_width / picture.width))
+            shrunk = picture.convert("RGB").resize((max_width, height),
+                                                   Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            shrunk.save(out, format="JPEG", quality=90, optimize=True)
+            return out.getvalue(), ".jpg"
+    except Exception:
+        return data, None
 
 
 # ------------------------------------------------ the browser's download
@@ -727,8 +772,17 @@ def _order_by_audio(candidates, audio):
 # HTTP_WORKERS ranged connections into a preallocated file, and only then
 # turns to the swarm - reading it in order (torrent_engine.sequential),
 # because with every piece at one priority the head arrived last.
-SERVICE_TRIES = 2
+SERVICE_TRIES = 4
 SERVICE_BUDGET_S = 150.0
+# **A swarm that is going nowhere is left, not waited on.** The owner's
+# queue file, 7 September 2026: two Attack on Titan episodes "paused" at
+# 16% and 10% with "0.0 MB/s - 6 peers", which is what he called failed.
+# A swarm under SWARM_STALL_RATE for SWARM_STALL_S asks the service once
+# more (a fetch that outran its budget may have finished there), then
+# moves to the next release, up to SWARM_SWITCHES times, before it sits.
+SWARM_STALL_RATE = 60_000       # bytes a second
+SWARM_STALL_S = 90.0
+SWARM_SWITCHES = 3
 HTTP_WORKERS = 4
 HTTP_PART_BYTES = 8 * 1024 * 1024
 HTTP_TIMEOUT_S = 30.0
@@ -861,6 +915,12 @@ def _fetch_ranged(job, url, size, target) -> str:
             _update(job_id, parts=[list(p) for p in sorted(done)])
         return ""
     if failed or len(done) != len(parts):
+        try:
+            host = urllib.parse.urlsplit(url).netloc
+        except Exception:
+            host = "?"
+        logs.info(f"download: {len(failed)} part(s) of {len(parts)} failed "
+                  f"from {host}; {len(done)} whole - giving up on this link")
         return ""
     os.replace(part_path, target)
     _update(job_id, parts=[])
@@ -984,6 +1044,9 @@ def _run_video(job) -> str:
     wanted_index = torrent_engine.file_index_for(
         info_hash, season=season, episode=episode,
         title=(entry.get("title") or None))
+    tried = {info_hash.lower()}
+    switches = 0
+    moving_since = time.monotonic()
     while True:
         if job_id in _cancelled:
             torrent_engine.release(info_hash, force=True)
@@ -993,11 +1056,69 @@ def _run_video(job) -> str:
         state = torrent_engine.file_progress(info_hash, index=wanted_index)
         if not state:
             return ""
+        rate = float(state.get("rate") or 0)
+        if rate >= SWARM_STALL_RATE:
+            moving_since = time.monotonic()
         _update(job_id, progress=round(state.get("fraction") or 0.0, 4),
-                detail=f"{(state.get('rate') or 0)/1e6:.1f} MB/s · "
-                       f"{state.get('peers', 0)} peers")
+                detail=f"{rate/1e6:.1f} MB/s · {state.get('peers', 0)} peers")
         if state.get("finished"):
             break
+        if time.monotonic() - moving_since >= SWARM_STALL_S:
+            logs.info(f"download: {info_hash[:8]} under "
+                      f"{SWARM_STALL_RATE/1000:.0f}KB/s for {SWARM_STALL_S:.0f}s "
+                      f"at {100 * float(state.get('fraction') or 0):.0f}% - looking elsewhere")
+            # The service once more: a fetch that outran its budget may
+            # have finished there by now.
+            if debrid is not None and debrid.available():
+                _update(job_id, detail="Asking Real-Debrid again...")
+                try:
+                    got = debrid.fetch_url(info_hash, season=season, episode=episode,
+                                           deadline=net.deadline_in(60.0),
+                                           title=entry.get("title"))
+                except Exception:
+                    got = None
+                url = str((got or {}).get("url") or "")
+                if url.startswith("http"):
+                    # The stalled swarm is kept until the link has
+                    # delivered: a pull that fails leaves the job where
+                    # it was, not on a released torrent.
+                    target = pull(url, got.get("size"), got.get("file_name"))
+                    if target:
+                        torrent_engine.release(info_hash, force=True)
+                        return finish(target)
+                    if job_id in _cancelled or job_id in _paused:
+                        return ""
+            if switches < SWARM_SWITCHES and candidates:
+                others = [s for s in candidates
+                          if (s.get("info_hash") or "").lower() not in tried]
+                if others:
+                    switches += 1
+                    _update(job_id, detail="Trying another release...")
+                    for other in others[:6]:
+                        tried.add((other.get("info_hash") or "").lower())
+                    ready = streams.prepare_fastest(others[:6], season=season,
+                                                    episode=episode)
+                    ready_url = str((ready or {}).get("url") or "")
+                    if ready and ready.get("kind") == "direct" and ready_url.startswith("http"):
+                        target = pull(ready_url, ready.get("size"), ready.get("name"))
+                        if target:
+                            torrent_engine.release(info_hash, force=True)
+                            return finish(target)
+                    elif ready and ready.get("info_hash") \
+                            and ready["info_hash"].lower() != info_hash.lower():
+                        torrent_engine.release(info_hash, force=True)
+                        info_hash = ready["info_hash"]
+                        if season and episode:
+                            _season_packs[pack_key] = info_hash
+                        torrent_engine.download_whole(info_hash)
+                        torrent_engine.sequential(info_hash, True)
+                        wanted_index = torrent_engine.file_index_for(
+                            info_hash, season=season, episode=episode,
+                            title=(entry.get("title") or None))
+                        logs.info(f"download: switched to {info_hash[:8]}")
+                        moving_since = time.monotonic()
+                        continue
+            moving_since = time.monotonic()       # nothing else to try: keep waiting
         time.sleep(1.5)
     source = state.get("path")
     extension = os.path.splitext(source)[1] or ".mkv"
@@ -1158,6 +1279,11 @@ def _run_chapter(job) -> str:
                                        f"be downloaded: {url}")
                         continue
                     extension = os.path.splitext(url.split("?")[0])[1].lower() or ".jpg"
+                    max_width = job.get("max_width")
+                    if max_width:
+                        data, shrunk_ext = _shrink_page(data, int(max_width))
+                        if shrunk_ext:
+                            extension = shrunk_ext
                     # Zero-padded so readers show pages in order rather
                     # than 1, 10, 11, 2 - the classic cbz mistake.
                     archive.writestr(f"{index:03d}{extension}", data)

@@ -794,3 +794,54 @@ priority the head arrived last. A direct answer from the race is pulled
 the same way. After, the same episode: **done in 34s, 499MB at
 14.7MB/s overall with peaks of 25MB/s** on four connections. Not
 exercised: the service's waiting branch - it held every release tried.
+
+## A stalled swarm asks the service again, then the next release (7 September 2026)
+
+His queue file that morning: two Attack on Titan episodes "paused" at 16%
+and 10% with `0.0 MB/s - 6 peers`, which is what he called a failed
+download. Nothing in `_run_video`'s progress loop ever gave up on a
+swarm, and nothing in `debrid.fetch_url` said why the service had not
+answered - every `None` it returned was silent.
+
+Now `downloads._run_video` keeps `moving_since`: a swarm under
+`SWARM_STALL_RATE` (60KB/s) for `SWARM_STALL_S` (90s) logs `download:
+<hash> under 60KB/s for 90s at N% - looking elsewhere`, asks the service
+once more with a 60s budget (a fetch that outran `SERVICE_BUDGET_S` may
+have finished there since - the torrent stays in the account), and
+otherwise re-runs `prepare_fastest` over the candidates it has not tried
+(`tried`, up to `SWARM_SWITCHES` = 3 switches), logging `download:
+switched to <hash>`. **The stalled torrent is released only once the
+replacement is in hand**: after the re-ask's pull has delivered, or
+after the race has returned another hash - a pull that fails leaves the
+job on the swarm it had, not on a released torrent. `SERVICE_TRIES` is 4.
+
+Harnessed (`h_stall.py`, mocked engine/race/service, `SWARM_STALL_S`
+2s): the re-ask's link is pulled and A released after `pull_done`; with
+no link the second race is given the candidates without A, returns B,
+and A is released after B is in hand, the file coming from B; a link
+whose pull fails keeps A through the failure and then switches. Each
+resolved 3.2-3.5s after the loop began. `pause_all`, `resume_all` and
+`cancel_all` touch only queued/running, paused, and queued/running/
+paused rows respectively, and write the states to disk.
+
+`debrid.fetch_url` names every `None` now: `not asked - no key` /
+`cooling down`, `refused before (451)`, `selectFiles answered nothing`,
+`info answered nothing`, `downloaded but no link`, `unrestrict answered
+nothing`, each with the HTTP status or `budget spent`. The first such
+line the frozen build wrote read `info answered nothing (HTTP None)`,
+which was the 150s budget running out on a torrent the service was
+still downloading - hence `_none_reason`.
+
+On the frozen build (1.10.278, a copy of his data): Attack on Titan
+S01E04 at the dialog's new **1080p** pick - Download pressed 17:49:17,
+sources at 17:49:19.6, `debrid fetch: a6856c0c ready after 0s`, the
+page's redraw on the finished row at 17:49:40; 209,688,402 bytes over
+four connections, 14.3MB/s on the row while it ran. Kingdom (WAN) 883
+at the chapter dialog's **Up to 900 px wide**: 21 pages, every one 900
+wide, JPEG, a 9.3MB .cbz, about 35s. **Not exercised live**: a real
+stall on the frozen build - a swarm cannot be starved on demand; the
+harness is the proof of that path. Seen on the way and left alone: a
+job cancelled during the service's poll runs on to the swarm for a few
+seconds (`pick_file` at 17:53:55 for a job cancelled at 17:53:09) before
+the loop's first check releases it - `_cancelled` is read between
+candidates and at the loop's head, as before this change.

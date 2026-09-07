@@ -360,6 +360,12 @@ function hostMessage(ev) {
   }
   if (!m) return;
   if (m.fold) hostFold(m.fold);
+  // A key the host wants the page to act on as if pressed - the reader's
+  // ArrowRight for mouse button 5 (web_reader.go_forward).
+  if (m.key) {
+    try { dispatchEvent(new KeyboardEvent('keydown', { key: String(m.key) })); }
+    catch (err) { /* an old engine without the constructor: nothing to do */ }
+  }
   /* **Draw this route again, now.** The owner, 3 September 2026: "in
      the history make it when I clear the history it immediately clears
      not when I change pages or tabs then come back!"
@@ -3208,11 +3214,43 @@ let downloadsTimer = null;
 function downloadsInto(parent, data) {
   const head = el('div', 'shelfhead');
   head.appendChild(el('h1', 'paneltitle', data.title || 'Downloads'));
+  /* **Pause All / Resume All / Cancel All** - the owner, 7 September
+     2026: "add cancel all and pause all buttons in downloads page". Each
+     is drawn only when it has something to act on, so the row never
+     offers a press that does nothing. Cancel All asks first, on the
+     Qt side (web_pages._queue_action). */
+  if (data.any_running) {
+    const pauseAll = el('button', 'plainbtn', 'Pause All');
+    pauseAll.title = 'Hold every download that is queued or running';
+    pauseAll.addEventListener('click', function () {
+      tellHost({ action: 'dl', do: 'pause_all' });
+      setTimeout(redrawDownloads, 150);
+    });
+    head.appendChild(pauseAll);
+  }
+  if (data.any_paused) {
+    const resumeAll = el('button', 'plainbtn', 'Resume All');
+    resumeAll.title = 'Start every paused download again where it stood';
+    resumeAll.addEventListener('click', function () {
+      tellHost({ action: 'dl', do: 'resume_all' });
+      setTimeout(redrawDownloads, 150);
+    });
+    head.appendChild(resumeAll);
+  }
+  if (data.any_active) {
+    const cancelAll = el('button', 'plainbtn', 'Cancel All');
+    cancelAll.title = 'Stop every download that is queued, running or paused';
+    cancelAll.addEventListener('click', function () {
+      tellHost({ action: 'dl', do: 'cancel_all' });
+      setTimeout(redrawDownloads, 400);
+    });
+    head.appendChild(cancelAll);
+  }
   const clear = el('button', 'plainbtn', 'Clear Finished');
   clear.title = 'Remove everything that has finished, failed or been cancelled';
   clear.addEventListener('click', function () {
     tellHost({ action: 'dl', do: 'clear' });
-    setTimeout(function () { go('downloads'); }, 150);
+    setTimeout(redrawDownloads, 150);
   });
   head.appendChild(clear);
   parent.appendChild(head);
@@ -3272,10 +3310,10 @@ function downloadsPatch(data) {
   if (!list) return false;
   const rows = Array.prototype.slice.call(list.querySelectorAll('.dlrow'));
   const jobs = data.rows || [];
-  if (rows.length !== jobs.length) { go('downloads'); return false; }
+  if (rows.length !== jobs.length) { redrawDownloads(); return false; }
   for (let i = 0; i < jobs.length; i += 1) {
     const job = jobs[i], row = rows[i];
-    if (row.dataset.dlid !== String(job.id || '')) { go('downloads'); return false; }
+    if (row.dataset.dlid !== String(job.id || '')) { redrawDownloads(); return false; }
     const title = row.querySelector('.dltitle');
     if (title && title.textContent !== (job.title || '')) {
       title.textContent = job.title || '';
@@ -3286,7 +3324,7 @@ function downloadsPatch(data) {
     // The bar exists only while a job is running, so its arrival or
     // departure is a change of shape rather than of text.
     const fill = row.querySelector('.dlfill');
-    if (!!fill !== !!job.active) { go('downloads'); return false; }
+    if (!!fill !== !!job.active) { redrawDownloads(); return false; }
     if (fill) {
       const want = Math.max(0, Math.min(100, job.percent)) + '%';
       if (fill.style.width !== want) fill.style.width = want;
@@ -3295,7 +3333,7 @@ function downloadsPatch(data) {
     const acts = row.querySelector('.dlacts');
     const wanted = [job.can_pause ? 'Pause' : '', job.can_resume ? 'Resume' : '',
                     job.active ? 'Cancel' : ''].filter(Boolean).join(',');
-    if (acts && acts.dataset.acts !== wanted) { go('downloads'); return false; }
+    if (acts && acts.dataset.acts !== wanted) { redrawDownloads(); return false; }
   }
   const folder = page.querySelector('.dlpath');
   if (folder && folder.textContent !== (data.folder || '')) {
@@ -3308,9 +3346,27 @@ function dlButton(label, id, what) {
   const button = el('button', 'plainbtn small', label);
   button.addEventListener('click', function () {
     tellHost({ action: 'dl', do: what, id: id });
-    setTimeout(function () { go('downloads'); }, 150);
+    setTimeout(redrawDownloads, 150);
   });
   return button;
+}
+
+/* **Drawn again where it stood.** The owner, 7 September 2026: "when I
+   press cancel or pause or the ep load finish in the download page, do
+   not make it take me to the page top when it reloads!!!" Every one of
+   those went through go('downloads'), which empties the page and builds
+   it from nothing at scrollTop 0. The offset is read before and put back
+   after a frame, the way the host's redraw message already does. */
+function redrawDownloads() {
+  const at = page.scrollTop;
+  go('downloads').then(function () {
+    requestAnimationFrame(function () {
+      page.scrollTop = at;
+      // Where it stood and where it is - the line that proves the claim
+      // on his machine, not only on the rig's.
+      tellHost({ action: 'diag', what: 'downloads redrawn', at: at, now: page.scrollTop });
+    });
+  }, function () { /* the route failed; nothing to restore into */ });
 }
 
 /* ---- the catalogue grid -------------------------------------------

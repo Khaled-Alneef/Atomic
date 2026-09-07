@@ -2331,7 +2331,10 @@ def _downloads():
             "can_resume": state == queue.PAUSED,
         })
     return {"kind": "downloads", "title": "Downloads", "rows": rows,
-            "folder": _download_folder()}
+            "folder": _download_folder(),
+            "any_running": any(r["can_pause"] for r in rows),
+            "any_paused": any(r["can_resume"] for r in rows),
+            "any_active": any(r["active"] for r in rows)}
 
 
 def _download_folder():
