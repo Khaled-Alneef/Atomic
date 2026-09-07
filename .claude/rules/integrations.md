@@ -750,71 +750,47 @@ otherwise; `unreachable` when the fetch failed), `backend.pages` logs
 blank readers. Photographed on the frozen build: row 173 of The Holy
 Power Of Modern Medicine shows the message; row 168 reads and marks.
 
-## Download in Browser reaches the swarm, the way Stremio does (7 September 2026)
+## The in-app download asks the service first, over four connections (7 September 2026)
 
-His ask: *"the downloading takes so long and many times it does not
-download the ep, I want it to be like Stremio, it somehow opens the
-browser and downloads ep from it!"* Stremio hands the browser its own
-local stream URL and the browser's downloader does the rest. Atomic's
-"Download in Browser" (details dialog, player panel) only ever handed
-over a *direct* link - a debrid or addon URL, `downloads.direct_url_for`
-- and fell back to the in-app queue when there was none, and the queue
-is what he was describing.
+His asks, in order that day: *"the downloading takes so long and many
+times it does not download the ep, I want it to be like Stremio, it
+somehow opens the browser"*, then *"the issue is the SPEED ... purely
+on the internet speed"*, then *"retrieve the only in app download, and
+make it as super fast as possible, cancel the browser download!"*. The
+browser hand-off built for the first two (2-7 September: a direct link
+opened in the system browser, then the engine's own URL served
+patiently under `dl=1`) was **removed at his word** - the details
+dialog's button, the player panel's, their bridges, and the engine's
+browser-reader mode - and nothing references it now.
 
-`downloads.browser_url_for` is what both hand-offs ask now: the direct
-link first, unchanged; otherwise the queue's own pick
-(`streams.prepare_fastest` over the same candidates), the torrent
-pinned and raised to full priority (`download_whole`), and the engine's
-URL with `dl=1&name=...`. `torrent_engine._serve` treats that flag as
-a browser reading: it waits for a missing piece up to
-BROWSER_PIECE_WAIT_S instead of ending the response the way it does for
-mpv (which reopens; a browser marks the file failed and waits for a
-hand), and it sends `Content-Disposition: attachment` with the file's
-name so the save is `[Atomic] Reacher_EP02_S01.mkv`, not `0`. A watcher
-lets the pin go two minutes after the file is whole. Measured on the
-source with debrid dark: the URL in 10.3s, HEAD video/x-matroska,
-679MB, Accept-Ranges, the name; a plain reader pulled 41.9MB in 8.1s
-with the swarm at 10.5MB/s.
-
-Two traps paid for on the way. **The race's debrid lane answers a
-direct link with a hash kept for identity only**, so an engine half
-that asked `stream_url` for it got nothing - a direct answer from
-`prepare_fastest` is a browser link already and is handed over as one.
-And **the browser probe accepted a page**: with debrid dark, Comet's
-`playback` link answered 200 to the one-byte Range probe and the
-browser was handed 8,473 bytes of text/html - the addon's own player
-page. `_browser_can_fetch` now refuses text/html/json bodies and a 200
-under BROWSER_MIN_FILE_BYTES.
-
-## A download runs at the line's speed: ask the service, do not ask the cache check (7 September 2026)
-
-His follow-up: *"no no this solved nothing, the issue is the SPEED and
-sometimes it does not load, I want the download to be purely on the
-internet speed!!!!"* Measured on this machine, source tree, copy of his
-data:
+What was measured before the fix, source tree, copy of his data, Attack
+on Titan S1E4: the queue **failed in 4s** - "Nothing could be
+downloaded for this". The race's debrid lane wins with a direct HTTPS
+link and keeps the hash for identity only, and `_run_video` then asked
+the engine for a torrent it had never added. With a key in Settings
+that is what most of his downloads met - the "many times it does not
+download". And the speeds:
 
     a plain HTTPS file (proof.ovh.net)        7.9 MB/s   one stream
     the swarm, Attack on Titan S1E4, 28 peers 15.5 MB/s  peak, 0.4 in the first 10s
-    the engine handing one reader that file  10.6 MB/s  over the whole 416MB
     Real-Debrid's CDN, the same episode       21.1 MB/s
-    Real-Debrid's CDN, Adults S2E3            16.8 MB/s  192MB in 11s
+    Real-Debrid's CDN, Adults S2E3            16.8 MB/s
 
-The CDN is the one source that is the line's speed whatever the swarm
-does, and the browser path almost never got it: `direct_url_for` asks
-only the hashes `debrid.cached_hashes` calls held, and that check -
-built on add-and-look since instantAvailability went - said **4 of 30**
-for Attack on Titan and **0 of 16** for Adults while the service served
-both at once. Every "uncached" release fell to the swarm or the queue.
+`debrid.cached_hashes` called 4 of Attack on Titan's 30 releases held
+and 0 of Adults' 16 while the service served every one at once, so
+anything that asked the cache check first fell to the swarm.
 
-`browser_url_for` now asks the service to fetch the best candidates
-outright (`debrid.fetch_url`, BROWSER_FETCH_TRIES of them): the same
-addMagnet -> selectFiles -> link as a play, but a status of queued or
-downloading is polled up to FETCH_BUDGET_S with the percentage on the
-sticky toast ("Real-Debrid Is Fetching It... 37%") instead of being
-deleted, and the torrent stays in the account so a fetch that outran
-the budget is found downloaded next time. Only then the swarm, and a
-browser reading the swarm takes the file in order
-(`torrent_engine.sequential`), because with every piece at one priority
-the reader had 0.4MB/s in its first ten seconds while the swarm ran at
-7.9. Not exercised: the waiting branch itself - the service held every
-release tried, including the "uncached" ones.
+`downloads._run_video` now asks the service for the best candidates
+outright (`debrid.fetch_url`: the same addMagnet -> selectFiles -> link
+as a play, but queued/downloading is polled up to FETCH_BUDGET_S with
+the percentage in the job's detail line, and the torrent stays in the
+account so a fetch that outran the budget is found ready next time),
+and pulls the link over HTTP_WORKERS ranged connections into a
+preallocated file in HTTP_PART_BYTES parts (`_fetch_ranged`), each part
+retried on its own and the whole ones kept on the job so a pause
+resumes where it stood. Only then the swarm, and the swarm is read in
+order (`torrent_engine.sequential`) because with every piece at one
+priority the head arrived last. A direct answer from the race is pulled
+the same way. After, the same episode: **done in 34s, 499MB at
+14.7MB/s overall with peaks of 25MB/s** on four connections. Not
+exercised: the service's waiting branch - it held every release tried.

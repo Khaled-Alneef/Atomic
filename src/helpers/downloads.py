@@ -28,7 +28,6 @@ import os
 import re
 import threading
 import time
-import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -552,325 +551,12 @@ def queue_chapters(entry, chapters, *, folder=None) -> list:
 # Range request against it came back **206** with `Accept-Ranges: bytes`
 # (1024 bytes in 0.61s) - so the browser can download it as an ordinary
 # file, at whatever the line does.
-BROWSER_DEBRID_TRIES = 4
-BROWSER_LINK_BUDGET_S = 25.0
-BROWSER_PROBE_TIMEOUT_S = 6.0
-# Smaller than this with a 200 is a page or an error, not an episode.
-BROWSER_MIN_FILE_BYTES = 5 * 1024 * 1024
-
-
-def _browser_can_fetch(url, deadline) -> bool:
-    """Whether a plain GET of `url` answers with a body - a 200, or a
-    206 to the one-byte Range asked for here. Checked before the link
-    is handed to a browser: a link that 403s there is a blank tab, and
-    nothing in the app would ever hear about it."""
-    timeout = net.step_timeout(deadline, BROWSER_PROBE_TIMEOUT_S)
-    if timeout is None:
-        return False
-    try:
-        request = urllib.request.Request(
-            url, headers={"Range": "bytes=0-0", "User-Agent": _UA})
-        with net.urlopen(request, timeout=timeout) as response:
-            status = int(getattr(response, "status", 0) or 0)
-            if status not in (200, 206):
-                return False
-            # **A page is not a file.** Measured 7 September 2026 with
-            # debrid dark: Comet's `playback` link answered 200 to this
-            # probe and the browser was handed 8,473 bytes of text/html -
-            # an addon's own player page, not the episode - which is one
-            # of the owner's "many times it does not download the ep".
-            # A body a browser would save has to say it is not a page,
-            # and a 200 has to be big enough to be a video.
-            kind = str(response.headers.get("Content-Type") or "").lower()
-            if kind.startswith("text/") or "html" in kind or "json" in kind:
-                return False
-            if status == 200:
-                try:
-                    length = int(response.headers.get("Content-Length") or 0)
-                except ValueError:
-                    length = 0
-                if 0 < length < BROWSER_MIN_FILE_BYTES:
-                    return False
-            return True
-    except Exception:
-        return False
-
-
-def direct_url_for(entry, *, season=None, episode=None, quality=None,
-                   audio=None, streams_found=None, prefer=None,
-                   deadline=None):
-    """A plain http(s) URL for this episode (or film) that the system
-    browser can download by itself, or None when only the swarm can
-    serve it.
-
-    The pick follows the queue's own order (`quality` via
-    streams.matching_quality, then `_order_by_audio`), with `prefer` -
-    the release the player is showing - moved to the front. Releases
-    the debrid service already holds are asked first, because that is
-    the one source measured answering Range requests from a CDN; an
-    addon's own direct URL is the fallback. Every link is probed
-    (`_browser_can_fetch`) before it is returned.
-
-    **Deliberately not streams.prepare().** That races the debrid arm
-    against the engine, and the engine's win is a 127.0.0.1 URL served
-    from the swarm - exactly the speed this exists to get away from -
-    with a torrent left added for a download that is going to happen in
-    the browser instead. Only the debrid half is wanted here, so only
-    that half is asked. `streams_found` skips the fan-out when the
-    caller already has the list (the player does; find_streams measured
-    6.9s cold on Reacher S1E2, 0s from its cache).
-
-    Returns {"url", "name", "size"} - the URL carries an account token
-    and must never be logged or shown, only opened."""
-    from . import streams
-    try:
-        from . import debrid
-    except Exception:
-        debrid = None
-    if deadline is None:
-        deadline = net.deadline_in(BROWSER_LINK_BUDGET_S)
-
-    found = list(streams_found or [])
-    if not found:
-        budget = net.step_timeout(deadline, 40.0)
-        if budget is None:
-            return None
-        found = list(streams.find_streams(
-            entry, season=season, episode=episode,
-            deadline=net.deadline_in(budget)) or [])
-    ordered = streams.matching_quality(found, quality) if quality else []
-    candidates = list(ordered or found)
-    candidates = _order_by_audio(candidates, audio)
-    if prefer:
-        key = (prefer.get("info_hash") or "").lower(), prefer.get("url")
-        rest = [s for s in candidates
-                if ((s.get("info_hash") or "").lower(), s.get("url")) != key]
-        candidates = [dict(prefer)] + rest
-
-    torrents = [s for s in candidates
-                if s.get("kind") == "torrent" and s.get("info_hash")]
-    directs = [s for s in candidates
-               if s.get("kind") == "direct"
-               and str(s.get("url") or "").startswith("http")]
-    # The playing release may already be a debrid link (prepare() turns
-    # the stream into kind="direct"); that is the best answer there is.
-    if prefer and prefer in directs:
-        directs.remove(prefer)
-        directs.insert(0, prefer)
-
-    if debrid is not None and torrents:
-        try:
-            available = debrid.available()
-        except Exception:
-            available = False
-        if available:
-            hashes = [s["info_hash"].lower() for s in torrents[:20]]
-            try:
-                cached = debrid.cached_hashes(
-                    hashes, deadline=net.deadline_in(
-                        net.step_timeout(deadline, 8.0) or 1.0))
-            except Exception:
-                cached = set()
-            tries = 0
-            for stream in torrents:
-                info_hash = stream["info_hash"].lower()
-                if info_hash not in cached or tries >= BROWSER_DEBRID_TRIES:
-                    continue
-                budget = net.step_timeout(deadline, 12.0)
-                if budget is None:
-                    break
-                tries += 1
-                try:
-                    got = debrid.playable_url(
-                        info_hash, season=season, episode=episode,
-                        deadline=net.deadline_in(budget),
-                        title=entry.get("title"))
-                except Exception:
-                    got = None
-                url = (got or {}).get("url") or ""
-                if url.startswith("http") and _browser_can_fetch(url, deadline):
-                    return {"url": url,
-                            "name": got.get("file_name") or stream.get("name"),
-                            "size": got.get("size")}
-    for stream in directs:
-        url = stream.get("url")
-        if _browser_can_fetch(url, deadline):
-            return {"url": url, "name": stream.get("name"),
-                    "size": stream.get("size")}
-    return None
 
 
 # ------------------------------------------------------------- worker
 
-# How many uncached releases the service is asked to fetch for one
-# download, and the budget the whole fetch-and-wait is given.
-BROWSER_FETCH_TRIES = 2
-BROWSER_FETCH_BUDGET_S = 150.0
 
 
-def browser_url_for(entry, *, season=None, episode=None, quality=None,
-                    audio=None, streams_found=None, prefer=None,
-                    deadline=None, on_progress=None):
-    """A URL the system browser can save this episode from: the direct
-    link when a debrid or addon has one (direct_url_for, unchanged), and
-    otherwise the app's own stream server over the swarm - which is what
-    Stremio hands its browser. The owner, 7 September 2026: "the
-    downloading takes so long and many times it does not download the
-    ep, I want it to be like Stremio". The in-app queue used to be the
-    only answer when no direct link existed, and it is the queue he was
-    describing.
-
-    The engine half follows the queue's own pick (`streams.prepare_fastest`
-    over the same candidates in the same order), pins the torrent so the
-    player's releases leave it alone, raises the whole file to full
-    priority so it completes, and returns the stream URL with `dl=1` -
-    the flag torrent_engine._serve serves patiently and names the file
-    under. A watcher lets the pin go once the file is whole.
-
-    Returns {"url", "name", "size", "engine"} or None when nothing can
-    serve it."""
-    from . import streams, torrent_engine
-    if deadline is None:
-        deadline = net.deadline_in(BROWSER_LINK_BUDGET_S + 40.0)
-    found = list(streams_found or [])
-    if not found:
-        budget = net.step_timeout(deadline, 40.0)
-        if budget is None:
-            return None
-        found = list(streams.find_streams(
-            entry, season=season, episode=episode,
-            deadline=net.deadline_in(budget)) or [])
-    direct = direct_url_for(entry, season=season, episode=episode,
-                            quality=quality, audio=audio, streams_found=found,
-                            prefer=prefer, deadline=deadline)
-    if direct:
-        direct["engine"] = False
-        return direct
-    ordered = streams.matching_quality(found, quality) if quality else []
-    candidates = [s for s in (ordered or found) if s.get("info_hash")]
-    candidates = _order_by_audio(candidates, audio)
-    if prefer and prefer.get("info_hash"):
-        key = (prefer.get("info_hash") or "").lower()
-        rest = [s for s in candidates if (s.get("info_hash") or "").lower() != key]
-        candidates = [dict(prefer)] + rest
-    if not candidates:
-        return None
-    # **The service fetches what it does not hold, and the download waits
-    # for it.** The owner, 7 September 2026: "the issue is the SPEED and
-    # sometimes it does not load, I want the download to be purely on
-    # the internet speed". A debrid CDN link is the one source that runs
-    # at the line's speed whatever the swarm is doing, and the only
-    # reason it answered so rarely for a download was that only releases
-    # the service already held were asked for (direct_url_for). A
-    # release it has to fetch first is fetched at a rate no home swarm
-    # sees, and a download - unlike a play - can wait the minute or two
-    # that takes, with the toast saying how far it is.
-    try:
-        from . import debrid
-    except Exception:
-        debrid = None
-    if debrid is not None and debrid.available():
-        tries = 0
-        for stream in candidates:
-            if tries >= BROWSER_FETCH_TRIES:
-                break
-            budget = net.step_timeout(deadline, BROWSER_FETCH_BUDGET_S)
-            if budget is None or budget < 20.0:
-                break
-            tries += 1
-            name = str(stream.get("name") or "")[:40]
-
-            def progress(status, percent, _name=name):
-                if on_progress is not None:
-                    on_progress(f"Real-Debrid Is Fetching It... {percent}%"
-                                if percent else "Real-Debrid Is Fetching It...")
-
-            try:
-                got = debrid.fetch_url(stream["info_hash"], season=season,
-                                       episode=episode,
-                                       deadline=net.deadline_in(budget),
-                                       title=entry.get("title"),
-                                       on_progress=progress)
-            except Exception:
-                logs.exception("debrid fetch for a download failed")
-                got = None
-            url = str((got or {}).get("url") or "")
-            if url.startswith("http") and _browser_can_fetch(url, deadline):
-                return {"url": url, "name": got.get("file_name") or stream.get("name"),
-                        "size": got.get("size"), "engine": False}
-    if not torrent_engine.available():
-        return None
-    if on_progress is not None:
-        on_progress("Connecting to Peers...")
-    preferred, rest = _split_by_audio(candidates, audio)
-    ready = None
-    if preferred:
-        ready = streams.prepare_fastest(preferred, season=season, episode=episode)
-    if (not ready or not ready.get("info_hash")) and rest:
-        ready = streams.prepare_fastest(rest, season=season, episode=episode)
-    if not ready:
-        return None
-    # The race's debrid lane wins with a plain HTTPS link (kind "direct",
-    # the hash kept for identity only - integrations.md); that is a
-    # browser link already and no torrent was added for it. Only an
-    # engine answer has a torrent to pin and serve.
-    ready_url = str(ready.get("url") or "")
-    if ready.get("kind") == "direct" and ready_url.startswith("http"):
-        if _browser_can_fetch(ready_url, deadline):
-            return {"url": ready_url, "name": ready.get("name"),
-                    "size": ready.get("size"), "engine": False}
-        return None
-    if not ready.get("info_hash"):
-        return None
-    info_hash = ready["info_hash"]
-    torrent_engine.pin(info_hash)
-    torrent_engine.download_whole(info_hash)
-    torrent_engine.sequential(info_hash, True)
-    base = torrent_engine.stream_url(info_hash)
-    if not base:
-        return None
-    state = torrent_engine.file_progress(info_hash) or {}
-    source = str(state.get("path") or "")
-    extension = os.path.splitext(source)[1] or ".mkv"
-    number = episode_tag(episode)
-    name = saved_name(entry.get("title") or "Video", number=number,
-                      season=season_tag(season) if number else None,
-                      fallback="Video") + extension
-    url = f"{base}?dl=1&name={urllib.parse.quote(name)}"
-    logs.info(f"browser download: {info_hash[:8]} handed to the browser as "
-              f"{name!r} ({(state.get('size') or 0) / 1e6:.0f}MB)")
-    threading.Thread(target=_watch_browser_download, args=(info_hash,),
-                     name="browser-download", daemon=True).start()
-    return {"url": url, "name": name, "size": state.get("size"),
-            "engine": True}
-
-
-# How long the pin outlives the finished file, so a browser still reading
-# the tail of a file the swarm has just completed is not cut off.
-BROWSER_UNPIN_AFTER_S = 120.0
-
-
-def _watch_browser_download(info_hash):
-    """Let the pin go once the file is whole - the browser owns the copy
-    from then on and the player's ordinary release can reclaim the
-    torrent. Never raises."""
-    from . import torrent_engine
-    try:
-        finished_at = None
-        while True:
-            time.sleep(5.0)
-            state = torrent_engine.file_progress(info_hash)
-            if not state:
-                return                     # released by someone else
-            if state.get("finished"):
-                if finished_at is None:
-                    finished_at = time.monotonic()
-                    logs.info(f"browser download: {info_hash[:8]} is whole")
-                elif time.monotonic() - finished_at >= BROWSER_UNPIN_AFTER_S:
-                    torrent_engine._pinned.discard(info_hash.lower())
-                    return
-    except Exception:
-        logs.exception("browser download watcher failed")
 
 
 def _ensure_worker():
@@ -1019,82 +705,273 @@ def _order_by_audio(candidates, audio):
                   != wants_dub)
 
 
+# Pages in flight at once for one chapter - see the note in _run_chapter
+# for the measurement, and net.MAX_IDLE_PER_HOST for why six.
+# **The service first, over several connections; the swarm in order after
+# it.** The owner, 7 September 2026: "retrieve the only in app download,
+# and make it as super fast as possible, cancel the browser download!"
+#
+# Measured on this machine before any of this, the queue on Attack on
+# Titan S1E4: **failed in 4s** - "Nothing could be downloaded for this".
+# The race's debrid lane had won with a direct HTTPS link, the job then
+# asked the engine for a torrent it had never added, and gave up. With a
+# key in Settings that is what most of his downloads met. And the
+# speeds, same machine, same episode: a plain HTTPS file 7.9MB/s on one
+# stream; the swarm 15.5MB/s at its peak and 0.4MB/s in its first ten
+# seconds with 28 peers; Real-Debrid's CDN 21.1MB/s, and 16.8MB/s on
+# Adults S2E3 - a release debrid.cached_hashes called uncached, as it
+# called 0 of Adults' 16 and 4 of Attack on Titan's 30 while the
+# service served every one at once. So the job asks the service for the
+# best candidates outright (debrid.fetch_url, waiting while it fetches
+# with the percentage in the detail line), pulls the link it gets over
+# HTTP_WORKERS ranged connections into a preallocated file, and only then
+# turns to the swarm - reading it in order (torrent_engine.sequential),
+# because with every piece at one priority the head arrived last.
+SERVICE_TRIES = 2
+SERVICE_BUDGET_S = 150.0
+HTTP_WORKERS = 4
+HTTP_PART_BYTES = 8 * 1024 * 1024
+HTTP_TIMEOUT_S = 30.0
+HTTP_RETRIES = 4
+
+
+def _fetch_ranged(job, url, size, target) -> str:
+    """Pull `url` into `target` over HTTP_WORKERS ranged connections.
+
+    The file is preallocated at its full size and written in
+    HTTP_PART_BYTES parts, each part on its own connection, retried on
+    its own; the parts already whole are kept on the job (`parts`) so a
+    paused job resumes from where it stood and a cancelled one is
+    removed. A server that ignores Range gets one connection. Returns
+    the finished path, or "" (the job's state says why)."""
+    job_id = job["id"]
+    part_path = target + ".part"
+    ranged = False
+    try:
+        probe = urllib.request.Request(
+            url, headers={"User-Agent": _UA, "Range": "bytes=0-0"})
+        with net.urlopen(probe, timeout=HTTP_TIMEOUT_S) as response:
+            status = int(getattr(response, "status", 0) or 0)
+            if status not in (200, 206):
+                return ""
+            kind = str(response.headers.get("Content-Type") or "").lower()
+            if kind.startswith("text/") or "html" in kind or "json" in kind:
+                return ""               # a page, not a file
+            ranged = status == 206
+            total = re.search(r"/(\d+)$", response.headers.get("Content-Range") or "")
+            if total:
+                size = int(total.group(1))
+            elif not size:
+                size = int(response.headers.get("Content-Length") or 0)
+    except Exception:
+        return ""
+    if size <= 0:
+        return ""
+    if ranged:
+        parts = [(start, min(start + HTTP_PART_BYTES, size) - 1)
+                 for start in range(0, size, HTTP_PART_BYTES)]
+    else:
+        parts = [(0, size - 1)]
+    done = set()
+    if ranged and os.path.exists(part_path) and os.path.getsize(part_path) == size:
+        done = {tuple(p) for p in (job.get("parts") or []) if isinstance(p, (list, tuple)) and len(p) == 2}
+        done = {p for p in done if p in set(parts)}
+    else:
+        with open(part_path, "wb") as handle:
+            handle.truncate(size)
+    todo = [p for p in parts if p not in done]
+    lock = threading.Lock()
+    stop = threading.Event()
+    inflight = {}
+    failed = []
+
+    def worker():
+        while not stop.is_set():
+            with lock:
+                if not todo:
+                    return
+                start, end = todo.pop(0)
+            ok = False
+            for attempt in range(HTTP_RETRIES):
+                if stop.is_set():
+                    return
+                pos = start
+                with lock:
+                    inflight[start] = 0
+                try:
+                    headers = {"User-Agent": _UA}
+                    if ranged:
+                        headers["Range"] = f"bytes={start}-{end}"
+                    request = urllib.request.Request(url, headers=headers)
+                    with net.urlopen(request, timeout=HTTP_TIMEOUT_S) as response, \
+                            open(part_path, "r+b") as handle:
+                        handle.seek(start)
+                        while pos <= end:
+                            chunk = response.read(min(1 << 20, end - pos + 1))
+                            if not chunk:
+                                raise IOError("short body")
+                            handle.write(chunk)
+                            pos += len(chunk)
+                            with lock:
+                                inflight[start] = pos - start
+                            if stop.is_set():
+                                return
+                    ok = True
+                    break
+                except Exception:
+                    time.sleep(1.5 * (attempt + 1))
+            with lock:
+                inflight.pop(start, None)
+                if ok:
+                    done.add((start, end))
+                else:
+                    failed.append((start, end))
+                    stop.set()
+
+    threads = [threading.Thread(target=worker, name="download-http", daemon=True)
+               for _ in range(HTTP_WORKERS if ranged else 1)]
+    for thread in threads:
+        thread.start()
+    last_bytes, last_at = None, time.monotonic()
+    while any(t.is_alive() for t in threads):
+        time.sleep(1.0)
+        if job_id in _cancelled or job_id in _paused:
+            stop.set()
+            break
+        with lock:
+            have = sum(e - s + 1 for s, e in done) + sum(inflight.values())
+            kept = [list(p) for p in sorted(done)]
+        now = time.monotonic()
+        rate = 0.0 if last_bytes is None else (have - last_bytes) / max(now - last_at, 0.5)
+        last_bytes, last_at = have, now
+        _update(job_id, progress=round(have / size, 4),
+                detail=f"{rate / 1e6:.1f} MB/s · "
+                       f"{len(threads)} connection{'s' if len(threads) > 1 else ''}",
+                parts=kept)
+    for thread in threads:
+        thread.join(timeout=10)
+    if job_id in _cancelled:
+        try:
+            os.remove(part_path)
+        except OSError:
+            pass
+        return ""
+    if job_id in _paused:
+        with lock:
+            _update(job_id, parts=[list(p) for p in sorted(done)])
+        return ""
+    if failed or len(done) != len(parts):
+        return ""
+    os.replace(part_path, target)
+    _update(job_id, parts=[])
+    return target
+
+
 def _run_video(job) -> str:
     from . import streams, subtitles, torrent_engine
-
+    try:
+        from . import debrid
+    except Exception:
+        debrid = None
     entry = job.get("entry") or {}
     season, episode = job.get("season"), job.get("episode")
     job_id = job["id"]
+    folder = os.path.join(job.get("folder") or default_folder(), WATCHABLE_DIR,
+                          safe_name(entry.get("title") or "Video",
+                                    fallback="Video"))
+    os.makedirs(folder, exist_ok=True)
+    number = episode_tag(episode)
+    stem = os.path.join(folder, saved_name(
+        entry.get("title") or "Video", number=number,
+        season=season_tag(season) if number else None, fallback="Video"))
 
-    # A season queued as five jobs used to pay five full source lookups
-    # and five swarm warm-ups even when every episode lived in the one
-    # season pack the first job had already connected to. If the pack a
-    # sibling resolved is still held and *names* this episode, reuse it -
-    # the metadata, the peers and often the pieces are already here.
-    # file_index_for insists on a name match, so a single-episode torrent
-    # can never be mistaken for a pack (the copied-episode-1-five-times
-    # defect this whole path replaces).
-    # **Keyed by what was actually asked for, not just the season - the
-    # owner, 24 August 2026: "when I downloaded aot s1 ep 3 it was
-    # embedded English sound although I selected JP".**
-    #
-    # The reuse below is the right optimisation for a season queued as N
-    # jobs, and it was silently the wrong one for a *changed* request:
-    # keyed on (entry, season) alone, the first download of a season
-    # pinned the release for every later episode of it, so the audio and
-    # quality choices on the second download were never consulted at
-    # all - the branch that reads them is the one this skips. Measured
-    # that day on his own entry: of 74 candidates for Attack on Titan
-    # S01E03, 39 name themselves dual-audio and 35 do not, and
-    # `_order_by_audio("jp")` correctly floats the Japanese-audio
-    # fansubs (Erai-raws, MTBB) to the top - it simply never ran.
-    #
-    # With the choices in the key, a season queued in one go still
-    # shares one pack (every job carries the same values), and asking
-    # for something different starts a fresh, correctly-ordered pick.
+    def finish(target):
+        chosen = job.get("subtitle")
+        if chosen:
+            _update(job_id, detail="Fetching subtitle...")
+            try:
+                text = subtitles.fetch(chosen, net.deadline_in(30))
+                if text:
+                    base = os.path.splitext(target)[0]
+                    suffix = "ass" if str(chosen.get("format", "")).lower() in ("ass", "ssa") else "srt"
+                    with open(f"{base}.ar.{suffix}", "w", encoding="utf-8") as handle:
+                        handle.write(text)
+            except Exception:
+                pass                 # a missing subtitle must not fail the video
+        return target
+
+    def pull(url, size, name_hint):
+        extension = os.path.splitext(str(name_hint or ""))[1] or ".mkv"
+        _update(job_id, detail="Connecting...")
+        return _fetch_ranged(job, url, int(size or 0), stem + extension)
+
     pack_key = (entry.get("id") or entry.get("title"), season,
                 job.get("audio"), job.get("quality"))
     info_hash = _season_packs.get(pack_key)
+    found, candidates = [], []
     if not (info_hash and torrent_engine.file_index_for(
             info_hash, season, episode) is not None):
+        info_hash = None
         _update(job_id, detail="Looking for a source...")
-        found = streams.find_streams(entry, season=season, episode=episode,
-                                     deadline=net.deadline_in(40))
+        found = list(streams.find_streams(entry, season=season, episode=episode,
+                                          deadline=net.deadline_in(40)) or [])
         wanted = job.get("quality")
         ordered = streams.matching_quality(found, wanted) if wanted else []
         candidates = [s for s in (ordered or found) if s.get("info_hash")]
         candidates = _order_by_audio(candidates, job.get("audio"))
         if not candidates:
             return ""
+        # 1. The service, for what it holds and for what it will fetch.
+        if debrid is not None and debrid.available():
+            tries = 0
+            for stream in candidates:
+                if tries >= SERVICE_TRIES or job_id in _cancelled or job_id in _paused:
+                    break
+                tries += 1
+                _update(job_id, detail="Asking Real-Debrid...")
 
+                def progress(status, percent):
+                    _update(job_id, detail=(f"Real-Debrid is fetching it... {percent}%"
+                                            if percent else "Real-Debrid is fetching it..."))
+
+                try:
+                    got = debrid.fetch_url(stream["info_hash"], season=season,
+                                           episode=episode,
+                                           deadline=net.deadline_in(SERVICE_BUDGET_S),
+                                           title=entry.get("title"),
+                                           on_progress=progress)
+                except Exception:
+                    logs.exception("The service fetch for a download failed")
+                    got = None
+                url = str((got or {}).get("url") or "")
+                if url.startswith("http"):
+                    target = pull(url, got.get("size"), got.get("file_name"))
+                    if target:
+                        return finish(target)
+                    if job_id in _cancelled or job_id in _paused:
+                        return ""
+        # 2. The swarm.
         _update(job_id, detail="Connecting to peers...")
-        # **The asked-for audio gets its own race first.** See
-        # _split_by_audio: handing one ordered list to prepare_fastest
-        # left the choice as a tie-break on a race decided by whichever
-        # swarm answered first, which is not the same thing at all.
         preferred, rest = _split_by_audio(candidates, job.get("audio"))
         ready = None
         if preferred:
             ready = streams.prepare_fastest(preferred, season=season,
                                             episode=episode)
         if (not ready or not ready.get("info_hash")) and rest:
-            # Nothing in the preferred group would start. A download in
-            # the other language beats no download at all, and the name
-            # may simply not have said.
             ready = streams.prepare_fastest(rest, season=season,
                                             episode=episode)
-        if not ready or not ready.get("info_hash"):
+        if not ready:
+            return ""
+        ready_url = str(ready.get("url") or "")
+        if ready.get("kind") == "direct" and ready_url.startswith("http"):
+            # The race's debrid lane, kept for the case the fetch above
+            # could not take: a plain link, and no torrent to wait on.
+            target = pull(ready_url, ready.get("size"), ready.get("name"))
+            return finish(target) if target else ""
+        if not ready.get("info_hash"):
             return ""
         info_hash = ready["info_hash"]
     else:
-        # **own=False: a download must never repoint a pack that is
-        # being watched.** `file_index` is what the stream server
-        # resolves `<hash>/0` through, so re-picking it here moves the
-        # picture of anyone playing another episode out of the same
-        # pack to this one - the wrong-episode report, from the download
-        # side rather than the prewarm side that torrent_engine.add
-        # already records. The file this job wants is asked for
-        # separately below and never written to the torrent.
         if not torrent_engine.add(info_hash, season=season, episode=episode,
                                   own=False):
             _season_packs.pop(pack_key, None)
@@ -1102,32 +979,16 @@ def _run_video(job) -> str:
     if season and episode:
         _season_packs[pack_key] = info_hash
     torrent_engine.download_whole(info_hash)
+    torrent_engine.sequential(info_hash, True)
     _prefetch_group_siblings(job, info_hash)
-
-    # Same shape as _run_chapter's, one level deeper - see WATCHABLE_DIR.
-    # safe_name for the title part so it matches the file inside it
-    # ("Attack_on_Titan", not "Attack on Titan (2013)").
-    # Which file in the pack is this job's, asked without moving the
-    # torrent's own pointer - see torrent_engine.file_index_for.
     wanted_index = torrent_engine.file_index_for(
         info_hash, season=season, episode=episode,
         title=(entry.get("title") or None))
-
-    folder = os.path.join(job.get("folder") or default_folder(), WATCHABLE_DIR,
-                          safe_name(entry.get("title") or "Video",
-                                    fallback="Video"))
-    os.makedirs(folder, exist_ok=True)
-
     while True:
         if job_id in _cancelled:
             torrent_engine.release(info_hash, force=True)
             return ""
         if job_id in _paused:
-            # Held, not stopped: the torrent stays added, so the pieces
-            # already fetched are still there when this is resumed. The
-            # job's state was set to PAUSED by pause() - returning ""
-            # here must not be read as a failure, which is why the
-            # queue checks _paused before it judges the result.
             return ""
         state = torrent_engine.file_progress(info_hash, index=wanted_index)
         if not state:
@@ -1138,28 +999,10 @@ def _run_video(job) -> str:
         if state.get("finished"):
             break
         time.sleep(1.5)
-
     source = state.get("path")
-    # The owner's scheme, not the release's own name - see saved_name.
-    # The extension is the release's, because that is the part that says
-    # what the file actually is.
     extension = os.path.splitext(source)[1] or ".mkv"
-    number = episode_tag(episode)
-    target = os.path.join(folder, saved_name(
-        entry.get("title") or "Video",
-        number=number,
-        # A season number only means anything beside an episode: a film
-        # that happens to carry one is still just the film.
-        season=season_tag(season) if number else None,
-        fallback="Video") + extension)
+    target = stem + extension
     _update(job_id, detail="Saving...")
-    # Copy rather than move: the engine may still be serving this file
-    # to a player, and pulling it out from under mpv mid-frame is a
-    # crash rather than a tidy-up. Retried once - the engine can still
-    # be flushing its last pieces - and a copy that still fails fails
-    # the *job*: the old fallback reported Done pointing into the
-    # engine's temp cache, which trim_cache later deletes, i.e. a
-    # download that quietly ceases to exist.
     import shutil
     for attempt in (1, 2):
         try:
@@ -1170,26 +1013,9 @@ def _run_video(job) -> str:
                 raise RuntimeError("The finished file could not be saved "
                                    "into the download folder.")
             time.sleep(2.0)
-
-    chosen = job.get("subtitle")
-    if chosen:
-        _update(job_id, detail="Fetching subtitle...")
-        try:
-            text = subtitles.fetch(chosen, net.deadline_in(30))
-            if text:
-                stem = os.path.splitext(target)[0]
-                suffix = "ass" if str(chosen.get("format", "")).lower() in ("ass", "ssa") else "srt"
-                # `.ar.` so players label the track Arabic and pick it up
-                # automatically beside the video.
-                with open(f"{stem}.ar.{suffix}", "w", encoding="utf-8") as handle:
-                    handle.write(text)
-        except Exception:
-            pass                 # a missing subtitle must not fail the video
-    return target
+    return finish(target)
 
 
-# Pages in flight at once for one chapter - see the note in _run_chapter
-# for the measurement, and net.MAX_IDLE_PER_HOST for why six.
 CHAPTER_PAGE_WORKERS = 6
 
 

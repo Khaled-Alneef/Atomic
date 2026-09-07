@@ -1681,15 +1681,6 @@ class _WorkBridge(QObject):
     note = Signal(str, int)
 
 
-class _BrowserLinkBridge(QObject):
-    """Worker -> Qt for the Download panel's "Download in Browser": the
-    direct link found (or None) and the request it answers. Parented to
-    the page, so a link that resolves after the player closed lands on
-    nothing rather than on a deleted widget."""
-    resolved = Signal(object, object)   # {"url", "name", "size"} | None, request
-    progress = Signal(str)              # the sticky toast's next words
-
-
 # ---------------------------------------------------------------------
 # Pieces of the page
 
@@ -9268,24 +9259,6 @@ class PlayerPage(GlassPage):
         folder_btn.clicked.connect(self._dl_pick_folder)
         panel.footer_layout.addWidget(self._dl_footer_row("Folder", folder_btn))
 
-        # **"Download in Browser"** - the owner's ask, 2 September 2026
-        # (roadmap #14): a download at the line's speed rather than the
-        # source's. What a browser can take is a direct http(s) link -
-        # a release the debrid service holds, or an addon's own URL
-        # (downloads.direct_url_for says which, and measured the 206 a
-        # Range request gets from the debrid CDN). A torrent has no
-        # such link, and _on_dl_browser_resolved says so and queues it
-        # here instead. One episode only: a season would be a browser
-        # tab per episode, and the in-app queue is the right tool there.
-        browser = _text_button(
-            "Download in Browser",
-            "Open a direct link in your browser, which downloads it at "
-            "your connection's full speed" if self._dl_scope != "season"
-            else "One episode at a time - a whole season would open a "
-                 "browser tab per episode")
-        browser.setEnabled(self._dl_scope != "season")
-        browser.clicked.connect(self._dl_open_in_browser)
-        panel.footer_layout.addWidget(browser)
 
         start = _text_button("Download", "Add this to the download queue")
         start.setStyleSheet(
@@ -9297,96 +9270,6 @@ class PlayerPage(GlassPage):
         start.clicked.connect(self._dl_start)
         panel.footer_layout.addWidget(start)
         self._show_panel(panel)
-
-    def _dl_open_in_browser(self):
-        """Find a direct link off the UI thread and hand it to the system
-        browser; when only the swarm can serve the release, say so and
-        queue it in Atomic instead (see _on_dl_browser_resolved).
-
-        The playing release goes first (`prefer`) and the list the
-        panel already shows is passed along, so nothing here repeats the
-        stream fan-out - measured 6.9s cold. A sticky toast goes up at
-        once (rule 7): the debrid round trips took 0.70s on Reacher
-        S1E2 and a whole lookup can take longer than a second."""
-        if self._dl_scope == "season" and self.episode:
-            show_toast(self._toast_anchor(), "One Episode at a Time in the Browser")
-            return
-        bridge = getattr(self, "_dl_browser_bridge", None)
-        if bridge is None:
-            bridge = self._dl_browser_bridge = _BrowserLinkBridge(self)
-            bridge.resolved.connect(self._on_dl_browser_resolved)
-            bridge.progress.connect(self._on_dl_browser_progress)
-        request = {
-            "entry": self.entry, "season": self.season, "episode": self.episode,
-            "quality": self._dl_quality, "subtitle": self._dl_subtitle,
-            "audio": self._dl_audio, "folder": self._download_folder(),
-        }
-        prefer = None
-        if 0 <= self._stream_index < len(self._streams):
-            prefer = self._streams[self._stream_index] or None
-        self._close_panel()
-        self._dl_browser_toast = show_toast(
-            self._toast_anchor(), "Finding a Direct Link...", duration_ms=None)
-        self._spawn(self._dl_browser_worker, request, list(self._streams), prefer)
-
-    def _dl_browser_worker(self, request, found, prefer):
-        """Never raises - an exception here would kill the thread
-        silently and leave the sticky toast up forever."""
-        result = None
-        try:
-            def progress(text):
-                try:
-                    if not self._closing:
-                        self._dl_browser_bridge.progress.emit(text)
-                except RuntimeError:
-                    pass
-            result = downloads.browser_url_for(
-                request["entry"], season=request["season"],
-                episode=request["episode"], quality=request["quality"],
-                audio=request["audio"], streams_found=found, prefer=prefer,
-                on_progress=progress)
-        except Exception:
-            logs.exception("Direct link lookup failed")
-        try:
-            if not self._closing:
-                self._dl_browser_bridge.resolved.emit(result, request)
-        except RuntimeError:
-            pass            # the page (and the bridge with it) is gone
-
-    def _on_dl_browser_progress(self, text):
-        if self._closing:
-            return
-        toast = getattr(self, "_dl_browser_toast", None)
-        if toast is not None:
-            finish_toast(toast, self._toast_anchor(), text, duration_ms=None)
-
-    def _on_dl_browser_resolved(self, result, request):
-        if self._closing:
-            return
-        anchor = self._toast_anchor()
-        toast = getattr(self, "_dl_browser_toast", None)
-        self._dl_browser_toast = None
-        url = str((result or {}).get("url") or "")
-        if url:
-            # The URL carries an account token: opened, never logged.
-            import webbrowser
-            webbrowser.open(url)
-            finish_toast(toast, anchor, "Opened in Your Browser")
-            return
-        try:
-            downloads.queue_episode(
-                request["entry"], season=request["season"],
-                episode=request["episode"], quality=request["quality"],
-                subtitle=request["subtitle"], audio=request["audio"],
-                folder=request["folder"])
-        except Exception:
-            logs.exception("Could not queue a download")
-            finish_toast(toast, anchor, "Only a Torrent Is Available - "
-                                        "Could Not Queue It")
-            return
-        finish_toast(toast, anchor, "Only a Torrent Is Available - "
-                                    "Queued in Atomic Instead",
-                     duration_ms=4000)
 
     @staticmethod
     def _dl_footer_row(name, button):

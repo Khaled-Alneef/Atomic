@@ -1363,7 +1363,10 @@ def install():
     #     to fetch a release it does not hold and waited for, with the
     #     toast saying how far; the swarm, when it is the source, reads
     #     in order from the first byte.
-    updater.APP_VERSION = "1.10.276"
+    #   * Only the in-app download, as fast as the line: the queue asks the
+    #     service first and pulls a direct link over four connections; the
+    #     browser download is gone (his ask, 7 September).
+    updater.APP_VERSION = "1.10.277"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

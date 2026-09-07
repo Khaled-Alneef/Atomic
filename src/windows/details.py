@@ -351,38 +351,6 @@ def _episode_ratings_worker(signals, run, imdb_id, season, videos):
     signals.episode_ratings.emit(run, (imdb_id, season), mapping)
 
 
-class _BrowserLinkBridge(QObject):
-    """Worker -> Qt for the download dialog's "Download in Browser": the
-    direct link found (or None) and the request it answers. Parented to
-    the page, so a link resolving after the page closed lands on nothing
-    rather than on a deleted widget."""
-    resolved = Signal(object, object)   # {"url", "name", "size"} | None, request
-    progress = Signal(str)              # the sticky toast's next words
-
-
-def _browser_link_worker(bridge, request):
-    """Never raises - lookup_pool workers die silently (see that module),
-    and a dead one here would leave the sticky toast up forever."""
-    result = None
-    try:
-        from helpers import downloads
-        def progress(text):
-            try:
-                bridge.progress.emit(text)
-            except RuntimeError:
-                pass
-        result = downloads.browser_url_for(
-            request["entry"], season=request["season"],
-            episode=request["episode"], audio=request["audio"],
-            on_progress=progress)
-    except Exception:
-        logs.exception("details direct link lookup failed")
-    try:
-        bridge.resolved.emit(result, request)
-    except RuntimeError:
-        pass                # the page, and the bridge with it, is gone
-
-
 def _resolve_id_worker(signals, run, title, entry_type):
     """Find the catalog id for a title that arrived without one.
 
@@ -3778,18 +3746,6 @@ class DetailsPage(GlassPage):
         column.addWidget(count_label)
         folder_of = self._folder_row(column, dialog)
 
-        # **"Download in Browser"** - the owner's ask, 2 September 2026
-        # (roadmap #14): a download at the line's speed rather than the
-        # source's. A browser can take a direct http(s) link and nothing
-        # else, so this resolves one (downloads.direct_url_for - a
-        # release the debrid service holds answered a Range request 206
-        # from its CDN, measured) and falls back to the in-app queue,
-        # saying so, when only a torrent exists. One episode at a time:
-        # a range would be a browser tab per episode.
-        browser_btn = QPushButton("Download in Browser")
-        browser_btn.setToolTip("Open a direct link in your browser, which "
-                               "downloads it at your connection's full speed")
-        use_hover_cursor(browser_btn)
 
         def picked_numbers():
             if is_movie:
@@ -3810,12 +3766,6 @@ class DetailsPage(GlassPage):
             whole = scope.currentIndex() == 2
             ranged = scope.currentIndex() == 1
             one = len(picked_numbers()) == 1
-            browser_btn.setEnabled(one)
-            browser_btn.setToolTip(
-                "Open a direct link in your browser, which downloads it "
-                "at your connection's full speed" if one else
-                "One episode at a time - a range would open a browser "
-                "tab per episode")
             last_box.setEnabled(ranged)
             # Hidden rather than merely disabled: a greyed-out "To:" is
             # still a caption saying a range is being chosen, and a
@@ -3863,67 +3813,9 @@ class DetailsPage(GlassPage):
             dialog.accept()
             show_toast(self, "Queued - See the Downloads Page")
 
-        def in_browser():
-            numbers = picked_numbers()
-            if not is_movie and len(numbers) != 1:
-                return          # the button is disabled for a range
-            dialog.accept()
-            self._open_episode_in_browser(
-                season=None if is_movie else season,
-                episode=None if is_movie else numbers[0],
-                audio=audio_box.currentData(), folder=folder_of())
-        browser_btn.clicked.connect(in_browser)
 
-        self._dialog_buttons(dialog, column, start, extra=[browser_btn])
+        self._dialog_buttons(dialog, column, start)
         dialog.exec()
-
-    def _open_episode_in_browser(self, *, season, episode, audio, folder):
-        """Resolve a direct link on a watched worker, then hand it to the
-        system browser - or queue the episode in Atomic, saying why,
-        when only the swarm can serve it. The sticky toast goes up at
-        once (rule 7): the lookup is a stream fan-out (6.9s cold on
-        Reacher S1E2) plus the debrid round trips (0.70s)."""
-        bridge = getattr(self, "_browser_link_bridge", None)
-        if bridge is None:
-            bridge = self._browser_link_bridge = _BrowserLinkBridge(self)
-            bridge.resolved.connect(self._on_browser_link)
-            bridge.progress.connect(self._on_browser_link_progress)
-        request = {"entry": dict(self.entry), "season": season,
-                   "episode": episode, "audio": audio, "folder": folder}
-        self._browser_link_toast = show_toast(
-            self, "Finding a Direct Link...", duration_ms=None)
-        lookup_pool.submit_watched(_browser_link_worker, bridge, request)
-
-    def _on_browser_link_progress(self, text):
-        from helpers.widgets import finish_toast
-        toast = getattr(self, "_browser_link_toast", None)
-        if toast is not None:
-            finish_toast(toast, self, text, duration_ms=None)
-
-    def _on_browser_link(self, result, request):
-        from helpers import downloads
-        from helpers.widgets import finish_toast
-        toast = getattr(self, "_browser_link_toast", None)
-        self._browser_link_toast = None
-        url = str((result or {}).get("url") or "")
-        if url:
-            # The URL carries an account token: opened, never logged.
-            import webbrowser
-            webbrowser.open(url)
-            finish_toast(toast, self, "Opened in Your Browser")
-            return
-        try:
-            downloads.queue_episode(request["entry"], season=request["season"],
-                                    episode=request["episode"],
-                                    audio=request["audio"],
-                                    folder=request["folder"])
-        except Exception:
-            logs.exception("details page could not queue a download")
-            finish_toast(toast, self, "Only a Torrent Is Available - "
-                                      "Could Not Queue It")
-            return
-        finish_toast(toast, self, "Only a Torrent Is Available - "
-                                  "Queued in Atomic Instead", duration_ms=4000)
 
     def _open_chapter_download_dialog(self):
         """Which chapters - one, or a chosen range - then queue as .cbz.
@@ -3986,14 +3878,6 @@ class DetailsPage(GlassPage):
         count_label = QLabel("", objectName="Muted")
         count_label.setWordWrap(True)
         column.addWidget(count_label)
-        # No "Download in Browser" here, and the label says why in the
-        # owner's terms (roadmap #14, 2 September 2026): a reading site
-        # hands out its page images only to a request carrying the
-        # chapter page as Referer (3asq answers 403 without it - see
-        # chapter_source.chapter_pages), and a browser link cannot carry
-        # one. The speed went into the fetch instead: six pages at a
-        # time (downloads._run_chapter), measured 5.95-10.73s to
-        # 2.66-2.87s on a 21-page chapter.
         why = QLabel("Chapters are saved by Atomic itself, six pages at a "
                      "time: the site only hands out pages to a request "
                      "carrying the app's own headers, so a browser link "

@@ -384,20 +384,6 @@ STREAM_STALL_S = 60.0
 # response is ended and the client reopens - _Torrent.wait_for's own
 # default, now waited in slices so the client hanging up is noticed.
 PIECE_WAIT_S = 45.0
-# **A browser saving the file is waited for, not cut.** The owner, 7
-# September 2026: "the downloading takes so long and many times it does
-# not download the ep, I want it to be like Stremio, it somehow opens the
-# browser and downloads ep from it". Stremio hands the browser its own
-# local stream URL and the browser's downloader does the rest; this
-# server can be that URL (downloads.browser_url_for), with one
-# difference from a player reading it: mpv reopens a response this
-# server ends early (PIECE_WAIT_S, STREAM_STALL_S above - a stall is
-# ended on purpose so the reader re-aims), while a browser marks the
-# file failed and waits for a hand to press Resume. So a request that
-# says `dl=1` is served patiently: a missing piece is waited for as long
-# as the torrent is alive and the browser is still reading, up to this
-# cap of silence, and the response carries the release's name.
-BROWSER_PIECE_WAIT_S = 15 * 60.0
 
 # The window that belongs to nobody in particular - what add(),
 # set_start_seconds() and a bare focus() move. Every live HTTP read
@@ -3930,20 +3916,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._serve(head_only=False)
 
-    def _query(self) -> dict:
-        try:
-            return {k: v[0] for k, v in urllib.parse.parse_qs(
-                urllib.parse.urlsplit(self.path).query).items()}
-        except Exception:
-            return {}
-
     def _serve(self, head_only=False):
         torrent = self._torrent()
         if torrent is None or torrent.file_index is None:
             self.send_error(404)
             return
-        query = self._query()
-        patient = query.get("dl") == "1"       # a browser saving the file
         size = torrent.file_size()
         start, end = 0, size - 1
         header = self.headers.get("Range")
@@ -3967,11 +3944,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(length))
         if header:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        if patient:
-            name = query.get("name") or os.path.basename(torrent.file_path())
-            self.send_header(
-                "Content-Disposition",
-                "attachment; filename*=UTF-8''" + urllib.parse.quote(name))
         self.end_headers()
         if head_only:
             return
@@ -4022,8 +3994,7 @@ class _Handler(BaseHTTPRequestHandler):
         stalled_since = time.monotonic()
         try:
             while remaining > 0:
-                if (time.monotonic() - stalled_since
-                        > (BROWSER_PIECE_WAIT_S if patient else STREAM_STALL_S)):
+                if time.monotonic() - stalled_since > STREAM_STALL_S:
                     logs.info(
                         f"stream stalled at {offset} of {size} after "
                         f"{STREAM_STALL_S:g}s with nothing to send - "
@@ -4062,8 +4033,7 @@ class _Handler(BaseHTTPRequestHandler):
                         if self._client_gone():
                             gone = True
                             break
-                        if (time.monotonic() - waited_from
-                                >= (BROWSER_PIECE_WAIT_S if patient else PIECE_WAIT_S)):
+                        if time.monotonic() - waited_from >= PIECE_WAIT_S:
                             break
                     waited = time.monotonic() - waited_from
                     if waited >= 1.0:
