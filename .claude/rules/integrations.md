@@ -749,3 +749,39 @@ otherwise; `unreachable` when the fetch failed), `backend.pages` logs
 **skips the read mark** - the pass had marked c174 and c214 read on two
 blank readers. Photographed on the frozen build: row 173 of The Holy
 Power Of Modern Medicine shows the message; row 168 reads and marks.
+
+## Download in Browser reaches the swarm, the way Stremio does (7 September 2026)
+
+His ask: *"the downloading takes so long and many times it does not
+download the ep, I want it to be like Stremio, it somehow opens the
+browser and downloads ep from it!"* Stremio hands the browser its own
+local stream URL and the browser's downloader does the rest. Atomic's
+"Download in Browser" (details dialog, player panel) only ever handed
+over a *direct* link - a debrid or addon URL, `downloads.direct_url_for`
+- and fell back to the in-app queue when there was none, and the queue
+is what he was describing.
+
+`downloads.browser_url_for` is what both hand-offs ask now: the direct
+link first, unchanged; otherwise the queue's own pick
+(`streams.prepare_fastest` over the same candidates), the torrent
+pinned and raised to full priority (`download_whole`), and the engine's
+URL with `dl=1&name=...`. `torrent_engine._serve` treats that flag as
+a browser reading: it waits for a missing piece up to
+BROWSER_PIECE_WAIT_S instead of ending the response the way it does for
+mpv (which reopens; a browser marks the file failed and waits for a
+hand), and it sends `Content-Disposition: attachment` with the file's
+name so the save is `[Atomic] Reacher_EP02_S01.mkv`, not `0`. A watcher
+lets the pin go two minutes after the file is whole. Measured on the
+source with debrid dark: the URL in 10.3s, HEAD video/x-matroska,
+679MB, Accept-Ranges, the name; a plain reader pulled 41.9MB in 8.1s
+with the swarm at 10.5MB/s.
+
+Two traps paid for on the way. **The race's debrid lane answers a
+direct link with a hash kept for identity only**, so an engine half
+that asked `stream_url` for it got nothing - a direct answer from
+`prepare_fastest` is a browser link already and is handed over as one.
+And **the browser probe accepted a page**: with debrid dark, Comet's
+`playback` link answered 200 to the one-byte Range probe and the
+browser was handed 8,473 bytes of text/html - the addon's own player
+page. `_browser_can_fetch` now refuses text/html/json bodies and a 200
+under BROWSER_MIN_FILE_BYTES.

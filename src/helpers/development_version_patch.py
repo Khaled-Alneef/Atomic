@@ -1356,7 +1356,10 @@ def install():
     #     paints the app's ground rather than white before its first
     #     frame: the reader no longer flashes white and dark on entry
     #     (his "black stutter" in the 3asq readings).
-    updater.APP_VERSION = "1.10.274"
+    #   * Download in Browser reaches the swarm: with no direct link the
+    #     browser is handed the app's own stream URL, served patiently
+    #     and named, the way Stremio does it (his ask, 7 September).
+    updater.APP_VERSION = "1.10.275"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

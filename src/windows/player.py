@@ -9332,7 +9332,7 @@ class PlayerPage(GlassPage):
         silently and leave the sticky toast up forever."""
         result = None
         try:
-            result = downloads.direct_url_for(
+            result = downloads.browser_url_for(
                 request["entry"], season=request["season"],
                 episode=request["episode"], quality=request["quality"],
                 audio=request["audio"], streams_found=found, prefer=prefer)

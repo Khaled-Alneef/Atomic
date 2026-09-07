@@ -365,7 +365,7 @@ def _browser_link_worker(bridge, request):
     result = None
     try:
         from helpers import downloads
-        result = downloads.direct_url_for(
+        result = downloads.browser_url_for(
             request["entry"], season=request["season"],
             episode=request["episode"], audio=request["audio"])
     except Exception:

@@ -28,6 +28,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -554,6 +555,8 @@ def queue_chapters(entry, chapters, *, folder=None) -> list:
 BROWSER_DEBRID_TRIES = 4
 BROWSER_LINK_BUDGET_S = 25.0
 BROWSER_PROBE_TIMEOUT_S = 6.0
+# Smaller than this with a 200 is a page or an error, not an episode.
+BROWSER_MIN_FILE_BYTES = 5 * 1024 * 1024
 
 
 def _browser_can_fetch(url, deadline) -> bool:
@@ -568,7 +571,27 @@ def _browser_can_fetch(url, deadline) -> bool:
         request = urllib.request.Request(
             url, headers={"Range": "bytes=0-0", "User-Agent": _UA})
         with net.urlopen(request, timeout=timeout) as response:
-            return int(getattr(response, "status", 0) or 0) in (200, 206)
+            status = int(getattr(response, "status", 0) or 0)
+            if status not in (200, 206):
+                return False
+            # **A page is not a file.** Measured 7 September 2026 with
+            # debrid dark: Comet's `playback` link answered 200 to this
+            # probe and the browser was handed 8,473 bytes of text/html -
+            # an addon's own player page, not the episode - which is one
+            # of the owner's "many times it does not download the ep".
+            # A body a browser would save has to say it is not a page,
+            # and a 200 has to be big enough to be a video.
+            kind = str(response.headers.get("Content-Type") or "").lower()
+            if kind.startswith("text/") or "html" in kind or "json" in kind:
+                return False
+            if status == 200:
+                try:
+                    length = int(response.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                if 0 < length < BROWSER_MIN_FILE_BYTES:
+                    return False
+            return True
     except Exception:
         return False
 
@@ -678,6 +701,125 @@ def direct_url_for(entry, *, season=None, episode=None, quality=None,
 
 
 # ------------------------------------------------------------- worker
+
+def browser_url_for(entry, *, season=None, episode=None, quality=None,
+                    audio=None, streams_found=None, prefer=None,
+                    deadline=None):
+    """A URL the system browser can save this episode from: the direct
+    link when a debrid or addon has one (direct_url_for, unchanged), and
+    otherwise the app's own stream server over the swarm - which is what
+    Stremio hands its browser. The owner, 7 September 2026: "the
+    downloading takes so long and many times it does not download the
+    ep, I want it to be like Stremio". The in-app queue used to be the
+    only answer when no direct link existed, and it is the queue he was
+    describing.
+
+    The engine half follows the queue's own pick (`streams.prepare_fastest`
+    over the same candidates in the same order), pins the torrent so the
+    player's releases leave it alone, raises the whole file to full
+    priority so it completes, and returns the stream URL with `dl=1` -
+    the flag torrent_engine._serve serves patiently and names the file
+    under. A watcher lets the pin go once the file is whole.
+
+    Returns {"url", "name", "size", "engine"} or None when nothing can
+    serve it."""
+    from . import streams, torrent_engine
+    if deadline is None:
+        deadline = net.deadline_in(BROWSER_LINK_BUDGET_S + 40.0)
+    found = list(streams_found or [])
+    if not found:
+        budget = net.step_timeout(deadline, 40.0)
+        if budget is None:
+            return None
+        found = list(streams.find_streams(
+            entry, season=season, episode=episode,
+            deadline=net.deadline_in(budget)) or [])
+    direct = direct_url_for(entry, season=season, episode=episode,
+                            quality=quality, audio=audio, streams_found=found,
+                            prefer=prefer, deadline=deadline)
+    if direct:
+        direct["engine"] = False
+        return direct
+    if not torrent_engine.available():
+        return None
+    ordered = streams.matching_quality(found, quality) if quality else []
+    candidates = [s for s in (ordered or found) if s.get("info_hash")]
+    candidates = _order_by_audio(candidates, audio)
+    if prefer and prefer.get("info_hash"):
+        key = (prefer.get("info_hash") or "").lower()
+        rest = [s for s in candidates if (s.get("info_hash") or "").lower() != key]
+        candidates = [dict(prefer)] + rest
+    if not candidates:
+        return None
+    preferred, rest = _split_by_audio(candidates, audio)
+    ready = None
+    if preferred:
+        ready = streams.prepare_fastest(preferred, season=season, episode=episode)
+    if (not ready or not ready.get("info_hash")) and rest:
+        ready = streams.prepare_fastest(rest, season=season, episode=episode)
+    if not ready:
+        return None
+    # The race's debrid lane wins with a plain HTTPS link (kind "direct",
+    # the hash kept for identity only - integrations.md); that is a
+    # browser link already and no torrent was added for it. Only an
+    # engine answer has a torrent to pin and serve.
+    ready_url = str(ready.get("url") or "")
+    if ready.get("kind") == "direct" and ready_url.startswith("http"):
+        if _browser_can_fetch(ready_url, deadline):
+            return {"url": ready_url, "name": ready.get("name"),
+                    "size": ready.get("size"), "engine": False}
+        return None
+    if not ready.get("info_hash"):
+        return None
+    info_hash = ready["info_hash"]
+    torrent_engine.pin(info_hash)
+    torrent_engine.download_whole(info_hash)
+    base = torrent_engine.stream_url(info_hash)
+    if not base:
+        return None
+    state = torrent_engine.file_progress(info_hash) or {}
+    source = str(state.get("path") or "")
+    extension = os.path.splitext(source)[1] or ".mkv"
+    number = episode_tag(episode)
+    name = saved_name(entry.get("title") or "Video", number=number,
+                      season=season_tag(season) if number else None,
+                      fallback="Video") + extension
+    url = f"{base}?dl=1&name={urllib.parse.quote(name)}"
+    logs.info(f"browser download: {info_hash[:8]} handed to the browser as "
+              f"{name!r} ({(state.get('size') or 0) / 1e6:.0f}MB)")
+    threading.Thread(target=_watch_browser_download, args=(info_hash,),
+                     name="browser-download", daemon=True).start()
+    return {"url": url, "name": name, "size": state.get("size"),
+            "engine": True}
+
+
+# How long the pin outlives the finished file, so a browser still reading
+# the tail of a file the swarm has just completed is not cut off.
+BROWSER_UNPIN_AFTER_S = 120.0
+
+
+def _watch_browser_download(info_hash):
+    """Let the pin go once the file is whole - the browser owns the copy
+    from then on and the player's ordinary release can reclaim the
+    torrent. Never raises."""
+    from . import torrent_engine
+    try:
+        finished_at = None
+        while True:
+            time.sleep(5.0)
+            state = torrent_engine.file_progress(info_hash)
+            if not state:
+                return                     # released by someone else
+            if state.get("finished"):
+                if finished_at is None:
+                    finished_at = time.monotonic()
+                    logs.info(f"browser download: {info_hash[:8]} is whole")
+                elif time.monotonic() - finished_at >= BROWSER_UNPIN_AFTER_S:
+                    torrent_engine._pinned.discard(info_hash.lower())
+                    return
+    except Exception:
+        logs.exception("browser download watcher failed")
+
 
 def _ensure_worker():
     global _worker
