@@ -1687,6 +1687,7 @@ class _BrowserLinkBridge(QObject):
     the page, so a link that resolves after the player closed lands on
     nothing rather than on a deleted widget."""
     resolved = Signal(object, object)   # {"url", "name", "size"} | None, request
+    progress = Signal(str)              # the sticky toast's next words
 
 
 # ---------------------------------------------------------------------
@@ -9314,6 +9315,7 @@ class PlayerPage(GlassPage):
         if bridge is None:
             bridge = self._dl_browser_bridge = _BrowserLinkBridge(self)
             bridge.resolved.connect(self._on_dl_browser_resolved)
+            bridge.progress.connect(self._on_dl_browser_progress)
         request = {
             "entry": self.entry, "season": self.season, "episode": self.episode,
             "quality": self._dl_quality, "subtitle": self._dl_subtitle,
@@ -9332,10 +9334,17 @@ class PlayerPage(GlassPage):
         silently and leave the sticky toast up forever."""
         result = None
         try:
+            def progress(text):
+                try:
+                    if not self._closing:
+                        self._dl_browser_bridge.progress.emit(text)
+                except RuntimeError:
+                    pass
             result = downloads.browser_url_for(
                 request["entry"], season=request["season"],
                 episode=request["episode"], quality=request["quality"],
-                audio=request["audio"], streams_found=found, prefer=prefer)
+                audio=request["audio"], streams_found=found, prefer=prefer,
+                on_progress=progress)
         except Exception:
             logs.exception("Direct link lookup failed")
         try:
@@ -9343,6 +9352,13 @@ class PlayerPage(GlassPage):
                 self._dl_browser_bridge.resolved.emit(result, request)
         except RuntimeError:
             pass            # the page (and the bridge with it) is gone
+
+    def _on_dl_browser_progress(self, text):
+        if self._closing:
+            return
+        toast = getattr(self, "_dl_browser_toast", None)
+        if toast is not None:
+            finish_toast(toast, self._toast_anchor(), text, duration_ms=None)
 
     def _on_dl_browser_resolved(self, result, request):
         if self._closing:

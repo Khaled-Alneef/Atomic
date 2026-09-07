@@ -785,3 +785,36 @@ And **the browser probe accepted a page**: with debrid dark, Comet's
 browser was handed 8,473 bytes of text/html - the addon's own player
 page. `_browser_can_fetch` now refuses text/html/json bodies and a 200
 under BROWSER_MIN_FILE_BYTES.
+
+## A download runs at the line's speed: ask the service, do not ask the cache check (7 September 2026)
+
+His follow-up: *"no no this solved nothing, the issue is the SPEED and
+sometimes it does not load, I want the download to be purely on the
+internet speed!!!!"* Measured on this machine, source tree, copy of his
+data:
+
+    a plain HTTPS file (proof.ovh.net)        7.9 MB/s   one stream
+    the swarm, Attack on Titan S1E4, 28 peers 15.5 MB/s  peak, 0.4 in the first 10s
+    the engine handing one reader that file  10.6 MB/s  over the whole 416MB
+    Real-Debrid's CDN, the same episode       21.1 MB/s
+    Real-Debrid's CDN, Adults S2E3            16.8 MB/s  192MB in 11s
+
+The CDN is the one source that is the line's speed whatever the swarm
+does, and the browser path almost never got it: `direct_url_for` asks
+only the hashes `debrid.cached_hashes` calls held, and that check -
+built on add-and-look since instantAvailability went - said **4 of 30**
+for Attack on Titan and **0 of 16** for Adults while the service served
+both at once. Every "uncached" release fell to the swarm or the queue.
+
+`browser_url_for` now asks the service to fetch the best candidates
+outright (`debrid.fetch_url`, BROWSER_FETCH_TRIES of them): the same
+addMagnet -> selectFiles -> link as a play, but a status of queued or
+downloading is polled up to FETCH_BUDGET_S with the percentage on the
+sticky toast ("Real-Debrid Is Fetching It... 37%") instead of being
+deleted, and the torrent stays in the account so a fetch that outran
+the budget is found downloaded next time. Only then the swarm, and a
+browser reading the swarm takes the file in order
+(`torrent_engine.sequential`), because with every piece at one priority
+the reader had 0.4MB/s in its first ten seconds while the swarm ran at
+7.9. Not exercised: the waiting branch itself - the service held every
+release tried, including the "uncached" ones.

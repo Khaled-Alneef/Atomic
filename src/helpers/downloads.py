@@ -702,9 +702,15 @@ def direct_url_for(entry, *, season=None, episode=None, quality=None,
 
 # ------------------------------------------------------------- worker
 
+# How many uncached releases the service is asked to fetch for one
+# download, and the budget the whole fetch-and-wait is given.
+BROWSER_FETCH_TRIES = 2
+BROWSER_FETCH_BUDGET_S = 150.0
+
+
 def browser_url_for(entry, *, season=None, episode=None, quality=None,
                     audio=None, streams_found=None, prefer=None,
-                    deadline=None):
+                    deadline=None, on_progress=None):
     """A URL the system browser can save this episode from: the direct
     link when a debrid or addon has one (direct_url_for, unchanged), and
     otherwise the app's own stream server over the swarm - which is what
@@ -740,8 +746,6 @@ def browser_url_for(entry, *, season=None, episode=None, quality=None,
     if direct:
         direct["engine"] = False
         return direct
-    if not torrent_engine.available():
-        return None
     ordered = streams.matching_quality(found, quality) if quality else []
     candidates = [s for s in (ordered or found) if s.get("info_hash")]
     candidates = _order_by_audio(candidates, audio)
@@ -751,6 +755,53 @@ def browser_url_for(entry, *, season=None, episode=None, quality=None,
         candidates = [dict(prefer)] + rest
     if not candidates:
         return None
+    # **The service fetches what it does not hold, and the download waits
+    # for it.** The owner, 7 September 2026: "the issue is the SPEED and
+    # sometimes it does not load, I want the download to be purely on
+    # the internet speed". A debrid CDN link is the one source that runs
+    # at the line's speed whatever the swarm is doing, and the only
+    # reason it answered so rarely for a download was that only releases
+    # the service already held were asked for (direct_url_for). A
+    # release it has to fetch first is fetched at a rate no home swarm
+    # sees, and a download - unlike a play - can wait the minute or two
+    # that takes, with the toast saying how far it is.
+    try:
+        from . import debrid
+    except Exception:
+        debrid = None
+    if debrid is not None and debrid.available():
+        tries = 0
+        for stream in candidates:
+            if tries >= BROWSER_FETCH_TRIES:
+                break
+            budget = net.step_timeout(deadline, BROWSER_FETCH_BUDGET_S)
+            if budget is None or budget < 20.0:
+                break
+            tries += 1
+            name = str(stream.get("name") or "")[:40]
+
+            def progress(status, percent, _name=name):
+                if on_progress is not None:
+                    on_progress(f"Real-Debrid Is Fetching It... {percent}%"
+                                if percent else "Real-Debrid Is Fetching It...")
+
+            try:
+                got = debrid.fetch_url(stream["info_hash"], season=season,
+                                       episode=episode,
+                                       deadline=net.deadline_in(budget),
+                                       title=entry.get("title"),
+                                       on_progress=progress)
+            except Exception:
+                logs.exception("debrid fetch for a download failed")
+                got = None
+            url = str((got or {}).get("url") or "")
+            if url.startswith("http") and _browser_can_fetch(url, deadline):
+                return {"url": url, "name": got.get("file_name") or stream.get("name"),
+                        "size": got.get("size"), "engine": False}
+    if not torrent_engine.available():
+        return None
+    if on_progress is not None:
+        on_progress("Connecting to Peers...")
     preferred, rest = _split_by_audio(candidates, audio)
     ready = None
     if preferred:
@@ -774,6 +825,7 @@ def browser_url_for(entry, *, season=None, episode=None, quality=None,
     info_hash = ready["info_hash"]
     torrent_engine.pin(info_hash)
     torrent_engine.download_whole(info_hash)
+    torrent_engine.sequential(info_hash, True)
     base = torrent_engine.stream_url(info_hash)
     if not base:
         return None

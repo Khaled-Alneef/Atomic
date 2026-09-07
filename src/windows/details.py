@@ -357,6 +357,7 @@ class _BrowserLinkBridge(QObject):
     the page, so a link resolving after the page closed lands on nothing
     rather than on a deleted widget."""
     resolved = Signal(object, object)   # {"url", "name", "size"} | None, request
+    progress = Signal(str)              # the sticky toast's next words
 
 
 def _browser_link_worker(bridge, request):
@@ -365,9 +366,15 @@ def _browser_link_worker(bridge, request):
     result = None
     try:
         from helpers import downloads
+        def progress(text):
+            try:
+                bridge.progress.emit(text)
+            except RuntimeError:
+                pass
         result = downloads.browser_url_for(
             request["entry"], season=request["season"],
-            episode=request["episode"], audio=request["audio"])
+            episode=request["episode"], audio=request["audio"],
+            on_progress=progress)
     except Exception:
         logs.exception("details direct link lookup failed")
     try:
@@ -3880,11 +3887,18 @@ class DetailsPage(GlassPage):
         if bridge is None:
             bridge = self._browser_link_bridge = _BrowserLinkBridge(self)
             bridge.resolved.connect(self._on_browser_link)
+            bridge.progress.connect(self._on_browser_link_progress)
         request = {"entry": dict(self.entry), "season": season,
                    "episode": episode, "audio": audio, "folder": folder}
         self._browser_link_toast = show_toast(
             self, "Finding a Direct Link...", duration_ms=None)
         lookup_pool.submit_watched(_browser_link_worker, bridge, request)
+
+    def _on_browser_link_progress(self, text):
+        from helpers.widgets import finish_toast
+        toast = getattr(self, "_browser_link_toast", None)
+        if toast is not None:
+            finish_toast(toast, self, text, duration_ms=None)
 
     def _on_browser_link(self, result, request):
         from helpers import downloads

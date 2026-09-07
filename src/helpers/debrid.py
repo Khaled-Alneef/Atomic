@@ -738,6 +738,104 @@ def playable_url(info_hash, season=None, episode=None, deadline=None,
     return result
 
 
+# How long a download waits for the service to fetch a release it does
+# not hold yet, and how often it asks. The owner, 7 September 2026: "I
+# want the download to be purely on the internet speed" - a service's
+# CDN is the one source that is, and a release it has not got yet is
+# fetched by it at a rate no home swarm sees. A play cannot wait for
+# that (playable_url deletes an uncached add and falls to the race); a
+# download can.
+FETCH_BUDGET_S = 150.0
+FETCH_POLL_S = 2.0
+
+
+def fetch_url(info_hash, season=None, episode=None, deadline=None,
+              title=None, on_progress=None):
+    """A direct HTTPS URL for this release's right file, waiting for the
+    service to fetch the release when it does not hold it yet.
+
+    The same addMagnet -> selectFiles -> link shape as playable_url,
+    with the one difference a download affords: a status of queued or
+    downloading is polled, not abandoned, up to the deadline, and
+    `on_progress` hears the percentage as it climbs. The torrent is left
+    in the account whatever happens - a fetch that ran past the deadline
+    finishes on its own there, and the next ask finds it downloaded.
+
+    Returns {"url", "file_name", "size"} or None."""
+    info_hash = str(info_hash or "").strip().lower()
+    if not _HASH_RE.fullmatch(info_hash) or not available():
+        return None
+    if info_hash in refused_hashes():
+        return None
+    if deadline is None:
+        deadline = net.deadline_in(FETCH_BUDGET_S)
+    added = _api("/torrents/addMagnet", deadline=deadline,
+                 data={"magnet": f"magnet:?xt=urn:btih:{info_hash}"})
+    torrent_id = str((added or {}).get("id") or "")
+    if not torrent_id:
+        if getattr(_last_status, "value", None) == 451:
+            _remember_refused(info_hash)
+        _say(f"debrid fetch: {info_hash[:8]} addMagnet answered nothing "
+             f"(HTTP {getattr(_last_status, 'value', None)})")
+        return None
+    info = _await_files(torrent_id, deadline)
+    files = (info or {}).get("files") or []
+    status = str((info or {}).get("status") or "")
+    if not files or status in _GONE_STATUSES:
+        _say(f"debrid fetch: {info_hash[:8]} no files ({status or '?'})")
+        return None
+    picked = pick_file(files, season, episode, title)
+    if picked is None:
+        _say(f"debrid fetch: {info_hash[:8]} holds no file for this episode")
+        _delete_quietly(torrent_id)
+        return None
+    if status == "waiting_files_selection":
+        if _api(f"/torrents/selectFiles/{torrent_id}", deadline=deadline,
+                data={"files": str(picked.get("id"))}) is None:
+            return None
+    started = time.monotonic()
+    said = -1
+    while True:
+        info = _api(f"/torrents/info/{torrent_id}", deadline=deadline)
+        if not isinstance(info, dict):
+            return None
+        status = str(info.get("status") or "")
+        if status == "downloaded":
+            break
+        if status in _GONE_STATUSES:
+            _say(f"debrid fetch: {info_hash[:8]} {status}")
+            return None
+        try:
+            percent = int(float(info.get("progress") or 0))
+        except (TypeError, ValueError):
+            percent = 0
+        if on_progress is not None and percent != said:
+            said = percent
+            try:
+                on_progress(status, percent)
+            except Exception:
+                pass
+        if net.step_timeout(deadline, FETCH_POLL_S) is None:
+            _say(f"debrid fetch: {info_hash[:8]} still {status} at {percent}% "
+                 f"after {time.monotonic() - started:.0f}s - left to finish there")
+            return None
+        time.sleep(FETCH_POLL_S)
+    link = _link_for(info.get("files") or files, info.get("links") or [], picked)
+    if not link:
+        return None
+    got = _api("/unrestrict/link", deadline=deadline, data={"link": link})
+    url = str((got or {}).get("download") or "")
+    if not url.startswith("http"):
+        return None
+    _say(f"debrid fetch: {info_hash[:8]} ready after "
+         f"{time.monotonic() - started:.0f}s")
+    return {"url": url,
+            "file_name": (str((got or {}).get("filename") or "")
+                          or os.path.basename(str(picked.get("path") or ""))),
+            "size": int((got or {}).get("filesize") or 0) or
+                    int(picked.get("bytes") or 0)}
+
+
 def _resolve(torrent_id, season, episode, deadline, title=None):
     """(result dict or None, last status seen). The status ride-along is
     what playable_url's cleanup decides on."""

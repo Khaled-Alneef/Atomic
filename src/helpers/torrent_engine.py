@@ -4242,6 +4242,25 @@ def stream_url(info_hash: str):
 _pinned = set()
 
 
+def sequential(info_hash: str, on: bool = True) -> bool:
+    """Fetch this torrent's pieces in order. A browser saving the file
+    reads it from the first byte and never seeks, and with every piece
+    at one priority the head arrives late: measured 7 September 2026 on
+    a 416MB episode with 28 peers, the swarm at 7.9MB/s inside ten
+    seconds while the reader got 0.4MB/s in those ten, then 10.6MB/s
+    over the whole file. The player's add() turns this off again for a
+    hash it plays (a seek waits forever under sequential mode - see
+    focus)."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return False
+    try:
+        torrent.handle.set_sequential_download(bool(on))
+        return True
+    except Exception:
+        return False
+
+
 def pin(info_hash: str):
     """Mark a torrent as somebody's download, so an ordinary release
     leaves it alone."""

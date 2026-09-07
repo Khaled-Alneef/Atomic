@@ -1359,7 +1359,11 @@ def install():
     #   * Download in Browser reaches the swarm: with no direct link the
     #     browser is handed the app's own stream URL, served patiently
     #     and named, the way Stremio does it (his ask, 7 September).
-    updater.APP_VERSION = "1.10.275"
+    #   * A download runs at the line's speed: the debrid service is asked
+    #     to fetch a release it does not hold and waited for, with the
+    #     toast saying how far; the swarm, when it is the source, reads
+    #     in order from the first byte.
+    updater.APP_VERSION = "1.10.276"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
