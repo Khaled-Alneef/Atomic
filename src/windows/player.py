@@ -128,6 +128,15 @@ MOUSE_POLL_MS = 40
 # click, and must not toggle playback.
 CLICK_MOVE_TOLERANCE_PX = 6
 POSITION_SAVE_MS = 5000
+# **When display-resample is not holding** - see _watch_cadence. A
+# display rate that moves more than this between samples is a panel
+# changing refresh under the player (a laptop's power management), and
+# this many frames delayed or dropped inside one 5s sample is the
+# picture visibly breaking up. Two samples in a row, so one hiccup
+# while a source settles is not enough to change the mode.
+CADENCE_FPS_DRIFT = 0.05
+CADENCE_LOST_FRAMES = 12
+CADENCE_BAD_SAMPLES = 2
 
 SEEK_STEP_S = 5
 VOLUME_STEP = 5
@@ -2696,6 +2705,11 @@ class PlayerPage(GlassPage):
         # does - see _seek_absolute.
         self._pending_start_seek = None
         self._buffering_percent = 0
+        # What the presentation has been doing - see _watch_cadence.
+        self._cadence_fps = 0.0
+        self._cadence_bad = 0
+        self._cadence_switched = False
+        self._cadence_frames_lost = (0, 0)
         # Sources already proven dead this session, so _try_next_source
         # cannot loop back onto one it has just rejected.
         self._dead_sources = set()
@@ -7741,7 +7755,73 @@ class PlayerPage(GlassPage):
             show_toast(self._toast_anchor(), "Marked As Watched")
         clear_resume(self.entry, self.season, self.episode)
 
+    def _watch_cadence(self):
+        """Watch how the picture is actually being presented, and step
+        out of display-resample when it stops working.
+
+        The owner, 8 September 2026, watching on his laptop: "the video
+        player is super stuttering ... it also goes 2x speed suddenly
+        then slows down for a bit and like that", and then "it seems
+        more like changing the playback speed randomly while playing".
+
+        `video-sync=display-resample` is the app's default on a
+        measurement (video_backend, 4 September 2026) taken on his 240Hz
+        desktop panel, where it cut uneven frames from 14.6% to 0.2%.
+        It works by presenting on the *display's* clock and resampling
+        to it - so it depends on that clock being steady. A laptop's is
+        not: Windows moves the panel's refresh rate underneath it for
+        power (dynamic refresh), and every move leaves mpv's estimate
+        wrong until it re-converges, which is bursts of repeated and
+        dropped frames - stutter that reads as the speed changing.
+        Nothing here sets `speed`; the only writer is the speed panel,
+        which relabels its own button.
+
+        So this measures rather than assumes: mpv's own numbers, every
+        save tick. A display rate that moves, or frames being delayed
+        and dropped in quantity, switches this session to
+        `video-sync=audio` - mpv's default, the mode that needs no
+        display clock at all - once, out loud, and never back.
+
+        **Not reproduced here**: this machine's panel is steady, so what
+        is proven locally is that the watch reads the numbers and the
+        switch applies. The line it writes is what will name the cause
+        on his."""
+        if self._closing or self.handle is None or self._cadence_switched:
+            return
+        try:
+            fps = self._mpv_number("estimated-display-fps")
+            dropped = self._mpv_number("frame-drop-count") or 0
+            delayed = self._mpv_number("vo-delayed-frame-count") or 0
+            correction = self._mpv_number("video-speed-correction")
+        except Exception:
+            return
+        if not fps or fps <= 0:
+            return
+        moved = 0.0
+        if self._cadence_fps:
+            moved = abs(fps - self._cadence_fps) / self._cadence_fps
+        else:
+            self._cadence_fps = fps
+        lost = ((dropped or 0) - self._cadence_frames_lost[0]
+                + (delayed or 0) - self._cadence_frames_lost[1])
+        self._cadence_frames_lost = (dropped or 0, delayed or 0)
+        bad = moved > CADENCE_FPS_DRIFT or lost >= CADENCE_LOST_FRAMES
+        self._cadence_bad = self._cadence_bad + 1 if bad else 0
+        if self._cadence_bad < CADENCE_BAD_SAMPLES:
+            return
+        self._cadence_switched = True
+        logs.info(
+            f"player cadence: display {self._cadence_fps:.2f} -> {fps:.2f}Hz "
+            f"({moved * 100:.1f}% moved), {lost:.0f} frames lost this sample, "
+            f"speed correction {correction or 1:.4f} - display-resample is "
+            f"not holding here; switching this session to video-sync=audio")
+        try:
+            self.handle["video-sync"] = "audio"
+        except Exception:
+            logs.exception("Could not switch the video sync mode")
+
     def _save_position(self):
+        self._watch_cadence()
         if self._closing or not self._duration or self._position <= RESUME_MIN_S:
             return
         if self._position > self._duration * RESUME_MAX_FRACTION:

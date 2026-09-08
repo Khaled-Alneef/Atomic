@@ -34,8 +34,8 @@ in `%APPDATA%\Atomic` that 1.10 wrote.
 
 | Item | Description |
 |---|---|
-| `Atomic.zip` (release asset) | The application. **125,503,917 bytes**. SHA-256 `270091738e0bfbff9fd167e9730fbe62d1b4810989e4f96275fc13bea2335fa3` (third cut - see below) |
-| `Atomic.exe` (inside that zip) | **126,282,235 bytes**. SHA-256 `d591fcfe5f7fdd8b47dc8fb150990fdf6392dcb9a955aa929f95c818813b62d0` |
+| `Atomic.zip` (release asset) | The application. **125,507,299 bytes**. SHA-256 `8c52f152180f314028cfa005bf82427c802397e2b31ddc9c05de66c953624cf2` (fourth cut - see below) |
+| `Atomic.exe` (inside that zip) | **126,285,269 bytes**. SHA-256 `e9e9d57e4a7cec82fc64037c70358b27db0042d3f595cada6b91e13038fd2b3c` |
 | `Atomic.exe` (committed at `v2.0`) | The **bridge installer**, 11,101,411 bytes. SHA-256 `e14661e2dbcc4cf9370a216ac9e842ed17bdf644284c2265d8cc1d26bb3d4545` (second cut - see below) |
 | `Atomic.zip` (committed at `v2.0`) | The same bridge installer, zipped, for a zip-preferring updater |
 | `src/` | Full source, **125,204 Python lines** across 126 modules, plus 5,748 lines of served static UI |
@@ -59,6 +59,42 @@ its `Atomic.exe`, so that install had to be repaired by hand from the
 release zip. The application itself was never involved and no data was
 touched. `v2.0` was moved to the second cut; §11 records how the
 verification missed it and what now stops it.
+
+**A fourth cut, the same day.** Two more, and both are cases this
+machine cannot produce:
+
+- **A horizontal wheel still did not scroll a row.** The third cut told
+  a wheel from a finger by *cadence*, and every shape a horizontal
+  wheel takes looks like a stream: a tilt held down auto-repeats every
+  30-50ms, and a free-spinning or high-resolution wheel sends small
+  deltas as fast as a touchpad. What no hand does is send the **same
+  delta twice running** - a driver's tick is one constant, a swipe
+  follows the hand. Measured on the real handler: a repeating tilt at
+  35ms is eased 10 of 10 and at 120ms 6 of 6, a hi-res wheel of 12px
+  every 10ms 20 of 20 and of 6px every 8ms 19 of 20, while a touchpad
+  of varying deltas is eased 0 of 30 and a varying flick 1 of 20, and
+  an 8px blip on its own is left to the browser.
+- **The player stuttered and seemed to change speed at random.** On his
+  laptop only. Nothing in the app writes mpv's `speed` but the speed
+  panel, which relabels its own button, so this is the presentation
+  clock. `video-sync=display-resample` is the default on a measurement
+  taken on his **240Hz desktop panel** (§6 of VDD-1.10's successor
+  notes; uneven frames 14.6% -> 0.2%, 4 September 2026) and it works by
+  presenting on the display's own clock - which a laptop's is not:
+  Windows moves the panel's refresh rate underneath it for power, and
+  each move leaves mpv's estimate wrong until it re-converges, in
+  bursts of repeated and dropped frames. `PlayerPage._watch_cadence`
+  reads mpv's own numbers every save tick (`estimated-display-fps`,
+  `frame-drop-count`, `vo-delayed-frame-count`,
+  `video-speed-correction`) and steps out of display-resample into
+  `video-sync=audio` once, permanently for that session, saying why.
+  Harnessed on the real method: a steady panel is never touched, one
+  hiccup is not enough, 60 -> 47.9Hz switches, sustained frame loss
+  switches, and it never switches twice. **Not reproduced**: this
+  panel is steady, so 75s of Reacher S02E01 on the frozen build wrote
+  no cadence line, no fallback and no `stopped mid`, and the resume
+  record advanced normally - the fix is aimed at the mechanism, and the
+  line it writes is what will name the cause on his machine.
 
 **A third cut, the same day.** Three more of his reports, all in the
 source this tag carries:
