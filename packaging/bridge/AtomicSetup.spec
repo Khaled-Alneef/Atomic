@@ -24,11 +24,17 @@ a = Analysis(
     hiddenimports=[],
     hookspath=[],
     runtime_hooks=[],
+    # **Only third-party weight is excluded here, never the standard
+    # library.** The first cut of this file excluded `email`, `xml`,
+    # `asyncio` and friends to shave a megabyte or two - and
+    # `urllib.request` imports `email` at module scope, so the built
+    # program died on its first line with `No module named 'email'` on
+    # the owner's machine, mid-update, with this exe already swapped in
+    # as his Atomic. It cost nothing in size and everything in trust;
+    # the standard library stays whole.
     excludes=[
         "PyQt6", "PyQt5", "PySide6", "numpy", "PIL", "libtorrent",
-        "mpv", "pandas", "matplotlib", "scipy", "setuptools", "pip",
-        "pytest", "unittest", "email", "http.server", "xml", "sqlite3",
-        "multiprocessing", "asyncio", "distutils", "lib2to3",
+        "mpv", "pandas", "matplotlib", "scipy", "pytest",
     ],
     noarchive=False,
 )
