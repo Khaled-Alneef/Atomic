@@ -1,0 +1,1128 @@
+/* Atomic's look, in one place. The values are helpers/theme.py's, so the
+   web pages and the Qt build agree. */
+:root {
+  --bg: #0a0e16; --surface: #141b28; --hover: #1c2534;
+  --text: #e8eef6; --dim: #64718a; --accent: #2fb9a6;
+  --border: #2a3548; --rail: 216px; --danger: #ff5470;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden;
+  background: var(--bg); color: var(--text);
+  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+  user-select: none; -webkit-user-drag: none;
+}
+
+/* ---- the rail (standalone only) ---------------------------------- */
+#rail {
+  position: fixed; inset: 0 auto 0 0; width: var(--rail);
+  padding: 18px 12px; overflow: hidden;
+  border-right: 1px solid var(--border); background: var(--bg);
+}
+#brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 22px; }
+#brand b { font-size: 19px; letter-spacing: .3px; }
+#brand span { color: var(--accent); font-size: 26px; line-height: 1; }
+.navgap { height: 18px; }
+.nav {
+  display: flex; align-items: center; gap: 11px;
+  padding: 9px 12px; border-radius: 9px; cursor: pointer;
+  color: var(--text); font-size: 13.5px; font-weight: 500;
+}
+.nav:hover { background: var(--hover); }
+.nav.on { background: var(--surface); color: var(--accent); }
+.nav i { width: 16px; text-align: center; font-style: normal; opacity: .85; }
+
+/* ---- embedded in the Qt app --------------------------------------
+   Hosted inside Atomic, the page is the *content* and nothing else: Qt
+   draws the sidebar, the title bar and the search field. A rail drawn
+   here sat right beside Qt's own - two identical sidebars, which is what
+   the owner saw first. `?embed=1` is set by windows/web_pages.py. */
+body.embed #rail { display: none; }
+body.embed #page { inset: 0; }
+
+/* ---- the page ---------------------------------------------------- */
+#page {
+  position: fixed; inset: 0 0 0 var(--rail);
+  overflow-y: auto; overflow-x: hidden;
+}
+
+/* **Chromium's own scrollbar, wearing the app's colours.** This page
+   used to draw one and ease the content toward the pointer, because his
+   mouse reports at ~125Hz against 238Hz of frames and snapping straight
+   to it stepped. Every version of that follower traded stepping for lag
+   or lag for stepping, and the last was "a bad delay in the dragging
+   scrollbar method". The browser drags with no interpolation at all. */
+#page::-webkit-scrollbar { width: 12px; }
+#page::-webkit-scrollbar-track { background: transparent; }
+#page::-webkit-scrollbar-thumb {
+  background: #263143;                   /* theme.SURFACE_ACTIVE */
+  border-radius: 6px;
+  border: 3px solid var(--bg);           /* insets the thumb to 6px */
+}
+#page:hover::-webkit-scrollbar-thumb { background: #3a4761; }
+#page::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ---- the banner --------------------------------------------------
+   widgets.HeroBanner and widgets.hero_split, by their own numbers:
+   300px tall with 28px corners, laid out inside margins rather than
+   running to the window edges; a 196x264 cover on the left, vertically
+   centred; the text column beside it, centred too, because hero_split
+   puts a stretch above and below it "so the title block sits in the
+   middle of the banner rather than against the dashes". The art is an
+   <img> the block clips, so this is a banner *on* the page rather than
+   a background *of* it. */
+.hero {
+  position: relative;
+  height: 300px;
+  margin: 18px 22px 4px;
+  border-radius: 28px;
+  overflow: hidden;
+  background: var(--surface);
+  display: flex;
+  align-items: center;
+}
+.hero .hart {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+.hero.poster .hart {
+  /* A discover row has only a poster, never wide art. Blurred and
+     over-scaled rather than stretched, so it reads as deliberate. */
+  filter: blur(24px); transform: scale(1.18);
+}
+.hero::after {
+  /* A scrim across the left, where the text is - not a fade into the
+     page, which is what made it look like a background. */
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(90deg, rgba(8, 11, 18, .92) 0%,
+              rgba(8, 11, 18, .72) 38%, rgba(8, 11, 18, .12) 72%,
+              rgba(8, 11, 18, 0) 100%);
+}
+.hero .inner {
+  position: relative; z-index: 2;
+  padding: 18px 32px 18px 26px;          /* hero_split's own margins */
+  max-width: 900px;
+  display: flex; align-items: center; gap: 24px;
+}
+.hero .herocover {
+  width: 196px; height: 264px;           /* HERO_COVER_SIZE */
+  object-fit: cover; border-radius: 10px;
+  flex: 0 0 auto; background: #0e131d;
+  border: 1px solid rgba(255, 255, 255, .12);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .55);
+}
+.hero .col { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.hero.clickable { cursor: pointer; }
+.hero img.logo {
+  /* **Height first, then the width cap** - hero_logo_label's own words.
+     `max-height` only shrank a large treatment and left a small one
+     small; this scales every logo to HERO_LOGO_HEIGHT and lets
+     HERO_LOGO_MAX_WIDTH bite only when the result would be too wide. */
+  height: 84px; width: auto;
+  max-width: 480px; object-fit: contain;
+  display: block;
+}
+.hero h1 { margin: 0; font-size: 32px; font-weight: 700; letter-spacing: .2px; }
+.hero p { margin: 0; color: #c7d2e2; font-size: 12.5px; }
+/* The four fact lines, stacked - see _bullets for what each one is. */
+.hero .bullets { display: flex; flex-direction: column; gap: 3px; }
+
+/* The two actions, 46px tall as DriftButton is: accent Continue, and an
+   outlined pill the backdrop reads through for the list. */
+.hero .acts { display: flex; gap: 10px; margin-top: 8px; }
+.hero .act {
+  height: 46px; padding: 0 22px; border-radius: 10px; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600;
+  display: inline-flex; align-items: center;
+}
+.hero .act.go {
+  background: var(--accent); color: #062521; border: 0;
+}
+.hero .act.go:hover { background: #3fd0bb; }
+.hero .act.quiet {
+  background: rgba(255, 255, 255, .06); color: var(--text);
+  border: 1px solid rgba(255, 255, 255, .35);
+}
+.hero .act.quiet:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---- the banner's pager pills -------------------------------------
+   windows.home._HeroDash's own numbers: 18px at rest, 30px lit, 6px
+   tall, 200ms. Lit along its length rather than top-down - at 6px a
+   vertical ramp is under a pixel and does not render at all. */
+.herobox { position: relative; }
+.herobox .slide { display: none; }
+.herobox .slide.on { display: flex; }
+.pager {
+  position: absolute; left: 0; right: 0; bottom: 14px; z-index: 3;
+  display: flex; justify-content: center; gap: 6px;
+}
+.pill {
+  width: 18px; height: 6px; border-radius: 3px; cursor: pointer;
+  background: #263143;                     /* theme.SURFACE_ACTIVE */
+  transition: width .2s ease, background-color .2s ease;
+}
+.pill:hover { background: #93a1b5; }        /* theme.TEXT_MUTED */
+.pill.on {
+  width: 30px;
+  /* theme.accent_stops(), along the length */
+  background: linear-gradient(90deg, #63c8bc 0%, #2fb9a6 7%, #1c8f80 100%);
+}
+.pill.on:hover {
+  background: linear-gradient(90deg, #75dace 0%, #48d2be 7%, #26a795 100%);
+}
+
+header { padding: 22px 28px 10px; }
+header h1 { margin: 0; font-size: 23px; font-weight: 600; }
+header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
+
+.card {
+  /* **No frame.** The owner, 1 September 2026: "in ALL pages that have
+     cards, remove the card frame BG, and just keep the image and labels
+     for it (Like Qt before)" - which is what the Games and Apps grids
+     have always looked like: cover, name, meta, and the page's own
+     ground behind them. The hover fill stays, because it is the only
+     thing that says a card is a thing you press, and it is what
+     widgets.Card gives every clickable surface in the Qt build. */
+  background: transparent; border: 1px solid transparent;
+  border-radius: 10px; padding: 8px 8px 10px; text-align: center;
+  cursor: pointer;
+  /* Off-screen cards cost nothing; the intrinsic size keeps the bar
+     honest while they are unrealised. */
+  content-visibility: auto; contain-intrinsic-size: 300px;
+}
+.card:hover { background: var(--hover); border-color: var(--accent); }
+/* **Saved's select mode** - the owner, 4 September 2026: "add a select
+   button in saved to select multi then delete!". The same 20px box the
+   shelf cards wear (.sc .spick), placed against the poster rather than
+   the card so it sits on the artwork and not in the padding. `position`
+   is set only while picking, so a card outside select mode keeps the
+   containing block it has always had. */
+.card.picking { position: relative; }
+/* **Nothing hovers while picking.** The owner, 4 September 2026: "in
+   select mode, do not make the image blur and the resume btn appear on
+   the cards in the saved page". The frost (`.art::after`) and the ring
+   are both keyed on `.card:hover`, and the sheet laid over the card is
+   a descendant - so hovering it still lit both, offering a Continue that
+   cannot be pressed and blurring the cover behind a tick. The tick and
+   the accent outline are what say "picked"; nothing else needs to move. */
+.card.picking:hover { background: transparent; border-color: transparent; }
+.card.picking:hover .art:not(.plain)::after { opacity: 0; }
+.card.picking:hover .ring { opacity: 0; }
+/* The sheet that takes the click while picking - see statusCard for why
+   the card underneath is left wired rather than replaced. */
+.card.picking .spickover { position: absolute; inset: 0; z-index: 3; }
+.card .spick {
+  position: absolute; top: 18px; right: 18px; width: 20px; height: 20px;
+  border-radius: 6px; border: 1px solid var(--text);
+  background: rgba(8, 11, 18, .55);
+}
+.card .spick.on { background: var(--accent); border-color: var(--accent); }
+.card .spick.on::after {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 4px; height: 9px; border: solid var(--bg);
+  border-width: 0 2.5px 2.5px 0;
+  transform: translate(-50%, -64%) rotate(45deg);
+}
+.card.picked img { outline: 2px solid var(--accent); outline-offset: 1px; }
+.card img {
+  display: block; width: 160px; height: 216px; margin: 0 auto;
+  object-fit: cover; border-radius: 7px; background: #0e131d;
+}
+
+/* ---- the continue ring --------------------------------------------
+   tracker.ContinueCover's numbers: CONTINUE_BUTTON_SIZE 46 and
+   COVER_FADE_IN_MS 220. A ring with an empty middle, in its own words,
+   "so the artwork stays visible through it" - and the cover frosts
+   under it rather than the ring sitting on a plain dark square. */
+.art { position: relative; width: 160px; margin: 0 auto; }
+.art::after {
+  content: ""; position: absolute; inset: 0; border-radius: 7px;
+  background: rgba(8, 11, 18, .45);
+  backdrop-filter: blur(2px);
+  opacity: 0; transition: opacity .22s ease; pointer-events: none;
+  z-index: 1;
+}
+.card:hover .art:not(.plain)::after { opacity: 1; }
+.ring {
+  /* **Above the frost, not under it.** `.art::after` carries a
+     backdrop-filter and paints over any child with no stacking order of
+     its own, so the ring was being blurred along with the artwork. The
+     owner wants the blur on the cover and the button sharp. */
+  z-index: 2;
+  position: absolute; left: 50%; top: 50%;
+  width: 46px; height: 46px; margin: -23px 0 0 -23px;
+  border-radius: 50%; cursor: pointer;
+  border: 2px solid var(--accent);
+  background: rgba(8, 11, 18, .35);
+  opacity: 0; transform: scale(.82);
+  transition: opacity .22s ease, transform .22s ease, background-color .22s ease;
+}
+.card:hover .ring { opacity: 1; transform: scale(1); }
+.ring:hover { background: rgba(47, 185, 166, .28); }
+.ring::before {
+  /* A play triangle, drawn rather than typed: a glyph would size itself
+     off the font and sit slightly off-centre.
+
+     **Centred the way tracker._ContinueButton centres it**, rather than
+     by two numbers typed in: that paints a triangle `side * 0.36` tall
+     and 0.86 of that wide, about `side/2`, nudged right by `side * 0.04`
+     because the visual mass of a right-pointing triangle sits left of
+     its bounding box. On a 46px ring that is 16.6 x 14.2 with a 1.84px
+     nudge. The old rule was 20px tall and sat 3.5px right of centre
+     inside the 42px padding box - the owner's "make the resume symbol
+     at the center of the circle". Positioned by transform so the ring's
+     2px border cannot shift it. */
+  content: ""; position: absolute; left: 50%; top: 50%;
+  border-style: solid;
+  border-width: 8.3px 0 8.3px 14.2px;
+  border-color: transparent transparent transparent var(--accent);
+  transform: translate(calc(-50% + 1.84px), -50%);
+}
+.card .t { margin-top: 7px; font-size: 12px; height: 31px; overflow: hidden; }
+.card .m { color: var(--dim); font-size: 11px; min-height: 14px; }
+
+/* rows of tiles */
+.row { padding: 4px 28px 18px; }
+.row h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+.strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 10px;
+         scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+/* **A row has to be scrollable by hand.** It was hidden entirely
+   (height: 0), so a row wider than the window could only be reached with
+   a sideways gesture the owner's mouse does not have - "no horizontal
+   scrolls". Slim, dark until hovered, and it does not move the cards:
+   the padding below reserves its height whether or not it is drawn. */
+.strip::-webkit-scrollbar { height: 8px; }
+.strip::-webkit-scrollbar-track { background: transparent; }
+.strip::-webkit-scrollbar-thumb {
+  background: var(--border); border-radius: 4px;
+}
+.strip:hover::-webkit-scrollbar-thumb { background: #3a4761; }
+.strip::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+.strip .card { flex: 0 0 auto; width: 176px; }
+
+.empty { padding: 60px 28px; color: var(--dim); }
+/* The page-wide "Looking around..." - in the middle of the page, not at
+   its left edge (the owner, 6 September 2026). */
+.empty.looking { text-align: center; padding: 160px 28px 40px; }
+/* A chapter with no pages - see app.js openChapter's noPages. */
+.rnopages { text-align: center; padding: 120px 28px; }
+.rnopages-head { color: var(--text); font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+.rnopages-why { margin-bottom: 22px; }
+.rnopages .rbtn { display: inline-block; }
+
+/* ---- the reader ---------------------------------------------------
+   The Qt reader's own numbers, from windows/reader.py: BAR_HEIGHT 48,
+   BAR_REVEAL_PX 72, BOTTOM_HEIGHT 60, PLACEHOLDER_RATIO 1.45, and
+   MEDIUM_TARGET_WIDTH (manga 1100, manhwa/manhua 762) as --pagew, in
+   CSS px - the same unit the pages are drawn in (openChapter.sizePage). */
+.rreach {
+  position: fixed; top: 0; left: 0; right: 0; height: 72px; z-index: 11;
+}
+.rbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 12;
+  height: 48px;                          /* reader.BAR_HEIGHT */
+  display: flex; align-items: center; gap: 10px; padding: 0 18px;
+  background: rgba(10, 14, 22, .94);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+  transform: translateY(-104%);
+  transition: transform .16s ease-out;
+}
+.rreach:hover ~ .rbar, .rbar:hover { transform: translateY(0); }
+/* **The bar's empty parts move the window** (the owner, 6 September
+   2026), through WebView2's non-client regions (webview2_host._ready):
+   the controls stay controls, and in full screen there is nothing to
+   move - app.js marks the document `fs` from its own size. */
+.rbar { app-region: drag; -webkit-app-region: drag; }
+.rbar button, .rbar select, .rbar .rjump, .rbar .rzoom {
+  app-region: no-drag; -webkit-app-region: no-drag;
+}
+body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
+.rbtn {
+  background: var(--surface); color: var(--text); cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 14px; font: inherit; font-size: 12.5px;
+}
+.rbtn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.rbtn:disabled { opacity: .38; cursor: default; }
+.rlabel { position: absolute; right: 18px; bottom: -18px;
+          color: var(--dim); font-size: 11px; pointer-events: none; }
+
+/* The two clusters, and the title between them.
+
+   **The title is positioned across the whole bar, not laid out between
+   the clusters** - reader._build_bar keeps it out of the row for exactly
+   this reason: "a label between two stretches sits in the middle of what
+   the two clusters leave over, and those clusters are different widths,
+   so it would land off centre by half their difference". Absolute and
+   full width makes the centre the real centre, and it is transparent to
+   the pointer so the controls under it still take their clicks. */
+.rgroup { display: flex; align-items: center; gap: 6px; z-index: 1; }
+/* **A class, not :last-of-type.** That pseudo-class matches by element
+   *type*, and `.rlabel` is a div that comes after this one - so it never
+   matched, the right-hand cluster was never pushed right, and every
+   control sat bunched at the left beside the chapter number. */
+.rgroup.rright { margin-left: auto; }
+.rtitle {
+  position: absolute; left: 0; right: 0; text-align: center;
+  font-size: 13.5px; font-weight: 600; pointer-events: none;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  padding: 0 340px;
+}
+.rnum { color: var(--dim); font-size: 12.5px; margin-left: 4px;
+        white-space: nowrap; }
+.rzoom { color: var(--dim); font-size: 11.5px; min-width: 42px;
+         text-align: center; cursor: pointer; user-select: none; }
+
+/* Squared to the same footprint reader._glyph_button uses - left at the
+   default padding these came out far wider than the icons beside them,
+   which is the measurement reader.py records for the Qt pair. The font
+   is Windows' own icon face, so these are the same glyphs the Qt bar
+   draws rather than lookalikes; the fallback keeps a missing face from
+   printing a private-use box. */
+.rglyph {
+  font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
+  font-size: 14px; line-height: 1;
+  width: 34px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text); cursor: pointer;
+  border: 1px solid transparent; border-radius: 7px;
+}
+.rglobe {
+  display: block; width: 17px; height: 17px; background: currentColor;
+  -webkit-mask-size: contain; mask-size: contain;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+}
+.rglyph:hover { background: var(--hover); border-color: var(--border); }
+.rglyph:disabled { opacity: .38; cursor: default; }
+
+/* The chapter list, now in the middle of the top bar. */
+.rjump {
+  background: var(--surface); color: var(--text); font: inherit;
+  font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; max-width: 560px; cursor: pointer;
+}
+.rjump:hover { border-color: var(--accent); }
+
+/* **Centred on the window, not between the two clusters.** The same
+   reasoning `.rtitle` carried when it held the chapter's number: the
+   left and right groups are different widths, so a centred flex item
+   sits off centre by half their difference (windows/reader says so
+   too). Absolute and translated, so it is centred on the bar however
+   wide either side grows - and unlike the old label it is a control, so
+   it keeps its pointer events. */
+.rbar .rjump.rtitle {
+  position: absolute; left: 50%; right: auto;
+  transform: translateX(-50%);
+  font-weight: 600; text-align: left; padding: 6px 10px;
+  max-width: min(560px, calc(100% - 700px));
+  /* **It is a control now, so it takes the pointer.** The owner, 4
+     September 2026: "make the button in image 1 finger-pointing on
+     hover, and it does not press now!!!". `.rtitle` was a *label* -
+     the chapter's number, centred - and carried `pointer-events: none`
+     so it could never swallow a press meant for the bar behind it.
+     Re-using the class for the dropdown inherited that, which is
+     exactly one property away from a control that cannot be clicked at
+     all. Both halves of his report are this line. */
+  pointer-events: auto; cursor: pointer;
+}
+
+/* **A 30px gutter each side, the site's own.** Madara's reading page
+   draws its pages in `.container{max-width:100%;padding:0 30px}`, so a
+   page is at most the viewport less 60px; this is the same column, and
+   openChapter.availableWidth subtracts the same 30 (STRIP_PAD) - change
+   one and change the other. Measured 2 September 2026 on 3asq. */
+.reader { display: flex; flex-direction: column; align-items: center;
+          padding: 0 30px 76px; background: var(--bg); }
+/* **No side gutter for manga.** The owner, 6 September 2026, zooming
+   in: single pages stopped at the same width as the double pages, "so
+   make sure the width limit is on the screen". The 30px a side was the
+   site's own container padding; the limit is the window now, and
+   openChapter.availableWidth reads whatever padding is left. */
+.reader.paged { padding-left: 0; padding-right: 0; }
+/* A hair between manga pages - see the note in openChapter. Small
+   enough to read as a join rather than a break. */
+.reader.paged .rpage + .rpage { margin-top: 6px; }
+
+/* The chapter controls, pinned to the floor - reader.BOTTOM_HEIGHT 60,
+   previous and next hard against the two edges with the list between
+   them. Revealed by reaching for the bottom of the window, the way the
+   top bar is revealed by reaching for the top. */
+.rreach-b {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 72px; z-index: 11;
+}
+.rfloor {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 12;
+  height: 60px; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 18px;
+  background: rgba(10, 14, 22, .94);
+  border-top: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+  transform: translateY(104%);
+  transition: transform .16s ease-out;
+}
+.rreach-b:hover ~ .rfloor, .rfloor:hover { transform: translateY(0); }
+.rbtn.go { background: var(--accent); color: #062521; border-color: var(--accent);
+           font-weight: 600; }
+.rbtn.go:hover:not(:disabled) { background: #3fd0bb; color: #062521; }
+/* **The same containment the grid's cards have.** The owner, 4
+   September 2026: "make the scrolling in the reader view exactly the
+   same as in the movies page EXACTLY."
+
+   `.gc` has carried `content-visibility: auto` with `contain: layout
+   paint style` since web_grid was written, and its note says why:
+   without it the compositor re-rasterises everything in the scroller on
+   every frame. A reader page is far larger than a card - a chapter is
+   twenty images 1100 CSS wide and 1600 tall - and it had no containment
+   at all, so every frame of a scroll was re-rasterising pages nobody
+   was looking at. This is that mechanism, on the page instead of the
+   card.
+
+   No `contain-intrinsic-size` is needed: the element already has an
+   explicit width and an `aspect-ratio` below, so its box is determinate
+   without laying its contents out, which is precisely the condition
+   `content-visibility: auto` needs to skip work without the scrollbar
+   jumping. */
+.reader .rpage {
+  content-visibility: auto;
+  contain: layout paint style;
+  /* The width is set per page by openChapter.sizePage, from the scan's
+     own CSS px capped to this column - this is only the box a page
+     occupies before it has arrived, capped the same way (100% is the
+     content width, inside the gutter) so nothing jumps when it does, and
+     max-width is the same ceiling once more, as Madara's own
+     `.reading-content img{max-width:100%}` is. */
+  display: block; width: min(var(--pagew, 1100px), 100%); max-width: 100%;
+  background: #0e131d;
+  /* Its own shape once loaded (a double-page spread is twice as wide as
+     a single one); the shared --ar, or reader.PLACEHOLDER_RATIO's 1.45,
+     only estimates boxes that have not arrived yet so nothing below
+     moves as they load. */
+  aspect-ratio: var(--ar, 1 / 1.45);
+  height: auto;
+}
+
+.items { display: grid; gap: 4px; padding: 10px 28px 60px; }
+.ep { display: flex; gap: 14px; align-items: baseline; cursor: pointer;
+      padding: 9px 12px; border-radius: 8px; background: var(--surface);
+      border: 1px solid transparent;
+      content-visibility: auto; contain-intrinsic-size: 38px; }
+.ep:hover { background: var(--hover); border-color: var(--accent); }
+.ep.done, .ep.done .epn { color: var(--dim); }
+.epn { font-size: 12.5px; min-width: 116px; flex: 0 0 auto; }
+.eps { color: var(--dim); font-size: 11.5px; overflow: hidden;
+       white-space: nowrap; text-overflow: ellipsis; }
+
+/* ---- the catalogue grid -------------------------------------------
+   The medium pages' own design, carried over from helpers/web_grid.py's
+   shell rather than reinvented - the owner, 1 September 2026: "use the
+   same design as before but with the WebView2". The card is that file's
+   - an 8px pad with a 10px radius, a 7px-radius cover, the title block
+   fixed at 31px so a two-line title cannot shift the row under it, and
+   the meta line in ACCENT when the title is one of his.
+
+   The *cell* is the painted grid's, which is what these pages actually
+   drew: layout.poster_size is 160x216 and layout.adopt makes the card
+   poster + 20, so 180px, with poster_grid.GRID_SPACING's 14px between
+   them - not web_grid's 176 and 10. Both pages were measured running at
+   DPR 1.25 with the same 160x216 poster (from the page's own
+   getBoundingClientRect, and from layout.poster_size), so these are the
+   same numbers on the glass rather than numbers that merely match on
+   paper. Read out of the screenshots first and thrown away: a colour
+   classifier over the two shots split posters wherever the artwork went
+   dark, and was measuring itself. */
+.grid {
+  /* 42px in from each edge, which is the Qt page's own 18 + 24: its
+     outer panel margin plus the body's (tracker.py:2477, 2482). At 20px
+     - web_grid's number, which sits inside a panel that already had the
+     rest - the grid started 58 device pixels left of where the Qt one
+     does and fitted a ninth column. Measured off both screenshots by
+     the card borders: Qt's first edge at x=188, this one's at 159. */
+  display: grid; gap: 14px; padding: 16px 42px 60px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+}
+.gc {
+  /* Frameless, like every other card here - see .card. */
+  background: transparent; border: 1px solid transparent;
+  border-radius: 10px; padding: 8px 8px 10px; text-align: center;
+  cursor: pointer;
+  /* **The card is its own island** - web_grid's words, and its reason:
+     without this the compositor re-rasterises the whole grid as it
+     scrolls, which is 250 cards of layout, paint and image decode for a
+     viewport showing two dozen. The intrinsic size keeps the scrollbar
+     honest while the rest is skipped; a wrong one makes the thumb jump
+     as cards are realised, which is its own bug. */
+  content-visibility: auto;
+  contain-intrinsic-size: 282px;
+  contain: layout paint style;
+}
+.gc:hover { background: var(--hover); border-color: var(--accent); }
+.gc .p {
+  width: 160px; height: 216px; margin: 0 auto; border-radius: 7px;
+  background: var(--bg); object-fit: cover; display: block;
+}
+.gc .t { margin-top: 7px; font-size: 12px; line-height: 1.25; height: 31px;
+         overflow: hidden; }
+.gc .m { color: var(--dim); font-size: 11px; margin-top: 2px;
+         min-height: 14px; }
+.gc .m.s { color: var(--accent); }
+
+/* The medium name over the note. Both dim and the same size, which is
+   the point: a large name here stacked two copies of the same word.
+   Indented to the grid's own 42px so the three left edges line up. */
+header.gridhead { padding: 34px 42px 12px; }
+header p.ptitle { margin: 0 0 22px; }
+
+/* The read tick on a chapter row - reader.ICON_READ, the CheckMark from
+   Windows' own icon face, dim until the chapter is marked. Right-clicking
+   the row does the same thing, which is how the Qt list offers it. */
+.eptick {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
+  font-size: 12px; line-height: 1;
+  width: 30px; height: 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--dim); cursor: pointer;
+  border: 1px solid transparent; border-radius: 6px;
+  opacity: .45;
+}
+.eptick:hover { background: var(--hover); border-color: var(--border); opacity: 1; }
+.eptick.on { color: var(--accent); opacity: 1; }
+
+/* ---- the shelves: Games, Apps, Websites ----------------------------
+   windows/games.py and windows/link_grid.py by their own numbers: an
+   18px outer margin round a 24/20 panel (theme.RADIUS_LG is 18, and
+   QWidget#Panel fills with PANEL_FILL, which resolves to SURFACE); a
+   180px card (layout.adopt's poster + 20) at 14px spacing
+   (grid_layout.setSpacing(14)); and the grid **centred**, which is the
+   owner's ask of 28 August 2026 recorded in games.py, not a default. */
+.shelfhead {
+  display: flex; align-items: center; gap: 12px;
+  padding: 18px 30px 10px;
+}
+.paneltitle { margin: 0; font-size: 25px; font-weight: 700; flex: 1; }
+.shelfacts { display: flex; gap: 8px; }
+.roundbtn {
+  width: 40px; height: 40px; border-radius: 20px;   /* setFixedSize(40, 40) */
+  font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
+  font-size: 14px; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border);
+}
+.roundbtn:hover { border-color: var(--accent); color: var(--accent); }
+.roundbtn.accent {
+  background: var(--accent); color: #021815; border-color: var(--accent);
+  font-family: inherit; font-size: 21px; font-weight: 600;
+}
+.roundbtn.accent:hover { background: #48d2be; color: #021815; }
+
+.sortrow { display: flex; align-items: center; gap: 10px; padding: 0 30px 12px; }
+.sortlabel { color: var(--text); font-size: 13px; }
+.sortbox, .plainbtn, .selbtn {
+  background: var(--surface); color: var(--text); font: inherit;
+  font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 12px; cursor: pointer;
+}
+.sortbox { min-width: 168px; }
+.sortbox:hover, .plainbtn:hover, .selbtn:hover { border-color: var(--accent); }
+.selbtn { margin-left: auto; }
+.selbtn.on { border-color: var(--accent); color: var(--accent); }
+.plainbtn.small { padding: 5px 10px; font-size: 12px; }
+.plainbtn:disabled { opacity: .4; cursor: default; }
+
+.selbar {
+  display: flex; align-items: center; gap: 12px; padding: 0 30px 12px;
+}
+.selcount { color: var(--dim); font-size: 12.5px; flex: 1; }
+.selall { display: flex; align-items: center; gap: 6px; font-size: 12.5px;
+          cursor: pointer; }
+/* **Select All wears the app's checkbox, not Windows'.** The owner, 4
+   September 2026: "make the select all box when clicking select in the
+   games, apps and websites pages also has the same box design as the
+   filter check boxes". It was a bare <input type=checkbox>, so it drew
+   the platform's white square - the brightest thing on this ground, and
+   the exact complaint that took the genre ticks out of the paint on the
+   same day. Same three tokens, same 13px box, same longhand
+   `background-color` (the shorthand resets background-image with it and
+   Chromium keeps a checkbox's own rendering in that slot under
+   `appearance: none`), and the tick itself is the shared rule below. */
+.selall input {
+  appearance: none; -webkit-appearance: none;
+  width: 13px; height: 13px; margin: 0; flex: 0 0 auto;
+  border: 1px solid var(--border); border-radius: 4px;
+  background-color: var(--bg); position: relative; cursor: pointer;
+}
+.selall:hover input { border-color: var(--accent); }
+.selall input:checked {
+  background-color: var(--accent); border-color: var(--accent);
+}
+.selall input:focus-visible { outline: 1px solid var(--accent); }
+.binbtn {
+  font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
+  font-size: 13px; width: 34px; height: 30px; padding: 0; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: #ff5470;             /* theme.DANGER */
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.binbtn:hover:not(:disabled) { border-color: #ff5470; background: var(--hover); }
+.binbtn:disabled { opacity: .35; cursor: default; }
+
+.shelfpanel {
+  margin: 0 18px 24px; padding: 20px 24px 24px;
+  background: var(--surface); border-radius: 18px;     /* RADIUS_LG */
+  /* The Qt panel takes the rest of the page - its grid is added with
+     stretch=1 - so a short shelf still shows a full panel rather than a
+     band the height of two rows. The subtraction is this page's own
+     chrome: the 18px top margin, the 40px button row, the sort row, and
+     the panel's bottom margin. */
+  min-height: calc(100vh - 172px);
+}
+.shelfgrid {
+  display: flex; flex-wrap: wrap; gap: 14px;           /* setSpacing(14) */
+  justify-content: center;                             /* centred, per games.py */
+  align-content: flex-start;
+}
+.sc {
+  width: 180px; padding: 10px 8px;                     /* CARD_MARGINS */
+  text-align: center; cursor: pointer; position: relative;
+  background: transparent; border: 1px solid transparent; border-radius: 10px;
+  content-visibility: auto; contain-intrinsic-size: 262px;
+}
+.sc:hover { background: var(--hover); border-color: var(--accent); }
+.sc .sart {
+  width: 160px; height: 216px; object-fit: cover;      /* CARD_COVER_SIZE */
+  display: block; margin: 0 auto; border-radius: 7px; background: var(--bg);
+}
+/* An app or a website draws its icon square at the card's full width -
+   "store icons are square originals, and cropping one to the movie
+   tile's portrait would cut the sides off every logo" (link_grid). */
+.sc.square .sart { height: 160px; object-fit: contain; background: transparent; }
+.sc .sart.gone { opacity: .3; }
+.sc .sname { margin-top: 7px; font-size: 12px; line-height: 1.25; }
+.sc .smissing {
+  color: #ff5470; font-weight: 700; font-size: 10.5px; margin-top: 2px;
+}
+/* **The same checkbox the filter uses, on the card's corner.** The
+   owner, 4 September 2026: "in the select mode when a card selected
+   make it also have the square checkbox on its corner and check mark
+   when selected (just like the check box on the filter)". It was a
+   round blob that filled with the accent and carried no tick at all,
+   so "selected" and "hovered" read alike at a glance.
+
+   Square with the same 4px-at-13px corner (6px at 20px), the same three
+   tokens, and the same tick - which is one rule shared with the genre
+   ticks above rather than a second copy of the geometry. Kept on a
+   translucent ground rather than the flat --bg, because this one sits
+   on a picture and has to stay legible over a light cover. */
+/* Dragging a card to reorder it - the one lifted and the one it is
+   about to land on. Faint on purpose: the grid is the thing being read,
+   and a heavy highlight on every dragover is noise. */
+.sc.dragging { opacity: .45; }
+.sc.dropinto .sart { outline: 2px dashed var(--accent); outline-offset: 2px; }
+
+.sc .spick {
+  position: absolute; top: 12px; right: 12px; width: 20px; height: 20px;
+  border-radius: 6px; border: 1px solid var(--text);
+  background: rgba(8, 11, 18, .55);
+}
+.sc .spick.on { background: var(--accent); border-color: var(--accent); }
+/* The card's tick is the same shape a size up - 20px of box against the
+   filter's 13px - so it is scaled by the same ratio the box was. */
+.sc .spick.on::after {
+  width: 4px; height: 9px; border-width: 0 2.5px 2.5px 0;
+}
+/* Selected reads as selected from across the grid, not only at the
+   corner: the same accent outline a hovered card wears. */
+.sc.picked .sart { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---- Downloads ---------------------------------------------------- */
+.dlfolder { display: flex; align-items: center; gap: 10px; padding: 0 30px 12px; }
+.dlpath { color: var(--dim); font-size: 12px; flex: 1;
+          overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.dllist { display: flex; flex-direction: column; gap: 10px; }
+.dlrow {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 12px; border-radius: 10px; background: var(--bg);
+}
+.dlmain { flex: 1; min-width: 0; }
+.dltitle { font-size: 13px; overflow: hidden; white-space: nowrap;
+           text-overflow: ellipsis; }
+.dldetail { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
+.dlacts { display: flex; gap: 8px; flex: 0 0 auto; }
+.dlbar {
+  height: 6px; border-radius: 3px; background: #263143; margin-top: 8px;
+  overflow: hidden;
+}
+.dlfill {
+  height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, #63c8bc 0%, #2fb9a6 7%, #1c8f80 100%);
+  transition: width .3s ease-out;
+}
+
+/* ---- Home's Quick Apps and Websites --------------------------------
+   home._build_quick_list: the two lists are **columns of one row**, each
+   a small title over a vertical list of icon-and-name. No path under the
+   name; the icon is 28px (home.ROW_ICON_SIZE).
+
+   Five rows visible, the rest reached by scrolling *inside* the list -
+   the owner, 2 September 2026: "only shows 5 (in a scrollable frame that
+   contains all but in order to see more than 5 scroll inside their
+   frame). (make separate scrollable frames to apps and websites)". So
+   each column owns its own scroller; neither moves the other, and the
+   page below them does not grow with the number of apps. */
+.row.quick { display: inline-block; vertical-align: top; width: 50%; }
+.row.quick .tiles {
+  display: flex; flex-direction: column; gap: 2px;
+  /* Five rows: 28px of icon plus 6px of padding top and bottom, plus the
+     2px gap between them. */
+  max-height: 212px;
+  overflow-y: auto; overflow-x: hidden;
+  /* Its own scrollbar, and the page keeps its wheel when this one is at
+     an end rather than handing the whole page a scroll it did not ask
+     for. */
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+.row.quick .tiles::-webkit-scrollbar { width: 8px; }
+.row.quick .tiles::-webkit-scrollbar-track { background: transparent; }
+.row.quick .tiles::-webkit-scrollbar-thumb {
+  background: #263143; border-radius: 4px;
+}
+.row.quick .tiles:hover::-webkit-scrollbar-thumb { background: #3a4761; }
+.tile {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px; border-radius: 8px; cursor: pointer;
+  border: 1px solid transparent; min-width: 0; flex: 0 0 auto;
+}
+.tile:hover { background: var(--hover); border-color: var(--accent); }
+.tart {
+  width: 28px; height: 28px; flex: 0 0 auto;      /* home.ROW_ICON_SIZE */
+  display: flex; align-items: center; justify-content: center;
+  color: var(--dim); font-size: 13px; font-weight: 700;
+  /* **No plate behind the icon** - the owner: "remove the images bg in
+     the apps and websites list in the main page". A store icon is its
+     own shape and a rounded box round it reads as a second frame. */
+  background: transparent; border-radius: 0; overflow: visible;
+}
+/* **The icon itself is rounded.** The owner, 4 September 2026: "make
+   the apps icons in the main page has round corners!". On the picture,
+   not on `.tart` - the plate behind it is deliberately absent (see
+   above), so rounding the box would round nothing. 6px on a 28px icon
+   is the same proportion the 160px shelf art carries at 7px on its own
+   corners, and a logo that is already a circle is unaffected. */
+.tart img { width: 28px; height: 28px; object-fit: contain; display: block;
+            background: transparent; border-radius: 6px; }
+.tbody { min-width: 0; flex: 1; }
+.tname { font-size: 13px; overflow: hidden; white-space: nowrap;
+         text-overflow: ellipsis; }
+.tgone { color: #ff5470; font-size: 11px; font-weight: 700; flex: 0 0 auto; }
+
+/* ---- Saved / History / Schedule ------------------------------------
+   The Qt tabs' own layout: the page name, then the Watch/Read pills
+   beside it, and under those either cards carrying the status and the
+   number, or Schedule's list of rows. */
+.tabrow { display: flex; align-items: center; gap: 10px; padding: 18px 30px 6px; }
+.tabrow .ptitle { margin: 0 8px 0 0; color: var(--dim); font-size: 12px; }
+.pill2 {
+  padding: 5px 18px; border-radius: 14px; cursor: pointer;
+  font: inherit; font-size: 12.5px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border);
+}
+.pill2:hover { border-color: var(--accent); }
+.pill2.on { background: var(--accent); color: #021815; border-color: var(--accent);
+            font-weight: 600; }
+.tabnote { margin: 0; padding: 0 30px 8px; color: var(--dim); font-size: 12px; }
+
+/* The number under a saved card, in ACCENT - the one colour on it. */
+.cnum { color: var(--accent); font-size: 11.5px; margin-top: 2px; }
+
+/* Schedule: a row per title, the slot and countdown at the right. */
+.schedblock { padding: 4px 30px 18px; }
+.schedblock h2 { margin: 10px 0 2px; font-size: 14px; font-weight: 600; }
+.schedday { color: var(--dim); font-size: 11.5px; margin: 12px 0 6px; }
+/* **A size up, at his ask** - 2 September 2026, "make the items in the
+   History and Schedule pages a bit larger". These two pages are lists
+   rather than grids, so the row is the whole card: the art, the type
+   size and the padding all move together, or a bigger picture only
+   makes the text beside it look smaller. */
+.schedblock h2 { font-size: 15.5px; }
+.schedday { font-size: 12.5px; margin: 14px 0 7px; }
+.schedrow {
+  display: flex; align-items: center; gap: 14px;
+  padding: 11px 15px; border-radius: 11px; cursor: pointer;
+  background: var(--surface); border: 1px solid transparent;
+  margin-bottom: 8px;
+}
+.schedrow:hover { background: var(--hover); border-color: var(--accent); }
+.schedart {
+  width: 56px; height: 56px; flex: 0 0 auto; border-radius: 7px;
+  object-fit: cover; background: var(--bg);
+}
+.schedbody { flex: 1; min-width: 0; }
+.schedname { display: flex; align-items: center; gap: 8px; font-size: 14.5px;
+             overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.savedtag {
+  background: var(--accent); color: #021815; border-radius: 10px;
+  padding: 2px 9px; font-size: 11px; font-weight: 700; flex: 0 0 auto;
+}
+.schednum { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
+.schedwhen { text-align: right; flex: 0 0 auto; font-size: 13px; }
+.schedleft { color: var(--accent); font-size: 12.5px; margin-top: 4px; }
+
+/* ---- History -------------------------------------------------------
+   tracker._build_history_row's own shape: a 46x62 cover (portrait, not
+   the schedule's 44 square - a history row is a title, and its poster
+   is how it is picked out of a list), the title with its progress under
+   it, and the right-hand column carrying when it was opened over the
+   In Saved / Not saved tag. Same lift as the schedule rows and for the
+   same reason the Qt page gives: SURFACE on this panel is invisible
+   without a border. */
+.histhead {
+  display: flex; justify-content: flex-end;
+  padding: 0 30px 10px;
+}
+.histclear {
+  flex: 0 0 auto; cursor: pointer; font: inherit; font-size: 12px;
+  color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px;
+}
+.histclear:hover { background: var(--hover); border-color: var(--danger);
+                   color: var(--danger); }
+/* **The history row's one-item right-click menu.** The owner, 4
+   September 2026: "make when I right click on any item in the history
+   show a Remove from History button and make it in red". Red is the
+   app's own --danger, the colour widgets' Danger button and the Clear
+   History hover already use - not a literal (theme.py owns the six). */
+.histmenu {
+  position: fixed; z-index: 60;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 5px; box-shadow: 0 12px 30px #0009;
+}
+.histforget {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  font: inherit; font-size: 13px; white-space: nowrap;
+  color: var(--danger); background: transparent; border: 0;
+  border-radius: 7px; padding: 9px 16px;
+}
+.histforget:hover { background: #ff547022; }
+.histlist { padding: 0 30px 24px; }
+.histrow {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 16px 10px 12px; border-radius: 11px; cursor: pointer;
+  background: var(--surface); border: 1px solid transparent;
+  margin-bottom: 9px;
+}
+.histrow:hover { background: var(--hover); border-color: var(--accent); }
+/* The Qt row's 46x62 cover, a size up with it - the poster is how a
+   title is picked out of a list, so it leads the change. */
+.histart {
+  width: 60px; height: 81px; flex: 0 0 auto; border-radius: 7px;
+  object-fit: cover; background: var(--bg);
+}
+.histbody { flex: 1; min-width: 0; }
+.histname { font-size: 14.5px; overflow: hidden; white-space: nowrap;
+            text-overflow: ellipsis; }
+.histmeta { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
+.histwhen { text-align: right; flex: 0 0 auto; font-size: 13px;
+            color: var(--dim); }
+/* The tag is the one thing on the row that is not a fact about the
+   title but about this app: an unsaved title leaving a trace here is
+   what the whole section exists for, so it is stated rather than left
+   to look identical to a saved one. */
+.histtag { font-size: 11.5px; font-weight: 700; margin-top: 5px;
+           color: var(--dim); }
+.histtag.in { color: var(--accent); }
+
+/* Nothing to show yet, or nothing at all: helpers/images.blank_tile,
+   which is theme.SURFACE_HOVER - the same flat slab the Qt cards use,
+   and never a border or a broken-image glyph. */
+/* Specific enough to beat `.sc.square .sart`, which sets a transparent
+   ground so a square logo is not letterboxed onto a slab. */
+.sc .sart.blank, .sc.square .sart.blank, .gc .p.blank,
+.histart.blank, .schedart.blank, .art img.blank {
+  background: var(--hover); border: none;
+}
+
+/* ---- a way out of the genre and cast pages ------------------------
+   The owner, 3 September 2026: "in the same genere/ cast pages there is
+   no back button, add it". Those two routes are drawn inside
+   web_reader's shell, which covers the window whole - the app's own bar
+   is behind it - so this is the only door on screen.
+
+   Sized and shaped like the reader's own chevron (.rglyph, 34px) and
+   sitting on the page heading's line, indented to the grid's 42px so
+   its left edge lines up with the cards and the title under it. */
+header .pback {
+  display: block; width: 34px; height: 34px; margin: 0 0 10px;
+  border-radius: 9px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text);
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+header .pback:hover { border-color: var(--accent); background: var(--hover); }
+/* What the genre and cast pages say while their rows are being fetched -
+   the door above is drawn immediately and this stands in for the count
+   until there is one (see go()). */
+header .pwait { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
+
+/* ---- a face, not a poster -----------------------------------------
+   The Cast row on Discover and on a search (server._cast_section). A
+   person's TMDB portrait is 2:3 like a poster, so the card is the same
+   card - what changes is that the picture is a face, which reads as a
+   face when it is round. The name stays on two lines like every other
+   card's title so a row of faces lines up with the rows above it. */
+.strip.faces .card .art { border-radius: 50%; overflow: hidden; }
+.strip.faces .card img { border-radius: 50%; object-fit: cover; }
+
+/* **An empty number takes no room.** progressInto writes into `.cnum`,
+   `.histmeta` and `.schednum`, which now exist on every card whether or
+   not anything has been marked yet - a card drawn before the first mark
+   had no node to write into, so the first tick showed nothing until the
+   page was rebuilt. Empty, they are not in the layout at all, so an
+   unmarked card looks exactly as it did. */
+.card .cnum:empty, .histmeta:empty, .schednum:empty { display: none; }
+
+/* The Anime / Series / Movies tabs on a genre or cast page. Same pill
+   as the Watch/Read header tabs (.pill2), on their own row under the
+   page name so the count still reads as the line below them. */
+header .btabs { display: flex; gap: 8px; margin: 2px 0 10px; }
+
+/* The filter field on Watch and Read - one control, on the header row
+   opposite the page name, sized like the Sort box on a shelf. */
+.filterrow { display: flex; align-items: center; gap: 10px;
+             padding: 0 42px 10px; }
+.filterrow input {
+  flex: 0 1 320px; height: 32px; padding: 0 10px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px;
+}
+.filterrow input:focus { outline: none; border-color: var(--accent); }
+.filterrow .fcount { color: var(--dim); font-size: 11.5px; }
+
+/* **Sort and Clear All, on the right of the filter row.** The owner, 4
+   September 2026, asked for both: a list that changes the order, and one
+   press that unticks everything. `margin-left: auto` on the first of the
+   pair pushes them and everything after them to the right edge, so the
+   name box and the Saved pills keep the left. */
+.filterrow .sortpick {
+  display: flex; align-items: center; gap: 7px;
+  color: var(--dim); font-size: 11.5px; flex: 0 0 auto;
+}
+.filterrow .sortpick select {
+  background: var(--surface); color: var(--text); font: inherit;
+  font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; cursor: pointer;
+}
+.filterrow .sortpick select:hover { border-color: var(--accent); }
+/* Its own left margin rather than `auto`, so that a page with no Sort
+   control (the reading catalogues still get one, but a future page may
+   not) still finds this at the right-hand end. */
+/* Sort is the only thing on the right-hand end of the always-visible
+   row; Clear All Filters sits at the head of the panel the Filter
+   button opens, which is where its ticks are (the owner's order, 4
+   September 2026). */
+.filterrow .sortpick { margin-left: auto; }
+.filterrow .clearall { flex: 0 0 auto; }
+
+/* The genre ticks under the filter row. A wrapping run of small
+   checkboxes rather than a menu: the page holds a dozen or two, and a
+   reader picking "Romance" wants to see the others beside it. */
+.genrebox { display: flex; flex-wrap: wrap; gap: 6px 10px;
+            padding: 0 42px 12px; max-width: 1100px; }
+.genrebox .gpick {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px 3px 6px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--dim); font-size: 11.5px; cursor: pointer;
+  user-select: none;
+}
+.genrebox .gpick:hover { border-color: var(--accent); }
+.genrebox .gpick.on { color: var(--text); border-color: var(--accent); }
+/* **Drawn, not the platform's.** The owner, 4 September 2026: "make
+   the check box use a color matches the app theme not white."
+   `accent-color` only tints the tick's *fill* when it is on; the box
+   itself stays the system's white square, which on this ground is the
+   brightest thing on the page. So the native control is taken out of
+   the paint entirely (`appearance: none`) and the box is drawn from the
+   same three tokens everything else here uses. */
+.genrebox .gpick input {
+  appearance: none; -webkit-appearance: none;
+  width: 13px; height: 13px; margin: 0; flex: 0 0 auto;
+  border: 1px solid var(--border); border-radius: 4px;
+  /* Longhands, not the `background` shorthand. The shorthand resets
+     background-image with it, and Chromium keeps a checkbox's own
+     rendering in that slot even under `appearance: none` - so the
+     checked rule's shorthand was being applied and then losing the
+     colour again on the state change. Measured 4 September 2026: the
+     box matched `:checked`, `--accent` resolved on the element, and
+     the computed background stayed the ground colour even when set
+     inline. */
+  background-color: var(--bg); position: relative; cursor: pointer;
+}
+.genrebox .gpick:hover input { border-color: var(--accent); }
+.genrebox .gpick input:checked {
+  background-color: var(--accent); border-color: var(--accent);
+}
+/* The tick itself: two strokes of the ground colour, so it reads on the
+   accent whatever the accent is.
+
+   **Centred by construction, not by eye.** The owner, 4 September 2026:
+   "the icon is not in the center of the box in the filter". Measured on
+   the running window that day, the tick sat 3px/1px from the left and
+   right of the 16-device-px box and 5px/2px from its top and bottom -
+   because `left: 4px; top: 1px` places the *unrotated* box and a 45
+   degree tick's ink is nowhere near the middle of that box.
+
+   Where the ink actually is, worked out rather than nudged: for an
+   L-tick of content w by h with a border b, the ink is the right bar
+   (b by h+b) plus the bottom-left remainder (w by b), whose combined
+   centroid sits (dx, dy) from the box centre with dx = dy. Rotating
+   that offset by 45 degrees sends it straight down - the horizontal
+   halves cancel - by dx * sqrt(2). For 3x7 with a 2px border that is
+   1.24px below centre, which is 13.75% of the element's 9px height.
+   So the rotation centre goes that far above the middle: -50% - 13.75%
+   = **-64%**, and the number is the same at any size because the whole
+   construction scales. `content-box` because the file sets border-box
+   globally, and these numbers are content plus border. */
+.genrebox .gpick input:checked::after,
+.selall input:checked::after,
+.sc .spick.on::after {
+  content: ''; position: absolute; box-sizing: content-box;
+  left: 50%; top: 50%;
+  width: 3px; height: 7px; border: solid var(--bg);
+  border-width: 0 2px 2px 0;
+  transform: translate(-50%, -64%) rotate(45deg);
+}
+.genrebox .gpick input:focus-visible { outline: 1px solid var(--accent); }
+
+/* The banner's Save/Remove control carries a Fluent codepoint beside
+   its words, so the glyph needs the icon font while the words keep the
+   app's.
+
+   **Two elements, because one cannot have two fonts.** The owner, 4
+   September 2026: "the icons in the discover page banner are not
+   showing, it is showing some random square instead". This rule used to
+   read `font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", inherit`
+   - and `inherit` is a CSS-wide keyword, legal only as a declaration's
+   whole value. In a font list it makes the declaration invalid, so
+   Chromium threw the **entire rule** away and the button drew in Segoe
+   UI, where U+E710 is an unassigned private-use codepoint: a tofu box.
+   Photographed on the running window, which is the only way this was
+   ever going to be caught (rules/ui.md) - the CSS parses "successfully"
+   and the fallback chain looks reasonable in the file.
+
+   So the codepoint goes in its own span with the icon font on it, and
+   the button keeps the app's. */
+.hero .act .gi {
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 13px; line-height: 1; margin-right: 7px;
+}
+/* Saved and hovered: the press would remove it, and the button says so
+   in the one colour this app uses for that. */
+.hero .act.danger {
+  background: var(--danger); border-color: var(--danger); color: #2a0710;
+  font-weight: 600;
+}

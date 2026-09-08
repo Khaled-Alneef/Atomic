@@ -39,17 +39,24 @@ _MIN_REQUEST_GAP = 0.7
 _throttle_lock = threading.Lock()
 _last_request_at = 0.0
 
+# **Once AniList says no, stop asking for a while** (5 September 2026,
+# chasing a live "Kingdom" search showing the live-action series under
+# Anime). `_anime_confirmed` fails soft to the unfiltered list exactly
+# whenever AniList cannot be asked - by design, so a rate-limited AniList
+# does not empty the section - but every search still *tried* the
+# request first, paying its own timeout and, worse, adding one more hit
+# to a host already answering 403. Measured live that day: a direct
+# `_post` call answered 403 outright. Once seen, every call within
+# _RATE_LIMIT_COOLDOWN_S raises RateLimited immediately - no socket, no
+# throttle sleep - so a search fails soft at once instead of after
+# paying for a doomed request, and the host is given the quiet it needs
+# to lift the limit rather than being asked again every few seconds.
+_RATE_LIMIT_COOLDOWN_S = 120.0
+_rate_limited_until = 0.0
+
 # How close a catalog title has to be to the tracker's own before its
 # schedule is trusted (see title_match.similarity).
 _MATCH_THRESHOLD = 0.8
-
-_SEARCH_QUERY = """
-query ($search: String) {
-  Media(search: $search, type: ANIME) {
-    id
-  }
-}
-"""
 
 # Deliberately a paged search, not the single-Media one above: a title
 # like "Bleach: Thousand-Year Blood War" resolves to the *first* season's
@@ -62,11 +69,96 @@ query ($search: String) {
     media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
       title { romaji english native }
       synonyms
+      startDate { year }
       nextAiringEpisode { episode airingAt }
     }
   }
 }
 """
+
+# Everything airing in a window, rather than one title's next episode.
+# `airingAt` is a unix timestamp and the sort is by it, so the first page
+# is simply "what is out next" across the whole catalogue - which is what
+# the Schedule tab needs to show more than the user's own saved shows.
+_UPCOMING_QUERY = """
+query ($from: Int, $to: Int, $perPage: Int) {
+  Page(perPage: $perPage) {
+    airingSchedules(airingAt_greater: $from, airingAt_lesser: $to,
+                    sort: TIME) {
+      episode
+      airingAt
+      media {
+        title { romaji english native }
+        synonyms
+        coverImage { large }
+        format
+        isAdult
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_upcoming_airing(hours: int = 168, limit: int = 40,
+                          timeout: int = 8) -> list:
+    """What airs next across AniList, soonest first.
+
+    The Schedule tab's "everything else" - the rows that are not the
+    owner's own saved shows. Each row is
+    {title, episode, at (aware UTC datetime), cover_url}.
+
+    Adult titles are dropped, and so are the formats nobody schedules a
+    week around (music videos above all). Fails soft to [] and lets
+    RateLimited through for the caller to say out loud, exactly as
+    fetch_next_episode does - a schedule that quietly shows only saved
+    rows because AniList said 403 is the failure this project has
+    already shipped once."""
+    now = int(time.time())
+    try:
+        data = _post(_UPCOMING_QUERY,
+                     {"from": now, "to": now + int(hours) * 3600,
+                      "perPage": max(1, min(int(limit), 50))}, timeout)
+    except RateLimited:
+        raise
+    except Exception:
+        return []
+    page = ((data or {}).get("data") or {}).get("Page") or {}
+    out = []
+    for row in page.get("airingSchedules") or []:
+        media = row.get("media") or {}
+        if media.get("isAdult") or media.get("format") in ("MUSIC",):
+            continue
+        titles = media.get("title") or {}
+        title = (titles.get("english") or titles.get("romaji")
+                 or titles.get("native") or "").strip()
+        if not title or not row.get("airingAt"):
+            continue
+        out.append({
+            "title": title,
+            # Every name AniList has for it: a row headed by the romaji
+            # ("Wanmei Shijie") finds nothing on Cinemeta, which files
+            # the show under its English title ("Perfect World") - the
+            # owner's screenshot of 7 September 2026, a Schedule click
+            # opening on "no matched title". The details page tries
+            # each (details._resolve_id_worker).
+            # ...and its synonyms: a donghua often has no English title
+            # field at all, and "Perfect World" sits in synonyms.
+            "titles": [t for t in (titles.get("english"), titles.get("romaji"),
+                                   titles.get("native"),
+                                   *(media.get("synonyms") or [])) if t][:8],
+            "episode": int(row.get("episode") or 0),
+            "at": datetime.fromtimestamp(int(row["airingAt"]), timezone.utc),
+            "cover_url": (media.get("coverImage") or {}).get("large") or "",
+            # What the Schedule tab files the row under. Stated rather
+            # than assumed now that TVmaze's calendar is merged in
+            # beside this one (tvmaze.fetch_upcoming_schedule) - the tab
+            # used to type every catalogue row "Anime" because this was
+            # the only source it had.
+            "type": "Anime",
+        })
+    return out[:limit]
+
 
 _EXTERNAL_LINKS_QUERY = """
 query ($search: String) {
@@ -75,6 +167,37 @@ query ($search: String) {
       title { romaji english native }
       synonyms
       externalLinks { site url }
+    }
+  }
+}
+"""
+
+
+# Both media types in **one** document, because the manga side of
+# AniList is where `bannerImage` is thinnest. Measured 22 August 2026
+# over 43 real reading titles (the owner's tracker and history plus a
+# live Discover catalogue): 29 carried a manga banner, 9 carried only a
+# portrait cover, 5 matched nothing. Of the 14 with no manga banner, the
+# same franchise's *anime* entry carried a real wide banner for 2
+# (Tsukimichi, Chillin' in Another World) - and an alias in the same POST
+# costs no extra request and no extra throttle wait, which a second
+# lookup would. The anime side is asked for only when a banner is what
+# is wanted; a poster tile must never be handed one (see fetch_manga_cover).
+_MANGA_ART_QUERY = """
+query ($search: String, $withAnime: Boolean!) {
+  manga: Page(perPage: 8) {
+    media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
+      title { romaji english native }
+      synonyms
+      bannerImage
+      coverImage { extraLarge large }
+    }
+  }
+  anime: Page(perPage: 6) @include(if: $withAnime) {
+    media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+      title { romaji english native }
+      synonyms
+      bannerImage
     }
   }
 }
@@ -98,7 +221,9 @@ _RATE_LIMIT_CODES = (403, 429)
 
 
 def _post(query: str, variables: dict, timeout: int):
-    global _last_request_at
+    global _last_request_at, _rate_limited_until
+    if time.monotonic() < _rate_limited_until:
+        raise RateLimited("AniList still cooling down from a recent 403/429")
     payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
     req = urllib.request.Request(API_URL, data=payload, headers={
         "Content-Type": "application/json",
@@ -114,10 +239,11 @@ def _post(query: str, variables: dict, timeout: int):
     # request, and the gap above can be most of a second on its own.
     deadline = net.deadline_in(timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             return json.loads(net.read_text(resp, deadline))
     except urllib.error.HTTPError as exc:
         if exc.code in _RATE_LIMIT_CODES:
+            _rate_limited_until = time.monotonic() + _RATE_LIMIT_COOLDOWN_S
             raise RateLimited(f"AniList answered {exc.code}") from exc
         raise
 
@@ -165,6 +291,42 @@ def fetch_next_episode(title: str, timeout: int = 8):
         "at": datetime.fromtimestamp(soonest["airingAt"], timezone.utc),
         "episode": soonest.get("episode"),
     }
+
+
+def anime_name_years(title: str, timeout: int = 6):
+    """Like `anime_name_sets`, but each hit carries the year it began.
+
+    **A title alone cannot separate two works that share one.** Measured
+    2 September 2026 on the owner's own search: AniList's set for
+    "Kingdom" contains the exact string "Kingdom", and so does Cinemeta's
+    row for the 2019 Korean live-action series - so a name-only test put
+    that series in the Anime section and, once the seasons collapsed to
+    one row, it was the *only* thing left there. The 2012 anime it was
+    standing in for had gone.
+
+    The year is what tells them apart, and AniList already knows it. Same
+    contract as anime_name_sets: [] is a real "no anime is called that",
+    None is silence.
+    """
+    title = (title or "").strip()
+    if not title:
+        return []
+    try:
+        body = _post(_AIRING_QUERY, {"search": title}, timeout)
+    except Exception:
+        return None
+    try:
+        media_list = (((body.get("data") or {}).get("Page") or {})
+                      .get("media")) or []
+        out = []
+        for media in media_list:
+            names = [name for name in _candidate_names(media) if name]
+            year = ((media.get("startDate") or {}).get("year")
+                    if isinstance(media.get("startDate"), dict) else None)
+            out.append({"names": names, "year": year})
+        return out
+    except Exception:
+        return None
 
 
 def fetch_external_urls(title: str, site_keyword: str, timeout: int = 8) -> list:
@@ -221,7 +383,107 @@ def fetch_external_urls(title: str, site_keyword: str, timeout: int = 8) -> list
     return min(scored)[2]
 
 
-def fetch_crunchyroll_urls(title: str, timeout: int = 8) -> list:
-    """Crunchyroll's own links for `title` - see fetch_external_urls,
-    which this is the original and most-used case of."""
-    return fetch_external_urls(title, "crunchyroll", timeout)
+def _best_url(title: str, media_list, pick):
+    """The URL `pick` yields for the best-matching entry in `media_list`,
+    or None.
+
+    Scored against the title the user actually has, never the stripped or
+    quote-folded query: normalize() drops the tag and folds the quote on
+    both sides, so the full string loses nothing and stays the thing being
+    matched. Only an entry whose title genuinely matches is considered at
+    all, because a wrong backdrop is still a page confidently dressed as a
+    different series. Shortest romaji breaks a score tie, the same
+    base-series rule as fetch_external_urls."""
+    scored = []
+    for media in media_list or []:
+        url = pick(media)
+        if not url:
+            continue
+        names = _candidate_names(media)
+        score = title_match.best_similarity(title, names)
+        if score < _MATCH_THRESHOLD:
+            continue
+        scored.append((-score, len(title_match.normalize(names[0] or "")), url))
+    return min(scored)[2] if scored else None
+
+
+def _cover_of(media):
+    cover = media.get("coverImage") or {}
+    return cover.get("extraLarge") or cover.get("large")
+
+
+def manga_art(title: str, timeout: int = 8, banner_first: bool = True):
+    """`(url, kind)` for the best AniList art for a reading title, where
+    kind is "banner" (a real landscape image, 1900x400) or "cover" (the
+    portrait one, ~460x650), or `(None, None)`.
+
+    The caller needs to know *which*, because they are not
+    interchangeable at a 1266x300 hero: a 460x650 cover scaled with
+    KeepAspectRatioByExpanding into that box is 1266x1717, of which the
+    banner shows 300 rows - the middle **17%** of the picture, upscaled
+    2.75x. See helpers/hero_art.py for what is done with a cover instead.
+
+    Preference order, and it matters: this title's manga banner, then the
+    same franchise's *anime* banner (same POST, see _MANGA_ART_QUERY),
+    then the manga cover. A cover is never preferred over a banner and an
+    anime banner is never preferred over the work's own.
+
+    `banner_first=False` keeps the portrait cover only, which is what a
+    poster tile needs, and skips the anime alias entirely.
+
+    The search is retried across title_match.search_variants - the quote
+    fold first, then the raw string, then both with the reading site's
+    group tag dropped. Measured: AniList answers "Kingdom (WAN)" with
+    nothing and "Kingdom" with the banner, and answers "Swordmaster’S
+    Youngest Son" with nothing and "Swordmaster'S Youngest Son" with the
+    entry (that one is U+2019 against U+0027 and nothing else)."""
+    title = (title or "").strip()
+    if not title:
+        return None, None
+    for query in title_match.search_variants(title):
+        try:
+            body = _post(_MANGA_ART_QUERY,
+                         {"search": query, "withAnime": bool(banner_first)}, timeout)
+        except RateLimited:
+            # The block is on the connection, not the query: a second
+            # variant buys another 403 and another throttle wait.
+            return None, None
+        except Exception:
+            # Anything else is this one request failing. Measured: the
+            # first variant timed out at 8.4s and the stripped retry
+            # never ran, so "Kingdom (WAN)" reported no artwork on a
+            # title AniList answers for.
+            continue
+
+        data = body.get("data") or {}
+        manga = ((data.get("manga") or {}).get("media")) or []
+        if banner_first:
+            found = _best_url(title, manga, lambda m: m.get("bannerImage"))
+            if found:
+                return found, "banner"
+            anime = ((data.get("anime") or {}).get("media")) or []
+            found = _best_url(title, anime, lambda m: m.get("bannerImage"))
+            if found:
+                return found, "banner"
+        found = _best_url(title, manga, _cover_of)
+        if found:
+            return found, "cover"
+    return None, None
+
+
+def fetch_manga_artwork(title: str, timeout: int = 8):
+    """A wide banner (or failing that, the large cover) URL for a manga
+    title, or None - what the reading details page draws its ground from,
+    since reading entries have no IMDb id and so no TMDB artwork.
+
+    Kept for callers that only want a URL; anything drawing a *hero*
+    wants manga_art, so it can tell a banner from a cover."""
+    return manga_art(title, timeout, banner_first=True)[0]
+
+
+def fetch_manga_cover(title: str, timeout: int = 8):
+    """The portrait cover only - the last fallback for a card whose own
+    reading site served no cover art (manga_sites._external_cover).
+    Never the banner: it would be cropped to its middle in a poster
+    box, which reads as a broken image rather than as a cover."""
+    return manga_art(title, timeout, banner_first=False)[0]

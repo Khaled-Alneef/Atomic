@@ -16,15 +16,24 @@ from PyQt6.QtCore import QObject, QSize, Qt, QTimer
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from helpers import child_process, images, storage, theme
+from helpers import (app_art, art_paths, child_process, images, lookup_pool,
+                     storage, theme)
 from helpers.widgets import (
-    Card, CardDragReorder, GlassPage, GridSelection, defer_grid_rebuild,
-    scroll_area, search_field, show_toast, show_undo_toast,
+    # CardTextLabel is re-exported: it used to be defined here.
+    CardTextLabel,  # noqa: F401
+    Card, CardDragReorder, GlassPage, GridSelection, confirm,
+    defer_grid_rebuild, frameless_dialog, inform, scroll_area, search_field,
+    smooth_combo,
+    show_toast, show_undo_toast, use_hover_cursor,
 )
+# One poster number for the whole app: the Games/Apps tiles are sized
+# off the tracker's own POSTER_SIZE (no cycle - tracker imports no
+# windows module at load time).
+from windows.tracker import POSTER_SIZE as POSTER_ART_SIZE
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;All files (*.*)"
 EXE_FILTER = "Executable / Shortcut (*.exe *.lnk);;All files (*.*)"
@@ -39,6 +48,22 @@ THUMB_SIZE = (44, 44)
 # will overflow rather than wrap.
 GRID_COLS = 14
 GRID_COLS_SIDEBAR_OPEN = 13
+
+# The poster-size tile the Games and Apps grids draw now - the same
+# card the Movies & Series page uses (the owner's ask: "make the games
+# and apps cards the same size as movies cards").
+POSTER_CARD_WIDTH = POSTER_ART_SIZE[0] + 20
+# Fewer per row than the 120px tiles above, for the same fixed-count
+# reasoning: each of these cards is half again as wide.
+POSTER_GRID_COLS = 9
+POSTER_GRID_COLS_SIDEBAR_OPEN = 8
+
+
+def poster_grid_columns(page) -> int:
+    """grid_columns' twin for the poster-size grids."""
+    window = getattr(page, "app", None)
+    return (POSTER_GRID_COLS if getattr(window, "_sidebar_collapsed", False)
+            else POSTER_GRID_COLS_SIDEBAR_OPEN)
 
 # Shared by Apps, Websites and Games so the three grids stay identical
 # and CARD_TEXT_WIDTH below can't drift out of step with the margins it
@@ -67,50 +92,51 @@ def grid_columns(page) -> int:
     return GRID_COLS if getattr(window, "_sidebar_collapsed", False) else GRID_COLS_SIDEBAR_OPEN
 
 
-class CardTextLabel(QLabel):
-    """A word-wrapped line of text on a card, sized honestly for the
-    width it will actually be given.
+# CardTextLabel moved to helpers/widgets.py - the Discover cards in
+# tracker.py need the same honest wrapped-text height, and a window
+# module importing another window module is how import cycles start.
+# Re-exported above so every existing `link_grid.CardTextLabel` still
+# resolves.
 
-    A plain wrapped QLabel is not, and that clipped the second line of
-    every long card name on Apps, Websites and Games. Two Qt behaviours
-    combine to do it:
 
-    * `QLabel.sizeHint()` for a wrapped label is a heuristic - it picks a
-      wrap width it thinks looks balanced rather than the one it will be
-      laid out at, and reports the height *that* width needs. Measured on
-      "A Really Long Missing Application Name": a sizeHint wide enough
-      for two lines, in a card that only ever offers 104px, where the
-      same text needs three.
-    * A QBoxLayout with an alignment set (these cards centre their
-      contents) lays itself out inside `alignmentRect`, which clamps the
-      layout's *width* to what the card has - but keeps the height the
-      too-wide sizeHint asked for. So the label is narrowed without ever
-      being asked how tall it now needs to be.
+def _stamp_used(entry):
+    """Record that this entry was just opened.
 
-    Fixing the width and answering sizeHint from `heightForWidth` at that
-    same width removes both halves: the layout cannot narrow it further,
-    and the height it reports is the height the text really occupies.
-    Deliberately lazy rather than measured in `__init__` - the fonts here
-    come from QSS (#CardTitle's weight, the badge's 8pt), which is not
-    applied to a widget until it is polished, some time after it is
-    built."""
+    **Here, not in the page that called.** The owner, 4 September 2026:
+    *"the apps and websites in the main page when I open one it does not
+    come 1st after 1.5 sec!"* - games did and apps and websites did not,
+    and the difference was that only `LinkGridPage._open_entry` wrote
+    `last_used`. Home is a web page now, and its click goes
+    web_pages._open_links -> `open_link_entry` without ever touching
+    that method, so nothing was stamped and server._recent_first had
+    nothing to sort by.
 
-    def __init__(self, text, width=CARD_TEXT_WIDTH, parent=None):
-        super().__init__(text, parent)
-        self._text_width = width
-        self.setWordWrap(True)
-        self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.setFixedWidth(width)
+    So the stamp belongs to the launch itself, which is the one thing
+    every caller shares. `web_pages._WATCHED_FILES` already watches
+    apps.json and websites.json at 150ms, so writing it here is what
+    makes Home re-order inside his ~1.5s.
 
-    def sizeHint(self):
-        return QSize(self._text_width, self.heightForWidth(self._text_width))
-
-    def minimumSizeHint(self):
-        # Same answer as sizeHint: QLabel's own minimumSizeHint for
-        # wrapped text is another heuristic, and a minimum shorter than
-        # the real height is all a grid row needs to squeeze the last
-        # line back off the card.
-        return self.sizeHint()
+    One field on one entry through storage.update_entry - never the
+    whole list back, which is the defect that once erased freshly
+    imported games (rules/ui.md).
+    """
+    entry_id = entry.get("id")
+    if not entry_id:
+        return
+    kind = ("websites.json"
+            if any(str(t.get("type") or "") != "app"
+                   for t in (entry.get("targets") or []))
+            else "apps.json")
+    stamp = storage.now_iso()
+    entry["last_used"] = stamp
+    # The entry may live in either file - an id is unique across both,
+    # so writing the wrong one is a no-op rather than a wrong row.
+    for name in (kind, "apps.json" if kind != "apps.json" else "websites.json"):
+        try:
+            if storage.update_entry(name, entry_id, {"last_used": stamp}):
+                return
+        except Exception:
+            return          # a launch must never fail on bookkeeping
 
 
 def open_link_entry(parent, entry, label="Links"):
@@ -129,6 +155,7 @@ def open_link_entry(parent, entry, label="Links"):
     a toast, and toasts carry no title; the parameter stays so the two
     call sites (this page's and Home's) don't have to change together.
     """
+    _stamp_used(entry)
     missing = set(missing_app_targets(entry))
     launched = 0
     failures = []
@@ -269,6 +296,11 @@ class LinkGridPage(GridSelection, GlassPage):
     TITLE = "Links"
     DEFAULT_ENTRIES = []
     TARGET_KIND = "site"
+    # Poster-size tiles with store-quality artwork (the Apps page, the
+    # owner's ask) instead of the 120px icon tiles. Websites keep the
+    # small tiles: favicons have no high-res source and a wall of
+    # poster-sized favicons is worse, not bigger.
+    POSTER_CARDS = False
     # What the selection bar and its messages call these - see
     # widgets.GridSelection, shared with the Games page. "entries" rather
     # than the page's own title, because one of these grids holds apps
@@ -321,25 +353,23 @@ class LinkGridPage(GridSelection, GlassPage):
 
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Sort:"))
-        self.sort_box = QComboBox()
+        self.sort_box = smooth_combo(QComboBox())
+        use_hover_cursor(self.sort_box)
         self.sort_box.addItems(SORT_OPTIONS)
         self.sort_box.currentTextChanged.connect(self._refresh_grid)
         top_row.addWidget(self.sort_box)
         # No drag hint here any more: it named a right-click Move Up/Down
         # that no longer exists, and dragging is how every page reorders.
         top_row.addStretch()
-        self.search_box = search_field(f"Search {self.TITLE.lower()}...", width=220)
         # Debounced rather than filtering on every keystroke: each redraw
         # rebuilds every card from scratch (pages hold no state - see
         # .claude/rules/ui.md), so typing six characters would otherwise
-        # rebuild the whole grid six times. Same 150ms as the tracker
-        # pages, which this is the extension of.
+        # rebuild the whole grid six times. Kept now that the field lives
+        # in the window's bar - `refresh_filter` starts it.
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
         self._search_timer.timeout.connect(self._refresh_grid)
-        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
-        top_row.addWidget(self.search_box)
         top_row.addWidget(self._build_select_button(
             f"Pick several {self.TITLE.lower()} and delete them at once"))
         panel_layout.addLayout(top_row)
@@ -349,13 +379,72 @@ class LinkGridPage(GridSelection, GlassPage):
         self.grid_body = QWidget()
         self.grid_layout = QGridLayout(self.grid_body)
         self.grid_layout.setSpacing(10)
-        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        panel_layout.addWidget(scroll_area(self.grid_body), stretch=1)
+        # **Centred, not left-hugging - the same thing poster_grid does.**
+        # The owner's ask, 28 August 2026: "make the games and apps and
+        # webs grid in the mid like the movies". The column count here is
+        # a fixed 8 or 9 (link_grid.poster_grid_columns), so on a wide
+        # window the row is narrower than the area it sits in and every
+        # pixel of the difference used to land on the right, which reads
+        # as the page leaning left. poster_grid._left_margin solves the
+        # same problem by halving the slack; a QGridLayout does it with
+        # the alignment, and the last partial row still fills from the
+        # left inside the centred block exactly as the poster grids' does.
+        self.grid_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        panel_layout.addWidget(scroll_area(self.grid_body, ground=theme.PANEL_FILL), stretch=1)
 
         self._drag_reorder = CardDragReorder(
             self.grid_body, self._begin_custom_order, self._drop_reorder)
 
+        # entry id -> the drawn card's art label, so arriving artwork
+        # swaps one pixmap instead of rebuilding the grid. Nothing in
+        # it outlives the redraw that filled it.
+        self._art_labels = {}
+        self._art_signals = _ArtSignals()
+        self._art_signals.ready.connect(self._on_app_art)
+
         self._refresh_grid()
+        self._backfill_app_art()
+
+    # ------------------------------------------------------------------
+    def _backfill_app_art(self):
+        """Fetch high-res artwork for every poster-card entry that has
+        none (see helpers/app_art). One lookup per entry on the shared
+        bounded pool; app_art caches hits and authoritative misses on
+        disk, so later loads cost a stat, not a request."""
+        if not self.POSTER_CARDS:
+            return
+        for entry in self.entries:
+            if images.resolve_art_path(entry.get("art")):
+                continue
+            lookup_pool.submit(self._app_art_worker, entry.get("id"),
+                               entry.get("name") or "")
+
+    def _app_art_worker(self, entry_id, name):
+        # Never raises - an exception here kills the pool worker thread.
+        try:
+            path = app_art.fetch_art(name)
+        except Exception:
+            path = None
+        if path and entry_id:
+            self._art_signals.ready.emit(entry_id, str(path))
+
+    def _on_app_art(self, entry_id, path):
+        entry = next((e for e in self.entries if e.get("id") == entry_id), None)
+        if entry is None:
+            return
+        entry["art"] = path
+        # One field on one entry - Home holds its own copy of this file
+        # (see _mutate for the defect a whole-list write caused).
+        storage.update_entry(self.DATA_FILE, entry_id, {"art": path})
+        drawn = self._art_labels.get(entry_id)
+        if drawn is not None:
+            try:
+                drawn.setPixmap(images.thumbnail_or_avatar(
+                    path, entry.get("name") or "", (POSTER_ART_SIZE[0],
+                                                    POSTER_ART_SIZE[0])))
+            except RuntimeError:
+                pass    # the grid rebuilt; the new card already asked
 
     # ------------------------------------------------------------------
     def _begin_custom_order(self):
@@ -395,10 +484,33 @@ class LinkGridPage(GridSelection, GlassPage):
         return self.entries
 
     def _search_query(self) -> str:
-        # getattr because _refresh_grid can run before the box exists on a
-        # page still being built.
-        box = getattr(self, "search_box", None)
-        return box.text().strip().lower() if box else ""
+        """What the one search field in the window's title bar currently
+        says, lowercased.
+
+        It used to be this page's own box. There is no page box any more
+        (the owner's ask, 25 August 2026: one bar that searches
+        everything, and remove the others), so the answer comes from the
+        window - `main.MainWindow.page_filter_text`. The seam is
+        deliberately this method and nothing else: every grid on the page
+        already funnelled through it, so the field moving out of the page
+        changed one line rather than every caller."""
+        window = self.window()
+        getter = getattr(window, "page_filter_text", None)
+        if not callable(getter):
+            return ""
+        return getter()
+
+    def refresh_filter(self):
+        """Redraw against the field's current text. Called by the window
+        as it is typed into.
+
+        Debounced through the same timer the page's own box used, and
+        for the same measured reason: a redraw rebuilds every card from
+        scratch, so six characters would otherwise rebuild the grid six
+        times."""
+        timer = getattr(self, "_search_timer", None)
+        if timer is not None:
+            timer.start()
 
     def _visible_entries(self):
         """What the grid draws: the sorted list narrowed by the search box.
@@ -429,6 +541,9 @@ class LinkGridPage(GridSelection, GlassPage):
                 widget.hide()
                 widget.deleteLater()
         self._clear_selection_cards()
+        # Emptied with the cards it names, same reason as the selection
+        # map above.
+        self._art_labels = {}
 
         # Dragging is off while a search is narrowing the grid: a drop
         # writes the order that is on screen (see _begin_custom_order),
@@ -440,13 +555,14 @@ class LinkGridPage(GridSelection, GlassPage):
         # that matches nothing must still drop the selection it hid.
         self._prune_selection({e.get("id") for e in entries})
         if not entries:
-            message = (f"Nothing here matches '{self.search_box.text().strip()}'."
+            message = (f"Nothing here matches '{self._search_query()}'."
                        if narrowed
                        else f"No {self.TITLE.lower()} yet - click '+' to create one.")
             self.grid_layout.addWidget(QLabel(message, objectName="Muted"), 0, 0)
             return
 
-        columns = grid_columns(self)
+        columns = (poster_grid_columns(self) if self.POSTER_CARDS
+                   else grid_columns(self))
         for index, entry in enumerate(entries):
             # Dragging is off while selecting as well as while the grid is
             # narrowed: both a drag and a pick want the same left press.
@@ -461,8 +577,12 @@ class LinkGridPage(GridSelection, GlassPage):
         self._refresh_grid()
 
     def _build_card(self, entry, draggable=True):
-        card = Card(hoverable=True, matte=True)
-        card.setFixedWidth(CARD_WIDTH)
+        # No matte any more: a plain #Card is the frameless tile now
+        # (theme.py) - icon and name floating on the ground, box only on
+        # hover - the same Harbor language the poster grids and Home use.
+        poster = self.POSTER_CARDS
+        card = Card(hoverable=True)
+        card.setFixedWidth(POSTER_CARD_WIDTH if poster else CARD_WIDTH)
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.setContentsMargins(*CARD_MARGINS)
@@ -470,8 +590,29 @@ class LinkGridPage(GridSelection, GlassPage):
         missing = missing_app_targets(entry)
 
         icon = QLabel()
-        icon.setFixedSize(*THUMB_SIZE)
-        icon.setPixmap(images.thumbnail_or_avatar(entry.get("image"), entry["name"], THUMB_SIZE))
+        # Resolved, not read as written: the saved path may name a cache
+        # this machine does not have (helpers/art_paths). When neither
+        # picture can be found at all, the extracted icon is re-made in
+        # the background and written back for the next build.
+        art = images.resolve_art_path(entry.get("art"))
+        image = images.resolve_art_path(entry.get("image"))
+        if not art and not image:
+            art_paths.heal_missing_art(entry, self.DATA_FILE)
+        if poster:
+            # Square, at the poster card's full width: store icons are
+            # square originals, and cropping one to the movie tile's
+            # portrait would cut the sides off every logo. Falls back to
+            # the extracted icon (soft at this size but recognisable),
+            # then the letter avatar.
+            art_size = (POSTER_ART_SIZE[0], POSTER_ART_SIZE[0])
+            icon.setFixedSize(*art_size)
+            icon.setPixmap(images.thumbnail_or_avatar(
+                art or image, entry["name"], art_size))
+            self._art_labels[entry.get("id")] = icon
+        else:
+            icon.setFixedSize(*THUMB_SIZE)
+            icon.setPixmap(images.thumbnail_or_avatar(
+                image, entry["name"], THUMB_SIZE))
         if missing:
             # Dimmed rather than swapped for a warning glyph: the icon is
             # how a card is picked out of a grid at a glance, and losing
@@ -482,7 +623,9 @@ class LinkGridPage(GridSelection, GlassPage):
             icon.setGraphicsEffect(faded)
         layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        name = CardTextLabel(entry["name"])
+        text_width = (POSTER_CARD_WIDTH - CARD_MARGINS[0] - CARD_MARGINS[2]
+                      if poster else CARD_TEXT_WIDTH)
+        name = CardTextLabel(entry["name"], width=text_width)
         name.setObjectName("CardTitle")
         layout.addWidget(name)
 
@@ -493,7 +636,7 @@ class LinkGridPage(GridSelection, GlassPage):
             # and saying otherwise would be wrong rather than cautious.
             text = ("Not found" if len(missing) >= total
                     else f"{len(missing)} of {total} not found")
-            badge = CardTextLabel(text)
+            badge = CardTextLabel(text, width=text_width)
             badge.setStyleSheet(
                 f"color: {theme.DANGER}; font-weight: 700; font-size: 8pt; background: transparent;")
             layout.addWidget(badge)
@@ -552,16 +695,16 @@ class LinkGridPage(GridSelection, GlassPage):
         return next((i for i, e in enumerate(entries) if e.get("id") == entry.get("id")), None)
 
     def _open_entry(self, entry):
+        # The stamp is written by open_link_entry itself now - one field
+        # on one entry, so no whole-list write and no redraw of cards
+        # the user is still looking at - because Home opens an entry
+        # without ever reaching this method (see _stamp_used).
         open_link_entry(self, entry, self.TITLE)
-        entry["last_used"] = storage.now_iso()
-        # One field on one entry, so no whole-list write and no redraw of
-        # cards the user is still looking at.
-        storage.update_entry(self.DATA_FILE, entry.get("id"), {"last_used": entry["last_used"]})
         if self.sort_box.currentText() == "Last Used":
             self._refresh_grid()
 
     def _remove_entry(self, entry):
-        if QMessageBox.question(self, "Remove", f"Remove '{entry['name']}'?") != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Remove", f"Remove '{entry['name']}'?"):
             return
 
         # The whole record, copied before it is dropped: the cards holding
@@ -648,7 +791,18 @@ class TargetRow(QWidget):
         self.target_edit.editingFinished.connect(self._notify_change)
         row.addWidget(self.target_edit, stretch=1)
 
-        self.browse_btn = QPushButton("...", objectName="Small")
+        # **Parented on construction, not by the addWidget below.** `row`
+        # is a free-standing QHBoxLayout at this point - it is not
+        # attached to a widget until `layout.addLayout(row)` at the end -
+        # so adding to it reparents nothing, and the setVisible(True)
+        # underneath was landing on a widget with no parent. Qt promotes
+        # that to a *window*, and widgets.install_stray_window_guard
+        # then suppresses it for good: the owner's log carries "stray
+        # window suppressed: QPushButton#Small" and the Apps page had
+        # lost its browse-for-an-exe button. Same trap as details.py's
+        # Save button; the guard now reconsiders too, but a widget that
+        # never becomes a stray needs neither fix.
+        self.browse_btn = QPushButton("...", self, objectName="Small")
         self.browse_btn.setFixedWidth(36)
         self.browse_btn.clicked.connect(self._browse)
         self.browse_btn.setVisible(kind == "app")
@@ -688,6 +842,12 @@ class _IconSignals(QObject):
     ready = Signal(str, str)  # target (identity check), local path ("" = failed)
 
 
+class _ArtSignals(QObject):
+    # entry id -> local high-res artwork path, back from the lookup pool
+    # so the storage write and the repaint stay on the UI thread.
+    ready = Signal(str, str)
+
+
 class EntryForm(QDialog):
     def __init__(self, parent, entry, on_save):
         super().__init__(parent)
@@ -704,8 +864,9 @@ class EntryForm(QDialog):
         self._icon_signals.ready.connect(self._on_site_icon_ready)
 
         self.setWindowTitle("Edit Entry" if entry else "Add Entry")
-        self.setFixedSize(420, 560)
-        theme.apply_dark_titlebar(self)
+        # 590 tall, up from the framed 560: the panel carries its own
+        # heading now, where the native title bar used to.
+        self.setFixedSize(420, 590)
 
         form = QVBoxLayout(self)
         form.setContentsMargins(24, 20, 24, 16)
@@ -754,6 +915,7 @@ class EntryForm(QDialog):
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)
 
+        frameless_dialog(self, title=self.windowTitle())
         self.exec()
 
     def _on_primary_target_changed(self, target_data):
@@ -799,7 +961,16 @@ class EntryForm(QDialog):
         name = self.name_edit.text().strip()
         targets = [t for t in (row.get() for row in self.rows) if t]
         if not name or not targets:
-            QMessageBox.warning(self, "Links", "Name and at least one URL/app are required.")
+            # Named for the thing this dialog actually collects - the
+            # owner's ask, 24 August 2026: "make it says app in the app
+            # adding instead of (URL/app), and in the web adding make it
+            # says URL". "URL/app" was one message written to cover both
+            # forms, and on either of them half of it is about something
+            # the dialog has no field for. `target_kind` is already what
+            # decides the field's placeholder and the Browse button
+            # (see TargetRow), so it decides the wording too.
+            noun = "app" if self.target_kind == "app" else "URL"
+            inform(self, "Links", f"Name and at least one {noun} are required.")
             return
 
         if self.is_new:

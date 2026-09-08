@@ -5,6 +5,8 @@ fails soft (returns []/None) so a flaky connection never crashes the
 tracker UI - it just means no suggestions/covers/progress show up.
 """
 
+import time
+import re
 import json
 import urllib.error
 import urllib.parse
@@ -12,7 +14,7 @@ import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 
-from . import net
+from . import net, storage
 
 BASE_URL = "https://v3-cinemeta.strem.io"
 API_URL = "https://api.strem.io/api"
@@ -87,7 +89,7 @@ def search(query_text: str, content_type: str = "series", timeout: int = 6):
     })
     try:
         deadline = net.deadline_in(timeout)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             body = json.loads(net.read_text(resp, deadline))
     except Exception:
         return []
@@ -127,6 +129,119 @@ def _parse_aired(value):
         return None
 
 
+def fetch_meta(imdb_id: str, content_type: str = "series", timeout: int = 8):
+    """Cinemeta's whole meta record for one title, or None.
+
+    One keyless request carrying everything the details page draws:
+    name, description, genres, cast, runtime, releaseInfo, imdbRating,
+    and `videos[]` - every episode with its season, number, name,
+    firstAired and thumbnail. Measured on Bleach TYBW: 50 episodes,
+    all fields present."""
+    url = f"{BASE_URL}/meta/{content_type}/{imdb_id}.json"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 PC-App/1.0",
+    })
+    try:
+        deadline = net.deadline_in(timeout)
+        with net.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(net.read_text(resp, deadline))
+    except Exception:
+        return None
+    meta = (body or {}).get("meta")
+    return meta if isinstance(meta, dict) else None
+
+
+# Cinemeta meta, kept on disk per title - the same files and shape the
+# details page writes (windows.details._meta_worker), so one fetch serves
+# the episode list, the search classifier and the player's audio hint.
+META_CACHE_TTL_S = 24 * 3600.0
+
+
+def _meta_cache_name(imdb_id, content_type) -> str:
+    safe = re.sub(r"[^a-z0-9]", "", str(imdb_id or "").lower())
+    return f"meta-{content_type}-{safe}.json"
+
+
+def fetch_meta_cached(imdb_id: str, content_type: str = "series",
+                      timeout: int = 8):
+    """fetch_meta, answered from disk when the title was seen inside
+    META_CACHE_TTL_S. Never raises; None when neither has it."""
+    name = _meta_cache_name(imdb_id, content_type)
+    try:
+        stored = storage.load(name, None)
+        if (isinstance(stored, dict) and isinstance(stored.get("meta"), dict)
+                and time.time() - float(stored.get("ts") or 0) < META_CACHE_TTL_S):
+            return stored["meta"]
+    except Exception:
+        pass
+    meta = fetch_meta(imdb_id, content_type, timeout)
+    if meta:
+        try:
+            storage.save(name, {"ts": time.time(), "meta": meta})
+        except Exception:
+            pass
+    return meta
+
+
+def cached_meta(imdb_id: str, content_type: str = "series"):
+    """The Cinemeta meta on disk for a title, at any age, or None.
+    Never fetches - for a reader that wants the title's own season split
+    (anime_identity) and must not spend a network round trip on it."""
+    name = _meta_cache_name(imdb_id, content_type)
+    try:
+        stored = storage.load(name, None)
+        if isinstance(stored, dict) and isinstance(stored.get("meta"), dict):
+            return stored["meta"]
+    except Exception:
+        pass
+    return None
+
+
+def looks_anime(meta) -> bool:
+    """Whether a Cinemeta record describes anime: the Animation genre
+    *and* Japan among its countries.
+
+    Both, because either alone is wrong in a way the owner would see.
+    Measured 24 August 2026: Demon Slayer and its Infinity Castle film
+    carry `genres: [Animation, ...]` with `country: Japan` (the film
+    says "Japan, United States"); House of the Dragon carries neither;
+    and a Cinemeta search for "Infinity Castle" also returns Castle in
+    the Sky - Ghibli, Japan, correctly anime - beside American animated
+    films that are not. The search's own result rows carry no genres at
+    all (measured: no `genres`, no genre `links`), which is why the
+    classifier needs the full meta and the cache above."""
+    if not isinstance(meta, dict):
+        return False
+    genres = {str(g).strip().lower() for g in (meta.get("genres") or meta.get("genre") or [])}
+    if "animation" not in genres and "anime" not in genres:
+        return False
+    country = str(meta.get("country") or "").lower()
+    return "japan" in country
+
+
+def is_anime_entry(entry) -> bool:
+    """Whether a tracked entry is anime - its own type when it says so,
+    else Cinemeta's verdict from the genres and country the details page
+    carries on it.
+
+    Here rather than at the two call sites because both of them are
+    asking the same question about the same entry: the download dialog
+    and the player's download panel decide whether to offer an audio
+    choice at all (the owner, 28 August 2026: "only show the Audio
+    selection option while download page while in Anime, and completely
+    remove this button selection from series and movies").
+
+    Never raises and never asks the network."""
+    try:
+        data = entry if isinstance(entry, dict) else {}
+        if str(data.get("type") or "").strip().lower() == "anime":
+            return True
+        return bool(looks_anime(data))
+    except Exception:
+        return False
+
+
 def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: int = 6):
     """Season/episode of the most recently aired episode, from Cinemeta's
     full episode list for this title (the catalog search used elsewhere
@@ -135,19 +250,11 @@ def fetch_latest_episode(imdb_id: str, content_type: str = "series", timeout: in
     than leaving it blank. Specials (season 0) are skipped in favor of
     the latest numbered-season episode when both exist. Returns
     (season, episode) ints, or None if it can't be determined."""
-    url = f"{BASE_URL}/meta/{content_type}/{imdb_id}.json"
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 PC-App/1.0",
-    })
-    try:
-        deadline = net.deadline_in(timeout)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(net.read_text(resp, deadline))
-    except Exception:
+    body = fetch_meta(imdb_id, content_type, timeout)
+    if body is None:
         return None
 
-    videos = ((body.get("meta") or {}).get("videos")) or []
+    videos = body.get("videos") or []
     now = datetime.now(timezone.utc)
     aired = []
     for v in videos:
@@ -172,7 +279,7 @@ def _api_post(path: str, payload: dict, timeout: int):
     })
     deadline = net.deadline_in(timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with net.urlopen(req, timeout=timeout) as resp:
             return json.loads(net.read_text(resp, deadline))
     except urllib.error.HTTPError as exc:
         if exc.code in _AUTH_HTTP_CODES:

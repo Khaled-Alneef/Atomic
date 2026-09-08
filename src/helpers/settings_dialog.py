@@ -4,11 +4,12 @@ own sidebar) on the left, the selected category's controls on the right.
 General: Windows-startup toggle (plus whether that sign-in launch opens
 full screen), and which sections show up in the main
 sidebar (Anime, Reading, Series, Games, Apps, Websites can each be hidden
-without losing their saved data). Watching: the list of Video
-Websites anime, film and series entries can be set to open on (Stremio is
-always available as a built-in option; Crunchyroll and any others are
-addable/editable, the same way Reading sites work) and the connected
-Stremio account used to pull in real watch progress. Reading: the list of manga/manhwa/manhua reading sites the
+without losing their saved data). Watching: the resolution the in-app
+player starts on (anime, films and series play inside the app now, so
+there is no per-entry "where does this open" list here any more, and the
+Stremio account sign-in is gone at the owner's ask - see
+_build_anime_page).
+Reading: the list of manga/manhwa/manhua reading sites the
 Reading page can search and open to, plus an optional music/ambience URL.
 Games: each game launcher's install directory, so the Games page can
 bulk-import every game it finds there (see helpers.launchers) instead of
@@ -17,8 +18,8 @@ restore one again, wipe one content category's saved entries at a time,
 or uninstall the app entirely (every saved file plus the app itself).
 """
 
+import copy
 import json
-import sys
 import threading
 import zipfile
 from datetime import datetime
@@ -26,22 +27,25 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import (
     anime_sites, app_settings, global_search, launchers, logs, lookup_pool,
-    manga_sites, nav_config, startup, storage, stremio, theme, uninstall,
+    manga_sites, nav_config, startup, storage, theme, uninstall,
     updater,
 )
-from .widgets import finish_toast, scroll_area, show_toast
+from .widgets import (confirm, finish_toast, frameless_dialog, inform,
+                      show_toast, smooth_combo,
+                      smooth_scrolling, use_hover_cursor)
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
-# and the Video Websites and Stremio account on this page serve all three
-# media. The literal "Anime, Movies & Series" was measured against this
+# and the page's settings serve all three media. The
+# literal "Anime, Movies & Series" was measured against this
 # sidebar and does not fit - it needs 192px of the list's 182px and elides
 # to "Anime, Movies & Seri..." (Segoe UI 10.5 at 125% scaling; "Anime,
 # Films & Series" clears it by 3px, which is no margin at all on a
@@ -49,7 +53,7 @@ from .widgets import finish_toast, scroll_area, show_toast
 # excluding films, and pairs with "Reading" one row below - the two things
 # the tracker does.
 CATEGORIES = ["General", "Preferences", "Watching", "Reading", "Games",
-              "Data", "Keybinds", "Uninstall"]
+              "API Keys", "Data", "Keybinds", "Uninstall"]
 
 # Uninstall is a category rather than a section at the bottom of Data,
 # and it is the one row drawn in the danger colour: it deletes every
@@ -59,12 +63,41 @@ DANGER_CATEGORY = "Uninstall"
 
 # Width of the key-combination column under Keybinds, so every
 # description starts at the same x rather than stepping with the
-# combination's length. Measured, not guessed: with each key in its own
-# frame the longest ("Ctrl+1-9") wants 111px against the 92 this was
-# when the keys were one plain string, and a fixed width narrower than
-# its content clips rather than wraps. 124 leaves margin for a wider
-# font or scale factor.
-KEYBIND_COLUMN_WIDTH = 124
+# combination's length. Measured, not guessed, and re-measured whenever
+# a row is added - a fixed width narrower than its content clips rather
+# than wraps.
+#
+#   92   the keys as one plain string
+#   124  each key in its own frame; longest was "Ctrl+1-9" at 111px
+#   184  the player and reader rows, 28 August 2026; longest is
+#        "Backspace / PageUp" at 180px
+#   308  the same row, re-measured properly the same day
+#
+# **The 184 and the 180 in it were measured wrong, and the row was
+# clipped on screen because of it.** They were taken from a `_key_caps`
+# holder built in a QApplication that had never been given
+# theme.apply_theme, so the caps carried no #KeyCap padding, border or
+# 600 weight at all - the number was the bare text. Under the real
+# stylesheet that same row is 296px, and 308px once the caps became
+# pills (the owner's fully-rounded frame, +3px of padding a side, over
+# two caps and two sides). Caught by a screenshot: "Backspace" and
+# "PageDown" were being cut off square at the column edge.
+#
+# Re-measure with `theme.apply_theme(app)` called first, or the number
+# will be wrong again in the same direction.
+#
+# Every row was measured by building _key_caps for it and reading the
+# sizeHint, which is also what caught "Alt+Left / Alt+Right" at 247px -
+# now two rows, because widening the column to fit one entry leaves
+# every other row with a hand's width of gap before its description.
+KEYBIND_COLUMN_WIDTH = 308
+
+# The API-key page's two fixed columns, so every field starts and ends at
+# the same x rather than stepping with the service's name. Sized off the
+# longest label in app_settings.API_KEYS ("TMDB (The Movie Database)")
+# and off "Not set", both with room for a wider font or scale factor.
+API_KEY_LABEL_WIDTH = 190
+API_KEY_STATE_WIDTH = 56
 
 # Slack added to the measured height of the category rows: the selected
 # row's QSS border draws at the very edge of its box, and without a few
@@ -72,19 +105,57 @@ KEYBIND_COLUMN_WIDTH = 124
 # main.NavListWidget keeps, for the same reason.
 CATEGORY_LIST_PADDING = 12
 
+# How each stored resolution reads in the Watching page's dropdown. Same
+# order as app_settings.RESOLUTION_CHOICES, which is the order the player
+# ranks in - highest first, "best" last because it is not a resolution
+# but an instruction. "2160p" is spelled out as 4K as well: the sources
+# are labelled 2160p and the person choosing thinks in 4K.
+RESOLUTION_LABELS = {
+    "2160p": "4K (2160p)",
+    "1080p": "1080p (recommended)",
+    "720p": "720p",
+    "480p": "480p",
+    "best": "Best available",
+}
+
 # (display name, data file, predicate). A predicate of None means "clear
 # the whole file" (Series/Games/Apps/Websites each hold only their own
 # entries) - Anime and Reading share tracker.json, so those two instead
 # filter out just the matching type(s) and keep the rest. Mirrors
 # windows.tracker.MANGA_TYPES, duplicated here rather than imported to
 # avoid a helpers -> windows dependency for one 3-value tuple.
+# **Rebuilt 21 August 2026 to match where the app actually keeps things.**
+# It had drifted, and silently: "Anime" cleared `tracker.json` for
+# entries typed Anime, but anime moved into `series.json` when the two
+# watch pages merged (main._merge_anime_into_series) - so ticking Anime
+# cleared *nothing at all* (measured: 0 entries), while ticking "Series"
+# wiped every anime with it (measured: all 6). A destructive control
+# that does nothing, beside one that does more than it says, is the
+# worst pair of the two.
+#
+# So the three watch kinds are named separately and keyed off the type
+# they are really stored under, reading is the whole of tracker.json
+# (which holds nothing else since the merge), and the three files the
+# app has grown since - history, downloads and the catalogue cache - are
+# offered instead of being unclearable.
+# **"Saved" leads every entry category** - the owner's ask, 23 August
+# 2026. "Anime" beside "Watch & Read History" reads as though it clears
+# anime *itself*; what it actually clears is the anime he has saved. The
+# three rows below the entry categories keep their own names, because
+# they are not saved entries and prefixing them would be a lie.
 CLEAR_CATEGORIES = [
-    ("Anime", "tracker.json", lambda e: e.get("type") == "Anime"),
-    ("Reading", "tracker.json", lambda e: e.get("type") in ("Manga", "Manhwa", "Manhua")),
-    ("Series", "series.json", None),
-    ("Games", "games.json", None),
-    ("Apps", "apps.json", None),
-    ("Websites", "websites.json", None),
+    ("Saved Anime", "series.json", lambda e: e.get("type") == "Anime"),
+    ("Saved Series", "series.json", lambda e: e.get("type") == "Series"),
+    ("Saved Movies", "series.json", lambda e: e.get("type") == "Movie"),
+    ("Saved Reading", "tracker.json", None),
+    ("Saved Games", "games.json", None),
+    ("Saved Apps", "apps.json", None),
+    ("Saved Websites", "websites.json", None),
+    # Not entries, but the three other things this app accumulates and
+    # that someone clearing data plainly means to include.
+    ("Watch & Read History", "history.json", None),
+    ("Download Queue", "downloads.json", None),
+    ("Cached Discover Results", "discover_cache.json", None),
 ]
 
 
@@ -187,10 +258,6 @@ def _read_backup(path: Path) -> dict:
             "only partly downloaded. Nothing was changed.")
 
 
-class _StremioLoginSignals(QObject):
-    done = Signal(str, str, str)  # email, auth key, error message (one is always "")
-
-
 class _SiteProbeSignals(QObject):
     done = Signal(str, str)  # which list ("reading"/"video"), site name
 
@@ -247,57 +314,106 @@ _CHECKED_THIS_RUN = set()
 # (see probe_site's deadline).
 _PROBE_TITLE_LIMIT = 3
 
-# Set once the user signs in again from this dialog, to stop the marker
-# below - which is sticky for the life of the process - from calling a
-# brand new session rejected. Module level for the same reason as the set
-# above: the dialog is rebuilt on every open, the fact is not.
-_STREMIO_SIGNED_IN_HERE = False
-
-
-def _stremio_sign_in_rejected() -> bool:
-    """Whether the tracker's last progress sync was turned away by
-    Stremio, meaning the saved session is dead and nothing is syncing.
-
-    Read, never measured: asking Stremio whether the key still works
-    would put a network request behind merely opening this dialog. The
-    tracker has already asked, on every page arrival, and records the
-    answer - windows.tracker._auth_warning_shown goes True the first time
-    a bulk sync comes back REASON_STREMIO_AUTH_FAILED (see
-    TrackerPage._warn_stremio_auth_once). That marker is once-per-run by
-    design and never resets, so this reads exactly as often as the
-    tracker's own toast says it: a dead key stays dead until reconnected.
-
-    sys.modules rather than an import, on purpose - helpers must not
-    depend on windows (see CLEAR_CATEGORIES above for the same call), and
-    a run in which no tracker page was ever built then reads as "nothing
-    known" rather than dragging the whole page module in to find out."""
-    if _STREMIO_SIGNED_IN_HERE:
-        return False
-    tracker = sys.modules.get("windows.tracker")
-    return bool(tracker is not None and getattr(tracker, "_auth_warning_shown", False))
+# The Stremio account sign-in that used to live on the Watching page is
+# gone entirely, at the owner's ask. A session saved before the removal
+# keeps working - app_settings still holds and serves the auth key and
+# the tracker still syncs with it - there is simply no UI here to add or
+# replace one any more.
 
 
 def _key_caps(keys: str) -> QWidget:
     """"Ctrl+K" as two framed keys with a plus between them.
 
     Split on "+" rather than parsed: every combination in SHORTCUTS is
-    plus-separated and no key in it is itself a plus, so a parser would
-    be code with nothing to decide. "Ctrl+," survives it - the comma is
-    the second half - and "Ctrl+1-9" keeps its range on one cap, which
-    is what it is: one key, any of nine.
+    plus-separated, so a parser would be code with nothing to decide.
+    "Ctrl+," survives it - the comma is the second half - and "Ctrl+1-9"
+    keeps its range on one cap, which is what it is: one key, any of
+    nine. A lone "+" is guarded below, because the reader binds one.
+
+    **" / " separates alternatives**, added 28 August 2026 with the
+    player and reader rows: "Left / Right" and "Space / PageDown" are two
+    keys that do related things, and giving each its own row would say
+    the list is twice as long as the thing it describes. The slash is
+    drawn between the two runs of caps, so each side still reads as
+    keys. Split on " / " with the spaces, so the reader's "+ / -" zoom
+    row survives - a bare "/" would cut "Ctrl+/" in half if one is ever
+    added.
     """
     holder = QWidget()
     row = QHBoxLayout(holder)
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(4)
-    for index, key in enumerate(keys.split("+")):
-        if index:
-            row.addWidget(QLabel("+", objectName="KeyPlus"))
-        row.addWidget(QLabel(key, objectName="KeyCap"))
+    for alt_index, alternative in enumerate(keys.split(" / ")):
+        if alt_index:
+            row.addWidget(QLabel("/", objectName="KeyPlus"))
+        # **A lone "+" is a key, not a separator.** The reader's zoom row
+        # is "+ / -", and splitting that on "+" gave two empty caps with a
+        # plus between them - visible in the very first render of this
+        # page. The old docstring's "no key in it is itself a plus" was
+        # true until the reader rows were added.
+        parts = [alternative] if alternative == "+" else alternative.split("+")
+        for index, key in enumerate(parts):
+            if index:
+                row.addWidget(QLabel("+", objectName="KeyPlus"))
+            row.addWidget(QLabel(key, objectName="KeyCap"))
     # Left-aligned in a fixed-width column: without this the caps spread
     # across the whole column and stop lining up with the row above.
     row.addStretch()
     return holder
+
+
+def add_spoiler_controls(form, owner=None):
+    """The two spoiler controls, appended to `form`.
+
+    One function rather than two copies because they are drawn in two
+    places now - Settings > Preferences and the first-run wizard's
+    Preferences step (the owner's ask, 28 August 2026: "make sure to
+    show the preferences page in the set up configuration"). A second
+    hand-written copy is a second thing to forget when the wording
+    changes.
+
+    `owner` is only used to keep the checkboxes reachable by name, which
+    is what the existing tests drive them through; passing None is fine
+    for a caller that has no need of them.
+
+    Both write straight through on toggle, like every other control in
+    Settings. Nothing here is undone by Cancel except through the
+    snapshot SettingsDialog.reject restores."""
+    form.addWidget(QLabel("Spoilers", objectName="SectionTitle"))
+    spoilers_hint = QLabel(
+        "What episode and chapter rows are allowed to give away before "
+        "you get there.", objectName="Muted")
+    spoilers_hint.setWordWrap(True)
+    form.addWidget(spoilers_hint)
+
+    blur_check = QCheckBox("Blur episode images")
+    blur_check.setChecked(app_settings.get_blur_episode_stills())
+    blur_check.toggled.connect(app_settings.set_blur_episode_stills)
+    form.addWidget(blur_check)
+    blur_hint = QLabel(
+        "Episode rows show a picture of the episode. Turn this on to "
+        "soften them, so a still cannot give away what happens. Takes "
+        "effect the next time a title's page is opened.",
+        objectName="Muted")
+    blur_hint.setWordWrap(True)
+    form.addWidget(blur_hint)
+
+    names_check = QCheckBox("Show episode and chapter numbers only")
+    names_check.setChecked(app_settings.get_hide_entry_names())
+    names_check.toggled.connect(app_settings.set_hide_entry_names)
+    form.addWidget(names_check)
+    names_hint = QLabel(
+        "Leaves the title off every episode and chapter row, so a name "
+        "cannot give away what happens before you get there. The number "
+        "stays. Takes effect the next time a title's page is opened.",
+        objectName="Muted")
+    names_hint.setWordWrap(True)
+    form.addWidget(names_hint)
+
+    if owner is not None:
+        owner.blur_stills_check = blur_check
+        owner.hide_names_check = names_check
+    return blur_check, names_check
 
 
 def _verdict_legend(kind: str) -> QLabel:
@@ -318,16 +434,86 @@ class _UpdateSignals(QObject):
     downloaded = Signal(object, str)   # downloaded Path (or None), error message
 
 
+class _NoScrollList(QListWidget):
+    """The settings sidebar, which does not scroll at all.
+
+    Every category fits - the list is sized to hold all of them (see
+    where its height is set) - so there is nothing below the fold to
+    reach, and the ways it could still move were all bugs. Selecting a
+    row used to slide the list (fixed once with setAutoScroll(False),
+    the owner's "when I click Uninstall the list scrolls down!!"), and
+    the wheel could still shift it a few pixels with the scrollbars
+    hidden, which leaves rows off the top with no way back.
+
+    The wheel is ignored rather than consumed, so the gesture is simply
+    not this widget's - nothing behind it scrolls either, and that is
+    the intent (the owner, 26 August 2026: remove it completely).
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+    def scrollContentsBy(self, dx, dy):
+        # Belt and braces: anything that asks the view to scroll - a
+        # keyboard move, an ensureVisible from deep inside Qt - is
+        # answered by not moving.
+        return
+
+
+def _plain_scroller(body: QWidget) -> QScrollArea:
+    """A Settings page that scrolls exactly the way Windows does.
+
+    **The owner's ask, 1 September 2026: "make scrolling in the settings
+    100% normal with no edits on notches".** So this is deliberately not
+    widgets.scroll_area, which installs the app's smooth-wheel model -
+    the per-notch distance, the glide and the pacing that the pages
+    want. A dialog is not a page: it is short, it is read rather than
+    browsed, and every one of those behaviours is felt as the settings
+    "not scrolling like everything else on the computer".
+
+    What is kept from that scroller is the one thing that was never
+    about notches: an **opaque** viewport. A transparent scroll body
+    denies Qt its blit path and makes it repaint every visible widget
+    every frame - measured on Home at 29.4ms per frame, 100% of them
+    over a 16.7ms budget, against 4.6ms and none once it had a ground.
+    That is a paint cost, not a wheel behaviour, and dropping it would
+    trade one complaint for a worse one.
+    """
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setWidget(body)
+    area.setStyleSheet(f"QScrollArea {{ background: {theme.BG}; border: 0; }}")
+    body.setAutoFillBackground(True)
+    palette = body.palette()
+    palette.setColor(body.backgroundRole(), QColor(theme.BG))
+    body.setPalette(palette)
+    area.viewport().setAutoFillBackground(True)
+    area.viewport().setPalette(palette)
+    return area
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.resize(920, 640)
         self.setMinimumSize(760, 560)
-        theme.apply_dark_titlebar(self)
+
+        # Taken before a single page is built, so it is what the user
+        # walked in with - see the Cancel button below. copy.deepcopy
+        # rather than the dict itself: nested values (nav_order, the
+        # launcher dirs) would otherwise be the very lists a setter
+        # mutates in place.
+        self._settings_snapshot = copy.deepcopy(
+            storage.load(app_settings.SETTINGS_FILE, {}))
+        self._startup_snapshot = self._read_startup_state()
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        # 1px, not 0: the dialog is a frameless rounded panel now and
+        # paints its own 1px border at the window edge - a flush child
+        # (the sidebar) would sit on top of that line.
+        outer.setContentsMargins(1, 1, 1, 1)
         outer.setSpacing(0)
 
         body = QHBoxLayout()
@@ -341,9 +527,6 @@ class SettingsDialog(QDialog):
         content_col.setContentsMargins(28, 24, 28, 20)
         content_col.setSpacing(14)
         content_col.addWidget(QLabel("Settings", objectName="PanelTitle"))
-
-        self._login_signals = _StremioLoginSignals()
-        self._login_signals.done.connect(self._on_stremio_login_done)
 
         self._site_probe_signals = _SiteProbeSignals()
         self._site_probe_signals.done.connect(self._on_site_probed)
@@ -368,67 +551,188 @@ class SettingsDialog(QDialog):
         self.stack = QStackedWidget()
         # Same order as CATEGORIES - the stack is indexed by the
         # sidebar's row, so the two lists are one list in two places.
-        self.stack.addWidget(scroll_area(self._build_general_page()))
-        self.stack.addWidget(scroll_area(self._build_preferences_page()))
-        self.stack.addWidget(scroll_area(self._build_anime_page()))
-        self.stack.addWidget(scroll_area(self._build_reading_page()))
-        self.stack.addWidget(scroll_area(self._build_games_page()))
-        self.stack.addWidget(scroll_area(self._build_data_page()))
-        self.stack.addWidget(scroll_area(self._build_keybinds_page()))
-        self.stack.addWidget(scroll_area(self._build_uninstall_page()))
+        #
+        # **Built on first visit, not all nine up front** (22 August 2026,
+        # the owner: "the settings btn takes ~1 sec to show the settings
+        # window, make it < 200 ms"). Measured against the real main
+        # window over the owner's own data, click to the dialog's first
+        # paint: 355-376ms, and nothing in it was one slow call. Every
+        # cost was simply *proportional to how many widgets existed*, so
+        # the same 300ms was being paid nine times over for eight pages
+        # nobody was looking at:
+        #
+        #     scroll_area x9                     60ms
+        #     stack.addWidget x9                 54ms
+        #     content_wrap.setLayout             47ms   (reparents the lot)
+        #     frameless_dialog                   50ms   (setWindowFlag)
+        #     the nine _build_* methods          40ms
+        #
+        # The last line is the only one that looks like page building;
+        # the rest is Qt walking the tree those pages made - an empty
+        # frameless QDialog of this size builds in **0.2ms**, which is
+        # what says the cost is the tree and not the dialog.
+        #
+        # After: **44-57ms** click to first paint, three consecutive
+        # opens, same harness. A category's first visit then costs
+        # 9-59ms (worst: API Keys, 41 widgets), measured in both
+        # directions through the list so a per-tab cost could be told
+        # from a first-switch one; a second visit costs nothing.
+        self._page_builders = [
+            self._build_general_page,
+            self._build_preferences_page,
+            self._build_anime_page,
+            self._build_reading_page,
+            self._build_games_page,
+            self._build_api_keys_page,
+            self._build_data_page,
+            self._build_keybinds_page,
+            self._build_uninstall_page,
+        ]
+        self._built_pages = set()
+        for _ in self._page_builders:
+            # #Bare, so an unbuilt slot paints nothing: the app
+            # stylesheet's plain QWidget rule is an opaque BG fill, and
+            # these stand where a transparent QScrollArea used to.
+            holder = QWidget(objectName="Bare")
+            slot = QVBoxLayout(holder)
+            slot.setContentsMargins(0, 0, 0, 0)
+            self.stack.addWidget(holder)
         content_col.addWidget(self.stack, stretch=1)
+        # Builds row 0 on the way through _on_category_changed, so the
+        # page that is about to be on screen is the one page that exists.
         self.category_list.setCurrentRow(0)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
+        # **Cancel and Save, not Close** (the owner's ask, 28 August
+        # 2026). Every control on every page still writes the moment it
+        # is touched - that is what makes a toggle land on the sidebar
+        # behind the dialog while it is open, and unpicking it into a
+        # staged model would touch all nine pages. So Cancel is an
+        # *undo*: `_settings_snapshot` is the whole of settings.json as
+        # it stood when the dialog opened, and Cancel writes it back and
+        # redraws. Save is simply "keep what is there", which is why it
+        # does nothing but close.
+        #
+        # What Cancel does **not** undo, deliberately, is an action
+        # rather than a setting: a data restore, a launcher import, a
+        # cleared category, an installed update. Those are their own
+        # confirmed operations and pretending a dialog button could roll
+        # them back would be the dangerous kind of wrong.
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        save_btn = QPushButton("Save", objectName="Accent")
+        save_btn.clicked.connect(self.accept)
+        save_btn.setDefault(True)
+        btn_row.addWidget(save_btn)
+        for button in (cancel_btn, save_btn):
+            use_hover_cursor(button)
         content_col.addLayout(btn_row)
 
-        content_wrap = QWidget()
+        # Bare, or the app stylesheet's opaque QWidget fill paints this
+        # wrapper's square corners over the frameless panel's rounded
+        # right edge (measured: both right corners came back alpha 255).
+        content_wrap = QWidget(objectName="Bare")
         content_wrap.setLayout(content_col)
         body.addWidget(content_wrap, stretch=1)
 
-        self._refresh_stremio_account()
-        self._refresh_video_sites()
-        self._refresh_sites()
+        # The sites list used to be filled here. It is filled by
+        # _build_reading_page instead now - that page may not exist yet,
+        # and a list nobody has built has nothing to fill.
 
+        # No title heading: the content column already opens with its
+        # own "Settings" PanelTitle.
+        frameless_dialog(self)
         self.exec()
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _read_startup_state():
+        """Whether "Launch on Windows startup" is on, or None when that
+        could not be read. None means Cancel leaves it alone rather than
+        guessing - the setting lives in the Windows registry, not in
+        settings.json, so a failed read is not a value."""
+        try:
+            return bool(startup.is_enabled())
+        except Exception:
+            return None
+
+    def reject(self):
+        """Cancel: put settings.json back the way it was, then close.
+
+        The redraw afterwards is not cosmetic - section visibility, the
+        sidebar order and Home's contents are all read from this file by
+        the window behind the dialog, and they were re-applied live as
+        the user toggled them."""
+        try:
+            storage.save(app_settings.SETTINGS_FILE, self._settings_snapshot)
+            if self._startup_snapshot is not None:
+                if self._read_startup_state() != self._startup_snapshot:
+                    startup.set_enabled(self._startup_snapshot)
+        except Exception:
+            logs.exception("Could not undo the settings changes")
+        try:
+            self._apply_section_visibility()
+        except Exception:
+            logs.exception("Could not redraw after cancelling settings")
+        super().reject()
+
     def _build_category_sidebar(self):
         sidebar = QWidget(objectName="Sidebar")
         sidebar.setFixedWidth(210)
+        # The shared #Sidebar rule rounds only the right corners (in the
+        # main window its left edge is the screen edge). Here the left
+        # edge is the dialog's rounded corner, and the sidebar's square
+        # corners would paint over the transparent rounding - so this
+        # copy rounds its left corners too. Merged property-by-property
+        # with the app rule, so the gradient and right radii stay.
+        sidebar.setStyleSheet(
+            f"QWidget#Sidebar {{"
+            f" border-top-left-radius: {theme.RADIUS_LG}px;"
+            f" border-bottom-left-radius: {theme.RADIUS_LG}px; }}")
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(14, 20, 14, 16)
         layout.setSpacing(4)
 
-        self.category_list = QListWidget(objectName="NavList")
+        self.category_list = _NoScrollList(objectName="SettingsNav")
         self.category_list.setFrameShape(QFrame.Shape.NoFrame)
         self.category_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.category_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.category_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # **No auto-scroll to the clicked row** - the owner's ask, 23
+        # August 2026: "when I click in the sidebar of the settings on
+        # Uninstall the list scrolls down!! do not make it do that!
+        # (there is no need for scroll in the settings sidebar)".
+        #
+        # Hiding the scrollbars does not stop a QListWidget scrolling:
+        # selecting a row calls scrollTo(EnsureVisible) on it, so if the
+        # viewport is even a pixel short of the last row - which is
+        # exactly the bottom row, Uninstall - clicking it slides the
+        # whole list up to reveal it, and with no scrollbar there is no
+        # way back down. The list is already sized to hold every row
+        # (below), so there is nothing it should ever need to scroll to.
+        self.category_list.setAutoScroll(False)
         self.category_list.setSpacing(2)
         for name in CATEGORIES:
             item = QListWidgetItem(f"  {name}")
+            # **Coloured through the model, not through a child widget.**
+            # The danger row used to be a QLabel dropped onto the item
+            # with setItemWidget, because a stylesheet `color` on ::item
+            # beats the model's ForegroundRole - true, and the cure was
+            # worse: an item widget brings its own geometry, so that row
+            # ignored the padding every other row gets and the selection
+            # pill was drawn behind a label that did not line up with it.
+            # The owner's screenshot, 26 August 2026: the highlight
+            # clipped, and the word sitting at a different x from the
+            # eight above it.
+            #
+            # #SettingsNav sets no `color` at all now (see theme.py), so
+            # the model wins for every row and each one is the same
+            # shape - one plain item, one padding, one pill.
+            item.setForeground(QColor(theme.DANGER if name == DANGER_CATEGORY
+                                      else theme.TEXT_MUTED))
             self.category_list.addItem(item)
-            if name == DANGER_CATEGORY:
-                # Painted by a label sitting on the row, not by the item's
-                # own foreground brush. The brush was the obvious way and
-                # it does nothing here: the nav list's QSS sets a colour
-                # on ::item, and a stylesheet colour beats the model's
-                # ForegroundRole - measured, the row still drew at
-                # #9d9db1 with theme.DANGER set on it. A child widget's
-                # own stylesheet is the one thing that wins, and a
-                # transparent background leaves the row's hover and
-                # selection painting untouched underneath.
-                label = QLabel(item.text())
-                label.setStyleSheet(
-                    f"color: {theme.DANGER}; background: transparent;")
-                item.setSizeHint(self.category_list.item(0).sizeHint())
-                item.setText("")
-                self.category_list.setItemWidget(item, label)
         self.category_list.currentRowChanged.connect(self._on_category_changed)
         # Tall enough for every row, measured rather than left to Qt.
         # QListWidget's own sizeHint is bounded however many items it
@@ -440,8 +744,17 @@ class SettingsDialog(QDialog):
         rows = self.category_list.count()
         row_height = self.category_list.sizeHintForRow(0) if rows else 0
         spacing = self.category_list.spacing()
+        # **Spacing wraps every item, not the gaps between them.** Qt
+        # gives each row a margin of `spacing` on all four sides, so N
+        # rows occupy N * (height + 2 * spacing) - the old arithmetic
+        # counted spacing * (N + 1), which at nine rows is 16px short.
+        # The list has its scrollbars off, so those 16px do not scroll:
+        # they come off the bottom row, and the bottom row is Uninstall.
+        # That is the owner's report of 26 August 2026 - its highlight
+        # "not showing completely" while the eight above it were fine.
+        frame = self.category_list.frameWidth() * 2
         self.category_list.setFixedHeight(
-            rows * row_height + spacing * (rows + 1) + CATEGORY_LIST_PADDING)
+            rows * (row_height + spacing * 2) + frame + CATEGORY_LIST_PADDING)
         layout.addWidget(self.category_list)
         layout.addStretch()
 
@@ -449,7 +762,22 @@ class SettingsDialog(QDialog):
 
     def _on_category_changed(self, row):
         if row >= 0:
+            self._ensure_page(row)
             self.stack.setCurrentIndex(row)
+
+    def _ensure_page(self, row):
+        """Build one category's page, the first time it is asked for.
+
+        Before setCurrentIndex, deliberately: the page is added while its
+        holder is still the hidden one, so Qt lays it out once rather
+        than laying out and then showing. A row is recorded as built
+        before the builder runs, so a builder that raises leaves an empty
+        page rather than being retried on every click."""
+        if row in self._built_pages:
+            return
+        self._built_pages.add(row)
+        self.stack.widget(row).layout().addWidget(
+            _plain_scroller(self._page_builders[row]()))
 
     # ------------------------------------------------------------------
     def _build_general_page(self):
@@ -545,6 +873,9 @@ class SettingsDialog(QDialog):
         home_hint.setWordWrap(True)
         form.addWidget(home_hint)
 
+        form.addSpacing(24)
+        add_spoiler_controls(form, self)
+
         form.addStretch()
         return page
 
@@ -561,17 +892,24 @@ class SettingsDialog(QDialog):
                            objectName="Muted")
         keys_hint.setWordWrap(True)
         form.addWidget(keys_hint)
-        for keys, what in global_search.SHORTCUTS:
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            # Fixed width so the descriptions line up in a column
-            # instead of stepping in and out with the length of each
-            # combination.
-            caps = _key_caps(keys)
-            caps.setFixedWidth(KEYBIND_COLUMN_WIDTH)
-            row.addWidget(caps)
-            row.addWidget(QLabel(what, objectName="Muted"), stretch=1)
-            form.addLayout(row)
+        # Grouped by where the keys apply - see global_search.SHORTCUTS.
+        # A flat list said "these are the shortcuts" while describing only
+        # the window's, which is how Ctrl+F came to be documented as
+        # something it had stopped doing.
+        for heading, rows in global_search.SHORTCUTS:
+            form.addSpacing(14)
+            form.addWidget(QLabel(heading, objectName="SectionTitle"))
+            for keys, what in rows:
+                row = QHBoxLayout()
+                row.setSpacing(8)
+                # Fixed width so the descriptions line up in a column
+                # instead of stepping in and out with the length of each
+                # combination.
+                caps = _key_caps(keys)
+                caps.setFixedWidth(KEYBIND_COLUMN_WIDTH)
+                row.addWidget(caps)
+                row.addWidget(QLabel(what, objectName="Muted"), stretch=1)
+                form.addLayout(row)
 
         form.addStretch()
         return page
@@ -716,88 +1054,96 @@ class SettingsDialog(QDialog):
         form.setContentsMargins(4, 4, 12, 4)
         form.setSpacing(6)
 
-        form.addWidget(QLabel("Video Websites", objectName="SectionTitle"))
-        video_sites_hint = QLabel(
-            "Where entries open, chosen per entry in Add/Edit.",
+        # No Video Websites list here any more - no Stremio/Netflix/
+        # Crunchyroll to choose between, and nothing to add to the choice.
+        # Video plays inside Atomic now, so where an entry "opens" stopped
+        # being a setting. The saved sites file and every entry's site_id
+        # are untouched: anime_sites.streaming_provider still reads them
+        # to tell the player that a Netflix or Crunchyroll entry is DRM
+        # and cannot be played. This is a removal from the interface, not
+        # from the data.
+
+        form.addWidget(QLabel("Playback", objectName="SectionTitle"))
+        resolution_row = QHBoxLayout()
+        resolution_row.addWidget(QLabel("Default resolution"))
+        self.resolution_combo = smooth_combo(QComboBox())
+        for value in app_settings.RESOLUTION_CHOICES:
+            self.resolution_combo.addItem(RESOLUTION_LABELS.get(value, value), value)
+        current = app_settings.get_preferred_resolution()
+        index = self.resolution_combo.findData(current)
+        if index >= 0:
+            self.resolution_combo.setCurrentIndex(index)
+        # currentIndexChanged, not activated: the two behave the same for
+        # a click, and this one also fires for a keyboard change, which
+        # `activated` misses.
+        self.resolution_combo.currentIndexChanged.connect(self._save_resolution)
+        resolution_row.addWidget(self.resolution_combo)
+        resolution_row.addStretch()
+        form.addLayout(resolution_row)
+
+        resolution_hint = QLabel(
+            "Which quality the player starts on when a title offers several. "
+            "It falls back to the nearest available one.",
             objectName="Muted",
         )
-        video_sites_hint.setWordWrap(True)
-        video_sites_hint.setToolTip(
-            "Stremio is always available and opens the title directly. Crunchyroll "
-            "and Netflix open the title's own page too, found through public "
-            "databases. Anything else you add depends on its own search - Check "
-            "says which. Suggestions, covers and watch progress come from Stremio "
-            "either way, whichever site an entry opens on.")
-        form.addWidget(video_sites_hint)
+        resolution_hint.setWordWrap(True)
+        # The detail that does not fit two lines - and the reason the
+        # default is not "best".
+        resolution_hint.setToolTip(
+            "4K is picked from a much smaller swarm and moves far larger "
+            "pieces: one measured here advertised 313 seeders and served "
+            "nothing at all inside a minute, while 1080p started instantly.")
+        form.addWidget(resolution_hint)
 
-        self.video_sites_list = QListWidget()
-        self.video_sites_list.setMinimumHeight(120)
-        self.video_sites_list.itemDoubleClicked.connect(self._edit_video_site)
-        form.addWidget(self.video_sites_list)
-
-        video_sites_btn_row = QHBoxLayout()
-        add_video_site_btn = QPushButton("Add...")
-        add_video_site_btn.clicked.connect(self._add_video_site)
-        video_sites_btn_row.addWidget(add_video_site_btn)
-        edit_video_site_btn = QPushButton("Edit...")
-        edit_video_site_btn.clicked.connect(self._edit_video_site)
-        video_sites_btn_row.addWidget(edit_video_site_btn)
-        check_video_site_btn = QPushButton("Check")
-        check_video_site_btn.setToolTip(
-            "Searches this site for a title it should have, then says which "
-            "of the verdicts below you would get by opening an entry here.")
-        check_video_site_btn.clicked.connect(self._check_video_site)
-        video_sites_btn_row.addWidget(check_video_site_btn)
-        check_all_video_btn = QPushButton("Check All")
-        check_all_video_btn.setToolTip("Check every site in this list. Verdicts clear "
-                                       "when Atomic restarts, so this is how to fill "
-                                       "them back in.")
-        check_all_video_btn.clicked.connect(lambda: self._check_all_sites("video"))
-        video_sites_btn_row.addWidget(check_all_video_btn)
-        remove_video_site_btn = QPushButton("Remove", objectName="Danger")
-        remove_video_site_btn.clicked.connect(self._remove_video_site)
-        video_sites_btn_row.addWidget(remove_video_site_btn)
-        form.addLayout(video_sites_btn_row)
-        form.addWidget(_verdict_legend("anime/movies/series"))
-
-        form.addSpacing(24)
-        form.addWidget(QLabel("Stremio Account", objectName="SectionTitle"))
-
-        self.stremio_account_status = QLabel("", objectName="Muted")
-        # Wraps because the rejected-session wording is longer than one
-        # line at this width; kept to two rendered lines like every other
-        # hint on this page (measured at the dialog's 920px, 688px pane).
-        self.stremio_account_status.setWordWrap(True)
-        form.addWidget(self.stremio_account_status)
-
-        self.stremio_email_edit = QLineEdit()
-        self.stremio_email_edit.setPlaceholderText("Email")
-        form.addWidget(self.stremio_email_edit)
-
-        self.stremio_password_edit = QLineEdit()
-        self.stremio_password_edit.setPlaceholderText("Password")
-        self.stremio_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addWidget(self.stremio_password_edit)
-
-        stremio_account_btn_row = QHBoxLayout()
-        self.stremio_connect_btn = QPushButton("Sign In")
-        self.stremio_connect_btn.clicked.connect(self._connect_stremio)
-        stremio_account_btn_row.addWidget(self.stremio_connect_btn)
-        self.stremio_disconnect_btn = QPushButton("Disconnect", objectName="Danger")
-        self.stremio_disconnect_btn.clicked.connect(self._disconnect_stremio)
-        stremio_account_btn_row.addWidget(self.stremio_disconnect_btn)
-        form.addLayout(stremio_account_btn_row)
-
-        stremio_account_hint = QLabel(
-            "Fills in how far you have watched. Your password is never stored.",
+        form.addSpacing(10)
+        self.auto_pick_check = QCheckBox("Auto choose source to play")
+        self.auto_pick_check.setChecked(app_settings.get_auto_pick_source())
+        self.auto_pick_check.toggled.connect(app_settings.set_auto_pick_source)
+        form.addWidget(self.auto_pick_check)
+        auto_pick_hint = QLabel(
+            "Pressing an episode starts the best source at your preferred "
+            "resolution right away. Turn off to pick from the source list "
+            "each time - the source and resolution can still be changed "
+            "inside the player either way.",
             objectName="Muted",
         )
-        stremio_account_hint.setWordWrap(True)
-        form.addWidget(stremio_account_hint)
+        auto_pick_hint.setWordWrap(True)
+        form.addWidget(auto_pick_hint)
+
+        form.addSpacing(20)
+        form.addWidget(QLabel("Picture", objectName="SectionTitle"))
+        motion_hint = QLabel(
+            "Off by default, and off is what most people want. The player "
+            "already locks every frame to your screen's refresh rate, which "
+            "is what stops panning judder - that is always on and is not "
+            "this setting. This one is different: it blends frames to "
+            "invent motion the release never had, so 24fps film looks like "
+            "video. Some people like it; it is the “soap opera” "
+            "look. Takes effect the next time something is played.",
+            objectName="Muted",
+        )
+        motion_hint.setWordWrap(True)
+        form.addWidget(motion_hint)
+
+        # The "Episode List" block that used to sit here - "Blur episode
+        # images" and "Show episode and chapter numbers only" - moved to
+        # the Preferences page on 28 August 2026, at the owner's ask.
+        # Both are spoiler controls and both already applied to chapter
+        # rows as well as episode ones, so filing them under Watching
+        # was describing half of what they do. They are one block,
+        # built by `_spoiler_controls`, so the wizard shows the same
+        # pair rather than a second copy that can drift.
 
         form.addSpacing(24)
+        # The Stremio Account sign-in that lived here (email/password,
+        # Sign In/Disconnect) is removed entirely at the owner's ask -
+        # see the module-level note near _PROBE_TITLE_LIMIT. The progress
+        # note below survives it: it describes the in-app player, which
+        # is the only thing recording progress now.
         progress_note = QLabel(
-            "Only Stremio can report watch progress - nobody else publishes it.",
+            "Playing an episode here records it on the entry by itself. "
+            "Progress only ever moves forward - rewatching an old episode "
+            "leaves the number where it is.",
             objectName="Muted",
         )
         progress_note.setWordWrap(True)
@@ -822,9 +1168,16 @@ class SettingsDialog(QDialog):
         form.addWidget(sites_hint)
 
         self.sites_list = QListWidget()
+        # A list is a scroll area like any other: without this it has
+        # Qt's raw thumb drag and Qt's three-lines wheel, neither of
+        # which is what the rest of the app does - see ScrollBarDrag.
+        smooth_scrolling(self.sites_list)
         self.sites_list.setMinimumHeight(160)
         self.sites_list.itemDoubleClicked.connect(self._edit_site)
         form.addWidget(self.sites_list, stretch=1)
+        # Filled here rather than from __init__: this page builds on
+        # first visit, so this is the moment the list exists.
+        self._refresh_sites()
 
         sites_btn_row = QHBoxLayout()
         add_site_btn = QPushButton("Add...")
@@ -942,6 +1295,127 @@ class SettingsDialog(QDialog):
                      f"{label}: {launchers.import_result_message(added)}")
 
     # ------------------------------------------------------------------
+    def _build_api_keys_page(self):
+        """One field per key in app_settings.API_KEYS.
+
+        Its own category rather than a section tacked onto Watching:
+        these keys serve three different features (artwork, subtitle
+        sources, translation) and there was previously **nowhere at all**
+        to put them - the table existed, every reader of it existed, and
+        the only way to set one was to hand-edit settings.json.
+
+        Drawn from the table, not written out by hand, so adding a source
+        is a row in app_settings and nothing here."""
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        intro = QLabel(
+            "Keys are stored on this machine only, in settings.json, and are "
+            "never sent anywhere except to the service they belong to. "
+            "Anything without a key stays off and says so rather than "
+            "failing quietly.",
+            objectName="Muted",
+        )
+        intro.setWordWrap(True)
+        form.addWidget(intro)
+
+        self.api_key_edits = {}
+        self.api_key_states = {}
+        for heading, names in app_settings.API_KEY_GROUPS:
+            form.addSpacing(18)
+            form.addWidget(QLabel(heading, objectName="SectionTitle"))
+            for name in names:
+                label, unlocks = app_settings.API_KEYS.get(name, (name, ""))
+                row = QHBoxLayout()
+                caption = QLabel(label)
+                caption.setFixedWidth(API_KEY_LABEL_WIDTH)
+                row.addWidget(caption)
+
+                edit = QLineEdit(app_settings.get_api_key(name))
+                # Password echo by default: this dialog gets opened with
+                # somebody watching often enough, and a key on screen is
+                # a key on screen. The Show tick below reveals all of
+                # them at once for the one job that needs it - checking
+                # a paste went in whole.
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+                edit.setPlaceholderText(f"Paste your {label} key")
+                edit.editingFinished.connect(
+                    lambda n=name: self._save_api_key(n))
+                row.addWidget(edit, stretch=1)
+
+                state = QLabel("", objectName="Muted")
+                state.setFixedWidth(API_KEY_STATE_WIDTH)
+                row.addWidget(state)
+                form.addLayout(row)
+
+                hint_text = (f"{unlocks} · "
+                             f"{app_settings.API_KEY_HELP.get(name, '')}")
+                # The same "Get a key" link the first-run wizard carries,
+                # from the same URL table, so the two never drift apart.
+                url = app_settings.API_KEY_URLS.get(name, "")
+                if url:
+                    hint_text = (f'<a href="{url}" style="color: '
+                                 f'{theme.ACCENT};">Get a key ↗</a>'
+                                 f" · {hint_text}")
+                hint = QLabel(hint_text, objectName="Muted")
+                hint.setWordWrap(True)
+                if url:
+                    hint.setOpenExternalLinks(True)
+                    hint.setTextInteractionFlags(
+                        Qt.TextInteractionFlag.TextBrowserInteraction)
+                hint.setContentsMargins(API_KEY_LABEL_WIDTH + 8, 0, 0, 4)
+                form.addWidget(hint)
+
+                self.api_key_edits[name] = edit
+                self.api_key_states[name] = state
+
+        form.addSpacing(18)
+        show_keys = QCheckBox("Show keys")
+        show_keys.toggled.connect(self._toggle_api_key_echo)
+        form.addWidget(show_keys)
+
+        # No debrid line here any more - the row is gone from
+        # app_settings.API_KEYS at the owner's ask and every build uses the
+        # bundled token, so describing a field that no longer exists would
+        # be the only place in the app still advertising the choice.
+        note = QLabel(
+            "TMDB already has a key built into this build - only paste one "
+            "here if logos stop loading. Subtitles need at least one source "
+            "key; AI translation is what covers a title nobody has published "
+            "Arabic for, and one AI key is enough.",
+            objectName="Muted",
+        )
+        note.setWordWrap(True)
+        form.addWidget(note)
+
+        self._refresh_api_key_states()
+        form.addStretch()
+        return page
+
+    def _toggle_api_key_echo(self, shown):
+        mode = (QLineEdit.EchoMode.Normal if shown
+                else QLineEdit.EchoMode.Password)
+        for edit in self.api_key_edits.values():
+            edit.setEchoMode(mode)
+
+    def _save_api_key(self, name):
+        edit = self.api_key_edits.get(name)
+        if edit is None:
+            return
+        app_settings.set_api_key(name, edit.text().strip())
+        self._refresh_api_key_states()
+
+    def _refresh_api_key_states(self):
+        for name, state in self.api_key_states.items():
+            configured = bool(app_settings.get_api_key(name))
+            state.setText("Set" if configured else "Not set")
+            state.setStyleSheet(
+                f"color: {theme.SUCCESS if configured else theme.TEXT_DIM};"
+                f" background: transparent;")
+
+    # ------------------------------------------------------------------
     def _build_data_page(self):
         page = QWidget()
         form = QVBoxLayout(page)
@@ -1002,7 +1476,14 @@ class SettingsDialog(QDialog):
 
         self.clear_checks = []
         for name, _file, _predicate in CLEAR_CATEGORIES:
-            cb = QCheckBox(name)
+            # `&&`, not `&`: Qt reads a single ampersand in a button or
+            # checkbox label as a mnemonic accelerator and swallows it,
+            # so "Watch & Read History" was drawn as "Watch  Read
+            # History" with a hole where the ampersand should be - the
+            # owner's screenshot. The table keeps the real string,
+            # because it is also printed in the "... cleared." toast,
+            # where an escaped one would show through.
+            cb = QCheckBox(name.replace("&", "&&"))
             cb.toggled.connect(self._sync_clear_select_all)
             form.addWidget(cb)
             self.clear_checks.append(cb)
@@ -1024,9 +1505,8 @@ class SettingsDialog(QDialog):
         gone."""
         files = sorted(p for p in storage.DATA_DIR.glob(_BACKUP_GLOB) if p.is_file())
         if not files:
-            QMessageBox.information(
-                self, "Back Up Data",
-                "There is nothing saved to back up yet.")
+            inform(self, "Back Up Data",
+                   "There is nothing saved to back up yet.")
             return
 
         suggested = str(Path.home() / f"Atomic Backup {datetime.now():%Y-%m-%d}.zip")
@@ -1047,10 +1527,9 @@ class SettingsDialog(QDialog):
             # A dialog rather than a toast: a backup the user believes
             # they have and doesn't is the failure this whole feature is
             # meant to prevent.
-            QMessageBox.warning(
-                self, "Back Up Data",
-                "Could not write the backup there. Try another folder - a "
-                "system folder or a full drive will refuse.")
+            inform(self, "Back Up Data",
+                   "Could not write the backup there. Try another folder - a "
+                   "system folder or a full drive will refuse.")
             return
 
         show_toast(self, f"Backed Up {len(files)} Files")
@@ -1072,21 +1551,19 @@ class SettingsDialog(QDialog):
         try:
             restored = _read_backup(Path(path))
         except _BackupError as exc:
-            QMessageBox.warning(self, "Restore Data", str(exc))
+            inform(self, "Restore Data", str(exc))
             return
 
         names = ", ".join(sorted(restored))
         # Defaulting to No, like Uninstall and unlike Clear Data: this one
         # overwrites files the user did not name, and the accidental
         # Return keypress must not be the one that does it.
-        if QMessageBox.warning(
-            self, "Restore Data",
-            f"Replace what is saved now with this backup?\n\n{names}\n\n"
-            f"Everything currently in those files is overwritten. This "
-            f"cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+        if not confirm(
+                self, "Restore Data",
+                f"Replace what is saved now with this backup?\n\n{names}\n\n"
+                f"Everything currently in those files is overwritten. This "
+                f"cannot be undone.",
+                danger=True, default_no=True):
             return
 
         for name, data in sorted(restored.items()):
@@ -1149,16 +1626,16 @@ class SettingsDialog(QDialog):
     def _clear_checked_categories(self):
         checked = [CLEAR_CATEGORIES[i] for i, cb in enumerate(self.clear_checks) if cb.isChecked()]
         if not checked:
-            QMessageBox.information(self, "Clear Data", "Check at least one category first.")
+            inform(self, "Clear Data", "Check at least one category first.")
             return
         names = ", ".join(name for name, _file, _predicate in checked)
-        if QMessageBox.question(
-            self, "Clear Data", f"Clear all {names} entries? This cannot be undone."
-        ) != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Clear Data",
+                       f"Clear all {names} entries? This cannot be undone."):
             return
 
-        # Anime and Reading share tracker.json - load/save it once for
-        # both instead of the second clear stomping the first's result.
+        # The three watch kinds share series.json - load/save it once for
+        # all of them instead of the second clear stomping the first's
+        # result.
         by_file = {}
         for name, data_file, predicate in checked:
             by_file.setdefault(data_file, []).append(predicate)
@@ -1176,19 +1653,17 @@ class SettingsDialog(QDialog):
         main_window = self.parent()
         if main_window is not None and hasattr(main_window, "refresh_current_page"):
             main_window.refresh_current_page()
-        QMessageBox.information(self, "Clear Data", f"{names} cleared.")
+        inform(self, "Clear Data", f"{names} cleared.")
 
     def _uninstall(self):
-        confirm = QMessageBox.warning(
-            self, "Uninstall Atomic",
-            "This permanently deletes every saved Atomic file on this PC "
-            "(all Anime/Reading/Series/Games/Apps/Websites entries, site "
-            "lists, and settings) and removes the app itself. This cannot "
-            "be undone.\n\nThe app will close immediately. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
+        if not confirm(
+                self, "Uninstall Atomic",
+                "This permanently deletes every saved Atomic file on this PC "
+                "(all Anime/Series/Movies/Reading/Games/Apps/Websites entries, "
+                "your watch and read history, the download queue, site "
+                "lists, and settings) and removes the app itself. This cannot "
+                "be undone.\n\nThe app will close immediately. Continue?",
+                danger=True, default_no=True):
             return
         uninstall.run()
         QApplication.instance().quit()
@@ -1221,10 +1696,10 @@ class SettingsDialog(QDialog):
         if not site:
             return
         self._probing_sites.add(site_id)
+        # Reading is the only list on screen now (the Video Websites one
+        # is gone), so it is the only one with a row to repaint.
         if which == "reading":
             self._refresh_sites()
-        else:
-            self._refresh_video_sites()
         # Pooled, not a thread of its own: Check All fires one of these
         # per configured site, and a bare thread each is the shape that
         # once put 651 simultaneous connections on this user's network
@@ -1303,10 +1778,17 @@ class SettingsDialog(QDialog):
         self._probing_sites.discard(site_id)
         if which == "reading":
             self._refresh_sites()
-        else:
-            self._refresh_video_sites()
 
     def _refresh_sites(self):
+        # The Reading page builds on first visit, and a probe started
+        # before that (Add Website, or one still running from an earlier
+        # visit) reports back through _on_site_probed regardless. An
+        # AttributeError raised in a Qt slot takes the whole process down
+        # (planning.md, defect #5) - so ask whether the list exists
+        # rather than assuming it does. Nothing is lost: the page fills
+        # itself from disk when it is finally built.
+        if getattr(self, "sites_list", None) is None:
+            return
         self.sites_list.clear()
         for site in manga_sites.list_sites():
             item = QListWidgetItem(self._site_label(site))
@@ -1327,7 +1809,7 @@ class SettingsDialog(QDialog):
     def _edit_site(self):
         site_id = self._selected_site_id()
         if not site_id:
-            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            inform(self, "Reading Websites", "Select a website first.")
             return
         dialog = SiteForm(self, "Website", manga_sites.get_site(site_id))
         if dialog.result_data:
@@ -1353,72 +1835,25 @@ class SettingsDialog(QDialog):
     def _check_site(self):
         site_id = self._selected_site_id()
         if not site_id:
-            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            inform(self, "Reading Websites", "Select a website first.")
             return
         self._probe_site_async("reading", site_id)
 
     def _remove_site(self):
         site_id = self._selected_site_id()
         if not site_id:
-            QMessageBox.information(self, "Reading Websites", "Select a website first.")
+            inform(self, "Reading Websites", "Select a website first.")
             return
         site = manga_sites.get_site(site_id)
-        if QMessageBox.question(self, "Remove Website", f"Remove '{site['name']}'?") == QMessageBox.StandardButton.Yes:
+        if confirm(self, "Remove Website", f"Remove '{site['name']}'?"):
             manga_sites.remove_site(site_id)
             self._refresh_sites()
 
-    # ------------------------------------------------------------------
-    def _refresh_video_sites(self):
-        self.video_sites_list.clear()
-        item = QListWidgetItem("Stremio  —  built-in, always available")
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        self.video_sites_list.addItem(item)
-        for site in anime_sites.list_sites():
-            item = QListWidgetItem(self._site_label(site))
-            item.setData(Qt.ItemDataRole.UserRole, site["id"])
-            self.video_sites_list.addItem(item)
-
-    def _selected_video_site_id(self):
-        items = self.video_sites_list.selectedItems()
-        return items[0].data(Qt.ItemDataRole.UserRole) if items else None
-
-    def _add_video_site(self):
-        # Same plain base URL as a Reading Website now - the per-site
-        # search pattern is worked out in anime_sites, not typed here.
-        dialog = SiteForm(self, "Video Website")
-        if dialog.result_data:
-            site = anime_sites.add_site(*dialog.result_data)
-            self._refresh_video_sites()
-            self._probe_site_async("video", site["id"])
-
-    def _edit_video_site(self):
-        site_id = self._selected_video_site_id()
-        if not site_id:
-            QMessageBox.information(self, "Video Websites", "Select a website first.")
-            return
-        dialog = SiteForm(self, "Video Website", anime_sites.get_site(site_id))
-        if dialog.result_data:
-            anime_sites.update_site(site_id, *dialog.result_data)
-            self._refresh_video_sites()
-            # Re-checked, not kept: the URL may be the thing that changed.
-            self._probe_site_async("video", site_id)
-
-    def _check_video_site(self):
-        site_id = self._selected_video_site_id()
-        if not site_id:
-            QMessageBox.information(self, "Video Websites", "Select a website first.")
-            return
-        self._probe_site_async("video", site_id)
-
-    def _remove_video_site(self):
-        site_id = self._selected_video_site_id()
-        if not site_id:
-            QMessageBox.information(self, "Video Websites", "Select a website first.")
-            return
-        site = anime_sites.get_site(site_id)
-        if QMessageBox.question(self, "Remove Website", f"Remove '{site['name']}'?") == QMessageBox.StandardButton.Yes:
-            anime_sites.remove_site(site_id)
-            self._refresh_video_sites()
+    # The Add/Edit/Check/Remove set for Video Websites lived here. It went
+    # with the list itself: there is nothing to add a video site *to* any
+    # more. anime_sites keeps its saved sites and its whole API - entries
+    # still carry site_id, and streaming_provider is what tells the player
+    # a Netflix or Crunchyroll entry is DRM - it simply has no editor.
 
     def _toggle_startup(self, checked):
         try:
@@ -1427,7 +1862,7 @@ class SettingsDialog(QDialog):
             self.startup_check.blockSignals(True)
             self.startup_check.setChecked(not checked)
             self.startup_check.blockSignals(False)
-            QMessageBox.critical(self, "Settings", f"Couldn't update startup setting:\n{exc}")
+            inform(self, "Settings", f"Couldn't update startup setting:\n{exc}")
         # Whichever way that went, the fullscreen option follows the
         # checkbox's *actual* state - including the rolled-back one above.
         self._sync_fullscreen_startup_check()
@@ -1449,82 +1884,10 @@ class SettingsDialog(QDialog):
     def _toggle_fullscreen_on_startup(self, checked):
         app_settings.set_fullscreen_on_startup(checked)
 
-    def _refresh_stremio_account(self):
-        """Three states, not two. "Connected as X" used to be shown for
-        the whole life of a saved key, including after Stremio had begun
-        refusing it - the account page said connected while every sync
-        silently returned nothing, which is the one place the user would
-        come to fix it. The third state is read off the tracker's last
-        attempt (see _stremio_sign_in_rejected), never re-measured."""
-        email, auth_key = app_settings.get_stremio_auth()
-        connected = bool(auth_key)
-        rejected = connected and _stremio_sign_in_rejected()
-        if not connected:
-            self.stremio_account_status.setText("Not connected")
-        elif rejected:
-            self.stremio_account_status.setText(
-                f"Connected as {email} — but Stremio is refusing this sign-in, "
-                "so no watch progress is syncing. Sign in again below.")
-        else:
-            self.stremio_account_status.setText(f"Connected as {email}")
-        # Muted grey is right for a status nobody needs to act on and
-        # wrong for this one; the colour comes from theme so it follows
-        # the palette rather than pinning a literal here.
-        self.stremio_account_status.setStyleSheet(
-            f"color: {theme.WARNING}; background: transparent;" if rejected else "")
-        # The sign-in fields come back for a rejected session: telling
-        # someone to sign in again while hiding the form behind Disconnect
-        # is the same defect one step further on. Disconnect stays too -
-        # there is still a stored key, and clearing it is a valid answer.
-        self.stremio_email_edit.setVisible(not connected or rejected)
-        self.stremio_password_edit.setVisible(not connected or rejected)
-        self.stremio_connect_btn.setVisible(not connected or rejected)
-        self.stremio_disconnect_btn.setVisible(connected)
-        if rejected and not self.stremio_email_edit.text():
-            self.stremio_email_edit.setText(email)
-
-    def _connect_stremio(self):
-        email = self.stremio_email_edit.text().strip()
-        password = self.stremio_password_edit.text()
-        if not email or not password:
-            QMessageBox.warning(self, "Stremio Account", "Email and password are required.")
-            return
-        self.stremio_connect_btn.setEnabled(False)
-        self.stremio_account_status.setText("Signing in...")
-        threading.Thread(target=self._stremio_login_worker, args=(email, password), daemon=True).start()
-
-    def _stremio_login_worker(self, email, password):
-        try:
-            auth_key = stremio.login(email, password)
-            self._login_signals.done.emit(email, auth_key, "")
-        except Exception as exc:
-            self._login_signals.done.emit("", "", str(exc))
-
-    def _on_stremio_login_done(self, email, auth_key, error):
-        self.stremio_connect_btn.setEnabled(True)
-        self.stremio_password_edit.clear()
-        if error:
-            self.stremio_account_status.setText("Not connected")
-            QMessageBox.critical(self, "Stremio Account", f"Couldn't sign in:\n{error}")
-            return
-        global _STREMIO_SIGNED_IN_HERE
-        app_settings.set_stremio_auth(email, auth_key)
-        # Stremio just issued this key, so whatever the tracker's earlier
-        # attempt found is about a key that no longer exists. Without
-        # this, the marker's once-per-run stickiness would leave a fresh
-        # sign-in reading as rejected until the app restarted.
-        _STREMIO_SIGNED_IN_HERE = True
-        self.stremio_email_edit.clear()
-        self._refresh_stremio_account()
-
-    def _disconnect_stremio(self):
-        global _STREMIO_SIGNED_IN_HERE
-        app_settings.clear_stremio_auth()
-        # Nothing stored, nothing rejected - and the next sign-in from
-        # here would otherwise inherit the old verdict.
-        _STREMIO_SIGNED_IN_HERE = True
-        self.stremio_email_edit.clear()
-        self._refresh_stremio_account()
+    def _save_resolution(self, index):
+        value = self.resolution_combo.itemData(index)
+        if value:
+            app_settings.set_preferred_resolution(value)
 
     def _save_manga_music_url(self):
         app_settings.set_manga_music_url(self.manga_music_edit.text().strip())
@@ -1541,8 +1904,9 @@ class SiteForm(QDialog):
         super().__init__(parent)
         self.result_data = None
         self.setWindowTitle(f"Edit {kind}" if site else f"Add {kind}")
-        self.setFixedSize(360, 210)
-        theme.apply_dark_titlebar(self)
+        # 240 tall, up from the 210 the natively-framed version needed:
+        # the panel now carries its own heading where the title bar was.
+        self.setFixedSize(360, 240)
 
         form = QVBoxLayout(self)
         form.setContentsMargins(20, 18, 20, 16)
@@ -1570,13 +1934,14 @@ class SiteForm(QDialog):
         btn_row.addWidget(save_btn)
         form.addLayout(btn_row)
 
+        frameless_dialog(self, title=self.windowTitle())
         self.exec()
 
     def _save(self):
         name = self.name_edit.text().strip()
         url = self.url_edit.text().strip()
         if not name or not url:
-            QMessageBox.warning(self, "Websites", "Name and URL are required.")
+            inform(self, "Websites", "Name and URL are required.")
             return
         self.result_data = (name, url)
         self.accept()

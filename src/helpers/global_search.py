@@ -1,4 +1,4 @@
-"""One search across every page, opened with Ctrl+K.
+"""One search across every page, opened from the window's search bar.
 
 Where it sits, and why, since the owner asked for that specifically:
 every application that has this - VS Code's Quick Open, Spotlight,
@@ -27,49 +27,215 @@ the same function the entry's own page uses, so there is one open
 behaviour per kind of thing and this is not a second one.
 """
 
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import QObject, QPoint, QSize, Qt
 from PyQt6.QtCore import pyqtSignal as Signal
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QDialog, QLabel, QListWidget, QListWidgetItem, QVBoxLayout,
+    QApplication, QDialog, QLabel, QListWidget, QListWidgetItem, QVBoxLayout,
 )
 
-from . import storage, theme
-from .widgets import show_toast
+from . import discover, logs, lookup_pool, storage, theme
+from .widgets import show_toast, smooth_scrolling
 
-# The app's keyboard map. Listed in Settings under Keybinds - it lived in
-# this panel first, which put a wall of grey text under the field every
-# time the panel opened, in front of someone who had just proved they
-# knew the shortcut. Kept here because this is where the keys are
+# The app's keyboard map, as Settings lists it under Keybinds. It lives
+# here rather than in that dialog because this is where the keys are
 # defined-adjacent, and Settings imports it rather than repeating it.
-# Alt+Left/Right and F11 predate this and sit where a browser puts them.
+#
+# **Read against the code, 28 August 2026, because it had drifted.** The
+# owner's ask was "make them match the real app", and three things were
+# wrong: Ctrl+F was described as "Search this page", which stopped being
+# true when the per-page boxes were removed on 25 August (there is one
+# field now, and Ctrl+F focuses it - see main.MainWindow.keyPressEvent);
+# Alt+Left/Right and F11 were left out deliberately as "browser
+# conventions", which is a reason not to explain them, not a reason to
+# hide them from the one screen that answers "what does the keyboard
+# do"; and neither the player nor the reader appeared at all, though
+# between them they bind most of the keys anyone actually uses.
+#
+# Every row below was taken from the handler that implements it -
+# MainWindow.keyPressEvent, player.PlayerPage.keyPressEvent and
+# reader.ReaderPage.keyPressEvent - rather than from memory.
 SHORTCUTS = (
-    ("Ctrl+K", "Search everything"),
-    ("Ctrl+F", "Search this page"),
-    ("Ctrl+N", "Add something"),
-    ("Ctrl+Z", "Undo the last action"),
-    ("Ctrl+Y", "Redo the last action"),
-    ("Ctrl+1-9", "Jump to a sidebar page"),
-    ("Ctrl+,", "Settings"),
-    ("Esc", "Exit search"),
+    ("Anywhere", (
+        # **No Ctrl+K row** - the owner's ask, 28 August 2026: "remove
+        # the Ctrl+K and make it does nothing". It opened the same
+        # window search bar Ctrl+F does, so it was a second key for one
+        # action, and the window no longer answers it at all (see
+        # main.AtomicWindow.keyPressEvent).
+        ("Ctrl+F", "Jump to the search bar"),
+        ("Ctrl+N", "Add something"),
+        ("Ctrl+Z", "Undo the last action"),
+        ("Ctrl+Y", "Redo the last action"),
+        ("Ctrl+1-9", "Jump to a sidebar page"),
+        ("Ctrl+,", "Settings"),
+        # Two rows, not one "Alt+Left / Alt+Right": measured at 247px of
+        # caps against a 124px column, which would have been clipped in
+        # half, and widening the column for one row would leave every
+        # other row with a hand's width of gap before its description.
+        ("Alt+Left", "Back"),
+        ("Alt+Right", "Forward"),
+        ("F11", "Full screen"),
+        ("Esc", "Leave the search bar, then full screen"),
+        # The owner's ask, 28 August 2026 - listed here as well as under
+        # the two overlays, because main._MouseNavFilter is installed on
+        # the *application*: these work on every page, and the Watching
+        # and Reading rows below say what "back" means once one of those
+        # is on screen, not that the buttons only work there.
+        ("Mouse 4", "Back"),
+        ("Mouse 5", "Forward"),
+    )),
+    ("Watching", (
+        ("Space", "Play / pause"),
+        ("Left / Right", "Seek back / forward"),
+        ("Up / Down", "Volume"),
+        ("M", "Mute"),
+        ("N / P", "Next / previous episode"),
+        ("F", "Full screen"),
+        # Same key, same idea, on all three surfaces that can be showing
+        # a stale answer - the reader reloads its chapter, the episode
+        # list re-asks its source, and this replays the current release
+        # from where it is (player.reload_source).
+        ("R", "Reload the source, from where you are"),
+        # The player unwinds one layer at a time on purpose - see its
+        # keyPressEvent - so saying only "close the player" would be a
+        # lie about the first two presses.
+        ("Esc", "Close the panel, then full screen, then the player"),
+        # The two side buttons, listed because they are now bound here
+        # rather than only over ordinary pages - the owner's ask, 28
+        # August 2026. Over the bare picture mpv owns the click and Qt
+        # never sees it, so the player polls them; see player._poll_mouse.
+        ("Mouse 4", "Back, one layer at a time"),
+        ("Mouse 5", "Undo the last Mouse 4 step"),
+    )),
+    ("Episode & Chapter Lists", (
+        ("R", "Ask the source for the list again"),
+        ("Esc", "Close the list"),
+    )),
+    ("Reading", (
+        # Deliberately the opposite of the on-screen buttons, which sit
+        # right-to-left with the content; reader.keyPressEvent carries
+        # the note asking that this not be "fixed" to match them.
+        ("Right / Left", "Next / previous chapter"),
+        ("Space / PageDown", "Next page"),
+        ("Backspace / PageUp", "Previous page"),
+        ("Up / Down", "Scroll"),
+        ("Home / End", "First / last page"),
+        ("+ / -", "Zoom in / out"),
+        ("0", "Reset zoom"),
+        ("F", "Full screen"),
+        ("R", "Reload the chapter"),
+        ("Esc", "Close the reader"),
+        ("Mouse 4", "Back to the chapter list, then out"),
+        ("Mouse 5", "Back into the chapter"),
+    )),
 )
 
 PANEL_WIDTH = 620
 PANEL_TOP_FRACTION = 0.18
 MAX_RESULTS = 8
 
-# Which file holds what, and which page each entry belongs to. Anime and
-# Reading share tracker.json, so that one is split by the entry's own
-# type rather than by file - the same rule home.PAGE_FOR_TYPE uses.
-_MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
+# A poster is 2:3, so a 44px-tall thumbnail is about 29 wide - enough to
+# recognise a cover at a glance without turning the panel into a grid.
+THUMB_HEIGHT = 44
+# How many outside results ride under the owned ones. Deliberately few:
+# they are the answer to "do I have this?" coming back "no, but this
+# exists", not a browse - the Discover page is the browse.
+MAX_DISCOVER_RESULTS = 5
+
+# Marks a row as coming from outside rather than from a file the
+# app owns. An object rather than a string so it can never collide
+# with a real page name.
+_DISCOVER = object()
+
+
+class _DiscoverSignals(QObject):
+    """Carries an outside lookup back to the UI thread.
+
+    **Module level, not owned by the panel.** The panel is
+    WA_DeleteOnClose and a search outlives the keystroke that started it,
+    so a signals object parented to the panel would be freed while a
+    worker still held it - and emitting on a freed C++ object takes the
+    process with it. One object for the app's lifetime, with the query
+    carried alongside so a late answer to an abandoned query can be
+    dropped rather than shown."""
+
+    ready = Signal(str, list)
+
+
+_signals = _DiscoverSignals()
+
+# Scaled covers, keyed by (path, ratio). The panel rebuilds its rows on
+# every keystroke and the same handful of covers come back each time.
+_thumbs = {}
+
+
+def _thumbnail(entry) -> QIcon:
+    """The entry's own cover, read off disk.
+
+    **Never `cover_url`.** This is a dropdown that has to be on screen
+    inside a keystroke (CLAUDE.md rule 7), and a URL is a download per
+    row. An entry with no local cover gets no picture at all rather than
+    a placeholder - a column of identical grey blocks reads worse than a
+    clean list of titles.
+
+    Cut at the screen's devicePixelRatio and tagged with it, or the
+    thumbnails blur on any non-100% display (.claude/rules/ui.md)."""
+    app = QApplication.instance()
+    screen = app.primaryScreen() if app is not None else None
+    ratio = float(screen.devicePixelRatio()) if screen else 1.0
+    # In the order a kind prefers its own art: a saved title's cached
+    # cover, a game's poster then its launcher icon, an app's artwork
+    # then its exe icon, a site's icon. Measured against the real files,
+    # 26 August 2026 - these are the keys the four pages actually write,
+    # and the first version guessed three that no page has ever used.
+    for key in ("cover_path", "cover", "art", "image", "icon"):
+        path = entry.get(key)
+        if not path:
+            continue
+        cached = _thumbs.get((path, ratio))
+        if cached is None:
+            source = QPixmap(str(path))
+            if source.isNull():
+                continue
+            scaled = source.scaledToHeight(
+                max(1, round(THUMB_HEIGHT * ratio)),
+                Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(scaled.height() / float(THUMB_HEIGHT))
+            cached = QIcon(scaled)
+            _thumbs[(path, ratio)] = cached
+        return cached
+    return QIcon()
+
+
+def discover_worker(query: str):
+    """Ask the outside sources what `query` finds, off the UI thread.
+
+    Never raises and always emits, even empty: the panel counts on an
+    answer to know the section is settled, and a worker that dies
+    silently leaves it waiting forever (.claude/rules/integrations.md).
+    """
+    rows = []
+    try:
+        for kind in ("series", "movie"):
+            rows += discover.discover_video(kind, query, limit=3) or []
+        rows += discover.discover_reading(query, limit=3) or []
+    except Exception:
+        logs.exception("Global search: the Discover lookup failed")
+    finally:
+        _signals.ready.emit(query, rows[:MAX_DISCOVER_RESULTS])
+
+# Which file holds what, and which page each entry belongs to. Since
+# the Anime merge (main._merge_anime_into_series), tracker.json is the
+# reading file and series.json holds everything watched.
 _SOURCES = (
-    ("tracker.json", None, "title"),
+    ("tracker.json", "manga", "title"),
     ("series.json", "series", "title"),
     ("games.json", "games", "name"),
     ("apps.json", "apps", "name"),
     ("websites.json", "websites", "name"),
 )
 _PAGE_LABELS = {
-    "anime": "Anime", "manga": "Reading", "series": "Movies & Series",
+    "manga": "Read", "series": "Watch",
     "games": "Games", "apps": "Apps", "websites": "Websites",
 }
 
@@ -92,15 +258,55 @@ def collect(query: str):
             title = entry.get(key) or ""
             if query not in title.lower():
                 continue
-            entry_page = page
-            if entry_page is None:
-                entry_page = "manga" if entry.get("type") in _MANGA_TYPES else "anime"
-            results.append((title, entry_page,
-                            _PAGE_LABELS.get(entry_page, entry_page), entry))
+            results.append((title, page, _PAGE_LABELS.get(page, page), entry))
     # Titles that *start* with what was typed first - typing "one" should
     # reach One Piece before The World After The End.
     results.sort(key=lambda row: (not row[0].lower().startswith(query), row[0].lower()))
     return results[:MAX_RESULTS]
+
+
+
+def _cached_outside(query, limit=MAX_DISCOVER_RESULTS):
+    """Outside matches already on disk, for the instant half of a search.
+
+    The network lookup below is the *right* answer and takes seconds; the
+    discover cache holds well over a thousand rows this machine has
+    already seen, and matching them costs a dictionary walk. So the panel
+    fills at once and the network only ever adds to it - the owner: "make
+    sure that the search suggestion appear super faster than now".
+
+    Never a substitute: _on_discover_ready replaces these the moment the
+    real answer lands, keyed on the same query.
+    """
+    wanted = str(query or "").strip().lower()
+    if len(wanted) < 2:
+        return []
+    try:
+        import json
+        from web import backend as _backend
+        raw = (_backend.DATA_DIR / "discover_cache.json").read_text(
+            encoding="utf-8-sig")
+        cached = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(cached, dict):
+        return []
+    found, seen = [], set()
+    for block in cached.values():
+        if not isinstance(block, dict):
+            continue
+        for row in (block.get("rows") or []):
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            key = title.lower()
+            if not title or key in seen or wanted not in key:
+                continue
+            seen.add(key)
+            found.append(row)
+            if len(found) >= limit:
+                return found
+    return found
 
 
 class GlobalSearch(QDialog):
@@ -138,12 +344,20 @@ class GlobalSearch(QDialog):
         # it and every keystroke still arrives there.
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Translucent, so the border-radius below leaves genuinely
+        # transparent corners rather than square slabs of window - the
+        # same treatment widgets.frameless_dialog gives the app's modal
+        # dialogs (this panel keeps its own flags: it must not grab
+        # focus, and dragging a suggestion list would be wrong).
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
         self.results = QListWidget()
+        smooth_scrolling(self.results)     # see widgets.ScrollBarDrag
+        self.results.setIconSize(QSize(THUMB_HEIGHT, THUMB_HEIGHT))
         self.results.itemActivated.connect(self._open)
         self.results.itemClicked.connect(self._open)
         layout.addWidget(self.results)
@@ -153,29 +367,101 @@ class GlobalSearch(QDialog):
         layout.addWidget(self.empty)
 
         self.setStyleSheet(
-            f"QDialog {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};"
-            f" border-radius: 10px; }}")
+            f"QDialog {{ background: {theme.PANEL_FILL}; border: 1px solid {theme.BORDER};"
+            f" border-radius: {theme.RADIUS}px; }}")
         self._rows = []
+        # The query these rows belong to, so a Discover answer that
+        # arrives after the user has typed on can be dropped instead of
+        # appended under the wrong search.
+        self._query = ""
+        self._discover_rows = []
+        _signals.ready.connect(self._on_discover_ready)
 
     def set_query(self, query: str):
         """Show what `query` finds. Returns whether anything was found -
-        the caller decides whether an empty panel is worth showing."""
+        the caller decides whether an empty panel is worth showing.
+
+        Two halves, in this order and never merged: what the user
+        already has, then what exists outside. The owner asked for one
+        bar that searches everything (25 August 2026), and "everything"
+        stops being useful the moment a title you own has to be picked
+        out of a list of ones you do not."""
+        self._query = query
         self.results.clear()
+        self._discover_rows = []
         self._rows = collect(query)
         for title, page, label, entry in self._rows:
             item = QListWidgetItem(f"{title}    ·    {label}")
+            item.setIcon(_thumbnail(entry))
             item.setData(Qt.ItemDataRole.UserRole, (page, entry))
             self.results.addItem(item)
         if self._rows:
             self.results.setCurrentRow(0)
-        self.results.setVisible(bool(self._rows))
-        self.empty.setVisible(not self._rows)
-        self.empty.setText("" if self._rows else f"Nothing matches '{query.strip()}'.")
-        self.results.setFixedHeight(
-            max(1, len(self._rows)) * (self.results.sizeHintForRow(0) if self._rows else 1) + 8)
+        # Fired even when the library already answered: "I have this, and
+        # there are two more seasons of it" is the useful answer.
+        # submit_latest, not submit - every debounced keystroke but the
+        # last is stale before it lands, and the shared queue is drained
+        # by page-load backfill this must not queue behind
+        # (.claude/rules/integrations.md).
+        if query.strip():
+            # The cache first, on this thread - it is a dictionary walk
+            # and it means the panel is never empty while the network
+            # thinks. The real answer replaces these when it lands.
+            self._show_outside(_cached_outside(query), cached=True)
+            lookup_pool.submit_latest("global-search", discover_worker, query)
+        self._relayout(searching=bool(query.strip()))
+        return bool(self._rows)
+
+    def _on_discover_ready(self, query, rows):
+        """Outside results, appended under the owned ones."""
+        if query != self._query:
+            return          # the user typed on; this answers a dead query
+        self._show_outside(rows, cached=False)
+        self._relayout(searching=False)
+
+    def _show_outside(self, rows, cached):
+        """Draw the outside half. A live answer replaces a cached one."""
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        if not cached:
+            # Take the cached stand-ins back out before adding the real
+            # ones, so the same title cannot appear twice.
+            for index in range(self.results.count() - 1, -1, -1):
+                data = self.results.item(index).data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, tuple) and data and data[0] is _DISCOVER:
+                    self.results.takeItem(index)
+        elif self._discover_rows:
+            return              # the live answer is already showing
+        if not rows:
+            return
+        self._discover_rows = list(rows) if not cached else []
+        for row in rows:
+            bits = [row.get("type") or "", str(row.get("year") or "")]
+            label = "  ".join(bit for bit in bits if bit)
+            item = QListWidgetItem(
+                f"{row.get('title', '')}    ·    {label}  —  Discover")
+            item.setData(Qt.ItemDataRole.UserRole, (_DISCOVER, row))
+            self.results.addItem(item)
+        if not self._rows and self.results.count():
+            self.results.setCurrentRow(0)
+
+    def _relayout(self, searching):
+        """Size the panel to whatever it is currently showing.
+
+        Row heights vary now that owned rows carry a cover and Discover
+        rows do not, so this adds the rows up rather than multiplying by
+        the first one's hint - which under-measured the panel by the
+        difference and clipped the last row."""
+        count = self.results.count()
+        self.results.setVisible(count > 0)
+        self.empty.setVisible(count == 0)
+        if count == 0:
+            self.empty.setText(
+                "Searching…" if searching
+                else f"Nothing matches '{self._query.strip()}'.")
+        total = sum(self.results.sizeHintForRow(i) for i in range(count))
+        self.results.setFixedHeight(max(1, total) + 8)
         self.adjustSize()
         self.place()
-        return bool(self._rows)
 
     def move_selection(self, delta):
         if not self._rows:
@@ -212,13 +498,47 @@ class GlobalSearch(QDialog):
                       frame.y() + int(frame.height() * PANEL_TOP_FRACTION))
 
     def closeEvent(self, event):
+        # Disconnected by hand: _signals lives for the life of the app
+        # (see _DiscoverSignals), so a connection left behind would keep
+        # calling a slot on a panel Qt has already deleted.
+        try:
+            _signals.ready.disconnect(self._on_discover_ready)
+        except TypeError:
+            pass
         self.closed.emit()
         super().closeEvent(event)
 
     def _open(self, item):
         page_name, entry = item.data(Qt.ItemDataRole.UserRole)
         self.close()
+        if page_name is _DISCOVER:
+            # Hand it to the Discover page rather than opening it here.
+            # Adding a title is that page's flow - it resolves artwork,
+            # picks a medium and writes the entry - and a second way in
+            # would be a second behaviour to keep in step, which is the
+            # trap `open_entry` below exists to avoid.
+            open_discover(self._window, self._query, entry)
+            return
         open_entry(self._window, page_name, entry)
+
+
+def open_discover(window, query, row):
+    """Show an outside result on the Discover page.
+
+    Deliberately not "add it from here". Adding a title is the Discover
+    page's own flow - it resolves artwork, decides a medium and writes
+    the entry - and a second way in would be a second behaviour to keep
+    in step with the first. This puts the user in front of the same row
+    on the page that knows what to do with it."""
+    try:
+        window.navigate_to("discover", animate=False)
+        page = getattr(window, "_current_page", None)
+        start = getattr(page, "start_search", None)
+        if callable(start):
+            start(query)
+    except Exception:
+        logs.exception("Could not open the Discover page for a result")
+        show_toast(window, "Could Not Open Discover")
 
 
 def open_entry(parent, page_name, entry):
@@ -233,8 +553,11 @@ def open_entry(parent, page_name, entry):
     from windows.link_grid import open_link_entry
     from windows.tracker import open_tracker_entry
 
-    if page_name in ("anime", "manga", "series"):
-        open_tracker_entry(parent, entry)
+    if page_name in ("manga", "series"):
+        # The details page, not an immediate resume: someone searching a
+        # title by name is looking it up, the same intent as clicking a
+        # card's body - resuming playback is the cover button's job.
+        open_tracker_entry(parent, entry, resume=False)
     elif page_name == "games":
         _open_game(parent, entry)
     else:

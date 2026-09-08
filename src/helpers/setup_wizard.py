@@ -1,0 +1,717 @@
+"""Setup: shown once, over a launch's window, to offer the accounts,
+keys and preferences that already live in Settings.
+
+It was first-launch-only until 2.0. The owner's ask, 8 September 2026,
+was that "the set up window appear on the 1st time they open the app
+after the update" - because 2.0 is where a debrid key, a preferred
+resolution and a downloads folder became worth having, and an install
+that has been running since 1.4 has never once been offered them. So
+the gate is a *version* now (SETUP_VERSION, app_settings.
+setup_shown_for) rather than a "has this ever run" flag, and an
+existing install sees it exactly once per release that raises that
+number.
+
+Every field is optional and writes through app_settings (or the helper
+that owns the value) the moment it changes - the wizard keeps no storage
+of its own, so Settings later shows exactly what was entered here.
+Finishing, skipping, closing the window, and simply being an existing
+install all stamp the same flag (setup_completed_at), so the wizard can
+never appear twice however it is left.
+"""
+
+from pathlib import Path
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+)
+
+from . import (app_settings, logs, nav_config, settings_dialog,
+               startup, storage, theme, updater)
+from .widgets import (frameless_dialog, scroll_area, smooth_combo,
+                      use_hover_cursor)
+
+# How long after main() the offer fires: enough for the window to have
+# actually painted, so the dialog opens over a visible app rather than
+# racing its first frame onto an empty desktop.
+SHOW_DELAY_MS = 400
+
+STEPS = 4
+
+# **The release whose setup screen everybody is shown once.** Raise it
+# only when a release genuinely adds something worth interrupting for -
+# the wizard reopening for a version that added nothing is an
+# interruption with no payoff, and it is remembered per profile in
+# app_settings.setup_shown_for.
+SETUP_VERSION = "2.0"
+
+# The step pager's pills, matching Home's hero dashes.
+LOGO_HEIGHT = 96
+
+# Same column width as Settings' API Keys page, for the same reason it
+# is fixed there: every field starts at one x instead of stepping with
+# the service's name.
+LABEL_COLUMN_WIDTH = 190
+
+# The saved files whose contents prove this profile is not a fresh
+# install. tracker.json alone is not enough - someone who only tracks
+# games or websites has never written it.
+_ENTRY_FILES = ("tracker.json", "series.json", "games.json",
+                "apps.json", "websites.json")
+
+_ICON_PATH = (Path(__file__).resolve().parent.parent
+              / "assets" / "atomic_icon.png")
+
+
+def show_on_first_run(window, notes=None):
+    """main()'s one call: arm the offer, decided only when the timer
+    fires. A timer so the dialog appears over a painted window, and armed
+    by main() after whats_new has returned so it cannot fire inside that
+    dialog's nested event loop - the same trap schedule_update_check
+    documents.
+
+    `notes` is what whats_new would have shown and did not, so the
+    wizard's first page can carry it (see will_offer)."""
+    QTimer.singleShot(SHOW_DELAY_MS, lambda: _offer(window, notes))
+
+
+def will_offer() -> bool:
+    """Whether the wizard is going to open on this launch - asked by
+    main() *before* whats_new, so that dialog can stand down and let the
+    wizard carry the release notes instead of stacking two modals over a
+    just-relaunched app.
+
+    Reads only the stamp, not the data: the "is this a fresh install"
+    test decides which voice the wizard speaks in, never whether it
+    appears."""
+    try:
+        return not _already_answered()
+    except Exception:
+        return False
+
+
+def _already_answered() -> bool:
+    """Whether this profile has already met SETUP_VERSION's wizard."""
+    seen = app_settings.get_setup_shown_for()
+    if not seen:
+        return False
+    return updater.parse_version(seen) >= updater.parse_version(SETUP_VERSION)
+
+
+def _offer(window, notes=None):
+    """Show the wizard once per SETUP_VERSION.
+
+    Fails soft: a launch that cannot decide must still open the app, so
+    anything wrong here is logged and swallowed."""
+    try:
+        if _already_answered():
+            return
+        SetupWizard(window, notes=notes, fresh=_install_is_fresh()).exec()
+    except Exception:
+        logs.exception("Could not offer the setup window")
+
+
+def _install_is_fresh() -> bool:
+    """No user data anywhere: no setting ever saved and nothing tracked.
+
+    has_run_before rather than "settings.json exists": by the time the
+    timer fires, whats_new has already written last_seen_version into a
+    genuinely first-run settings.json - has_run_before is the accessor
+    that ignores exactly the markers a launch writes by itself."""
+    if app_settings.has_run_before():
+        return False
+    return not any(storage.load(name, []) for name in _ENTRY_FILES)
+
+
+def _resolution_labels() -> dict:
+    """Settings' own display names for the resolution choices, imported
+    so the two dropdowns cannot drift apart. Soft, and local rather than
+    at module level: settings_dialog pulls in half of helpers, and the
+    wizard would rather show the raw values than refuse to open."""
+    try:
+        from .settings_dialog import RESOLUTION_LABELS
+        return RESOLUTION_LABELS
+    except Exception:
+        return {}
+
+
+def _downloads_page():
+    """windows.downloads_page, or None. Soft and local on purpose:
+    helpers must not depend on windows at import time (settings_dialog
+    records the same rule for one tuple), and losing the folder row is
+    better than the wizard not opening."""
+    try:
+        from windows import downloads_page
+        return downloads_page
+    except Exception:
+        return None
+
+
+def _note_bullet(text: str):
+    """whats_new's own hanging-indent bullet, imported rather than
+    reimplemented. Local: whats_new imports nothing from here, and this
+    keeps it that way round."""
+    from .whats_new import UpdateSummaryDialog
+    return UpdateSummaryDialog._bullet(text)
+
+
+class SetupWizard(QDialog):
+    """Four steps: welcome, API keys, preferences, done.
+
+    No Stremio sign-in in here - the owner asked for it to stay gone
+    (the same ask that removed it from Settings; see settings_dialog's
+    own note). The account key the tracker reads is restored from a
+    backup or set by other means, never typed into a first-run form.
+
+    Constructed without exec() (like whats_new.UpdateSummaryDialog, and
+    unlike SettingsDialog) so a test can build one offscreen and drive
+    the buttons without a nested event loop - _offer is the caller that
+    execs it."""
+
+    def __init__(self, parent=None, notes=None, fresh=True):
+        super().__init__(parent)
+        # What this profile is: a genuinely fresh install being welcomed,
+        # or an existing one meeting SETUP_VERSION's screen after an
+        # update. It changes the first page's words, and it lifts the
+        # Skip gate - see _sync_skip.
+        self._fresh = bool(fresh)
+        self._notes = list(notes or [])
+        self.setWindowTitle("Set Up Atomic" if fresh else "Welcome to Atomic 2.0")
+        # Wide enough that a key hint indented past the caption column
+        # keeps a Settings-like measure (~440px) instead of wrapping to
+        # four cramped lines at 640.
+        self.resize(700, 620)
+        self.setMinimumSize(600, 540)
+
+        body = QVBoxLayout(self)
+        body.setContentsMargins(28, 20, 28, 16)
+        body.setSpacing(12)
+
+        # Step indicator: one pill per step, the current one lit - the
+        # same pager language as Home's hero dashes, which is the app's
+        # only other "which of N am I on" control. It was a row of
+        # bullet glyphs, which sized itself off the font rather than off
+        # anything, and read as punctuation left in the layout.
+        dots_row = QHBoxLayout()
+        dots_row.setSpacing(6)
+        dots_row.addStretch()
+        self._dots = []
+        # The hero's own pager pill, not a lookalike - the owner's ask,
+        # 30 August 2026: "make their transition exactly like the
+        # bullets in the main page banner". _HeroDash carries the grow/
+        # shrink tween and the length-lit gradient; reusing it is what
+        # makes "exactly" true by construction. Imported lazily: home
+        # imports helpers at module scope, so a top-level import back
+        # would be a cycle.
+        from windows.home import _HeroDash
+        for index in range(STEPS):
+            dot = _HeroDash()
+            dot.clicked.connect(lambda step=index: self._go(step))
+            dots_row.addWidget(dot)
+            self._dots.append(dot)
+        dots_row.addStretch()
+        body.addLayout(dots_row)
+
+        self.stack = QStackedWidget()
+        # Scrolled when it carries release notes: 2.0's list is longer
+        # than the page is tall, and a first page that cuts its last
+        # line off is worse than one that scrolls.
+        welcome = self._build_welcome_step()
+        self.stack.addWidget(scroll_area(welcome) if self._notes else welcome)
+        # The two middle steps scroll: the keys step lists seven key
+        # fields and does not fit 600px on every scale factor.
+        self.stack.addWidget(scroll_area(self._build_accounts_step()))
+        self.stack.addWidget(scroll_area(self._build_preferences_step()))
+        self.stack.addWidget(self._build_done_step())
+        body.addWidget(self.stack, stretch=1)
+
+        btn_row = QHBoxLayout()
+        self.skip_btn = QPushButton("Skip for now")
+        # Deliberately quiet next to Back/Next: skipping must be easy but
+        # should not compete with the accent Finish. No QSS objectName
+        # does "muted button", so the two colours are set here - from
+        # theme, per the house rule.
+        self.skip_btn.setStyleSheet(
+            f"QPushButton {{ color: {theme.TEXT_DIM}; background: transparent;"
+            f" border: none; }}"
+            f"QPushButton:hover {{ color: {theme.TEXT}; }}")
+        self.skip_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.skip_btn)
+        btn_row.addStretch()
+
+        self.back_btn = QPushButton("Back")
+        self.back_btn.clicked.connect(lambda: self._go(self._step - 1))
+        btn_row.addWidget(self.back_btn)
+        self.next_btn = QPushButton("Next")
+        self.next_btn.clicked.connect(lambda: self._go(self._step + 1))
+        btn_row.addWidget(self.next_btn)
+        self.finish_btn = QPushButton("Finish", objectName="Accent")
+        self.finish_btn.clicked.connect(self._finish)
+        btn_row.addWidget(self.finish_btn)
+        body.addLayout(btn_row)
+
+        for btn in (self.skip_btn, self.back_btn, self.next_btn,
+                    self.finish_btn):
+            use_hover_cursor(btn)
+
+        # No title heading: every step opens with its own SectionTitle
+        # ("Welcome to Atomic", ...), and the dots row sits above them.
+        frameless_dialog(self)
+
+        self._step = 0
+        self._go(0)
+
+    # ------------------------------------------------------------------
+    def _go(self, step):
+        self._step = max(0, min(STEPS - 1, step))
+        self.stack.setCurrentIndex(self._step)
+        for index, dot in enumerate(self._dots):
+            # The hero pill animates itself - see _HeroDash.set_active,
+            # which tweens width and colour together.
+            dot.set_active(index == self._step)
+        # Enabled rather than hidden: Back disappearing would shift Next
+        # sideways under a pointer mid-click.
+        self.back_btn.setEnabled(self._step > 0)
+        last = self._step == STEPS - 1
+        self.next_btn.setVisible(not last)
+        self.finish_btn.setVisible(last)
+        # On the last step Finish is the close; a second escape hatch
+        # beside it would just be a dimmer copy of the same action.
+        self._sync_skip()
+        (self.finish_btn if last else self.next_btn).setDefault(True)
+
+    def _has_tmdb_key(self) -> bool:
+        """Whether a TMDB key has been given - typed into the wizard now,
+        or already saved from an earlier run."""
+        edit = self.api_key_edits.get("tmdb")
+        if edit is not None and edit.text().strip():
+            return True
+        try:
+            return bool(app_settings.get_api_key("tmdb"))
+        except Exception:
+            return False
+
+    def _sync_skip(self):
+        """**Skip appears only once a TMDB key has been entered** - the
+        owner's ask, 23 August 2026: "in the setup window there was a skip
+        for now btn, make it appear but after the user enters the TMDB key
+        (TMDB KEY IS MUST)".
+
+        Hidden rather than disabled: a greyed-out Skip invites a click and
+        explains nothing, while a Skip that appears the moment the key
+        lands reads as the key having been accepted. The window's own
+        close button still exits, which is deliberate - this is a strong
+        nudge toward the one key the app genuinely needs, not a trap with
+        no way out."""
+        last = self._step == STEPS - 1
+        # The gate is for a *first* install, which has no key at all and
+        # would otherwise skip past the one thing the app genuinely wants.
+        # An existing install being shown 2.0's screen has been running
+        # for months on the bundled token; holding it here would leave it
+        # with only the window's X, which reads as a trap.
+        allowed = self._has_tmdb_key() or not self._fresh
+        try:
+            self.skip_btn.setVisible(not last and allowed)
+        except RuntimeError:
+            pass
+
+    def _finish(self):
+        # editingFinished only fires on focus-out/Return, so a key typed
+        # and immediately Finished-past would be lost without this sweep.
+        # Only changed values are written - unconditionally writing all
+        # seven would pad settings.json with empty keys.
+        for name, edit in self.api_key_edits.items():
+            value = edit.text().strip()
+            if value != app_settings.get_api_key(name):
+                app_settings.set_api_key(name, value)
+        self.accept()
+
+    def done(self, result):
+        # Finish, Skip, Escape and the title-bar X all pass through here,
+        # so however the wizard is left, it is left answered - it must
+        # never greet the same install twice.
+        try:
+            app_settings.set_setup_completed_at(storage.now_iso())
+            # The stamp that actually gates the next launch. Written
+            # here rather than in _finish for the reason above: however
+            # this window was left, it has been answered.
+            app_settings.set_setup_shown_for(SETUP_VERSION)
+        except Exception:
+            logs.exception("Could not record that the setup wizard ran")
+        super().done(result)
+
+    # ------------------------------------------------------------------
+    def _build_welcome_step(self):
+        page = QWidget()
+        col = QVBoxLayout(page)
+        col.setContentsMargins(8, 8, 8, 8)
+        col.setSpacing(10)
+        if not self._notes:
+            col.addStretch()
+
+        logo = QLabel()
+        logo.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # Scale to physical pixels and tag the result with the screen's
+        # scale, or the pixmap is stretched blurry on any non-100%
+        # display - same move as the sidebar logo in main.py.
+        dpr = QApplication.primaryScreen().devicePixelRatio()
+        pixmap = QPixmap(str(_ICON_PATH))
+        if not pixmap.isNull():
+            pixmap = pixmap.scaledToHeight(
+                int((LOGO_HEIGHT if self._fresh else LOGO_HEIGHT * 0.7) * dpr),
+                Qt.TransformationMode.SmoothTransformation)
+            pixmap.setDevicePixelRatio(dpr)
+            logo.setPixmap(pixmap)
+        col.addWidget(logo)
+
+        heading = ("Welcome to Atomic" if self._fresh
+                   else f"Welcome to Atomic {updater.APP_VERSION}")
+        title = QLabel(heading, objectName="SectionTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        col.addWidget(title)
+
+        # A single "&": QLabel only treats an ampersand as a mnemonic
+        # marker when it has a buddy, so unlike the QCheckBox case in
+        # Settings this one must NOT be doubled - "&&" here draws both.
+        if self._fresh:
+            intro_text = (
+                "One dashboard for your anime, reading, movies & series, "
+                "games, apps and websites - tracked in your own files, on "
+                "this machine.")
+        else:
+            intro_text = (
+                "The update is installed, and everything you had is where "
+                "you left it - entries, history, settings and covers. "
+                "This is the same setup screen a new install gets, shown "
+                "once, in case there is something here you have never "
+                "been offered.")
+        intro = QLabel(intro_text)
+        intro.setWordWrap(True)
+        intro.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        col.addWidget(intro)
+
+        # The release notes whats_new stood down from showing - see
+        # show_on_first_run. Drawn with that dialog's own bullet, not a
+        # copy of it: two implementations of one row is how the search
+        # panel's cast rows ended up wearing the wrong meta line.
+        if self._notes:
+            col.addSpacing(6)
+            for version, lines in self._notes:
+                caption = QLabel(f"What's new in {version}",
+                                 objectName="SectionTitle")
+                col.addWidget(caption)
+                for line in lines:
+                    col.addWidget(_note_bullet(line))
+
+        later = QLabel(
+            "The next steps are optional - everything here can be "
+            "changed later in Settings.", objectName="Muted")
+        later.setWordWrap(True)
+        later.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        col.addSpacing(6)
+        col.addWidget(later)
+
+        col.addStretch()
+        return page
+
+    # ------------------------------------------------------------------
+    def _build_accounts_step(self):
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        self.api_key_edits = {}
+        first_group = True
+        for heading, names in app_settings.API_KEY_GROUPS:
+            if not first_group:
+                form.addSpacing(18)
+            first_group = False
+            form.addWidget(QLabel(heading, objectName="SectionTitle"))
+            for name in names:
+                label, unlocks = app_settings.API_KEYS.get(name, (name, ""))
+                row = QHBoxLayout()
+                caption = QLabel(label)
+                caption.setFixedWidth(LABEL_COLUMN_WIDTH)
+                row.addWidget(caption)
+                edit = QLineEdit(app_settings.get_api_key(name))
+                # Password echo, like Settings: this can be on screen
+                # with somebody watching, and a key on screen is a key
+                # on screen. "Show keys" below reveals them for checking
+                # a paste went in whole.
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+                edit.setPlaceholderText(f"Paste your {label} key (optional)")
+                edit.editingFinished.connect(
+                    lambda n=name: self._save_api_key(n))
+                row.addWidget(edit, stretch=1)
+                form.addLayout(row)
+
+                help_line = app_settings.API_KEY_HELP.get(name, "")
+                if name == "tmdb":
+                    # The one key the app already carries - without this
+                    # line the field reads as required for artwork.
+                    hint_text = ("A key is already bundled with the app - "
+                                 "pasting one here only overrides it · "
+                                 f"{help_line}")
+                else:
+                    hint_text = f"{unlocks} · {help_line}"
+                # "Get a key" is a real link straight to the page that
+                # issues this key (the owner's ask): rich text with
+                # openExternalLinks, styled in the accent so it reads as
+                # the one clickable thing in a muted hint.
+                url = app_settings.API_KEY_URLS.get(name, "")
+                if url:
+                    hint_text = (f'<a href="{url}" style="color: '
+                                 f'{theme.ACCENT};">Get a key ↗</a>'
+                                 f" · {hint_text}")
+                hint = QLabel(hint_text, objectName="Muted")
+                hint.setWordWrap(True)
+                if url:
+                    hint.setOpenExternalLinks(True)
+                    hint.setTextInteractionFlags(
+                        Qt.TextInteractionFlag.TextBrowserInteraction)
+                hint.setContentsMargins(LABEL_COLUMN_WIDTH + 8, 0, 0, 4)
+                form.addWidget(hint)
+                self.api_key_edits[name] = edit
+                if name == "tmdb":
+                    # Live, not on editingFinished: the Skip button below
+                    # is gated on this field having something in it, and a
+                    # button that only appears once you click elsewhere
+                    # reads as broken.
+                    edit.textChanged.connect(lambda _t: self._sync_skip())
+
+        form.addSpacing(12)
+        show_keys = QCheckBox("Show keys")
+        show_keys.toggled.connect(self._toggle_api_key_echo)
+        form.addWidget(show_keys)
+
+        form.addStretch()
+        return page
+
+    def _toggle_api_key_echo(self, shown):
+        mode = (QLineEdit.EchoMode.Normal if shown
+                else QLineEdit.EchoMode.Password)
+        for edit in self.api_key_edits.values():
+            edit.setEchoMode(mode)
+
+    def _save_api_key(self, name):
+        edit = self.api_key_edits.get(name)
+        if edit is not None:
+            app_settings.set_api_key(name, edit.text().strip())
+
+    # ------------------------------------------------------------------
+    def _build_preferences_step(self):
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        form.addWidget(QLabel("Playback", objectName="SectionTitle"))
+        resolution_row = QHBoxLayout()
+        resolution_row.addWidget(QLabel("Default resolution"))
+        self.resolution_combo = smooth_combo(QComboBox())
+        labels = _resolution_labels()
+        for value in app_settings.RESOLUTION_CHOICES:
+            self.resolution_combo.addItem(labels.get(value, value), value)
+        index = self.resolution_combo.findData(
+            app_settings.get_preferred_resolution())
+        if index >= 0:
+            self.resolution_combo.setCurrentIndex(index)
+        # currentIndexChanged, not activated - same reasoning as
+        # Settings: activated misses a keyboard change.
+        self.resolution_combo.currentIndexChanged.connect(
+            self._save_resolution)
+        resolution_row.addWidget(self.resolution_combo)
+        resolution_row.addStretch()
+        form.addLayout(resolution_row)
+        resolution_hint = QLabel(
+            "Which quality the player starts on when a title offers "
+            "several. It falls back to the nearest available one.",
+            objectName="Muted")
+        resolution_hint.setWordWrap(True)
+        form.addWidget(resolution_hint)
+
+        form.addSpacing(10)
+        self.auto_pick_check = QCheckBox("Auto choose source to play")
+        self.auto_pick_check.setChecked(app_settings.get_auto_pick_source())
+        self.auto_pick_check.toggled.connect(app_settings.set_auto_pick_source)
+        form.addWidget(self.auto_pick_check)
+        auto_pick_hint = QLabel(
+            "Pressing an episode starts the best source right away, "
+            "instead of listing every source to pick from first.",
+            objectName="Muted")
+        auto_pick_hint.setWordWrap(True)
+        form.addWidget(auto_pick_hint)
+
+        downloads_module = _downloads_page()
+        self._downloads_module = downloads_module
+        if downloads_module is not None:
+            form.addSpacing(18)
+            form.addWidget(QLabel("Downloads", objectName="SectionTitle"))
+            folder_row = QHBoxLayout()
+            self.folder_edit = QLineEdit(downloads_module.saved_folder())
+            # Read-only: the picker below is the one writer, and it is
+            # what persists the choice (choose_folder remembers it).
+            self.folder_edit.setReadOnly(True)
+            folder_row.addWidget(self.folder_edit, stretch=1)
+            browse_btn = QPushButton("Browse...")
+            browse_btn.clicked.connect(self._browse_download_folder)
+            use_hover_cursor(browse_btn)
+            folder_row.addWidget(browse_btn)
+            form.addLayout(folder_row)
+            folder_hint = QLabel(
+                "Where downloaded episodes, seasons and chapters are "
+                "saved.", objectName="Muted")
+            folder_hint.setWordWrap(True)
+            form.addWidget(folder_hint)
+
+        form.addSpacing(18)
+        form.addWidget(QLabel("Startup", objectName="SectionTitle"))
+        self.startup_check = QCheckBox("Launch on Windows startup")
+        self.startup_check.setChecked(startup.is_enabled())
+        self.startup_check.toggled.connect(self._toggle_startup)
+        form.addWidget(self.startup_check)
+        startup_hint = QLabel(
+            "Starts Atomic automatically when you sign in to Windows.",
+            objectName="Muted")
+        startup_hint.setWordWrap(True)
+        form.addWidget(startup_hint)
+
+        self.fullscreen_check = QCheckBox(
+            "Fullscreen mode when launch on startup")
+        self.fullscreen_check.setChecked(
+            app_settings.get_fullscreen_on_startup())
+        self.fullscreen_check.toggled.connect(
+            app_settings.set_fullscreen_on_startup)
+        form.addWidget(self.fullscreen_check)
+
+        # Normally empty; carries the rolled-back registry failure, which
+        # a modal box would make the loudest thing in a wizard where
+        # every field is optional.
+        self.startup_status = QLabel("")
+        self.startup_status.setWordWrap(True)
+        self.startup_status.setStyleSheet(
+            f"color: {theme.DANGER}; background: transparent;")
+        form.addWidget(self.startup_status)
+        self._sync_fullscreen_check()
+
+        # **The Preferences page's own two blocks, 28 August 2026** (the
+        # owner: "make sure to show the preferences page in the set up
+        # configuration"). Settings > Preferences is Sections plus the
+        # spoiler pair, and both are first-run decisions - which parts of
+        # the app exist at all, and whether an episode row is allowed to
+        # give anything away - so meeting them after the first spoiler
+        # rather than before it is meeting them too late.
+        #
+        # The spoiler pair comes from settings_dialog.add_spoiler_controls
+        # rather than being written out again here, so the wording and
+        # the wiring cannot drift between the two places that draw it.
+        form.addSpacing(18)
+        form.addWidget(QLabel("Sections", objectName="SectionTitle"))
+        sections_hint = QLabel(
+            "Which sections show in the sidebar. Hidden ones keep their "
+            "entries, and this can be changed later in Settings.",
+            objectName="Muted")
+        sections_hint.setWordWrap(True)
+        form.addWidget(sections_hint)
+
+        hidden = set(app_settings.get_hidden_sections())
+        self.section_checks = {}
+        for name, page_name in nav_config.ordered_nav_items():
+            # "&&": QCheckBox eats a single ampersand as a mnemonic
+            # marker - same note as Settings' copy of this loop.
+            check = QCheckBox(name.replace("&", "&&"))
+            check.setChecked(page_name not in hidden)
+            check.toggled.connect(
+                lambda checked, page=page_name:
+                self._toggle_section_visibility(page, checked))
+            form.addWidget(check)
+            self.section_checks[page_name] = check
+
+        form.addSpacing(18)
+        settings_dialog.add_spoiler_controls(form, self)
+
+        form.addStretch()
+        return page
+
+    def _toggle_section_visibility(self, page_name, visible):
+        """Hide or show one section, live.
+
+        The window behind the wizard is already built, so the sidebar is
+        rebuilt here for the same reason Settings does it: a tick that
+        changes nothing until the next launch reads as a tick that did
+        not work."""
+        hidden = set(app_settings.get_hidden_sections())
+        if visible:
+            hidden.discard(page_name)
+        else:
+            hidden.add(page_name)
+        app_settings.set_hidden_sections(hidden)
+        window = self.parent()
+        for name in ("_refresh_nav_list", "refresh_current_page"):
+            action = getattr(window, name, None)
+            if callable(action):
+                try:
+                    action()
+                except Exception:
+                    logs.exception("Could not redraw after a section toggle")
+
+    def _browse_download_folder(self):
+        if self._downloads_module is None:
+            return
+        picked = self._downloads_module.choose_folder(
+            self, self.folder_edit.text())
+        if picked:
+            self.folder_edit.setText(picked)
+
+    def _toggle_startup(self, checked):
+        try:
+            startup.set_enabled(checked)
+            self.startup_status.setText("")
+        except OSError as exc:
+            # Roll the box back so it shows what is actually registered,
+            # the same recovery Settings does.
+            self.startup_check.blockSignals(True)
+            self.startup_check.setChecked(not checked)
+            self.startup_check.blockSignals(False)
+            self.startup_status.setText(
+                f"Couldn't update the startup setting: {exc}")
+        self._sync_fullscreen_check()
+
+    def _sync_fullscreen_check(self):
+        # Only means anything while there is a startup launch - greys out
+        # with the toggle above rather than sitting there ticked and
+        # inert. Its saved value is left alone, same as Settings.
+        enabled = self.startup_check.isChecked()
+        self.fullscreen_check.setEnabled(enabled)
+        self.fullscreen_check.setToolTip(
+            "" if enabled else "Turn on \"Launch on Windows startup\" first.")
+
+    def _save_resolution(self, index):
+        value = self.resolution_combo.itemData(index)
+        if value:
+            app_settings.set_preferred_resolution(value)
+
+    # ------------------------------------------------------------------
+    def _build_done_step(self):
+        page = QWidget()
+        col = QVBoxLayout(page)
+        col.setContentsMargins(8, 8, 8, 8)
+        col.setSpacing(10)
+        col.addStretch()
+
+        title = QLabel("You're set", objectName="SectionTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        col.addWidget(title)
+        outro = QLabel(
+            "Atomic works as-is with sensible defaults. Anything you "
+            "skipped - the account, keys, preferences - is waiting in "
+            "Settings whenever you want it.", objectName="Muted")
+        outro.setWordWrap(True)
+        outro.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        col.addWidget(outro)
+
+        col.addStretch()
+        return page

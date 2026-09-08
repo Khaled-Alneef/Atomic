@@ -1,6 +1,6 @@
 """Run this to build Atomic.exe: `python build.py`.
 
-Wraps `pyinstaller Atomic.spec` (which bundles src/app_icon.ico into the
+Wraps `pyinstaller Atomic.spec` (which bundles src/assets/app_icon.ico into the
 build - the plain `pyinstaller src/main.py` form skips that and the
 taskbar/title-bar icon comes up blank at runtime). Installs PyInstaller
 first if it isn't already available. PyInstaller's own work/dist folders
@@ -10,7 +10,7 @@ copied to the project root so Atomic.exe stays the one loose file there.
 Then it proves the exe belongs to the source tree it was built from,
 because a build log that says "completed successfully" does not. 1.4 was
 tagged with an executable built before its own last two commits: it was
-missing src/filter_icon.png outright (173 bundled entries where the tree
+missing src/assets/filter_icon.png outright (173 bundled entries where the tree
 produces 174), and the release notes recorded the size and hash of a
 build that was never the one committed. Nothing failed at the time -
 PyInstaller re-copied a cached binary and reported success. Both checks
@@ -28,9 +28,59 @@ PACKAGING_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGING_DIR.parent
 SRC_DIR = PROJECT_ROOT / "src"
 SPEC_FILE = PACKAGING_DIR / "Atomic.spec"
-ICON_FILE = SRC_DIR / "app_icon.ico"
+# Everything the app ships as an image lives under src/assets/ now (the
+# nav icons, SVG since 25 August 2026, in src/assets/icons/).
+# Atomic.spec resolves the same paths.
+ASSETS_DIR = SRC_DIR / "assets"
+ICON_FILE = ASSETS_DIR / "app_icon.ico"
 DIST_DIR = PACKAGING_DIR / "dist"
 WORK_DIR = PACKAGING_DIR / "build"
+
+
+# The interpreter the exe must be built with. Not a preference: the
+# built-in torrent engine is libtorrent, which publishes wheels for
+# CPython 3.9-3.13 only. This machine's default python is 3.15, a beta
+# with no wheels for it at all, so a build run there produces an exe
+# whose player cannot stream anything on its own.
+BUILD_PYTHON_TAG = "3.13"
+ENGINE_MODULES = ("libtorrent",)
+
+
+def _reexec_on_build_python():
+    """Re-run this script under the interpreter that has the engine.
+
+    Done here rather than by telling the user to type a different
+    command: `python packaging/build.py` is what the docs and habit say,
+    and a build that silently omits the torrent engine is exactly the
+    class of "succeeded but wrong" this file already exists to catch."""
+    missing = [m for m in ENGINE_MODULES if not _importable(m)]
+    if not missing:
+        return
+    if os.environ.get("ATOMIC_BUILD_REEXEC"):
+        raise SystemExit(
+            f"{', '.join(missing)} is missing from {sys.executable}.\n"
+            f"Install it there, or install Python {BUILD_PYTHON_TAG} and "
+            f"run: py -{BUILD_PYTHON_TAG} -m pip install libtorrent")
+    launcher = shutil.which("py")
+    if not launcher:
+        raise SystemExit(
+            f"{', '.join(missing)} is missing and the `py` launcher was not "
+            f"found to switch to Python {BUILD_PYTHON_TAG}.")
+    print(f"{', '.join(missing)} missing here - rebuilding under "
+          f"Python {BUILD_PYTHON_TAG}...")
+    environment = dict(os.environ, ATOMIC_BUILD_REEXEC="1")
+    result = subprocess.run([launcher, f"-{BUILD_PYTHON_TAG}",
+                             str(Path(__file__).resolve()), *sys.argv[1:]],
+                            env=environment)
+    raise SystemExit(result.returncode)
+
+
+def _importable(name: str) -> bool:
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _ensure_pyinstaller():
@@ -39,6 +89,60 @@ def _ensure_pyinstaller():
     except ImportError:
         print("PyInstaller not found - installing...")
         subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller>=6.0"], check=True)
+
+
+def _ensure_pinned_libmpv():
+    """Make the player engine reproducible before PyInstaller sees it.
+
+    fetch_libmpv.ensure_pinned() is a no-op once the Stremio-matched mpv
+    0.41.0 DLL and its hash marker are present, so offline rebuilds remain
+    possible after the first fetch. An unmarked/nightly DLL is replaced.
+    """
+    import fetch_libmpv
+
+    fetch_libmpv.ensure_pinned()
+
+
+
+def _ensure_webview2():
+    """Put Edge's WebView2 assemblies in vendor/, from the installed
+    pywebview.
+
+    Same arrangement as libmpv above and for the same reason: vendor/ is
+    gitignored, so a fresh clone has to be able to produce these rather
+    than carry them. They are three small files that ship inside the
+    pywebview wheel, and Atomic.spec lists them by literal path because
+    build.py verifies every datas entry with `ast` and cannot follow a
+    call into site-packages.
+
+    Not fatal when they are missing: helpers/webview2_host reports itself
+    unavailable and Home and Discover fall back to their Qt classes, so
+    the build is a working app either way.
+    """
+    target = PACKAGING_DIR.parent / "vendor" / "webview2"
+    wanted = ("Microsoft.Web.WebView2.Core.dll",
+              "Microsoft.Web.WebView2.WinForms.dll",
+              "WebView2Loader.dll")
+    if all((target / name).is_file() for name in wanted):
+        return
+    try:
+        import webview
+        lib = Path(webview.__file__).parent / "lib"
+    except Exception:
+        print("pywebview is not installed - Home and Discover will use Qt.")
+        return
+    sources = {
+        "Microsoft.Web.WebView2.Core.dll": lib / "Microsoft.Web.WebView2.Core.dll",
+        "Microsoft.Web.WebView2.WinForms.dll": lib / "Microsoft.Web.WebView2.WinForms.dll",
+        "WebView2Loader.dll": lib / "runtimes" / "win-x64" / "native" / "WebView2Loader.dll",
+    }
+    target.mkdir(parents=True, exist_ok=True)
+    for name, source in sources.items():
+        if not source.is_file():
+            print(f"WebView2: {source.name} not found in pywebview.")
+            return
+        shutil.copy2(source, target / name)
+    print(f"Vendored WebView2 assemblies into {target}")
 
 
 def _resolve(node, known):
@@ -102,9 +206,24 @@ def _required_datas():
         if source is None or dest is None:
             raise SystemExit(f"Couldn't resolve a datas entry in {SPEC_FILE.name}: "
                              f"{ast.dump(element)}")
-        name = os.path.basename(source) if dest == "." else f"{dest}/{os.path.basename(source)}"
+        # **Joined with the OS separator, then normalised on both
+        # sides at lookup.** PyInstaller writes a nested destination
+        # into the archive using the platform separator - measured,
+        # `assets\icons\anime.png` - while this built the name with a
+        # forward slash and reported all 17 nav icons "missing from the
+        # executable" on a clean build that had bundled every one of
+        # them. Nothing used a nested dest before the assets folder, so
+        # the bug had never been reachable.
+        name = (os.path.basename(source) if dest == "."
+                else os.path.join(dest, os.path.basename(source)))
         required.append((name, Path(source).resolve()))
     return required
+
+
+def _canon(name):
+    r"""An archive entry name with its separators flattened, so a lookup
+    cannot fail on `/` against `\` - see the note in _required_datas."""
+    return str(name).replace("\\", "/").lower()
 
 
 def _verify_bundle(exe_path):
@@ -118,14 +237,15 @@ def _verify_bundle(exe_path):
     from PyInstaller.archive.readers import CArchiveReader
 
     archive = CArchiveReader(str(exe_path))
-    bundled = set(archive.toc)
+    bundled = {_canon(n): n for n in archive.toc}
 
     problems = []
     for name, source in _required_datas():
-        if name not in bundled:
+        actual = bundled.get(_canon(name))
+        if actual is None:
             problems.append(f"{name} is missing from the executable")
             continue
-        if archive.extract(name) != source.read_bytes():
+        if archive.extract(actual) != source.read_bytes():
             problems.append(f"{name} in the executable differs from {source}")
 
     if problems:
@@ -170,12 +290,50 @@ def _verify_not_cached():
                  "  python packaging/build.py\n")
 
 
+def _refresh_shell_icon(exe_path):
+    """Tell Explorer this file changed, so it re-reads the icon.
+
+    Windows caches an executable's icon per path, and a rebuild that
+    keeps the same path keeps the cached picture - which is why a
+    freshly gold icon can go on showing as the old one in folder view
+    (the owner reported exactly that, with an app_icon.ico measured at
+    21% gold and 0% blue). SHChangeNotify is the polite ask: it
+    invalidates this one item rather than deleting the whole icon
+    cache database and restarting the shell.
+
+    Best effort - a build that cannot reach the shell API still
+    produced a correct exe, so this never fails the build."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        SHCNE_UPDATEITEM = 0x00002000
+        SHCNE_ASSOCCHANGED = 0x08000000
+        SHCNF_PATHW = 0x0005
+        SHCNF_FLUSH = 0x1000
+        shell32 = ctypes.windll.shell32
+        shell32.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH,
+                               ctypes.c_wchar_p(str(exe_path)), None)
+        shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_FLUSH, None, None)
+        print("Asked Explorer to re-read the icon.")
+    except Exception as error:            # pragma: no cover - shell only
+        print(f"(Could not refresh the shell icon cache: {error})")
+
+
 def main():
+    # Before anything else: a build without the torrent engine is not a
+    # build worth doing.
+    _reexec_on_build_python()
     if not ICON_FILE.exists():
-        sys.exit(f"Missing {ICON_FILE.name} in {SRC_DIR} - put the icon there before building.")
+        sys.exit(f"Missing {ICON_FILE.name} in {ASSETS_DIR} - put the icon there before building.")
     if not SPEC_FILE.exists():
         sys.exit(f"Missing {SPEC_FILE.name} in {PACKAGING_DIR}.")
 
+    # Every build must use the same known player engine. This deliberately runs
+    # before the spec validates vendor/libmpv-2.dll so an old nightly copy is
+    # replaced instead of silently becoming part of the exe.
+    _ensure_pinned_libmpv()
+    _ensure_webview2()
     _ensure_pyinstaller()
     # Read before building: a spec this can't parse is a problem to hear
     # about now, not after a two-minute build.
@@ -203,7 +361,29 @@ def main():
 
     final_exe = PROJECT_ROOT / "Atomic.exe"
     shutil.copy2(built_exe, final_exe)
+    _refresh_shell_icon(final_exe)
     print(f"\nDone: {final_exe}")
+    if "--zip" in sys.argv[1:]:
+        print(f"Zipped: {_write_zip(final_exe)}")
+
+
+def _write_zip(exe: Path) -> Path:
+    """`Atomic.zip`, holding the one executable - what a release and the
+    remote-tests branch ship (CLAUDE.md rule 8).
+
+    Not made on every build: it costs ten seconds and another 95MB on
+    disk, and a local test run needs the exe rather than the archive, so
+    the release and the remote-tests push ask for it with --zip.
+
+    One file, named exactly `Atomic.exe` at the root of the archive -
+    `updater._exe_from_zip` refuses anything else rather than guessing
+    which of several executables to install."""
+    import zipfile
+    archive = PROJECT_ROOT / "Atomic.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED,
+                         compresslevel=6) as bundle:
+        bundle.write(exe, "Atomic.exe")
+    return archive
 
 
 if __name__ == "__main__":

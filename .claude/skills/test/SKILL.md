@@ -18,7 +18,20 @@ from helpers import storage
 work = Path(tempfile.mkdtemp(prefix="atomic-test-"))
 shutil.copytree(Path(os.environ["APPDATA"]) / "Atomic", work, dirs_exist_ok=True)
 storage.DATA_DIR = work          # must happen before `import main` or any page
+try:
+    ...                          # the harness
+finally:
+    shutil.rmtree(work, ignore_errors=True)
 ```
+
+**The `finally` is not optional.** On 23 August 2026 about a hundred of
+these copies (50-100MB each) were left in `%TEMP%`, the drive hit 100%,
+and the next source patch - `open(path, "w")` truncates before it
+writes - left `player.py` at 0 bytes with ~900 uncommitted lines in it.
+Recovered by replaying the session transcripts against the surviving
+`__pycache__` bytecode, which is not a procedure anyone wants twice.
+Two rules that fall out of it: every harness deletes its copy, and a
+source patch writes to `path + ".tmp"` and `os.replace`s it.
 
 ## Offscreen for logic/flows
 
@@ -54,3 +67,62 @@ bitmap doesn't. Take a baseline of the settled state first. If colours
 are ambiguous (this app's surfaces are near-black), monkeypatch the
 paint event to fill one flat unmistakable colour for the run rather
 than guessing from raw pixel values.
+
+## Driving the real window from outside (rig.py, playwatch.py)
+
+`rig.py` beside this file launches the exe (or `src/main.py` under
+3.13) against a data copy, finds the window by its exact title, clicks,
+hovers, types, sends keys and photographs the window or a crop of it,
+all from a separate process. `playwatch.py` watches the player from the
+user's side: a screen-diff of the picture every second, reporting
+stalls of three seconds or more - a held anime frame reads as a stall,
+so confirm with `player_state.json`'s position advancing in real time.
+
+    python rig.py launch <Atomic.exe or src/main.py> <dir holding an Atomic copy>
+    python rig.py click 448 664 | move x y | key ctrl+2 | type kingdom
+    python rig.py shot name.png [x0 y0 x1 y1]   # window-relative physical px
+    python playwatch.py 90 out.csv "Reacher S1E2"
+
+Two traps it already carries, both measured 3 September 2026:
+
+- **Match the title exactly.** "Atomic - File Explorer" (the repo
+  folder open in Explorer) matched a startswith test and took the
+  clicks meant for the app; a second source run left two windows up.
+- **The Claude desktop app confines the cursor to its own monitor.**
+  With Atomic closed, any click on the primary monitor still produced
+  `GetClipCursor = (-1920, 0, 0, 1080)` and warped the pointer to
+  x=-1, so every synthetic click missed the app while keyboard
+  shortcuts worked. The rig releases the clip (`ClipCursor(None)`)
+  before every pointer move and again between button-down and
+  button-up. It is not the app - grep finds no ClipCursor in src/.
+
+## The proof-loop checklist (CLAUDE.md rule 12, testing.md has the why)
+
+    [ ] reproduce on the build he tested, APPDATA -> a copy, screenshot
+        of the state he described; read atomic.log around his times
+    [ ] number the cause with a harness before editing
+    [ ] preview from source against a copy (rig.py launch src/main.py)
+    [ ] build; read PYZ.pyz back: added names present, deleted names gone
+    [ ] frozen exe, separate process: screenshots of each surface named
+        in the ask; playwatch 90-100s per title + player_state.json
+        position advancing 1s per second; the log lines named up front
+        ((pre-started), no stopped/was gone/could not open/falling back)
+    [ ] motion: band burst through the animation, card edges per frame
+    [ ] sizes: device px on the screenshot vs the source's own rule
+    [ ] every regression found -> fix -> build -> read back -> photograph
+    [ ] new log lines read after the run; environment ruled out first
+    [ ] say what was NOT exercised, and why
+
+## Copying his data, and the seeds (8 September 2026)
+
+- `copy_real_data.py <dest-root>` copies `%APPDATA%\Atomic` to
+  `<dest-root>\Atomic` with a robocopy spawned **outside** the Claude
+  desktop app's package. From inside it, `%APPDATA%` is virtualized and a
+  copytree copies a stale shadow (`rules/testing.md`, "The desktop app's
+  %APPDATA% is not his"). `--check` compares the two views and exits 1
+  when they differ; run it before trusting a read of his files here.
+- `make_reading_seed.py <reading_meta.json>` regenerates
+  `helpers/reading_seed.py` from a real copy of his verdicts;
+  `make_catalog_seed.py` regenerates `helpers/catalog_seed.py` from
+  Cinemeta's first ten pages of each video kind.
+- `d.py` is the batch driver (its docstring lists the steps).

@@ -1,8 +1,9 @@
 # Atomic
 
 A PyQt6 desktop dashboard for one person's anime, reading, series, games,
-apps and websites. Ships as a single `Atomic.exe` committed at the repo
-root, which updates itself from this repository's GitHub tags.
+apps and websites. Ships as `Atomic.zip` - one `Atomic.exe` inside it -
+committed at the repo root, which updates itself from this repository's
+GitHub tags.
 
     src/main.py     window, sidebar, navigation, full screen
     src/windows/    the pages - home, tracker (Anime/Reading/Series), games, link_grid
@@ -24,12 +25,29 @@ root, which updates itself from this repository's GitHub tags.
    even to look something up.
 3. **Implement, then stop.** Finish, rebuild locally (`build` skill),
    leave it for the user to test - don't commit or push on your own
-   initiative, however small the change. Testing happens before code
+   initiative, however small the change.
+
+   **`remote-tests` is pushed only when the user says to push to it.**
+   His rule, 25 August 2026, stated as its own line because "rebuild it"
+   had started to read as "and put it where I can install it". It is the
+   branch he installs from on another machine, so a push to it lands a
+   build on a device he may be in the middle of testing on. Rebuild
+   locally and say it is ready; wait to be told. Testing happens before code
    lands, not after. Once the user says **approved**, commit and push
    per rule 4.
 4. **Every approved change bumps the third part of `APP_VERSION`**, in
-   the same commit as the source change. `Atomic.exe` is gitignored on
-   `development` and tracked only on `main`, at a release.
+   the same commit as the source change. `Atomic.exe` and `Atomic.zip`
+   are gitignored on `development`; the **zip** is tracked on `main`, at
+   a release (rule 8).
+
+   **Superseded at 2.0, 8 September 2026, by a measurement**: the build
+   is 126MB and GitHub refuses any file over 100MiB on push, so nothing
+   buildable can be committed at a tag any more. The app ships as a
+   **release asset**; what the tag carries is the ~10MB bridge
+   installer (`packaging/bridge/`), which is the only thing an install
+   running 1.10 or older can be handed - it asks for
+   `/contents/Atomic.exe?ref=<tag>` and knows nothing about assets.
+   `docs/RELEASING.md` has the whole of it.
    - **"Approved"** (tested, not released): commit and push to
      `development` - 1.0.1 → 1.0.2.
    - **"Approved, release it"**: skip the `development` push; use the
@@ -39,11 +57,208 @@ root, which updates itself from this repository's GitHub tags.
      1.1.3"), never the new number alone.
 5. **Never test against real user data** in `%APPDATA%\Atomic`. Copy it
    to a temp directory and point `storage.DATA_DIR` at the copy before
-   importing anything - see the `test` skill.
+   importing anything - see the `test` skill. **Copy it with
+   `copy_real_data.py`, not a copytree**: from inside the Claude desktop
+   app `%APPDATA%` is virtualized, and a copytree copies a stale shadow
+   (`.claude/rules/testing.md`, "The desktop app's %APPDATA% is not
+   his", 8 September 2026).
 6. **Close any running Atomic before a build or checkout touches the
    binary**, automatically, without asking - it may destroy in-progress
    test state, but Windows won't let the build replace a running binary
    either way.
+7. **One second.** The owner's standing rule, 21 August 2026: *"make all
+   transitions in the app take at most 1 sec"*. Anything the user
+   started and is now watching - a page opening, a search answering,
+   sources listing, the reader or player opening - is finished, or is
+   *showing what it has so far*, inside a second. A scroll frame has
+   16.7ms, not a second: 60Hz is the budget there.
+
+   This is a rule about what is on screen, not about when the network
+   replies. Where an answer cannot arrive in a second, show the part
+   that has (`on_partial`, as `streams.find_streams` and
+   `subtitles.search` already do) and fill the rest in - never an empty
+   surface waiting on the slowest source.
+
+   **Measure it before claiming it**, and against the frozen build, not
+   only the source tree. Three things that were slow and what they
+   actually were, so the same ground is not re-dug:
+   - every HTTP request opened a new connection (six GETs: **40.3s**,
+     against **0.75s** over one kept-alive connection) - fixed in
+     `helpers/net.py`, which everything must now go through;
+   - a scroll body was transparent, so Qt repainted every widget every
+     frame instead of blitting (Home: **29.4ms** per frame, *every*
+     frame over budget → **4.6ms**, none) - `widgets.scroll_area`'s
+     `ground`;
+   - a search's results depended on which sites won a race inside the
+     budget, so the same query returned 22, then 10, then 16 rows.
+
+   None of it was Python, Qt, or the owner's connection, and no rewrite
+   in another language would have touched any of it.
+8. **Ship the zip, never the bare exe.** The owner's rule, 25 August
+   2026, after a build he could not download: `Atomic.zip` is what goes
+   on `main` at a release and on `remote-tests`, and the exe is not
+   committed beside it.
+
+   It is a measurement, not a preference. The bare exe was refused on
+   download as `Trojan:Win32/Wacatac.B!ml` - Microsoft's *machine
+   learning* classifier, no signature match - while **the identical
+   bytes inside a zip downloaded cleanly**. Before concluding that, all
+   seven builds of that day were compared out of the `remote-tests`
+   history: same 193 bundled entries (nothing ever added), same 347
+   Python modules (none added), byte-identical bootloader (the first
+   differing byte is the PE TimeDateStamp at 0x108), and every one of
+   them scanning clean under Defender with cloud protection on and the
+   Mark-of-the-Web set. `upx=True` in `Atomic.spec` has never applied -
+   upx.exe is not installed - so the usual first suspect was never in
+   play. Nothing in the code was ever shown to cause it; the container
+   was.
+
+   `python packaging/build.py --zip` writes it, and from 2.0 it is
+   uploaded as the release's asset rather than committed.
+   `helpers/updater.py` asks the releases API *and* the old
+   tag+contents route and takes the newest, the asset winning a tie -
+   **do not remove either half**: the first is how anything from 2.0 on
+   is delivered, the second is the only thing 1.0-1.10 can read. See
+   rule 4 and `docs/RELEASING.md`.
+
+9. **Find the cause before writing the fix - by measurement, not by
+   reading.** The owner's ask, 21 August 2026, after the pass above
+   landed every item on his list: *"make the method you used (accurate
+   calculations, finding new solutions) a rule for you and the other
+   agents"*. It outranks the instinct to start editing, and it is not
+   the same as "test afterwards" - the measuring comes **first**, and
+   often changes what gets built.
+
+   The loop, in order:
+
+   1. **Reproduce and put a number on it** before forming a theory. A
+      harness that drives the real thing (`test` skill), not a reading
+      of the code. "The scroll stutters" became "29.4ms per frame, 100%
+      of frames over a 16.7ms budget, 278 paints per frame" - and the
+      last of those three numbers is what named the cause.
+   2. **Split the number until one part dominates.** DNS / TCP / TLS /
+      first byte, not "the request is slow". Per site, not "search is
+      slow". Frame time *and* paint count, not "it feels heavy".
+   3. **Test the theory in isolation before building on it.** One
+      attribute at a time, re-measured each time: it took four variants
+      to learn that a single `WA_OpaquePaintEvent` bought the whole 4x
+      and the palette changes bought nothing.
+   4. **Run a control.** Two runs of *unchanged* code, to find out what
+      moves on its own. That is the only reason a 37% screenshot diff
+      was correctly read as live network content rather than a bug -
+      the control diffed 37% too.
+   5. **Prove the fix on the same measurement**, then prove it changed
+      nothing else (pixel diff, correctness check, the frozen exe).
+   6. **Write the number into the code** at the place it explains, with
+      the date. Every table in `net.py` and `manga_sites.py` is there so
+      the next person inherits the measurement instead of the guess.
+
+   Two failure modes this exists to catch, both of which happened here:
+   a fix that measured as doing **nothing** (Qt's polish silently
+   cleared the attribute - caught only because the number was taken
+   again afterwards), and a fix that was **fast and wrong** (a ground
+   colour that was 12 levels off across 65% of the frame, caught only
+   by diffing screenshots). A change nobody measured is a guess, however
+   good the reasoning behind it reads.
+
+   Corollary: **say what was not measured.** "I did not exercise the
+   browser launch live" is a finding. Silence about it is a claim.
+
+10. **A visible change is proven on a screenshot of the running app.**
+    His rule, 2 September 2026: *"make it a rule to test any UI
+    modifications on screenshots from the user POV!"* - after three
+    changes verified in a browser pane shipped broken in the window.
+    Photograph the real window (`QScreen.grabWindow(0)`, cropped to its
+    geometry - a WebView2 page is a native child and `widget.grab()`
+    leaves a hole where it is), look at the picture, and say which
+    screenshots were taken. `.claude/rules/ui.md` has the procedure.
+
+11. **A root-cause fix retires what it replaced - with his say-so.**
+    His rule, 31 August 2026: *"if we find a root changing fix, then
+    remove the old code if I approve"*. Two weeks of scroll work left
+    four superseded models layered on top of each other, and every later
+    measurement had to reason past all of them.
+
+    So when a fix changes the root rather than a symptom, say plainly
+    what it supersedes and ask. On approval, remove the old code **only
+    where nothing still uses it** - check by scanning the whole tree, and
+    re-check after each deletion, because removing one dead function
+    usually kills the constants it was the last caller of. Anything still
+    in use stays, and is said out loud: on the day this rule was written,
+    the painted scroll model was superseded on one page and still ran
+    every other, so only four members were genuinely dead.
+
+    Keep the measurement that justified the change in the code that
+    replaced it. The point is to remove dead machinery, not the evidence.
+
+12. **A change is proven by the loop, not by any one step of it.** His
+    rule, 3 September 2026, after the pass that closed his eighteen-item
+    list: *"the testing methods you used for testing make them rules!!!
+    it is perfect!"*. The method, in order, and every step is written
+    out in `.claude/rules/testing.md`:
+
+    1. **Reproduce on the build he tested**, against a copy of his
+       data, and photograph the exact state he described. Two of his
+       reports did not reproduce that day (the shelves drew in under a
+       second) and one reproduced differently (two blank tiles, not
+       every tile) - the fix that followed was for what was actually
+       on screen.
+    2. Fix, with the number written into the code (rule 9).
+    3. **Run the source tree against a copy as a preview**, never as
+       the proof - it is where a wrong click path is cheapest to find
+       (the manga "Kingdom" opening the anime's page was found there).
+    4. **Build, then read the archive back**: the symbols the change
+       added must be in the frozen code and the ones it deleted must
+       be gone, before a single screenshot is taken of it.
+    5. **Drive the frozen exe from a separate process** (the rig in the
+       `test` skill): the screenshots of rule 10, playback watched from
+       the screen and confirmed against the app's own state file, and
+       the log lines that prove the claim - the child stayed alive, the
+       restart took the pre-started one, nothing fell back.
+    6. **Every regression the verification finds goes back through 2
+       to 5.** Three builds that day, and the second and third existed
+       only because step 5 of the one before found something.
+
+    Three habits ride with it. **Let the log find the next bug**: a
+    silent `except` becomes a log line, and the line it produces is
+    read - the three oversized covers and a broken image proxy were both
+    found by lines that had not existed an hour earlier. **Rule out the
+    environment before the app**: a dead pointer was another program's
+    cursor clip and a stray window's title, not Atomic. **Verify the
+    verification**: a review finding is refuted by two independent
+    readers before it is fixed, and a fix the Manager applied gets its
+    own checker - one of nine checks that day found a wrapper that
+    silently bypassed the fix.
+
+## Plan in named phases, always
+
+**The owner's ask, 23 August 2026**, after watching a run go past: *"the
+plan and phases method you used, I do not know what is it, but make it a
+rule to use it always it is good!"*
+
+What he was looking at is the **Workflow tool's phased plan** - a script
+that declares `meta.phases` up front (`[{title, detail}, ...]`) and then
+groups the work under `phase('Name')` calls, so the progress display
+reads as *Map → Fix → Verify* rather than as an undifferentiated stream
+of tool calls. He can watch it, and he can tell which part is which.
+
+So, for any request with more than one moving part:
+
+1. **Name the phases before starting**, in the order they will run, and
+   say what each one is for. Investigation is its own phase and comes
+   first - it is where rule 8's measuring lives.
+2. **Say which phase each piece of work belongs to** as it happens, so a
+   report can be read against the plan.
+3. **Verification is always its own final phase**, never folded into the
+   phase that made the change - see rule 8 step 5.
+4. Where the work genuinely fans out (several independent files to map,
+   several sources to measure), run it as an actual `Workflow` with
+   those phases; where it does not, the phases are still named in the
+   answer. **The phases are the deliverable, not the tool.**
+
+A phase that turns out to be unnecessary is dropped out loud. A phase
+that fails is reported as failed - "Verify" exists precisely so that a
+fix nobody proved has somewhere to be marked unproven.
 
 ## How work gets done here
 
@@ -147,3 +362,25 @@ reported every frame broken in both the broken and fixed case, a
 Crunchyroll resolver that was correct in isolation while the real save
 dialog raced it. Check what can be checked; say plainly what you
 couldn't.
+
+13. **A change the user makes shows everywhere at once.** His rule, 6
+    September 2026: *"make any changes the user make like un-saving the
+    watch or read from the main page, make the effect appear
+    immediately in the main page no need to switch pages to refresh!!!!
+    make this a rule and implement it in the whole app!"*
+
+    The mechanism is `helpers/changes.py`: every write the user makes
+    (a save, a removal, a status, a mark, a history edit) calls
+    `changes.bump()` **at the write itself**, never at the surface that
+    asked for it, so every surface is covered by construction. Each web
+    page's 150ms tick reads `changes.version()`: a list page (Home,
+    Discover, Saved, History, Schedule) redraws, a catalogue grid
+    patches its numbers and saved marks in place, and a page behind an
+    overlay does it the moment the overlay closes. The tracker's
+    background lookups never bump it - that is why it is a counter and
+    not a file mtime, and why the file watch could not do this job.
+
+    So a new write the user can make gets a `bump()` beside it, and a
+    new page reads the counter in its tick. Photographed on the frozen
+    build: Reacher removed on its details page, and Home behind it
+    without the card two seconds later, no page switch.

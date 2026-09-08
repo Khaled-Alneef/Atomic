@@ -14,6 +14,14 @@ dist/
 # every time it is committed. Adding it to a release commit needs
 # `git add -f`, since this rule would otherwise skip it.
 /Atomic.exe
+/Atomic.zip
+
+# The video player's decode engine (libmpv-2.dll, ~120MB unpacked).
+# Same argument as Atomic.exe above: it is a rebuildable artifact, not
+# source, and committing it would put 120MB into every clone forever.
+# Fetch it with `python packaging/fetch_libmpv.py`; the build refuses to
+# run without it rather than shipping a player that cannot decode.
+/vendor/
 
 # User data: personal tracker lists, settings (incl. Stremio auth key/
 # email once connected), cached cover images, site config - none of this
@@ -28,3 +36,62 @@ data/
 .idea/
 Thumbs.db
 .DS_Store
+
+# The owner's TMDB read token is *committed* now, at
+# packaging/tmdb_token.txt, and is deliberately not ignored here.
+#
+# It used to be ignored, with the encrypted tmdb_token.txt.enc beside it
+# as the way to move it between machines. That broke down the first time
+# it was actually needed: a second machine could not build, the
+# passphrase was not to hand, and no released exe carried the token to
+# recover it from either - v1.10 was tagged two days before the bundling
+# existed. The owner's call, 21 August 2026, was to commit it plainly.
+#
+# The risk that decision accepts is not that someone uses the key - it
+# is that a scanner finds it and TMDB revokes it, which blanks artwork
+# for every copy at once. If that happens, the fix is a new key from
+# themoviedb.org/settings/api, not a hunt for a bug. And it is in the
+# history from now on, so removing the file later does not unpublish it;
+# rotating the key is what does.
+
+# The owner's Real-Debrid token is the opposite call, and deliberately
+# so: the TMDB token is a free read-only metadata key, this is a *paid
+# account credential*, and on a public repository "committed" means
+# "published". It reaches users inside the built exe (Atomic.spec
+# bundles it when the file exists) and never through the repository.
+# The owner places the file himself; a tree without it builds fine and
+# simply ships an exe whose debrid stays dark until a key is pasted in
+# Settings.
+packaging/rd_token.txt
+
+# Window-event logs from the diagnostic rig used to chase the flashing
+# windows (packaging has no use for them; one got committed once).
+/events.jsonl
+*.jsonl
+
+# WebView2's own user-data folder. Edge creates it beside the exe the
+# first time a page is hosted (helpers/webview2_host) and fills it with
+# a browser profile - a cache, cookies, and a few thousand files. It is
+# per-machine state, never source.
+/Atomic.exe.WebView2/
+*.WebView2/
+
+# Vendored beside libmpv for the same reason: fetched, not written here.
+# Unlike libmpv these are small and the build needs them, so they stay
+# tracked - this line is only a reminder of where they came from.
+#   vendor/webview2/  <- tracked on purpose (packaging/Atomic.spec)
+
+# Run logs from driving the app during development.
+/debug.log
+/run_src.log
+/probe.log
+/cover.log
+
+# The bridge installer's build output. `packaging/bridge/dist/Atomic.exe`
+# is committed at a release tag by hand (as Atomic.exe at the repo root),
+# never from here - see docs/RELEASING.md.
+/packaging/bridge/build/
+/packaging/bridge/dist/
+
+# Server log from driving the local web UI during development.
+/srv.log

@@ -6,28 +6,39 @@ files the other pages read/write (tracker.json's/series.json's
 "recents" state to maintain.
 """
 
+import threading
 from datetime import datetime
+from pathlib import Path
 
-from PyQt6.QtCore import (
-    QEasingCurve, QEvent, QParallelAnimationGroup, QPropertyAnimation, QRect,
-    QTimer, Qt, pyqtSignal,
-)
-from PyQt6.QtGui import QPainter, QPixmap
+from PyQt6.QtCore import QObject, QRectF, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QLinearGradient, QPainter
+
+Signal = pyqtSignal
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
+    QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from helpers import (game_launch, global_search, images, launchers,
+# hero_art at module level costs nothing new: its imports (PIL via
+# helpers.images) are already pulled by this module's own `images`
+# import - measured, not assumed, 22 August 2026.
+from helpers import (app_art, cover_fetch, game_art, game_launch,
+                     hero_art, history, images, launchers, lookup_pool,
                      nav_config, storage, theme)
 from helpers.widgets import (
-    Card, GlassPage, hold_hover_cursor, release_hover_cursor,
-    scroll_area, search_field,
+    Card, GlassPage, HERO_COVER_SIZE, HeroBanner, SideScroller, _OpaqueGround,
+    hero_logo_label,
+    hero_split, inform, scroll_area, set_hero_logo, SmoothTween, warm_backdrop,
+    DriftButton,
+    use_hover_cursor,
 )
 from windows.link_grid import missing_app_targets, open_link_entry
 from windows.tracker import (
-    IN_PROGRESS_STATUSES, MANGA_TYPES, format_chapter_progress,
-    open_tracker_entry, shows_last_watched,
+    IN_PROGRESS_STATUSES, MANGA_TYPES, POSTER_SIZE, VIDEO_TYPES,
+    _cover_kind,
+    ContinueCover, _progress_data_file, attach_continue_cover,
+    discover_entry, format_chapter_progress, open_tracker_entry,
+    shows_last_watched,
 )
 
 GREETING_REFRESH_MS = 60_000
@@ -38,8 +49,10 @@ GAMES_FILE = "games.json"
 WEBSITES_FILE = "websites.json"
 APPS_FILE = "apps.json"
 
-POSTER_SIZE = (78, 104)
-HERO_COVER_SIZE = (156, 208)
+# No local POSTER_SIZE any more: Home's rows show the same-size cards
+# the Anime/Reading/Series pages do (the owner's ask), so the size is
+# imported from windows.tracker with the rest of its pieces - one number
+# in one place, and main.py's prewarm follows it automatically.
 ICON_SIZE = (40, 40)
 ROW_ICON_SIZE = (28, 28)
 
@@ -51,117 +64,45 @@ ROW_ICON_SIZE = (28, 28)
 # itself while the click was still being let go of.
 RESORT_DELAY_MS = 2500
 
-TRACKER_PREVIEW_LIMIT = 6
-SERIES_PREVIEW_LIMIT = 6
-GAMES_PREVIEW_LIMIT = 6
+# No preview limits for the tracker rows any more - see _recent_entries,
+# and none for Games either since 28 August 2026 (_recent_games). Quick
+# Apps and Quick Websites keep theirs: they are vertical lists in a
+# fixed box, not a strip that scrolls, so an uncapped one would push
+# everything below it off the page.
 QUICK_LIST_LIMIT = 5
 
 # The search field's width here. Wider than a page's own 220px filter box
 # because it searches everything rather than one list, and capped so it
 # stays a field rather than a banner across a 2048px display.
-SEARCH_BAR_WIDTH = 520
 # What it may shrink to before the page would rather clip it - narrow
 # enough that a 1000px window still shows a usable field.
-SEARCH_BAR_MIN_WIDTH = 240
 
-HERO_CONTENT_WIDTH = 620
 HERO_SLIDE_LIMIT = 4
-HERO_SLIDE_INTERVAL_MS = 5000
-HERO_SLIDE_ANIM_MS = 320
-# The active slide's cover+text+button block sits on its own framed
-# card (same #Card look the peeks use below), padded out beyond the
-# cover's own HERO_COVER_SIZE so the frame reads as a background for
-# the whole block rather than just a border around the cover.
-HERO_SLIDE_PADDING = 18
-HERO_SLIDE_HEIGHT = HERO_COVER_SIZE[1] + HERO_SLIDE_PADDING * 2
-HERO_COVER_TEXT_GAP = 20   # cover -> text column gap in the active slide
-# Left/right breathing room for the Continue button, which otherwise
-# spans its whole column edge to edge.
-HERO_CONTINUE_INSET = 24
-HERO_PEEK_GAP = 14
-# The previous/next entries flanking the active slide are that same
-# slide's exact layout at half scale (rendered scaled, not re-laid-out
-# smaller) - the size difference alone reads as "further back", so the
-# active slide doesn't need to compete with a same-size neighbor.
-#
-# Deriving the peek size by halving BOTH of the active slide's own
-# dimensions - rather than composing it from its own cover/padding
-# constants - is what keeps the two rects the same shape, and that
-# matters: QPropertyAnimation interpolates a QRect's width and height
-# independently, so tweening between two differently-shaped rects makes
-# every frame in between some third shape. With a scaled pixmap that
-# means a non-uniform stretch - a portrait cover visibly fattening
-# toward square as it grows. Same aspect ratio at both ends keeps the
-# whole grow/shrink a clean uniform zoom instead.
-HERO_PEEK_FRAME_SIZE = (HERO_CONTENT_WIDTH // 2, HERO_SLIDE_HEIGHT // 2)
-# Card pixmaps are rendered at this multiple of the *active slide's*
-# full size, so they stay sharp all the way up to it rather than only
-# at the smaller peek size they spend most of their time at.
-HERO_CARD_SUPERSAMPLE = 2
+# How long after the hero is built before its covers are warmed, and
+# the gap between each - see _warm_next_hero_cover.
+HERO_COVER_WARM_MS = 120
+HERO_SLIDE_INTERVAL_MS = 6000
 
-# The carousel's 3 slots (peek/mid/peek) plus 2 off-stage holding spots
-# (further out on each side) that an entering peek starts from / an
-# exiting one animates into before being deleted - all laid out once on
-# a fixed "stage" widget so _transition_hero can animate real widgets'
-# geometry directly between them instead of juggling a viewport +
-# separately-positioned peeks (see _transition_hero).
-HERO_STAGE_WIDTH = HERO_PEEK_FRAME_SIZE[0] * 2 + HERO_PEEK_GAP * 2 + HERO_CONTENT_WIDTH
-HERO_STAGE_HEIGHT = HERO_SLIDE_HEIGHT
-_HERO_PEEK_TOP = (HERO_STAGE_HEIGHT - HERO_PEEK_FRAME_SIZE[1]) // 2
-HERO_LEFT_RECT = QRect(0, _HERO_PEEK_TOP, *HERO_PEEK_FRAME_SIZE)
-HERO_MID_RECT = QRect(HERO_PEEK_FRAME_SIZE[0] + HERO_PEEK_GAP, 0, HERO_CONTENT_WIDTH, HERO_SLIDE_HEIGHT)
-HERO_RIGHT_RECT = QRect(
-    HERO_PEEK_FRAME_SIZE[0] + HERO_PEEK_GAP + HERO_CONTENT_WIDTH + HERO_PEEK_GAP, _HERO_PEEK_TOP,
-    *HERO_PEEK_FRAME_SIZE)
-HERO_EXIT_LEFT_RECT = QRect(-(HERO_PEEK_FRAME_SIZE[0] + HERO_PEEK_GAP), _HERO_PEEK_TOP, *HERO_PEEK_FRAME_SIZE)
-HERO_EXIT_RIGHT_RECT = QRect(HERO_STAGE_WIDTH + HERO_PEEK_GAP, _HERO_PEEK_TOP, *HERO_PEEK_FRAME_SIZE)
+# The hero's logo treatment (widgets.hero_logo_label) went with the
+# cover-left redesign of 23 August 2026 and is back by the owner's ask
+# of 24 August: the TMDB logo stands where the name does, and the name
+# is text when there is none. Only ever that swap - see _build_hero for
+# the hide-the-name rule that is *not* coming back with it.
 
-PAGE_FOR_TYPE = {"Anime": "anime", "Series": "series", **{t: "manga" for t in MANGA_TYPES}}
+# Anime opens on the merged watch page now - there is no "anime" page
+# key left (see nav_config).
+PAGE_FOR_TYPE = {"Anime": "series", "Series": "series",
+                 **{t: "manga" for t in MANGA_TYPES}}
 
 
-class _HeroCardLabel(QLabel):
-    """A clickable, pixmap-backed carousel card - scaledContents makes it
-    stretch the pixmap to fill whatever geometry it's given, so animating
-    its `geometry` (see _transition_hero) smoothly shrinks/grows it while
-    it moves. A plain widget with a laid-out cover+text row can't do this:
-    its children have fixed pixel sizes and just get clipped/reflowed,
-    not visually scaled, when the parent's geometry is animated - hence
-    rendering the card to a pixmap first (see _build_hero_card_pixmap,
-    which supersamples so this stays sharp when stretched up toward the
-    much larger active-slide size, not just shrunk down).
-
-    The scaling only stays undistorted because every rect this is
-    animated between shares one aspect ratio - see HERO_PEEK_FRAME_SIZE."""
-
-    clicked = pyqtSignal()
-
-    def __init__(self, pixmap, parent=None):
-        super().__init__(parent)
-        # A dedicated objectName rather than the shared #Card hoverable
-        # rule (theme.py) - that rule highlights via *background*, which
-        # a scaledContents pixmap filling the whole label would just
-        # paint over invisibly. QLabel is a QFrame under the hood, so a
-        # :hover *border* still shows up fine around the pixmap instead.
-        self.setObjectName("HeroCardLabel")
-        self.setScaledContents(True)
-        self.setPixmap(pixmap)
-
-    # Only while the pointer is genuinely inside, same as widgets.Card -
-    # and these are the worst offenders for holding a cursor they
-    # shouldn't, since the carousel builds fresh ones on a timer whether
-    # or not anyone is looking at this page.
-    def enterEvent(self, event):
-        hold_hover_cursor(self)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        release_hover_cursor(self)
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
+class _HeroSignals(QObject):
+    # entry id -> local backdrop path, crossing back from a fetch thread.
+    backdrop = pyqtSignal(str, str)
+    # entry id -> (logo path or "", hide the text title): the title
+    # treatment the banner draws in place of its typed name, and whether
+    # the name should go even without one (a real AniList reading banner
+    # already carries it). See _hero_backdrop_worker.
+    overlay = pyqtSignal(str, str, bool)
 
 
 def _greeting():
@@ -184,7 +125,104 @@ def _clock_text() -> str:
     return f"{now.hour % 12 or 12}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}"
 
 
+class _HeroDash(QWidget):
+    """One pager pill under the hero, and the movement between them.
+
+    The owner's ask, 26 August 2026: *"add an animation while
+    transitioning of the bullets"*. They were QPushButtons carrying a
+    stylesheet, resized and restyled on every slide change - which is a
+    snap, and a style recomputation per pill per change on top of it.
+
+    Painted instead, with one tween per pill carrying both the width and
+    the colour, so the active pill *grows* into place while the outgoing
+    one shrinks. Lit along its length rather than top-down for the
+    reason theme.accent_gradient records: at 6px tall the vertical lip
+    is well under a pixel and does not render at all."""
+
+    clicked = Signal()
+
+    HEIGHT = 6
+    WIDTH_REST = 18
+    WIDTH_ACTIVE = 30
+    # 200ms: long enough to read as movement, short enough to be over
+    # before the eye has finished travelling to the new slide.
+    TWEEN_MS = 200
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._t = 0.0
+        self._hover = False
+        self.setFixedHeight(self.HEIGHT)
+        self.setFixedWidth(self.WIDTH_REST)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._tween = SmoothTween(self, self._on_tween, self.TWEEN_MS)
+        use_hover_cursor(self)
+
+    def _on_tween(self, value):
+        self._t = float(value)
+        self.setFixedWidth(int(round(
+            self.WIDTH_REST + (self.WIDTH_ACTIVE - self.WIDTH_REST) * self._t)))
+        self.update()
+
+    def set_active(self, active, animate=True):
+        target = 1.0 if active else 0.0
+        if not animate:
+            self._on_tween(target)
+            return
+        self._tween.start(self._t, target, self.TWEEN_MS)
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0, 0, self.width(), self.height())
+        radius = self.height() / 2.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        if self._t <= 0.001:
+            resting = theme.TEXT_MUTED if self._hover else theme.SURFACE_ACTIVE
+            painter.setBrush(QColor(resting))
+            painter.drawRoundedRect(rect, radius, radius)
+            painter.end()
+            return
+        # The resting tone underneath, then the accent ramp faded in over
+        # it - so the colour crosses rather than switching, and a pill
+        # halfway through the tween is halfway through the colour too.
+        painter.setBrush(QColor(theme.SURFACE_ACTIVE))
+        painter.drawRoundedRect(rect, radius, radius)
+        gradient = QLinearGradient(rect.topLeft(), rect.topRight())
+        for at, colour in theme.accent_stops(hover=self._hover):
+            tint = QColor(colour)
+            tint.setAlphaF(min(1.0, max(0.0, self._t)))
+            gradient.setColorAt(at, tint)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.end()
+
+
 class HomePage(GlassPage):
+    # **This page folds live** - see main._toggle_sidebar. It is one
+    # banner and a few scrolling rows rather than a grid of a hundred
+    # cards, so it can be laid out on every step of the fold instead of
+    # being photographed and blitted - which is what lets the hero
+    # actually resize with the sidebar rather than snapping when the
+    # animation lands.
+    FOLD_LIVE = True
+
     def __init__(self, app):
         super().__init__(parent=None)
         self.app = app
@@ -240,12 +278,16 @@ class HomePage(GlassPage):
         # width unconditionally keeps that centered regardless of
         # whether this page's content is currently tall enough to
         # actually need scrolling (see scroll_area's always_show_vbar).
-        panel_layout.addWidget(scroll_area(body, always_show_vbar=True))
+        # **0.7 - Home scrolls 30% slower than the rest of the app**,
+        # the owner's ask, 24 August 2026 ("make the scrolling in the
+        # main page 30% slower"), on top of the whole-app cut made the
+        # same day. Home is a short page of big blocks where every other
+        # page is a long list, so the same notch reads as a lurch here
+        # and as travel there.
+        panel_layout.addWidget(scroll_area(body, always_show_vbar=True,
+                                           ground=theme.BG, notch_scale=0.7))
 
-        # Greeting on the left, the app-wide search on the same line.
-        # Only this page carries the field: it searches everything, and
-        # Home is the page that is already about everything. Ctrl+K
-        # reaches the same panel from anywhere else.
+        # Greeting on the left, the clock on the right.
         header_row = QHBoxLayout()
         header = QVBoxLayout()
         header.setSpacing(2)
@@ -256,35 +298,21 @@ class HomePage(GlassPage):
         greeting_box.setLayout(header)
         header_row.addWidget(greeting_box)
 
+        # **The search field that used to sit between these two
+        # stretches is gone.** One bar in the window's title bar
+        # searches everything from every page now (the owner's ask, 25
+        # August 2026), and a second field on Home - directly under it -
+        # was the same question asked twice.
+        #
+        # Both stretches stay. They were here to centre the field
+        # between the greeting and the clock, and with it gone they are
+        # what still pushes the clock to the right edge; collapsing them
+        # to one would leave the clock floating beside the greeting.
         header_row.addStretch()
-        # A range, not a fixed width. Fixed at 520 the row's minimum came
-        # to 1733px - the greeting, the field and the greeting-width
-        # spacer that balances it - so on a 1400px window the row
-        # overflowed the viewport and the field was clipped off the right
-        # edge rather than sitting centred.
-        self.search_bar = search_field("Search everything...")
-        self.search_bar.setMinimumWidth(SEARCH_BAR_MIN_WIDTH)
-        self.search_bar.setMaximumWidth(SEARCH_BAR_WIDTH)
-        self.search_bar.textEdited.connect(self._search_bar_typed)
-        self.search_bar.installEventFilter(self)
-        # The results list under the field, built on the first keystroke
-        # and closed with the query.
-        self._search_results = None
-        # Top-aligned, which puts it on the greeting's own line: the
-        # block under it is two lines (greeting plus subtitle), so
-        # centring the field against the block dropped it into the gap
-        # between them - measured 11px below the greeting's centre, and
-        # visibly so. The field and the greeting line are within a pixel
-        # of the same height, so aligning their tops aligns their middles.
-        header_row.addWidget(self.search_bar, stretch=3, alignment=Qt.AlignmentFlag.AlignTop)
-        header_row.addStretch()
-        # Balances the greeting's width on the right, so the field lands
-        # centred in the page rather than centred in what is left over
-        # beside the greeting. Taken from the greeting's own hint at
-        # build time; the stretches either side do the rest. It carries
-        # the clock now - the balance was already the right shape and
-        # width for it, and a second widget beside it would have thrown
-        # the centring out by its own width.
+        # Capped at the greeting's width, which is what kept the field
+        # centred in the page rather than in what was left over beside
+        # the greeting. Kept with the field gone: it is still what stops
+        # a long clock string dragging the row's balance around.
         clock_box = QWidget(objectName="Bare")
         clock_box.setMaximumWidth(greeting_box.sizeHint().width())
         clock_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -326,25 +354,33 @@ class HomePage(GlassPage):
         # whichever of the two sits earlier.
         sections = []
 
-        anime_manga_recent = self._recent_entries(self._home_tracker_entries)
-        if anime_manga_recent:
-            # One section covering two nav entries, so hiding just one of
-            # them retitles it rather than dropping it - a row of only
-            # manga still headed "Anime & Reading" reads like a bug.
-            title = "Anime & Reading"
-            if "anime" in hidden:
-                title = "Reading"
-            elif "manga" in hidden:
-                title = "Anime"
-            pos = min(nav_config.nav_position("anime"), nav_config.nav_position("manga"))
+        # tracker.json holds only the reading types now - Anime moved to
+        # series.json with the page merge (main._merge_anime_into_series)
+        # - so this section is plainly Reading.
+        reading_recent = self._recent_entries(self._home_tracker_entries)
+        if reading_recent:
+            pos = nav_config.nav_position("manga")
             sections.append((pos, self._build_section(
-                title, self._build_poster_grid(anime_manga_recent))))
+                "Reading", self._build_poster_grid(reading_recent))))
 
         series_recent = self._recent_entries(self._home_series_entries)
+        if not series_recent:
+            # **Nothing saved does not mean nothing watched** - the
+            # owner, 31 August 2026: "I meant add it to the home page
+            # like the reading". The row was already here and had simply
+            # never had anything to draw: measured on his own data,
+            # series.json holds **0** entries while History holds 41, of
+            # which the watchable ones are what he has actually been
+            # watching (Attack on Titan S01E02, Reacher S01E02, The Angel
+            # Next Door S01E09). Reading looks populated beside it only
+            # because its eight titles happen to be saved ones.
+            series_recent = self._watching_from_history()
         if series_recent:
             pos = nav_config.nav_position("series")
+            # "Watching", not the sidebar's "Watch": Home's rows keep the
+            # longer headings (the owner's ask), pairing with "Reading".
             sections.append((pos, self._build_section(
-                "Movies & Series", self._build_poster_grid(series_recent))))
+                "Watching", self._build_poster_grid(series_recent))))
 
         # Kept so the row can be redrawn in place the moment a game is
         # launched from it (see _refresh_games_row) - the order here is
@@ -357,6 +393,11 @@ class HomePage(GlassPage):
         recent_games = [] if "games" in hidden else self._recent_games()
         if recent_games:
             pos = nav_config.nav_position("games")
+            # No separate backfill pass here any more - every card asks
+            # for its own cover through cover_fetch as it is built (see
+            # _ensure_game_cover). The old pass ran once, at page
+            # construction, over the six games this row happens to show;
+            # a card built by a later _refresh_games_row got nothing.
             self._games_grid = self._build_games_grid(recent_games)
             self._games_section = self._build_section("Games", self._games_grid)
             sections.append((pos, self._games_section))
@@ -379,63 +420,6 @@ class HomePage(GlassPage):
             body_layout.addWidget(widget)
 
         body_layout.addStretch()
-
-    def _search_bar_typed(self, text):
-        """Results appear under the field as it is typed into.
-
-        The panel is a list, not a second search box: it opens beneath
-        this field, follows it, and closes when there is nothing to
-        show."""
-        if not text.strip():
-            self._close_search_results()
-            return
-        if self._search_results is None:
-            self._search_results = global_search.GlobalSearch(
-                self.window(), anchor=self.search_bar)
-            # The panel can close without this page asking it to - it
-            # closes itself when a result is clicked - and it deletes
-            # itself when it does. Dropping the reference then is what
-            # keeps the next keystroke from talking to a deleted panel.
-            self._search_results.closed.connect(self._forget_search_results)
-            self._search_results.show()
-        self._search_results.set_query(text)
-
-    def _forget_search_results(self):
-        self._search_results = None
-
-    def _close_search_results(self):
-        if self._search_results is not None:
-            self._search_results.close()
-            self._search_results = None
-
-    def eventFilter(self, obj, event):
-        """Up/Down/Enter/Escape in the field drive the list under it -
-        the field keeps the focus while the list is being driven, which
-        is why the panel is shown without activating. Escape is the one
-        that ends it, focus included."""
-        if obj is self.search_bar and event.type() == QEvent.Type.KeyPress:
-            key = event.key()
-            if self._search_results is not None:
-                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
-                    self._search_results.move_selection(1 if key == Qt.Key.Key_Down else -1)
-                    return True
-                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                    self._search_results.open_current()
-                    self.search_bar.clear()
-                    self._close_search_results()
-                    return True
-            if key == Qt.Key.Key_Escape:
-                # Escape leaves the field, it doesn't just empty it -
-                # measured, clearing alone left the caret blinking in a
-                # box the user had just said they were done with, while
-                # the same key on a tracker page dropped focus onto the
-                # page. Same ending on both now.
-                self.search_bar.clear()
-                self._close_search_results()
-                self.search_bar.clearFocus()
-                self.setFocus()
-                return True
-        return super().eventFilter(obj, event)
 
     def _refresh_greeting(self):
         self.greeting_label.setText(f"{_greeting()} \U0001F44B")
@@ -464,15 +448,111 @@ class HomePage(GlassPage):
         entries = [e for e in self._all_trackable_entries() if e.get("status") in IN_PROGRESS_STATUSES]
         return sorted(entries, key=lambda e: e.get("updated_at") or "", reverse=True)
 
+    def _hero_slide_entries(self):
+        """Up to HERO_SLIDE_LIMIT slides, deliberately mixed across
+        reading and watching rather than simply the newest four.
+
+        Sorted by recency alone the hero showed only manga - the owner's
+        report, 22 August 2026: he reads most days and watches in
+        bursts, so on his real data every one of the four newest
+        in-progress entries was a reading title and the carousel never
+        held a watching one, though five were in progress. The two media
+        now alternate, each lane newest-first, leading with whichever
+        was touched last - so the first slide is still the most recently
+        touched entry overall - and a lane running out hands its
+        remaining slots to the other."""
+        entries = self._in_progress_entries()
+        reading = [e for e in entries if e.get("type") in MANGA_TYPES]
+        watching = [e for e in entries if e.get("type") not in MANGA_TYPES]
+        lanes = [reading, watching]
+        if entries and entries[0].get("type") not in MANGA_TYPES:
+            lanes.reverse()
+        slides = []
+        while len(slides) < HERO_SLIDE_LIMIT and any(lanes):
+            for lane in lanes:
+                if lane and len(slides) < HERO_SLIDE_LIMIT:
+                    slides.append(lane.pop(0))
+        return slides
+
     def _recent_entries(self, entries):
-        entries = sorted(entries, key=lambda e: e.get("updated_at") or "", reverse=True)
-        return entries[:TRACKER_PREVIEW_LIMIT]
+        """Every entry, most recently touched first - no preview cap any
+        more (the owner's ask: an added entry must always appear here).
+        The row scrolls sideways instead of truncating, the same answer
+        the tracker pages give a long section."""
+        return sorted(entries, key=lambda e: e.get("updated_at") or "",
+                      reverse=True)
+
+    def _watching_from_history(self):
+        """The Watching row built out of History, for when series.json is
+        empty - see the call site for the counts that made this needed.
+
+        A saved entry is always preferred where one exists, so progress
+        marks and Save state stay real; only the rest are transient
+        records built from what History stored. That is the same rule
+        tracker._history_entry follows for the History tab, and it is
+        deliberately the same code shape - a second, subtly different
+        conversion is how two sources start disagreeing about one title.
+
+        Reading types are excluded: History holds those too (One Piece
+        sits in it at Ch 1190), and letting them through would put the
+        same titles in both Home rows.
+        """
+        try:
+            rows = history.recent(VIDEO_TYPES)
+        except Exception:
+            return []                       # a lost row, never a lost page
+
+        def key(title):
+            return " ".join(str(title or "").strip().lower().split())
+
+        saved = {key(entry.get("title")): entry
+                 for entry in self.series_entries}
+        out = []
+        for row in rows:
+            found = saved.get(key(row.get("title")))
+            if found is not None:
+                out.append(found)
+                continue
+            try:
+                entry = discover_entry(
+                    {"title": row.get("title"),
+                     "poster": row.get("cover_url"),
+                     "imdb_id": row.get("imdb_id")},
+                    row.get("type") or VIDEO_TYPES[0])
+            except Exception:
+                continue
+            # The site it was opened with, so resuming does not have to
+            # go looking for it again.
+            entry["url"] = row.get("url") or ""
+            entry["site_id"] = row.get("site_id")
+            entry["cover_path"] = row.get("cover_path")
+            if row.get("progress"):
+                entry["progress"] = row.get("progress")
+            # _recent_entries sorts on this; History's own stamp is
+            # last_opened, which is the same event by another name.
+            entry["updated_at"] = row.get("last_opened") or ""
+            out.append(entry)
+        return out
 
     def _recent_games(self):
+        """Every game, most recently played first, then the ones never
+        played in saved order.
+
+        **No preview cap**, 28 August 2026, the owner: "make the main
+        page shows all games just like the readings and watchings in the
+        main page!". It used to stop at six, which is the one thing that
+        made this row different from Reading and Watching - those have
+        carried every entry since `_recent_entries` dropped its own cap,
+        and the row was already built to hold them: `_build_games_grid`
+        is a sideways strip behind SideScroller's arrows, so a long
+        library scrolls rather than being cut off. Each card asks for its
+        own cover through `cover_fetch`, which queues on the bounded
+        covers pool, so a large library is more queued lookups and not
+        more simultaneous ones."""
         played = [g for g in self.games if g.get("last_played")]
         played = sorted(played, key=lambda g: g["last_played"], reverse=True)
         rest = [g for g in self.games if not g.get("last_played")]
-        return (played + rest)[:GAMES_PREVIEW_LIMIT]
+        return played + rest
 
     def _recent_links(self, entries):
         """Same "sort by latest used" rule as Anime/Manga/Series'
@@ -510,328 +590,592 @@ class HomePage(GlassPage):
         return section
 
     def _build_hero(self):
-        hero = QFrame(objectName="Hero")
-        outer_layout = QHBoxLayout(hero)
-        outer_layout.setContentsMargins(20, 20, 20, 20)
-
-        self._hero_entries = self._in_progress_entries()[:HERO_SLIDE_LIMIT]
+        """The continue hero, Harbor's shape (the owner's ask): one
+        full-width banner - the current title's backdrop under a scrim,
+        the title and its progress over it, Continue beside a details
+        button, the pagination dashes underneath - rotating through the
+        in-progress entries. Replaces the fixed-width peek carousel."""
+        self._hero_entries = self._hero_slide_entries()
         if not self._hero_entries:
-            empty = QLabel("Nothing in progress yet - add an anime, manga, or series to start tracking.",
-                            objectName="Muted")
-            outer_layout.addWidget(empty)
+            hero = QFrame(objectName="Hero")
+            layout = QHBoxLayout(hero)
+            layout.setContentsMargins(20, 20, 20, 20)
+            layout.addWidget(QLabel(
+                "Nothing in progress yet - add an anime, manga, or series "
+                "to start tracking.", objectName="Muted"))
             return hero
 
-        # A fixed-size stage, not a layout - _transition_hero animates
-        # the peek/mid widgets' raw geometry directly between the fixed
-        # slot rects (HERO_LEFT_RECT/HERO_MID_RECT/HERO_RIGHT_RECT etc.,
-        # in this widget's local coordinates), which needs stable pixel
-        # bounds rather than a layout that would just reflow around them.
-        self._hero_stage = QWidget(objectName="Bare")
-        self._hero_stage.setFixedSize(HERO_STAGE_WIDTH, HERO_STAGE_HEIGHT)
         self._hero_index = 0
-        self._hero_transitioning = False
+        # Seeded from the entries themselves before anything is
+        # fetched. The ground for a reading title costs an AniList query
+        # *and* a banner download, with no small-copy fast path like the
+        # video types have - so an unseeded Home paid the whole of it on
+        # every single visit, which is the owner's "Kingdom WAN image
+        # takes so long". Resolved once, remembered on the entry, and
+        # from then on the slide is painted from disk on the first frame.
+        self._hero_backdrops = {}
+        # entry id -> logo path (a title-treatment PNG), and -> whether
+        # the typed title should be hidden even without a logo. Both are
+        # remembered on the entry the same way the backdrop is, so a
+        # revisit draws the finished banner on the first frame with no
+        # lookup - see _hero_backdrop_worker and _remember_hero_overlay.
+        self._hero_logos = {}
+        self._hero_hide_title = {}
+        # Entries whose remembered ground was composed by an older
+        # hero_art: the old JPEG still exists on disk, so exists() alone
+        # would serve the superseded composition forever - the filename
+        # version bump in hero_art cannot reach a path already written
+        # onto an entry. Seeded anyway (old art on the first frame beats
+        # a flat panel), but the worker below re-runs and cross-fades
+        # the new composition in when it lands.
+        stale_grounds = set()
+        for hero in self._hero_entries:
+            hid = hero.get("id")
+            stored = hero.get("hero_backdrop")
+            try:
+                if stored and Path(stored).exists():
+                    self._hero_backdrops[hid] = stored
+                    if hero_art.stale_ground(stored):
+                        stale_grounds.add(hid)
+            except OSError:
+                pass        # an unreadable path is simply not a cache hit
+            logo = hero.get("hero_logo")
+            try:
+                if logo and Path(logo).exists():
+                    self._hero_logos[hid] = logo
+            except OSError:
+                pass
+            if hero.get("hero_hide_title") is not None:
+                self._hero_hide_title[hid] = bool(hero.get("hero_hide_title"))
+        self._hero_signals = _HeroSignals()
+        self._hero_signals.backdrop.connect(self._on_hero_backdrop)
+        self._hero_signals.overlay.connect(self._on_hero_overlay)
 
-        self._hero_mid_widget = self._build_hero_slide(self._hero_entries[0])
-        self._hero_mid_widget.setParent(self._hero_stage)
-        self._hero_mid_widget.setGeometry(HERO_MID_RECT)
-        self._hero_mid_widget.show()
+        # theme.BG: Home's body is the page ground itself, and that is
+        # what the banner paints its corner outsides back to.
+        banner = HeroBanner(theme.BG)
+        self._hero_banner = banner
+        # Cover on the left, details on the right - the owner's ask of
+        # 23 August 2026, shared with the tracker's featured banner so
+        # the two hero surfaces stay one design (widgets.hero_split).
+        self._hero_cover, column = hero_split(banner)
 
-        has_neighbors = len(self._hero_entries) > 1
-        self._hero_left_widget = None
-        self._hero_right_widget = None
-        if has_neighbors:
-            self._hero_left_widget = self._build_hero_peek_label(self._neighbor_entry(-1))
-            self._hero_left_widget.setParent(self._hero_stage)
-            self._hero_left_widget.setGeometry(HERO_LEFT_RECT)
-            self._hero_left_widget.clicked.connect(lambda: self._transition_hero(-1))
-            self._hero_left_widget.show()
+        chip_row = QHBoxLayout()
+        self._hero_chip = QLabel("")
+        self._hero_chip.setStyleSheet(theme.EYEBROW_CHIP_QSS)
+        chip_row.addWidget(self._hero_chip)
+        chip_row.addStretch(1)
+        column.addLayout(chip_row)
+        column.addStretch(1)
 
-            self._hero_right_widget = self._build_hero_peek_label(self._neighbor_entry(1))
-            self._hero_right_widget.setParent(self._hero_stage)
-            self._hero_right_widget.setGeometry(HERO_RIGHT_RECT)
-            self._hero_right_widget.clicked.connect(lambda: self._transition_hero(1))
-            self._hero_right_widget.show()
+        # The title treatment (a transparent TMDB logo PNG) sits where
+        # the typed title does and replaces it when there is one - the
+        # owner's ask, 24 August 2026: "instead of the name in the banner,
+        # make it use the logo from TMDB, if it has no logo then use the
+        # name normally". A reading title gets the logo of its anime
+        # (Kingdom, One Piece, Hunter x Hunter - artwork.logo_path_by_title).
+        #
+        # **Only that swap.** The first version of this (22 August) also
+        # hid the typed name for a reading title whose ground was real
+        # AniList banner art, on the theory that the name was inside the
+        # artwork - true of some banners, false of others - and the
+        # owner's 23 August report was a banner with no name anywhere on
+        # it ("where is the name on the banner????"). hero_hide_title is
+        # still written onto entries by the worker but is never read:
+        # the name hides only when a logo is actually drawn in its place.
+        self._hero_logo = hero_logo_label()
+        column.addWidget(self._hero_logo)
+        self._hero_title = QLabel("")
+        self._hero_title.setWordWrap(True)
+        self._hero_title.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 25pt; font-weight: 800;"
+            f" background: transparent;")
+        column.addWidget(self._hero_title)
 
-            self._hero_timer = QTimer(self)
-            self._hero_timer.timeout.connect(lambda: self._transition_hero(1))
+        # The medium, in accent, directly under the name - image 2's
+        # "Manga" line.
+        self._hero_kind = QLabel("")
+        self._hero_kind.setStyleSheet(
+            f"color: {theme.ACCENT}; font-size: 12pt; font-weight: 700;"
+            f" background: transparent;")
+        column.addWidget(self._hero_kind)
+
+        self._hero_meta = QLabel("")
+        self._hero_meta.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 600;"
+            f" background: transparent;")
+        column.addWidget(self._hero_meta)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        buttons.setContentsMargins(0, 8, 0, 0)
+        self._hero_continue = DriftButton("▶  Continue", kind="accent",
+                                          objectName="DriftAccent")
+        self._hero_continue.setFixedHeight(46)
+        use_hover_cursor(self._hero_continue)
+        self._hero_continue.clicked.connect(lambda: self._hero_open(resume=True))
+        buttons.addWidget(self._hero_continue)
+        # Harbor's second action: an outlined pill the backdrop reads
+        # through, opening the episode/chapter list (the details page).
+        self._hero_view = DriftButton("", kind="quiet", objectName="DriftQuiet")
+        self._hero_view.setFixedHeight(46)
+        # Fill, border and hover all come from DriftButton/#DriftQuiet now.
+        use_hover_cursor(self._hero_view)
+        self._hero_view.clicked.connect(lambda: self._hero_open(resume=False))
+        buttons.addWidget(self._hero_view)
+        buttons.addStretch(1)
+        column.addLayout(buttons)
+
+        # Balances the stretch above the chip so the title block sits in
+        # the middle of the banner rather than against the dashes.
+        column.addStretch(1)
+
+        # The pagination dashes, centred at the banner's foot - each one
+        # jumps straight to its slide; the active one is longer and lit.
+        dash_row = QHBoxLayout()
+        dash_row.setContentsMargins(0, 10, 0, 0)
+        dash_row.setSpacing(6)
+        dash_row.addStretch(1)
+        self._hero_dashes = []
+        for index in range(len(self._hero_entries)):
+            dash = _HeroDash()
+            dash.clicked.connect(lambda i=index: self._jump_hero(i))
+            dash_row.addWidget(dash)
+            self._hero_dashes.append(dash)
+        dash_row.addStretch(1)
+        column.addLayout(dash_row)
+
+        # The banner's body is the details page, like a card's body.
+        banner.clicked.connect(lambda: self._hero_open(resume=False))
+
+        self._hero_timer = QTimer(self)
+        self._hero_timer.timeout.connect(self._advance_hero)
+        if len(self._hero_entries) > 1:
             self._hero_timer.start(HERO_SLIDE_INTERVAL_MS)
 
-        outer_layout.addStretch()
-        # See the comment further down (theme.SCROLLBAR_WIDTH nudge) -
-        # unchanged from the single-entry version, just now positioning
-        # the whole stage instead of the content block directly.
-        outer_layout.addSpacing(9 + 45)
-        outer_layout.addWidget(self._hero_stage)
-        outer_layout.addStretch()
-        return hero
+        # Every slide's backdrop starts fetching now, its own thread each
+        # (they are one cached file apiece after the first run), so
+        # rotating never waits on the network. A slide whose ground was
+        # already remembered above is skipped outright - that is the
+        # whole saving: no AniList round trip and no download for a
+        # picture that is sitting on disk.
+        for entry in self._hero_entries:
+            hid = entry.get("id")
+            # Start the worker unless the whole banner is already known -
+            # its ground (composed by the *current* hero_art, see
+            # stale_grounds above), its logo, and the hide-title
+            # decision. A cached ground alone is not enough now: the
+            # logo and that decision are what the overlay draws, and a
+            # title resolved before this change has neither on its
+            # entry yet.
+            if (hid in self._hero_backdrops and hid not in stale_grounds
+                    and hid in self._hero_logos
+                    and hid in self._hero_hide_title):
+                continue
+            threading.Thread(target=self._hero_backdrop_worker,
+                             args=(dict(entry),), daemon=True).start()
+        self._show_hero_slide(0, fade=False)
+        # **Every other slide's cover, decoded before a slide needs it.**
+        # Measured 27 August 2026 on the real page, timing each step of a
+        # slide change: `thumbnail_or_avatar` was **21-26ms** on the GUI
+        # thread, and it is what the owner saw as the banner background
+        # "glitching in a really fast way" - one 29-42ms stall at the
+        # instant the transition starts, which is two dropped frames of
+        # a 260ms fade. The same slide shown a second time costs 0.2ms,
+        # so the cost is the first decode and nothing else.
+        #
+        # One per timer tick rather than a loop: four covers in a row is
+        # the same stall moved somewhere else, where a tick apiece lands
+        # each one in its own idle frame.
+        self._hero_warm_queue = [dict(e) for e in self._hero_entries]
+        QTimer.singleShot(HERO_COVER_WARM_MS, self._warm_next_hero_cover)
+        return banner
 
-    def _neighbor_entry(self, offset):
-        n = len(self._hero_entries)
-        return self._hero_entries[(self._hero_index + offset) % n]
+    def _warm_next_hero_cover(self):
+        """One hero cover into the image cache, then re-arm for the next.
 
-    def _build_hero_card_pixmap(self, entry, with_button):
-        """Renders one carousel entry's card (the same full-size layout
-        the active slide uses - see _build_hero_slide) to a QPixmap
-        rather than returning the live widget. _HeroCardLabel displays
-        this and scales it as it animates; the widget itself is thrown
-        away immediately since only its rendered appearance is needed.
-
-        Always rendered at the *active slide's* size regardless of where
-        it'll be shown - a peek is this exact pixmap displayed at half
-        scale, which is what makes growing one into the active slide a
-        clean uniform zoom rather than a re-layout. Supersampled on top
-        of that so it stays sharp at full size too."""
-        frame = self._build_hero_slide(entry, with_button=with_button)
-        pixmap = QPixmap(frame.width() * HERO_CARD_SUPERSAMPLE, frame.height() * HERO_CARD_SUPERSAMPLE)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.scale(HERO_CARD_SUPERSAMPLE, HERO_CARD_SUPERSAMPLE)
-        frame.render(painter)
-        painter.end()
-        frame.deleteLater()
-        return pixmap
-
-    def _build_hero_peek_label(self, entry):
-        """A resting peek: the buttonless card, shown at half size."""
-        return _HeroCardLabel(self._build_hero_card_pixmap(entry, with_button=False))
-
-    def _build_hero_slide(self, entry, with_button=True):
-        """One carousel page: cover+title+progress+Continue button for a
-        single in-progress entry. Built fresh per entry (initial slide
-        and every _transition_hero swap) rather than kept alive -
-        simpler than diffing/updating one persistent widget's
-        contents.
-
-        with_button=False builds the identical card minus the Continue
-        button, for the peeks - they're this same layout rendered at
-        half scale (see _build_hero_card_pixmap), so they have to be
-        built from the same code to stay perfectly in proportion."""
-        # The cover+text block is centered as a group within the hero
-        # card (stretches on both sides below) rather than pinned flush
-        # left with a big empty gap on wide windows. A *fixed* width -
-        # not just a cap - matters here: a word-wrapped QLabel's sizeHint
-        # is a conservative guess unless something forces it wider, so
-        # without this the block would shrink to that guess instead of
-        # actually using the room a fixed width guarantees it.
-        # A #Card frame (same look the peeks use) rather than a bare
-        # widget, so the cover+text+button all sit on one shared
-        # background instead of floating directly on the Hero's own.
-        # Matte like the rest of Home - set as a property rather than
-        # via Card(matte=True) since this is a plain frame, not a
-        # clickable Card.
-        content = QFrame(objectName="Card")
-        content.setProperty("matte", True)
-        content.setFixedSize(HERO_CONTENT_WIDTH, HERO_SLIDE_HEIGHT)
-        layout = QHBoxLayout(content)
-        layout.setContentsMargins(*([HERO_SLIDE_PADDING] * 4))
-        layout.setSpacing(HERO_COVER_TEXT_GAP)
-
-        cover = QLabel()
-        cover.setFixedSize(*HERO_COVER_SIZE)
-        cover.setPixmap(images.thumbnail_or_avatar(entry.get("cover_path"), entry["title"], HERO_COVER_SIZE))
-        layout.addWidget(cover)
-
-        # A real QWidget (not a bare layout) so it gets actual geometry
-        # from the HBoxLayout's stretch - the wrapped title label below
-        # needs that to compute its wrap width against the row's real
-        # available space instead of a too-narrow layout-item guess.
-        text_widget = QWidget(objectName="Bare")
-        text_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        text_col = QVBoxLayout(text_widget)
-        text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(4)
-        text_col.addWidget(QLabel("CONTINUE READING" if entry["type"] in MANGA_TYPES else "CONTINUE WATCHING",
-                                   objectName="Muted"))
-        title = QLabel(entry["title"], objectName="HeroTitle")
-        title.setWordWrap(True)
-        title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        text_col.addWidget(title)
-        # Manga shows your own last-*watched* chapter (manually entered on
-        # the Reading page), not the site's latest-available one - "Chapter
-        # 24.5" reads naturally. Anime/Series progress is only ever auto-
-        # filled with a *guess* (the latest episode currently out, not
-        # necessarily what you've watched) unless it's been verified (a
-        # connected account, or typed in by hand) - shown only once
-        # verified, same rule as the Anime/Reading pages themselves,
-        # rather than stating a guess as fact.
-        if not shows_last_watched(entry):
-            progress_text = ""  # tick off, or a film - see shows_last_watched
-        elif entry["type"] in MANGA_TYPES:
-            watched = entry.get("last_watched_chapter")
-            progress_text = f"Chapter {format_chapter_progress(watched)}" if watched else entry["status"]
-        elif entry.get("progress_verified") and entry.get("progress"):
-            progress_text = entry["progress"]
-        else:
-            progress_text = ""
-        if progress_text:
-            text_col.addWidget(QLabel(progress_text, objectName="CardMeta"))
-        # A capped gap, not addStretch() - a full stretch would soak up
-        # all the column's leftover height and pin the button to the
-        # very bottom of the (taller) cover; this keeps it up near the
-        # cover's middle instead.
-        text_col.addSpacing(20)
-
-        if with_button:
-            continue_btn = QPushButton("▶ Continue", objectName="Accent")
-            continue_btn.setFixedHeight(46)
-            continue_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            continue_btn.clicked.connect(lambda: self._continue_entry(entry))
-            # Stretched to fill rather than a fixed width nudged off to
-            # one side, so it's as wide as the space allows and centred
-            # in it. "The space" is the whole gap from the cover's right
-            # edge to the card's inner edge - which is the text column
-            # *plus* the column's leading gap, so the trailing inset has
-            # to absorb that extra gap for the button to sit centred on
-            # that span rather than on the narrower column alone.
-            continue_row = QHBoxLayout()
-            continue_row.setContentsMargins(
-                HERO_CONTINUE_INSET, 0, HERO_CONTINUE_INSET + HERO_COVER_TEXT_GAP, 0)
-            continue_row.addWidget(continue_btn)
-            text_col.addLayout(continue_row)
-
-        layout.addWidget(text_widget, stretch=1)
-        return content
-
-    def _transition_hero(self, direction):
-        """Advance the carousel forward (direction=1, the auto-play
-        timer's only mode) or backward (direction=-1, clicking the left
-        peek) - the active slide shrinks and moves to become the peek
-        on the departure side, the peek on the arrival side grows and
-        moves to become the active slide, and a freshly-built peek
-        slides in from off-stage to refill the arrival side. Clicking
-        the right peek is direction=1, same as the timer.
-
-        The active slide is a live interactive widget (it owns the real
-        Continue button), but a live widget with fixed-size children
-        can't be smoothly resized by animating its geometry - only
-        moved. So it's ghosted to a _HeroCardLabel (a static pixmap
-        that *can* be scaled smoothly) for the duration of the move,
-        and only swapped back to a real widget once it lands - see
-        _HeroCardLabel. The two peeks are already pixmap-backed, so
-        they animate directly with no ghosting needed.
-
-        The outgoing ghost is rendered as peek-style content (cover+
-        title+meta, no button/eyebrow) from the very first frame, not
-        grabbed from the live mid widget - it's *becoming* a peek, and
-        a peek-shaped target doesn't have room for the button, so
-        animating a full mid-with-button pixmap down to that size just
-        squishes the button into a mangled sliver instead of shrinking
-        cleanly."""
-        if len(self._hero_entries) <= 1 or self._hero_transitioning:
+        Guarded on the page still existing: this outlives a page rebuild
+        by design (pages are rebuilt on every visit) and a dead widget
+        must not take the timer's thread with it."""
+        queue = getattr(self, "_hero_warm_queue", None)
+        if not queue:
             return
-        self._hero_transitioning = True
-        self._hero_timer.stop()
+        entry = queue.pop(0)
+        try:
+            images.thumbnail_or_avatar(entry.get("cover_path"),
+                                       entry.get("title") or "",
+                                       HERO_COVER_SIZE)
+        except (RuntimeError, OSError, ValueError):
+            pass                # a missing cover is the flat avatar, not a stall
+        if queue:
+            QTimer.singleShot(HERO_COVER_WARM_MS, self._warm_next_hero_cover)
 
-        n = len(self._hero_entries)
-        old_index = self._hero_index
-        new_index = (old_index + direction) % n
-        old_mid_entry = self._hero_entries[old_index]
-        entering_entry = self._hero_entries[(new_index + direction) % n]
+    def _hero_entry(self):
+        return self._hero_entries[self._hero_index % len(self._hero_entries)]
 
-        # Each card in motion is rendered as whatever it's *becoming*,
-        # not what it was, so it already matches its neighbours when it
-        # arrives: this one is on its way out to a peek slot, so it
-        # drops the Continue button for the whole trip (the peeks it's
-        # joining don't have one), while the peek on its way in to the
-        # mid slot picks one up (see arriving_widget below). Each swap
-        # is therefore invisible at the end of the move; the button
-        # blinks only at the very first frame, where it's covered by
-        # the motion starting.
-        mid_ghost = _HeroCardLabel(
-            self._build_hero_card_pixmap(old_mid_entry, with_button=False), self._hero_stage)
-        mid_ghost.setGeometry(HERO_MID_RECT)
-        mid_ghost.show()
-        mid_ghost.raise_()
-        self._hero_mid_widget.hide()
-        self._hero_mid_widget.deleteLater()
-
-        if direction == 1:
-            exiting_widget, arriving_widget = self._hero_left_widget, self._hero_right_widget
-            exit_rect, enter_rect = HERO_EXIT_LEFT_RECT, HERO_EXIT_RIGHT_RECT
-            mid_ghost_target, entering_target = HERO_LEFT_RECT, HERO_RIGHT_RECT
-        else:
-            exiting_widget, arriving_widget = self._hero_right_widget, self._hero_left_widget
-            exit_rect, enter_rect = HERO_EXIT_RIGHT_RECT, HERO_EXIT_LEFT_RECT
-            mid_ghost_target, entering_target = HERO_RIGHT_RECT, HERO_LEFT_RECT
-
-        # The mirror of mid_ghost above - this peek is becoming the
-        # active slide, so it carries the button in on the way.
-        arriving_widget.setPixmap(
-            self._build_hero_card_pixmap(self._hero_entries[new_index], with_button=True))
-
-        entering_widget = self._build_hero_peek_label(entering_entry)
-        entering_widget.setParent(self._hero_stage)
-        entering_widget.setGeometry(enter_rect)
-        entering_widget.show()
-        entering_widget.raise_()
-        arriving_widget.raise_()
-
-        group = QParallelAnimationGroup(self)
-
-        def animate(widget, end_rect):
-            anim = QPropertyAnimation(widget, b"geometry", self)
-            anim.setDuration(HERO_SLIDE_ANIM_MS)
-            anim.setStartValue(widget.geometry())
-            anim.setEndValue(end_rect)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            group.addAnimation(anim)
-
-        animate(exiting_widget, exit_rect)
-        animate(mid_ghost, mid_ghost_target)
-        animate(arriving_widget, HERO_MID_RECT)
-        animate(entering_widget, entering_target)
-
-        def finish():
-            exiting_widget.deleteLater()
-            mid_ghost.deleteLater()
-            arriving_widget.deleteLater()
-
-            self._hero_index = new_index
-            self._hero_mid_widget = self._build_hero_slide(self._hero_entries[new_index])
-            self._hero_mid_widget.setParent(self._hero_stage)
-            self._hero_mid_widget.setGeometry(HERO_MID_RECT)
-            self._hero_mid_widget.show()
-
-            settled_side_widget = self._build_hero_peek_label(old_mid_entry)
-            settled_side_widget.setParent(self._hero_stage)
-            settled_side_widget.setGeometry(mid_ghost_target)
-            settled_side_widget.show()
-
-            if direction == 1:
-                self._hero_left_widget = settled_side_widget
-                self._hero_left_widget.clicked.connect(lambda: self._transition_hero(-1))
-                self._hero_right_widget = entering_widget
-                self._hero_right_widget.clicked.connect(lambda: self._transition_hero(1))
-            else:
-                self._hero_right_widget = settled_side_widget
-                self._hero_right_widget.clicked.connect(lambda: self._transition_hero(1))
-                self._hero_left_widget = entering_widget
-                self._hero_left_widget.clicked.connect(lambda: self._transition_hero(-1))
-
-            self._hero_transitioning = False
+    def _hero_open(self, resume):
+        # Re-armed, not left running: the slide must not advance the
+        # moment the player or details page closes over it.
+        if self._hero_timer.isActive():
             self._hero_timer.start(HERO_SLIDE_INTERVAL_MS)
+        self._continue_entry(self._hero_entry(), resume=resume)
 
-        group.finished.connect(finish)
-        self._hero_anim_group = group  # keep a reference so it isn't gc'd mid-animation
-        group.start()
+    def _advance_hero(self):
+        if self._hero_holds():
+            return          # the timer keeps ticking; the next one may pass
+        self._show_hero_slide((self._hero_index + 1) % len(self._hero_entries))
 
-    def _continue_entry(self, entry):
-        if not open_tracker_entry(self, entry):
-            self.app.navigate_to(PAGE_FOR_TYPE.get(entry["type"], "anime"))
+    def _hero_holds(self) -> bool:
+        """Whether this rotation must not happen. Two reasons, in the
+        order they cost:
+
+        **Something is covering the page.** The reader, the player and
+        the details page are hand-placed children of the *central
+        widget* while a page lives in main.container, so Qt sees no
+        overlap between them and goes on delivering this timer and
+        painting the banner underneath. Measured 22 August 2026 with the
+        details page open over Home: `page.visibleRegion()` is not empty,
+        `_hero_timer.isActive()` is still True, and the banner painted
+        **72 times in 20 seconds** - a burst holding the UI thread 73.6ms
+        every six seconds, ten dropped frames at 144Hz, for a banner
+        nobody can see. Worse on the first sight of each backdrop, which
+        adds a full-resolution decode (48-107ms, see
+        widgets._decoded_backdrop). That is the whole time a chapter
+        list, a chapter or an episode is on screen - the owner's
+        "clicked ... it showed me ch list and lagged heavily".
+        `_top_overlay` is main.py's own answer to "what is on top", duck-
+        typed there, so this covers the genre browse too and needs no
+        open/close wiring on this page - a rotation skipped is simply
+        retried six seconds later, and a browser-fallback open (which
+        puts no overlay up) never freezes the carousel.
+
+        **The pointer is on the banner.** A slide carries two buttons
+        whose target changes with it - "View Chapters" becomes "View
+        Episodes" - so rotating under an aiming pointer does not just
+        move a control, it changes what pressing it does. This page
+        already delays the games/apps re-sort by RESORT_DELAY_MS for the
+        weaker version of the same problem.
+
+        Asked of QApplication.widgetAt rather than the banner's
+        Enter/Leave on purpose (.claude/rules/ui.md): crossing onto
+        Continue fires the banner's *Leave*, so leave-means-gone would
+        resume the carousel precisely while the pointer sits on a
+        button."""
+        banner = getattr(self, "_hero_banner", None)
+        if banner is None:
+            return False
+        top_overlay = getattr(self.window(), "_top_overlay", None)
+        try:
+            if callable(top_overlay) and top_overlay() is not None:
+                return True
+        except RuntimeError:
+            return True     # the window is going away; nothing to rotate for
+        under = QApplication.widgetAt(QCursor.pos())
+        return under is not None and (under is banner
+                                      or banner.isAncestorOf(under))
+
+    def _jump_hero(self, index):
+        if self._hero_timer.isActive():
+            self._hero_timer.start(HERO_SLIDE_INTERVAL_MS)
+        self._show_hero_slide(index)
+
+    def _show_hero_slide(self, index, fade=True):
+        self._hero_index = index
+        entry = self._hero_entry()
+        reading = entry["type"] in MANGA_TYPES
+        self._hero_chip.setText("CONTINUE READING" if reading
+                                else "CONTINUE WATCHING")
+        self._hero_title.setText(entry["title"])
+        self._hero_kind.setText(str(entry.get("type") or ""))
+        self._apply_hero_overlay()
+        # The type moved up to its own accent line (_hero_kind), so it is
+        # not repeated here - this row is the progress and the status.
+        meta_bits = [self._progress_meta_text(entry) or entry.get("status") or ""]
+        self._hero_meta.setText("   ·   ".join(bit for bit in meta_bits if bit))
+        if reading:
+            self._hero_view.setText("View Chapters")
+        elif entry.get("type") == "Movie":
+            self._hero_view.setText("View Details")
+        else:
+            self._hero_view.setText("View Episodes")
+        self._hero_banner.set_backdrop(
+            self._hero_backdrops.get(entry.get("id")), fade=fade)
+        for i, dash in enumerate(self._hero_dashes):
+            # animate=fade: the first draw is a state, not a change -
+            # every pill tweening in on page build would read as the
+            # pager loading rather than as the slide moving.
+            dash.set_active(i == index, animate=fade)
+
+    def _hero_backdrop_worker(self, entry):
+        """One slide's ground, off the UI thread: TMDB's backdrop by
+        IMDb id for the video types, hero_art's chain for reading. Never
+        raises; a title with no landscape art anywhere just keeps the
+        banner's flat panel.
+
+        The reading side used to take AniList's *cover* when AniList had
+        no banner and hand that straight to HeroBanner, which expands it -
+        so a 460x624 portrait was drawn as the middle 17% of itself at
+        2.75x. hero_art composes a real ground out of a cover instead;
+        see that module for what was rendered and compared."""
+        entry_id = str(entry.get("id") or "")
+        from helpers import artwork
+        try:
+            if entry.get("type") in MANGA_TYPES:
+                # cover_path/cover_url are whatever the entry's own
+                # reading site already served - every tracked reading
+                # entry here carries both - so a title AniList cannot
+                # match still has a picture to build a ground from, and
+                # the local copy costs no request at all.
+                found, kind = hero_art.reading_ground(
+                    entry.get("title") or "",
+                    cover_path=entry.get("cover_path"),
+                    cover_url=str(entry.get("cover_url") or ""))
+                if found:
+                    # Decoded here, on this thread, so the slide change does
+                    # not pay a JPEG on the GUI thread - see
+                    # widgets.warm_backdrop for the 31-43ms it cost.
+                    warm_backdrop(found)
+                    self._hero_signals.backdrop.emit(entry_id, str(found))
+                # A reading title's logo: only when the same franchise is
+                # an anime/series TMDB has a title treatment for - Kingdom,
+                # Hunter x Hunter, One Piece all resolve (the owner's ask).
+                # Cheap and disk-cached, so it runs even when the ground
+                # above was already known.
+                logo = artwork.logo_path_by_title(entry.get("title") or "")
+                # Drop the typed name when a real AniList banner carries it
+                # ("take the whole banner from Anilist ... remove the name")
+                # or when a logo will stand in its place; keep it over a
+                # composed cover ground (image 2).
+                hide = bool(logo) or (kind == "banner")
+                self._hero_signals.overlay.emit(entry_id, str(logo or ""), hide)
+                return
+            if not entry.get("imdb_id"):
+                return
+            # Both sizes, in that order - the details page's pattern,
+            # and the fix for a soft slider: the small w780 copy used to
+            # be taken with `or`, so the full-resolution original was
+            # never fetched at all and a ~1200px-wide banner was drawn
+            # from a 780px image. Now the small one fills the banner
+            # immediately and the original replaces it when it lands.
+            # Both sizes in that order, and **the logo beside them, not
+            # behind them** - artwork.deliver, which carries the
+            # measurement. The owner's ask, 4 September 2026: "fix also
+            # in all pages including the home and the discover banners
+            # ... ALL pages". This hero had the identical shape the
+            # episode list did: the logo fetched last, queued behind a
+            # 2.5MB "original" backdrop, so a cold hero showed its typed
+            # name for the better part of two seconds.
+            def _backdrop(path):
+                # Decoded here, on this thread, so the slide change does
+                # not pay a JPEG on the GUI thread - see
+                # widgets.warm_backdrop for the 31-43ms it cost.
+                warm_backdrop(path)
+                self._hero_signals.backdrop.emit(entry_id, path)
+
+            # The video logo (TMDB title treatment): shown in place of the
+            # typed title. Fails soft to text when the title has none.
+            artwork.deliver(
+                entry,
+                on_backdrop=_backdrop,
+                on_logo=lambda path: self._hero_signals.overlay.emit(
+                    entry_id, path, bool(path)))
+        except Exception:
+            return          # no art anywhere just keeps the flat panel
+
+    def _on_hero_backdrop(self, entry_id, path):
+        # Whether this slide already had art: the sharp original landing
+        # over the small copy is the *same picture*, so it swaps without
+        # a cross-fade - dissolving a photo into itself reads as a
+        # flicker. Only a genuinely new slide fades.
+        upgrade = entry_id in self._hero_backdrops
+        self._hero_backdrops[entry_id] = path
+        self._remember_hero_backdrop(entry_id, path)
+        if str(self._hero_entry().get("id") or "") != entry_id:
+            return
+        try:
+            self._hero_banner.set_backdrop(path, fade=not upgrade)
+        except RuntimeError:
+            pass    # the page was torn down under the fetch
+
+    def _on_hero_overlay(self, entry_id, logo_path, hide_title):
+        """A slide's logo and hide-title decision, back from the fetch
+        thread. Stored per id so a rotation redraws from it, remembered on
+        the entry so a revisit needs no lookup, and applied at once if
+        this is the slide on screen."""
+        self._hero_logos[entry_id] = logo_path or None
+        self._hero_hide_title[entry_id] = bool(hide_title)
+        self._remember_hero_overlay(entry_id, logo_path or "",
+                                    bool(hide_title))
+        if str(self._hero_entry().get("id") or "") == entry_id:
+            self._apply_hero_overlay()
+
+    def _apply_hero_overlay(self):
+        """Draw the current slide's title treatment, or fall back to the
+        typed name. The logo replaces the text; a real AniList reading
+        banner (hide_title, no logo) drops the text with nothing in its
+        place, because the name is already in the banner art."""
+        try:
+            entry = self._hero_entry()
+        except (IndexError, ZeroDivisionError):
+            return
+        # Logo in place of the name when this slide has one, the name
+        # otherwise - never neither (see _build_hero).
+        set_hero_logo(self._hero_logo, self._hero_title,
+                      self._hero_logos.get(str(entry.get("id") or ""))
+                      or self._hero_logos.get(entry.get("id")))
+        # The portrait cover. `images.thumbnail_or_avatar` is the same
+        # call every card on this page makes, so for a title already
+        # drawn in the poster grid below this is a cache hit and not a
+        # decode.
+        try:
+            self._hero_cover.setPixmap(images.thumbnail_or_avatar(
+                entry.get("cover_path"), entry.get("title") or "",
+                HERO_COVER_SIZE))
+        except Exception:
+            self._hero_cover.clear()
+        # Same rule as the grid below: missing on disk means fetch, and
+        # the swap only lands if this slide is still the one showing.
+        _url = str(entry.get("cover_url") or "")
+
+        def _set_hero(pixmap, en=entry):
+            if self._hero_entry() is en:
+                self._hero_cover.setPixmap(pixmap)
+        cover_fetch.ensure(
+            entry.get("id"), entry.get("cover_path"),
+            (lambda u=_url, en=entry: cover_fetch.resolve(
+                u, imdb_id=en.get("imdb_id") or "",
+                title=en.get("title") or "",
+                kind=_cover_kind(en.get("type")))) if _url else None,
+            entry.get("title") or "", HERO_COVER_SIZE, _set_hero,
+            persist=lambda path, en=entry: (
+                en.__setitem__("cover_path", str(path)),
+                storage.update_entry(_progress_data_file(en), en.get("id"),
+                                     {"cover_path": str(path)})))
+
+    def _on_inapp_closed(self, _entry_id):
+        """The player or reader opened from this page has closed -
+        rebuild Home fresh from disk, so the hero's "S01E07" / "Ch 551"
+        and every card's progress caption show what was just watched or
+        read. The owner, 24 August 2026: "make the Ep and Season / ch
+        num in the main page change immediately when watched or read!".
+
+        tracker._wire_overlay_refresh has delivered this hook to every
+        tracker page since it was written and named Home as the one
+        caller that "simply is not notified" - the player marks the
+        episode watched at 85% (WATCHED_FRACTION) and the number was on
+        disk all along; this page was showing the copy it loaded at
+        build.
+
+        A whole-page rebuild rather than surgical label updates, on
+        purpose: the hero, its peeks, the Reading and Watching rows and
+        History all carry the number somewhere, and pages here rebuild
+        from scratch on every visit anyway - this is the same rebuild,
+        one navigation earlier. Deferred a tick so the overlay's own
+        close (which this page hosted) finishes tearing down first."""
+        window = self.app
+        refresh = getattr(window, "refresh_current_page", None)
+        if not callable(refresh):
+            return
+        current = getattr(window, "_current_page", None)
+        if current is not self:
+            return          # the user already navigated; that rebuild won
+        QTimer.singleShot(0, lambda: refresh() if current is
+                          getattr(window, "_current_page", None) else None)
+
+    def _ensure_game_cover(self, game, label):
+        """Draw this game's poster now if it is on disk, and go and get
+        it on the shared pool if it is not - see the note at the call
+        site for why Home has to do this itself.
+
+        `helpers/game_art` is the same resolver the Games page's
+        backfill uses, so a cover fetched from either surface is one
+        download and both find it afterwards."""
+        game_id = game.get("id")
+        if not game_id:
+            return
+        name = game.get("name") or ""
+        install_path = game.get("path")
+
+        def _set(pixmap, lbl=label):
+            lbl.setPixmap(pixmap)
+
+        cover_fetch.ensure(
+            f"game:{game_id}", images.resolve_art_path(game.get("cover")),
+            lambda n=name, p=install_path: game_art.fetch_cover(
+                n, install_path=p),
+            name, POSTER_SIZE, _set,
+            persist=lambda path, g=game, gid=game_id: (
+                g.__setitem__("cover", str(path)),
+                storage.update_entry(GAMES_FILE, gid, {"cover": str(path)})))
+
+    def _remember_hero_overlay(self, entry_id, logo_path, hide_title):
+        """Persist a slide's logo and hide-title decision onto its entry,
+        so the next visit draws the finished banner without a lookup.
+        Through update_entry, never a whole-list write - the same rule
+        _remember_hero_backdrop follows."""
+        entry = next((e for e in self._hero_entries
+                      if str(e.get("id") or "") == entry_id), None)
+        if entry is None:
+            return
+        if (entry.get("hero_logo") == (logo_path or None)
+                and entry.get("hero_hide_title") == hide_title):
+            return
+        entry["hero_logo"] = logo_path or None
+        entry["hero_hide_title"] = hide_title
+        try:
+            storage.update_entry(_progress_data_file(entry), entry.get("id"),
+                                 {"hero_logo": logo_path or None,
+                                  "hero_hide_title": hide_title})
+        except Exception:
+            pass
+
+    def _remember_hero_backdrop(self, entry_id, path):
+        """Write a resolved backdrop onto its entry, so the next visit
+        (and the next run) draws it without asking the network again.
+
+        Through update_entry, never a whole-list write: Home holds
+        copies of entries owned by two different files and several
+        pages, and writing a list back from here is exactly the defect
+        .claude/rules/ui.md records. Failing is fine - it only costs one
+        re-resolve."""
+        entry = next((e for e in self._hero_entries
+                      if str(e.get("id") or "") == entry_id), None)
+        if entry is None or entry.get("hero_backdrop") == path:
+            return
+        entry["hero_backdrop"] = path
+        try:
+            storage.update_entry(_progress_data_file(entry), entry.get("id"),
+                                 {"hero_backdrop": path})
+        except Exception:
+            pass
+
+    def _continue_entry(self, entry, resume=True):
+        """`resume=False` is the body of a reading card - it opens the
+        chapter list instead of the chapter that was left open. The hero's
+        own Continue button and the round button on a poster's cover both
+        pass True, which is what every card here did before there were
+        two targets on one."""
+        if not open_tracker_entry(self, entry, resume=resume):
+            self.app.navigate_to(PAGE_FOR_TYPE.get(entry["type"], "series"))
 
     # ------------------------------------------------------------------
     def _build_poster_grid(self, entries):
         # No #SectionBox frame here (unlike the Apps/Websites lists
         # below) - a wall of poster art doesn't need a background box
         # to read as a group the way rows of icon+text do.
+        #
+        # One sideways-scrolling strip, not a fixed grid: the rows carry
+        # *every* entry now (see _recent_entries), so a full row scrolls
+        # behind SideScroller's ‹ › arrows exactly like a tracker page's
+        # section strips (tracker._build_section_strip is the model).
         box = QWidget(objectName="Bare")
         outer = QVBoxLayout(box)
         outer.setContentsMargins(16, 16, 16, 16)
 
-        grid = QGridLayout()
+        strip = QWidget(objectName="Bare")
+        grid = QHBoxLayout(strip)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(10)
-        grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        outer.addLayout(grid)
 
         for index, entry in enumerate(entries):
             # One shared #SectionBox frame for the whole grid (below)
@@ -843,10 +1187,41 @@ class HomePage(GlassPage):
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(6, 8, 6, 8)
 
-            cover = QLabel()
-            cover.setFixedSize(*POSTER_SIZE)
-            cover.setPixmap(images.thumbnail_or_avatar(entry.get("cover_path"), entry["title"], POSTER_SIZE))
+            pixmap = images.thumbnail_or_avatar(entry.get("cover_path"),
+                                                entry["title"], POSTER_SIZE)
+            # Every tracker medium carries the same two targets here now
+            # (the owner's ask - anime/series/movies used to be a single
+            # target): the round ring on the hovered cover resumes where
+            # that entry stopped, the rest of the card opens the episode/
+            # chapter list (the details page).
+            continuable = entry["type"] in MANGA_TYPES + VIDEO_TYPES
+            if continuable:
+                cover = ContinueCover(
+                    pixmap, POSTER_SIZE,
+                    lambda en=entry: self._continue_entry(en, resume=True))
+            else:
+                cover = QLabel()
+                cover.setFixedSize(*POSTER_SIZE)
+                cover.setPixmap(pixmap)
             card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
+            # Fetched when it is not on disk, and written back - the owner's
+            # "the main page does not load the images by itself" (see
+            # helpers/cover_fetch). Before this, Home drew cover_path and
+            # nothing else, and only a visit to Discover ever re-created
+            # the file it was pointing at.
+            _url = str(entry.get("cover_url") or "")
+            cover_fetch.ensure(
+                entry.get("id"), entry.get("cover_path"),
+                (lambda u=_url, en=entry: cover_fetch.resolve(
+                    u, imdb_id=en.get("imdb_id") or "",
+                    title=en.get("title") or "",
+                    kind=_cover_kind(en.get("type")))) if _url else None,
+                entry["title"], POSTER_SIZE,
+                cover.set_cover if isinstance(cover, ContinueCover) else cover.setPixmap,
+                persist=lambda path, en=entry: (
+                    en.__setitem__("cover_path", str(path)),
+                    storage.update_entry(_progress_data_file(en), en.get("id"),
+                                         {"cover_path": str(path)})))
 
             name = QLabel(entry["title"], objectName="CardTitle")
             name.setWordWrap(True)
@@ -859,32 +1234,88 @@ class HomePage(GlassPage):
                 meta.setAlignment(Qt.AlignmentFlag.AlignHCenter)
                 card_layout.addWidget(meta)
 
-            card.clicked.connect(lambda en=entry: self._continue_entry(en))
-            grid.addWidget(card, 0, index)
+            card.clicked.connect(
+                lambda en=entry, r=not continuable: self._continue_entry(en, resume=r))
+            if continuable:
+                # After every child exists - the relay watches each of
+                # them, since each takes the hover off the card as the
+                # pointer crosses onto it.
+                attach_continue_cover(card, cover)
+            grid.addWidget(card)
+        grid.addStretch()
+
+        # Same recipe as tracker._build_section_strip: the strip in its
+        # own horizontal scroll area, fixed to the cards' height (without
+        # that it claims the whole page), vertical wheel left for the
+        # page, and SideScroller's arrows laid over the two ends.
+        area = QScrollArea(objectName="Bare")
+        area.setWidget(strip)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # **Opaque, not transparent - and this reverses the two lines
+        # that used to sit here.** theme.py's `#Bare` rule makes a scroll
+        # body transparent, and a transparent body cannot be scrolled by
+        # blitting: Qt repaints the page underneath and every widget over
+        # it, every frame. scroll_area()'s docstring measures that at
+        # 14.5ms/frame against 3.5ms, and these hand-built rows never had
+        # the fix because they never went through that helper. Same
+        # change, same reason, as the tracker's section strips.
+        _OpaqueGround(strip, theme.BG)
+        strip.adjustSize()
+        area.setFixedHeight(strip.sizeHint().height()
+                            + area.horizontalScrollBar().sizeHint().height())
+        outer.addWidget(SideScroller(area, ground=theme.BG))
         return box
 
     def _build_games_grid(self, games):
         # No #SectionBox frame here either - see _build_poster_grid.
+        #
+        # Poster tiles at the watch cards' own size (the owner's ask),
+        # drawing the Steam cover helpers/game_art resolves rather than
+        # the extracted .exe icon - a 32px shell icon stretched across a
+        # 160px tile is mush. A game with no cover yet keeps the letter
+        # avatar and gains its art the next time the Games page runs its
+        # backfill.
         box = QWidget(objectName="Bare")
         outer = QVBoxLayout(box)
         outer.setContentsMargins(16, 16, 16, 16)
 
-        grid = QGridLayout()
+        strip = QWidget(objectName="Bare")
+        grid = QHBoxLayout(strip)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(10)
-        grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        outer.addLayout(grid)
 
-        for index, game in enumerate(games):
+        for game in games:
             card = Card(hoverable=True)
             card.setObjectName("HomeItem")
-            card.setFixedWidth(96)
+            card.setFixedWidth(POSTER_SIZE[0] + 20)
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(6, 10, 6, 10)
+            card_layout.setContentsMargins(6, 8, 6, 8)
 
-            icon = QLabel()
-            icon.setFixedSize(*ICON_SIZE)
-            icon.setPixmap(images.thumbnail_or_avatar(game.get("icon"), game["name"], ICON_SIZE))
-            card_layout.addWidget(icon, alignment=Qt.AlignmentFlag.AlignHCenter)
+            cover = QLabel()
+            cover.setFixedSize(*POSTER_SIZE)
+            # Resolved by name too (helpers/art_paths): the saved path
+            # may name a cache this machine does not have.
+            cover.setPixmap(images.thumbnail_or_avatar(
+                images.resolve_art_path(game.get("cover")), game["name"],
+                POSTER_SIZE))
+            # **And fetch it if there is none - the owner, 24 August
+            # 2026: "the games images only load from the games page,
+            # make them start loading from the main page also!".** This
+            # row drew `game["cover"]` and nothing else, so a game whose
+            # art had never been resolved stayed a blank slab here until
+            # the Games page was opened and ran `_backfill_covers`. Same
+            # shape as the defect cover_fetch was written for, and the
+            # same fix: draw what is on disk, fetch what is not, write
+            # the path back onto the entry.
+            #
+            # `storage.update_entry`, never a whole-list write - the
+            # Games page holds its own copy of this file and a snapshot
+            # written from here would undo whatever it has done since.
+            self._ensure_game_cover(game, cover)
+            card_layout.addWidget(cover, alignment=Qt.AlignmentFlag.AlignHCenter)
 
             name = QLabel(game["name"], objectName="CardTitle")
             name.setWordWrap(True)
@@ -892,14 +1323,39 @@ class HomePage(GlassPage):
             card_layout.addWidget(name)
 
             card.clicked.connect(lambda g=game: self._launch_game(g))
-            grid.addWidget(card, 0, index)
+            grid.addWidget(card)
+        grid.addStretch()
+
+        # The poster rows' own recipe (see _build_poster_grid): at this
+        # width a full library no longer fits across the page, so the
+        # row scrolls sideways behind SideScroller's arrows instead of
+        # being cut off at the edge.
+        area = QScrollArea(objectName="Bare")
+        area.setWidget(strip)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # **Opaque, not transparent - and this reverses the two lines
+        # that used to sit here.** theme.py's `#Bare` rule makes a scroll
+        # body transparent, and a transparent body cannot be scrolled by
+        # blitting: Qt repaints the page underneath and every widget over
+        # it, every frame. scroll_area()'s docstring measures that at
+        # 14.5ms/frame against 3.5ms, and these hand-built rows never had
+        # the fix because they never went through that helper. Same
+        # change, same reason, as the tracker's section strips.
+        _OpaqueGround(strip, theme.BG)
+        strip.adjustSize()
+        area.setFixedHeight(strip.sizeHint().height()
+                            + area.horizontalScrollBar().sizeHint().height())
+        outer.addWidget(SideScroller(area, ground=theme.BG))
         return box
 
     def _launch_game(self, game):
         try:
             game_launch.run(game)
         except OSError as exc:
-            QMessageBox.critical(self, "Games", f"Couldn't launch this game:\n{exc}")
+            inform(self, "Games", f"Couldn't launch this game:\n{exc}")
             return
         game["last_played"] = storage.now_iso()
         self._resort_after_delay(self._refresh_games_row)
@@ -979,7 +1435,28 @@ class HomePage(GlassPage):
 
             icon = QLabel()
             icon.setFixedSize(*ROW_ICON_SIZE)
-            icon.setPixmap(images.thumbnail_or_avatar(entry.get("image"), entry["name"], ROW_ICON_SIZE))
+            # `art` before `image`, exactly as the Apps page draws its own
+            # tiles (link_grid): `art` is the iTunes 512px artwork, `image`
+            # the extracted shell icon, and Home preferring `image` is why
+            # the same app wore two different icons on the two pages (the
+            # owner's Wand report). Websites entries have no `art` and
+            # keep their favicon through the fallback.
+            art = (images.resolve_art_path(entry.get("art"))
+                   or images.resolve_art_path(entry.get("image")))
+            icon.setPixmap(images.thumbnail_or_avatar(
+                art, entry["name"], ROW_ICON_SIZE))
+            if data_file == APPS_FILE:
+                # The Apps page resolves artwork through app_art on its
+                # own build; Home only ever drew what that page had left
+                # behind - the owner's "the apps images do not load until
+                # I go to the apps page". Same lookup, from here.
+                cover_fetch.ensure(
+                    entry.get("id"), art,
+                    lambda n=entry.get("name") or "": app_art.fetch_art(n),
+                    entry["name"], ROW_ICON_SIZE, icon.setPixmap,
+                    persist=lambda path, en=entry: (
+                        en.__setitem__("art", str(path)),
+                        storage.update_entry(APPS_FILE, en.get("id"), {"art": str(path)})))
             row_layout.addWidget(icon)
             row_layout.addWidget(QLabel(entry["name"]))
             row_layout.addStretch()

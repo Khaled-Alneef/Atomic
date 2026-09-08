@@ -68,7 +68,7 @@ def _get_json(url: str, timeout: int):
     lookup_pool's small worker set."""
     deadline = net.deadline_in(timeout)
     request = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with net.urlopen(request, timeout=timeout) as response:
         return json.loads(net.read_text(response, deadline, _MAX_RESPONSE_BYTES))
 
 

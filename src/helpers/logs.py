@@ -112,3 +112,84 @@ def install_excepthook():
             pass
 
     sys.excepthook = hook
+
+
+# ---- ATOMIC_MEMTRACE: where the memory goes ----------------------------
+# Set ATOMIC_MEMTRACE=1 before a run and every ten seconds the log gets the
+# process's working set beside Python's own traced total and its eight
+# biggest allocation sites. Written 6 September 2026 for "Atomic 256MB ->
+# 676MB over sixteen sidebar switches": the page slide's pictures were
+# the first theory and measured as not it, which is what this exists to
+# settle before the next theory. Costs nothing when the variable is
+# unset; a traced run is slower and is never a release measurement.
+def start_memtrace():
+    import os
+    if not os.environ.get("ATOMIC_MEMTRACE"):
+        return
+    try:
+        import tracemalloc, ctypes, ctypes.wintypes as wt
+        from PyQt6.QtCore import QTimer
+        tracemalloc.start(12)
+
+        class _Counters(ctypes.Structure):
+            _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                        ("PrivateUsage", ctypes.c_size_t)]
+
+        psapi = ctypes.WinDLL("psapi")
+        kernel = ctypes.WinDLL("kernel32")
+        # argtypes, or the handle and the pointer are truncated to
+        # c_int and the call quietly fills nothing (rules/testing.md).
+        psapi.GetProcessMemoryInfo.argtypes = [wt.HANDLE, ctypes.POINTER(_Counters), wt.DWORD]
+        psapi.GetProcessMemoryInfo.restype = wt.BOOL
+        kernel.GetCurrentProcess.restype = wt.HANDLE
+
+        def working_set():
+            counters = _Counters(); counters.cb = ctypes.sizeof(counters)
+            psapi.GetProcessMemoryInfo(kernel.GetCurrentProcess(),
+                                       ctypes.byref(counters), counters.cb)
+            return counters.WorkingSetSize // (1 << 20), counters.PrivateUsage // (1 << 20)
+        start_memtrace.working_set = working_set
+
+        def report():
+            try:
+                ws, private = working_set()
+                traced, peak = tracemalloc.get_traced_memory()
+                info(f"memtrace: working set {ws}MB private {private}MB "
+                     f"python traced {traced // (1 << 20)}MB")
+                snap = tracemalloc.take_snapshot()
+                for stat in snap.statistics("lineno")[:8]:
+                    frame = stat.traceback[0]
+                    info(f"memtrace:   {stat.size // 1024}KB x{stat.count} "
+                         f"{frame.filename.replace(chr(92), '/')[-60:]}:{frame.lineno}")
+            except Exception:
+                pass
+
+        timer = QTimer()
+        timer.timeout.connect(report)
+        timer.start(10000)
+        start_memtrace._timer = timer          # kept alive on the function
+        info("memtrace: on")
+    except Exception:
+        exception("memtrace could not start")
+
+
+def memtrace_mark(label):
+    """One working-set line, only while ATOMIC_MEMTRACE is on."""
+    ws = getattr(start_memtrace, "working_set", None)
+    if ws is None:
+        return
+    try:
+        import gc
+        gc.collect()
+        w, p = ws()
+        info(f"memtrace mark {label}: working set {w}MB private {p}MB")
+    except Exception:
+        pass

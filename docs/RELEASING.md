@@ -18,6 +18,49 @@ unreleased work off it is what makes "is this released?" answerable.
 branches share no ancestry and `git merge` between them refuses.** A
 release is taken as a snapshot instead.
 
+## Where the artifact lives — changed at 2.0
+
+Every release up to 1.10 shipped as a file **committed in the
+repository** at the release tag, and the in-app updater read it through
+GitHub's contents API. That route closed at 2.0, by measurement rather
+than by preference:
+
+| | |
+|---|---|
+| `Atomic.exe`, 8 September 2026 | **126,273,930 bytes** |
+| `Atomic.zip` beside it | **125,496,253 bytes** |
+| GitHub's per-file limit on push | **100 MiB — a hard refusal, not a warning** |
+| GitHub's release-asset limit | **2 GiB** |
+
+So from 2.0 on:
+
+- **the real build is a release asset** (`Atomic.zip` attached to the
+  GitHub Release), and the repository never carries it;
+- **the tag carries the bridge installer** as `Atomic.exe` (and the same
+  program zipped as `Atomic.zip`, for a zip-preferring updater). It is
+  ~10.4 MB, built by `packaging/bridge/build_bridge.py`, and it exists
+  for exactly one reason: an install running 1.10 or older asks GitHub
+  for `/contents/Atomic.exe?ref=<tag>` and swaps in whatever comes back.
+  Without it, every one of those installs is told *"v2.0 has no
+  Atomic.exe committed to it"* and can never update again.
+
+`updater.check_for_update` asks both places and takes the newest, with
+the release asset winning a tie — so a 2.0 install gets the app and a
+1.10 install gets the bridge, from the same tag.
+
+**Do not remove the bridge from a later release tag** until nothing in
+the field predates 2.0, and there is no way to know that.
+
+## Two constants carry the version, not one
+
+`updater.APP_VERSION` is the number, and
+`helpers/development_version_patch.install()` **overwrites it at
+startup** — `_ui_startup` installs that patch last on purpose, so it is
+the final identity. A release that bumps only `updater.py` ships a build
+that calls itself by the last development number, offers itself an
+update for ever, and shows the wrong "what's new". Bump both, and check
+the frozen build says the right thing before tagging.
+
 ## Version numbers
 
 A release has two parts. A build still in development has three, counting
