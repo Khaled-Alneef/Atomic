@@ -351,7 +351,13 @@ def _episode_ratings_worker(signals, run, imdb_id, season, videos):
     signals.episode_ratings.emit(run, (imdb_id, season), mapping)
 
 
-def _resolve_id_worker(signals, run, title, entry_type):
+# One Cinemeta search's budget inside the id lookup: its CDN answers a
+# hit in 0.1-2.6s and a miss in up to 11s (measured 7 September 2026).
+LOOKUP_STEP_S = 4.0
+LOOKUP_RETRY_S = 10.0
+
+
+def _resolve_id_worker(signals, run, title, entry_type, alternates=()):
     """Find the catalog id for a title that arrived without one.
 
     Never raises - lookup_pool workers die silently (see that module).
@@ -364,17 +370,54 @@ def _resolve_id_worker(signals, run, title, entry_type):
     found = ""
     try:
         from helpers import discover, title_match
-        wanted = (title or "").strip()
-        kinds = (("movie",) if entry_type == "Movie" else ("anime", "series"))
-        for kind in kinds:
-            rows = discover.discover_video(kind, query=wanted, limit=6) or []
-            best, score = None, 0.0
-            for row in rows:
-                value = title_match.similarity(wanted, row.get("title") or "")
-                if value > score:
-                    best, score = row, value
-            if best is not None and score >= 0.8 and best.get("imdb_id"):
-                found = best["imdb_id"]
+        # **The series catalog first, and every name the row came with.**
+        # The anime kind confirms its rows against AniList and, with
+        # AniList refusing, waits up to five seconds on Cinemeta's meta
+        # (discover.ANIME_META_WAIT) - all of it "Looking this title
+        # up..." on screen for an id the series search answers in under
+        # a second, since Cinemeta's series search lists anime among the
+        # rest and the 0.8 similarity bar is the safeguard here. And a
+        # Schedule row headed by a romaji title ("Wanmei Shijie") is on
+        # Cinemeta under its English one ("Perfect World"), so the
+        # alternates AniList gave the row are tried in turn. The owner,
+        # 7 September 2026: "it takes so long to load ... and sometimes
+        # it does not load at all".
+        # Measured on the source tree, 7 September 2026, "Wanmei Shijie":
+        # Cinemeta's series search answered "Perfect World" in 2.6s, the
+        # anime kind then spent 4.4s on its meta wait for nothing, and a
+        # second search hit a slow CDN miss at 11s - 15s of "Looking this
+        # title up..." for an answer that was in at 2.6s. So: the anime
+        # kind is not asked (its rows are the series search's, confirmed
+        # - the id is the same), each query is bounded at LOOKUP_STEP_S,
+        # and a row is matched against *every* name the entry carries,
+        # so Cinemeta's own alias hit counts when a synonym names it.
+        from helpers import net
+        names = []
+        for name in (title, *alternates):
+            name = str(name or "").strip()
+            if name and name.lower() not in [n.lower() for n in names]:
+                names.append(name)
+        kind = "movie" if entry_type == "Movie" else "series"
+        # Two passes: every name at LOOKUP_STEP_S, then the first name
+        # once more at LOOKUP_RETRY_S - a miss on Cinemeta's CDN can take
+        # 11s to answer, and a title that answered in 0.1s one minute
+        # was lost to the 4s bound the next (measured, "That Time I Got
+        # Reincarnated as a Slime").
+        for pass_names, budget in ((names, LOOKUP_STEP_S), (names[:1], LOOKUP_RETRY_S)):
+            for wanted in pass_names:
+                rows = discover.discover_video(
+                    kind, query=wanted, limit=6,
+                    deadline=net.deadline_in(budget)) or []
+                best, score = None, 0.0
+                for row in rows:
+                    value = max((title_match.similarity(n, row.get("title") or "")
+                                 for n in names), default=0.0)
+                    if value > score:
+                        best, score = row, value
+                if best is not None and score >= 0.8 and best.get("imdb_id"):
+                    found = best["imdb_id"]
+                    break
+            if found:
                 break
     except Exception:
         logs.exception("details id lookup failed")
@@ -1543,7 +1586,8 @@ class DetailsPage(GlassPage):
             # _on_resolved_id).
             self._panel_note.setText("Looking this title up...")
             lookup_pool.submit_watched(_resolve_id_worker, self._signals, self._run,
-                               self.entry.get("title"), self.entry.get("type"))
+                               self.entry.get("title"), self.entry.get("type"),
+                               tuple(self.entry.get("alt_titles") or ()))
             self._expect_list()
         else:
             self._panel_note.setText(
@@ -2023,6 +2067,13 @@ class DetailsPage(GlassPage):
             button.clicked.connect(
                 lambda _checked=False, n=str(name): self._open_cast_browse(n))
             self._cast_row.insertWidget(self._cast_row.count() - 1, button)
+        # The chips' pages are fetched now, behind this one, so a press
+        # answers from memory - see people.prefetch (8 September 2026).
+        try:
+            from helpers import people
+            people.prefetch([str(n) for n in names])
+        except Exception:
+            logs.exception("cast prefetch could not start")
 
     def _open_cast_browse(self, name):
         """One cast member's titles as a full page over the window - the

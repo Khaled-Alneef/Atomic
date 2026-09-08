@@ -1181,10 +1181,13 @@ def _transient(body):
     which is what helpers/images' cache is keyed by (web/server._row).
     """
     art = str((body or {}).get("poster") or "")
+    titles = (body or {}).get("titles") or []
     return {"title": str((body or {}).get("title") or ""),
             "type": str((body or {}).get("type") or "Series"),
             "url": str((body or {}).get("url") or ""),
             "imdb_id": str((body or {}).get("imdb") or ""),
+            # A schedule row's other names, for the id lookup.
+            "alt_titles": [str(t) for t in titles if t] if isinstance(titles, list) else [],
             "cover_url": art if art.startswith("http") else "",
             "cover_path": "" if art.startswith("http") else art}
 

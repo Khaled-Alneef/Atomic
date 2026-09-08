@@ -89,6 +89,7 @@ query ($from: Int, $to: Int, $perPage: Int) {
       airingAt
       media {
         title { romaji english native }
+        synonyms
         coverImage { large }
         format
         isAdult
@@ -135,6 +136,17 @@ def fetch_upcoming_airing(hours: int = 168, limit: int = 40,
             continue
         out.append({
             "title": title,
+            # Every name AniList has for it: a row headed by the romaji
+            # ("Wanmei Shijie") finds nothing on Cinemeta, which files
+            # the show under its English title ("Perfect World") - the
+            # owner's screenshot of 7 September 2026, a Schedule click
+            # opening on "no matched title". The details page tries
+            # each (details._resolve_id_worker).
+            # ...and its synonyms: a donghua often has no English title
+            # field at all, and "Perfect World" sits in synonyms.
+            "titles": [t for t in (titles.get("english"), titles.get("romaji"),
+                                   titles.get("native"),
+                                   *(media.get("synonyms") or [])) if t][:8],
             "episode": int(row.get("episode") or 0),
             "at": datetime.fromtimestamp(int(row["airingAt"]), timezone.utc),
             "cover_url": (media.get("coverImage") or {}).get("large") or "",

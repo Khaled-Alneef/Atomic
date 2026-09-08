@@ -1395,7 +1395,15 @@ def install():
     #     series and movies while the anime walk runs on; the cover
     #     warm is eight wide; back from a search lands on Discover
     #     (7 September, late).
-    updater.APP_VERSION = "1.10.283"
+    #   * A schedule click looks the title up on the series catalog
+    #     first and under every name AniList gave it; the catalogue
+    #     filter's walk goes on past a late kind; a title under Anime
+    #     leaves Series; "hide from Home" hides; the waveform is thinner
+    #     and the caption glyphs smaller; a passed release time is
+    #     looked up again from Home and every countdown ticks; back
+    #     from a search lands on Discover through history back too
+    #     (his six asks, 7 September, night).
+    updater.APP_VERSION = "1.10.285"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

@@ -54,7 +54,11 @@ GitHub tags.
      1.1.3"), never the new number alone.
 5. **Never test against real user data** in `%APPDATA%\Atomic`. Copy it
    to a temp directory and point `storage.DATA_DIR` at the copy before
-   importing anything - see the `test` skill.
+   importing anything - see the `test` skill. **Copy it with
+   `copy_real_data.py`, not a copytree**: from inside the Claude desktop
+   app `%APPDATA%` is virtualized, and a copytree copies a stale shadow
+   (`.claude/rules/testing.md`, "The desktop app's %APPDATA% is not
+   his", 8 September 2026).
 6. **Close any running Atomic before a build or checkout touches the
    binary**, automatically, without asking - it may destroy in-progress
    test state, but Windows won't let the build replace a running binary

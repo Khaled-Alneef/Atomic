@@ -89,6 +89,9 @@ LOCAL_GENRE_PAGES = 8
 # which is the partial answer that rule asks for; Comedy fills its 50
 # inside it and Horror runs the catalog out.
 LOCAL_GENRE_BUDGET_S = 4.0
+# The anime kind's whole genre answer, first page and fallback catalog
+# included - see the note in discover_video.
+LOCAL_GENRE_TOTAL_S = 12.0
 _KIND_LABELS = {"anime": "Anime", "series": "Series", "movie": "Movie"}
 
 # Unprompted browse grid, so it stays filtered: measured, the unfiltered
@@ -466,6 +469,12 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
                    genre: str = "", skip: int = 0, reached=None) -> list:
     """Popular or searched titles for one of the video trackers.
 
+    Every catalogue page fetched here - a browse page, a scroll top-up,
+    every page of a genre walk - is remembered whole by kind
+    (helpers/catalog_index, `_remember`), which is where a genre tick
+    answers from first (8 September 2026). Search rows carry no genres
+    and are not kept.
+
     `kind` is "anime", "series" or "movie". An empty `query` returns the
     popular catalog; a non-empty one searches; `genre` (with no query)
     asks the genre's own catalog - the details pages' genre buttons.
@@ -536,6 +545,16 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
         if kind == "anime" and genre.strip().lower() != "anime":
             urls = _video_catalog_urls(kind, content_type)
             local_genre = genre
+            # **The whole walk is bounded, first page included.** The
+            # walk's own budget (LOCAL_GENRE_BUDGET_S) started only after
+            # the first page, which ran on VIDEO_TIMEOUT's 20s - measured
+            # 7 September 2026 on Mystery: a first page that errored at
+            # 9.9s, then the walk, then the same again over
+            # genre=Animation, 18.7s in all with series and movies long
+            # in. The page draws those and pulls this kind's rows when
+            # they land (server._genre_video), so what this bounds is
+            # how long "still looking" can last.
+            deadline = min(deadline, net.deadline_in(LOCAL_GENRE_TOTAL_S))
         else:
             urls = [f"{CINEMETA_URL}/catalog/{content_type}/top/"
                     f"genre={urllib.parse.quote(genre)}.json"]
@@ -560,6 +579,8 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
         if kind == "anime" and not query and index == len(urls) - 1 and len(urls) > 1:
             metas = [m for m in metas if _is_animated(m)]
         rows = [row for row in (_video_row(m, label) for m in metas) if row]
+        if not query:
+            _remember(kind, rows)
         if local_genre:
             wanted = local_genre.strip().lower()
 
@@ -604,8 +625,9 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
                     if not got:
                         break
                     _note_reached(reached, page + len(got))
-                    rows += _wanted(
-                        [r for r in (_video_row(m, label) for m in got) if r])
+                    page_rows = [r for r in (_video_row(m, label) for m in got) if r]
+                    _remember(kind, page_rows)
+                    rows += _wanted(page_rows)
         # A searched anime section is a plain series search (see the
         # docstring), so a second witness separates anime from the
         # live-action rows sharing the results - see _anime_confirmed.
@@ -616,6 +638,17 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
         if rows:
             return rows[:limit]
     return []
+
+
+def _remember(kind, rows):
+    """Hand a fetched catalogue page to the index; never raises."""
+    if not rows:
+        return
+    try:
+        from . import catalog_index
+        catalog_index.remember(kind, rows)
+    except Exception:
+        pass
 
 
 def _note_reached(store, page):
@@ -1455,6 +1488,47 @@ def reading_genre_sites(genre: str, limit: int = 30, deadline=None) -> list:
         if len(kept) >= limit:
             break
     return kept
+
+
+def reading_genre_now(genre: str, limit: int = 120) -> tuple:
+    """One genre's rows from the last browse and the verdicts already
+    in memory - **no network, no wait**: (rows, still classifying).
+
+    The owner, 8 September 2026: *"when I select some filter in the
+    watch or read pages, it loads but super super slow"*. Measured on a
+    copy with nothing on disk but the seed: the reading tick's first
+    answer took 7.84s (the six-site browse and its budget inside the
+    request), and every pull after it blocked CLASSIFY_KNOWN_BUDGET_S
+    (1.5s) to hand over one fresh row, nineteen rows at 22.8s. The
+    verdicts arrive at MangaDex's pace whatever the request does, so
+    the request stops waiting on them: server._genre runs
+    reading_genre_sites behind the answer and every pull reads this,
+    which costs a walk of the browsed rows. ([], 0) when there is no
+    browse fresher than SWEEP_ROWS_TTL_S - the caller starts one."""
+    wanted = (genre or "").strip().lower()
+    cached = _SWEEP_ROWS
+    if (not wanted or limit <= 0 or cached is None
+            or time.monotonic() - cached[0] >= SWEEP_ROWS_TTL_S):
+        return [], 0
+    _load_reading_meta()
+    kept, unknown = [], 0
+    with _MEDIUM_LOCK:
+        for row in cached[1]:
+            title = row.get("title") or ""
+            key = title.lower()
+            if key not in _MEDIUM_CACHE or key not in _GENRE_CACHE:
+                unknown += 1
+                continue
+            if wanted not in {str(name).strip().lower()
+                              for name in _GENRE_CACHE[key] or []}:
+                continue
+            medium = _MEDIUM_CACHE[key]
+            row = dict(row)
+            row["type"] = medium if medium in MEDIUM_LANGUAGES else "Manga"
+            kept.append(row)
+            if len(kept) >= limit:
+                break
+    return kept, unknown
 
 
 def discover_reading_sites(query: str = "", limit: int = 30,

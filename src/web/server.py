@@ -29,7 +29,7 @@ from . import backend
 # inside its own try/except and the Discover page answered from an empty
 # cache on every device from 1.10.268 on. The owner's "the discover page
 # in the other device is only showing cast", 6 September 2026, was this.
-from helpers import storage
+from helpers import logs, storage
 
 DATA = backend.DATA_DIR
 COVERS = DATA / "image_cache"
@@ -1467,6 +1467,10 @@ def _heroes(candidates):
     found, seen = [], set()
     for entry in candidates:
         hero = backend.hero_for(entry)
+        if isinstance(hero, dict):
+            block = entry.get("next_release")
+            hero["next_at"] = (str(block.get("at") or "")
+                               if isinstance(block, dict) else "")
         if not hero:
             continue
         key = (hero.get("id") or hero.get("title") or "").lower()
@@ -1541,6 +1545,21 @@ def _home():
     wanted = ("anime", "series", "movie")
     watching = [e for e in saved
                 if str(e.get("type", "")).lower() in wanted]
+    # **"Hide them from the Home page too."** The setting has sat in
+    # Settings > General (app_settings.get_hide_sections_from_home) and
+    # only the sidebar ever read the hidden list; this page drew every
+    # section regardless - the owner, 7 September 2026: "when the hide
+    # from home page too in the settings is checked, it does not hide
+    # them from home". The keys are the nav pages' (series:cat_anime,
+    # manga:cat_manga, games, ...), the same list the sidebar hides.
+    hidden = _hidden_on_home()
+    if hidden:
+        watching = [e for e in watching if _home_key(e) not in hidden]
+        reading = [e for e in reading if _home_key(e) not in hidden]
+    # A release time that has passed is looked up again behind this
+    # draw - see _refresh_stale_schedules.
+    _refresh_stale_schedules(watching, "series.json")
+    _refresh_stale_schedules(reading, "tracker.json")
 
     recent = {}
     for position, row in enumerate(_history(("Anime", "Series", "Movie"))):
@@ -1615,24 +1634,125 @@ def _home():
         return out
 
     heroes = _heroes(ordered)
-    return {"kind": "rows", "note": "",
-            "hero": heroes[0] if heroes else None,
-            "heroes": heroes, "sections": [
+    sections = [
         {"title": "Watching",
          "rows": [_row(e, resume=True) for e in watching]},
         {"title": "Reading",
          "rows": [_row(e, resume=True) for e in reading]},
-        {"title": "Games",
+        {"title": "Games", "key": "games",
          "rows": [_row(e, "game") for e in _recent_first("games.json",
                                                          "last_played")]},
         # `style: list` - these two were a list of icon, name and link
         # in the Qt Home, not a shelf of posters, and a website has no
         # poster to show anyway.
-        {"title": "Quick Apps", "style": "list",
+        {"title": "Quick Apps", "style": "list", "key": "apps",
          "rows": _linked("apps.json", "app")},
-        {"title": "Websites", "style": "list",
+        {"title": "Websites", "style": "list", "key": "websites",
          "rows": _linked("websites.json", "site")},
-    ]}
+    ]
+    if hidden:
+        sections = [s for s in sections if s.get("key", "") not in hidden]
+    return {"kind": "rows", "note": "",
+            "hero": heroes[0] if heroes else None,
+            "heroes": heroes, "sections": sections}
+
+
+_HOME_KEYS = {"movie": "series:cat_movies", "series": "series:cat_series",
+              "anime": "series:cat_anime", "manga": "manga:cat_manga",
+              "manhwa": "manga:cat_manhwa", "manhua": "manga:cat_manhua"}
+
+
+def _home_key(entry) -> str:
+    return _HOME_KEYS.get(str((entry or {}).get("type") or "").lower(), "")
+
+
+def _hidden_on_home() -> set:
+    try:
+        from helpers import app_settings
+        if not app_settings.get_hide_sections_from_home():
+            return set()
+        return {str(k) for k in (app_settings.get_hidden_sections() or [])}
+    except Exception:
+        return set()
+
+
+# entry id -> when it was last sent for a schedule lookup from here
+_SCHEDULE_ASKED = {}
+SCHEDULE_REASK_S = 600.0
+
+
+def _refresh_stale_schedules(entries, file_name):
+    """A stored release time that has passed is looked up again, in the
+    background, and the answer written onto the entry.
+
+    The Qt tracker did this on its own page visits
+    (tracker._refresh_schedules) and the web Home never did, so a banner
+    kept "Countdown: any moment now" for as long as nobody opened the
+    tracker - the owner's picture of Reacher, 7 September 2026 ("the
+    countdown is stuck at any moment now, fix it and make it always
+    update"). release_schedule.needs_refresh is the same test the
+    tracker uses (a passed time, or a check older than its TTL); an
+    entry is asked at most once per SCHEDULE_REASK_S from here, and the
+    write goes through storage.update_entry and changes.bump so every
+    page redraws (CLAUDE.md rule 13)."""
+    try:
+        from helpers import lookup_pool, release_schedule
+    except Exception:
+        return
+    now = time.monotonic()
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        try:
+            if not release_schedule.needs_refresh(entry):
+                continue
+        except Exception:
+            continue
+        key = str(entry["id"])
+        if now - _SCHEDULE_ASKED.get(key, 0.0) < SCHEDULE_REASK_S:
+            continue
+        _SCHEDULE_ASKED[key] = now
+        try:
+            lookup_pool.submit(_refresh_schedule_worker, dict(entry), file_name)
+        except Exception:
+            logs.exception("Could not queue a schedule refresh")
+
+
+def _refresh_schedule_worker(entry, file_name):
+    """Never raises - a lookup_pool worker dies silently."""
+    try:
+        from helpers import changes, release_schedule
+        kind = str(entry.get("type") or "").strip().lower()
+        if kind in ("manga", "manhwa", "manhua", "other"):
+            medium = release_schedule.MEDIUM_MANGA
+        elif kind == "anime":
+            medium = release_schedule.MEDIUM_ANIME
+        else:
+            medium = release_schedule.MEDIUM_SERIES
+        found, manga_id = release_schedule.fetch(
+            medium, entry.get("title") or "", imdb_id=entry.get("imdb_id"),
+            manga_id=entry.get("mangadex_id"))
+        # **An empty answer keeps the old record.** The tracker's own
+        # refresh writes None over it, which on a tracker visit is a
+        # finished show losing a stale date; here, fired from every Home
+        # draw, it was AniList's 403 wiping "Expected: ..." off eight of
+        # his entries in one pass (measured on a copy, 7 September
+        # 2026). A passed date kept reads "any moment now" until a
+        # source answers - honest - and needs_refresh asks again at
+        # SCHEDULE_REASK_S's pace until one does.
+        fields = {"next_release_checked_at": storage.now_iso()}
+        if isinstance(found, dict) and found.get("at"):
+            fields["next_release"] = found
+        if manga_id:
+            fields["mangadex_id"] = manga_id
+        storage.update_entry(file_name, entry["id"], fields)
+        if "next_release" in fields:
+            changes.bump()
+        at = str((found or {}).get("at") or "") if isinstance(found, dict) else ""
+        logs.info(f"schedule refreshed from Home: {str(entry.get('title'))[:40]} "
+                  f"-> {at or 'nothing known, kept what it had'}")
+    except Exception:
+        logs.exception("A schedule refresh from Home failed")
 
 
 # Which banner pool each discover section feeds, and how often each pool
@@ -2041,9 +2161,20 @@ def _search(text, more=False):
 
     sections, total = [], 0
     cast = [r for r in found.get("Cast") or [] if r.get("title")]
+    # **A title the Anime section holds is not listed under Series as
+    # well** - the owner, 7 September 2026: "attack on titan on the
+    # searching page appears as series not an anime". Cinemeta's series
+    # search returns anime among the rest; the Anime section is those
+    # rows confirmed as anime, so the same ids come out of Series here.
+    # When Anime is still pending the page does the same the moment it
+    # arrives (app.js mergeSections).
+    anime_ids = {str(r.get("imdb_id") or "") for r in found.get("Anime") or []
+                 if isinstance(r, dict) and r.get("imdb_id")}
     for order, name in enumerate(("Anime", "Series", "Movies", "Reading")):
         rows = [r for r in found.get(name) or [] if isinstance(r, dict)
                 and r.get("title")]
+        if name == "Series" and anime_ids:
+            rows = [r for r in rows if str(r.get("imdb_id") or "") not in anime_ids]
         if name in ("Anime", "Series"):
             rows = _one_per_work(rows)
         if not rows:
@@ -2713,6 +2844,10 @@ def _schedule_row(entry, when="", saved=False):
     row = _row(entry)
     head, slot, countdown = _when_words(when) if when else ("", "", "")
     row.update({"day": head, "slot": slot, "countdown": countdown,
+                "at": str(when or ""),
+                # The other names AniList knows the title by, for the
+                # details page's id lookup (web_pages._transient).
+                "titles": [t for t in (entry.get("titles") or []) if t],
                 "saved": bool(saved), "progress": _progress_text(entry)})
     return row
 
@@ -2977,9 +3112,60 @@ def _browse_tabs(tab):
         tab if tab in dict((k, 1) for k, _l, _n in BROWSE_TABS) else "all")
 
 
-def _genre_video(name, skip, limit):
+_READING_SWEEPS = {}           # genre -> the thread running its sweep
+_READING_SWEEPS_LOCK = threading.Lock()
+_READING_SWEEP_STARTED = {}     # genre -> monotonic of the last start
+
+
+def _reading_sweep_running(name):
+    with _READING_SWEEPS_LOCK:
+        thread = _READING_SWEEPS.get(name)
+        return bool(thread is not None and thread.is_alive())
+
+
+def _start_reading_sweep(name):
+    """Run discover.reading_genre_sites for `name` on a thread, one per
+    genre at a time, and no more than once every RESWEEP_GAP_S - the
+    page pulls every 700ms while pending and each pull must not start a
+    browse of its own. Returns True while a sweep is running."""
+    with _READING_SWEEPS_LOCK:
+        thread = _READING_SWEEPS.get(name)
+        if thread is not None and thread.is_alive():
+            return True
+        last = _READING_SWEEP_STARTED.get(name, 0.0)
+        if time.monotonic() - last < RESWEEP_GAP_S:
+            return False
+
+        def _run():
+            try:
+                from helpers import discover
+                found = discover.reading_genre_sites(name, limit=120)
+                logs.info(f"reading genre sweep: {name}: {len(found or [])} rows, "
+                          f"{int(discover.sweep_pending() or 0)} still classifying")
+            except Exception:
+                logs.exception(f"reading genre sweep failed for {name}")
+
+        thread = threading.Thread(target=_run, name=f"genre-sweep-{name}", daemon=True)
+        _READING_SWEEPS[name] = thread
+        _READING_SWEEP_STARTED[name] = time.monotonic()
+        thread.start()
+        return True
+
+
+def _genre_video(name, skip, limit, tab="all"):
     """One page of a video genre, series and movies both, from one
-    cursor: (rows, next cursor).
+    cursor: (rows, next cursor, kinds still running).
+
+    **The index first, and only the page's kind from Cinemeta** (8
+    September 2026, the owner: "when I select some filter in the watch
+    or read pages, it loads but super super slow"). Every catalogue row
+    this machine has fetched is in helpers/catalog_index with its
+    genres; the rows carrying this genre are answered at once, with no
+    wait, and the Cinemeta walk runs behind them as `pending`. A tab
+    names one kind, so the other two are not asked at all - the Anime
+    page's tick used to fetch series and movies too and throw them away
+    (_tab_rows). On a machine that has never scrolled, the index is
+    empty and the walk is waited for as before.
 
     **One skip for both kinds, advanced by the larger batch.** Two
     cursors packed into the one integer the page hands back was the
@@ -3023,6 +3209,23 @@ def _genre_video(name, skip, limit):
     # kind now reports how far it actually read, and the cursor takes
     # the furthest of the three.
     progress = {}
+    kinds = ("anime", "series", "movie")
+    for key, _label, names in BROWSE_TABS:
+        if key == tab and names:
+            kinds = tuple(k for k in ("anime", "series", "movie") if k in names)
+    indexed = []
+    if skip <= 0:
+        try:
+            from helpers import catalog_index
+            seen = set()
+            for kind in kinds:
+                for row in catalog_index.rows_for(kind, name, limit=GENRE_INDEX_LIMIT):
+                    key = str(row.get("imdb_id") or "")
+                    if key and key not in seen and len(indexed) < GENRE_INDEX_LIMIT:
+                        seen.add(key)
+                        indexed.append(dict(row))
+        except Exception:
+            indexed = []
 
     def _page(kind):
         try:
@@ -3050,16 +3253,19 @@ def _genre_video(name, skip, limit):
     # _GENRE_LATE, and `pending` tells the page to pull `/api/more`,
     # where _genre_late_rows hands the late rows over (server._more_browse).
     from concurrent.futures import wait
-    pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="genre")
-    futures = {kind: pool.submit(_page, kind)
-               for kind in ("anime", "series", "movie")}
+    pool = ThreadPoolExecutor(max_workers=max(1, len(kinds)),
+                              thread_name_prefix="genre")
+    futures = {kind: pool.submit(_page, kind) for kind in kinds}
     pool.shutdown(wait=False)
-    wait(list(futures.values()), timeout=GENRE_FIRST_WAIT_S)
-    rows, advanced, late = [], 0, 0
+    # With the index answering, the page has rows to draw now and the
+    # walk's rows arrive on its pull; nothing waits.
+    wait(list(futures.values()),
+         timeout=0.05 if len(indexed) >= GENRE_INDEX_ENOUGH else GENRE_FIRST_WAIT_S)
+    rows, advanced, late = list(indexed), 0, 0
     for kind, future in futures.items():
         if not future.done():
             with _GENRE_LOCK:
-                _GENRE_LATE.setdefault(name, {})[kind] = future
+                _GENRE_LATE.setdefault(name, {})[kind] = (future, progress, skip)
             late += 1
             continue
         try:
@@ -3075,30 +3281,48 @@ def _genre_video(name, skip, limit):
 
 
 GENRE_FIRST_WAIT_S = 2.0
+# Indexed rows enough to draw a page without waiting on the walk at all,
+# and the most the first answer carries: a Manga page draws 117 rows in
+# 49ms on his machine, so 200 is well inside the second and several
+# screens deep; the walk's rows follow on the pull.
+GENRE_INDEX_ENOUGH = 12
+GENRE_INDEX_LIMIT = 200
+# A reading genre's sweep is not restarted inside this after it ends: a
+# browse the sites answered with nothing is asked again in a minute, not
+# on every 700ms pull.
+RESWEEP_GAP_S = 60.0
 _GENRE_LATE = {}          # genre name -> {kind: Future still running}
 _GENRE_LOCK = threading.Lock()
 
 
 def _genre_late_rows(name):
-    """(rows, still running) from the kinds a genre answer left running,
-    or None when nothing was left running for this genre."""
+    """(rows, still running, reached) from the kinds a genre answer left
+    running, or None when nothing was left running for this genre.
+
+    `reached` is how far the late walk read, so the caller's cursor moves
+    past it: handed over at the old cursor, the page's walk saw its
+    cursor stand still and stopped after that one chunk - the owner, 7
+    September 2026: "it only loads one more chunk of cards then stops"."""
     with _GENRE_LOCK:
         kinds = _GENRE_LATE.get(name)
         if not kinds:
             return None
-        rows, running = [], 0
-        for kind, future in list(kinds.items()):
+        rows, running, reached = [], 0, 0
+        for kind, (future, progress, skip) in list(kinds.items()):
             if future.done():
                 del kinds[kind]
                 try:
-                    rows.extend(future.result() or [])
+                    batch = future.result() or []
                 except Exception:
-                    pass
+                    batch = []
+                rows.extend(batch)
+                reached = max(reached, skip + len(batch),
+                              int(progress.get("skip") or 0))
             else:
                 running += 1
         if not kinds:
             _GENRE_LATE.pop(name, None)
-    return rows, running
+    return rows, running, reached
 
 
 def _more_browse(route, have, skip):
@@ -3150,8 +3374,18 @@ def _more_browse(route, have, skip):
                     rows = []
                 pending = 0
                 if len(rows) <= max(0, skip):
-                    rows = discover.reading_genre_sites(body, limit=wanted)
-                    pending = int(discover.sweep_pending() or 0)
+                    # No wait here either (8 September 2026): the rows
+                    # whose verdicts are in, and a sweep started behind
+                    # if none is running and the browse has gone stale.
+                    rows, unknown = discover.reading_genre_now(body, limit=wanted)
+                    running = _reading_sweep_running(body)
+                    if not running and (not rows and not unknown):
+                        # Nothing browsed inside SWEEP_ROWS_TTL_S: browse
+                        # again behind the answer, once.
+                        running = _start_reading_sweep(body)
+                    pending = 1 if running else int(discover.sweep_pending() or 0)
+                    if not running and unknown and not pending:
+                        pending = unknown
                 skip = skip + len(rows)
             else:
                 # A kind the first answer left running is handed over
@@ -3160,9 +3394,10 @@ def _more_browse(route, have, skip):
                 # walk is at most one in flight.
                 late = _genre_late_rows(body)
                 if late is not None and (late[0] or late[1]):
-                    rows, pending = late
+                    rows, pending, reached = late
+                    skip = max(skip, reached)
                 else:
-                    rows, skip, pending = _genre_video(body, skip, GENRE_PAGE)
+                    rows, skip, pending = _genre_video(body, skip, GENRE_PAGE, tab)
     except Exception as error:
         return {"rows": [], "skip": skip, "error": str(error)[:120]}
     rows = [r for r in (rows or []) if isinstance(r, dict) and r.get("title")]
@@ -3237,11 +3472,22 @@ def _genre(name, reading, tab="all"):
                 rows = list(discover.reading_genre_cached(name, limit=120) or [])
             except Exception:
                 rows = []
-            if not rows:
-                rows = list(discover.reading_genre_sites(name, limit=120) or [])
-                pending = int(discover.sweep_pending() or 0)
+            # **The sweep runs behind the answer** (8 September 2026,
+            # see discover.reading_genre_now): what the disk has is
+            # drawn now, the six-site browse and the classification go
+            # to a thread, and the page's pulls collect the rows as
+            # their verdicts land. `pending` is what makes the page
+            # keep pulling; 1 stands for "the sweep has not said yet".
+            now_rows, unknown = discover.reading_genre_now(name)
+            for row in now_rows:
+                if not any((r.get("title") or "").lower() == (row.get("title") or "").lower()
+                           for r in rows):
+                    rows.append(row)
+            if len(rows) < GENRE_PAGE or unknown:
+                _start_reading_sweep(name)
+                pending = 1
         else:
-            rows, skip, pending = _genre_video(name, 0, GENRE_PAGE)
+            rows, skip, pending = _genre_video(name, 0, GENRE_PAGE, tab)
     except Exception as error:
         return {"kind": "grid", "rows": [], "title": name,
                 "back": True, "note": str(error)[:120]}

@@ -1277,7 +1277,9 @@ class TitleBar(QWidget):
                                    else theme.SURFACE_HOVER),
                              objectName=name)
         button.resting = WINDOW_BUTTON_FILL
-        button.setFont(theme.icon_font(9))
+        # 7pt, from 9: "make the icons inside the buttons smaller" - the
+        # owner, 7 September 2026, with a picture of the three.
+        button.setFont(theme.icon_font(7))
         button.setFixedSize(QSize(WINDOW_BUTTON_SIZE, WINDOW_BUTTON_SIZE))
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.setToolTip(tip)

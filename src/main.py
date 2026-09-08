@@ -4224,15 +4224,6 @@ class MainWindow(QMainWindow):
         takes the same one."""
         overlay = self._top_overlay()
         if overlay is None:
-            # A page may hold a route of its own to step out of first -
-            # Discover's search results (web_pages.WebDiscoverPage.back_within).
-            within = getattr(self._current_page, "back_within", None)
-            if callable(within):
-                try:
-                    if within():
-                        return
-                except Exception:
-                    logs.exception("The page could not step back within itself")
             self.go_back()
             return
         for name in ("go_back", "close_player", "leave"):
@@ -5516,6 +5507,20 @@ class MainWindow(QMainWindow):
         return None
 
     def go_back(self):
+        # **A page may hold a route of its own to step out of first** -
+        # Discover's search results (web_pages.WebDiscoverPage.back_within).
+        # Here and not in navigate_back: the page's own Alt+Left (app.js
+        # auxclick for mouse button 4, web_pages._AS_QT) reaches the
+        # history shortcut directly, so on the frozen build a button-4
+        # press on the search page drew Home (measured 7 September 2026)
+        # while the hook sat one level up.
+        within = getattr(self._current_page, "back_within", None)
+        if callable(within):
+            try:
+                if within():
+                    return
+            except Exception:
+                logs.exception("The page could not step back within itself")
         if self._history_index > 0:
             current = self._history[self._history_index]
             self._history_index -= 1

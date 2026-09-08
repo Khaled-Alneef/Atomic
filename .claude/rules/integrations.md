@@ -907,3 +907,210 @@ a range E01-E04 queued reads E01, E02, E03, E04 at the bottom of the
 list with E01 running; Pause All at E02 52%, Resume All, and the
 worker took the top-most paused row - his older S04E03, above the
 range - not E04.
+
+## The slow pages, measured and answered as they arrive (7 September 2026)
+
+His report: *"fix the searching, genre and the cast pages takes too long
+to load!"* Measured in-process on the source tree with every HTTP
+request timed by host (`h_slow.py`, a wrapper over `net.urlopen` /
+`read_text` / `read_bytes`), against his log:
+
+    /api/search?q=kingdom        5.94s   every fast source in by 1.1s; the route
+                                         waited on Cinemeta's movie search (4.62s,
+                                         one CDN miss), 3asq (4.69s) and a
+                                         mangalik timeout (4.50s). His log: 6.0s, 4.4s.
+    /api/genre?name=Mystery     18.67s   series and movies in at once; the anime
+                                         kind walked eight Cinemeta pages that timed
+                                         out at 4s, one erroring at 9.9s, then the
+                                         same over genre=Animation. His log: 12.6s,
+                                         continuations 9.2s and 13.4s.
+    /api/cast?name=...           0.40s   TMDB, two requests; the wait he sees is
+                                         the sixty covers after the draw.
+    24 cast covers, cold          1.19s at 4 warm workers, 0.49s at 12
+
+**A search is a job, answered with what is in.** `server._search_job`
+keeps one set of futures per query for `SEARCH_JOB_TTL_S`; the first
+answer waits `SEARCH_FIRST_WAIT_S` (1.5s) and says how many sources
+are still running (`pending`), and app.js `pullSearch` asks again with
+`more=1` every 650ms until none are, slotting each late section in by
+its `order` (`mergeSections`) - never at the end. Every source is still
+waited for, only not on screen: the race that once answered 22, 10, 16
+rows is not back. Measured after: the first answer at 1.51s with 28
+rows, the reading section on the second pull, 45-57 rows by 7s. Frozen
+build: 1.5s (`web route slow` still names it - the threshold is 1s).
+
+**A video genre answers with the kinds that are in.** `_genre_video`
+waits `GENRE_FIRST_WAIT_S` (2s) on its three kinds and keeps a kind
+still running in `_GENRE_LATE`; `_more_browse` hands the late rows over
+on the page's next pull (`_genre_late_rows`, with how far the walk read
+so the cursor moves - handed over at the old cursor, the catalogue
+filter's walk saw its cursor stand still and stopped after one chunk,
+his "only loads one more chunk of cards then stops"), and starts no
+new batch while one is running - the anime walk is at most one in
+flight. The walk itself is bounded whole, first page included
+(`discover.LOCAL_GENRE_TOTAL_S` 12s; the walk's own 4s budget started
+after a first page on VIDEO_TIMEOUT's 20s). Measured after: the first
+answer 2.03s with 99 rows and `pending=1`, the anime rows landing at
++8.0s with the cursor 50 -> 200. `moreOnScroll` and `pullGenre` pull on
+a 700ms timer while `pending` is above zero instead of on the scroll or
+at once - asking again immediately was a busy loop.
+
+**The cover warm is eight workers** (`backend._WARM_WORKERS`, from
+four): 1.19s -> about 0.6s for a cast page's first screenful, the
+scanlation hosts being what keeps it from twelve.
+
+## A schedule click looks the title up bounded, under every name (7 September 2026)
+
+His picture: "Wanmei Shijie" opened from the Schedule on "This entry
+has no matched title", after a long "Looking this title up...".
+Measured: Cinemeta's series search answered *Perfect World* for the
+romaji in 2.6s - and the 0.8 similarity bar cannot see that with no
+English name to compare against; the anime kind then spent 4.4s on its
+meta wait (`ANIME_META_WAIT`, AniList refusing) for nothing; a second
+search hit a CDN miss at 11s. `details._resolve_id_worker` now asks the
+series catalog only (its rows are the anime kind's, confirmed - the id
+is the same), bounds each query at `LOOKUP_STEP_S` (4s) with one
+`LOOKUP_RETRY_S` (10s) pass on the first name (a query that answered in
+0.1s one minute was lost to the 4s bound the next), and matches a row
+against every name the entry carries: the calendar rows keep AniList's
+english/romaji/native **and synonyms** (`titles`, `_UPCOMING_QUERY`) -
+"Perfect World" is a synonym on a donghua with no English title field
+- and they travel with the click into the transient entry
+(`alt_titles`). Measured: Slime 0.62s, Kaiju No. 8 0.11s, Frieren
+13.84s on a miss then the retry, "Wanmei Shijie" + "Perfect World"
+0.40s -> tt14986786. The cached calendar carries `titles` only from its
+next AniList fetch.
+
+**A release time that has passed is looked up again from Home.** The
+Qt tracker refreshed schedules on its own visits and the web Home
+never did, so his Reacher banner read "Countdown: any moment now" for
+as long as nobody opened the tracker. `server._refresh_stale_schedules`
+runs on every Home draw over the rows it drew, `release_schedule.
+needs_refresh` deciding (the same test as the tracker's), at most once
+per entry per `SCHEDULE_REASK_S` (10 min); the worker writes
+`next_release` through `storage.update_entry` and `changes.bump`s so
+every page redraws (rule 13). Harnessed with `fetch` mocked: the
+stored time replaced and the bump seen within 0.1s, the entry not
+asked twice. A first draw of his library queued eight lookups (seven
+manga at MangaDex's pace, one series).
+
+**An empty answer keeps the old record.** On the frozen build's first
+pass those eight lookups came back empty (AniList refusing, MangaDex
+answering nothing for the estimate) and the worker wrote `None` over
+`next_release` the way the tracker's refresh does - eight entries lost
+their "Expected: ..." line in one Home draw, on a copy. The worker now
+writes the record only when a source answered with a time, stamps
+`next_release_checked_at` either way, and bumps only on a change; a
+passed date kept reads "any moment now" until a source answers, and
+needs_refresh asks again at SCHEDULE_REASK_S's pace. The tracker's own
+visit still wipes as before.
+
+## A genre tick answers from the index, and a reading tick never waits (8 September 2026)
+
+His report, the morning after the progressive genre route landed:
+*"when I select some filter in the watch or read pages, it loads but
+super super slow fix that!"*. His own log of that night: four Romance
+ticks on the Anime page at **2.0s each** with no rows, and after each
+one the page's scroll top-up walking Cinemeta thirty rows a batch at
+1-6s a batch on his line, through 781 anime rows over fifty seconds -
+while every one of those rows had come with its genres and nothing
+kept them. `discover_cache.json` holds the first page of each video
+kind (30 rows) and nothing deeper.
+
+**Watch.** `helpers/catalog_index` keeps every catalogue row
+`discover_video` fetches, by kind, with its genres - browse pages,
+scroll top-ups, and every page of a genre walk, whole (`_remember`),
+not only the rows that matched. It is bounded at `MAX_ROWS` (4000) a
+kind and written through `storage.save` at most every `WRITE_GAP_S`,
+and at exit. `server._genre_video` answers the wanted genre's rows out
+of it first (`GENRE_INDEX_LIMIT` 200, newest first), waits only 50ms on
+the Cinemeta walk when the index gave `GENRE_INDEX_ENOUGH` (12) rows,
+and asks Cinemeta for **the page's kind alone** - the Anime page's tick
+used to fetch series and movies too and drop them in `_tab_rows`. The
+walk still runs behind the answer as `pending` and warms the index as
+it goes. A fresh install starts with `helpers/catalog_seed` (Cinemeta's
+first ten pages of anime, series and movie, 499/498/494 rows, 357KB,
+17ms to import; regenerate with the test skill's
+`make_catalog_seed.py`), the oldest layer under what the machine
+fetches itself.
+
+Measured in-process on a copy of his data (`h_index.py`, `h_seed.py`):
+the cold tick with no index 2.01s and 0 rows; after one tick's walk the
+index held 449 anime rows and Comedy - never ticked - answered **100
+rows in 0.06s**; Romance 29 rows in 0.05s (32 with the seed). With the
+seed alone, an empty data directory: anime Romance 32 rows 0.05s, anime
+Comedy 100 in 0.06s, series Crime 100 in 0.06s, movies Romance 48 in
+0.05s, all-kinds Mystery 173 in 0.06s; series Sport had under 12 in the
+seed and took the walk's 1.25s as before.
+
+**Read.** The reading tick blocked twice over. Measured on a copy with
+nothing on disk but the seed: the first answer took **7.84s** - the
+six-site browse, the probe and the classification budget all inside
+the request - and every pull after it blocked `CLASSIFY_KNOWN_BUDGET_S`
+(1.5s) to hand over about one fresh row, nineteen rows at 22.8s,
+because the verdicts arrive at MangaDex's pace whatever the request
+does. Now `server._genre` draws what the disk has (`reading_genre_
+cached`) and starts `reading_genre_sites` on a thread
+(`_start_reading_sweep`, one per genre, not again inside
+`RESWEEP_GAP_S`), and every pull reads `discover.reading_genre_now` -
+the last browse's rows against the verdicts in memory, no network, no
+wait - with `pending` held at 1 while the sweep runs and at the
+sweep's own count after. Measured after: the empty copy answers in
+0.01s, its pulls in 0-10ms, and the browse's thirteen Romance rows land
+at +4.2s, the rest as they are classified; the Manga page on a copy of
+his data 35 rows at 0.02s and six more at +5.7s with every pull under
+10ms. What did not change: MangaDex's pace (`_MIN_REQUEST_GAP` 0.25s,
+four a second), which is the ceiling on how fast a title this machine
+has never seen gets its verdict.
+
+**Measured again on his real data the same morning** - the copies above
+were of the Claude package's stale shadow (rules/testing.md, "The
+desktop app's %APPDATA% is not his"): his real `reading_meta.json` holds
+**1,828** verdicts, not 936, and his real `discover_cache.json` 3,884
+rows, not 652. `helpers/reading_seed` is regenerated from the real file
+(`make_reading_seed.py`, 1,828 titles, 194KB), and on a true copy of
+his data the Manga page's Romance tick answers **120 rows in 0.04s**
+from the caches alone, no sweep needed. The video ticks are unchanged by
+this (the index and its seed do not read his data).
+
+**On the frozen build (1.10.285, a true copy of his data, 2578x1398)**:
+the Anime page's Romance tick photographed 0.4s after the click reads
+"32 of 92" with two full rows of Romance cards and their covers, the
+same picture at 1.5s and 10s (the walk still warms the index behind it,
+but the page already has more than GENRE_WANT and stops pulling); no
+`web route slow` line for `/api/genre`, where his own log the night
+before had 2.0s. The Manga page's Romance tick at 0.4s reads "121 of
+226" with the first row's covers in, no sweep started (the caches
+answered 120 rows and nothing was unknown), the second row's covers by
+12s. Screenshots `r_04/r_15/r_100.png` and `m_04/m_120.png` in the
+session's scratchpad.
+
+## A cast chip's page is fetched before the chip is pressed (8 September 2026)
+
+His follow-up the same morning: *"also the genre and cast pages are
+loading slow"*. Measured on the frozen build from the Breaking Bad
+details page: the **genre** chip drew `route=genre?name=Crime ms=78,
+rows=200` (his own log of the night before: 1,458ms for Romance and
+12,630ms for Mystery on 1.10.283) - the catalogue index above is what
+answers it, nothing more was needed. The **cast** chip drew `route=cast
+?name=Bryan Cranston ms=665, rows=60` after a page reading only
+"looking..." (photographed at 0.5s): `people.filmography` paid TMDB's
+`search/person` and `combined_credits` serially on the click (0.1-0.6s
+each here, in-process 0.47-0.85s per name), and the in-memory cache died
+with the session. Now `details._fill_cast_buttons` hands its chips'
+names to `people.prefetch` as the page opens (lookup_pool, one job a
+name, `_INFLIGHT` so never twice), and every filmography fetched is
+kept in `people_cache.json` for `_DISK_TTL_S` (a week; 120 names at
+most). Harnessed (`h_people.py`): three chips in memory 0.80s after the
+page opened (6 requests), the click 0.003s and no request, the next
+session's answer 0.008s from disk, an expired entry fetched again.
+Discover's and the search page's faces are not prefetched (twenty a
+page, two requests each); their click still costs the two requests.
+On the frozen build, from the "Together" details page: `people:
+prefetched Dave Franco: 59 titles` 1.1s after the page opened, and the
+chip's press drew `route=cast?name=Dave Franco, ms=12, rows=59`: at
+0.5s every card's title, year and rating is on screen with the cover
+boxes still empty (`cast2_05.png`), at 2s every cover of the first two
+rows is in (`cast2_20.png`) - the pictures are TMDB's CDN through the
+proxy and were never the route's wait. `people_cache.json` 57KB on disk
+after it.

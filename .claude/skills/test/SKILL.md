@@ -112,3 +112,17 @@ Two traps it already carries, both measured 3 September 2026:
     [ ] every regression found -> fix -> build -> read back -> photograph
     [ ] new log lines read after the run; environment ruled out first
     [ ] say what was NOT exercised, and why
+
+## Copying his data, and the seeds (8 September 2026)
+
+- `copy_real_data.py <dest-root>` copies `%APPDATA%\Atomic` to
+  `<dest-root>\Atomic` with a robocopy spawned **outside** the Claude
+  desktop app's package. From inside it, `%APPDATA%` is virtualized and a
+  copytree copies a stale shadow (`rules/testing.md`, "The desktop app's
+  %APPDATA% is not his"). `--check` compares the two views and exits 1
+  when they differ; run it before trusting a read of his files here.
+- `make_reading_seed.py <reading_meta.json>` regenerates
+  `helpers/reading_seed.py` from a real copy of his verdicts;
+  `make_catalog_seed.py` regenerates `helpers/catalog_seed.py` from
+  Cinemeta's first ten pages of each video kind.
+- `d.py` is the batch driver (its docstring lists the steps).

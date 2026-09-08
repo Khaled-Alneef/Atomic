@@ -20,9 +20,10 @@ name, all read as an empty page saying why, never an exception into the
 server.
 """
 import threading
+import time
 import urllib.parse
 
-from . import artwork, title_match
+from . import artwork, logs, storage, title_match
 
 # Poster width for a grid tile. artwork.POSTER_SIZE_PATH is w500 for the
 # tracker's own cards; w342 is the next size down and still twice what a
@@ -152,6 +153,7 @@ def filmography(name):
     if not key:
         return [], "no name"
     with _LOCK:
+        _load_disk()
         if key in _CACHE:
             return _CACHE[key], ""
     if not artwork.available():
@@ -165,7 +167,98 @@ def filmography(name):
         _CACHE_ORDER.append(key)
         while len(_CACHE_ORDER) > _CACHE_LIMIT:
             _CACHE.pop(_CACHE_ORDER.pop(0), None)
+        if rows:
+            _DISK[key] = {"at": time.time(), "rows": rows}
+            while len(_DISK) > _DISK_LIMIT:
+                del _DISK[min(_DISK, key=lambda k: _DISK[k].get("at", 0))]
+            _save_disk()
     return rows, ("" if rows else "nothing under this name")
+
+
+# **The click on a cast chip used to pay TMDB twice, serially, while
+# the page said "looking..."** (8 September 2026, the owner: "the genre
+# and cast pages are loading slow"). Measured on the frozen build:
+# `route drawn, route=cast?name=Bryan Cranston, ms=665` - two requests
+# of 0.1-0.6s each on this line, more on his - and the in-memory cache
+# above died with the session. Two answers: the details page hands its
+# chips' names to `prefetch` as it opens, so the filmographies are in
+# memory before a chip can be pressed (lookup_pool, one job a name,
+# never twice), and every filmography fetched is kept in
+# people_cache.json for _DISK_TTL_S so the next session does not fetch
+# it again. A filmography changes by a credit or two a month, which is
+# why a week is safe.
+_DISK_FILE = "people_cache.json"
+_DISK_TTL_S = 7 * 24 * 3600
+_DISK_LIMIT = 120
+_DISK = {}
+_DISK_LOADED = False
+_INFLIGHT = set()
+
+
+def _load_disk():
+    """Under _LOCK. The on-disk filmographies, once per session."""
+    global _DISK_LOADED
+    if _DISK_LOADED:
+        return
+    _DISK_LOADED = True
+    try:
+        saved = storage.load(_DISK_FILE, {}) or {}
+    except Exception:
+        saved = {}
+    now = time.time()
+    for key, entry in (saved.items() if isinstance(saved, dict) else ()):
+        try:
+            at = float(entry.get("at") or 0)
+            rows = entry.get("rows")
+        except Exception:
+            continue
+        if now - at < _DISK_TTL_S and isinstance(rows, list) and rows:
+            _DISK[str(key)] = {"at": at, "rows": rows}
+            if str(key) not in _CACHE:
+                _CACHE[str(key)] = rows
+                _CACHE_ORDER.append(str(key))
+
+
+def _save_disk():
+    """Under _LOCK. Never raises - a lost cache is a slower next visit."""
+    try:
+        storage.save(_DISK_FILE, dict(_DISK))
+    except Exception:
+        logs.exception("people: could not write the filmography cache")
+
+
+def prefetch(names):
+    """Fetch these names' filmographies behind the page that shows their
+    chips, so the chip's click answers from memory. Never raises."""
+    try:
+        from . import lookup_pool
+    except Exception:
+        return
+    for name in names or ():
+        key = str(name or "").strip().lower()
+        if not key:
+            continue
+        with _LOCK:
+            _load_disk()
+            if key in _CACHE or key in _INFLIGHT:
+                continue
+            _INFLIGHT.add(key)
+
+        def _warm(k=key, n=str(name)):
+            try:
+                rows, _note = filmography(n)
+                logs.info(f"people: prefetched {n}: {len(rows)} titles")
+            except Exception:
+                logs.exception(f"people: prefetch failed for {n}")
+            finally:
+                with _LOCK:
+                    _INFLIGHT.discard(k)
+
+        try:
+            lookup_pool.submit(_warm)
+        except Exception:
+            with _LOCK:
+                _INFLIGHT.discard(key)
 
 
 def page(name, skip, limit):

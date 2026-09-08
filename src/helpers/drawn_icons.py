@@ -105,7 +105,9 @@ def paint_waveform(painter, rect: QRectF, colour=None):
     `rect`'s width - his "stretch its width a bit, it seems truncated"."""
     ink = QColor(colour or theme.TEXT)
     size = min(rect.width(), rect.height())
-    pen = QPen(ink, size * 0.11)
+    # Thinner than the first cut (0.11 of the box) at his word, 7
+    # September 2026: "make the lines in the symbol a little thinner".
+    pen = QPen(ink, size * 0.075)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)

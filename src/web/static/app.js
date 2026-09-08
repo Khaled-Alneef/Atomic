@@ -797,6 +797,13 @@ function askForCover(img, row, width) {
 
 function cardFor(row) {
   const card = el('div', 'card' + (row.kind === 'person' ? ' person' : ''));
+  // Keyed like a grid card (gridCard), so a section arriving late can
+  // find a title already drawn elsewhere - mergeSections takes an anime
+  // out of Series by these. Measured on the frozen build, 7 September
+  // 2026: with no key on a strip card the removal found nothing and
+  // Attack on Titan stayed under Series beside its Anime card.
+  card.dataset.pid = row.id || '';
+  card.dataset.ptitle = (row.title || '').trim().toLowerCase();
   // The frost is part of the ring, so a card without one is a plain
   // cover - a Discover result has nothing to resume.
   const art = el('div', row.resume ? 'art' : 'art plain');
@@ -851,6 +858,56 @@ function cardFor(row) {
   });
   return markProgress(card, row);
 }
+
+/* **A countdown that keeps counting.** The owner, 7 September 2026, with
+   a banner reading "Countdown: any moment now" long after the hour: the
+   text was written once per draw from the stored time. The banner's
+   schedule line and every schedule row now carry the time itself, and
+   this rewrites them every COUNTDOWN_TICK_MS from the clock - the same
+   words the server uses (release_schedule.format_countdown and
+   server._when_words). A time that has passed reads "any moment now"
+   until the server's own refresh (server._refresh_stale_schedules)
+   brings the next one and the page redraws. */
+const COUNTDOWN_TICK_MS = 30000;
+function formatCountdown(at, style) {
+  const when = Date.parse(at);
+  if (isNaN(when)) return '';
+  let seconds = Math.floor((when - Date.now()) / 1000);
+  if (seconds <= 0) return style === 'short' ? 'now' : 'any moment now';
+  if (style === 'short') {
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ' + Math.floor((seconds % 3600) / 60) + 'm';
+    return Math.floor(seconds / 86400) + 'd ' + Math.floor((seconds % 86400) / 3600) + 'h';
+  }
+  seconds += 30;
+  const days = Math.floor(seconds / 86400); seconds -= days * 86400;
+  const hours = Math.floor(seconds / 3600); seconds -= hours * 3600;
+  const minutes = Math.floor(seconds / 60);
+  if (days) return days + 'd ' + hours + 'h ' + minutes + 'm';
+  if (hours) return hours + 'h ' + minutes + 'm';
+  return minutes + 'm';
+}
+function markCountdown(box, at) {
+  if (!at) return;
+  box.querySelectorAll('p').forEach(function (p) {
+    const text = p.textContent || '';
+    const idx = text.indexOf('Countdown:');
+    if (idx < 0) return;
+    p.dataset.countdownAt = at;
+    p.dataset.countdownPrefix = text.slice(0, idx);
+    p.dataset.countdownStyle = 'long';
+  });
+}
+function tickCountdowns() {
+  document.querySelectorAll('[data-countdown-at]').forEach(function (node) {
+    const words = formatCountdown(node.dataset.countdownAt, node.dataset.countdownStyle || 'long');
+    if (!words) return;
+    const text = (node.dataset.countdownPrefix || '')
+                 + (node.dataset.countdownStyle === 'short' ? '' : 'Countdown: ') + words;
+    if (node.textContent !== text) node.textContent = text;
+  });
+}
+setInterval(tickCountdowns, COUNTDOWN_TICK_MS);
 
 function heroFor(hero) {
   const box = el('div', 'hero' + (hero.poster ? ' poster' : ''));
@@ -925,6 +982,7 @@ function heroFor(hero) {
   const metaLines = Array.isArray(hero.meta) ? hero.meta
                     : (hero.meta ? [hero.meta] : []);
   writeLines((hero.bullets || []).concat(metaLines));
+  markCountdown(bullets, hero.next_at);
   text.appendChild(bullets);
   if (hero.poster && hero.title) {
     // Standing in with the cover, so the wide still and the title
@@ -1194,7 +1252,12 @@ function mergeSections(parent, sections) {
   sections.forEach(function (section) {
     if (!section.rows || !section.rows.length || !section.key) return;
     if (parent.querySelector('.row[data-skey="' + section.key + '"]')) return;
-    const holder = document.createDocumentFragment();
+    // A real element, not a fragment: sectionsInto reads its parent's
+    // dataset (the card style), and a fragment has none - the pull died
+    // on that silently on the frozen build, 7 September 2026, leaving
+    // "still searching reading" on screen with the section already in.
+    const holder = el('div');
+    holder.dataset.cardstyle = parent.dataset.cardstyle || '';
     sectionsInto(holder, [section]);
     const block = holder.firstChild;
     if (!block) return;
@@ -1205,6 +1268,21 @@ function mergeSections(parent, sections) {
     });
     parent.insertBefore(block, before);
     added += section.rows.length;
+    if (section.key === 'anime') {
+      // The same title must not stay under Series (server._search does
+      // this when both are in; here Anime came after Series was drawn).
+      const series = parent.querySelector('.row[data-skey="series"]');
+      if (series) {
+        section.rows.forEach(function (r) {
+          const title = (r.title || '').trim().toLowerCase();
+          series.querySelectorAll('.card').forEach(function (card) {
+            if ((r.id && card.dataset.pid === r.id)
+                || (title && card.dataset.ptitle === title)) card.remove();
+          });
+        });
+        if (!series.querySelector('.card')) series.remove();
+      }
+    }
   });
   return added;
 }
@@ -3044,7 +3122,9 @@ function scheduleInto(parent, data) {
       if (row.slot || row.countdown) {
         const when = el('div', 'schedwhen');
         when.appendChild(el('div', null, row.slot || ''));
-        when.appendChild(el('div', 'schedleft', row.countdown || ''));
+        const left = el('div', 'schedleft', row.countdown || '');
+        if (row.at) { left.dataset.countdownAt = row.at; left.dataset.countdownStyle = 'short'; }
+        when.appendChild(left);
         line.appendChild(when);
       }
       line.addEventListener('click', function () {
@@ -3053,6 +3133,7 @@ function scheduleInto(parent, data) {
         // "no matched title" when they did not.
         tellHost({ action: 'open', kind: 'title', id: row.id || '',
                    title: row.title || '', type: row.type || '',
+                   titles: row.titles || [],
                    url: row.url || '',
                    poster: row.art || row.cover || '', imdb: row.imdb || '' });
       });
@@ -4044,6 +4125,7 @@ const GENRE_WANT = 30;
 const GENRE_PULL_BATCHES = 4;
 const GENRE_PULL_BUDGET_MS = 14000;
 const GENRE_PENDING_BUDGET_MS = 20000;
+const GENRE_PENDING_POLL_MS = 700;
 
 function pullGenre(host, name) {
   const data = host._filterData || {};
@@ -4162,7 +4244,11 @@ function pullGenre(host, name) {
             && (pending || ((found.rows || []).length
                             && batches < GENRE_PULL_BATCHES && next > skip))) {
           say('looking for more ' + name + '...');
-          step(Math.max(next, skip));
+          // A kind still running on the server answers "not yet" in a
+          // few milliseconds; asking again at once was a busy loop.
+          const later = Math.max(next, skip);
+          if (pending && !added) setTimeout(function () { step(later); }, GENRE_PENDING_POLL_MS);
+          else step(later);
           return;
         }
         say('');

@@ -803,3 +803,51 @@ the OEM keys, so "=" is virtual key 0xBB and "-" 0xBD (`d.py keyvk`);
 and a Ctrl+wheel is posted as WM_MOUSEWHEEL with MK_CONTROL to the
 window under the pointer (`ctrlwheelto`), since SendInput's wheel goes
 to the keyboard's window.
+
+## Six more, the same night (7 September 2026)
+
+- **Back from a search lands on Discover.** The results are a route
+  inside Discover's own view, so history back stepped over them to the
+  page before (Series, his report). `WebDiscoverPage.back_within`
+  shows `#discover` and `main.go_back` asks the page first - `go_back`
+  itself, not `navigate_back`: the page's Alt+Left (app.js auxclick for
+  button 4, `web_pages._AS_QT`) reaches the history shortcut directly,
+  which is why the first cut, one level up, drew Home on the frozen
+  build.
+- **"Hide them from the Home page too" hides.** The setting was read
+  by the sidebar alone; `server._home` now drops the hidden pages'
+  rows from Watching/Reading (`_home_key`: series:cat_anime,
+  manga:cat_manga, ...) and the Games / Quick Apps / Websites blocks by
+  their keys. Harnessed: anime rows and the Games block gone with the
+  box ticked, back with it clear.
+- **A title under Anime is not under Series too.** `_search` drops the
+  Anime section's ids from Series when both are in, and app.js
+  `mergeSections` removes those cards when Anime arrives late (AniList
+  refusing puts it 5s behind). Harnessed on "attack on titan": Anime
+  holds it, Series holds only the spin-offs.
+- **The catalogue filter keeps walking** past a kind the server left
+  running (`pullGenre` polls every `GENRE_PENDING_POLL_MS` while
+  `pending`; the late rows carry the reached cursor - see
+  integrations.md).
+- **The waveform is thinner** (0.075 of the box, from 0.11) and the
+  caption buttons' glyphs are 7pt, from 9 (`window_chrome._window_button`).
+- **Countdowns tick.** The banner's schedule line and every schedule
+  row carry the time (`next_at`, `at`); app.js `tickCountdowns`
+  rewrites them every 30s with the server's own words
+  (`formatCountdown`: "2d 5h 23m" / "any moment now"; the schedule
+  rows' short form "3h 4m" / "now"), and a passed time is looked up
+  again behind the Home draw (integrations.md).
+
+Photographed on the frozen build (1.10.284, a copy of his data): Home
+with Games and Quick Apps hidden and the caption glyphs at 7pt; a
+Schedule click on "Swallowed Star" at "Looking this title up..." 2.5s
+in and the Season 5 list by 9s; the Anime page's Romance tick reading
+"2 of 61 · looking for more" at 3s and "29 of 88" with a full row at
+25s; "attack on titan" answering in 1.5s with the late sections logged
+at +2.8s and +6.0s and back landing on Discover; the schedule's
+countdowns "4h 0m" -> "3h 59m" and "1d 0h" -> "23h 59m" across 66s with
+no redraw between. Two things the first frozen pass found: a strip card
+carried no key, so a late Anime section could not take Attack on Titan
+out of Series (cardFor now sets `pid`/`ptitle` like gridCard), and the
+server module had never imported its logger, so the schedule worker
+raised after writing - see integrations.md for what it wrote.

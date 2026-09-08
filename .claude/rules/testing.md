@@ -257,7 +257,9 @@ and read the archive back for the absence.
 ### Copies go out, never back
 
 Every harness copies `%APPDATA%\Atomic` to a temp dir and deletes it.
-Nothing ever copies a temp dir back: the day after a long pass the live
+(**Superseded 8 September 2026** - what follows was a shadow of the
+Claude package's virtualized AppData, not a copy back; see "The desktop
+app's %APPDATA% is not his" below.) Nothing ever copies a temp dir back: the day after a long pass the live
 `discover_cache.json` was a day-old 1053-row snapshot while its `.bak`
 held the newer 2667 rows, which only a copy with a preserved
 timestamp can produce. If a harness must touch his files it says so
@@ -420,3 +422,46 @@ residual and rejects frames whose best match is still three times worse
 than the median glide frame - before that, every run reported a
 "reversal" at 0.27s that was the page slide. And the control was run:
 1.10.268 measured the same three pages with the same driver.
+
+## The desktop app's %APPDATA% is not his (8 September 2026)
+
+Found while chasing a data-loss signature that was not one: every `.bak`
+in his data directory was newer than the file beside it, `history.json`
+held a 4 September version with a 4 September timestamp, and NTFS's
+ChangeTime - which no program can set - said the record had not been
+touched since. The app's saves were "landing nowhere". They were landing
+fine. **The Claude desktop app is an MSIX package
+(`Claude_pzs8sxrjxfjjc`), and every process it spawns runs inside that
+package with AppData virtualization**: a write to `%APPDATA%\Atomic`
+from a session's shell, Python, or a rig-launched Atomic.exe goes to
+`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Atomic`
+as a copy-on-write shadow, and from then on every read of that path from
+inside answers the shadow while his real file goes on changing outside.
+The 1 September `move_entry` accident and the 6 September "day-old
+discover_cache snapshot beside a newer .bak" (above, "Copies go out,
+never back") were both this - the writes went into the shadow, and the
+shadow is what every copytree since has copied.
+
+Measured that morning, inside against outside (a `dir` run through
+`Invoke-CimMethod Win32_Process Create`, which starts a process outside
+the package): `history.json` 28,531 bytes / 4 Sep against 21,386 / that
+morning; `discover_cache.json` 271,381 (652 rows) against 1,655,606
+(3,884 rows); `reading_meta.json` 936 verdicts against 1,828 - so the 6
+September reading seed carried half of what he had. Twenty-eight
+entries in the shadow, every one older than its real counterpart.
+
+Rules from it:
+
+- **Copy his data with `copy_real_data.py`** (test skill), which runs
+  the robocopy outside the package, never with a copytree from in
+  here. `--check` compares the two views and refuses when they differ.
+- **A file that will not change from in here is a shadow**, not a
+  locked file: read its NTFS ChangeTime, then look in LocalCache.
+- The shadow itself is stale junk under the Claude package's own cache.
+  Removing `LocalCache\Roaming\Atomic` from outside the package makes
+  the inside view truthful again until the next stray write; it is the
+  owner's call and his files are not involved.
+- A stray write to `%APPDATA%\Atomic` from in here no longer reaches
+  his files - which is the one mercy in this - but it poisons every
+  later read. Rule 5 stands: redirect `storage.DATA_DIR`, `backend.
+  DATA_DIR` and `server.DATA` after every import.
