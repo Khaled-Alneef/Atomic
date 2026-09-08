@@ -2793,6 +2793,21 @@ function glideStep(now) {
    finger's stream: it arrives alone, or at 30ms+ from the last notch. */
 const FINGER_GAP_MS = 40;
 let lastWheelAt = 0, lastWasFinger = false;
+/* The test itself, so the sideways rows apply exactly the same one -
+   the owner, 8 September 2026: "fix the horizontal scrolling in the
+   app, when I use the touchpad in the laptop it does not scroll
+   properly". The vertical handler learned to stand aside for a finger
+   on 5 September and the strip handler never did, so a two-finger
+   sideways swipe streamed 60-120 events a second into sideScroller,
+   each one re-aiming a 200ms ease a few pixels further on - a row that
+   crawls behind the finger and keeps moving after it stops. One
+   device, one answer: whichever axis it arrives on. */
+function wheelIsFinger(delta, now) {
+  const finger = Math.abs(delta) < NOTCH_MIN_PX
+                 || (lastWasFinger && now - lastWheelAt < FINGER_GAP_MS);
+  lastWheelAt = now; lastWasFinger = finger;
+  return finger;
+}
 /* **What the wheel asked for, and what the page did outside a glide.**
    The owner's laptop log of 6 September 2026 (1.10.271): every glide
    line said moved=0, and yet the page went the other way for the first
@@ -2825,9 +2840,7 @@ addEventListener('scroll', function () {
 addEventListener('wheel', function (e) {
   if (e.ctrlKey || e.shiftKey || e.deltaMode !== 0) return;
   const now = performance.now();
-  const finger = Math.abs(e.deltaY) < NOTCH_MIN_PX
-                 || (lastWasFinger && now - lastWheelAt < FINGER_GAP_MS);
-  lastWheelAt = now; lastWasFinger = finger;
+  const finger = wheelIsFinger(e.deltaY, now);
   wheelTrail.push({ t: now, d: Math.round(e.deltaY), f: finger ? 1 : 0,
                     top: Math.round(page.scrollTop) });
   if (wheelTrail.length > 12) wheelTrail.shift();
@@ -4534,8 +4547,20 @@ page.addEventListener('wheel', function (e) {
   const sideways = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
   if (!strip || !sideways) return;         // the page's wheel is the browser's
   if (strip.scrollWidth <= strip.clientWidth + 1) return;
+  /* **A finger scrolls the row itself; the ease is for a notch.**
+     sideScroller eases 6-12 frames toward a target, which is exactly
+     what a mouse's one big jump needs and exactly wrong for a stream of
+     small ones - a touchpad's swipe re-aimed it every ~10ms and the row
+     lagged the finger and drifted after it. `.strip` is `overflow-x:
+     auto`, so simply not taking the event hands the row to Chromium's
+     own compositor - the same answer the vertical glide has taken since
+     5 September. A line-mode wheel (deltaMode) is left to the browser
+     for the same reason it is there. */
+  if (e.deltaMode !== 0) return;
+  const delta = e.shiftKey ? e.deltaY : e.deltaX;
+  if (wheelIsFinger(delta, performance.now())) return;
   if (!strip._side) strip._side = sideScroller(strip);
-  if (strip._side(e.shiftKey ? e.deltaY : e.deltaX)) e.preventDefault();
+  if (strip._side(delta)) e.preventDefault();
 }, { passive: false });
 
 /* ---- the scrollbar -------------------------------------------------

@@ -34,8 +34,8 @@ in `%APPDATA%\Atomic` that 1.10 wrote.
 
 | Item | Description |
 |---|---|
-| `Atomic.zip` (release asset) | The application. **125,502,375 bytes**. SHA-256 `7c58bf90442534cd07b7acee6bf5457903f185c9e47bc089ea1f8ee52a843e38` |
-| `Atomic.exe` (inside that zip) | **126,279,591 bytes**. SHA-256 `ed1c84abc670b54ec7d9a692c36b32a4a834e57a4e127bd08c452e7bb0dc181b` |
+| `Atomic.zip` (release asset) | The application. **125,504,164 bytes**. SHA-256 `0c15667c8609a00b7cacb21e4fb277facfc47ac36cf4c6d89473ca6d7c9eb320` (second cut - see below) |
+| `Atomic.exe` (inside that zip) | **126,281,547 bytes**. SHA-256 `c8a268ea1c46935bbabbbc15ec2f9351ccd7eb045343cd4048b9f0abd0fb8137` |
 | `Atomic.exe` (committed at `v2.0`) | The **bridge installer**, 11,101,411 bytes. SHA-256 `e14661e2dbcc4cf9370a216ac9e842ed17bdf644284c2265d8cc1d26bb3d4545` (second cut - see below) |
 | `Atomic.zip` (committed at `v2.0`) | The same bridge installer, zipped, for a zip-preferring updater |
 | `src/` | Full source, **125,204 Python lines** across 126 modules, plus 5,748 lines of served static UI |
@@ -59,6 +59,36 @@ its `Atomic.exe`, so that install had to be repaired by hand from the
 release zip. The application itself was never involved and no data was
 touched. `v2.0` was moved to the second cut; §11 records how the
 verification missed it and what now stops it.
+
+**The application was cut twice as well, and the tag moved again.**
+The first cut - 126,279,591 bytes, SHA-256 `ed1c84ab...` inside a
+125,502,375-byte zip - shipped two defects the owner met within the
+hour, both fixed in the second:
+
+- **Continue from Home could ask for an episode that does not exist.**
+  `_starting_episode` stepped past a season's last episode on
+  `_season_episode_count`'s guess when Cinemeta's map was not yet on
+  disk. On his Reacher (progress S01E08 verified, `latest_available`
+  S04E05, the details page never opened on that machine) the count
+  answered **12** and Continue asked for **S01E09**, whose honest
+  answer is "No playable source was found for this episode". Opening
+  the episode list wrote the map, and the same press then played
+  S02E01 - which is exactly the asymmetry he reported. `_change_episode`
+  had been taught this rule on 6 September; `_starting_episode` was the
+  caller that was missed, and now holds the start ("Checking the
+  season's episode list...") rather than guessing.
+- **A touchpad could not scroll a sideways row.** The vertical glide
+  has stood aside for a finger since 5 September; the strip handler
+  never did, so a two-finger swipe streamed 60-120 events a second into
+  an ease built for one mouse notch. Measured against the shipped
+  app.js, 40 finger events: **40 of 40 taken before, 0 of 40 after**,
+  the mouse notch still eased in both, the vertical case identical.
+
+Neither the bridge installer nor the delivery route changed with this
+cut. **An install already running the first cut is not offered this
+one** - the version number is the same by the owner's decision, so that
+machine re-downloads the zip once; every install on 1.10 or older gets
+the second cut directly.
 
 ### Why the application is not committed at the tag
 
@@ -284,7 +314,25 @@ both accessors and the `setup_shown_for` key; `helpers.whats_new` holds
 `1.10.285`**.
 
 **Defender** — `MpCmdRun -Scan -ScanType 3` on the release exe, service
-confirmed Running: *"found no threats"*, exit 0.
+confirmed Running: *"found no threats"*, exit 0. Run again on the second
+cut, same verdict.
+
+**The second cut's own proof.** Fifteen checks on the real unbound
+methods (`h_step.py`): cold, Continue waits for the map, says so and
+looks nothing up; the map arriving plays S02E01; Cinemeta answering
+with nothing falls back to the guess rather than hanging; warm, S02E01
+at once; `latest_available` naming the season proves it without the
+map; caught up on the last episode out stays there; an explicit episode
+from the list is untouched; an unverified number still starts at the
+season's first. On the frozen build against a copy of his data with the
+map deleted, Continue **played S02E01 with Arabic subtitles 14 s after
+the press** (`streams Reacher S2E1: 76 rows`). The sideways scroll was
+A/B'd against the shipped app.js in a real browser over the app's own
+server. **Not measured**: a real precision touchpad (this machine has
+none - the fix is proven on synthetic wheel events through the real
+handler), and the *shipped* build could not be forced into the cold-map
+state on the frozen exe here, because Home rewrites the map within ten
+seconds of launch on this machine.
 
 **Frozen build driven from outside**, against a copy of the owner's real
 data (`copy_real_data.py`, 6,305 files) edited to look like a 1.10

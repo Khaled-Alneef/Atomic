@@ -2670,6 +2670,10 @@ class PlayerPage(GlassPage):
         # written the file already; reading it costs milliseconds.
         self._meta_aired = self._aired_from_disk()
         self._rolled_from = None
+        # Set before _starting_episode, which is what raises it: the
+        # resume wants an episode nothing yet proves exists, so the
+        # start waits for the map instead of guessing (see below).
+        self._start_waiting_for_map = False
         self.season, self.episode = self._starting_episode(season, episode)
         self._given_streams = list(streams) if streams else None
 
@@ -3108,7 +3112,32 @@ class PlayerPage(GlassPage):
         if self.entry.get("progress_verified") and stored_episode:
             season = stored_season or 1
             wanted = stored_episode + 1
-            last = max(1, self._season_episode_count(season))
+            # **Forward only on a known season end** - the rule
+            # _change_episode has followed since 6 September 2026, and
+            # this is the caller that was missed. _season_episode_count
+            # answers DEFAULT_SEASON_EPISODES while nothing but a guess
+            # is available, so a resume after a season's last episode
+            # asked for an episode that does not exist. Measured 8
+            # September 2026 on his Reacher - progress S01E08 verified,
+            # latest_available S04E05, and the meta file not yet written
+            # on that machine because the details page had never been
+            # opened there: the count came back **12**, Continue asked
+            # for **S01E09**, and the honest answer to that is "No
+            # playable source was found for this episode", which is what
+            # he photographed. The same title played from the episode
+            # list because opening it writes the map, after which the
+            # same press asks for S02E01.
+            end = self._known_season_end(season)
+            if end is None and not getattr(self, "_meta_answered", False):
+                # Hold rather than guess: _begin_episode says so on
+                # screen and _on_meta comes back through here with the
+                # map in hand. The stored episode is the placeholder
+                # because it is the one episode known to exist - nothing
+                # is looked up for it.
+                self._start_waiting_for_map = True
+                return season, stored_episode
+            last = max(1, end if end is not None
+                       else self._season_episode_count(season))
             if wanted > last:
                 # **Into the next season when the map says there is
                 # one.** This used to clamp and never roll, on the
@@ -3501,6 +3530,7 @@ class PlayerPage(GlassPage):
             imdb_id = self.entry.get("imdb_id")
         if not imdb_id:
             self._meta_answered = True      # nothing to ask; the guesses stand
+            self._say_meta_answered([])
             return
         try:
             from helpers import stremio
@@ -3523,8 +3553,23 @@ class PlayerPage(GlassPage):
         if meta and not self._closing:
             self._work.meta_facts.emit({"genres": meta.get("genres") or meta.get("genre") or [],
                                         "country": meta.get("country") or ""})
-            if meta.get("videos"):
-                self._work.meta_ready.emit(list(meta.get("videos") or []))
+        # **Always**, empty included. It used to emit only when there
+        # were videos, which is fine for bounding an episode number and
+        # not fine for releasing a start that is waiting for this answer
+        # (see _on_meta): a title Cinemeta has no list for would have
+        # left the player on "Checking the season's episode list..."
+        # with nothing on its way.
+        self._say_meta_answered(list((meta or {}).get("videos") or []))
+
+    def _say_meta_answered(self, videos):
+        """Hand the episode list - or the absence of one - to the UI
+        thread. A signal, not a direct call: this runs on the worker."""
+        if self._closing:
+            return
+        try:
+            self._work.meta_ready.emit(list(videos or []))
+        except RuntimeError:
+            pass                    # the page went while the request ran
 
     def _on_meta_facts(self, facts):
         """Cinemeta's genres/country landed: decide the audio language
@@ -3597,17 +3642,55 @@ class PlayerPage(GlassPage):
 
     def _on_meta(self, videos):
         """Fold Cinemeta's list into {season: highest aired episode} and
-        correct the current request if it points past what exists."""
+        correct the current request if it points past what exists.
+
+        **Called even when the answer is empty**, because a start held
+        for the map (see _starting_episode) has to be released either
+        way - a title Cinemeta cannot answer for must fall back to the
+        guess rather than sit on "Checking the season's episode list..."
+        for ever."""
         if self._closing:
             return
         aired = self._fold_aired(videos)
+        if aired:
+            self._meta_aired = aired
+            self._meta_videos = [v for v in videos if isinstance(v, dict)]
+        started = self._resume_deferred_start()
         if not aired:
             return
-        self._meta_aired = aired
-        self._meta_videos = [v for v in videos if isinstance(v, dict)]
-        self._apply_meta_bounds()
+        if not started:
+            # The deferred start has just decided with this same map;
+            # bounding it again would only repeat the work.
+            self._apply_meta_bounds()
         self._fill_episode_bar()
         self._sync_episode_buttons()
+
+    def _resume_deferred_start(self) -> bool:
+        """Release a start that was waiting for the episode map, and say
+        whether it began anything.
+
+        The decision is `_starting_episode` again, with whatever is now
+        known: the map if it landed, `latest_available` if it names this
+        season, and the old guess only once the map has answered and had
+        nothing (`_meta_answered`), which is the same fallback
+        _change_episode takes."""
+        if not getattr(self, "_start_waiting_for_map", False):
+            return False
+        self._start_waiting_for_map = False
+        self.season, self.episode = self._starting_episode(None, None)
+        # _starting_episode cannot ask to wait twice: _meta_answered is
+        # set by the worker before it emits, so the branch above is
+        # closed by the time this runs. Belt and braces, because a start
+        # that never begins is a player stuck on a status line.
+        self._start_waiting_for_map = False
+        self._panel_season = self.season
+        self._given_streams = None
+        self._begin_episode()
+        # The same sentence _start says when it moves a start itself -
+        # one implementation, so the deferred path cannot drift away
+        # from the immediate one.
+        self._announce_moved_start()
+        return True
 
     def _apply_meta_bounds(self):
         """If the episode being looked for does not exist, move to the
@@ -4107,11 +4190,17 @@ class PlayerPage(GlassPage):
         self._wake_controls()
         self.setFocus()
         self._begin_episode()
-        # Said out loud, not swallowed: the player was asked for the
-        # episode after the last one watched and that one is not out, so
-        # it is playing something other than what Play meant. Announced
-        # after _begin_episode so it lands over the source lookup rather
-        # than being replaced by it.
+        self._announce_moved_start()
+
+    def _announce_moved_start(self):
+        """Said out loud, not swallowed: the player was asked for the
+        episode after the last one watched and that one is not out, so it
+        is playing something other than what Play meant.
+
+        Called after _begin_episode so it lands over the source lookup
+        rather than being replaced by it - from _start, and from
+        _resume_deferred_start, which is where the decision is made when
+        the start waited for the episode map."""
         if getattr(self, "_clamped_from", None):
             show_toast(self._toast_anchor(),
                        f"Episode {self._clamped_from} Is Not Out Yet - "
@@ -4289,6 +4378,15 @@ class PlayerPage(GlassPage):
     def _begin_episode(self):
         """Everything that has to happen for one episode: find something
         to play, and look for subtitles for it."""
+        if getattr(self, "_start_waiting_for_map", False):
+            # The resume wants the episode after the last one watched
+            # and nothing here proves that episode exists yet - see
+            # _starting_episode. Nothing is looked up until the map
+            # answers; _on_meta comes back to _resume_deferred_start,
+            # which decides and calls this again. The request is already
+            # in flight (spawned in __init__), so this only says so.
+            self._show_status("Checking the season's episode list...")
+            return
         # Bring the torrent session and DHT up while the addon lookup is
         # still running. Bootstrapping costs several seconds and is pure
         # dead time if it only starts once a source has been chosen -
