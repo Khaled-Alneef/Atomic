@@ -4456,7 +4456,6 @@ function moreOnScroll(data, host, grid, stamp) {
   let skip = (typeof data.skip === 'number') ? data.skip
                                              : (data.rows || []).length;
   let busy = false;
-  let dry = 0;
   // **A kind still running on the server is pulled without a scroll.**
   // A video genre answers with series and movies while the anime kind
   // walks its pages (server._genre_video), and says so in `pending`;
@@ -4464,8 +4463,42 @@ function moreOnScroll(data, host, grid, stamp) {
   // page is scrolled to.
   let pending = data.pending || 0;
 
+  /* **A ticked genre pulls its own route, not the medium's.** The
+     owner, 8 September 2026: "the first grid load when applied the
+     filter is good but when I scroll down to load more, it loads super
+     slow". The tick's first screenful comes from the genre route, which
+     answers out of the catalogue index and walks LOCAL_GENRE_PAGES
+     catalogue pages at a time - but the *scroll* went on asking the
+     medium for its next thirty unfiltered rows, of which a sparse genre
+     matches one or two. Measured on his data: the Anime page's Sport
+     tick has 5 rows in the whole first walk, so filling a screen that
+     way costs a Cinemeta page per card. Scrolling now continues the
+     same route the tick opened.
+
+     A cursor and a dry count per route, because the two are different
+     walks: unticking must not resume the genre's cursor on the medium,
+     and a genre that has run out must not stop the medium's own
+     scrolling when the tick comes off. */
+  const skips = {};
+  const dries = {};
+
+  function routeNow() {
+    const ticked = (data.genrechoices && pageFilter.genres.length)
+                   ? pageFilter.genres[0] : '';
+    if (!ticked) return { key: data.browse, medium: data.browse };
+    return { key: 'genre:' + ticked,
+             medium: 'genre:' + ticked + ':'
+                     + (data.genrereading ? '1' : '0') + ':'
+                     + (data.genrekind || 'all') };
+  }
+
   function pull() {
-    if (busy || dry >= 2 || stamp !== token) return;
+    if (busy || stamp !== token) return;
+    const route = routeNow();
+    if (!(route.key in skips)) {
+      skips[route.key] = route.key === data.browse ? skip : 0;
+    }
+    if ((dries[route.key] || 0) >= 2) return;
     if (!pending
         && host.scrollHeight - host.scrollTop - host.clientHeight > MORE_MARGIN_PX) return;
     if (settling()) { setTimeout(pull, SETTLE_MS); return; }
@@ -4474,12 +4507,13 @@ function moreOnScroll(data, host, grid, stamp) {
     // reading branch of _more_browse widens its sweep by it, and a
     // count taken when the page opened goes stale the moment anything
     // else appends (see drawnTitles).
-    fetch('/api/more?medium=' + encodeURIComponent(data.browse) +
-          '&have=' + drawnTitles(host).size + '&skip=' + skip)
+    fetch('/api/more?medium=' + encodeURIComponent(route.medium) +
+          '&have=' + drawnTitles(host).size + '&skip=' + skips[route.key])
       .then(function (r) { return r.json(); })
       .then(function (batch) {
         if (stamp !== token) return;
-        skip = batch.skip || skip;
+        skips[route.key] = batch.skip || skips[route.key];
+        if (route.key === data.browse) skip = skips[route.key];
         pending = batch.pending || 0;
         const seen = drawnTitles(host);
         const fresh = (batch.rows || []).filter(function (r) {
@@ -4493,8 +4527,11 @@ function moreOnScroll(data, host, grid, stamp) {
         // `pending`); a batch with nothing new is only "dry" once that
         // count is zero, or a cold device's page would stop asking two
         // batches into a minute-long classification.
-        if (!fresh.length) { if (!batch.pending) dry += 1; return; }
-        dry = 0;
+        if (!fresh.length) {
+          if (!batch.pending) dries[route.key] = (dries[route.key] || 0) + 1;
+          return;
+        }
+        dries[route.key] = 0;
         const frag = document.createDocumentFragment();
         fresh.forEach(function (r) { frag.appendChild(gridCard(r)); });
         grid.appendChild(frag);
@@ -4504,7 +4541,7 @@ function moreOnScroll(data, host, grid, stamp) {
         applySort(host);
         applyFilter(host);
       })
-      .catch(function () { dry += 1; })
+      .catch(function () { dries[route.key] = (dries[route.key] || 0) + 1; })
       .then(function () {
         busy = false;
         // The batch may not have filled the viewport - ask again rather

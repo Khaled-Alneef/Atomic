@@ -80,7 +80,34 @@ _KIND_TYPES = {"anime": "series", "series": "series", "movie": "movie"}
 # away. Eight pages in parallel is 400 rows for the cost of the slowest
 # page: measured warm, one batch answers what four sequential batches
 # (15/15/25/10 Romance anime, 2.1/1.5/3.1/2.8s) used to.
-LOCAL_GENRE_PAGES = 8
+LOCAL_GENRE_PAGES = 24
+# How many of those pages may be in flight at once. It used to be all of
+# them (max_workers=len(pages)), which is the shape CLAUDE.md's own
+# concurrency rule exists to stop - unbounded per-item connections once
+# saturated the owner's whole home network. Eight keeps this walk's
+# footprint exactly what it was when it read eight pages, while reading
+# three times as many.
+#
+# **Why 24 pages and not 8** - the owner, 8 September 2026: "when filter
+# applied the cards loads slowly". Photographed on the frozen build, the
+# Anime page's Sport tick drew **1 card at +0.5s and 5 at +20s**. The
+# pages are fetched together under one budget, so reading more of them
+# costs concurrency rather than time, and the sparse genres are exactly
+# the ones that need the depth. Measured on his data, one batch from a
+# cold cursor:
+#
+#   Sport / anime         8 pages/8 workers  3.12s   5 rows
+#                        24 pages/8 workers  2.06s  13 rows
+#                        32 pages/12         1.89s  17 rows
+#   Music / anime         8 pages/8 workers  0.84s   2 rows
+#                        24 pages/8 workers  1.34s   9 rows
+#   Documentary / series  8 or 32 pages      0.23s  30 rows  (never walks -
+#                        Cinemeta filters that one server-side)
+#
+# 32 finds more still, and is not taken: the budget below is what keeps
+# a tick inside rule 7's second, and 24 already lands at 1.3-2.1s where
+# 32 measured 1.9-2.4s.
+LOCAL_GENRE_WORKERS = 8
 # ...and how long that walk may take, whatever it has found. Measured 4
 # September 2026 on the owner's connection: Romance walked all four
 # pages and the whole genre answer took **17.8s**, which is nothing like
@@ -618,7 +645,8 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
                     return page, ((more or {}).get("metas") or None)
 
                 with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=len(pages)) as pool:
+                        max_workers=min(LOCAL_GENRE_WORKERS,
+                                        len(pages))) as pool:
                     answered = dict(pool.map(_fetch, pages))
                 for page in pages:
                     got = answered.get(page)
