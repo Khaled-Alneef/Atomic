@@ -34,8 +34,8 @@ in `%APPDATA%\Atomic` that 1.10 wrote.
 
 | Item | Description |
 |---|---|
-| `Atomic.zip` (release asset) | The application. **125,507,299 bytes**. SHA-256 `8c52f152180f314028cfa005bf82427c802397e2b31ddc9c05de66c953624cf2` (fourth cut - see below) |
-| `Atomic.exe` (inside that zip) | **126,285,269 bytes**. SHA-256 `e9e9d57e4a7cec82fc64037c70358b27db0042d3f595cada6b91e13038fd2b3c` |
+| `Atomic.zip` (release asset) | The application. **125,508,591 bytes**. SHA-256 `15b1355dc55d69337b00342164726e6c0150a82e6cd501389829c4678b8596d8` (fifth cut - see below) |
+| `Atomic.exe` (inside that zip) | **126,286,802 bytes**. SHA-256 `ac777868dc45344dfc125a18ebe04b391e55a46375f44a9ba59d8e4b5843b4da` |
 | `Atomic.exe` (committed at `v2.0`) | The **bridge installer**, 11,101,411 bytes. SHA-256 `e14661e2dbcc4cf9370a216ac9e842ed17bdf644284c2265d8cc1d26bb3d4545` (second cut - see below) |
 | `Atomic.zip` (committed at `v2.0`) | The same bridge installer, zipped, for a zip-preferring updater |
 | `src/` | Full source, **125,204 Python lines** across 126 modules, plus 5,748 lines of served static UI |
@@ -59,6 +59,42 @@ its `Atomic.exe`, so that install had to be repaired by hand from the
 release zip. The application itself was never involved and no data was
 touched. `v2.0` was moved to the second cut; §11 records how the
 verification missed it and what now stops it.
+
+**A fifth cut, the same day - a filtered page's scrolling.** His
+report split the problem where the third cut had not looked: *"the first
+grid load when applied the filter is good but when I scroll down to load
+more, it loads super slow"*. Two causes, both measured on his data:
+
+- **The scroll asked the wrong route.** A tick's first screenful comes
+  from the genre route (index-backed, `_genre_indexed`), but
+  `moreOnScroll` went on asking the *medium* for its next thirty
+  unfiltered rows and keeping the few that matched - so the page paid a
+  Cinemeta page per card it could show. It now continues the route the
+  tick opened, with a cursor and a dry count per route so unticking does
+  not strand the medium's own position. Head to head from the same cold
+  index, counting only rows the filter would draw: the medium top-up
+  gave **62 Romance rows in 2.7s** (147 rows a pull, ~7% matching), the
+  genre route **115 in 0.1s**, every row a match.
+- **The walk read too little of the catalogue.** `LOCAL_GENRE_PAGES`
+  was 8. The pages are fetched together under one budget, so reading
+  more costs concurrency rather than time - and `LOCAL_GENRE_WORKERS`
+  (8, new) holds the socket count to exactly what it was, which
+  `max_workers=len(pages)` had not. Measured, one batch from a cold
+  cursor: Sport/anime 8 pages **3.12s, 5 rows** against 24 pages
+  **2.06s, 13 rows**; Music/anime 0.84s/2 rows against 1.34s/9 rows;
+  Documentary/series 0.23s and 30 rows either way, because Cinemeta
+  filters that one server-side and no walk happens.
+
+Photographed on the frozen build for the control: the Anime page's
+**Sport** tick drew 1 card at +0.5s and 5 at +20s.
+
+**Known and deliberate**: a filtered page now stops when the genre's own
+walk comes up empty twice, where the medium walk would have gone on
+dribbling a row at a time - the same two-dry-batches rule the medium
+route has always used, against a much better rate. **Not this
+release's**: deep in Cinemeta's anime catalogue there are rows that are
+not anime (telenovelas, "Kyle XY"). That is the source's own tagging and
+predates this change.
 
 **A fourth cut, the same day.** Two more, and both are cases this
 machine cannot produce:
