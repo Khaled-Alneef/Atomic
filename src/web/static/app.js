@@ -2833,15 +2833,39 @@ function wheelIsFinger(delta, now) {
    handler's next question. */
 const SIDE_STREAM_MS = 40;    // inside this, it is a stream, not a tick
 const SIDE_CHAIN_MS = 140;    // ...and a stream stays one this long
-const SIDE_MIN_PX = 12;       // below this it cannot be a wheel tick
+const SIDE_MIN_PX = 12;       // below this an isolated blip is not a tick
+const SIDE_TRAIL = 4;         // how many deltas the repeat test looks at
+const SIDE_GESTURE_MS = 400;  // longer than this and it is a new gesture
 let lastSideAt = 0, lastSideWasFinger = false, sideTold = 0;
+let sideTrail = [];
 function sidewaysIsFinger(delta, now) {
   const gap = now - lastSideAt;
-  const finger = gap < SIDE_STREAM_MS
-                 || (lastSideWasFinger && gap < SIDE_CHAIN_MS)
-                 || Math.abs(delta) < SIDE_MIN_PX;
+  if (gap > SIDE_GESTURE_MS) sideTrail = [];
+  sideTrail.push(Math.abs(Math.round(delta)));
+  if (sideTrail.length > SIDE_TRAIL) sideTrail.shift();
+  /* **A wheel repeats itself exactly; a hand never does.** Cadence
+     alone was not enough: his horizontal wheel was still wrong after
+     the tick/stream split, and the shapes it can take all look like a
+     stream - a tilt held down auto-repeats every 30-50ms, and a
+     free-spinning or high-resolution wheel sends small deltas as fast
+     as a touchpad. What no finger does is send the *same* delta four
+     times in a row: a driver's tick is one constant, a swipe follows
+     the hand and varies every event. So a repeat is a wheel whatever
+     its size or spacing, and everything else is judged on cadence. */
+  // Two is enough, and measured: at three, the second event of every
+  // wheel burst slipped through to the browser while the repeat was
+  // still being established (9 of 10 eased, not 10). A touchpad that
+  // happens to send one delta twice loses one event to the ease - the
+  // same single eased event the first of any swipe already pays.
+  const uniform = sideTrail.length >= 2
+                  && sideTrail.every(function (d) { return d === sideTrail[0]; });
+  const finger = !uniform
+                 && (gap < SIDE_STREAM_MS
+                     || (lastSideWasFinger && gap < SIDE_CHAIN_MS)
+                     || Math.abs(delta) < SIDE_MIN_PX);
   lastSideAt = now; lastSideWasFinger = finger;
-  return { finger: finger, gap: gap };
+  return { finger: finger, gap: gap, uniform: uniform,
+           trail: sideTrail.join(',') };
 }
 /* **What the wheel asked for, and what the page did outside a glide.**
    The owner's laptop log of 6 September 2026 (1.10.271): every glide
@@ -4637,6 +4661,8 @@ page.addEventListener('wheel', function (e) {
     sideTold = now;
     tellHost({ action: 'diag', what: 'side wheel', dx: Math.round(delta),
                gap: Math.round(verdict.gap), finger: verdict.finger ? 1 : 0,
+               uniform: verdict.uniform ? 1 : 0, trail: verdict.trail,
+               mode: e.deltaMode, dy: Math.round(e.deltaY),
                took: took ? 1 : 0, shift: e.shiftKey ? 1 : 0,
                left: Math.round(strip.scrollLeft),
                width: strip.scrollWidth, client: strip.clientWidth,
