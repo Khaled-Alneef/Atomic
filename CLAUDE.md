@@ -27,14 +27,21 @@ GitHub tags.
    leave it for the user to test - don't commit or push on your own
    initiative, however small the change.
 
-   **`remote-tests` is pushed only when the user says to push to it.**
+   **A build is never put where he can install it unless he says so.**
    His rule, 25 August 2026, stated as its own line because "rebuild it"
-   had started to read as "and put it where I can install it". It is the
-   branch he installs from on another machine, so a push to it lands a
-   build on a device he may be in the middle of testing on. Rebuild
-   locally and say it is ready; wait to be told. Testing happens before code
-   lands, not after. Once the user says **approved**, commit and push
-   per rule 4.
+   had started to read as "and put it where I can install it": a build
+   that appears on a device he may be in the middle of testing on is
+   the thing this exists to stop. Rebuild locally and say it is ready;
+   wait to be told. Testing happens before code lands, not after. Once
+   the user says **approved**, commit and push per rule 4.
+
+   The `remote-tests` branch this rule was written about is **deleted**
+   (his ask at the 2.0 release, 8 September 2026). It could not have
+   gone on carrying builds anyway - one is 126MB and GitHub refuses any
+   file over 100MiB on push (rule 8). A test build he asks for now goes
+   out as a **pre-release** with `Atomic.zip` attached as its asset,
+   which `updater.check_for_update` deliberately skips, so it can never
+   be offered to anyone running the app.
 4. **Every approved change bumps the third part of `APP_VERSION`**, in
    the same commit as the source change. `Atomic.exe` and `Atomic.zip`
    are gitignored on `development`; the **zip** is tracked on `main`, at
@@ -95,16 +102,16 @@ GitHub tags.
    None of it was Python, Qt, or the owner's connection, and no rewrite
    in another language would have touched any of it.
 8. **Ship the zip, never the bare exe.** The owner's rule, 25 August
-   2026, after a build he could not download: `Atomic.zip` is what goes
-   on `main` at a release and on `remote-tests`, and the exe is not
-   committed beside it.
+   2026, after a build he could not download: `Atomic.zip` is what is
+   published at a release - as the **release's asset** since 2.0 (see
+   rule 4) - and the bare exe is not offered beside it.
 
    It is a measurement, not a preference. The bare exe was refused on
    download as `Trojan:Win32/Wacatac.B!ml` - Microsoft's *machine
    learning* classifier, no signature match - while **the identical
    bytes inside a zip downloaded cleanly**. Before concluding that, all
    seven builds of that day were compared out of the `remote-tests`
-   history: same 193 bundled entries (nothing ever added), same 347
+   history (a branch since deleted, 8 September 2026): same 193 bundled entries (nothing ever added), same 347
    Python modules (none added), byte-identical bootloader (the first
    differing byte is the PE TimeDateStamp at 0x108), and every one of
    them scanning clean under Defender with cloud protection on and the
