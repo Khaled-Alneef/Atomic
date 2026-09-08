@@ -446,7 +446,72 @@ class SetupWindow:
         self.root.mainloop()
 
 
+def selftest(report: Path) -> int:
+    """Prove the *built* program works, without a window.
+
+    `--selftest` exists because the first release of this installer was
+    verified by importing atomic_setup in the development tree and never
+    by running the exe: the spec excluded `email`, `urllib.request`
+    imports it at module scope, and the frozen program died on its first
+    line - on the owner's machine, mid-update, with this already swapped
+    in as his Atomic.exe. build_bridge.py runs this against every build
+    and refuses one that cannot answer, so that class of failure cannot
+    reach a tag again.
+
+    **It writes to a file, not to stdout.** This is built with
+    `console=False`, where PyInstaller leaves `sys.stdout` as None and a
+    bare print() raises - a selftest that could only report through
+    stdout would fail every windowed build for the wrong reason.
+
+    It resolves the real release and reads the first bytes of the asset;
+    it never writes an executable and never touches an install."""
+    lines = []
+
+    def say(text):
+        lines.append(str(text))
+        try:
+            print(text)
+        except Exception:
+            pass
+
+    code = 1
+    try:
+        say(f"python: {sys.version}")
+        say(f"frozen: {bool(getattr(sys, 'frozen', False))}")
+        release = newest_release()
+        say(f"release: {release['tag']} {release['size']:,} bytes")
+        say(f"url: {release['url']}")
+        request = urllib.request.Request(release["url"], headers=HEADERS)
+        request.add_header("Range", "bytes=0-3")
+        with urllib.request.urlopen(request, timeout=CONNECT_TIMEOUT) as response:
+            head = response.read(4)
+        say(f"first bytes: {head!r}")
+        if head[:2] != b"PK":
+            say("SELFTEST FAILED: that is not a zip")
+        else:
+            # Built and destroyed without being shown, so a missing
+            # tkinter or a bad style is caught here too.
+            window = SetupWindow()
+            window.root.destroy()
+            say("SELFTEST OK")
+            code = 0
+    except Exception as exc:
+        say(f"SELFTEST FAILED: {type(exc).__name__}: {exc}")
+        import traceback
+        lines.append(traceback.format_exc())
+    try:
+        report.write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass
+    return code
+
+
 def main():
+    argv = sys.argv[1:]
+    if "--selftest" in argv:
+        rest = argv[argv.index("--selftest") + 1:]
+        report = Path(rest[0]) if rest else Path("atomic_setup_selftest.txt")
+        raise SystemExit(selftest(report))
     SetupWindow().run()
 
 

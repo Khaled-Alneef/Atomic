@@ -36,7 +36,7 @@ in `%APPDATA%\Atomic` that 1.10 wrote.
 |---|---|
 | `Atomic.zip` (release asset) | The application. **125,502,375 bytes**. SHA-256 `7c58bf90442534cd07b7acee6bf5457903f185c9e47bc089ea1f8ee52a843e38` |
 | `Atomic.exe` (inside that zip) | **126,279,591 bytes**. SHA-256 `ed1c84abc670b54ec7d9a692c36b32a4a834e57a4e127bd08c452e7bb0dc181b` |
-| `Atomic.exe` (committed at `v2.0`) | The **bridge installer**, 10,922,879 bytes. SHA-256 `9549508ab13ee798c154b85a95d3b87b5897bd77f8ef88ee02ec1663111561b2` |
+| `Atomic.exe` (committed at `v2.0`) | The **bridge installer**, 11,101,411 bytes. SHA-256 `e14661e2dbcc4cf9370a216ac9e842ed17bdf644284c2265d8cc1d26bb3d4545` (second cut - see below) |
 | `Atomic.zip` (committed at `v2.0`) | The same bridge installer, zipped, for a zip-preferring updater |
 | `src/` | Full source, **125,204 Python lines** across 126 modules, plus 5,748 lines of served static UI |
 | `packaging/` | `build.py`, `Atomic.spec`, `check_release_notes.py`, `fetch_libmpv.py`, and `bridge/` |
@@ -45,6 +45,20 @@ in `%APPDATA%\Atomic` that 1.10 wrote.
 
 **364 commits** stand between `released/1.10` and this release, taken
 from `development` as a single snapshot.
+
+**The bridge was cut twice, and the tag was moved.** The first cut -
+10,922,879 bytes, SHA-256 `9549508a...` - **could not start**: its spec
+excluded `email` among other standard-library modules to save a
+megabyte, and `urllib.request` imports `email` at module scope, so the
+program died on its first line with
+
+    ModuleNotFoundError: No module named 'email'
+
+It reached the owner's other machine, which had already swapped it in as
+its `Atomic.exe`, so that install had to be repaired by hand from the
+release zip. The application itself was never involved and no data was
+touched. `v2.0` was moved to the second cut; §11 records how the
+verification missed it and what now stops it.
 
 ### Why the application is not committed at the tag
 
@@ -286,6 +300,27 @@ install that has just updated:
   (`settings20.png`).
 
 **The live update path**, against the published release — §12.
+
+### What this verification missed, and the gate that replaces it
+
+The bridge was checked by **importing `atomic_setup` in the development
+tree** and driving its functions - `newest_release`, `download`,
+`exe_from_zip`, `install` - end to end against the live release. Every
+one passed, and none of it ran the built program, where `email` was not
+there to import. `.claude/rules/testing.md` has said since 3 September
+that a source run is a preview and never the proof; this pass took the
+preview as the proof for the one binary that had to work on somebody
+else's machine.
+
+`build_bridge.py` now **runs the exe it just built** (`--selftest`): it
+resolves the real release, reads four bytes of the asset and constructs
+the window, writing its report to a file because a windowed build has
+no stdout. A build that does not answer `SELFTEST OK` is refused. The
+second cut was then driven as a *program* - copied into a temp
+directory as `Atomic.exe`, `APPDATA` pointed at a temp profile, started
+the way the old updater starts it - and **installed the release in 10
+seconds**: 126,279,591 bytes, SHA-256 `ed1c84ab...`, and the Atomic it
+launched wrote `last_seen_version: 2.0`.
 
 ---
 

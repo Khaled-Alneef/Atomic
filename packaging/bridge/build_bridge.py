@@ -79,7 +79,30 @@ def main() -> int:
         print("Refusing this build: the version resource is missing, so "
               "Windows would show it as an unnamed binary.")
         return 1
-    print("Built. Commit this as Atomic.exe at the release tag.")
+    # **Run the thing.** The markers above prove what went in; only
+    # running it proves it starts. The first release of this installer
+    # passed every check above and died on its first line, because the
+    # spec excluded `email` and `urllib.request` imports it at module
+    # scope - on the owner's machine, mid-update, with this already in
+    # place as his Atomic.exe. `--selftest` resolves the real release,
+    # reads four bytes of the asset and builds the window; it reports to
+    # a file because a windowed build has no stdout to print to.
+    report = DIST / "selftest.txt"
+    if report.exists():
+        report.unlink()
+    result = subprocess.run([str(OUTPUT), "--selftest", str(report)],
+                            timeout=180)
+    text = report.read_text(encoding="utf-8") if report.exists() else ""
+    print()
+    print("--- selftest ---")
+    print(text or "(the build wrote no report at all)")
+    if result.returncode != 0 or "SELFTEST OK" not in text:
+        print()
+        print(f"Refusing this build: it does not run (exit {result.returncode}).")
+        return 1
+
+    print()
+    print("Built, and it runs. Commit this as Atomic.exe at the release tag.")
     return 0
 
 
