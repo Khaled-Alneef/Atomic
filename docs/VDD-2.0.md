@@ -34,8 +34,8 @@ in `%APPDATA%\Atomic` that 1.10 wrote.
 
 | Item | Description |
 |---|---|
-| `Atomic.zip` (release asset) | The application. **125,508,591 bytes**. SHA-256 `15b1355dc55d69337b00342164726e6c0150a82e6cd501389829c4678b8596d8` (fifth cut - see below) |
-| `Atomic.exe` (inside that zip) | **126,286,802 bytes**. SHA-256 `ac777868dc45344dfc125a18ebe04b391e55a46375f44a9ba59d8e4b5843b4da` |
+| `Atomic.zip` (release asset) | The application. **125,509,127 bytes**. SHA-256 `859451e02d5f25bbe641cc3b53800f0f96d980c3c6ebeeb9681cb3d2515279fa` (sixth cut - see below) |
+| `Atomic.exe` (inside that zip) | **126,286,519 bytes**. SHA-256 `6e59fd09517e873be02ac6044657029572496451c424662bc4cf9513076db598` |
 | `Atomic.exe` (committed at `v2.0`) | The **bridge installer**, 11,101,411 bytes. SHA-256 `e14661e2dbcc4cf9370a216ac9e842ed17bdf644284c2265d8cc1d26bb3d4545` (second cut - see below) |
 | `Atomic.zip` (committed at `v2.0`) | The same bridge installer, zipped, for a zip-preferring updater |
 | `src/` | Full source, **125,204 Python lines** across 126 modules, plus 5,748 lines of served static UI |
@@ -59,6 +59,28 @@ its `Atomic.exe`, so that install had to be repaired by hand from the
 release zip. The application itself was never involved and no data was
 touched. `v2.0` was moved to the second cut; §11 records how the
 verification missed it and what now stops it.
+
+**A sixth cut - the application is unchanged.** It carries one comment
+and nothing else, so that a measurement is not lost: after updating 1.10
+to 2.0 in place, Explorer went on drawing 1.10's icon in folder view
+while the taskbar drew 2.0's. **The build was never wrong.** Reproduced
+with the real binaries - v1.10's exe out of git, replaced by 2.0's the
+way the swap script does it - and photographed from Explorer:
+`ExtractAssociatedIcon` on the swapped file returned the new icon, and a
+copy of the same bytes under a new name in the same folder drew the new
+icon, while the replaced path drew the old one. What did **not** shift
+it: `SHChangeNotify(SHCNE_UPDATEITEM | SHCNE_ASSOCCHANGED)` - which is
+what `packaging/build.py` prints "Asked Explorer to re-read the icon"
+for - F5, a fresh Explorer window, `ie4uinit -show`, `ie4uinit
+-ClearIconCache`, and a full Explorer restart. What did: deleting
+`iconcache*.db` and `thumbcache*.db` (30 files) with the shell stopped.
+
+The app deliberately does none of those: an application has no business
+deleting a user's shell caches or restarting their Explorer, and this
+only appears when the icon itself changes between versions - once, at
+1.10 -> 2.0. The taskbar was right throughout because that icon is Qt's
+`setWindowIcon` from the running app, not the shell's file cache.
+build.py's docstring now carries all of it.
 
 **A fifth cut, the same day - a filtered page's scrolling.** His
 report split the problem where the third cut had not looked: *"the first

@@ -301,6 +301,27 @@ def _refresh_shell_icon(exe_path):
     invalidates this one item rather than deleting the whole icon
     cache database and restarting the shell.
 
+    **And on a replaced file it does not work - measured 8 September
+    2026.** The owner, after updating 1.10 to 2.0 in place: the folder
+    went on drawing 1.10's purple icon while the taskbar drew 2.0's
+    teal one (the taskbar's comes from the running app, Qt's
+    setWindowIcon, not from the shell). Reproduced with the real
+    binaries - v1.10's exe out of git, replaced by 2.0's the way the
+    swap script does it - and photographed from Explorer. The file was
+    provably right throughout: ExtractAssociatedIcon on it returned the
+    teal icon, and a copy of the same bytes under a new name in the
+    same folder drew teal. What did **not** shift the old path's
+    picture: this call, F5, a fresh Explorer window, `ie4uinit -show`,
+    `ie4uinit -ClearIconCache`, and a full Explorer restart. What did:
+    deleting `iconcache*.db` and `thumbcache*.db` (30 files) with the
+    shell stopped, then restarting it.
+
+    So this stays - it is free and it is the right ask - but it is not
+    a guarantee, and the app deliberately does not do any of the things
+    that would work: an application has no business deleting a user's
+    shell caches or restarting their Explorer. It only ever shows when
+    the icon itself changes between versions.
+
     Best effort - a build that cannot reach the shell API still
     produced a correct exe, so this never fails the build."""
     if os.name != "nt":
