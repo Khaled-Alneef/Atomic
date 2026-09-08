@@ -2703,6 +2703,14 @@ let glideRemain = 0;      // the distance still owed, signed
 let glideStart = 0;       // what the current curve set out to travel
 let glideApplied = 0;     // how much of it has been applied so far
 let glideAt = 0;
+/* How far the wheel handler's clock ran ahead of the frames during this
+   chain - `glideAt - now` at the moment a frame ran, in ms. It is the
+   whole of the free-spin freeze: a frame whose timestamp is older than
+   the notch that re-aimed it computes t = 0 and applies nothing. Zero
+   on this machine at 165Hz, which is why neither instance of this trap
+   could be reproduced here; it goes out on the glide line so his laptop
+   says the number rather than being guessed at. */
+let glideSkewMax = 0;
 let glideOn = false;
 /* **The glide reports itself.** Measured 5 September 2026 on the frozen
    build: five notches on Movies were 130 eased frames on a fresh launch
@@ -2747,6 +2755,7 @@ function glideStep(now) {
      timestamp lags the handler by up to a whole frame; at 165Hz here
      the same bursts measured monotonic, which is why it never
      reproduced on this machine. */
+  if (glideAt - now > glideSkewMax) glideSkewMax = glideAt - now;
   const t = Math.max(0, Math.min(1, (now - glideAt) / GLIDE_MS));
   // Chromium's own ease-out, the curve its scroll animation uses.
   const eased = 1 - Math.pow(1 - t, 3);
@@ -2768,6 +2777,7 @@ function glideStep(now) {
       glideTold = now;
       tellHost({ action: 'diag', what: 'glide', frames: glideFrames,
                  ms: Math.round(now - glideAt), gapMax: Math.round(glideGapMax),
+                 skew: Math.round(glideSkewMax),
                  moved: Math.round(glideMoved), movedMax: Math.round(glideMovedMax),
                  from: glideChainFrom, top: Math.round(page.scrollTop),
                  asked: glideChainDelta, reversed: reversed ? 1 : 0,
@@ -2793,20 +2803,45 @@ function glideStep(now) {
    finger's stream: it arrives alone, or at 30ms+ from the last notch. */
 const FINGER_GAP_MS = 40;
 let lastWheelAt = 0, lastWasFinger = false;
-/* The test itself, so the sideways rows apply exactly the same one -
-   the owner, 8 September 2026: "fix the horizontal scrolling in the
-   app, when I use the touchpad in the laptop it does not scroll
-   properly". The vertical handler learned to stand aside for a finger
-   on 5 September and the strip handler never did, so a two-finger
-   sideways swipe streamed 60-120 events a second into sideScroller,
-   each one re-aiming a 200ms ease a few pixels further on - a row that
-   crawls behind the finger and keeps moving after it stops. One
-   device, one answer: whichever axis it arrives on. */
 function wheelIsFinger(delta, now) {
   const finger = Math.abs(delta) < NOTCH_MIN_PX
                  || (lastWasFinger && now - lastWheelAt < FINGER_GAP_MS);
   lastWheelAt = now; lastWasFinger = finger;
   return finger;
+}
+
+/* **Sideways is told by cadence, and only by cadence.** The owner, 8
+   September 2026, in two reports an hour apart: first "the horizontal
+   scrolling ... with the touchpad does not scroll properly", then -
+   once the strip handler stood aside for a finger the way the vertical
+   one does - "the touch pad is smooth and perfect, BUT I have a mouse
+   that has a horizontal wheel ... it is not scrolling properly".
+
+   Both are the same measurement problem from opposite ends. Vertically
+   a mouse notch is ~100px and NOTCH_MIN_PX (50) separates it from a
+   finger by size alone; **a horizontal wheel tilt is not that big**, so
+   the size test read his tilt ticks as finger events and handed them to
+   the browser - where Chromium's own wheel animation is off
+   (webview2_host._BROWSER_ARGS) and a tick is one hard jump.
+
+   So this asks the one question that does separate them: a touchpad
+   *streams* (60-120 events a second), a wheel tick arrives alone. Size
+   is left with one job, rejecting a delta too small to be any tick at
+   all. Its state is its own, deliberately: the window handler below
+   also runs for every one of these events (deltaY is ~0, so it reads
+   them as a finger), and sharing lastWasFinger would let it answer this
+   handler's next question. */
+const SIDE_STREAM_MS = 40;    // inside this, it is a stream, not a tick
+const SIDE_CHAIN_MS = 140;    // ...and a stream stays one this long
+const SIDE_MIN_PX = 12;       // below this it cannot be a wheel tick
+let lastSideAt = 0, lastSideWasFinger = false, sideTold = 0;
+function sidewaysIsFinger(delta, now) {
+  const gap = now - lastSideAt;
+  const finger = gap < SIDE_STREAM_MS
+                 || (lastSideWasFinger && gap < SIDE_CHAIN_MS)
+                 || Math.abs(delta) < SIDE_MIN_PX;
+  lastSideAt = now; lastSideWasFinger = finger;
+  return { finger: finger, gap: gap };
 }
 /* **What the wheel asked for, and what the page did outside a glide.**
    The owner's laptop log of 6 September 2026 (1.10.271): every glide
@@ -2861,8 +2896,33 @@ addEventListener('wheel', function (e) {
   glideStart = want - here;
   glideApplied = 0;
   glideRemain = glideStart;
-  glideAt = performance.now();
-  if (glideFrames === 0) { glideLastNow = 0; glideGapMax = 0; }
+  /* **A chained notch keeps the frames' own clock.** The owner, 8
+     September 2026: "the mouse I have has a wheel that keeps spinning
+     like a tire, so when I go fast ... the screen does not scroll, it
+     freezes, and when the wheel stops it takes me where the wheel
+     scrolling should take me".
+
+     This is the other half of the trap glideStep documents. `now` in an
+     animation frame is the *frame's* timestamp, taken before the frame's
+     work; `performance.now()` here is later, so the next frame can find
+     a time earlier than this one and t clamps to 0 - a frame that
+     applies nothing. One notch pays that once and the frame after it
+     moves. A free-spinning wheel sends a notch before nearly every
+     frame, so *every* frame found t = 0 and applied nothing, while
+     glideStart went on accumulating; when the spin stopped, the last
+     curve ran with the whole distance in it - the freeze and then the
+     jump, exactly as described.
+
+     So while a glide is already running, the curve starts from the last
+     frame's own timestamp rather than from a moment that has not
+     happened yet. Every frame then has a real t (a frame's interval
+     over GLIDE_MS, ~0.12 at 60Hz - about a third of the distance still
+     owed on the ease-out below), so a spin scrolls continuously and
+     accelerates with itself, and the curve completes 130ms after the
+     last notch. An isolated notch is unchanged: no glide is running, so
+     it still starts from now. */
+  glideAt = (glideOn && glideLastNow) ? glideLastNow : performance.now();
+  if (glideFrames === 0) { glideLastNow = 0; glideGapMax = 0; glideSkewMax = 0; }
   glideChainDelta += Math.round(e.deltaY);
   if (!glideOn) {
     glideOn = true;
@@ -4547,20 +4607,41 @@ page.addEventListener('wheel', function (e) {
   const sideways = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
   if (!strip || !sideways) return;         // the page's wheel is the browser's
   if (strip.scrollWidth <= strip.clientWidth + 1) return;
-  /* **A finger scrolls the row itself; the ease is for a notch.**
+  /* **A finger scrolls the row itself; the ease is for a wheel.**
      sideScroller eases 6-12 frames toward a target, which is exactly
-     what a mouse's one big jump needs and exactly wrong for a stream of
-     small ones - a touchpad's swipe re-aimed it every ~10ms and the row
+     what one wheel tick needs and exactly wrong for a stream of small
+     ones - a touchpad's swipe re-aimed it every ~10ms and the row
      lagged the finger and drifted after it. `.strip` is `overflow-x:
      auto`, so simply not taking the event hands the row to Chromium's
-     own compositor - the same answer the vertical glide has taken since
-     5 September. A line-mode wheel (deltaMode) is left to the browser
-     for the same reason it is there. */
+     own compositor. Which of the two this is, is a question about
+     cadence and not size - see sidewaysIsFinger. A line-mode wheel
+     (deltaMode) is left to the browser for the same reason it is there
+     in the vertical handler. */
   if (e.deltaMode !== 0) return;
   const delta = e.shiftKey ? e.deltaY : e.deltaX;
-  if (wheelIsFinger(delta, performance.now())) return;
-  if (!strip._side) strip._side = sideScroller(strip);
-  if (strip._side(delta)) e.preventDefault();
+  const now = performance.now();
+  const verdict = sidewaysIsFinger(delta, now);
+  let took = false;
+  if (!verdict.finger) {
+    if (!strip._side) strip._side = sideScroller(strip);
+    if (strip._side(delta)) { e.preventDefault(); took = true; }
+  }
+  /* **The page says what it was handed.** Neither of his two reports
+     could be reproduced on this machine - it has no precision touchpad
+     and no tilt wheel - and a rule about cadence cannot be tuned
+     against a device nobody here has. This line is the instrument:
+     dx, the gap since the last sideways event, and what was done with
+     it. Throttled like the glide's own trail, and only while a strip is
+     actually under the pointer, so ordinary use writes nothing. */
+  if (now - sideTold > 250) {
+    sideTold = now;
+    tellHost({ action: 'diag', what: 'side wheel', dx: Math.round(delta),
+               gap: Math.round(verdict.gap), finger: verdict.finger ? 1 : 0,
+               took: took ? 1 : 0, shift: e.shiftKey ? 1 : 0,
+               left: Math.round(strip.scrollLeft),
+               width: strip.scrollWidth, client: strip.clientWidth,
+               route: location.hash });
+  }
 }, { passive: false });
 
 /* ---- the scrollbar -------------------------------------------------

@@ -3152,7 +3152,38 @@ def _start_reading_sweep(name):
         return True
 
 
-def _genre_video(name, skip, limit, tab="all"):
+def _genre_kinds(tab):
+    """Which catalogs a tab covers - all three unless it names some."""
+    for key, _label, names in BROWSE_TABS:
+        if key == tab and names:
+            return tuple(k for k in ("anime", "series", "movie") if k in names)
+    return ("anime", "series", "movie")
+
+
+def _genre_indexed(name, tab="all", want=None):
+    """Rows carrying this genre out of helpers/catalog_index - every
+    catalogue row this machine has ever fetched, with its genres, newest
+    first and deduplicated across the kinds a tab covers.
+
+    No network and no wait: this is a read of one file the app already
+    keeps. Soft, because a page drawn from Cinemeta alone is slower but
+    correct, and an unreadable index must not empty a genre."""
+    want = int(want or GENRE_INDEX_LIMIT)
+    rows, seen = [], set()
+    try:
+        from helpers import catalog_index
+        for kind in _genre_kinds(tab):
+            for row in catalog_index.rows_for(kind, name, limit=want):
+                key = str(row.get("imdb_id") or "")
+                if key and key not in seen and len(rows) < want:
+                    seen.add(key)
+                    rows.append(dict(row))
+    except Exception:
+        return []
+    return rows
+
+
+def _genre_video(name, skip, limit, tab="all", have=0):
     """One page of a video genre, series and movies both, from one
     cursor: (rows, next cursor, kinds still running).
 
@@ -3209,23 +3240,27 @@ def _genre_video(name, skip, limit, tab="all"):
     # kind now reports how far it actually read, and the cursor takes
     # the furthest of the three.
     progress = {}
-    kinds = ("anime", "series", "movie")
-    for key, _label, names in BROWSE_TABS:
-        if key == tab and names:
-            kinds = tuple(k for k in ("anime", "series", "movie") if k in names)
-    indexed = []
-    if skip <= 0:
-        try:
-            from helpers import catalog_index
-            seen = set()
-            for kind in kinds:
-                for row in catalog_index.rows_for(kind, name, limit=GENRE_INDEX_LIMIT):
-                    key = str(row.get("imdb_id") or "")
-                    if key and key not in seen and len(indexed) < GENRE_INDEX_LIMIT:
-                        seen.add(key)
-                        indexed.append(dict(row))
-        except Exception:
-            indexed = []
+    kinds = _genre_kinds(tab)
+    # **The index answers a continuation too** (8 September 2026, the
+    # owner: "the first chunk of cards loads perfectly and fast, but when
+    # I scroll down the new cards loading is super super super slow").
+    # This used to read the index only for the first answer, so every
+    # scroll-down went to the Cinemeta walk - and measured on his own
+    # data the walk hands back *nothing* for its first twelve seconds
+    # while the page pulls into an empty answer every 700ms. His index
+    # holds far more than the 200 rows the first answer carries: Drama
+    # 964, Comedy 637, Mystery 248, Thriller 225. All of it is on disk
+    # and was being ignored.
+    want = (GENRE_INDEX_LIMIT if skip <= 0
+            else min(GENRE_INDEX_MAX, max(GENRE_INDEX_LIMIT, have + limit)))
+    indexed = _genre_indexed(name, tab, want)
+    if skip > 0 and len(indexed) > have:
+        # The index still holds rows this page has not drawn. Hand them
+        # over and ask Cinemeta nothing: the page drops what it already
+        # shows by title (app.js moreOnScroll), so a superset is safe,
+        # and the walk that is already running keeps warming the index
+        # behind it.
+        return indexed, skip, 0
 
     def _page(kind):
         try:
@@ -3287,6 +3322,12 @@ GENRE_FIRST_WAIT_S = 2.0
 # screens deep; the walk's rows follow on the pull.
 GENRE_INDEX_ENOUGH = 12
 GENRE_INDEX_LIMIT = 200
+# What a *continuation* may carry. The page drops what it already draws,
+# so a batch is a superset of the rows beyond it and this only bounds
+# how large that superset may get - a page scrolled 1,200 rows deep is
+# past anything the index holds for a genre on his machine (Drama, the
+# biggest, is 964).
+GENRE_INDEX_MAX = 1200
 # A reading genre's sweep is not restarted inside this after it ends: a
 # browse the sites answered with nothing is asked again in a minute, not
 # on every 700ms pull.
@@ -3396,8 +3437,23 @@ def _more_browse(route, have, skip):
                 if late is not None and (late[0] or late[1]):
                     rows, pending, reached = late
                     skip = max(skip, reached)
+                    if not rows:
+                        # **The walk has nothing yet, and the index
+                        # might.** Measured on his data, 8 September
+                        # 2026: every continuation took this branch and
+                        # answered 0 rows in 0.00s while the anime kind
+                        # walked its pages, so the page pulled into an
+                        # empty answer every 700ms for as long as
+                        # LOCAL_GENRE_TOTAL_S - which is exactly "the
+                        # first chunk loads fast and then scrolling is
+                        # super super slow". Whatever the index holds
+                        # beyond what is drawn costs a file read.
+                        rows = _genre_indexed(body, tab,
+                                              min(GENRE_INDEX_MAX,
+                                                  have + GENRE_PAGE))
                 else:
-                    rows, skip, pending = _genre_video(body, skip, GENRE_PAGE, tab)
+                    rows, skip, pending = _genre_video(body, skip, GENRE_PAGE,
+                                                       tab, have=have)
     except Exception as error:
         return {"rows": [], "skip": skip, "error": str(error)[:120]}
     rows = [r for r in (rows or []) if isinstance(r, dict) and r.get("title")]

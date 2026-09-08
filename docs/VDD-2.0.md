@@ -34,8 +34,8 @@ in `%APPDATA%\Atomic` that 1.10 wrote.
 
 | Item | Description |
 |---|---|
-| `Atomic.zip` (release asset) | The application. **125,504,164 bytes**. SHA-256 `0c15667c8609a00b7cacb21e4fb277facfc47ac36cf4c6d89473ca6d7c9eb320` (second cut - see below) |
-| `Atomic.exe` (inside that zip) | **126,281,547 bytes**. SHA-256 `c8a268ea1c46935bbabbbc15ec2f9351ccd7eb045343cd4048b9f0abd0fb8137` |
+| `Atomic.zip` (release asset) | The application. **125,503,917 bytes**. SHA-256 `270091738e0bfbff9fd167e9730fbe62d1b4810989e4f96275fc13bea2335fa3` (third cut - see below) |
+| `Atomic.exe` (inside that zip) | **126,282,235 bytes**. SHA-256 `d591fcfe5f7fdd8b47dc8fb150990fdf6392dcb9a955aa929f95c818813b62d0` |
 | `Atomic.exe` (committed at `v2.0`) | The **bridge installer**, 11,101,411 bytes. SHA-256 `e14661e2dbcc4cf9370a216ac9e842ed17bdf644284c2265d8cc1d26bb3d4545` (second cut - see below) |
 | `Atomic.zip` (committed at `v2.0`) | The same bridge installer, zipped, for a zip-preferring updater |
 | `src/` | Full source, **125,204 Python lines** across 126 modules, plus 5,748 lines of served static UI |
@@ -60,7 +60,49 @@ release zip. The application itself was never involved and no data was
 touched. `v2.0` was moved to the second cut; §11 records how the
 verification missed it and what now stops it.
 
-**The application was cut twice as well, and the tag moved again.**
+**A third cut, the same day.** Three more of his reports, all in the
+source this tag carries:
+
+- **A horizontal wheel could not scroll a row.** The second cut taught
+  the strip handler to stand aside for a finger *by size*, and a
+  horizontal wheel tilt is not as big as a vertical notch - so his
+  tilt ticks were read as finger events and met Chromium's unanimated
+  jump. The question is cadence, not size: a touchpad streams, a tick
+  arrives alone. Measured on the real handler - an isolated tick of
+  20, 30, 40, 50 and 100px is eased **5 of 5** at every size; a
+  touchpad stream of 14px x40 and a flick of 60px x30 are eased once
+  each (the first, isolated event) and otherwise left to the browser;
+  an 8px blip is left alone as too small to be a tick.
+- **A filtered page loaded its first cards fast and then crawled.**
+  `_genre_video` read the catalogue index only for the *first* answer,
+  so every scroll-down went to the Cinemeta walk - which measured on
+  his own data hands back **nothing at all** while it runs, so the page
+  pulled into an empty answer every 700ms for as long as
+  LOCAL_GENRE_TOTAL_S. His index holds far more than the 200 rows the
+  first answer carries: Drama **964**, Comedy **637**, Mystery 248,
+  Thriller 225, Action 131. Measured through the real routes on a copy
+  of his data, Mystery: the four continuations answered **0 new rows**
+  each before, and **47 new in 0.02s** on the first pull after. The
+  reading side already answered from its caches (0.01-0.03s a pull,
+  30 new rows on the first) and is untouched.
+- **A free-spinning wheel froze the page and then jumped.** The glide's
+  curve started at `performance.now()` taken in the wheel handler,
+  while an animation frame carries the timestamp of when the frame
+  *began* - so a notch that lands during a frame's work leaves the next
+  frame with a time earlier than the start, t clamped to 0, and nothing
+  applied. One notch pays that once; a wheel that spins sends a notch
+  before nearly every frame, so every frame applied nothing while the
+  distance accumulated, and the whole of it arrived when the spin
+  stopped. A chained notch now starts its curve from the last frame's
+  own timestamp. **Not reproduced here**: at 165Hz the skew is zero and
+  the control measured 130 moving frames with 0 dead, exactly as the
+  same trap failed to reproduce on 6 September - the fix is proven
+  against the mechanism, by no regression locally (the same 5,005px of
+  travel over **162** frames instead of 132, median step 33px instead
+  of 46, 0 dead in both), and by a new `skew=` number on the glide line
+  so his laptop can say it.
+
+**The application was cut twice before this one.**
 The first cut - 126,279,591 bytes, SHA-256 `ed1c84ab...` inside a
 125,502,375-byte zip - shipped two defects the owner met within the
 hour, both fixed in the second:
