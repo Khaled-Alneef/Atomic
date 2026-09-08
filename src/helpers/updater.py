@@ -26,9 +26,13 @@ Checking asks GitHub for the tag list, keeps the ones that name a release
 tagged development build would otherwise be offered to everyone), takes
 the highest, and offers it when it is newer than APP_VERSION.
 
-What gets downloaded is the Atomic.exe committed at that tag. GitHub's
-contents API hands back the file's git blob hash alongside it, and the
-download is checked against that before anything is replaced - a
+What gets downloaded is the release's **Atomic.zip asset**, and the
+file committed at the tag only as a fallback. That split is a
+measurement, not a preference: the 2.0 build is 126MB and GitHub
+refuses any file over 100MiB on push, so the artifact cannot live in
+the repository at all any more - while a release asset may be 2GB.
+Assets carry a `digest` ("sha256:...") and repository files carry a git
+blob hash; either one is checked before anything is replaced, so a
 truncated or tampered download is discarded rather than installed.
 
 Everything here fails soft and reports why: no network, GitHub rate
@@ -54,7 +58,7 @@ from . import child_process, net
 # `development`, counting up from the last release; two parts on a build
 # that is being released, bumped in the same commit that tags it - or the
 # new build goes on offering itself an update.
-APP_VERSION = "1.10.116"
+APP_VERSION = "2.0"
 
 # What counts as a release: exactly two numeric parts, with or without the
 # leading v. Development builds are tagged (if at all) with three, and are
@@ -121,55 +125,122 @@ def current_exe() -> Path:
 
 def check_for_update(timeout: int = 10):
     """The newest released version if it is newer than this one, as
-    {"version", "tag", "url", "size", "sha"}. None means already current.
+    {"version", "tag", "url", "size", "sha"/"sha256", "asset"}. None means
+    already current.
+
+    Two places are asked, newest wins, and the release asset wins a tie:
+
+      * `/releases` - a published release's attached Atomic.zip. This is
+        where every release from 2.0 on lives, because the build passed
+        GitHub's 100MiB file limit (126MB measured, 8 September 2026) and
+        can no longer be committed to the repository at all.
+      * `/tags` + `/contents` - the artifact committed at the tag, which
+        is how 1.0 to 1.10 shipped and how the bridge installer at v2.0
+        reaches installs whose updater knows only this route.
 
     Raises UpdateError with something worth reading on failure."""
-    try:
-        tags = _get_json(f"{API_ROOT}/tags", timeout)
-    except Exception as exc:
-        raise UpdateError(_readable_network_error(exc)) from exc
-
-    releases = [tag for tag in tags
-                if RELEASE_TAG_RE.match((tag.get("name") or "").strip())]
-    if not releases:
-        raise UpdateError("No releases have been published yet.")
-
-    newest = max(releases, key=lambda tag: parse_version(tag.get("name")))
-    tag_name = newest.get("name") or ""
-    if parse_version(tag_name) <= parse_version(APP_VERSION):
-        return None
-
-    # The zip first, the bare exe second - see ZIP_NAME. A tag carrying
-    # both (which the first zipped release is expected to, so installs
-    # running an older updater can still find what they know) resolves
-    # to the zip here.
-    meta, asset, failure = None, "", None
-    for name in (ZIP_NAME, EXE_NAME):
+    found, failure = [], None
+    for source in (_from_releases, _from_repository):
         try:
-            found = _get_json(f"{API_ROOT}/contents/{name}?ref={tag_name}",
-                              timeout)
+            candidate = source(timeout)
+        except UpdateError:
+            raise
         except Exception as exc:
             failure = failure or exc
             continue
-        if found.get("download_url"):
-            meta, asset = found, name
-            break
-    if meta is None:
-        if failure is not None:
-            raise UpdateError(
-                f"{tag_name} is available, but its download could not be read "
-                f"from the repository ({_readable_network_error(failure)})")
-        raise UpdateError(
-            f"{tag_name} has neither {ZIP_NAME} nor {EXE_NAME} committed to it.")
+        if candidate:
+            found.append(candidate)
 
-    return {
-        "version": tag_name.lstrip("vV"),
-        "tag": tag_name,
-        "url": meta.get("download_url"),
-        "size": meta.get("size") or 0,
-        "sha": meta.get("sha") or "",
-        "asset": asset,
-    }
+    if not found:
+        if failure is not None:
+            raise UpdateError(_readable_network_error(failure))
+        raise UpdateError("No releases have been published yet.")
+
+    # Sorted on the version *and* on whether it is an asset, so a 2.0
+    # published both ways (the tag carries the bridge installer for old
+    # updaters; the release carries the real zip) hands this build the
+    # zip rather than the bridge it does not need.
+    newest = max(found, key=lambda item: (parse_version(item["tag"]),
+                                          item.get("from_release", False)))
+    if parse_version(newest["tag"]) <= parse_version(APP_VERSION):
+        return None
+    return newest
+
+
+def _from_releases(timeout: int):
+    """The newest published release carrying a downloadable asset.
+
+    Drafts and pre-releases are skipped: test builds are published as
+    pre-releases, and one must never be offered to somebody running the
+    app. RELEASE_TAG_RE is applied to the tag for the same reason it is
+    applied to the tag list - two numeric parts is what a release is."""
+    releases = _get_json(f"{API_ROOT}/releases?per_page=100", timeout)
+    best = None
+    for release in releases or []:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        tag_name = (release.get("tag_name") or "").strip()
+        if not RELEASE_TAG_RE.match(tag_name):
+            continue
+        by_name = {(a.get("name") or ""): a for a in release.get("assets") or []}
+        for name in (ZIP_NAME, EXE_NAME):
+            asset = by_name.get(name)
+            if not asset or not asset.get("browser_download_url"):
+                continue
+            candidate = {
+                "version": tag_name.lstrip("vV"),
+                "tag": tag_name,
+                "url": asset["browser_download_url"],
+                "size": asset.get("size") or 0,
+                # GitHub reports an asset's digest as "sha256:<hex>".
+                # There is no git blob hash for an asset - it is not in
+                # the repository - so this is what the download is
+                # checked against.
+                "sha256": (asset.get("digest") or "").split(":")[-1],
+                "asset": name,
+                "from_release": True,
+            }
+            if best is None or parse_version(tag_name) > parse_version(best["tag"]):
+                best = candidate
+            break
+    return best
+
+
+def _from_repository(timeout: int):
+    """The newest release tag whose artifact is committed in the repo.
+
+    This is the whole of what 1.0-1.10 could see, and it is kept because
+    it is the only route an old install has - v2.0's tag carries the
+    bridge installer as Atomic.exe precisely for them."""
+    tags = _get_json(f"{API_ROOT}/tags", timeout)
+    names = [(tag.get("name") or "").strip() for tag in tags or []]
+    names = [name for name in names if RELEASE_TAG_RE.match(name)]
+    if not names:
+        return None
+    tag_name = max(names, key=parse_version)
+    if parse_version(tag_name) <= parse_version(APP_VERSION):
+        # Nothing to fetch, and asking for two files that would be
+        # discarded costs the user two round trips on every check.
+        return None
+
+    # The zip first, the bare exe second - see ZIP_NAME.
+    for name in (ZIP_NAME, EXE_NAME):
+        try:
+            meta = _get_json(f"{API_ROOT}/contents/{name}?ref={tag_name}",
+                             timeout)
+        except Exception:
+            continue
+        if meta.get("download_url"):
+            return {
+                "version": tag_name.lstrip("vV"),
+                "tag": tag_name,
+                "url": meta.get("download_url"),
+                "size": meta.get("size") or 0,
+                "sha": meta.get("sha") or "",
+                "asset": name,
+                "from_release": False,
+            }
+    return None
 
 
 def _readable_network_error(exc) -> str:
@@ -216,7 +287,16 @@ def download_update(update: dict, progress=None, timeout: int = 60) -> Path:
     if expected_size and len(data) != expected_size:
         raise UpdateError(
             f"Download was incomplete ({len(data):,} of {expected_size:,} bytes).")
+    # Whichever hash the source of this update carries: a repository
+    # file reports git's own blob hash, a release asset reports a plain
+    # sha256 ("digest"). Neither is optional when it is there, and a
+    # download that arrives with neither is still size-checked above.
     if update.get("sha") and _git_blob_sha(data) != update["sha"]:
+        raise UpdateError(
+            "The downloaded file didn't match the checksum GitHub reported, "
+            "so it hasn't been installed.")
+    expected_sha256 = (update.get("sha256") or "").strip().lower()
+    if expected_sha256 and hashlib.sha256(data).hexdigest() != expected_sha256:
         raise UpdateError(
             "The downloaded file didn't match the checksum GitHub reported, "
             "so it hasn't been installed.")

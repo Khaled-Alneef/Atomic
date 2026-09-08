@@ -1,5 +1,15 @@
-"""First-run setup: shown once, over the very first launch's window, to
-offer the accounts, keys and preferences that already live in Settings.
+"""Setup: shown once, over a launch's window, to offer the accounts,
+keys and preferences that already live in Settings.
+
+It was first-launch-only until 2.0. The owner's ask, 8 September 2026,
+was that "the set up window appear on the 1st time they open the app
+after the update" - because 2.0 is where a debrid key, a preferred
+resolution and a downloads folder became worth having, and an install
+that has been running since 1.4 has never once been offered them. So
+the gate is a *version* now (SETUP_VERSION, app_settings.
+setup_shown_for) rather than a "has this ever run" flag, and an
+existing install sees it exactly once per release that raises that
+number.
 
 Every field is optional and writes through app_settings (or the helper
 that owns the value) the moment it changes - the wizard keeps no storage
@@ -18,7 +28,8 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import app_settings, logs, nav_config, settings_dialog, startup, storage, theme
+from . import (app_settings, logs, nav_config, settings_dialog,
+               startup, storage, theme, updater)
 from .widgets import (frameless_dialog, scroll_area, smooth_combo,
                       use_hover_cursor)
 
@@ -28,6 +39,13 @@ from .widgets import (frameless_dialog, scroll_area, smooth_combo,
 SHOW_DELAY_MS = 400
 
 STEPS = 4
+
+# **The release whose setup screen everybody is shown once.** Raise it
+# only when a release genuinely adds something worth interrupting for -
+# the wizard reopening for a version that added nothing is an
+# interruption with no payoff, and it is remembered per profile in
+# app_settings.setup_shown_for.
+SETUP_VERSION = "2.0"
 
 # The step pager's pills, matching Home's hero dashes.
 LOGO_HEIGHT = 96
@@ -47,33 +65,52 @@ _ICON_PATH = (Path(__file__).resolve().parent.parent
               / "assets" / "atomic_icon.png")
 
 
-def show_on_first_run(window):
+def show_on_first_run(window, notes=None):
     """main()'s one call: arm the offer, decided only when the timer
     fires. A timer so the dialog appears over a painted window, and armed
-    by main() after whats_new's modal summary has returned so it cannot
-    fire inside that dialog's nested event loop - the same trap
-    schedule_update_check documents."""
-    QTimer.singleShot(SHOW_DELAY_MS, lambda: _offer(window))
+    by main() after whats_new has returned so it cannot fire inside that
+    dialog's nested event loop - the same trap schedule_update_check
+    documents.
+
+    `notes` is what whats_new would have shown and did not, so the
+    wizard's first page can carry it (see will_offer)."""
+    QTimer.singleShot(SHOW_DELAY_MS, lambda: _offer(window, notes))
 
 
-def _offer(window):
-    """Show the wizard once ever, and only to a genuinely fresh install.
+def will_offer() -> bool:
+    """Whether the wizard is going to open on this launch - asked by
+    main() *before* whats_new, so that dialog can stand down and let the
+    wizard carry the release notes instead of stacking two modals over a
+    just-relaunched app.
 
-    Fails soft: a first launch that cannot decide must still open the
-    app, so anything wrong here is logged and swallowed."""
+    Reads only the stamp, not the data: the "is this a fresh install"
+    test decides which voice the wizard speaks in, never whether it
+    appears."""
     try:
-        if app_settings.get_setup_completed_at():
-            return
-        if not _install_is_fresh():
-            # An existing install updating into the build that introduced
-            # this must never see a setup screen - stamp silently. The
-            # stamp is also what keeps the check cheap: the file reads
-            # below happen once, not on every launch.
-            app_settings.set_setup_completed_at(storage.now_iso())
-            return
-        SetupWizard(window).exec()
+        return not _already_answered()
     except Exception:
-        logs.exception("Could not offer the first-run setup")
+        return False
+
+
+def _already_answered() -> bool:
+    """Whether this profile has already met SETUP_VERSION's wizard."""
+    seen = app_settings.get_setup_shown_for()
+    if not seen:
+        return False
+    return updater.parse_version(seen) >= updater.parse_version(SETUP_VERSION)
+
+
+def _offer(window, notes=None):
+    """Show the wizard once per SETUP_VERSION.
+
+    Fails soft: a launch that cannot decide must still open the app, so
+    anything wrong here is logged and swallowed."""
+    try:
+        if _already_answered():
+            return
+        SetupWizard(window, notes=notes, fresh=_install_is_fresh()).exec()
+    except Exception:
+        logs.exception("Could not offer the setup window")
 
 
 def _install_is_fresh() -> bool:
@@ -112,6 +149,14 @@ def _downloads_page():
         return None
 
 
+def _note_bullet(text: str):
+    """whats_new's own hanging-indent bullet, imported rather than
+    reimplemented. Local: whats_new imports nothing from here, and this
+    keeps it that way round."""
+    from .whats_new import UpdateSummaryDialog
+    return UpdateSummaryDialog._bullet(text)
+
+
 class SetupWizard(QDialog):
     """Four steps: welcome, API keys, preferences, done.
 
@@ -125,9 +170,15 @@ class SetupWizard(QDialog):
     the buttons without a nested event loop - _offer is the caller that
     execs it."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, notes=None, fresh=True):
         super().__init__(parent)
-        self.setWindowTitle("Set Up Atomic")
+        # What this profile is: a genuinely fresh install being welcomed,
+        # or an existing one meeting SETUP_VERSION's screen after an
+        # update. It changes the first page's words, and it lifts the
+        # Skip gate - see _sync_skip.
+        self._fresh = bool(fresh)
+        self._notes = list(notes or [])
+        self.setWindowTitle("Set Up Atomic" if fresh else "Welcome to Atomic 2.0")
         # Wide enough that a key hint indented past the caption column
         # keeps a Settings-like measure (~440px) instead of wrapping to
         # four cramped lines at 640.
@@ -164,7 +215,11 @@ class SetupWizard(QDialog):
         body.addLayout(dots_row)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._build_welcome_step())
+        # Scrolled when it carries release notes: 2.0's list is longer
+        # than the page is tall, and a first page that cuts its last
+        # line off is worse than one that scrolls.
+        welcome = self._build_welcome_step()
+        self.stack.addWidget(scroll_area(welcome) if self._notes else welcome)
         # The two middle steps scroll: the keys step lists seven key
         # fields and does not fit 600px on every scale factor.
         self.stack.addWidget(scroll_area(self._build_accounts_step()))
@@ -251,8 +306,14 @@ class SetupWizard(QDialog):
         nudge toward the one key the app genuinely needs, not a trap with
         no way out."""
         last = self._step == STEPS - 1
+        # The gate is for a *first* install, which has no key at all and
+        # would otherwise skip past the one thing the app genuinely wants.
+        # An existing install being shown 2.0's screen has been running
+        # for months on the bundled token; holding it here would leave it
+        # with only the window's X, which reads as a trap.
+        allowed = self._has_tmdb_key() or not self._fresh
         try:
-            self.skip_btn.setVisible(not last and self._has_tmdb_key())
+            self.skip_btn.setVisible(not last and allowed)
         except RuntimeError:
             pass
 
@@ -273,6 +334,10 @@ class SetupWizard(QDialog):
         # never greet the same install twice.
         try:
             app_settings.set_setup_completed_at(storage.now_iso())
+            # The stamp that actually gates the next launch. Written
+            # here rather than in _finish for the reason above: however
+            # this window was left, it has been answered.
+            app_settings.set_setup_shown_for(SETUP_VERSION)
         except Exception:
             logs.exception("Could not record that the setup wizard ran")
         super().done(result)
@@ -283,7 +348,8 @@ class SetupWizard(QDialog):
         col = QVBoxLayout(page)
         col.setContentsMargins(8, 8, 8, 8)
         col.setSpacing(10)
-        col.addStretch()
+        if not self._notes:
+            col.addStretch()
 
         logo = QLabel()
         logo.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -294,32 +360,57 @@ class SetupWizard(QDialog):
         pixmap = QPixmap(str(_ICON_PATH))
         if not pixmap.isNull():
             pixmap = pixmap.scaledToHeight(
-                int(LOGO_HEIGHT * dpr),
+                int((LOGO_HEIGHT if self._fresh else LOGO_HEIGHT * 0.7) * dpr),
                 Qt.TransformationMode.SmoothTransformation)
             pixmap.setDevicePixelRatio(dpr)
             logo.setPixmap(pixmap)
         col.addWidget(logo)
 
-        title = QLabel("Welcome to Atomic", objectName="SectionTitle")
+        heading = ("Welcome to Atomic" if self._fresh
+                   else f"Welcome to Atomic {updater.APP_VERSION}")
+        title = QLabel(heading, objectName="SectionTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         col.addWidget(title)
 
         # A single "&": QLabel only treats an ampersand as a mnemonic
         # marker when it has a buddy, so unlike the QCheckBox case in
         # Settings this one must NOT be doubled - "&&" here draws both.
-        intro = QLabel(
-            "One dashboard for your anime, reading, movies & series, "
-            "games, apps and websites - tracked in your own files, on "
-            "this machine.")
+        if self._fresh:
+            intro_text = (
+                "One dashboard for your anime, reading, movies & series, "
+                "games, apps and websites - tracked in your own files, on "
+                "this machine.")
+        else:
+            intro_text = (
+                "The update is installed, and everything you had is where "
+                "you left it - entries, history, settings and covers. "
+                "This is the same setup screen a new install gets, shown "
+                "once, in case there is something here you have never "
+                "been offered.")
+        intro = QLabel(intro_text)
         intro.setWordWrap(True)
         intro.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         col.addWidget(intro)
+
+        # The release notes whats_new stood down from showing - see
+        # show_on_first_run. Drawn with that dialog's own bullet, not a
+        # copy of it: two implementations of one row is how the search
+        # panel's cast rows ended up wearing the wrong meta line.
+        if self._notes:
+            col.addSpacing(6)
+            for version, lines in self._notes:
+                caption = QLabel(f"What's new in {version}",
+                                 objectName="SectionTitle")
+                col.addWidget(caption)
+                for line in lines:
+                    col.addWidget(_note_bullet(line))
 
         later = QLabel(
             "The next steps are optional - everything here can be "
             "changed later in Settings.", objectName="Muted")
         later.setWordWrap(True)
         later.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        col.addSpacing(6)
         col.addWidget(later)
 
         col.addStretch()

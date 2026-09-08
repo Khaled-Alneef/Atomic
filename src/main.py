@@ -5997,13 +5997,21 @@ def main():
     # the same foreground problem the relaunch already has to solve
     # above, and this launch is precisely the one that came from a
     # relaunch. Does nothing unless this launch followed an update.
-    whats_new.show_if_updated(window)
-    # First-ever launch only: offer the setup wizard over the visible
-    # window. Armed after whats_new on purpose - that dialog is modal,
-    # and a timer armed before it would fire inside its nested event
-    # loop. Existing installs are stamped silently and never see it
-    # (the decision lives in setup_wizard._offer, not here).
-    setup_wizard.show_on_first_run(window)
+    #
+    # Asked *before* whats_new, because the answer decides whether that
+    # dialog draws at all: on the first launch after updating into 2.0
+    # the setup window opens as well (the owner's ask, 8 September
+    # 2026), and two modal dialogs stacked over a just-relaunched app is
+    # one too many - so the wizard's first page carries the release
+    # notes and whats_new stays shut. It still reads and clears its
+    # markers, or the next launch would show them again.
+    pending_setup = setup_wizard.will_offer()
+    release_notes = whats_new.show_if_updated(window, skip_dialog=pending_setup)
+    # Once per SETUP_VERSION, over the visible window. Armed after
+    # whats_new on purpose - that dialog is modal, and a timer armed
+    # before it would fire inside its nested event loop. The decision
+    # lives in setup_wizard._offer, not here.
+    setup_wizard.show_on_first_run(window, release_notes)
     # Started after the window is up, so it fills the time the user
     # spends looking at Home rather than delaying it appearing.
     images.prewarm(_prewarm_image_specs())

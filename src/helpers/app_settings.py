@@ -178,6 +178,27 @@ def set_setup_completed_at(when: str):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_setup_shown_for() -> str:
+    """The version whose setup screen this profile has already been
+    shown, or "" if none has.
+
+    setup_completed_at alone could not answer 2.0's question. It is one
+    flag for "the wizard has been dealt with, ever", and every install
+    predating 2.0 carries it - stamped silently the first time an
+    existing profile met the wizard at all. 2.0 introduces settings
+    nobody has been offered (a debrid key, a resolution, a downloads
+    folder), and the owner asked for the setup window to open once for
+    everyone on the first launch after the update, so what has to be
+    remembered is *which* version's setup was seen, not that one was."""
+    return _load().get("setup_shown_for") or ""
+
+
+def set_setup_shown_for(version: str):
+    data = _load()
+    data["setup_shown_for"] = version or ""
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_notified_update_version() -> str:
     """The version the startup update check has already announced, or ""
     if it never has.

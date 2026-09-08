@@ -1403,7 +1403,7 @@ def install():
     #     looked up again from Home and every countdown ticks; back
     #     from a search lands on Discover through history back too
     #     (his six asks, 7 September, night).
-    updater.APP_VERSION = "1.10.285"
+    updater.APP_VERSION = "2.0"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

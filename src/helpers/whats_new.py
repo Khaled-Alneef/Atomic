@@ -26,6 +26,70 @@ from . import updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    # 2.0 is 364 commits after 1.10 and the first release with a video
+    # player, a reader and a downloader in it, so these are highlights
+    # rather than a list. The rule for what belongs is unchanged: if a
+    # line cannot be explained in terms of something the user would
+    # notice, it is not here.
+    "2.0": [
+        "Atomic plays. Pick an episode or a film and it opens in a real "
+        "player inside the app - every source asked at once, the best "
+        "release picked for you (or picked by hand), and playback "
+        "starting while the rest is still arriving.",
+        "It plays from your debrid service over HTTPS when the release "
+        "is already cached there, and from the swarm when it is not - "
+        "with no other program to install for either.",
+        "Where you stopped is where you start. A film resumes on the "
+        "right frame now, not at the beginning, whatever the file is.",
+        "Audio and subtitle tracks, playback speed, a volume slider that "
+        "goes past 100%, and picture statistics - on a bar composed over "
+        "the video so the picture shows through it.",
+        "Arabic subtitles, from the release's own attachments where the "
+        "big multi-language groups actually publish them. With an AI key "
+        "in Settings, an English track can be translated on the fly.",
+        "A Downloads page. Queue episodes at a resolution you choose and "
+        "chapters at a page width you choose, pause or cancel one row or "
+        "all of them, and resume where it stopped. An episode comes down "
+        "over four connections at once, and a swarm that stalls is given "
+        "up on and replaced rather than sat on.",
+        "Discover: the whole catalogue of films, series and anime to "
+        "browse by genre, with a search that answers from every source "
+        "at once and fills the slower ones in as they arrive.",
+        "A details page for every title - the cast, the seasons, every "
+        "source grouped by resolution, and a press to download.",
+        "Reading is a proper reader now. Chapters are drawn at exactly "
+        "the size the site draws them, spreads fill the width, the "
+        "chapter list is the whole list rather than the newest forty, "
+        "and the mouse's back and forward buttons turn chapters.",
+        "A chapter with nothing in it says why - locked behind the "
+        "site's coins, empty, or unreachable - and is no longer marked "
+        "as read.",
+        "Home has a banner for what is next, and every countdown on it "
+        "ticks. A release time that has passed is looked up again while "
+        "you are looking at the page.",
+        "Anything you change shows everywhere at once. Un-save a title "
+        "on its details page and its card is gone from Home behind it - "
+        "no page switch, no refresh.",
+        "The genre filters answer instantly from what the app has "
+        "already seen, instead of walking the catalogue while you wait.",
+        "Reading pages open on a full grid on a machine that has never "
+        "seen them, because the app now ships knowing what 1,828 titles "
+        "are and what they are about.",
+        "Covers that were missing, blurry or a scanlation site's "
+        "placeholder are chased through four sources until a real one "
+        "answers.",
+        "Scrolling is the app's own, everywhere - the same glide on the "
+        "reader as on the catalogue pages, and it no longer steps "
+        "backwards on the first tick of a wheel.",
+        "The setup window can offer a debrid key, a preferred "
+        "resolution and a downloads folder, and it opens once after this "
+        "update so nothing new is hidden behind a menu you never "
+        "visited.",
+        "Updates are downloaded from the release itself from now on, "
+        "which is what makes a build this size possible at all. "
+        "Installs on 1.10 and older are carried across by a small "
+        "installer, in one press, with nothing to do by hand.",
+    ],
     "1.10": [
         "An app or website you just opened moves to the top of its Home "
         "list 2.5 seconds later, instead of the instant you click it - "
@@ -337,10 +401,18 @@ def _sections_to_show(app_settings) -> list:
     return []  # genuine first install: nothing has changed *for them*
 
 
-def show_if_updated(parent):
-    """Show the summary once, if this launch followed an update. Always
-    records the running version on the way out, so the next launch is
-    silent whether or not anything was shown here.
+def show_if_updated(parent, skip_dialog: bool = False) -> list:
+    """Show the summary once, if this launch followed an update, and
+    return what it was. Always records the running version on the way
+    out, so the next launch is silent whether or not anything was shown
+    here.
+
+    `skip_dialog` hands the same notes to somebody else to draw instead:
+    on the first launch after updating into 2.0 the setup window opens
+    as well, and two modal dialogs stacked over a just-restarted app is
+    one too many - so the wizard's first page carries these lines and
+    this one stays shut. The markers are still read and cleared either
+    way, or the next launch would show them again.
 
     Fails soft: anything wrong (unreadable settings, a version string
     that won't parse) must not stop the app opening, hence the wrap."""
@@ -348,7 +420,8 @@ def show_if_updated(parent):
         from . import app_settings
         sections = _sections_to_show(app_settings)
         app_settings.set_last_seen_version(updater.APP_VERSION)
-        if sections:
+        if sections and not skip_dialog:
             UpdateSummaryDialog(parent, updater.APP_VERSION, sections).exec()
+        return sections
     except Exception:
-        pass
+        return []

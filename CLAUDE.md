@@ -40,11 +40,14 @@ GitHub tags.
    are gitignored on `development`; the **zip** is tracked on `main`, at
    a release (rule 8).
 
-   **The first zipped release carries both**, and only that one: every
-   install already out there runs an updater that looks for
-   `Atomic.exe` and nothing else, so a release without it leaves them
-   unable to update in place. Once a zip-aware build is what people are
-   running, later releases drop the exe.
+   **Superseded at 2.0, 8 September 2026, by a measurement**: the build
+   is 126MB and GitHub refuses any file over 100MiB on push, so nothing
+   buildable can be committed at a tag any more. The app ships as a
+   **release asset**; what the tag carries is the ~10MB bridge
+   installer (`packaging/bridge/`), which is the only thing an install
+   running 1.10 or older can be handed - it asks for
+   `/contents/Atomic.exe?ref=<tag>` and knows nothing about assets.
+   `docs/RELEASING.md` has the whole of it.
    - **"Approved"** (tested, not released): commit and push to
      `development` - 1.0.1 → 1.0.2.
    - **"Approved, release it"**: skip the `development` push; use the
@@ -110,11 +113,13 @@ GitHub tags.
    play. Nothing in the code was ever shown to cause it; the container
    was.
 
-   `python packaging/build.py --zip` writes it. `helpers/updater.py`
-   prefers `Atomic.zip` at a tag and falls back to `Atomic.exe`, so
-   releases already published still install - **do not remove that
-   fallback**, and see rule 4 for what the first zipped release has to
-   carry.
+   `python packaging/build.py --zip` writes it, and from 2.0 it is
+   uploaded as the release's asset rather than committed.
+   `helpers/updater.py` asks the releases API *and* the old
+   tag+contents route and takes the newest, the asset winning a tie -
+   **do not remove either half**: the first is how anything from 2.0 on
+   is delivered, the second is the only thing 1.0-1.10 can read. See
+   rule 4 and `docs/RELEASING.md`.
 
 9. **Find the cause before writing the fix - by measurement, not by
    reading.** The owner's ask, 21 August 2026, after the pass above

@@ -86,3 +86,12 @@ packaging/rd_token.txt
 /run_src.log
 /probe.log
 /cover.log
+
+# The bridge installer's build output. `packaging/bridge/dist/Atomic.exe`
+# is committed at a release tag by hand (as Atomic.exe at the repo root),
+# never from here - see docs/RELEASING.md.
+/packaging/bridge/build/
+/packaging/bridge/dist/
+
+# Server log from driving the local web UI during development.
+/srv.log
