@@ -1403,7 +1403,13 @@ def install():
     #     looked up again from Home and every countdown ticks; back
     #     from a search lands on Discover through history back too
     #     (his six asks, 7 September, night).
-    updater.APP_VERSION = "2.0"
+    #
+    # 2.1
+    #   * The player's episode list carries each episode's rating
+    #     beside its date, the way the title page's list does - one
+    #     source for a whole season, and nothing at all on an
+    #     episode nobody has rated (his ask, 10 September 2026).
+    updater.APP_VERSION = "2.1"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

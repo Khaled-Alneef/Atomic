@@ -26,6 +26,12 @@ from . import updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.1": [
+        "The episode list inside the player shows each episode's "
+        "rating beside its date, the way the title page's list does. "
+        "An episode nobody has rated yet - one that has not aired - "
+        "shows its date alone rather than a zero.",
+    ],
     # 2.0 is 364 commits after 1.10 and the first release with a video
     # player, a reader and a downloader in it, so these are highlights
     # rather than a list. The rule for what belongs is unchanged: if a

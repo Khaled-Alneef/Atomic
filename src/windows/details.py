@@ -2556,16 +2556,12 @@ class DetailsPage(GlassPage):
         back empty (Bleach: Thousand-Year Blood War has its own sparse
         TMDB entity) falls back to whatever Cinemeta did have, so a
         season is never left blank when a real rating exists somewhere."""
-        cine = {}
-        for video in rows:
-            number = int(video.get("number") or video.get("episode") or 0)
-            try:
-                score = float(str(video.get("rating")).strip())
-            except (TypeError, ValueError):
-                continue
-            if score > 0:
-                cine[number] = score
-        if rows and len(cine) >= 0.6 * len(rows):
+        from helpers import ratings
+        # The share test itself lives in ratings.cinemeta_scores, because
+        # the player's episode panel prints the same column and a second
+        # copy of it here is how the two would drift.
+        cine, enough = ratings.cinemeta_scores(rows)
+        if enough:
             return cine, "IMDb"
 
         imdb = (self.entry.get("imdb_id")
@@ -2582,7 +2578,6 @@ class DetailsPage(GlassPage):
         # (series, season) per page.
         tmdb = {}
         try:
-            from helpers import ratings
             tmdb = ratings.cached_episode_ratings(imdb, season,
                                                   self._videos) or {}
         except Exception:

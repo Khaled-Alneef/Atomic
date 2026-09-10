@@ -1699,6 +1699,11 @@ class _WorkBridge(QObject):
     # What the title *is*, from the same record: {genres, country}. The
     # audio default reads it - see _on_meta_facts.
     meta_facts = Signal(object)
+    # TMDB's per-episode ratings for one season, when Cinemeta had
+    # none of its own. Keyed by (imdb id, season) rather than by a run:
+    # a rating belongs to the season, and the panel can be flipped to
+    # another one while the fetch is in the air.
+    ratings_ready = Signal(object, object)  # (imdb, season), {number: score}
     # A torrent stream only becomes playable once the streaming server
     # has been handed its trackers, which takes a round trip (and may
     # start the server first). That cannot happen on the UI thread.
@@ -2896,6 +2901,7 @@ class PlayerPage(GlassPage):
         self._work.logo_ready.connect(self._on_logo)
         self._work.meta_ready.connect(self._on_meta)
         self._work.meta_facts.connect(self._on_meta_facts)
+        self._work.ratings_ready.connect(self._on_episode_ratings)
         self._work.stream_prepared.connect(self._on_stream_prepared)
         self._work.failed.connect(self._on_failed)
         # Its own slot, not _on_failed: a note is a *step* of the
@@ -2911,6 +2917,16 @@ class PlayerPage(GlassPage):
         # half-second.
         self._meta_aired = getattr(self, "_meta_aired", None)   # seeded above
         self._meta_videos = None      # Cinemeta's raw rows, for the list
+        # The episode panel's rating column. Cinemeta rates western live
+        # action and almost none of the anime watched here (0 of 89 on
+        # Attack on Titan, measured in helpers/ratings), so a season it
+        # has not rated is fetched from TMDB once and remembered for as
+        # long as the player is open - the details page this was opened
+        # from has usually paid for it already, and that cache is on
+        # disk, so the common case is no request at all.
+        self._tmdb_ratings = {}
+        self._tmdb_ratings_key = None
+        self._tmdb_ratings_asked = set()
         # Whether Cinemeta has answered at all this run - with or without
         # an episode list. Read by _change_episode: a season end that is
         # unknown because the answer has not landed is waited for; one
@@ -3887,6 +3903,12 @@ class PlayerPage(GlassPage):
             number = int(video.get("number") or video.get("episode") or 0)
             if number >= 1:
                 by_number[number] = video
+        # The season's rating column, read once per refill for the same
+        # reason _watched_mark is: this rebuilds on every episode change
+        # and every keystroke in the search box, and a season can run to
+        # thirty rows.
+        self._rating_map, self._rating_label = self._season_ratings(
+            season, list(by_number.values()))
         count = max(self._season_episode_count(season),
                     max(by_number) if by_number else 0)
         for number in range(1, count + 1):
@@ -3934,6 +3956,93 @@ class PlayerPage(GlassPage):
         season, episode = tracker.parse_episode_progress(
             self.entry.get("progress"))
         return int(season or 0), int(episode or 0)
+
+    def _season_ratings(self, season, rows):
+        """({number: score}, label) for the season the panel is showing.
+
+        The title page prints this same column, and this is deliberately
+        the same answer: one source for a whole list, Cinemeta's (IMDb's
+        numbers) when it rated most of the season and TMDB's otherwise -
+        the two scales differ by 0.4-0.6, so a column carrying some of
+        each would compare unlike things. The share test itself is
+        ratings.cinemeta_scores, shared with details._season_ratings.
+
+        Never opens a socket: `cached_episode_ratings` reads the disk
+        index the details page usually filled a moment ago, and a miss
+        asks the network on a worker - once per (series, season) for the
+        life of the page, not once per refill. This runs on every episode
+        change and every keystroke in the panel's search box."""
+        try:
+            from helpers import ratings
+        except Exception:                               # pragma: no cover
+            return {}, "IMDb"
+        cine, enough = ratings.cinemeta_scores(rows)
+        if enough:
+            return cine, "IMDb"
+
+        imdb = self._entry_imdb_id()
+        if not imdb:
+            return cine, "IMDb"
+
+        key = (imdb, int(season))
+        if self._tmdb_ratings_key == key and self._tmdb_ratings:
+            return dict(self._tmdb_ratings), "TMDB"
+        tmdb = {}
+        try:
+            tmdb = ratings.cached_episode_ratings(
+                imdb, season, self._meta_videos or []) or {}
+        except Exception:
+            tmdb = {}
+        if tmdb:
+            self._tmdb_ratings = tmdb
+            self._tmdb_ratings_key = key
+            return dict(tmdb), "TMDB"
+        if key not in self._tmdb_ratings_asked:
+            self._tmdb_ratings_asked.add(key)
+            self._spawn(self._ratings_worker, key, list(self._meta_videos or []))
+        # Nothing yet - print whatever Cinemeta did have, and let the
+        # fetch fill the rest in when it lands.
+        return cine, "IMDb"
+
+    def _entry_imdb_id(self):
+        try:
+            from windows import tracker
+            return str(tracker._entry_imdb_id(self.entry) or "").strip()
+        except Exception:
+            return str(self.entry.get("imdb_id") or "").strip()
+
+    def _ratings_worker(self, key, videos):
+        """One season's TMDB ratings, off the UI thread.
+
+        Never raises - an exception on a bare thread dies silently, and
+        this one only decorates a list, so a failure must cost the column
+        and nothing else. `ratings.episode_ratings` already fails soft to
+        {}; the wrapper is for everything around it."""
+        mapping = {}
+        try:
+            from helpers import ratings
+            mapping = ratings.episode_ratings(key[0], key[1], videos) or {}
+        except Exception:
+            logs.exception("episode ratings lookup failed")
+        if self._closing:
+            return
+        try:
+            self._work.ratings_ready.emit(key, mapping)
+        except RuntimeError:
+            pass                    # the page went while the request ran
+
+    def _on_episode_ratings(self, key, mapping):
+        """A season's ratings landed: keep them, and redraw the panel
+        only if it is still showing that season. An empty answer changes
+        nothing - whatever Cinemeta had is already drawn, and asking
+        again is what the next open is for."""
+        if self._closing or not mapping:
+            return
+        self._tmdb_ratings = dict(mapping)
+        self._tmdb_ratings_key = key
+        season = int(self._panel_season or self.season or 1)
+        if int(key[1]) == season:
+            self._fill_episode_bar()
 
     def _episode_row(self, number, video=None):
         """One row: number and name, the air date under it, and a badge -
@@ -4001,8 +4110,20 @@ class PlayerPage(GlassPage):
             f" font-weight: {700 if current else 500};"
             f" background: transparent; border: none;")
         column.addWidget(label)
-        if date_text:
-            date = QLabel(date_text)
+        # The episode's own rating, beside the date - the same line the
+        # title page's list carries (details._fill_episode_rows), and the
+        # owner's ask of 10 September 2026 for this panel. An unrated
+        # episode shows nothing rather than a zero, and the label names
+        # whose number it is: Cinemeta's are IMDb's, the fallback is
+        # TMDB's own scale.
+        from windows.details import _episode_rating
+        stars = _episode_rating(getattr(self, "_rating_map", {}).get(number),
+                                getattr(self, "_rating_label", "IMDb"))
+        meta_line = date_text or stars
+        if date_text and stars:
+            meta_line = f"{date_text}   ·   {stars}"
+        if meta_line:
+            date = QLabel(meta_line)
             date.setStyleSheet(
                 f"color: {theme.TEXT_MUTED}; font-size: 9.5pt;"
                 f" background: transparent; border: none;")

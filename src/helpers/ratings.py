@@ -88,6 +88,14 @@ MISS_TTL_SECONDS = 12 * 3600
 # covers that without ever reaching a neighbouring weekly episode.
 DATE_TOLERANCE_DAYS = 2
 
+# How much of a season Cinemeta must have rated before its own numbers
+# are used for the whole list. Below this the season is TMDB's - see
+# cinemeta_scores, and the measurements at the top of this file: for the
+# titles watched here Cinemeta rates 0 of 89, and for Breaking Bad 67 of
+# 67. There is no populated middle here either, so the share only has to
+# separate "all of it" from "none of it".
+CINEMETA_SEASON_SHARE = 0.6
+
 # A vote_average with no votes behind it is TMDB's 0.0, and printing that
 # as a confident rating is exactly the bug this module exists to fix.
 # Measured over the titles above, a rated episode carries 70-540 votes
@@ -390,6 +398,39 @@ def _answer(record, videos, season):
     numbers = _candidate_seasons(record.get("seasons") or [],
                                  min(dates), max(dates), season)
     return _match(_index(record, numbers), rows)
+
+
+def cinemeta_scores(rows):
+    """Cinemeta's own per-episode scores for one season's rows, and
+    whether they cover enough of that season to be printed as they are.
+
+    Returns `({number: score}, enough)`. **One source for the whole
+    season, never mixed within a list** - Cinemeta's numbers are IMDb's
+    and TMDB's differ by 0.4-0.6 (measured: Breaking Bad's pilot is 8.5
+    on TMDB and 8.2 on Cinemeta in the same fetch), so a list carrying
+    some of each would compare unlike things. Cinemeta wins the season
+    only when it actually rated most of it; otherwise the caller asks
+    here for TMDB's and labels the column with that name instead.
+
+    "0" is Cinemeta's way of saying unrated - every behind-the-scenes
+    row carries it - so a zero is absent rather than a score.
+
+    One implementation for both lists that print this: the title page's
+    (details.DetailsPage._season_ratings) and the player's episode panel
+    (player.VideoPlayerPage._season_ratings, the owner's ask of 10
+    September 2026). Copying the share into the second one is how the
+    two would have drifted apart."""
+    scores = {}
+    for video in rows or []:
+        try:
+            number = int(video.get("number") or video.get("episode") or 0)
+            score = float(str(video.get("rating")).strip())
+        except (TypeError, ValueError):
+            continue
+        if number >= 1 and score > 0:
+            scores[number] = score
+    enough = bool(rows) and len(scores) >= CINEMETA_SEASON_SHARE * len(rows)
+    return scores, enough
 
 
 def cached_episode_ratings(imdb_id: str, season, videos) -> dict:
