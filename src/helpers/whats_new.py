@@ -26,6 +26,28 @@ from . import updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.3": [
+        "Pressing play opens straight into the loading screen - the "
+        "title's own picture and logo - instead of showing a half-drawn "
+        "player with the page behind it for a moment.",
+        "Subtitles from a file on this device: \"Add Subtitle File...\" "
+        "in the Subtitles panel takes an .srt, .ass or a .zip out of a "
+        "release folder, remembers it for that episode, and keeps it "
+        "when the episode is reloaded.",
+        "The languages inside the file itself are offered, Arabic "
+        "included, and choosing one no longer freezes the picture for "
+        "several seconds.",
+        "The subtitle you pick lights up in the panel straight away, "
+        "and the one it replaced stops being lit.",
+        "Downloading a range of episodes takes one subtitle language "
+        "and source for the whole range, and the videos land in a "
+        "folder of their own named after the title.",
+        "A download that found a release but could not start it says "
+        "why instead of failing silently.",
+        "F11 really does reach the player and the reader now. 2.2 said "
+        "so, but the fix was never reached when either was opened from "
+        "a page.",
+    ],
     "2.2": [
         "The mouse wheel scrolls when the pointer is at the very right "
         "edge of the window, past the scroll bar - the last pixel column "

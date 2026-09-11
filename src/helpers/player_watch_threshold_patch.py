@@ -8,9 +8,10 @@ it. Two older shortcuts defeated that rule:
   end-file signal can also occur for stop/source-change paths, not only a
   natural EOF.
 
-This patch keeps History's ordinary "opened/played" touch on open, removes the
-instant watched tick, and makes every automatic watched decision obey the 85%
-position threshold. When the threshold is crossed it also writes the exact
+This patch keeps History's ordinary "opened/played" touch on open, turns the
+instant watched tick off (player.MARK_WATCHED_ON_OPEN, one flag rather than a
+second copy of open_player - see the note beside it), and makes every automatic
+watched decision obey the 85% position threshold. When the threshold is crossed it also writes the exact
 per-episode History tick, so unsaved Discover titles get the same watched state
 as saved tracker entries.
 """
@@ -80,71 +81,21 @@ def _patch(player):
 
     Page._check_watched = threshold_check_watched
 
-    def threshold_open_player(window, entry, season=None, episode=None,
-                              streams=None):
-        """Original player wiring, minus the instant watched tick on open."""
-        host = (window.immersive_host() if hasattr(window, "immersive_host")
-                else (window.centralWidget() if hasattr(window, "centralWidget")
-                      else window))
-
-        player.forget_untethered_resume()
-        # This wrapper replaces player.open_player outright, so the
-        # prewarm added there on 3 September 2026 never ran through it
-        # (found by the review's check): the video child starts here as
-        # well, before the page is built, and mpv_proxy.start joins it
-        # if it is still connecting.
-        try:
-            from helpers import mpv_proxy
-            mpv_proxy.prewarm()
-        except Exception:
-            pass
-
-        # Opening something should still make it appear in Watch History, but
-        # "opened" is not "watched". The watched key is added only by
-        # threshold_check_watched after 85% playback.
-        try:
-            from helpers import history
-            from windows.tracker import format_episode_progress
-            shown = (format_episode_progress(int(season or 0), int(episode))
-                     if episode else None)
-            history.touch(entry, progress=shown)
-        except Exception:
-            player.logs.exception("could not record the watch history")
-
-        existing = getattr(window, "_player_page", None)
-        if existing is not None:
-            try:
-                existing.close_player()
-            except RuntimeError:
-                pass
-
-        def on_close():
-            window._player_page = None
-
-        try:
-            page = player.PlayerPage(host, entry, season=season, episode=episode,
-                                     streams=streams, on_close=on_close)
-        except Exception:
-            # Preserve the original half-built-widget cleanup contract.
-            for stray in host.findChildren(player.PlayerPage):
-                if not hasattr(stray, "surface"):
-                    try:
-                        stray.hide()
-                        stray.setParent(None)
-                        stray.deleteLater()
-                    except RuntimeError:
-                        pass
-            raise
-
-        window._player_page = page
-        page.setGeometry(host.rect())
-        page.show()
-        page.raise_()
-        player.freeze_covered(page)
-        page.setFocus()
-        return page
-
-    player.open_player = threshold_open_player
+    # **The flag, not a second open_player.** This used to be a copy of
+    # player.open_player with the instant watched tick removed, and the
+    # copy is what actually ran - so every fix the original gained after
+    # it was written silently never ran at all. Measured 12 September
+    # 2026, reading the function the app really calls: the copy had
+    # neither `web_pages.overlay_opened(page)` (so the Home document
+    # under the player was never put down, and went on painting over it
+    # - a native child over a non-native sibling) nor
+    # `webview2_host.keyboard_to_qt(page)` (so the F11 fix of 11
+    # September had never once run when the player opened over a web
+    # page). That is .claude/rules/testing.md's "a wrapper that replaced
+    # the patched function outright, so the fix had never run", and the
+    # answer to it is one implementation with a flag on the one line
+    # that differs.
+    player.MARK_WATCHED_ON_OPEN = False
 
 
 class _Loader(importlib.abc.Loader):

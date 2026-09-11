@@ -851,3 +851,68 @@ carried no key, so a late Anime section could not take Attack on Titan
 out of Series (cardFor now sets `pid`/`ptitle` like gridCard), and the
 server module had never imported its logger, so the schedule worker
 raised after writing - see integrations.md for what it wrote.
+
+## The player's first frame, and the bars that gave it away (12 September 2026)
+
+His picture: the app's own sidebar and search bar, the page area blank,
+and the player's seek strip drawn across the bottom of it - *"when I
+play any episode this shows for < 1 sec then enters the vid player"*.
+The 11 September report ("some freezed screen from inside the player
+for ~1sec") is the same frame.
+
+Measured on the build he was running, a copy of his data, the screen
+sampled at 60Hz through a resume from a Home card: the press, **287ms
+with nothing on screen changing at all**, then the page as a flat
+ground with its two bars and no backdrop and no logo, and the real
+loading frame only at **+502ms** - 215ms of half-built player. The
+cause is ordering, not speed: `PlayerPage.__init__` ended with
+`QTimer.singleShot(0, self._start)`, and `_start` is what puts the
+loading frame up - one event-loop turn *after* `open_player` has shown
+the page. The page is a native window (its video surface, backdrop and
+bars are native, and Qt promotes every ancestor of a native child), so
+between `show()` and its first paint its HWND carries no pixels of its
+own and whatever was underneath shows through, while the bars - layered
+native children - compose themselves at once. That is his picture
+exactly.
+
+**The frame is composed in two halves, and the halves are the point.**
+`_prime_artwork()` reads the backdrop and logo in the constructor
+(`artwork.cached`: three `stat()`s, 0.05ms, plus a 2.5-37ms decode; no
+request, where `artwork.deliver` answers on a worker thread 200ms
+later). `reveal_loading_frame()` then composes, paints and reveals -
+called by `open_player` in the same call as `show()`.
+
+The first cut did the whole thing in the constructor, with the page
+still hidden, and he measured the cost from the other side: *"now there
+is a delay when I click to start the ep it takes ~1.5 sec"*. **The
+first `_show_loading` of a page costs ~450ms while the page is hidden
+and 2-4ms once it is shown** - every open, not once per session. It is
+not the artwork (the same 391ms with the picture set after the call)
+and not Python (the statements inside `_layout_overlays` sum to 1ms
+under cProfile); it is Qt realising the page's native children against
+a parent that is not on screen. So composing happens *after* `show()`,
+and what stops his picture coming back is that `top_bar` and `controls`
+are hidden in the constructor and only woken at the end of
+`reveal_loading_frame` - the exposed milliseconds can then show the
+page he pressed on and nothing else.
+
+Measured on the frozen build after, two opens: the press, ~340ms of the
+page he pressed on, **one 16-18ms frame** with the page area blank and
+no player chrome, the whole loading screen at **+353ms**, the bars at
++373ms. Photographed: the blank frame carries no bar, the next carries
+backdrop, logo, title and seek strip.
+
+**And the fix that had never run.** `player.open_player` is not what
+the app calls: `helpers/player_watch_threshold_patch` replaced it with
+a *copy* carrying one change (no watched tick on open), and the copy
+had drifted - no `web_pages.overlay_opened(page)` (so the Home document
+under the player was never put down) and no
+`webview2_host.keyboard_to_qt(page)` (so the 11 September F11 fix had
+never once run when the player opened over a web page). It is a flag
+now, `player.MARK_WATCHED_ON_OPEN`, and there is one implementation.
+F11 checked on the frozen build from inside the player: maximised
+(-9,-9,2569,1389) -> full screen (0,0,2560,1440) -> back. This is
+testing.md's "a wrapper that replaced the patched function outright";
+when a fix in `open_player`, `_start` or any other patched entry point
+seems to do nothing, print `player.open_player.__qualname__` before
+reading the code.

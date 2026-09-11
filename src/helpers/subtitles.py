@@ -819,3 +819,41 @@ def fetch(entry: dict, deadline=None) -> str:
     return text
 
 
+# The extensions the player's file picker offers, and the ones a browsed
+# archive is unpacked for. Kept here rather than in the player so the
+# filter and `_unpack`'s member test can never drift apart.
+FILE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub", ".zip", ".gz")
+
+
+def read_file(path) -> str:
+    """One subtitle file off this disk, as decoded text.
+
+    `fetch`'s twin for the file picker the owner asked for on 11
+    September 2026 - and deliberately the same three steps, so a file
+    browsed to behaves exactly as one downloaded: unpack whatever
+    container it arrived in (a .zip of a season's subtitles is what a
+    release folder usually holds), decode it with the same
+    UTF-8-then-codepage rule an Arabic .srt needs, and refuse anything
+    that carries no timings at all.
+
+    Returns None rather than raising - the player turns that into "that
+    subtitle could not be read" and leaves playback alone."""
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(MAX_SUBTITLE_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > MAX_SUBTITLE_BYTES:
+        return None             # not a subtitle; a subtitle is kilobytes
+    raw = _unpack(raw, os.path.basename(str(path)))
+    text = decode(raw)
+    # The same guard fetch uses: a file with no timestamp and no
+    # Dialogue line parses to zero cues and would load as a blank track
+    # with nothing to say why.
+    if not text or (not _TIME_RE.search(text) and "dialogue:" not in text.lower()):
+        return None
+    return text
+
+
