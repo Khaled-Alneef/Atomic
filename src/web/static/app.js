@@ -84,6 +84,36 @@ addEventListener('keydown', function (e) {
   if (e.key === 'F11' || e.key === 'Escape') {
     tellHost({ action: 'key', key: e.key });
     e.preventDefault();
+    return;
+  }
+  /* **And the Ctrl keys the window owns.** The owner, 11 September
+     2026: Ctrl+F drew Edge's find bar over his Home, and with the
+     browser's accelerator keys turned off it then did nothing at all -
+     the search field never took the keyboard either way. The page is
+     the one place that always sees the key: webview2_host's
+     AcceleratorKeyPressed hook is the intended route and did not
+     deliver it on his machine, while this same listener has carried
+     F11 and Escape for as long as it has existed. So the rest of the
+     window's own block goes down the proven path.
+
+     Inside a text field (the pages' own "Filter by name") only Ctrl+F
+     and the page numbers are taken, so undo, redo and the editing keys
+     stay with whatever he is typing in. */
+  if (e.ctrlKey && !e.altKey && !e.metaKey) {
+    const typed = String(e.key || '').toLowerCase();
+    const node = e.target || {};
+    const tag = String(node.tagName || '').toLowerCase();
+    const editing = tag === 'input' || tag === 'textarea' || node.isContentEditable;
+    let name = '';
+    if (typed === 'f') name = 'Ctrl+F';
+    else if (/^[1-9]$/.test(typed)) name = 'Ctrl+' + typed;
+    else if (!editing && (typed === 'n' || typed === 'z' || typed === 'y'))
+      name = 'Ctrl+' + typed.toUpperCase();
+    else if (!editing && typed === ',') name = 'Ctrl+,';
+    if (name) {
+      tellHost({ action: 'key', key: name });
+      e.preventDefault();
+    }
   }
 });
 
