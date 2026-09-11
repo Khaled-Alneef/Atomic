@@ -26,6 +26,18 @@ from . import updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.2": [
+        "The mouse wheel scrolls when the pointer is at the very right "
+        "edge of the window, past the scroll bar - the last pixel column "
+        "belonged to the window frame rather than to the page.",
+        "Ctrl+F goes to the search bar from any page, and the browser's "
+        "own find bar no longer appears over it. Where there is no search "
+        "bar to go to - the episode or chapter list in full screen, the "
+        "reader, the player - it does nothing rather than moving the "
+        "keyboard somewhere you cannot see.",
+        "F11 reaches the player and the reader, so full screen works "
+        "from inside them as it does everywhere else.",
+    ],
     "2.1": [
         "The episode list inside the player shows each episode's "
         "rating beside its date, the way the title page's list does. "

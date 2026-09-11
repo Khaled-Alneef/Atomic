@@ -4797,6 +4797,35 @@ class MainWindow(QMainWindow):
             logs.exception("could not close the reading music at exit")
         super().closeEvent(event)
 
+    def _search_bar_reachable(self) -> bool:
+        """Is the title bar's search field somewhere he can see it?
+
+        His ask, 11 September 2026: *"do not make the Ctrl+F works in
+        the ep/ch list when full screen since there is no search bar"*.
+        Windowed, the bar is a strip **above** the body and the details
+        page opens inside the body, so it is there and Ctrl+F belongs to
+        it. Full screen, the bar is re-parented into `container` and any
+        overlay is drawn over it (_apply_fullscreen_chrome says so in
+        its own comment); the reader and the player take
+        `immersive_host` and cover it in either state. In those cases
+        the field is `isVisible()` - Qt's answer is about being shown,
+        not about being on top - and focusing it would put his typing
+        somewhere he cannot see.
+        """
+        field = getattr(self, "top_search", None)
+        if field is None:
+            return False
+        try:
+            if not field.isVisible():
+                return False
+            overlay = self._top_overlay()
+            if overlay is None:
+                return True
+            return not (self.isFullScreen()
+                        or overlay.parent() is self.immersive_host())
+        except RuntimeError:
+            return False
+
     def _apply_fullscreen_chrome(self):
         """Move the bar between its two homes as full screen comes and
         goes.
@@ -5330,8 +5359,28 @@ class MainWindow(QMainWindow):
                 # others). Selected rather than cleared, so a second
                 # Ctrl+F types straight over an existing query instead
                 # of throwing away one that may still be wanted.
+                # **Nothing at all where the bar is not on screen.**
+                # The owner, 11 September 2026: "do not make the Ctrl+F
+                # works in the ep/ch list when full screen since there
+                # is no search bar". See _search_bar_reachable.
+                reachable = self._search_bar_reachable()
+                logs.info(f"Ctrl+F at the window: bar reachable={reachable}, "
+                          f"full screen={self.isFullScreen()}")
+                if not reachable:
+                    return
                 self.top_search.setFocus(Qt.FocusReason.ShortcutFocusReason)
                 self.top_search.selectAll()
+                # **And the keyboard itself, which Qt cannot move.** A
+                # web page is a native child window holding the real
+                # focus; setFocus above draws the field's ring and caret
+                # while every letter typed next still goes to the page
+                # (measured 11 September 2026). This is the other half of
+                # "take me to the search bar".
+                try:
+                    from helpers import webview2_host
+                    webview2_host.keyboard_to_qt(self)
+                except Exception:
+                    logs.exception("Ctrl+F could not take the keyboard back")
                 return
             if event.key() == Qt.Key.Key_Y:
                 # Redo: do again whatever Ctrl+Z just undid. Only ever

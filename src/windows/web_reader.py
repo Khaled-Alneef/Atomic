@@ -322,6 +322,7 @@ class WebReader(QWidget):
         would only add a frame to each.
         """
         window = self.window()
+        logs.info(f"reader key: {name!r} arrived from the page")
         # **Escape, forwarded by the page, closes the reader.** The page
         # takes the key (app.js `preventDefault`s it and sends it here),
         # so the QShortcut above never sees it while the view has focus
@@ -350,6 +351,8 @@ class WebReader(QWidget):
         if name in ("F11", "F") and hasattr(window, "toggle_fullscreen"):
             try:
                 window.toggle_fullscreen()
+                logs.info(f"reader key: {name} -> full screen="
+                          f"{window.isFullScreen()}")
             except Exception:
                 logs.exception("Full screen from the reader failed")
 

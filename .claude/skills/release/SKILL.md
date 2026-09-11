@@ -1,6 +1,9 @@
 ---
 name: release
-description: Ship an Atomic release to main - version bump, branch snapshot, tag, push, and the VDD. Use only when the user has explicitly asked for a release ("approved, release it"), never on your own initiative.
+description: Ship an Atomic release to main - version bump, branch
+snapshot, tag, push, and the VDD. Use only when the user has explicitly
+asked for a release ("approved, release it"), never on your own
+initiative.
 ---
 
 # Release
@@ -56,15 +59,37 @@ git add -A && git commit -m "Atomic 2.0"    # development
 git checkout main
 git read-tree -u --reset development
 cp packaging/bridge/dist/Atomic.exe Atomic.exe
-python -c "import zipfile;zipfile.ZipFile('Atomic.zip','w',zipfile.ZIP_DEFLATED).write('Atomic.exe','Atomic.exe')"
+python -c "import
+zipfile;zipfile.ZipFile('Atomic.zip','w',zipfile.ZIP_DEFLATED).write('Atomic.exe','Atomic.exe')"
 git add -f Atomic.exe Atomic.zip            # the bridge, both shapes - never the app
-git rm --cached docs/ROADMAP.md && rm -f docs/ROADMAP.md
+git rm --cached docs/ROADMAP.md docs/NEXT-SESSION.md && rm -f docs/ROADMAP.md docs/NEXT-SESSION.md
 git commit -m "Atomic 2.0"
 git tag -a v2.0 -m "Atomic 2.0"
 git push origin main && git push origin v2.0
-gh release create v2.0 <path-to-real-Atomic.zip> --title "Atomic 2.0" --notes-file <notes>
+gh release create v2.0 <dir>/Atomic.zip --title "Atomic 2.0" --notes-file <notes>
 git checkout development
 ```
+
+**The asset has to be *named* `Atomic.zip`, and `gh`'s `#` does not do
+that.** Both readers look for that exact name (`updater.ZIP_NAME`,
+`atomic_setup.ZIP_NAME`), so an asset called anything else is invisible
+to every install - the release exists and nobody is ever offered it. `gh
+release create v2.1 /tmp/Atomic-2.1-release.zip#Atomic.zip` reads as a
+fix and is not: `file#label` sets a *display label* and the asset keeps
+the file's own name. Measured at 2.1, which uploaded as
+`Atomic-2.1-release.zip` and had to be deleted and re-uploaded. **Copy
+the build to a directory as `Atomic.zip` and upload that path**, then
+read the name back before believing it:
+
+```
+gh release view v2.1 --json assets --jq '[.assets[]|{name,size,state}]'
+```
+
+**`docs/NEXT-SESSION.md` is development-only too**, like the roadmap -
+it has never been in a snapshot, and `read-tree` brings it in silently
+(caught at 2.1 by reading `git status` before committing, not by the
+procedure). Anything on `development` that main has never carried is
+worth the same look.
 
 The release is not published until the asset is attached: the tag alone
 offers 1.10 installs a bridge with nothing to fetch.
@@ -72,7 +97,8 @@ offers 1.10 installs a bridge with nothing to fetch.
 `main` and `development` share no ancestry (`main` was restarted at 1.0
 as a single squashed commit) - never merge, always snapshot.
 
-**Prove the exe belongs to the tree you are tagging, and notes are written, before pushing.**
+**Prove the exe belongs to the tree you are tagging, and notes are
+written, before pushing.**
 1.4 shipped an executable built before the last two commits - it was
 missing `src/filter_icon.png` entirely. This is now caught automatically:
 `packaging/build.py` verifies the produced exe contains every file

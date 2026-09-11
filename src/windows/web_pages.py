@@ -945,6 +945,12 @@ class _WebPage(GlassPage):
         if window is None:
             return
         combo = self._AS_QT.get(name)
+        # One line per app key out of a page - they are rare, and when
+        # one of them does not reach the window this is where the trail
+        # stops. Written before the send, so a raise below is visible as
+        # a line with no effect rather than as silence.
+        logs.info(f"web page key: {name!r} from {self.ROUTE} -> "
+                  f"{'the window' if combo else 'nothing (not an app key)'}")
         if combo is None:
             return
         key, modifier = combo

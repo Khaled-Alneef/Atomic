@@ -1409,7 +1409,24 @@ def install():
     #     beside its date, the way the title page's list does - one
     #     source for a whole season, and nothing at all on an
     #     episode nobody has rated (his ask, 10 September 2026).
-    updater.APP_VERSION = "2.1"
+    #
+    # 2.2
+    #   * The mouse wheel scrolls with the pointer in the window's very
+    #     last pixel column, right of the scroll bar. The view was sized
+    #     from width() x the device ratio and truncated, so that column
+    #     belonged to Qt, which forwards no wheel to it (his ask, 11
+    #     September 2026; measured, three notches there wrote nothing
+    #     while the same burst two pixels left of it scrolled).
+    #   * The app's own keys are the app's again on a web page. Edge
+    #     answered Ctrl+F with its own find bar and F11 with Chromium's
+    #     full screen, because the view holds the real keyboard focus:
+    #     the browser's accelerator keys are off, the page forwards the
+    #     window's Ctrl block down the same listener that has always
+    #     carried F11 and Escape, Ctrl+F takes the keyboard back so what
+    #     is typed next lands in the field, and the player takes it when
+    #     it opens. Ctrl+F does nothing where the bar is not on screen -
+    #     the ep/ch list in full screen, the reader, the player.
+    updater.APP_VERSION = "2.2"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

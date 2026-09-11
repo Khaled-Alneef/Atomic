@@ -30,6 +30,7 @@ never once seen.
 import ctypes
 import ctypes.wintypes as w
 import json
+import math
 import pathlib
 import sys
 import time
@@ -159,6 +160,10 @@ _u.IsWindowVisible.argtypes = [w.HWND]
 _u.IsWindowVisible.restype = ctypes.c_bool
 _u.SetWindowPos.argtypes = [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int,
                             ctypes.c_int, ctypes.c_int, w.UINT]
+_u.SetFocus.restype = w.HWND
+_u.SetFocus.argtypes = [w.HWND]
+_u.GetFocus.restype = w.HWND
+_u.GetFocus.argtypes = []
 
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
@@ -277,6 +282,31 @@ def _pump_once():
         _forms.Application.DoEvents()
     except Exception:
         pass
+
+
+def keyboard_to_qt(widget) -> bool:
+    """Take the Win32 keyboard back from whatever native child holds it,
+    and give it to `widget`'s own top-level window.
+
+    The exact reverse of WebView2Page.focus_view, and needed for the same
+    reason: a native child - a web view, or mpv's window - holds the real
+    keyboard focus while Qt believes its own window has it, so a Qt
+    `setFocus()` moves the caret and nothing else. Measured 11 September
+    2026 on the frozen build: Ctrl+F drew the search field's accent ring
+    and caret, and the letter typed next went to the page.
+
+    Returns whether Windows agrees the window now has it.
+    """
+    try:
+        window = widget.window() if widget is not None else None
+        if window is None:
+            return False
+        handle = int(window.winId())
+        _u.SetFocus(handle)
+        return int(_u.GetFocus() or 0) == handle
+    except Exception:
+        logs.exception("The keyboard could not be taken back from a view")
+        return False
 
 
 class WebView2Page(QWidget):
@@ -651,6 +681,29 @@ class WebView2Page(QWidget):
             core.Settings.AreDevToolsEnabled = False
             core.Settings.IsZoomControlEnabled = False
             core.Settings.IsStatusBarEnabled = False
+            # **And the browser's own shortcuts, which are not this
+            # app's.** The owner, 11 September 2026, with a picture of
+            # it: "the Ctrl+F is showing this in the sidebar pages" -
+            # Edge's find-on-page bar, floating over his Home. Ctrl+F
+            # belongs to the window's search field (main.keyPressEvent),
+            # and _accelerator below is meant to take it before the
+            # browser does; a key that arrives while the view holds the
+            # keyboard reached Chromium's own handler instead. This
+            # setting is the answer Microsoft provides for exactly that:
+            # with it off, Ctrl+F, Ctrl+P, Ctrl+R/F5, Ctrl+S, Ctrl+O and
+            # Ctrl+U do nothing in the view - none of them is a feature
+            # of these pages - while the editing keys (Ctrl+C/V/X/A/Z/Y
+            # and every movement key) are explicitly untouched by it, so
+            # the pages' own filter field still copies and pastes.
+            # AcceleratorKeyPressed still fires, so the forwarding below
+            # is unchanged; this only stops the browser acting first.
+            # Its own try: the property arrived in runtime 1.0.1189 and
+            # an older one must not fail the whole initialisation.
+            try:
+                core.Settings.AreBrowserAcceleratorKeysEnabled = False
+            except Exception:
+                logs.info("WebView2: browser accelerator keys cannot be "
+                          "turned off on this runtime")
             # **A page region can move the window.** The owner, 6
             # September 2026: "make the window draggable from the upper
             # bar in the reader mode while in not fullscreen". The reader
@@ -732,6 +785,8 @@ class WebView2Page(QWidget):
     _user32 = ctypes.WinDLL("user32")
     _user32.GetKeyState.restype = ctypes.c_short
     _user32.GetKeyState.argtypes = [ctypes.c_int]
+    _user32.GetAsyncKeyState.restype = ctypes.c_short
+    _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 
     @classmethod
     def _modifier_held(cls, virtual_key) -> bool:
@@ -741,9 +796,18 @@ class WebView2Page(QWidget):
         status but not the modifier state, and the app is the foreground
         window whenever this fires, so asking Windows is both the
         simplest route and the correct one.
+
+        **Both questions, because they are not the same question.**
+        GetKeyState answers from the *calling thread's* input queue -
+        the app's, while the key itself was delivered to the view - and
+        GetAsyncKeyState answers from the hardware. Either saying yes is
+        yes: a modifier missed here is a Ctrl+key silently left to the
+        browser, which is what Ctrl+F looked like on his screen.
         """
         try:
-            return bool(cls._user32.GetKeyState(virtual_key) & 0x8000)
+            if cls._user32.GetKeyState(virtual_key) & 0x8000:
+                return True
+            return bool(cls._user32.GetAsyncKeyState(virtual_key) & 0x8000)
         except Exception:
             return False
 
@@ -760,6 +824,7 @@ class WebView2Page(QWidget):
             if not name:
                 return
             args.Handled = True
+            logs.info(f"WebView2: took {name} for the app")
             self.message.emit({"action": "key", "key": name})
         except Exception:
             logs.exception("A web page key could not be forwarded")
@@ -956,9 +1021,38 @@ class WebView2Page(QWidget):
         # Device pixels: the child window is sized in them while Qt's
         # width()/height() are logical, and mixing the two leaves the
         # view short of the widget on any display above 100%.
+        #
+        # **And the size comes from this widget's own native window, not
+        # from width() x ratio.** The child is parented to `_host`, so
+        # that window's client area *is* the box to fill, exactly - while
+        # the arithmetic is not: Qt lays widgets out in device pixels and
+        # gives the leftover to the edge, so logical x ratio can be short
+        # of the real box by up to a pixel, and int() then throws away
+        # the fraction on top of it.
+        #
+        # Measured 11 September 2026 on the owner's own window (2560x1440
+        # physical, dpr 1.25): the page widget occupied x 293..2559 while
+        # int(1813 x 1.25) = 2266 sized the child 293..2558 - leaving the
+        # window's **last pixel column to Qt**, which does not forward a
+        # wheel to the native child (rig.py has said so since 5 September).
+        # That column is exactly where a pointer thrown at the right edge
+        # comes to rest, and it is the owner's "the mouse wheel does not
+        # scroll when the cursor is most right (right of the scroll bar)":
+        # three notches posted there wrote no `glide` line at all, while
+        # the same burst two pixels left of it - and at every other offset
+        # tried - wrote one. The bottom row was one short the same way.
         ratio = self.devicePixelRatioF()
-        width = int(self.width() * ratio)
-        height = int(self.height() * ratio)
+        width = height = 0
+        box = w.RECT()
+        if _u.GetClientRect(getattr(self, "_host", 0), ctypes.byref(box)):
+            width = box.right - box.left
+            height = box.bottom - box.top
+        if width <= 0 or height <= 0:
+            # A handle Qt has since replaced, or a widget with no window
+            # yet: round *up*, which is the old arithmetic without the
+            # truncation that opened the gap.
+            width = math.ceil(self.width() * ratio)
+            height = math.ceil(self.height() * ratio)
         if width <= 0 or height <= 0:
             return
         # **Ask Windows what size the child actually is.** This used to

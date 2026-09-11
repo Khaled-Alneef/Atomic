@@ -11318,6 +11318,11 @@ class PlayerPage(GlassPage):
             self.volume_slider.setValue(max(0, self._volume - VOLUME_STEP))
         elif key in (Qt.Key.Key_F, Qt.Key.Key_F11):
             self.toggle_fullscreen()
+            try:
+                logs.info(f"player key: {'F11' if key == Qt.Key.Key_F11 else 'F'}"
+                          f" -> full screen={self.window().isFullScreen()}")
+            except Exception:
+                pass
         elif key == Qt.Key.Key_M:
             self.toggle_mute()
         elif key == Qt.Key.Key_R and not event.modifiers():
@@ -11672,4 +11677,19 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     except Exception:
         logs.exception("Could not put the web pages down for the player")
     page.setFocus()
+    # **And the keyboard itself.** setFocus above is Qt's own idea of
+    # focus; the page this player opened over is a WebView2, a native
+    # child window holding the real Win32 focus, and Qt cannot move
+    # that. So every key pressed here went on reaching Edge - which
+    # answers F11 with Chromium's own full screen (nothing, embedded)
+    # and Ctrl+F with its find bar. The owner, 11 September 2026: "make
+    # the F11 works in the vid player and the reader". Measured on the
+    # source tree: with the key posted straight to the Qt window the
+    # player's own handler takes F11 and the window goes full screen and
+    # back, so the handling was never the problem - the routing was.
+    try:
+        from helpers import webview2_host
+        webview2_host.keyboard_to_qt(page)
+    except Exception:
+        logs.exception("The player could not take the keyboard")
     return page
