@@ -207,6 +207,18 @@ SEEK_BUFFER_MARGIN_S = 1.0
 # would mean most finished episodes never got marked.
 WATCHED_FRACTION = 0.85
 
+# Whether opening an episode ticks it watched by itself. False in this
+# app - helpers/player_watch_threshold_patch sets it at startup, and the
+# mark is written only once the playhead passes WATCHED_FRACTION.
+#
+# It is a flag rather than a second open_player because that is what it
+# used to be: the patch carried a copy of this module's open_player with
+# the tick removed, and the copy silently missed every fix the original
+# gained afterwards - the web pages being put down for the player and
+# the keyboard being taken back from Edge, both of which had therefore
+# never once run (measured 12 September 2026).
+MARK_WATCHED_ON_OPEN = True
+
 # Step of 2, not 4 - the owner's ask, 23 August 2026: one press of 4
 # jumped past the size he wanted. The buttons print the step
 # (add_stepper's step_text), so nothing else encodes this number.
@@ -3147,8 +3159,118 @@ class PlayerPage(GlassPage):
         if self.episode or self.entry.get("imdb_id"):
             self._spawn(self._fetch_meta_worker)
 
+        # **The loading frame, and why it is built in two halves.** The
+        # owner, 12 September 2026, with a picture: "when I play any
+        # episode this shows for < 1 sec then enters the vid player" -
+        # the app's own sidebar and search bar, the page area blank, and
+        # the player's seek strip already drawn across the bottom of it.
+        # The 11 September report ("some freezed screen from inside the
+        # player") is the same frame.
+        #
+        # Measured on the build he photographed, a copy of his data, the
+        # screen sampled at 60Hz through a resume from a Home card: the
+        # press, 287ms with nothing on screen changing at all, then the
+        # page as a *flat* ground with its two bars and no backdrop and
+        # no logo, and only at +502ms the real loading frame. This page
+        # is a native window (its video surface, its backdrop and its
+        # bars are native, and Qt promotes every ancestor of a native
+        # child), so between `show()` and its first paint its HWND
+        # carries no pixels of its own and what shows through is
+        # whatever was underneath - while the bars, layered native
+        # children, compose themselves at once. That is his picture
+        # exactly, and it lasted until `_start` - a `singleShot(0)`,
+        # therefore one event-loop turn *after* open_player had shown
+        # the page - put the loading frame up.
+        #
+        # The artwork is read here because it is cheap and must be in
+        # hand before the first paint; the frame itself is composed by
+        # `reveal_loading_frame()`, which open_player calls in the same
+        # call as `show()`. Composing it *here*, with the page still
+        # hidden, was the first cut and he measured the cost from the
+        # other side - "now there is a delay when I click to start the
+        # ep it takes ~1.5 sec": the first `_show_loading` of a page is
+        # **~450ms while the page is hidden and 2-4ms once it is
+        # shown**, every open, not once per session. It is not the
+        # artwork (the same 391ms with the picture set after the call)
+        # and not Python (the statements inside `_layout_overlays` sum
+        # to 1ms under cProfile) - it is Qt realising this page's native
+        # children against a parent that is not on screen.
+        #
+        # What keeps his picture from coming back is the bars: held down
+        # until the frame is composed, so the only thing the exposed
+        # milliseconds can show is the page he pressed on, unchanged.
+        #
+        # Measured on the frozen build after, two opens, a copy of his
+        # data, the same 60Hz sampling: the press, ~340ms of the page he
+        # pressed on, **one 16-18ms frame** with the page area blank and
+        # no player chrome in it, the whole loading screen at +353ms and
+        # the bars at +373ms. Against the build he photographed - bare
+        # player at +287ms standing 215ms, complete at +502ms.
+        self._prime_artwork()
+        # Not `_mpv_only_strip`'s business and not a style choice: these
+        # two are native children that compose themselves the moment the
+        # page is mapped, which is before anything has painted a ground
+        # under them. `reveal_loading_frame` brings them up a few
+        # milliseconds later, with the backdrop already behind them.
+        self.top_bar.hide()
+        self.controls.hide()
         self._mark_open("page built")
         QTimer.singleShot(0, self._start)
+
+    def _prime_artwork(self):
+        """This title's backdrop and logo from disk, before the page is
+        shown - so the first frame can be the whole loading screen.
+
+        `artwork.deliver` cannot serve this: it answers on a worker
+        thread a couple of hundred milliseconds later, which is the gap
+        being closed. `artwork.cached` is three `stat()` calls (0.05ms
+        measured) plus the decode (2.5ms for the w780 copy, 37ms for the
+        full-resolution original) and answers for any title this machine
+        has already drawn - a card, the details page, a previous episode.
+        A title it has nothing for shows the flat ground it always
+        showed, and `_on_logo` fills it in when the fetch lands, exactly
+        as before.
+
+        Never raises: a page that cannot prime its artwork must still
+        open."""
+        try:
+            backdrop, logo = artwork.cached(self.entry)
+            if backdrop:
+                self.backdrop.set_backdrop(backdrop)
+            if logo:
+                self.logo.set_logo(logo)
+        except Exception:
+            logs.exception("the player's artwork could not be read")
+
+    def reveal_loading_frame(self):
+        """Compose and paint the loading screen, in open_player's own
+        call, immediately after `show()`.
+
+        The order is the whole point: the frame is composed while the
+        page is already on screen (2-4ms; ~450ms if this runs while it
+        is hidden - see the note in `__init__`), painted synchronously
+        so it reaches the screen in this call rather than in the next
+        event-loop turn, and only then are the bars allowed up. Until
+        that last line the page he pressed on is what is on screen,
+        whole - never a bar of the player over it.
+
+        Wordless, for the reason `_start` gives: with text
+        `_show_loading` takes the `_show_status` branch, which is a
+        centred box over an otherwise bare page.
+
+        Never raises: a frame that cannot be composed must not stop the
+        episode."""
+        try:
+            self._show_loading("")
+            # Painted now, not when the event loop next gets a turn.
+            # The backdrop is told separately because it is a native
+            # child with its own surface - the same reason `_start`
+            # repaints it.
+            self.repaint()
+            self.backdrop.repaint()
+            self._wake_controls()
+        except Exception:
+            logs.exception("the player's first frame could not be composed")
 
     # ---- setup -------------------------------------------------------
     def _starting_episode(self, season, episode):
@@ -12315,7 +12437,14 @@ def open_player(window, entry, season=None, episode=None, streams=None):
         history.touch(entry, progress=shown)
         # The tick, only for an episode actually named - a film has no
         # episode to tick and is remembered by the touch above.
-        if episode:
+        #
+        # Off in this app: helpers/player_watch_threshold_patch turns
+        # MARK_WATCHED_ON_OPEN off at startup, because opening an
+        # episode is not watching it - the mark is written when the
+        # playhead passes WATCHED_FRACTION. The flag is what that patch
+        # sets instead of carrying its own copy of this function; see
+        # the note there.
+        if episode and MARK_WATCHED_ON_OPEN:
             history.set_watched(entry, history.episode_key(season, episode),
                                 True)
     except Exception:
@@ -12353,6 +12482,14 @@ def open_player(window, entry, season=None, episode=None, streams=None):
     window._player_page = page
     page.setGeometry(host.rect())
     page.show()
+    # **The loading frame, in this call, before anything else moves.**
+    # The page is a native window (PlayerPage.__init__ carries the
+    # measurement), so showing it only creates and maps an HWND with no
+    # pixels of its own: until Qt's next flush the app underneath shows
+    # through it. This composes the backdrop and logo, paints them
+    # synchronously and then lets the bars up - so what the exposed
+    # milliseconds can show is the page he pressed on and nothing else.
+    page.reveal_loading_frame()
     page.raise_()
     freeze_covered(page)   # see widgets._CoveredFreeze
     # **And the web pages go down.** mpv renders into a native child

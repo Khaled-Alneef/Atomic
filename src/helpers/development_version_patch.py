@@ -1426,7 +1426,22 @@ def install():
     #     is typed next lands in the field, and the player takes it when
     #     it opens. Ctrl+F does nothing where the bar is not on screen -
     #     the ep/ch list in full screen, the reader, the player.
-    updater.APP_VERSION = "2.2"
+    #
+    # 2.3
+    #   * Pressing play opens straight into the loading screen. The page
+    #     is a native window, so between show() and its first paint its
+    #     HWND carries no pixels and the app underneath showed through,
+    #     with the player's own bars - layered native children - composed
+    #     over it (his picture, 12 September 2026). The artwork is read
+    #     in the constructor and the frame is composed and painted in
+    #     open_player's own call, with the bars held down until it is:
+    #     press -> complete loading screen in 340-353ms, against a
+    #     half-built one standing 215ms.
+    #   * Subtitles from a file, from the container, and across a
+    #     reload; a range download takes one language and source; a
+    #     download that found a release says why it could not start it
+    #     (his nine asks, 11 September 2026).
+    updater.APP_VERSION = "2.3"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
