@@ -65,8 +65,8 @@ from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
                          QLinearGradient, QPainter, QPen, QPixmap,
                          QPolygonF, QRegion, QRegularExpressionValidator)
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMenu,
+    QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMenu,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
 
@@ -1659,6 +1659,26 @@ class _MpvBridge(QObject):
     host_lost = Signal()            # the video process went away unasked
 
 
+# How much of the episode a track pulled out of the container has to
+# cover before it is offered as a subtitle. Deliberately generous: a
+# release whose dialogue stops ten minutes before the credits is normal,
+# a track that stops after one line is a file still downloading. See
+# _fetch_subtitle_worker for the two measurements that set it.
+EMBEDDED_COVERAGE = 0.5
+
+
+def _subtitle_span(text) -> float:
+    """How far into the episode the last cue of `text` runs, in seconds.
+
+    Read off the timestamps rather than the cue count - a hundred cues
+    in the first two minutes is still a truncated track."""
+    last = 0.0
+    for match in re.finditer(r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})", str(text or "")):
+        hours, minutes, seconds, _fraction = match.groups()
+        last = max(last, int(hours) * 3600 + int(minutes) * 60 + int(seconds))
+    return last
+
+
 def _say_sub_failure(result, message):
     """Put a subtitle failure in the log as well as in the toast.
 
@@ -2673,6 +2693,18 @@ class PlayerPage(GlassPage):
         self._window = parent.window() if parent is not None else None
         self._closing = False
         self._run = 0
+        # **What each step of an open costs, written once when the
+        # picture arrives.** His report, 11 September 2026: "when I play
+        # any video from the resume button in the main page cards, the
+        # screen shows some freezed screen from inside the player for
+        # ~1sec then it shows the real player page." It does not
+        # reproduce here, and the surfaces involved are native child
+        # windows over a running video - the kind of thing a screen rig
+        # on this machine measures differently from his
+        # (.claude/rules/testing.md: where a screen number moves on its
+        # own, instrument instead). So the page marks its own milestones
+        # and `player open:` names which one took the second.
+        self._open_marks = [("start", time.monotonic())]
 
         # **Cinemeta's list from disk before anything is decided.** The
         # owner, 6 September 2026, twice: "Reacher still shows S01E09".
@@ -2719,6 +2751,17 @@ class PlayerPage(GlassPage):
         # cannot loop back onto one it has just rejected.
         self._dead_sources = set()
         self._subtitles = []
+        # Subtitle files browsed to by hand ("Add Subtitle File..."),
+        # in the order they were added. Held apart from `_subtitles`
+        # because _on_subtitles replaces that list on every search
+        # batch, and his own pick must outlive a source answering late.
+        self._file_subs = []
+        # Where the file picker opens next time. Per session, not saved:
+        # a subtitle usually sits beside the last one that was fetched.
+        self._last_sub_folder = ""
+        # The subtitle file mpv was given, kept so a reload can re-add
+        # it (see _reapply_subtitle).
+        self._loaded_sub = None
         self._subtitle_label = "Off"
         # Whether this episode's remembered subtitle has been dealt with
         # - applied, ruled out, or overtaken by a pick the user made.
@@ -3104,6 +3147,7 @@ class PlayerPage(GlassPage):
         if self.episode or self.entry.get("imdb_id"):
             self._spawn(self._fetch_meta_worker)
 
+        self._mark_open("page built")
         QTimer.singleShot(0, self._start)
 
     # ---- setup -------------------------------------------------------
@@ -4316,6 +4360,34 @@ class PlayerPage(GlassPage):
                 "python packaging/fetch_libmpv.py")
             self.controls.hide()
             return
+        # **The loading frame first, because the next step blocks the
+        # paint.** Measured on the frozen build, 11 September 2026,
+        # sampling the screen at 40Hz through a resume from a Home card
+        # and reading the page's own `player open:` line for the same
+        # open: page built 58ms, mpv core 340ms (282ms of it with the
+        # main thread inside _create_handle), loading frame 382ms - and
+        # the screen agreed, showing the page underneath for the whole
+        # 0.38s. Wordless on purpose: with a text `_show_loading` takes
+        # the `_show_status` branch until the logo art has loaded, and
+        # that is a centred box which leaves every other pixel showing
+        # the page beneath. `_begin_episode` puts the real wording up a
+        # moment later exactly as it always did.
+        self._show_loading("")
+        # Painted now, not when the event loop next gets a turn: showing
+        # a widget only queues its paint and a `singleShot(0)` fires
+        # ahead of a queued paint. A plain call in a timer slot - not
+        # inside a show or paint handler, where repaint() is not safe -
+        # and it is the backdrop that has to be told, being native.
+        try:
+            self.backdrop.repaint()
+        except Exception:
+            logs.exception("the loading frame could not be painted early")
+        QTimer.singleShot(0, self._start_core)
+
+    def _start_core(self):
+        """The rest of `_start`, once the loading frame has painted."""
+        if self._closing:
+            return
         if not self._create_handle():
             return
 
@@ -4379,13 +4451,16 @@ class PlayerPage(GlassPage):
         if old is not None:
             video_backend.shutdown(old)     # reaps on a thread, never here
         try:
-            self.handle = video_backend.create(self.surface.native_handle())
+            self.handle = video_backend.create(
+                self.surface.native_handle(),
+                **video_backend.subtitle_language_options(self._wanted_slang()))
         except video_backend.PlayerError as error:
             logs.exception("Could not create the mpv instance")
             self._show_status(f"The player could not start.\n\n{error}")
             self.controls.hide()
             return False
 
+        self._mark_open("mpv core")
         for name in ("time-pos", "duration", "pause", "demuxer-cache-time",
                      "track-list", "volume", "mute", "speed", "core-idle",
                      "paused-for-cache", "cache-buffering-state", "path"):
@@ -4655,6 +4730,13 @@ class PlayerPage(GlassPage):
         self._dead_hashes = set()
         self._streams_view = None
         self._subtitles = []
+        # A file browsed to for the *previous* episode is not this
+        # one's - a subtitle is cut against one episode's timing, and
+        # offering it here would be offering a wrong one.
+        self._file_subs = []
+        # And no subtitle is loaded for it yet - see _reapply_subtitle,
+        # which is what a *reload* of the same episode goes through.
+        self._loaded_sub = None
         self._set_subtitle_count(None)
 
         if self._given_streams is not None:
@@ -4902,17 +4984,52 @@ class PlayerPage(GlassPage):
         who wants it, and whatever track was already up is left alone."""
         try:
             track = int(result.get("embedded_track") or 0)
-            if track:
+            local = str(result.get("local_path") or "")
+            if local:
+                # A file he browsed to (_browse_subtitle_file). Read
+                # rather than fetched, but through the same unpack and
+                # decode steps a download gets - so a .zip off a release
+                # folder and a cp1256 Arabic .srt both work, and a
+                # non-Arabic one can still be fed to the translator
+                # below like any other row.
+                text = subtitles_module.read_file(local)
+                if not text:
+                    _say_sub_failure(result, "the file could not be read")
+                    self._work.failed.emit(
+                        "That Subtitle File Could Not Be Read", run)
+                    return
+            elif track:
                 # **Already here, so it is read rather than fetched.**
                 # helpers/mkv_subs walks the file's clusters for this one
                 # track - measured 6.2s over a 1.78GB episode, against a
                 # search plus a download for text the release carries.
-                text = mkv_subs.extract_srt(getattr(self, "_playing_path", ""),
-                                            track)
+                text = mkv_subs.extract_srt(self._local_media_path(), track)
                 if not text:
                     _say_sub_failure(result, "the track could not be read from the file")
                     self._work.failed.emit(
                         "That Track Could Not Be Read From The File", run)
+                    return
+                # **A half-downloaded release answers with a stub, fast,
+                # and that is worse than answering nothing.** Measured
+                # 11 September 2026 over his own stream cache: the walk
+                # stops at the first hole, so a 1.7GB release still
+                # filling in gave `extract_srt` **0 characters** on one
+                # episode and **193 - a single cue** on another, both in
+                # under 0.05s. Loaded, that is a subtitle that shows one
+                # line and then nothing for the rest of the episode, with
+                # nothing on screen to say why; translated, it is one
+                # line of Arabic and an AI bill. So what came back is
+                # measured against the runtime and refused when it plainly
+                # does not cover it.
+                covered = _subtitle_span(text)
+                runtime = float(getattr(self, "_duration", 0.0) or 0.0)
+                if runtime > 60 and covered < runtime * EMBEDDED_COVERAGE:
+                    _say_sub_failure(
+                        result, f"the track only covers {covered:.0f}s of a "
+                                f"{runtime:.0f}s episode - the file is still "
+                                f"downloading")
+                    self._work.failed.emit(
+                        "That Track Is Not All Downloaded Yet", run)
                     return
             else:
                 text = subtitles_module.fetch(
@@ -5288,7 +5405,7 @@ class PlayerPage(GlassPage):
         return best, None, (best.get("display_name") or best.get("release")
                             or "Subtitle")
 
-    def _on_subtitle_file(self, path, label, run):
+    def _on_subtitle_file(self, path, label, run, quiet=False):
         if self._closing or run != self._run or self.handle is None:
             return
         try:
@@ -5336,8 +5453,48 @@ class PlayerPage(GlassPage):
         # the add once before giving up, so "it did not load" becomes
         # either a subtitle or a sentence saying why.
         self._subtitle_label = label
-        self._confirm_subtitle_loaded(path, label, run)
+        # **Kept so a reload can put it back.** His ask, 11 September
+        # 2026: "when I reload the ep, make sure to re-load the subtitles
+        # were used". R re-opens the file in the same mpv core
+        # (reload_source -> _play_stream -> _load_into_mpv), and a
+        # `loadfile` drops every externally added track - so the
+        # subtitle that was on screen a second ago was simply gone, with
+        # `_sub_auto_done` already set so nothing would bring it back.
+        # Filed against the episode it belongs to, because the next
+        # episode's subtitle is a different file (see _reapply_subtitle).
+        self._loaded_sub = {"path": path, "label": label,
+                            "season": self.season, "episode": self.episode}
+        self._confirm_subtitle_loaded(path, label, run, quiet=quiet)
         return
+
+    def _reapply_subtitle(self):
+        """Put the loaded subtitle back after the file was re-opened.
+
+        Runs at the first frame of every load. Does nothing on a fresh
+        episode (nothing has been loaded yet), nothing when mpv already
+        has the track (the ordinary case - this is not a reload), and
+        nothing when the temp file has gone. What is left is exactly the
+        case his report names: the same episode, re-opened, with a
+        subtitle that was showing before and is not now.
+
+        `_on_subtitle_file` is the whole re-add - sub-add, the style,
+        the delay, and `_confirm_subtitle_loaded` polling until mpv has
+        actually taken it - so the reload uses the identical path the
+        first load did rather than a second copy of it."""
+        record = getattr(self, "_loaded_sub", None)
+        if not record or self.handle is None or self._closing:
+            return
+        if (record.get("season"), record.get("episode")) != (self.season, self.episode):
+            return              # it belonged to a different episode
+        path = str(record.get("path") or "")
+        if not path or not os.path.isfile(path):
+            self._loaded_sub = None
+            return
+        if self._external_sub_state(path) is True:
+            return              # still loaded; this was not a reload
+        logs.info(f"subtitle: re-adding {record.get('label')!r} after a reload")
+        self._on_subtitle_file(path, record.get("label") or "Subtitle",
+                               self._run, quiet=True)
 
     # How long mpv is given to publish a freshly added subtitle track,
     # and how often it is asked. 2.0s is eight times the 0.2s measured
@@ -5345,7 +5502,8 @@ class PlayerPage(GlassPage):
     SUB_CONFIRM_MS = 120
     SUB_CONFIRM_S = 2.0
 
-    def _confirm_subtitle_loaded(self, path, label, run, retried=False):
+    def _confirm_subtitle_loaded(self, path, label, run, retried=False,
+                                 quiet=False):
         """Watch for mpv to actually take the file, then say so.
 
         Runs on a timer rather than in line: the answer does not exist
@@ -5361,7 +5519,15 @@ class PlayerPage(GlassPage):
             state = self._external_sub_state(path)
             if state is True:
                 timer.stop()
-                self._finish_sub_toast("Subtitle Loaded")
+                # **Silent when nobody asked.** `quiet` is the automatic
+                # re-add after a reload (_reapply_subtitle): the subtitle
+                # was already on screen a second ago, and finish_toast
+                # raises a *fresh* box when there is no live one to
+                # finish - so every R press would have popped "Subtitle
+                # Loaded" in the corner for something the user did not
+                # do. A failure below still says so.
+                if not quiet:
+                    self._finish_sub_toast("Subtitle Loaded")
                 self._remember_subtitle_choice()
                 if self._panel is not None                         and getattr(self._panel, "kind", "") == "subs":
                     self._open_subtitle_panel(rebuild=True)
@@ -5383,7 +5549,8 @@ class PlayerPage(GlassPage):
                     self._apply_sub_delay()
                 except Exception:
                     logs.exception("the second sub-add failed")
-                self._confirm_subtitle_loaded(path, label, run, retried=True)
+                self._confirm_subtitle_loaded(path, label, run, retried=True,
+                                              quiet=quiet)
                 return
             logs.warning(f"subtitle: mpv would not select {os.path.basename(path)} "
                          f"({label})")
@@ -5403,6 +5570,26 @@ class PlayerPage(GlassPage):
         if not choice:
             return
         result, provider, label = choice
+        local = str((result or {}).get("local_path") or "")
+        if local:
+            # **A browsed file is this episode's alone.** It is cut
+            # against one episode's timing, so it is filed against the
+            # episode and deliberately *not* against the title: the
+            # title-level record is what carries a choice forward to
+            # the next episode, and carrying a file there would offer a
+            # subtitle for the wrong one. `kind` is what
+            # _apply_remembered_track dispatches on, the same field
+            # _remember_embedded_sub writes.
+            try:
+                save_sub_prefs(self.entry, self.season, self.episode,
+                               self._sub_delay, self._sub_size,
+                               self._sub_pos_offset,
+                               choice={"kind": "file", "path": local,
+                                       "lang": "", "source": "This device",
+                                       "provider": None, "label": label})
+            except Exception:
+                logs.exception("Could not remember the subtitle file")
+            return
         try:
             # **The row, not just its source.** `source` alone was the
             # whole identity, and a source answers with several rows: his
@@ -5588,8 +5775,9 @@ class PlayerPage(GlassPage):
                           "narration")
 
     def _apply_remembered_track(self):
-        """Re-select the muxed subtitle track this episode was watched
-        with, the moment the file lists its tracks.
+        """Re-select the muxed subtitle track - or re-load the subtitle
+        file - this episode was watched with, the moment the file lists
+        its tracks.
 
         The owner, 4 September 2026: "when I close the app it saves the
         position delay and the size but does not load the subtitle was
@@ -5617,11 +5805,31 @@ class PlayerPage(GlassPage):
                                      self.episode) or {}).get("choice") or {}
         except Exception:
             return
-        if str(stored.get("kind") or "") != "embedded":
+        kind = str(stored.get("kind") or "")
+        if kind == "file":
+            # A file he browsed to last time (_browse_subtitle_file).
+            # Re-offered only while it is still where he left it - a
+            # path into a folder that has since been cleared out must
+            # fail quietly and leave this episode's own search to
+            # answer, not raise a box at him mid-open.
+            path = str(stored.get("path") or "")
+            if not path or not os.path.isfile(path):
+                # Nothing claimed this episode, so the search's own
+                # auto-apply still gets to answer (_sub_auto_done is
+                # deliberately left alone).
+                return
+            row = self._file_sub_row(path)
+            logs.info(f"subtitle: re-loading the file {row['display_name']}")
+            # automatic=True so that a file which has since become
+            # unreadable is written off and the door re-opens for the
+            # search's own best match - see _on_failed.
+            self._pick_subtitle(row, label=row["display_name"], automatic=True)
+            return
+        if kind != "embedded":
             return
         want_lang = str(stored.get("lang") or "").lower()
         want_title = str(stored.get("title") or "").strip().lower()
-        subs = [t for t in self._tracks if t.get("type") == "sub"]
+        subs = self._muxed_subs()       # never a file this app loaded
         same_lang = [t for t in subs
                      if str(t.get("lang") or "").lower() == want_lang]
         track = None
@@ -5637,6 +5845,30 @@ class PlayerPage(GlassPage):
             return
         self._sub_auto_done = True
         self._pick_track("sid", track)
+
+    def _local_media_path(self) -> str:
+        """The real file behind what is playing, or "".
+
+        mpv's own `path` when that is a file on this disk, and otherwise
+        the file the torrent engine is writing for the release on
+        screen - a stream URL names no bytes, but the engine's store
+        does, and everything that wants to read *inside* the container
+        (the muxed subtitle tracks) needs the file, not the URL.
+
+        Empty for a debrid link or any other direct HTTPS source: those
+        are somebody else's server and there is no local copy at all.
+        Never raises - every caller treats "" as "nothing to offer"."""
+        path = str(getattr(self, "_playing_path", "") or "")
+        if path and "://" not in path:
+            return path
+        info_hash = self._playing_info_hash()
+        if not info_hash:
+            return ""
+        try:
+            from helpers import torrent_engine
+            return str(torrent_engine.playing_file_path(info_hash) or "")
+        except Exception:
+            return ""
 
     def _embedded_feedstock(self):
         """Text subtitle tracks inside the playing file the AI can
@@ -5654,8 +5886,23 @@ class PlayerPage(GlassPage):
 
         Read once per file and kept: the track list is 4ms on a 1.78GB
         file (measured) but this is asked on every panel rebuild.
+
+        **And a streamed release counts, which is the whole of his ask
+        of 11 September 2026** - "make the Make Arabic (AI) also
+        translate from the embedded not just the Opensubtitles". It
+        never did for him, and the reason was one line: `_playing_path`
+        is mpv's `path`, which for every torrent play is
+        `http://127.0.0.1:PORT/...`, and `mkv_subs.usable` correctly
+        refuses a URL. But the engine is writing that release to a real
+        file as it goes, and the Tracks element is at the head of a
+        Matroska, so the list is free whatever the rest of the file is
+        doing - measured on his own store the same day, seven subtitle
+        tracks including English off a 1.7GB ToonsHub release in
+        **0.00s**. Whether the *blocks* are all there is a different
+        question, and it is asked at the moment one is picked rather
+        than here (see _fetch_subtitle_worker).
         """
-        path = getattr(self, "_playing_path", "")
+        path = self._local_media_path()
         if not path or not mkv_subs.usable(path):
             return []
         if getattr(self, "_embedded_subs_for", None) == path:
@@ -5682,6 +5929,66 @@ class PlayerPage(GlassPage):
         self._embedded_subs_for = path
         self._embedded_subs = rows
         return rows
+
+    def _mark_open(self, name):
+        """Note a milestone of this page's first open. Never raises and
+        never grows past the handful of names below."""
+        marks = getattr(self, "_open_marks", None)
+        if marks is None or len(marks) > 12:
+            return
+        marks.append((str(name), time.monotonic()))
+
+    def _say_open_marks(self):
+        """One line saying what the open cost, then stop measuring.
+
+        Milliseconds from the page being constructed, so the number
+        beside a name is when that thing happened rather than how long
+        it took - which is what names a gap. Written once per page."""
+        marks, self._open_marks = getattr(self, "_open_marks", None), None
+        if not marks or len(marks) < 2:
+            return
+        base = marks[0][1]
+        try:
+            logs.info("player open: " + ", ".join(
+                f"{name}={1000 * (when - base):.0f}ms"
+                for name, when in marks[1:]))
+        except Exception:
+            pass
+
+    def _wanted_slang(self) -> str:
+        """The muxed subtitle language to open the file with, or "".
+
+        Read **before** the mpv core exists, because that is the whole
+        point: a track selected at open costs nothing and the same track
+        selected a minute later freezes a streamed picture for tens of
+        seconds (video_backend.subtitle_language_options has the
+        numbers).
+
+        The answer is exactly what `_auto_select_arabic_track` and
+        `_apply_remembered_track` would have arrived at afterwards, so
+        the behaviour is unchanged and only its timing moves:
+
+          * a remembered **embedded** pick names its own language;
+          * a remembered *downloaded* pick (or an AI translation) owns
+            the episode instead - it is fetched and `sub-add`ed, which
+            never refresh-seeks - so nothing muxed is asked for;
+          * with nothing remembered at all, Arabic, which is the
+            standing rule ("when loading the source that has ar in
+            embedded translations, make it auto select and load it").
+
+        Fails soft to "" - the file then opens with `sid: no` exactly as
+        every version before this did."""
+        try:
+            stored = ((load_sub_prefs(self.entry, self.season,
+                                      self.episode) or {}).get("choice")
+                      or load_subtitle_choice(self.entry))
+        except Exception:
+            return ""
+        if stored:
+            if str(stored.get("kind") or "") != "embedded":
+                return ""       # a downloaded file answers this episode
+            return str(stored.get("lang") or "").strip().lower()
+        return "ara"
 
     def _auto_select_arabic_track(self):
         """Select an embedded Arabic subtitle track the moment the file
@@ -5719,9 +6026,8 @@ class PlayerPage(GlassPage):
         if stored:
             return          # the remembered pick owns this episode
         track = next(
-            (t for t in self._tracks
-             if t.get("type") == "sub"
-             and subtitles_module is not None
+            (t for t in self._muxed_subs()
+             if subtitles_module is not None
              and subtitles_module.is_arabic_code(t.get("lang"))), None)
         if track is None or track.get("selected"):
             if track is not None:
@@ -6603,7 +6909,25 @@ class PlayerPage(GlassPage):
         self._buffering_percent = 0
         # A fresh file gets a fresh audio pick - see _apply_audio_default.
         self._audio_default_done = False
+        self._mark_open("file handed to mpv")
         self._clear_seat()
+        # **And a fresh muxed-subtitle language, before the file opens.**
+        # The core outlives an episode, so `slang` set when the core was
+        # made is the previous episode's answer - and this is the one
+        # moment at which selecting a muxed track is free (see
+        # video_backend.subtitle_language_options for the 19.2s it costs
+        # a second later). Written every load, including "" for a title
+        # whose answer is a downloaded file, so a stale language can
+        # never carry into the next episode.
+        if self.handle is not None:
+            try:
+                wanted = self._wanted_slang()
+                for name, value in (
+                        video_backend.subtitle_language_options(wanted)
+                        or {"slang": "", "sid": "no"}).items():
+                    self.handle[name.replace("_", "-")] = value
+            except Exception:
+                logs.exception("Could not set the subtitle language")
         self._update_startup_status()
 
         # Where this file should open: what the caller carried across a
@@ -7455,6 +7779,11 @@ class PlayerPage(GlassPage):
                 # actually started; until it lands, "nothing on screen"
                 # and "broken" look identical.
                 self._awaiting_first_frame = False
+                self._mark_open("first frame")
+                self._say_open_marks()
+                # The file was just (re)opened; if this episode had a
+                # subtitle loaded and mpv no longer has it, put it back.
+                self._reapply_subtitle()
                 self._hide_status()
                 if BARE_PLAYER:
                     # Now, not at build: the startup gauge and the
@@ -7593,6 +7922,17 @@ class PlayerPage(GlassPage):
             if self._panel is not None and getattr(self._panel, "kind", "") == "tracks":
                 if not (self._sync_track_rows() and self._highlight_tracks()):
                     self._open_tracks_panel(rebuild=True)
+            elif (self._panel is not None
+                    and getattr(self._panel, "kind", "") == "subs"):
+                # The same confirmation for the Subtitles panel, and
+                # only when mpv's answer differs from what that panel
+                # was drawn against: track-list is re-emitted on every
+                # sub_add, and refilling the panel on each of those
+                # would move a list the user is reading.
+                sid = next((t.get("id") for t in self._muxed_subs()
+                            if t.get("selected")), None)
+                if sid != getattr(self, "_subs_panel_sid", None):
+                    self._open_subtitle_panel(rebuild=True)
         elif name == "paused-for-cache":
             # Only ever a note, never an error: a stalled buffer usually
             # recovers, and a dialog for it would fire constantly on a
@@ -8066,6 +8406,13 @@ class PlayerPage(GlassPage):
     # person reach for either knowingly.
     _MAKE_ARABIC = "make-ar"
 
+    # The pseudo-language holding the files he browsed to himself (the
+    # "Add Subtitle File..." row). One row for all of them rather than
+    # filing each under a guessed language: a subtitle file off a disk
+    # very often carries no language anywhere in its name, and a row
+    # nobody can find is worse than a row in an obvious place.
+    _FROM_FILE = "from-file"
+
     @staticmethod
     def _sub_lang_key(value) -> str:
         """A language field collapsed to a two-letter key: 'ara', 'ar-sa'
@@ -8076,6 +8423,24 @@ class PlayerPage(GlassPage):
         if subtitles_module is not None and subtitles_module.is_arabic_code(code):
             return "ar"
         return code[:2]
+
+    def _muxed_subs(self) -> list:
+        """The subtitle tracks that are *inside* the playing file.
+
+        `self._tracks` is mpv's own track-list, and mpv lists a file
+        handed to `sub-add` as a subtitle track like any other - which
+        is every subtitle this app downloads or translates. So "the
+        tracks the release carries" is the list without those, and the
+        tell is `external-filename`, the same field
+        `_external_sub_state` matches a loaded file on.
+
+        Written 11 September 2026, with the highlight fix below: a
+        downloaded OpenSubtitles row was being drawn *twice* in the
+        variants column - once as itself and once as an `embedded` row
+        named "Track 3" - and `_active_sub_key` read the language off
+        whichever of the two mpv had selected."""
+        return [t for t in self._tracks
+                if t.get("type") == "sub" and not t.get("external-filename")]
 
     def _active_sub_key(self, embedded) -> str:
         """Which column-1 row owns the subtitle actually showing: a
@@ -8090,6 +8455,12 @@ class PlayerPage(GlassPage):
             return ""
         if label.startswith("Arabic (AI)"):
             return self._MAKE_ARABIC
+        # A browsed file is filed under My Files whatever language it
+        # turns out to be, so it is asked for first - its `lang` is
+        # usually empty, and an empty key is Off's.
+        if any((s.get("display_name") or s.get("release")) == label
+               for s in self._file_subs):
+            return self._FROM_FILE
         match = next((s for s in self._subtitles
                       if (s.get("display_name") or s.get("release")) == label),
                      None)
@@ -8147,12 +8518,39 @@ class PlayerPage(GlassPage):
         row.addLayout(settings_col, stretch=3)
         panel.body_layout.addWidget(columns)
 
-        embedded = [t for t in self._tracks if t.get("type") == "sub"]
-        external = list(self._subtitles)
+        embedded = self._muxed_subs()
+        # Files he browsed to first, then the search's rows: his own
+        # pick should never be pushed down a list by a source answering
+        # late. They are held apart from `self._subtitles` because
+        # `_on_subtitles` replaces that list on every batch, and a file
+        # added by hand must not be dropped by a search finishing.
+        external = list(self._file_subs) + list(self._subtitles)
         arabic = [s for s in external
                   if subtitles_module is not None
                   and subtitles_module.is_arabic_code(s.get("lang"))]
         other = [s for s in external if s not in arabic]
+        # **The file's own tracks count towards "is there anything to
+        # translate".** The Make Arabic row used to be drawn only when
+        # a *search* had returned a non-Arabic row, and the feedstock
+        # was added inside the row's own branch - so a release carrying
+        # an English track and a search that had found only Arabic (or
+        # nothing yet) offered no Make Arabic row at all, whatever was
+        # in the container. Read once here and used for both: it is
+        # cached per file (_embedded_feedstock).
+        feedstock = self._embedded_feedstock()
+        # Whether a track inside the file is what is showing. An
+        # external row is lit only when none is: mpv's `sid` is one
+        # value, so a muxed pick *replaced* whatever file was loaded,
+        # and leaving the old row lit on the strength of a stale
+        # `_subtitle_label` is exactly his "the previous selected one
+        # still highlighted" (11 September 2026).
+        muxed_on = any(t.get("selected") for t in embedded)
+        # Which muxed track this drawing of the panel was built against,
+        # so mpv's own track-list confirmation a beat later can tell
+        # "nothing changed" from "mpv chose differently" and only redraw
+        # for the second (see the track-list branch of _on_property).
+        self._subs_panel_sid = next((t.get("id") for t in embedded
+                                     if t.get("selected")), None)
         translators = []
         try:
             if ai_translate is not None:
@@ -8181,18 +8579,34 @@ class PlayerPage(GlassPage):
             if key and key not in languages:
                 languages.append(key)
         for item in other:
+            if item in self._file_subs:
+                continue        # filed under My Files, whatever it says
             key = self._sub_lang_key(item.get("lang"))
             if key and key not in languages:
                 languages.append(key)
-        if other and (translators or ai_translate is not None):
+        if self._file_subs:
+            languages.append(self._FROM_FILE)
+        if (other or feedstock) and (translators or ai_translate is not None):
             languages.append(self._MAKE_ARABIC)
         for key in languages:
             name = ("Make Arabic" if key == self._MAKE_ARABIC
+                    else "My Files" if key == self._FROM_FILE
                     else self._SUB_LANG_NAMES.get(key, key.upper()))
             panel.add_row(name, "",
                           lambda checked=False, k=key: browse(k),
                           selected=key == browsing, dot=key == active,
                           into=lang_col)
+        # The owner's ask, 11 September 2026: "add a button in the
+        # subtitles window ... to browse his files then add an external
+        # subtitle file to this video". An action, not a language, so it
+        # sits under them and wears the drill-down chevron - and it is
+        # in column 1 because that column never changes with what is
+        # being browsed, so the button is reachable from every state of
+        # the panel, including "Searching...".
+        panel.add_row("Add Subtitle File...",
+                      "from this device",
+                      lambda checked=False: self._browse_subtitle_file(),
+                      chevron=True, into=lang_col)
         lang_col.addStretch(1)
 
         # ---- column 2: variants of the browsed language -------------
@@ -8217,21 +8631,27 @@ class PlayerPage(GlassPage):
                          or item.get("release") or "Subtitle")
                 parts = [str(p) for p in
                          (item.get("source"), item.get("format"),
-                          item.get("release")) if p]
+                          item.get("release")) if p
+                         # A browsed file's release name *is* its title,
+                         # and the caption repeating the row's own name
+                         # reads as two different facts.
+                         and str(p) != label]
                 # Say so when a line was produced by machine translation
                 # rather than written by a person - which one you picked
                 # should not be a guess.
                 if item.get("translated"):
                     parts.insert(0, "auto-translated")
-                on = label == self._subtitle_label
+                on = label == self._subtitle_label and not muxed_on
                 panel.add_row(label, " · ".join(parts),
                               lambda checked=False, r=item:
                                   self._pick_subtitle(r),
                               selected=on, dot=on, into=variant_col)
                 shown += 1
 
-        if browsing == "ar":
-            add_external(arabic)
+        if browsing == self._FROM_FILE:
+            add_external(self._file_subs)
+        elif browsing == "ar":
+            add_external([s for s in arabic if s not in self._file_subs])
         elif browsing == self._MAKE_ARABIC:
             # **Every provider the owner has a key for, not just the
             # first** - four pasted keys once offered exactly one
@@ -8242,7 +8662,7 @@ class PlayerPage(GlassPage):
             # an option so that AI can translate from, not just
             # Opensubtitles!". Listed first, because it needs no search
             # and no download - the lines are already on this disk.
-            other = self._embedded_feedstock() + list(other)
+            other = list(feedstock) + list(other)
             if translators and other:
                 for provider in translators:
                     translator = ai_translate.label(provider)
@@ -8250,7 +8670,7 @@ class PlayerPage(GlassPage):
                         source_name = (item.get("display_name")
                                        or item.get("release") or "")
                         label = f"Arabic (AI) {index} {translator}"
-                        on = label == self._subtitle_label
+                        on = label == self._subtitle_label and not muxed_on
                         # r/p/l bound per row - the loop variables are
                         # rebound on the next iteration.
                         panel.add_row(
@@ -8267,7 +8687,8 @@ class PlayerPage(GlassPage):
                 shown += 1
         else:
             add_external([item for item in other
-                          if self._sub_lang_key(item.get("lang")) == browsing])
+                          if item not in self._file_subs
+                          and self._sub_lang_key(item.get("lang")) == browsing])
 
         if not shown:
             if not external and not embedded:
@@ -8351,6 +8772,77 @@ class PlayerPage(GlassPage):
         # and the point is to move the highlight onto it - closing the
         # panel under the press would look like the click missed.
         self._open_subtitle_panel(rebuild=True)
+
+    def _file_sub_row(self, path):
+        """One browsed file as a subtitle row, added to `_file_subs`.
+
+        Shaped like a search result so every existing path takes it
+        unchanged - the panel's `add_external`, `_pick_subtitle`, the
+        translator's feedstock list. `local_path` is what
+        `_fetch_subtitle_worker` reads instead of fetching, and `url`
+        carries the same string because that field is this row's
+        identity everywhere else (`_sub_auto_failed`, the panel's
+        de-duplication) and an empty one would make every file the same
+        row. `lang` is left empty on purpose: a subtitle file off a disk
+        very often says nothing about its language, and a guess that is
+        wrong files it under a language he would then not find it in -
+        My Files is where it goes instead (_FROM_FILE)."""
+        name = os.path.basename(path)
+        row = {"source": "This device", "lang": "",
+               "format": (subtitles_module.format_of(name)
+                          if subtitles_module is not None else "srt"),
+               "url": path, "local_path": path,
+               "release": name, "display_name": name}
+        # Re-picking the same file replaces its row rather than stacking
+        # a second identical one.
+        self._file_subs = [s for s in self._file_subs
+                           if s.get("local_path") != path] + [row]
+        return row
+
+    def _browse_subtitle_file(self):
+        """Pick a subtitle file off this device and load it.
+
+        The owner's ask, 11 September 2026: "add a button in the
+        subtitles window in the vid player to make the user browse his
+        files then add an external subtitle file to this video."
+
+        **`DontUseNativeDialog` is not a style choice, it is the fix for
+        the app freezing here** - the same one `downloads_page.
+        ask_for_folder` carries, and this is the surface it was measured
+        on. The native Windows picker runs its own Win32 modal loop, and
+        while the player is open mpv owns a native child window in the
+        same top-level; the two message loops deadlock. Qt's own dialog
+        runs inside Qt's event loop and does not.
+
+        The file is loaded straight away rather than just listed: "add
+        an external subtitle file to this video" is one action, and a
+        picked file that then had to be found again in a list would be
+        two."""
+        start = (self._last_sub_folder
+                 or os.path.dirname(getattr(self, "_playing_path", "") or "")
+                 or os.path.expanduser("~"))
+        pattern = " ".join("*" + e for e in subtitles_module.FILE_EXTENSIONS
+                           ) if subtitles_module is not None else "*.srt *.ass"
+        path, _chosen = QFileDialog.getOpenFileName(
+            self, "Add a subtitle file", start,
+            f"Subtitles ({pattern});;All files (*)",
+            options=QFileDialog.Option.DontUseNativeDialog)
+        if not path:
+            return
+        self._last_sub_folder = os.path.dirname(path)
+        row = self._file_sub_row(path)
+        # Land the panel on My Files, so the row that was just added is
+        # the one on screen when it lights up.
+        self._subs_panel_lang = self._FROM_FILE
+        logs.info(f"subtitle: adding the file {row['display_name']}")
+        self._pick_subtitle(row, label=row["display_name"])
+        # The row exists now even though nothing has loaded yet, so the
+        # panel is redrawn at once rather than at the end of the load -
+        # coming back from the dialog to an unchanged panel reads as the
+        # pick having missed. It lights when it loads
+        # (_confirm_subtitle_loaded rebuilds again).
+        if self._panel is not None and getattr(self._panel, "kind", "") == "subs":
+            self._open_subtitle_panel(rebuild=True)
 
     def _pick_subtitle(self, result, provider=None, label=None, automatic=False):
         """Load one subtitle, saying so until it has actually loaded.
@@ -8719,6 +9211,14 @@ class PlayerPage(GlassPage):
         """Select a muxed subtitle track *and* remember it - the two
         halves of what a person means by picking one."""
         self._sub_auto_done = True      # a hand pick owns this episode
+        # **What was showing is no longer showing.** mpv's `sid` holds
+        # one value, so selecting a track inside the file replaces
+        # whatever downloaded subtitle was loaded - and `_subtitle_label`
+        # is the panel's record of *that*. Left as it was, the old
+        # OpenSubtitles row stayed lit beside the new one: his "the
+        # previous selected one still highlighted even when I re-open
+        # the subtitles window", 11 September 2026.
+        self._subtitle_label = self._track_label(track)
         self._pick_track("sid", track)
         self._remember_embedded_sub(track)
 
@@ -8825,6 +9325,22 @@ class PlayerPage(GlassPage):
         if self._panel is not None and getattr(self._panel, "kind", "") == "tracks":
             if not (self._sync_track_rows() and self._highlight_tracks()):
                 self._open_tracks_panel(rebuild=True)
+        # **And a Subtitles panel follows a subtitle pick.** The guard
+        # above was written for the tracks panel alone (5 September
+        # 2026), and a muxed subtitle is picked from *this* panel as
+        # well - his "I select the embedded subtitle, it does not get
+        # highlighted immediately, I need to close the subtitles window
+        # then re-open it". Measured on the real unbound methods, 11
+        # September 2026: the panel's rows after the pick were identical
+        # to the ones before it, down to the ring on the row he had just
+        # moved off. Rebuilt rather than repainted because this panel
+        # has no row registry to repaint through - and a rebuild here is
+        # `OverlayPanel.reset` refilling the window that is already up,
+        # the same route the external pick's confirmation already takes
+        # (_confirm_subtitle_loaded), not a native window torn down.
+        elif (prop == "sid" and self._panel is not None
+                and getattr(self._panel, "kind", "") == "subs"):
+            self._open_subtitle_panel(rebuild=True)
 
     # How often the connection panel re-reads the swarm. The numbers
     # move constantly and nobody reads them faster than this; a second
@@ -9424,9 +9940,12 @@ class PlayerPage(GlassPage):
         video (see the module docstring), and a modal dialog in the
         middle of a film is a heavier interruption than the panel the
         same buttons beside it already open."""
-        # The subtitle-to-save rows below come from the same search the
-        # subtitle panel shows; opening this panel is the same request
-        # (see _ensure_subtitle_search).
+        # The subtitle rows below no longer come from a search - they are
+        # a language and a source, the same list the episode list's
+        # dialog offers (see _dl_subtitle_choices). The search is still
+        # started here because a person who has opened Download is one
+        # press from opening Subtitles, and starting it now is what makes
+        # that panel answer immediately (_ensure_subtitle_search).
         self._ensure_subtitle_search()
         panel = self._new_panel("Download", "download", rebuild)
         if panel is None:
@@ -9441,12 +9960,52 @@ class PlayerPage(GlassPage):
                 f"Season {int(self.season or 1)}, episode {int(self.episode)}",
                 lambda: self._dl_set("scope", "episode"),
                 selected=self._dl_scope == "episode")
+            # **A range, the owner's ask of 11 September 2026** - "in the
+            # download window inside the vid player make sure to add a
+            # range of ep option". The details page's dialog has had one
+            # since 28 August; this panel only had "this episode" and
+            # "the whole season", so queueing E03-E07 from inside the
+            # player meant queueing all twenty-four and cancelling
+            # seventeen. Two steppers rather than the dialog's two
+            # drop-downs, because this is an OverlayPanel over a running
+            # film and a stepper is what every other number in it uses.
+            low, high = self._dl_range()
+            panel.add_row(
+                "A range of episodes",
+                f"Episodes {low} to {high} of season {int(self.season or 1)}",
+                lambda: self._dl_set("scope", "range"),
+                selected=self._dl_scope == "range")
             panel.add_row(
                 "The whole season",
                 f"Season {int(self.season or 1)} - "
                 f"{count} episode{'s' if count != 1 else ''}",
                 lambda: self._dl_set("scope", "season"),
                 selected=self._dl_scope == "season")
+            if self._dl_scope == "range":
+                # Only while the range is the chosen scope: two steppers
+                # under "this episode" would be two numbers with nothing
+                # to do with what is about to be queued.
+                # `into=` explicitly: add_stepper with no column puts its
+                # block in the *footer*, beside Folder and Download,
+                # which is nowhere near the rows it belongs to.
+                panel.add_stepper(
+                    "From episode", str(low),
+                    lambda: self._dl_nudge_range("from", -1),
+                    lambda: self._dl_nudge_range("from", 1),
+                    step_text="1", into=panel.body_layout,
+                    on_typed=lambda value: self._dl_type_range("from", value),
+                    signed=False)
+                panel.add_stepper(
+                    "To episode", str(high),
+                    lambda: self._dl_nudge_range("to", -1),
+                    lambda: self._dl_nudge_range("to", 1),
+                    step_text="1", into=panel.body_layout,
+                    on_typed=lambda value: self._dl_type_range("to", value),
+                    signed=False)
+                picked = len(self._dl_numbers())
+                panel.add_message(
+                    f"{picked} episode{'s' if picked != 1 else ''} will be "
+                    f"queued, oldest first.")
         else:
             self._dl_scope = "episode"
 
@@ -9489,27 +10048,25 @@ class PlayerPage(GlassPage):
                           lambda: self._dl_set("audio", "en"),
                           selected=self._dl_audio == "en")
 
+        # **The same list the episode list's dialog offers**, his ask of
+        # 11 September 2026: "make the subtitles list in the download
+        # window inside the player same as the one in the ep list page
+        # download window". It used to be this episode's *found rows* -
+        # which is a different kind of thing entirely: it is empty until
+        # a search has answered, it names releases rather than sources,
+        # and for a range or a season it is the wrong file beside every
+        # episode but one. A language and a preferred source is what
+        # travels with each job instead (downloads._wanted_subtitle),
+        # and each job searches for its own episode.
         panel.add_group("SUBTITLE TO SAVE ALONGSIDE")
-        panel.add_row("None", "Video only",
-                      lambda: self._dl_set("subtitle", None),
-                      selected=self._dl_subtitle is None)
-        arabic = [s for s in self._subtitles
-                  if str(s.get("lang", "")).lower().startswith("ar")]
-        for item in arabic:
-            label = item.get("release") or item.get("name") or "Subtitle"
-            parts = [str(p) for p in (item.get("source"), item.get("format")) if p]
-            if item.get("translated"):
-                parts.insert(0, "auto-translated")
-            panel.add_row(label, " · ".join(parts),
-                          lambda checked=False, r=item: self._dl_set("subtitle", r),
-                          # By value, not identity: a fresh subtitle
-                          # search replaces the whole list, and an
-                          # identity check would silently unpick the row
-                          # the user had already chosen.
-                          selected=self._dl_subtitle == item)
-        if not arabic:
-            panel.add_message("No Arabic subtitles have been found for this "
-                              "yet - open the Subtitles panel to search.")
+        want = self._dl_subtitle_want()
+        for label, note, value in self._dl_subtitle_choices():
+            panel.add_row(label, note,
+                          lambda checked=False, v=value:
+                              self._dl_set("subtitle", v),
+                          # By value, not identity - a rebuild makes a
+                          # fresh dict for every row.
+                          selected=want == value)
         panel.finish()
 
         folder_btn = _text_button(os.path.basename(self._download_folder())
@@ -9550,6 +10107,96 @@ class PlayerPage(GlassPage):
         layout.addWidget(button)
         return row
 
+    @staticmethod
+    def _dl_subtitle_choices():
+        """The rows of the SUBTITLE TO SAVE ALONGSIDE group, in the same
+        order and with the same meanings as the episode list's dialog -
+        `(label, note, want)`, where a want is what each queued job
+        searches for (helpers/downloads._wanted_subtitle)."""
+        rows = [("None", "Video only", None),
+                ("Arabic", "The best source that answers", {"lang": "ar", "source": ""})]
+        try:
+            if subtitles_module is not None:
+                for name in subtitles_module.sources():
+                    rows.append((f"Arabic - {name}", f"Prefer {name}",
+                                 {"lang": "ar", "source": name}))
+        except Exception:
+            pass
+        rows.append(("English", "The best source that answers",
+                     {"lang": "en", "source": ""}))
+        return rows
+
+    def _dl_subtitle_want(self):
+        """What the Download panel is set to fetch, or None.
+
+        A *want* - a language and a preferred source - rather than one
+        found row: a row belongs to one episode, and a language and a
+        source belong to the title, which is the only shape that can be
+        right for a range. See helpers/downloads._wanted_subtitle.
+
+        Reads whatever `_dl_subtitle` holds, including a row left over
+        from an older build's panel, so a saved pick is never a crash."""
+        row = self._dl_subtitle
+        if not row:
+            return None
+        return {"lang": str(row.get("lang") or "ar"),
+                "source": str(row.get("source") or "")}
+
+    def _dl_range(self):
+        """The chosen range, clamped to the season, as (from, to).
+
+        Defaults to the episode on screen for both ends, so opening the
+        range and pressing Download with nothing else touched queues
+        exactly what "this episode" would have."""
+        here = int(self.episode or 1)
+        count = max(1, self._episode_count())
+        low = int(getattr(self, "_dl_from", 0) or here)
+        high = int(getattr(self, "_dl_to", 0) or here)
+        low = max(1, min(low, count))
+        high = max(1, min(high, count))
+        return min(low, high), max(low, high)
+
+    def _dl_numbers(self):
+        """The episode numbers the current scope names."""
+        if not self.episode:
+            return []
+        if self._dl_scope == "season":
+            return list(range(1, self._episode_count() + 1))
+        if self._dl_scope == "range":
+            low, high = self._dl_range()
+            return list(range(low, high + 1))
+        return [int(self.episode)]
+
+    def _dl_nudge_range(self, end, step):
+        low, high = self._dl_range()
+        value = (low if end == "from" else high) + int(step)
+        self._dl_type_range(end, str(value))
+
+    def _dl_type_range(self, end, typed):
+        # A number, however it arrives: add_stepper's `on_typed` hands
+        # back a float (it strips the unit and calls float()), the nudge
+        # buttons hand back a string. `int("6.0")` raises, which is how
+        # a typed episode number would have been silently dropped.
+        text = str(typed).strip()
+        if not text:
+            return          # left mid-edit; keep the range it had
+        try:
+            value = int(float(text))
+        except ValueError:
+            return
+        count = max(1, self._episode_count())
+        value = max(1, min(value, count))
+        low, high = self._dl_range()
+        if end == "from":
+            self._dl_from = value
+            # The far end follows rather than crossing over - a "from"
+            # dragged past "to" would otherwise read as an empty range.
+            self._dl_to = max(value, high)
+        else:
+            self._dl_to = value
+            self._dl_from = min(value, low)
+        self._open_download_panel(rebuild=True)
+
     def _dl_set(self, field, value):
         setattr(self, f"_dl_{field}", value)
         if field == "quality":
@@ -9570,23 +10217,41 @@ class PlayerPage(GlassPage):
 
     def _dl_start(self):
         folder = self._download_folder()
+        # **A want everywhere, never a found row.** The panel offers a
+        # language and a preferred source now (the episode list's own
+        # list, his ask of 11 September 2026), and every job searches
+        # for its own episode - which is also the only shape that can be
+        # right for a range: one row saved beside eight episodes is
+        # seven wrong files.
         try:
-            if self._dl_scope == "season" and self.episode:
-                numbers = list(range(1, self._episode_count() + 1))
+            numbers = self._dl_numbers()
+            if self._dl_scope in ("season", "range") and len(numbers) > 1:
+                whole = self._dl_scope == "season"
                 if not confirm(
-                        self, "Download Season",
-                        f"Queue all {len(numbers)} episodes of season "
-                        f"{int(self.season or 1)} for download?"):
+                        self, "Download Season" if whole else "Download Episodes",
+                        (f"Queue all {len(numbers)} episodes of season "
+                         f"{int(self.season or 1)} for download?") if whole else
+                        (f"Queue episodes {numbers[0]} to {numbers[-1]} of "
+                         f"season {int(self.season or 1)} for download?")):
                     return
                 downloads.queue_season(
                     self.entry, season=self.season, episodes=numbers,
-                    quality=self._dl_quality, subtitle=self._dl_subtitle,
+                    quality=self._dl_quality,
+                    subtitle_want=self._dl_subtitle_want(),
                     audio=self._dl_audio, folder=folder)
                 message = f"Queued {len(numbers)} Episodes"
+            elif self._dl_scope == "range" and numbers:
+                downloads.queue_episode(
+                    self.entry, season=self.season, episode=numbers[0],
+                    quality=self._dl_quality,
+                    subtitle_want=self._dl_subtitle_want(),
+                    audio=self._dl_audio, folder=folder)
+                message = "Queued for Download"
             else:
                 downloads.queue_episode(
                     self.entry, season=self.season, episode=self.episode,
-                    quality=self._dl_quality, subtitle=self._dl_subtitle,
+                    quality=self._dl_quality,
+                    subtitle_want=self._dl_subtitle_want(),
                     audio=self._dl_audio, folder=folder)
                 message = "Queued for Download"
         except Exception:
@@ -9885,6 +10550,7 @@ class PlayerPage(GlassPage):
             self._pending_loading_text = text
             return
         self._loading_visible = True
+        self._mark_open("loading frame")
         if self.logo.has_logo() or not text:
             self.status.hide()
             self._layout_overlays()
@@ -10381,6 +11047,18 @@ class PlayerPage(GlassPage):
         only ever a fallback; it cannot fire without a real press having
         happened."""
         if self._closing or os.name != "nt":
+            return
+        # **Nothing in here while a modal dialog is up.** This poll reads
+        # the physical button, not a Qt event, so it cannot tell a click
+        # inside the subtitle file picker from a click on the picture
+        # behind it - and both of the things it then does are wrong:
+        # dismiss the Subtitles panel the picker was opened from, or
+        # pause the film. The same test the key handler already makes
+        # (KeyHandler.eventFilter), for the same reason.
+        app = QApplication.instance()
+        if app is not None and app.activeModalWidget() is not None:
+            self._mouse_down = False
+            self._press_on_video = False
             return
         try:
             state = ctypes.windll.user32.GetAsyncKeyState(_VK_LBUTTON)
@@ -11562,6 +12240,24 @@ class PlayerPage(GlassPage):
 
         QTimer.singleShot(0, land)
         self.deleteLater()
+
+    def hideEvent(self, event):
+        """Take the composed bars down with the page.
+
+        `hide()` is not enough on its own for them - they are layered
+        child windows and DWM goes on presenting the bitmap it holds,
+        which is how the player's seek bar stayed painted over Home for
+        1.1 seconds after the episode ended (measured off his recording;
+        player_top_bar_live_patch.drop_composition has the frames).
+        Here rather than in `close_player` alone so that every route out
+        - Escape, the back button, the window closing, another player
+        opening over this one - is covered by one line."""
+        try:
+            from helpers import player_top_bar_live_patch as live_bar
+            live_bar.drop_composition(self)
+        except Exception:
+            pass            # never let a teardown detail block a close
+        super().hideEvent(event)
 
     def closeEvent(self, event):
         self.close_player()

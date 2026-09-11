@@ -280,6 +280,10 @@ def default_options() -> dict:
         # `select` (player._apply_subtitle), so both routes in are
         # untouched.
         "sid": "no",
+        # **Which is overridden, at open, by `slang`** - see
+        # `subtitle_language_options` below and PlayerPage._wanted_slang.
+        # Selecting a muxed track *after* the file is playing is what
+        # made it freeze; selecting it at open costs nothing at all.
         # Arabic .srt files are very often Windows-1256. We transcode to
         # UTF-8 before handing a file over (see helpers/subtitles.py), so
         # this is the belt to that braces - and "auto" is safe because a
@@ -366,6 +370,46 @@ core_created = False
 
 class PlayerError(Exception):
     """Playback failed in a way the UI should say out loud."""
+
+
+def subtitle_language_options(language) -> dict:
+    """Options that make mpv select a muxed subtitle track of
+    `language` **when the file opens**, or nothing at all.
+
+    **Measured 11 September 2026, and this is why it exists.** Selecting
+    a subtitle track mpv has not been demuxing makes it do a *refresh
+    seek* - its own log says `refresh track N (sub)`, `refresh seek to
+    <t>` - which re-reads the file from about eleven seconds behind the
+    play head, and reads the Cues at the file's tail on the way. On a
+    local file that is free: 0.00s, the picture never stops. Over a
+    network stream it is not: the same switch on the same file served
+    over HTTP froze playback for **19.2s and had not recovered** when
+    the measurement gave up, and the frozen build's own history has the
+    owner reporting it twice ("when I change the embedded subtitles it
+    freezes for ~5-10 sec", 24 August; "make the embedded subtitles load
+    when I use them immediately, no need to re-load the whole source",
+    11 September). Neither the demuxer back-buffer (swept 0 to 50MiB, no
+    change) nor the readahead (2s to 120s, no change) nor
+    `force-seekable` moves it. Selecting the track **at open** is the
+    only thing that does - measured at 0.00s, 100% of real time.
+
+    So the wanted language is handed to mpv before the file is opened
+    and mpv picks it itself:
+
+      * `slang` names the language;
+      * `sid: auto` lets mpv act on it (the standing `sid: no` above
+        would veto it);
+      * `subs-fallback: no` is what keeps the promise `sid: no` was
+        making - measured on a file carrying English and nothing else,
+        mpv selects **nothing** rather than burning the English track
+        over the picture, which is the whole reason `sid: no` is there.
+
+    An empty language gives the options back unchanged, so a title with
+    no wanted language opens exactly as before."""
+    code = str(language or "").strip().lower()
+    if not code:
+        return {}
+    return {"slang": code, "sid": "auto", "subs_fallback": "no"}
 
 
 def create(window_id: int, **overrides):

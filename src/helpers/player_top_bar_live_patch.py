@@ -275,6 +275,77 @@ def _bar_is_layered(page, bar=None) -> bool:
         return False
 
 
+def _layered_children(page):
+    """Every child of the player that is a *layered* native window.
+
+    All of these are given `WS_EX_LAYERED` somewhere in player.py -
+    `_set_window_alpha` for the backdrop (255), the status box and the
+    skip button, `_veil` for the bars and the episode bar, and
+    `_compose` for the two bars. That flag is what makes DWM composite
+    the window from a bitmap of its own, and therefore what makes it
+    outlive `hide()` on its parent - so this list is the set that has to
+    be taken down by hand when the page goes."""
+    found = []
+    for name in ("top_bar", "controls", "backdrop", "status", "skip_btn",
+                 "_episode_bar", "_panel"):
+        child = getattr(page, name, None)
+        if child is not None:
+            found.append(child)
+    return found
+
+
+def drop_composition(page) -> None:
+    """Take every layered child out of that mode and hide it, now.
+
+    **Measured off his own screen recording, 11 September 2026.** A
+    `WS_EX_LAYERED` child window is composited by DWM from a bitmap it
+    owns, and hiding the *parent* does not make DWM stop presenting it -
+    so `close_player`'s `self.hide()` took the page away and left the
+    controls bar painted over whatever the page had been covering.
+    Frame by frame at 25fps: the Reacher episode ends at 8.32s, Home is
+    fully drawn at 8.44s, and the player's seek strip, pause button,
+    volume and "Resumed From 33:44" are still across the bottom of it
+    at 8.44, 8.80, 9.20 and 9.52s - **1.1 seconds** - until the next
+    player opened over it. That is his "shows some frozen page for < 1
+    sec then it shows the real player page", and the second is not a
+    coincidence: the bar lives until Qt processes `deleteLater`, and the
+    event loop spends exactly that long building the next page and
+    starting mpv.
+
+    The top bar never showed the fault because it is only layered while
+    a frame is live (`refresh_live_bar`); the controls bar is composed
+    from the start, which is the 7 September change this pays for.
+
+    **Every layered child, not just the bars.** Asked what the held
+    picture actually was, he answered: "a video player page, but it
+    seems old not for the current played" - the *previous* title's
+    loading frame, which `_set_window_alpha(self.backdrop, 255)` also
+    makes layered, so it survives its page's `hide()` exactly as the
+    bars did (see _layered_children).
+
+    Style first, then hide: a window still in layered mode can be
+    presented after `ShowWindow(SW_HIDE)`, and clearing the bit is what
+    makes DWM let go of the surface."""
+    for bar in _layered_children(page):
+        try:
+            _set_layered(page, False, bar)
+        except Exception:
+            pass
+        try:
+            bar.hide()
+        except Exception:
+            # Already deleted on the C++ side, or not a widget at all.
+            # `Exception`, not `RuntimeError`: this runs in a teardown
+            # and the loop must reach the *other* bar whatever the first
+            # one does - a narrower catch let one bad bar leave the
+            # second one composed, which is the whole fault being fixed.
+            pass
+    try:
+        page._atomic_bar_layered = False
+    except Exception:
+        pass
+
+
 def refresh_live_bar(player, page) -> None:
     """Loading keeps the plain bar; a live frame gets the layered one.
 

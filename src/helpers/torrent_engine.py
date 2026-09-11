@@ -3326,6 +3326,27 @@ def chosen_file_size(info_hash: str) -> int:
         return 0
 
 
+def playing_file_path(info_hash: str) -> str:
+    """Where on this disk the file this torrent is serving is being
+    written, or "".
+
+    The engine writes real files while it streams (the module docstring
+    says so), so anything that needs to read *inside* the container
+    rather than play it - the muxed subtitle tracks the AI translator
+    can work from - has a path to open even mid-stream. What it does
+    **not** promise is that every byte is there yet; a Matroska keeps
+    its Tracks element at the head, which always is, and the caller
+    checks the rest for itself (player._fetch_subtitle_worker measures
+    how much of the track it actually got)."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None or torrent.file_index is None:
+        return ""
+    try:
+        return str(torrent.file_path() or "")
+    except Exception:
+        return ""
+
+
 def raise_files(info_hash: str, indexes) -> bool:
     """Additionally want these files, keeping everything already wanted.
     The download queue calls this once per season job with every sibling

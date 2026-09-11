@@ -259,16 +259,21 @@ def clear_finished():
 
 # **Finished videos are filed, not dumped.** The owner's ask, 27 August
 # 2026: episodes go into a folder of their own "exactly like the
-# readings". Readings have had a per-title subfolder since _run_chapter
-# was written, so videos get the same scheme with one folder above it -
-# every episode of a series together under its own title, and the whole
-# watchable library under one roof instead of loose in a download folder
-# that holds everything else too.
+# readings" - every episode of a series together under its own title.
+#
+# That first answer put a "Watchable" folder *above* the per-title ones,
+# which readings never had. His ask of 11 September 2026 takes it back
+# out: "make the Watchable downloads like the reading directly the
+# watchable name folder no Watchable folder". So both media are now the
+# same shape, and it is the shape _run_chapter has always used:
+#
+#     <download folder>/<Title>/<Title> - S01E04.mkv
+#     <download folder>/<Title>/<Title> - 886.cbz
 #
 # Only new downloads move. Nothing renames or relocates what is already
 # on disk, for the same reason _run_chapter gives about its own folder
-# scheme: his files are not this code's to reorganise.
-WATCHABLE_DIR = "Watchable"
+# scheme: his files are not this code's to reorganise, so anything saved
+# before this stays where it is under the old Watchable folder.
 
 
 def default_folder() -> str:
@@ -419,14 +424,22 @@ def _add(job: dict) -> dict:
 
 
 def queue_episode(entry, *, season=None, episode=None, quality=None,
-                  subtitle=None, folder=None, audio=None) -> dict:
+                  subtitle=None, subtitle_want=None, folder=None,
+                  audio=None) -> dict:
     """One episode (or a film, with season/episode left out).
 
     `audio` is a soft preference over which *release* gets picked -
     "en" prefers dual-audio/dub releases, "jp" (or None) the ordinary
     original-audio fansubs. Soft because a torrent's tracks are whatever
     the release carries; the preference reorders candidates, it cannot
-    conjure a dub that was never released (see _order_by_audio)."""
+    conjure a dub that was never released (see _order_by_audio).
+
+    `subtitle` is one already-found row - the player's panel has the
+    episode on screen and can hand over the exact subtitle the user
+    looked at. `subtitle_want` is the other shape, `{"lang", "source"}`,
+    and means "find this episode's own": it is what a range or a whole
+    season needs, and what the details page can offer without having
+    run a search at all (see _wanted_subtitle)."""
     title = entry.get("title") or "Video"
     label = title if not episode else f"{title} S{int(season or 1):02d}E{int(episode):02d}"
     return _add({
@@ -438,13 +451,15 @@ def queue_episode(entry, *, season=None, episode=None, quality=None,
         "season": season, "episode": episode,
         "quality": quality,
         "subtitle": subtitle,
+        "subtitle_want": subtitle_want,
         "audio": audio,
         "folder": folder or default_folder(),
     })
 
 
 def queue_season(entry, *, season=None, episodes=(), quality=None,
-                 subtitle=None, folder=None, audio=None) -> list:
+                 subtitle=None, subtitle_want=None, folder=None,
+                 audio=None) -> list:
     """A whole season, as one job per episode sharing a group.
 
     One job each rather than a single job for the lot: episodes come
@@ -466,7 +481,8 @@ def queue_season(entry, *, season=None, episodes=(), quality=None,
     jobs = []
     for number in episodes:
         job = queue_episode(entry, season=season, episode=number,
-                            quality=quality, subtitle=subtitle, folder=folder,
+                            quality=quality, subtitle=subtitle,
+                            subtitle_want=subtitle_want, folder=folder,
                             audio=audio)
         jobs.append(_update(job["id"], group=group, group_label=label) or job)
     return jobs
@@ -963,6 +979,43 @@ def _fetch_ranged(job, url, size, target) -> str:
     return target
 
 
+def _wanted_subtitle(entry, season, episode, want):
+    """One subtitle row for *this* episode matching `want`, or None.
+
+    `want` is `{"lang": "ar", "source": "OpenSubtitles"}` - the language
+    is what has to match, the source is a preference. The named source
+    is taken when it answered; otherwise the best row in that language
+    is, in `subtitles.SOURCE_PRIORITY` order, which is the same order
+    the player's own panel lists them in.
+
+    Fails soft in every direction: no search module, a search that
+    raises, a language nothing answered for - all of them return None
+    and the video is saved on its own, which is what a download with no
+    subtitle asked for has always done."""
+    from . import subtitles
+    lang = str((want or {}).get("lang") or "ar").lower()
+    source = str((want or {}).get("source") or "").lower()
+    try:
+        found = subtitles.search(
+            entry.get("title") or "",
+            season=season, episode=episode,
+            imdb_id=entry.get("imdb_id") or None,
+            kind="movie" if not episode else "series") or []
+    except Exception:
+        logs.exception("download: the subtitle search raised")
+        return None
+    rows = [row for row in found
+            if str(row.get("lang") or "").lower().startswith(lang[:2])]
+    if not rows:
+        return None
+    if source:
+        exact = [row for row in rows
+                 if str(row.get("source") or "").lower() == source]
+        if exact:
+            return exact[0]
+    return rows[0]
+
+
 def _run_video(job) -> str:
     from . import streams, subtitles, torrent_engine
     try:
@@ -972,7 +1025,7 @@ def _run_video(job) -> str:
     entry = job.get("entry") or {}
     season, episode = job.get("season"), job.get("episode")
     job_id = job["id"]
-    folder = os.path.join(job.get("folder") or default_folder(), WATCHABLE_DIR,
+    folder = os.path.join(job.get("folder") or default_folder(),
                           safe_name(entry.get("title") or "Video",
                                     fallback="Video"))
     os.makedirs(folder, exist_ok=True)
@@ -983,6 +1036,19 @@ def _run_video(job) -> str:
 
     def finish(target):
         chosen = job.get("subtitle")
+        if not chosen and job.get("subtitle_want"):
+            # **This episode's own, not episode one's.** A range or a
+            # season carries a want rather than a row, because a
+            # subtitle is cut against one episode and saving the same
+            # file beside twenty-four of them is twenty-three wrong
+            # ones. The search is the same one the player runs; it is
+            # done here, per job, at the end, so it costs nothing until
+            # there is a video to put it beside.
+            _update(job_id, detail="Looking for a subtitle...")
+            chosen = _wanted_subtitle(entry, season, episode,
+                                      job["subtitle_want"])
+            if chosen is None:
+                logs.info(f"download: no subtitle found for {job.get('label')}")
         if chosen:
             _update(job_id, detail="Fetching subtitle...")
             try:
@@ -990,10 +1056,14 @@ def _run_video(job) -> str:
                 if text:
                     base = os.path.splitext(target)[0]
                     suffix = "ass" if str(chosen.get("format", "")).lower() in ("ass", "ssa") else "srt"
-                    with open(f"{base}.ar.{suffix}", "w", encoding="utf-8") as handle:
+                    lang = str(chosen.get("lang") or "ar").lower()[:2] or "ar"
+                    with open(f"{base}.{lang}.{suffix}", "w", encoding="utf-8") as handle:
                         handle.write(text)
+                else:
+                    logs.info(f"download: the subtitle for {job.get('label')} "
+                              f"could not be fetched ({chosen.get('source')})")
             except Exception:
-                pass                 # a missing subtitle must not fail the video
+                logs.exception("download: fetching the subtitle raised")
         return target
 
     def pull(url, size, name_hint):
@@ -1087,6 +1157,8 @@ def _run_video(job) -> str:
             ready = streams.prepare_fastest(rest, season=season,
                                             episode=episode, should_stop=halted)
         if not ready:
+            logs.info(f"download: no release could be started for "
+                      f"{job.get('label')} ({len(candidates)} candidates)")
             return ""
         if halted():
             let_go(ready)
@@ -1098,6 +1170,8 @@ def _run_video(job) -> str:
             target = pull(ready_url, ready.get("size"), ready.get("name"))
             return finish(target) if target else ""
         if not ready.get("info_hash"):
+            logs.info(f"download: the winning release for {job.get('label')} "
+                      f"carries no info hash and no direct url; giving up")
             return ""
         info_hash = ready["info_hash"]
     else:
@@ -1107,6 +1181,22 @@ def _run_video(job) -> str:
             return _run_video(job)
     if season and episode:
         _season_packs[pack_key] = info_hash
+    # **Pinned, so the player cannot pull it out from under this job.**
+    # `torrent_engine.pin` was written for exactly this - its docstring
+    # says "somebody's download, so an ordinary release leaves it
+    # alone", `release()` honours it unless forced, and the player's own
+    # `_release_streams` comment promises that "a torrent a download is
+    # using is pinned and survives this". Nothing here ever pinned one.
+    #
+    # His "Reacher S03E01 - Failed · Nothing could be downloaded for
+    # this", 11 September 2026: he was streaming that episode, queued a
+    # download of it, and the race handed the job the very torrent the
+    # player was on (`race: 4a04b503 won (on disk)`). The player let it
+    # go a moment later, `file_progress` answered nothing, and the job
+    # gave up without a word. The cancel path below already passes
+    # `force=True`, which only makes sense against a pin that was never
+    # being taken.
+    torrent_engine.pin(info_hash)
     torrent_engine.download_whole(info_hash)
     torrent_engine.sequential(info_hash, True)
     _prefetch_group_siblings(job, info_hash)
@@ -1116,6 +1206,7 @@ def _run_video(job) -> str:
     tried = {info_hash.lower()}
     switches = 0
     moving_since = time.monotonic()
+    readded = False
     while True:
         if job_id in _cancelled:
             torrent_engine.release(info_hash, force=True)
@@ -1123,7 +1214,60 @@ def _run_video(job) -> str:
         if job_id in _paused:
             return ""
         state = torrent_engine.file_progress(info_hash, index=wanted_index)
+        if not state and not readded:
+            # **The race can hand back a winner the engine is no longer
+            # holding, and this used to end the job in silence.** His
+            # "Reacher S03E01 - Failed · Nothing could be downloaded for
+            # this", 11 September 2026. The log line added an hour
+            # earlier is what named it, and the timing is the whole
+            # story - four milliseconds:
+            #
+            #     23:45:15,656  race: 4a04b503 won (on disk)
+            #     23:45:15,660  download: 4a04b503 has no progress to
+            #                   read (file index None)
+            #     23:45:15,660  pick_file ? S3E1 ... (the other lanes)
+            #
+            # `file_index_for` answers None only when the torrent is not
+            # in `_torrents` or has no metadata, and that winner is the
+            # one candidate of five with no `pick_file` line of its own.
+            # A lane that wins on data already on disk can be given back
+            # by the race's own `let_go` in the same breath it is
+            # returned.
+            #
+            # So the job adds it itself rather than giving up. `own=False`
+            # because the player may be streaming this very release -
+            # that flag is what stops `add` repointing a live stream's
+            # file index (see torrent_engine.add) - and it still creates
+            # and picks for a torrent that genuinely is not held.
+            readded = True
+            logs.info(f"download: {info_hash[:8]} was not held by the engine "
+                      f"(file index {wanted_index}); adding it again for "
+                      f"{job.get('label')}")
+            try:
+                torrent_engine.add(info_hash, season=season, episode=episode,
+                                   title=(entry.get("title") or None),
+                                   own=False)
+                torrent_engine.pin(info_hash)
+                torrent_engine.download_whole(info_hash)
+                torrent_engine.sequential(info_hash, True)
+                wanted_index = torrent_engine.file_index_for(
+                    info_hash, season=season, episode=episode,
+                    title=(entry.get("title") or None))
+            except Exception:
+                logs.exception("download: could not add the release again")
+            time.sleep(1.0)
+            continue
         if not state:
+            logs.info(f"download: {info_hash[:8]} still has no progress to "
+                      f"read after being added again (file index "
+                      f"{wanted_index}); giving up on {job.get('label')}")
+            # And the pin goes with it, or a job that gave up here would
+            # hold a swarm nobody is watching for the rest of the run -
+            # which is the thing release() was added to stop.
+            try:
+                torrent_engine.release(info_hash, force=True)
+            except Exception:
+                pass
             return ""
         rate = float(state.get("rate") or 0)
         if rate >= SWARM_STALL_RATE:
@@ -1204,15 +1348,23 @@ def _run_video(job) -> str:
     target = stem + extension
     _update(job_id, detail="Saving...")
     import shutil
-    for attempt in (1, 2):
+    try:
+        for attempt in (1, 2):
+            try:
+                shutil.copy2(source, target)
+                break
+            except Exception:
+                if attempt == 2:
+                    raise RuntimeError("The finished file could not be saved "
+                                       "into the download folder.")
+                time.sleep(2.0)
+    finally:
+        # The copy is made; the swarm is nobody's now. `force` because
+        # the pin above is this job's own (see torrent_engine.release).
         try:
-            shutil.copy2(source, target)
-            break
+            torrent_engine.release(info_hash, force=True)
         except Exception:
-            if attempt == 2:
-                raise RuntimeError("The finished file could not be saved "
-                                   "into the download folder.")
-            time.sleep(2.0)
+            logs.exception("download: could not release the finished torrent")
     return finish(target)
 
 

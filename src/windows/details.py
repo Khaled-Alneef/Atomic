@@ -3802,6 +3802,34 @@ class DetailsPage(GlassPage):
         res_row.addWidget(res_box, stretch=1)
         column.addLayout(res_row)
 
+        # **Subtitles**, the owner's ask of 11 September 2026: "in the
+        # downloading window in the ep list page, make sure to add a
+        # subtitle loading also like Opensubtitles or SubDL". This
+        # dialog has never run a subtitle search - it is the episode
+        # list, not the player - so what is offered is a *want* rather
+        # than a row: a language and, optionally, which source to prefer.
+        # Each queued job then searches for its own episode and saves
+        # what it finds beside the video (downloads._wanted_subtitle),
+        # which is also the only shape that can be right for a range -
+        # one row saved beside eight episodes is seven wrong files.
+        subtitle_box = PickCombo()
+        subtitle_box.addItem("None - video only", None)
+        subtitle_box.addItem("Arabic - best source", {"lang": "ar", "source": ""})
+        try:
+            from helpers import subtitles as _subtitles
+            sources = list(_subtitles.sources())
+        except Exception:
+            sources = ()
+        for name in sources:
+            subtitle_box.addItem(f"Arabic - prefer {name}",
+                                 {"lang": "ar", "source": name})
+        subtitle_box.addItem("English - best source", {"lang": "en", "source": ""})
+        use_hover_cursor(subtitle_box)
+        subtitle_row = QHBoxLayout()
+        subtitle_row.addWidget(QLabel("Subtitles:"))
+        subtitle_row.addWidget(subtitle_box, stretch=1)
+        column.addLayout(subtitle_row)
+
         count_label = QLabel("", objectName="Muted")
         count_label.setWordWrap(True)
         column.addWidget(count_label)
@@ -3850,15 +3878,18 @@ class DetailsPage(GlassPage):
             numbers = picked_numbers()
             audio = audio_box.currentData()
             quality = res_box.currentData()
+            want = subtitle_box.currentData()
             try:
                 if is_movie:
                     downloads.queue_episode(self.entry, audio=audio,
                                             quality=quality,
+                                            subtitle_want=want,
                                             folder=folder_of())
                 elif len(numbers) == 1:
                     downloads.queue_episode(self.entry, season=season,
                                             episode=numbers[0], audio=audio,
                                             quality=quality,
+                                            subtitle_want=want,
                                             folder=folder_of())
                 else:
                     if not confirm(
@@ -3869,6 +3900,7 @@ class DetailsPage(GlassPage):
                     downloads.queue_season(self.entry, season=season,
                                            episodes=numbers, audio=audio,
                                            quality=quality,
+                                           subtitle_want=want,
                                            folder=folder_of())
             except Exception:
                 logs.exception("details page could not queue a download")
