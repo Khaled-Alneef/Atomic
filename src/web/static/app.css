@@ -977,6 +977,31 @@ header .pwait { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .strip.faces .card .art { border-radius: 50%; overflow: hidden; }
 .strip.faces .card img { border-radius: 50%; object-fit: cover; }
 
+/* ---- the person at the head of their own page ---------------------
+   His ask, 12 September 2026: "in the cast page, I want you to add the
+   actor image on top mid". Round for the same reason the Cast row's
+   cards are round (just above), and centred with the name and the title
+   count under it so the three read as one block rather than as a
+   picture with a left-aligned caption beside it.
+
+   132px: the cards under it draw 160, so the head of the page is not
+   the biggest thing on it - a person's page is still a grid of titles.
+   `.withface` is set by app.js only when the server had a portrait, so
+   the genre page, which shares this header, is untouched. */
+header.gridhead .pface {
+  display: block; margin: 2px auto 12px;
+  width: 132px; height: 132px; border-radius: 50%;
+  object-fit: cover; background: var(--hover);
+}
+header.gridhead.withface { text-align: center; }
+/* The name is the heading of this page, not the dim line the genre
+   page's is - under a portrait, 12px dim read as a caption that had
+   lost its picture. */
+header.gridhead.withface p.ptitle {
+  margin: 0 0 8px; color: var(--text); font-size: 19px; font-weight: 600;
+}
+header.gridhead.withface .btabs { justify-content: center; }
+
 /* **An empty number takes no room.** progressInto writes into `.cnum`,
    `.histmeta` and `.schednum`, which now exist on every card whether or
    not anything has been marked yet - a card drawn before the first mark

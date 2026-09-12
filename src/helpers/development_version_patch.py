@@ -1441,7 +1441,7 @@ def install():
     #     reload; a range download takes one language and source; a
     #     download that found a release says why it could not start it
     #     (his nine asks, 11 September 2026).
-    updater.APP_VERSION = "2.3"
+    updater.APP_VERSION = "2.4"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

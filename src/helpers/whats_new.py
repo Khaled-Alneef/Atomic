@@ -26,6 +26,10 @@ from . import updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.4": [
+        "A cast member's page opens with their own picture at the top, "
+        "with their name and the number of titles under it.",
+    ],
     "2.3": [
         "Pressing play opens straight into the loading screen - the "
         "title's own picture and logo - instead of showing a half-drawn "

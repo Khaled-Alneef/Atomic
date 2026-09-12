@@ -44,6 +44,28 @@ _ANIMATION = 16
 # The same 0.8 bar the details page's own id lookup uses.
 MIN_NAME_MATCH = 0.8
 
+# **The picture at the head of a cast page.** His ask, 12 September
+# 2026: "in the cast page, I want you to add the actor image on top
+# mid". w342 rather than FACE_SIZE's w185: the header draws it at 132
+# CSS px - 165 device pixels on his 125% panel - and a round crop spends
+# the whole width, so w185 would be the one upscaled picture on a page
+# of correctly-sized ones.
+PORTRAIT_SIZE = "w342"
+
+# name (lowercased, as it was clicked) -> that person's portrait url, or
+# "" for "TMDB has no picture of them". Filled for free by every path
+# that already parses a `search/person` or `person/popular` row -
+# `_person_id`, so a filmography fetch and every prefetch pay nothing
+# for it, and `_face`, so every face card Discover or a search has drawn
+# this session answers too. `portrait` below is the only thing that ever
+# asks on its own, and only for a name whose filmography was cached to
+# disk before any of this existed.
+_PORTRAITS = {}
+
+
+def _portrait_url(path):
+    return f"{artwork.CDN}/{PORTRAIT_SIZE}{path}" if path else ""
+
 # Bounded so a session that walked a hundred cast pages does not keep a
 # hundred filmographies. Keyed by the lowercased name as it was clicked.
 _CACHE_LIMIT = 24
@@ -60,7 +82,7 @@ def _person_id(name):
     otherwise take an actor's page."""
     url = f"{artwork.API}/search/person?query={urllib.parse.quote(name)}"
     body = artwork._get_json(url, TIMEOUT) or {}
-    best, score = 0, 0.0
+    best, score, path = 0, 0.0, ""
     for hit in body.get("results") or []:
         if not isinstance(hit, dict) or not hit.get("id"):
             continue
@@ -69,7 +91,16 @@ def _person_id(name):
             value -= 0.1
         if value > score:
             best, score = int(hit["id"]), value
-    return best if score >= MIN_NAME_MATCH else 0
+            path = str(hit.get("profile_path") or "")
+    if score < MIN_NAME_MATCH:
+        return 0
+    # The portrait is in the answer already in hand, so the cast page's
+    # own picture costs nothing on this path - the path a chip press and
+    # every prefetch take. Recorded even when it is "": that is the
+    # honest answer for a name TMDB has no picture of, and it stops
+    # `portrait` asking again for one.
+    _PORTRAITS[str(name or "").strip().lower()] = _portrait_url(path)
+    return best
 
 
 def _is_appearance(credit) -> bool:
@@ -168,7 +199,11 @@ def filmography(name):
         while len(_CACHE_ORDER) > _CACHE_LIMIT:
             _CACHE.pop(_CACHE_ORDER.pop(0), None)
         if rows:
-            _DISK[key] = {"at": time.time(), "rows": rows}
+            _DISK[key] = {"at": time.time(), "rows": rows,
+                          # Kept beside the rows so the next session's
+                          # cast page draws its portrait without a
+                          # request either - see `portrait`.
+                          "face": _PORTRAITS.get(key, "")}
             while len(_DISK) > _DISK_LIMIT:
                 del _DISK[min(_DISK, key=lambda k: _DISK[k].get("at", 0))]
             _save_disk()
@@ -214,6 +249,12 @@ def _load_disk():
             continue
         if now - at < _DISK_TTL_S and isinstance(rows, list) and rows:
             _DISK[str(key)] = {"at": at, "rows": rows}
+            # Absent on every entry written before portraits existed,
+            # which is the one case `portrait` pays a request for.
+            face = entry.get("face")
+            if face is not None:
+                _DISK[str(key)]["face"] = str(face or "")
+                _PORTRAITS.setdefault(str(key), str(face or ""))
             if str(key) not in _CACHE:
                 _CACHE[str(key)] = rows
                 _CACHE_ORDER.append(str(key))
@@ -240,14 +281,22 @@ def prefetch(names):
             continue
         with _LOCK:
             _load_disk()
-            if key in _CACHE or key in _INFLIGHT:
+            # **A name whose list is already cached still warms its
+            # portrait.** The filmography can have been written to disk
+            # by a session before portraits existed, and `portrait` is
+            # the one path that pays a `search/person` of its own - paid
+            # here, behind the details page, rather than inside the cast
+            # route's answer.
+            if key in _INFLIGHT or (key in _CACHE and key in _PORTRAITS):
                 continue
             _INFLIGHT.add(key)
 
         def _warm(k=key, n=str(name)):
             try:
                 rows, _note = filmography(n)
-                logs.info(f"people: prefetched {n}: {len(rows)} titles")
+                got = portrait(n)
+                logs.info(f"people: prefetched {n}: {len(rows)} titles"
+                          + ("" if got else ", no portrait"))
             except Exception:
                 logs.exception(f"people: prefetch failed for {n}")
             finally:
@@ -295,6 +344,12 @@ def _face(hit):
     known = [str((k or {}).get("title") or (k or {}).get("name") or "").strip()
              for k in (hit.get("known_for") or []) if isinstance(k, dict)]
     known = [k for k in known if k][:2]
+    # **Free for the cast page behind this card.** A plain assignment
+    # rather than a locked one - a dict store is atomic under the GIL,
+    # and both callers are on the request thread. setdefault so a strict
+    # `_person_id` match is never overwritten by a loose search hit that
+    # happens to carry the same name.
+    _PORTRAITS.setdefault(name.strip().lower(), _portrait_url(path))
     return {"title": name,
             "kind": "person",
             "type": "Person",
@@ -306,6 +361,45 @@ def _face(hit):
             # apart on a card.
             "note": "  ".join(known),
             "genres": []}
+
+
+def portrait(name):
+    """That person's TMDB portrait, or "" - the picture the cast page
+    puts at its head (his ask, 12 September 2026).
+
+    Answered from whatever request already parsed it (see _PORTRAITS),
+    which is every path but one: a name whose filmography was cached to
+    disk before portraits existed has no picture stored beside it, and
+    that name - and only that name - pays one `search/person` here. The
+    answer is then written into its disk entry, so it is paid once ever,
+    and `prefetch` pays it behind the details page rather than inside
+    the cast route wherever the chips were drawn first.
+    """
+    key = str(name or "").strip().lower()
+    if not key:
+        return ""
+    if key in _PORTRAITS:
+        return _PORTRAITS[key]
+    with _LOCK:
+        _load_disk()
+        kept = (_DISK.get(key) or {}).get("face")
+    if kept is not None:
+        _PORTRAITS[key] = str(kept or "")
+        return _PORTRAITS[key]
+    if not artwork.available():
+        return ""
+    try:
+        _person_id(key)          # records the portrait as a side effect
+    except Exception:
+        return ""
+    url = _PORTRAITS.get(key, "")
+    if url:
+        with _LOCK:
+            entry = _DISK.get(key)
+            if isinstance(entry, dict):
+                entry["face"] = url
+                _save_disk()
+    return url
 
 
 def search(query, limit=20):
