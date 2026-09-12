@@ -3479,6 +3479,18 @@ def _cast(name, tab="all"):
         rows, note = people.filmography(name)
     except Exception as error:
         rows, note = [], str(error)[:120]
+    # **The actor's own picture, at the head of their page** - his ask,
+    # 12 September 2026: "in the cast page, I want you to add the actor
+    # image on top mid". Through the app's own proxy like every other
+    # remote picture, and "" where TMDB has none, which app.js reads as
+    # "draw the plain heading" rather than a grey hole. Free on this
+    # line in every case but a filmography cached to disk by an older
+    # build - see people.portrait for what that one pays.
+    try:
+        face = people.portrait(name)
+        face = backend.remote_url(face) if face else ""
+    except Exception:
+        face = ""
     rows = [r for r in rows if isinstance(r, dict) and r.get("title")]
     # **Anime / Series / Movies, as on the genre page.** The owner, 3
     # September 2026: "in the genre and the cast pages add tabs Anime
@@ -3491,7 +3503,7 @@ def _cast(name, tab="all"):
     rows = _tab_rows(rows, tab)
     first = rows[:CAST_PAGE]
     saved = _saved_sides()
-    return {"kind": "grid", "hero": None, "title": name,
+    return {"kind": "grid", "hero": None, "title": name, "face": face,
             "browse": f"cast:{name}:{tab}", "skip": len(first),
             "browsetabs": tabs, "browsetab": tab,
             # **A way out.** The owner, 3 September 2026: "in the same

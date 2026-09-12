@@ -2440,6 +2440,28 @@ async function go(route) {
       });
       head.appendChild(door);
     }
+    /* **The person at the head of their own page.** His ask, 12
+       September 2026: "in the cast page, I want you to add the actor
+       image on top mid". Round, like every other face the app draws
+       (app.css .strip.faces): a 2:3 TMDB portrait reads as a face when
+       it is a circle and as a poster of a person when it is not. The
+       name and the count centre under it, which is what `withface`
+       does - the genre page, which shares this header and has no
+       picture, is left exactly as it was.
+
+       Only when the server had one (server._cast -> people.portrait):
+       a name TMDB has no picture of keeps the plain heading rather than
+       getting a grey hole where a face should be. `width`/`height` are
+       set on the element as well as in the CSS so the rows below do not
+       move when it decodes. */
+    if (data.face && !head.querySelector('.pface')) {
+      head.classList.add('withface');
+      const face = el('img', 'pface');
+      face.width = 132; face.height = 132;
+      face.alt = '';
+      face.src = data.face;
+      head.appendChild(face);
+    }
     if (data.title) head.appendChild(el('p', 'ptitle', data.title));
     /* **Anime / Series / Movies on a genre or a cast page.** The owner,
        3 September 2026. The kind is on every row already, so a tab is a
