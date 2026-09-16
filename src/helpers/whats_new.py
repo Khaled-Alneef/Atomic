@@ -26,6 +26,15 @@ from . import updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.5": [
+        "Atomic starts much sooner when Windows signs you in. It no "
+        "longer waits its turn at the back of the list of programs "
+        "Windows launches at startup - it starts alongside them "
+        "instead.",
+        "Opening an app, website or game from the home page no longer "
+        "makes all the cards flicker. The page stays as it is and just "
+        "moves what you opened to the front, without jumping.",
+    ],
     "2.4": [
         "A cast member's page opens with their own picture at the top, "
         "with their name and the number of titles under it.",

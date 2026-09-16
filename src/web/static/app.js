@@ -441,7 +441,15 @@ function hostMessage(ev) {
      anything. */
   if (m.redraw) {
     const at = page.scrollTop;
+    // go() now swaps the content in one synchronous task after its fetch
+    // (no empty frame - see the note there), and its promise resolves
+    // right after that render for a list route. Restoring the scroll in
+    // this resolve microtask - not a frame later - puts it back before
+    // the browser paints, so the redraw neither flashes nor bounces to
+    // the top for a frame. (The old rAF restore was a visible one-frame
+    // jump on Home when a launch stamped last_used.)
     go(currentRoute()).then(function () {
+      page.scrollTop = at;
       requestAnimationFrame(function () { page.scrollTop = at; });
     }, function () { /* the route failed; nothing to restore into */ });
     return;
@@ -2350,30 +2358,30 @@ async function go(route) {
     }
     return;
   }
-  page.scrollTop = 0;
-  page.innerHTML = '';
-  // The tick list is a child that was just removed; the reference to it
-  // is not, and a page without a filter would otherwise keep writing
-  // into the last page's box.
-  page._genreBox = null;
+  /* **The page keeps its current cards until the new ones are built.**
+     The owner, 16 September 2026: "when I open an app, website or a game
+     from the main page, all cards and items in the page blink (stutter)".
 
-  /* **The way out is drawn before the rows are asked for.** The owner,
-     4 September 2026: "in the genre and cast pages make the buttons
-     appear even if the cards did not load yet."
+     go() used to blank the page here, *before* awaiting the fetch, so an
+     empty frame painted for the length of that await (~50ms on Home). A
+     launch stamps last_used/last_played (link_grid._stamp_used,
+     game_launch._stamp_played), the 150ms file watch turns that into a
+     redraw of Home (web_pages._check_covered -> {redraw:1}), and every
+     launch therefore flashed the whole page white before it drew again.
 
-     Those two routes are the slowest the app has - a genre is three
-     Cinemeta catalogs walked for one genre's rows and measured at 2-10s
-     - and the header, the back button included, was built *after* the
-     await. So the whole wait was a blank window inside web_reader's
-     shell, which covers the app's own title bar: nothing on screen and
-     no way back except Escape. Rule 7's answer is to draw what there is
-     at once, and the door is something there is.
-
-     Only these two, because only they are drawn in that shell and only
-     they are slow; the header below reuses this element rather than
-     making a second one, so nothing moves when the rows land. */
+     So the blank now waits until *after* the fetch, at the swap below -
+     the old content stays on screen the whole time and is replaced in
+     one synchronous task, with no empty frame between. The two routes
+     that draw a door before their (slow) fetch are the exception: they
+     are drawn into web_reader's shell, which has no cards to lose, and
+     rule 7 wants their Back button up at once. search returned above.
+     resetLazy already ran; the swap re-observes the new pictures. */
   const early = route.split('&')[0].split('?')[0];
-  if (early === 'genre' || early === 'cast') {
+  const drawEarly = (early === 'genre' || early === 'cast');
+  if (drawEarly) {
+    page.scrollTop = 0;
+    page.innerHTML = '';
+    page._genreBox = null;
     const head = el('header', 'gridhead');
     const door = el('button', 'pback', '');
     door.title = 'Back (Esc)';
@@ -2395,6 +2403,19 @@ async function go(route) {
     return;
   }
   if (mine !== token) return;              // a later click won
+
+  // The swap. For every route but the draw-early two, the page still
+  // shows the old cards at this point - clear and refill happen in one
+  // task from here down (the render below is synchronous; the only
+  // awaits after this are background pulls), so no empty frame paints.
+  if (!drawEarly) {
+    page.scrollTop = 0;
+    page.innerHTML = '';
+    // The tick list is a child that was just removed; the reference to
+    // it is not, and a page without a filter would otherwise keep
+    // writing into the last page's box.
+    page._genreBox = null;
+  }
 
   const heroes = data.heroes || (data.hero ? [data.hero] : []);
   if (heroes.length) page.appendChild(heroCarousel(heroes));

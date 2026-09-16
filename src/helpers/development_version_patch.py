@@ -1441,7 +1441,25 @@ def install():
     #     reload; a range download takes one language and source; a
     #     download that found a release says why it could not start it
     #     (his nine asks, 11 September 2026).
-    updater.APP_VERSION = "2.4"
+    # 2.5
+    #   * Atomic starts much sooner at Windows sign-in. It launches from
+    #     a logon scheduled task now, not the registry Run key: the task
+    #     fires in parallel with the shell instead of last in Explorer's
+    #     serial Run-key queue - measured ~35-40s of that queue on his
+    #     own sign-in event log (logon 17:07:48, Atomic launched 17:08:27
+    #     as the 9th of 9 entries). The Run key stays as a fallback and
+    #     an old install migrates itself once; the task's battery flags
+    #     are off so a laptop still launches unplugged (his "too too too
+    #     long to start", 16 September 2026).
+    #   * Opening an app, website or game from Home no longer blinks every
+    #     card. A launch stamps last_used/last_played, the 150ms watch
+    #     turns that into a Home redraw, and go() blanked the page before
+    #     awaiting /api/home - an empty frame for the length of the fetch.
+    #     The blank now waits until after the fetch, so the old cards stay
+    #     on screen and are swapped in one task; the redraw restores the
+    #     scroll in its resolve microtask, without a one-frame bounce (his
+    #     ask, 16 September 2026).
+    updater.APP_VERSION = "2.5"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
