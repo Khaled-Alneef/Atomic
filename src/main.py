@@ -6008,6 +6008,18 @@ def main():
             torrent_engine.prewarm()
     except Exception:
         logs.exception("Could not warm the torrent session")
+    # Migrate a startup entry from the old registry Run key to a logon
+    # scheduled task, once. Off a timer and cheap: it is one registry read
+    # and returns immediately when there is nothing to migrate (the common
+    # case after the first launch of this version). The task is what makes
+    # a sign-in launch start ~35s sooner - see helpers/startup for the
+    # measurement. Never on the hot path, and never fatal.
+    def _reconcile_startup():
+        try:
+            startup.reconcile()
+        except Exception:
+            logs.exception("Could not reconcile the startup entry")
+    QTimer.singleShot(2000, _reconcile_startup)
     # The three overlay modules, imported now rather than inside the
     # click that opens one. **They are imported lazily on purpose** (see
     # tracker.open_in_app) and that is still right - it keeps them off
