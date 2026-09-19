@@ -1459,7 +1459,18 @@ def install():
     #     on screen and are swapped in one task; the redraw restores the
     #     scroll in its resolve microtask, without a one-frame bounce (his
     #     ask, 16 September 2026).
-    updater.APP_VERSION = "2.5"
+    # 2.6
+    #   * Marking an episode watched or unwatched inside the player works
+    #     the way it does on the title page's list. The player had its own
+    #     copy of the decision and it moved only the progress number, never
+    #     the History ticks the list draws from - so a mark made in the
+    #     player did not show on the list, the first episode of a season
+    #     could not be unmarked, and an unsaved title could not be marked
+    #     at all. One rule now, helpers/watch_marks, and one "nothing
+    #     watched" write, tracker.clear_video_progress (his report, 19
+    #     September 2026; 11 of 11 harness cases disagreed before, none
+    #     after, and 10 of 10 store the same as the list's own menu).
+    updater.APP_VERSION = "2.6"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

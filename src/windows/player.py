@@ -72,7 +72,7 @@ from PyQt6.QtWidgets import (
 
 from helpers import (skiptimes, app_settings, artwork, downloads, logs,
                      mkv_subs, net, storage, theme, video_backend,
-                     window_chrome)
+                     watch_marks, window_chrome)
 from helpers import drawn_icons
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
                              PickCombo,
@@ -4051,6 +4051,7 @@ class PlayerPage(GlassPage):
         # Read once per refill, not once per row: it parses the same
         # string every time and a season can run to thirty rows.
         self._watched_mark = self._watched_through()
+        self._watched_ticks = self._episode_ticks()
         # Bound the arrows so they cannot walk into a season with no data
         # (below 1, or above the furthest one the release names).
         if hasattr(self, "season_prev_btn"):
@@ -4114,7 +4115,14 @@ class PlayerPage(GlassPage):
         self._fill_episode_bar()
 
     def _watched_through(self):
-        """(season, episode) the entry's progress has reached, or (0, 0)."""
+        """(season, episode) the entry's progress has reached, or (0, 0).
+
+        Only a *verified* number - the title page's rule
+        (details._progress): an unverified one is the tracker's guess at
+        what is out, not at what was watched, and this panel used to
+        paint a whole season as seen off that guess."""
+        if not self.entry.get("progress_verified"):
+            return 0, 0
         try:
             from windows import tracker
         except ImportError:                             # pragma: no cover
@@ -4122,6 +4130,50 @@ class PlayerPage(GlassPage):
         season, episode = tracker.parse_episode_progress(
             self.entry.get("progress"))
         return int(season or 0), int(episode or 0)
+
+    def _episode_ticks(self):
+        """This title's per-episode History ticks - what the title page's
+        list draws DONE from, and so what this panel has to draw from too
+        (helpers/watch_marks has what happened while it did not).
+
+        Re-read only when the user has changed something: every tick
+        written anywhere bumps helpers/changes (history.set_watched), so
+        the counter is the whole invalidation and a refill per keystroke
+        in the panel's search box does not re-parse history.json."""
+        try:
+            from helpers import changes, history
+            stamp = changes.version()
+            if getattr(self, "_ticks_stamp", None) != stamp:
+                self._ticks = history.watched_keys(self.entry)
+                self._ticks_stamp = stamp
+            return self._ticks
+        except Exception:
+            logs.exception("could not read the episode ticks")
+            return set()
+
+    def _known_episodes(self):
+        """Every (season, episode) this panel can name, in playback order -
+        what "everything before this one" and "everything after it" mean
+        when a row is marked.
+
+        Cinemeta's rows once they have arrived, which is the list the
+        title page marks against. Before that (or for a title Cinemeta
+        cannot answer for) the aired map from disk, and failing that only
+        the season on screen, as long as the panel lists it - never a
+        guess at some *other* season's length, which would step progress
+        back onto an episode that does not exist."""
+        pairs = watch_marks.known_pairs(getattr(self, "_meta_videos", None))
+        if pairs:
+            return pairs
+        aired = getattr(self, "_meta_aired", None) or {}
+        pairs = [(int(season), number)
+                 for season, top in aired.items() if int(season) > 0
+                 for number in range(1, int(top or 0) + 1)]
+        if pairs:
+            return sorted(pairs)
+        season = int(self._panel_season or self.season or 1)
+        return [(season, number) for number in
+                range(1, self._season_episode_count(season) + 1)]
 
     def _season_ratings(self, season, rows):
         """({number: score}, label) for the season the panel is showing.
@@ -4222,9 +4274,12 @@ class PlayerPage(GlassPage):
         # light up its episode 5 as though it were the one on screen.
         current = (number == int(self.episode or 0)
                    and season == int(self.season or 0))
-        watched_season, watched_episode = getattr(self, "_watched_mark", (0, 0))
-        watched = bool(watched_episode) and (season, number) <= (watched_season,
-                                                                 watched_episode)
+        # The same answer the title page's list draws DONE from, and the
+        # one _episode_menu picks its verb with - ticks where the title
+        # has any, the verified number otherwise (watch_marks.is_watched).
+        watched = watch_marks.is_watched(
+            getattr(self, "_watched_ticks", None),
+            getattr(self, "_watched_mark", (0, 0)), season, number)
         name = str((video or {}).get("name") or (video or {}).get("title")
                    or "").strip()
         # Settings > Watching > "Show episode and chapter numbers only".
@@ -4248,6 +4303,9 @@ class PlayerPage(GlassPage):
                 upcoming = when > _dt.datetime.now(_dt.timezone.utc)
             except ValueError:
                 pass
+        # An episode that has not aired cannot have been watched, whatever
+        # a stale tick says - the title page's list reads it the same way.
+        watched = watched and not upcoming
 
         if current:
             fill, edge, text = theme.ACCENT_SOFT, theme.ACCENT, theme.ACCENT
@@ -4327,23 +4385,31 @@ class PlayerPage(GlassPage):
         return card
 
     def _episode_menu(self, card, pos, number):
-        """Mark this episode watched, or unwatched.
+        """Mark this episode watched, or unwatched - the title page's
+        rule, from the one place it is written (helpers/watch_marks).
 
-        "Watched" means progress reaches this episode; "unwatched" means
-        it stops just before it - so marking episode 5 unwatched leaves
-        the entry on episode 4, which is what someone means when they say
-        they have not seen 5. Both go through tracker.correct_progress,
-        the one writer allowed to move a number down; the automatic
-        write-back stays forward-only."""
+        The row clicked is a boundary: "watched" ticks every known
+        episode through it, "unwatched" clears it and everything after
+        and leaves progress on the episode before - marking 5 unwatched
+        leaves the entry on 4, which is what someone means when they say
+        they have not seen 5.
+
+        This was its own copy of that decision until 19 September 2026,
+        and the copy moved only the progress number. The title page draws
+        from the History ticks, so nothing marked here showed there; the
+        first episode of a season could not be unmarked at all; and an
+        unsaved title, which has no number, could not be marked either.
+        watch_marks has the list."""
         try:
+            from helpers import history
             from windows import tracker
         except ImportError:                             # pragma: no cover
             return
         season = int(self._panel_season or self.season or 1)
         number = int(number)
-        watched_season, watched_episode = tracker.parse_episode_progress(
-            self.entry.get("progress"))
-        already = (watched_season, watched_episode) >= (season, number)
+        # The verb and the row's tick are one answer, read the same way.
+        already = watch_marks.is_watched(
+            self._episode_ticks(), self._watched_through(), season, number)
 
         menu = QMenu(card)
         mark = menu.addAction("Mark as Unwatched" if already else "Mark as Watched")
@@ -4356,49 +4422,46 @@ class PlayerPage(GlassPage):
         # Positioned from the widget that was clicked, never mapToGlobal
         # on a parent - see .claude/rules/ui.md.
         chosen = menu.exec(card.mapToGlobal(pos))
-        if chosen is mark_all:
-            tracker.correct_progress(
-                self.entry, season=season,
-                episode=self._season_episode_count(season))
+        if chosen is mark:
+            action = watch_marks.MARK
+        elif chosen is mark_all:
+            action = watch_marks.MARK_ALL
         elif chosen is clear_all:
-            if season > 1:
-                tracker.correct_progress(
-                    self.entry, season=season - 1,
-                    episode=self._season_episode_count(season - 1))
-            else:
-                # Season 1 unwatched means nothing watched at all -
-                # cleared directly, since correct_progress refuses a
-                # zero episode.
-                self.entry["progress"] = ""
-                self.entry["progress_verified"] = False
-                try:
-                    storage.update_entry(
-                        tracker._progress_data_file(self.entry),
-                        self.entry.get("id"),
-                        {"progress": "", "progress_verified": False,
-                         "updated_at": storage.now_iso()})
-                except Exception:
-                    logs.exception("Could not clear watch progress")
-                # This bypasses correct_progress, so it owes the same
-                # tidy-up: a stored half-watched position must not
-                # outrank "nothing watched" (see clear_entry_resume).
-                clear_entry_resume(self.entry)
-        elif chosen is mark:
-            if already:
-                # Everything before this episode stays seen; this one
-                # does not.
-                if number <= 1:
-                    target_season, target_episode = max(season - 1, 1), 0
-                else:
-                    target_season, target_episode = season, number - 1
-                if not target_episode:
-                    return
-            else:
-                target_season, target_episode = season, number
-            tracker.correct_progress(self.entry, season=target_season,
-                                     episode=target_episode)
+            action = watch_marks.CLEAR_ALL
         else:
             return
+
+        pairs = self._known_episodes()
+        # "All" is what has aired: the panel lists an upcoming row with no
+        # menu on it, and an episode nobody could have seen is not ticked.
+        aired_top = self._season_episode_count(season)
+        aired_rows = ([e for s, e in pairs if s == season and e <= aired_top]
+                      or list(range(1, aired_top + 1)))
+        watched, affected, target = watch_marks.plan(
+            pairs, season, number, action, already, season_episodes=aired_rows)
+
+        # History first, and unconditionally: it is the only store an
+        # unsaved title has, and it is what the title page's list reads.
+        history.set_watched(
+            self.entry, [history.episode_key(s, e) for s, e in affected],
+            watched)
+        saved = True
+        if not self.entry.get("id"):
+            # No number to correct - but the mark still outranks a stored
+            # half-watched position (details._mark_history does the same;
+            # the two writers below do it for a saved title).
+            clear_entry_resume(self.entry)
+        elif target[0] <= 0 < target[1]:
+            pass        # a special never sets the number - see known_pairs
+        elif target[1] <= 0:
+            saved = tracker.clear_video_progress(self.entry)
+        else:
+            saved = tracker.correct_progress(
+                self.entry, season=target[0], episode=target[1])
+        if not saved:
+            # The ticks are written and are what the rows draw, so the
+            # panel is refreshed either way.
+            show_toast(self._toast_anchor(), "Could Not Save That")
         self._fill_episode_bar()
         self._sync_episode_buttons()
 

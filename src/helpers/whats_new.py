@@ -26,6 +26,19 @@ from . import updater, widgets
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.6": [
+        "Marking an episode as watched or unwatched from the episode "
+        "list inside the player now works the same way it does on the "
+        "title's own page: marking one as watched marks everything "
+        "before it, and marking one as unwatched clears it and "
+        "everything after it.",
+        "What you mark inside the player shows on the title's page "
+        "straight away, and the other way round - the two lists no "
+        "longer disagree about what you have seen.",
+        "The first episode of a season can be marked as unwatched from "
+        "the player, and a title you have not saved can be marked there "
+        "too.",
+    ],
     "2.5": [
         "Atomic starts much sooner when Windows signs you in. It no "
         "longer waits its turn at the back of the list of programs "

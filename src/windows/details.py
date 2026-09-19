@@ -3556,40 +3556,12 @@ class DetailsPage(GlassPage):
                 logs.exception("details page could not clear resume state")
 
     def _clear_video_progress(self):
-        from helpers import storage
-        from windows.tracker import _progress_data_file
-        # **`progress_cleared_at` is the statement, not just the empty
-        # field.** The owner, 4 September 2026, after the number came
-        # back: "when 1st ep season one is marked as unwatched that means
-        # that the user did not watch anything in this watchable yet".
-        #
-        # Emptying `progress` alone cannot hold, because the Stremio sync
-        # is forward-only against whatever is stored - and *every* number
-        # is forward of nothing, so the next sync writes 51 straight back
-        # with progress_verified True (tracker._on_progress_synced). His
-        # own log has the app asking for "The Apothecary Diaries S1E52"
-        # on a title he had just declared himself at the start of.
-        #
-        # So the clear leaves a mark, and the sync steps around a title
-        # carrying one. It is dropped the moment anything real happens
-        # here - playing an episode, or marking one - because
-        # tracker._write_progress clears it on every successful write.
-        fields = {"progress": "", "progress_verified": False,
-                  "progress_cleared_at": storage.now_iso(),
-                  "updated_at": storage.now_iso()}
-        self.entry.update(fields)
-        try:
-            storage.update_entry(_progress_data_file(self.entry),
-                                 self.entry.get("id"), fields)
-        except Exception:
-            logs.exception("details page could not clear progress")
-        # Same rule as correct_progress: "nothing watched" is a deliberate
-        # statement, so no stored position may outrank it.
-        try:
-            from windows import player
-            player.clear_entry_resume(self.entry)
-        except Exception:
-            logs.exception("details page could not clear resume state")
+        # The write itself is tracker.clear_video_progress - moved there,
+        # with the `progress_cleared_at` story, 19 September 2026: the
+        # player's episode panel makes this same statement and its own
+        # copy of the write had drifted from this one.
+        from windows.tracker import clear_video_progress
+        clear_video_progress(self.entry)
 
     def _chapter_menu(self, event, number):
         """Right-click on a chapter row - the reading mirror of
