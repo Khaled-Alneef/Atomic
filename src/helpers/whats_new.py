@@ -23,6 +23,10 @@ from PyQt6.QtWidgets import (
 
 from . import updater, widgets
 
+# Set by _sections_to_show when this launch followed an update that did
+# not land - main says so with a toast instead of coming back silent.
+update_did_not_install = False
+
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
@@ -38,6 +42,11 @@ NOTES = {
         "The first episode of a season can be marked as unwatched from "
         "the player, and a title you have not saved can be marked there "
         "too.",
+        "From this version on, updating from Settings works on a PC "
+        "where Windows will not let the old file be replaced - before, "
+        "Atomic closed, stayed closed, and was still the old version "
+        "when opened again. And if an update ever cannot be installed, "
+        "Atomic reopens as it was and says so.",
     ],
     "2.5": [
         "Atomic starts much sooner when Windows signs you in. It no "
@@ -449,8 +458,17 @@ def _sections_to_show(app_settings) -> list:
     profile already holds settings from those earlier runs. That's the
     third case, and without it the very first update into this feature
     would silently show nothing."""
+    global update_did_not_install
     previous = app_settings.take_updated_from()
     if previous:
+        # The marker is written just before the swap is handed off, so
+        # coming back up as the *same* version means the swap did not
+        # land and its script relaunched the old exe. That used to be
+        # silent - an app that closed, stayed closed, and was still 2.5
+        # when opened by hand (19 September 2026, updater._SWAP_SCRIPT).
+        if (updater.parse_version(previous)
+                == updater.parse_version(updater.APP_VERSION)):
+            update_did_not_install = True
         return notes_between(previous, updater.APP_VERSION)
 
     # No marker: an exe swapped by hand, or a build too old to leave one.

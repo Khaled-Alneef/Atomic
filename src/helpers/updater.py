@@ -341,26 +341,89 @@ def _exe_from_zip(data: bytes) -> bytes:
 
 
 # Windows won't let a running executable be replaced, so the swap happens
-# from a throwaway script that outlives this process: it retries the move
-# until the app has exited (up to a minute), relaunches the new build, and
-# deletes itself. Waiting on the move succeeding rather than on a process
-# id keeps it correct however the app exits.
-_SWAP_SCRIPT = """@echo off
+# from a throwaway script that outlives this process.
+#
+# **It steps the old exe aside instead of overwriting it, and it always
+# relaunches something.** The first version of this was one line retried
+# for a minute - `move /y new old` - and then a silent exit. The owner,
+# 19 September 2026, updating 2.5 to 2.6: "it finishes then close the app
+# then never re-open!!! and when I open the app manually I found it did
+# not update!!!!". Reproduced by driving the real 2.5 exe through its own
+# Settings > Install v2.6 in a sandbox folder, watching every process:
+#
+#    8.9s  download verified, windows closed, this script started
+#   11.6s  both Atomic processes gone
+#   69.5s  the script gave up after 60 refusals and deleted itself -
+#          58 of them with no Atomic process left alive to wait for
+#
+# So it was never waiting for the app to let go. After that quit Windows
+# answers the overwrite with "Access is denied" (error 5) and goes on
+# answering it for minutes - the same exe closed from its window, with no
+# update in flight, was replaceable 6s later. In that refused state, on
+# the same file, measured: renaming the old exe aside works, moving the
+# new one into the freed name works, and deleting the renamed one works.
+# His own %TEMP% held both verified 2.6 downloads from his two attempts,
+# byte-identical to the release.
+#
+# *Who* keeps the overwrite refused was not found, and two theories were
+# ruled out by test rather than kept: Defender (Controlled Folder Access
+# off, no block events, a never-seen exe replaced at once), and the
+# handles a service on his machine leaks to dead processes (a handle held
+# on a finished process did not stop its exe being overwritten).
+#
+# The order below follows from that. Wait for this process and the
+# bootloader above it to be gone (by id, capped - the rename would succeed
+# while they are still running, and the new build must not start beside
+# the old one); try the plain overwrite, which is still the whole job on
+# a machine that allows it; otherwise step aside, move in, and put the
+# old one back if the new one will not land. And whatever happened, start
+# the exe that is there: a failed update must cost the update, never the
+# app.
+_SWAP_SCRIPT = r"""@echo off
 set "TARGET=%~1"
 set "SOURCE=%~2"
+set "OLD=%~1.old"
+set "IMAGE=%~nx1"
+set "SYS=%SystemRoot%\System32"
+set /a WAITED=0
+:wait
+set "ALIVE="
+for %%P in (%~3 %~4) do (
+    "%SYS%\tasklist.exe" /FI "PID eq %%P" /FI "IMAGENAME eq %IMAGE%" 2>nul | "%SYS%\find.exe" /i "%IMAGE%" >nul && set "ALIVE=1"
+)
+if not defined ALIVE goto swap
+set /a WAITED+=1
+if %WAITED% geq 30 goto swap
+"%SYS%\PING.EXE" -n 2 127.0.0.1 >nul
+goto wait
+:swap
 set /a TRIES=0
 :retry
+if not exist "%SOURCE%" goto launch
 move /y "%SOURCE%" "%TARGET%" >nul 2>&1
 if not errorlevel 1 goto launch
+if exist "%OLD%" del /f /q "%OLD%" >nul 2>&1
+move /y "%TARGET%" "%OLD%" >nul 2>&1
+if errorlevel 1 goto again
+move /y "%SOURCE%" "%TARGET%" >nul 2>&1
+if not errorlevel 1 goto launch
+move /y "%OLD%" "%TARGET%" >nul 2>&1
+:again
 set /a TRIES+=1
-if %TRIES% geq 60 goto cleanup
-ping -n 2 127.0.0.1 >nul
+if %TRIES% geq 20 goto launch
+"%SYS%\PING.EXE" -n 2 127.0.0.1 >nul
 goto retry
 :launch
+if not exist "%TARGET%" if exist "%OLD%" move /y "%OLD%" "%TARGET%" >nul 2>&1
 start "" "%TARGET%"
-:cleanup
+if exist "%OLD%" del /f /q "%OLD%" >nul 2>&1
 (goto) 2>nul & del "%~f0"
 """
+
+# What a swap can leave behind, and how old it has to be before a launch
+# clears it - old enough that it cannot belong to an update in flight.
+_LEFTOVER_PATTERNS = ("Atomic-update-*.exe", "atomic-update-*.bat")
+_LEFTOVER_AGE_S = 15 * 60
 
 
 def apply_update(downloaded: Path):
@@ -393,11 +456,47 @@ def apply_update(downloaded: Path):
     # inheriting this build's PyInstaller unpack folder is precisely what
     # broke the relaunch. flags(): no console window for the swap script.
     # Both explained in helpers/child_process.
+    #
+    # The two ids are this process and the one above it: a onefile build
+    # is a bootloader running the app as its child, both from the same
+    # exe, and the script waits for both. It checks the image name as well
+    # as the id, so a parent that is not Atomic (Explorer, for a build that
+    # is not onefile) is never waited on.
     subprocess.Popen(
-        ["cmd", "/c", str(script), str(target), str(downloaded)],
+        ["cmd", "/c", str(script), str(target), str(downloaded),
+         str(os.getpid()), str(os.getppid())],
         creationflags=child_process.flags(detached=True), close_fds=True,
         env=child_process.clean_env(),
     )
+
+
+def tidy_leftovers() -> int:
+    """Clear what earlier swaps left behind; returns how many files went.
+
+    A swap that failed left its verified download in %TEMP% for ever - the
+    owner's two attempts at 2.6 left 252MB there - and one that stepped the
+    old exe aside can leave `Atomic.exe.old` beside the new one when
+    Windows would not delete it yet. Called once after startup, off the UI
+    thread; never raises, and never touches anything young enough to
+    belong to an update that is still running."""
+    if not is_frozen():
+        return 0
+    import glob
+    import time
+    removed = 0
+    candidates = [str(current_exe()) + ".old"]
+    for pattern in _LEFTOVER_PATTERNS:
+        candidates += glob.glob(os.path.join(tempfile.gettempdir(), pattern))
+    for path in candidates:
+        try:
+            if time.time() - os.path.getmtime(path) < _LEFTOVER_AGE_S \
+                    and not path.endswith(".old"):
+                continue
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass            # not there, or still held - the next launch tries again
+    return removed
 
 
 def _allow_foreground_for_relaunch():

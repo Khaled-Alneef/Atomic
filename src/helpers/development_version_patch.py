@@ -1470,6 +1470,19 @@ def install():
     #     watched" write, tracker.clear_video_progress (his report, 19
     #     September 2026; 11 of 11 harness cases disagreed before, none
     #     after, and 10 of 10 store the same as the list's own menu).
+    #   * An update installs where Windows refuses to overwrite the old
+    #     exe. The swap script was `move /y new old` retried for a minute
+    #     and then a silent exit: his 2.5 closed, never reopened, and was
+    #     still 2.5 (19 September 2026). Reproduced through the real
+    #     Settings > Install - both processes gone at 11.6s, the script
+    #     refused 60 times and gone at 69.5s. It steps the old exe aside
+    #     now, always relaunches what is there, and a launch that follows
+    #     an update which did not land says so (updater._SWAP_SCRIPT).
+    #     2.6 was cut twice for this - the first build, up for a few
+    #     hours with 3 downloads, all his own, carried the old script.
+    #   * No more "'MainWindow' object has no attribute '_current_page'"
+    #     at every launch: the first 2.6 build's newer Qt sends a resize
+    #     before __init__ has finished (main._fit_current_page).
     updater.APP_VERSION = "2.6"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"

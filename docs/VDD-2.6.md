@@ -26,9 +26,19 @@ games, applications and websites, with a native video player (libmpv)
 over its own torrent engine (libtorrent) and debrid support, a chapter
 reader, a download queue, and a locally served web UI (WebView2).
 
-**2.6 is one fix**: marking an episode watched or unwatched from the
+**2.6 is two fixes.** Marking an episode watched or unwatched from the
 episode list *inside the player* now does what the same menu does on the
-title's own page, and the two lists agree about what has been seen.
+title's own page, and the two lists agree about what has been seen. And
+the in-app updater installs an update on a PC where Windows refuses to
+overwrite the old executable - where it used to close the app, leave it
+closed, and leave it un-updated.
+
+**This version was cut twice.** The first 2.6 build was published for a
+few hours on the day of release and replaced by this one, under the same
+number at the owner's direction, once the updater fault was found by
+updating into it. Its asset had been downloaded 3 times, every one of
+them from the owner's own PC (his two attempts and a reproduction), so
+no install was left on it. §3 records both builds.
 
 ---
 
@@ -36,15 +46,25 @@ title's own page, and the two lists agree about what has been seen.
 
 | Item | Description |
 |---|---|
-| `Atomic.zip` (release asset) | The application. **125,115,176 bytes**. SHA-256 `5abc047f6bbafc573a610659fb4d1f82cd3c9b101ac35761dbb73851ed76d8a4` |
-| `Atomic.exe` (inside that zip) | **125,911,176 bytes**. SHA-256 `fb0b87f50fea922002313bdb62ea8bac31dcbbd49e5756ebf8d6dae49b4acf16` |
+| `Atomic.zip` (release asset) | The application. **125,115,986 bytes**. SHA-256 `ac0828ab94ff715732a699294a3731b590464a4b19c1054bdfd232fb5229647c` |
+| `Atomic.exe` (inside that zip) | **125,912,151 bytes**. SHA-256 `0971ead34464e32d90998ed06db0afdd0742f25d0ed3c40281848991d05258cc` |
 | `Atomic.exe` (committed at `v2.6`) | The **bridge installer**, 11,124,592 bytes. SHA-256 `96ff02d1e4cb60a7f931ce3f1719ecfd2eb68e427cba371afa9e5b2f4bc285c0` |
 | `Atomic.zip` (committed at `v2.6`) | The same bridge installer, zipped, for a zip-preferring updater |
-| `src/` | Full source, **127,620 Python lines** across 127 modules, plus 6,015 lines of served static UI |
+| `src/` | Full source, **127,767 Python lines** across 127 modules, plus 6,015 lines of served static UI |
 | `packaging/` | `build.py`, `Atomic.spec`, `check_release_notes.py`, `fetch_libmpv.py`, and `bridge/` |
 | `docs/VDD-2.6.md` | This document |
 
-One commit stands between `released/2.5` and this release.
+Two commits stand between `released/2.5` and this release: the player's
+watched marks, and the updater.
+
+**The first cut, replaced** - recorded so the two are never confused:
+`Atomic.zip` 125,115,176 bytes, SHA-256
+`5abc047f6bbafc573a610659fb4d1f82cd3c9b101ac35761dbb73851ed76d8a4`;
+`Atomic.exe` 125,911,176 bytes, SHA-256
+`fb0b87f50fea922002313bdb62ea8bac31dcbbd49e5756ebf8d6dae49b4acf16`. It is
+the same source without the updater fix and without the `_current_page`
+guard (§5). The `v2.6` tag was moved from that snapshot to this one; the
+bridge installer committed at the tag is byte-identical in both.
 
 **Built on a different machine from 2.5**, with a toolchain installed
 for the purpose that day: CPython 3.13.15, PyInstaller 6.22.3, PyQt6
@@ -80,6 +100,21 @@ way round. The first episode of a season can be unmarked from the player
 (it could not before), which for season 1 means "nothing watched yet";
 and a title that has not been saved to the library can be marked there
 too.
+
+**An update installs where Windows will not let the old exe be
+overwritten - and a failed one no longer costs the app.** Updating from
+Settings downloads and verifies the new build, closes Atomic, and a small
+script puts the new executable in place and reopens it. That script now
+waits for the app to be gone, tries the plain replace, and where Windows
+refuses it, steps the old executable aside, moves the new one into its
+name and removes the old one. If the new one cannot be put in place at
+all, the old one is put back; and whatever happened, Atomic is reopened.
+A launch that follows an update which did not land says so, and what
+failed updates left in the temp folder is cleared at the next start.
+
+**This takes effect for updates made *from* 2.6 onward.** The script that
+runs during an update belongs to the version being replaced, so an update
+*into* 2.6 from 2.5 or earlier still runs the old script (§9).
 
 ---
 
@@ -138,6 +173,62 @@ and reading the ticks means parsing `history.json`. Every tick write
 already bumps `helpers/changes`, so the panel re-reads only when that
 counter has moved.
 
+**The update that closed the app and never came back.** The owner,
+updating 2.5 to the first 2.6: *"it finishes then close the app then
+never re-open!!! and when I open the app manually I found it did not
+update!!!!"*. The swap script was one command, `move /y new old`, retried
+once a second for a minute on the theory that the only thing in the way
+is the app not having exited yet - and then a silent exit, with no
+relaunch. His `%TEMP%` held both verified downloads from his two
+attempts, byte-identical to the release, so nothing before the swap had
+failed.
+
+Reproduced by driving a copy of the real 2.5 executable through its own
+Settings > Install v2.6 in a sandbox folder, against a copy of his data,
+sampling every process twice a second:
+
+| | |
+|---|---|
+| 8.9 s | download verified, windows closed, the script started |
+| 11.6 s | both Atomic processes gone |
+| 69.5 s | the script gave up after 60 refusals and deleted itself |
+
+So for 58 of its 60 seconds it was not waiting for anything. After that
+quit, Windows answers the overwrite with *Access is denied* (error 5) and
+goes on doing so for minutes; the same executable closed from its window,
+with no update in flight, was replaceable 6 s later. In the refused
+state, on the same file, measured: renaming the old exe aside works,
+moving the new one into the freed name works, deleting the renamed one
+works. The new script is that, in that order, behind a wait on the two
+process ids (the rename would succeed while the app is still running, and
+the new build must not start beside the old one) and ahead of an
+unconditional relaunch.
+
+**What keeps the overwrite refused was not found**, and two theories were
+ruled out by test rather than kept. Defender: Controlled Folder Access
+off, no block or detection events, and a never-seen executable was
+replaced at once. Leaked process handles: a service on his machine
+(Nahimic audio) holds handles to 96 dead processes, nine of them dead
+`Atomic.exe` runs - but a handle deliberately held on a finished process
+did not stop its exe being overwritten, and the same service held one
+for the sandbox copy that was *not* refused.
+
+**The script names its tools by full path.** The harness that tested the
+process wait ran with Git's `find` ahead of Windows' on `PATH`, the wait
+silently saw nothing alive, and the script swapped under a running
+process. `tasklist`, `find` and `ping` are `%SystemRoot%\System32\...`
+now, so whatever is first on a user's `PATH` cannot change what the
+updater does.
+
+**A startup exception that only the first 2.6 build had.** His log shows
+`'MainWindow' object has no attribute '_current_page'`, from
+`resizeEvent`, on both launches of that build and on neither launch of
+the official 2.5 between them. Same source: the difference is the Qt the
+build machine carries (6.11.2 here), which delivers a resize before
+`__init__` has assigned the attribute. It was caught by the app's own
+handler and cost nothing visible; `_fit_current_page` reads it with
+`getattr` now.
+
 **Deliberately not done:** the list page's own menu
 (`episode_watch_state_patch.fixed_episode_menu`) still carries its copy
 of the decision rather than calling `watch_marks.plan`. It is working
@@ -150,7 +241,11 @@ player's does not.
 
 ## 6. Configuration and user data
 
-No new file and no migration. The player now **writes** per-episode
+No new file and no migration. During an update the old executable may
+briefly exist as `Atomic.exe.old` beside the new one; it is removed by
+the script, and by the next launch if Windows would not release it yet.
+At startup, `Atomic-update-*.exe` and `atomic-update-*.bat` files older
+than 15 minutes are removed from the temp folder. The player now **writes** per-episode
 ticks into `history.json` on a manual mark (it only ever wrote one tick
 at the 85% point before), and a clear made from the player now stamps
 `progress_cleared_at` on the entry in `series.json`, as a clear made from
@@ -178,6 +273,17 @@ asset.
 Carried forward from 2.0 §10 and earlier. Those that belong to this
 version:
 
+- **Updating *into* 2.6 from 2.5 or earlier still runs the old swap
+  script**, because the script belongs to the version being replaced. On
+  a PC where Windows refuses the overwrite - the owner's, reproducibly -
+  that update closes the app and leaves it on the old version. The cure
+  there is one manual replacement: rename the old `Atomic.exe`, put the
+  new one from the release's `Atomic.zip` in its place. Every update made
+  from 2.6 onward is covered.
+- **Why Windows refuses the overwrite after an update-path quit was not
+  found** (§5), so how many machines it affects is unknown. It happened
+  on 3 of 3 update-path quits on the owner's PC and on 0 of 1 ordinary
+  closes.
 - **A title Cinemeta cannot answer for, on season 2 or later:** with no
   episode list and no aired map, the player knows only the season on
   screen, so unmarking that season's first episode reads as "nothing
@@ -237,10 +343,64 @@ notes.
 `src/`, not a cached build; `build_bridge.py` — built, and it runs.
 
 **Defender**: `WinDefend` running; `MpCmdRun -Scan -ScanType 3
--DisableRemediation` over the release exe twice, the release zip, and
-the bridge — exit 0 every time.
+-DisableRemediation` over this build's exe twice and its zip - exit 0
+every time; the bridge, unchanged and byte-identical to the first cut's,
+was scanned clean then.
 
-**Not exercised here**: the running app (left to the owner, above);
+**The updater, second cut.** Reproduced first (§5): the real 2.5
+executable, its own Settings > Install v2.6, a sandbox folder and a copy
+of the owner's data made from outside the desktop app's package - both
+processes gone at 11.6 s, the script refused 60 times and gone at 69.5 s,
+executable unchanged. Then the new script, from the working tree, against
+four cases:
+
+| Case | Result |
+|---|---|
+| target idle (stand-in exes) | swapped in 0.2 s, nothing left behind |
+| target still running 9 s, its id passed | waited 8.4 s for it, then swapped; no `.old` left |
+| the sandbox exe Windows refuses to overwrite (precondition re-checked: error 5) | new build in place, `.old` and download both gone |
+| target held open with no delete sharing for the whole run - cannot be swapped at all | after 20 refusals the **existing app was relaunched** (window up at 31.7 s), download kept |
+
+**End to end on a frozen build**: the fixed source, numbered 2.5.1 for the
+test only so that GitHub would offer it the published 2.6, driven through
+Settings > Install v2.6 in a fresh sandbox folder. Download verified and
+script started at 8.7 s; both processes gone and the executable already
+the 2.6 bytes at 11.4 s *with `Atomic.exe.old` present* - the plain
+overwrite had been refused again and the step-aside did the job; new
+process at 15.5 s, `.old` and script gone; the main window and the
+"Atomic is now version 2.6" dialog at 25.3 s. Photographed: the update
+prompt, Settings reading "Atomic 2.5.1 - Install v2.6", and that dialog.
+The test build's startup tidy removed the owner's two dead downloads from
+his real `%TEMP%` (252 MB) as designed - the temp folder is not
+sandboxed.
+
+**The failed-update notice**, from source against a temporary data
+directory: a marker equal to the running version sets the flag and shows
+no notes; an older marker shows 2.6's notes and leaves it clear; no marker
+leaves it clear; the marker is consumed either way.
+
+**Two things the verification itself got wrong, and what caught them**: a
+run that "succeeded" while the relaunched app sat off-screen with
+WebView2 failing - the harness had passed its own
+`QT_QPA_PLATFORM=offscreen` down to the app (an A/B of the two launch
+methods on the same exe drew pages both ways, which cleared the product);
+and a process wait that saw nothing alive because Git's `find` shadowed
+Windows' on the harness's `PATH` - which became the full-path rule in §5.
+
+**Read back out of this build** (14 of 14, beside the 15 above): the
+script steps aside, waits on both ids, reaches `start` on its only way
+out, has no `goto cleanup`, names its tools through `%SYS%` with no
+mangled escape; `apply_update` passes `getpid` and `getppid`;
+`tidy_leftovers` exists and `main` calls it and shows the notice;
+`whats_new` sets the flag; `_fit_current_page` uses `getattr`; both
+version constants read **2.6** with no `2.5.1` left from the test build;
+the 2.6 notes carry the updater line.
+
+**Not exercised here**: the failed-update notice on a frozen build (its
+logic only, above); an update *from* this 2.6 to a later version, which
+cannot exist until there is one - the frozen test stood in for it; any
+machine but the owner's; the running app for the player fix (left to the
+owner, above);
 playback with the panel open across the 85% mark on the frozen build; a
 Stremio sync after a clear made from the player (§5); the no-Cinemeta
 corner of §9; his second machine.
