@@ -1172,6 +1172,60 @@ def _forget_contradicted_resume(entry, *, chapter=None):
         logs.exception("Could not clear the resume positions")
 
 
+def clear_video_progress(entry) -> bool:
+    """Declare that nothing of this title has been watched yet.
+
+    correct_progress refuses a zero episode, so "unwatched" on the first
+    episode - or on the whole of season 1 - is written here instead.
+
+    On the entry rather than on a page, because two surfaces make this
+    statement: the title page's episode list (details._clear_video_progress,
+    which is now this) and the player's episode panel. The player carried
+    its own copy of the write, and the copy had drifted: it left
+    `progress_cleared_at` out, so nothing held the sync described below
+    off a clear made from inside the player (19 September 2026 - read
+    off the two writers side by side, not reproduced against a sync).
+
+    **`progress_cleared_at` is the statement, not just the empty field.**
+    The owner, 4 September 2026, after the number came back: "when 1st ep
+    season one is marked as unwatched that means that the user did not
+    watch anything in this watchable yet".
+
+    Emptying `progress` alone cannot hold, because the Stremio sync is
+    forward-only against whatever is stored - and *every* number is
+    forward of nothing, so the next sync writes 51 straight back with
+    progress_verified True (_on_progress_synced). His own log has the app
+    asking for "The Apothecary Diaries S1E52" on a title he had just
+    declared himself at the start of.
+
+    So the clear leaves a mark, and the sync steps around a title carrying
+    one. It is dropped the moment anything real happens here - playing an
+    episode, or marking one - because _write_progress clears it on every
+    successful write."""
+    if not isinstance(entry, dict) or not entry.get("id"):
+        return False
+    fields = {"progress": "", "progress_verified": False,
+              "progress_cleared_at": storage.now_iso(),
+              "updated_at": storage.now_iso()}
+    entry.update(fields)
+    written = False
+    try:
+        written = storage.update_entry(_progress_data_file(entry),
+                                       entry.get("id"), fields)
+    except Exception:
+        logs.exception("Could not clear watch progress")
+    if written:
+        try:
+            from helpers import changes
+            changes.bump()          # the numbers on every card move now
+        except Exception:
+            pass
+    # Same rule as correct_progress: "nothing watched" is a deliberate
+    # statement, so no stored position may outrank it.
+    _forget_contradicted_resume(entry)
+    return written
+
+
 def record_progress(entry, *, season=None, episode=None, chapter=None) -> bool:
     """Record what was just opened - the automatic path, forward only.
 
