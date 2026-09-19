@@ -1483,7 +1483,17 @@ def install():
     #   * No more "'MainWindow' object has no attribute '_current_page'"
     #     at every launch: the first 2.6 build's newer Qt sends a resize
     #     before __init__ has finished (main._fit_current_page).
-    updater.APP_VERSION = "2.6"
+    # 2.6.1
+    #   * No behaviour change - the record corrected. What refused the
+    #     overwrite on his laptop was McAfee: he uninstalled it and the
+    #     same 2.5 -> 2.6 update worked at once (19 September 2026).
+    #     Pausing its real-time scanning had not been enough. 2.6 shipped
+    #     saying the cause "was not found" and that Defender was ruled
+    #     out, on a PC where Defender was never the active antivirus; the
+    #     note above updater._SWAP_SCRIPT has the whole of it. VDD-2.6 is
+    #     a released document and stays as written (docs/RELEASING.md) -
+    #     the next release's VDD is where this belongs.
+    updater.APP_VERSION = "2.6.1"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

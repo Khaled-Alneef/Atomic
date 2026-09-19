@@ -58,7 +58,7 @@ from . import child_process, net
 # `development`, counting up from the last release; two parts on a build
 # that is being released, bumped in the same commit that tags it - or the
 # new build goes on offering itself an update.
-APP_VERSION = "2.6"
+APP_VERSION = "2.6.1"
 
 # What counts as a release: exactly two numeric parts, with or without the
 # leading v. Development builds are tagged (if at all) with three, and are
@@ -365,11 +365,45 @@ def _exe_from_zip(data: bytes) -> bytes:
 # His own %TEMP% held both verified 2.6 downloads from his two attempts,
 # byte-identical to the release.
 #
-# *Who* keeps the overwrite refused was not found, and two theories were
-# ruled out by test rather than kept: Defender (Controlled Folder Access
-# off, no block events, a never-seen exe replaced at once), and the
-# handles a service on his machine leaks to dead processes (a handle held
-# on a finished process did not stop its exe being overwritten).
+# **Who refuses it: McAfee. Confirmed the same night - he uninstalled it
+# and the same 2.5 -> 2.6 update, from the same Settings button, worked at
+# once.** 2.6 shipped with this paragraph saying the cause "was not
+# found", and with Defender "ruled out" - on a PC where Defender is not
+# the active antivirus at all. `Get-MpComputerStatus` reads
+# RealTimeProtectionEnabled False there, because McAfee (preinstalled on
+# his Lenovo, kernel driver mfesec.sys) has the job; every Defender check
+# was aimed at a product that was not watching. The first pass also told
+# him "no one can update from 2.5", which no measurement supported - they
+# were all one PC, and one that had never attempted an in-app update (its
+# log begins a minute after the exe arrived on the Desktop).
+#
+# What separated the suspects before the uninstall settled it, so none of
+# it is re-dug: his own official **2.4**, driven through Settings >
+# Install in the same sandbox, failed identically (processes gone at
+# 11.6s, script gone at 69.3s, exe unchanged) - so not a 2.5 regression;
+# in the refused state a 1KB dummy and his official 2.5 exe were refused
+# exactly as the 2.6 build was - so not the incoming file; no process that
+# could be examined held the exe (3,262 file handles walked, 142 protected
+# processes not examinable, McAfee's among them); and a handle held on a
+# *finished* process did not stop its exe being overwritten, which cleared
+# the 96 dead-process handles a Nahimic audio service leaks there.
+#
+# **Pausing it is not enough, and that nearly cleared it wrongly.** With
+# McAfee's Real-Time Scanning switched off - its own log has
+# `set_rts_enabled ... state=disabled` ahead of the attempt, and its Real
+# Protect tracer, which had logged the swap script's cmd.exe as "Child of
+# TraceTarget" on the attempts before, logged nothing about this one - the
+# update still failed. Which part of McAfee refuses the replace is
+# therefore not known; only that it survives a pause and not an
+# uninstall. So "I paused my antivirus and it still fails" does not clear
+# the antivirus, and the first question for a report like his is what is
+# installed: `Get-CimInstance -Namespace root/SecurityCenter2 -ClassName
+# AntiVirusProduct`.
+#
+# On a PC without such a product the one-line script always worked, which
+# is every update he remembers. The script below is for the PCs that have
+# one - and it takes effect for updates made *from* 2.6 on, because the
+# script that runs belongs to the version being replaced.
 #
 # The order below follows from that. Wait for this process and the
 # bootloader above it to be gone (by id, capped - the rename would succeed
