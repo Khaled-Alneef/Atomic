@@ -4490,7 +4490,13 @@ class MainWindow(QMainWindow):
         self.refresh_current_page()
 
     def _fit_current_page(self):
-        if self._current_page is None:
+        # getattr: a resize can arrive before __init__ has assigned this.
+        # It never did under the Qt the releases up to 2.5 were built
+        # with; the 2.6 build (Qt 6.11.2, a different machine) logged
+        # "'MainWindow' object has no attribute '_current_page'" from
+        # resizeEvent on every launch - his log, 19 September 2026, 17:27
+        # and 17:38, and on neither launch of the official 2.5 between.
+        if getattr(self, "_current_page", None) is None:
             return
         # **A Qt page follows the fold frame by frame.** It used to be
         # pinned to the widest the container would be and clipped, so
@@ -6068,6 +6074,17 @@ def main():
     # markers, or the next launch would show them again.
     pending_setup = setup_wizard.will_offer()
     release_notes = whats_new.show_if_updated(window, skip_dialog=pending_setup)
+    # An update that was handed off and did not land used to be silent:
+    # the app closed, stayed closed, and was the old version when opened
+    # by hand (the owner, 19 September 2026). The swap script relaunches
+    # whatever exe is there now, and this is where that launch says so.
+    if whats_new.update_did_not_install:
+        show_toast(window, "The Update Could Not Be Installed - "
+                           "Try Again in Settings", 8000)
+    # What earlier swaps left in %TEMP% and beside the exe - off the UI
+    # thread, never raises (updater.tidy_leftovers).
+    threading.Thread(target=updater.tidy_leftovers, daemon=True,
+                     name="update-tidy").start()
     # Once per SETUP_VERSION, over the visible window. Armed after
     # whats_new on purpose - that dialog is modal, and a timer armed
     # before it would fire inside its nested event loop. The decision
