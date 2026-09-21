@@ -15,6 +15,10 @@ dist/
 # `git add -f`, since this rule would otherwise skip it.
 /Atomic.exe
 /Atomic.zip
+# The folder build (21 September 2026 - packaging/Atomic.spec's COLLECT
+# note): build.py writes it as app\ and --zip archives it as
+# the release Atomic.zip (inside it, as app.zip). Artifacts, like the exe above.
+/app/
 
 # The video player's decode engine (libmpv-2.dll, ~120MB unpacked).
 # Same argument as Atomic.exe above: it is a rebuildable artifact, not

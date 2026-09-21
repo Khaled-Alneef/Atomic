@@ -432,6 +432,16 @@ in the same pass:
   to **zero cues**. Only the Format line naming Start/End is the events
   one. This bug silently broke every .ass subtitle from every source.
 
+**The Stremio OpenSubtitles addon is not the site** (21 September
+2026). His report: Dagashi Kashi S01E02 showed no Arabic while
+opensubtitles.org listed three. Measured: every source answered 0 rows,
+and the addon holds **nothing in any language** for the show.
+`subtitles._opensubtitles_org` asks the site's own keyless REST search
+(the one VLC's VLSub uses: `X-User-Agent: VLSub 0.10.2`, path segments
+in alphabetical order): his three in 0.4s, and Arabic the addon missed
+across his library - Frieren 5 vs 1, JJK 6 vs an error, AoT 16 vs 4,
+Breaking Bad 13 vs 3, never fewer. Rows go under "OpenSubtitles".
+
 English results ride along (OpenSubtitles addon has 1-2 per anime
 episode) as feedstock for the AI translator: picking one with an AI key
 configured translates it to Arabic on the fly (`player.
@@ -1084,6 +1094,60 @@ before had 2.0s. The Manga page's Romance tick at 0.4s reads "121 of
 answered 120 rows and nothing was unknown), the second row's covers by
 12s. Screenshots `r_04/r_15/r_100.png` and `m_04/m_120.png` in the
 session's scratchpad.
+
+## An anime row's genres are IMDb's three, so AniList's are added (21 September 2026)
+
+His report: *"when I select a filter in the anime page like Romance, it
+shows only few of the anime not all romance! and the loading ... takes
+ages"*. Both halves were the source, not the walk. Cinemeta's genres are
+IMDb's - three at most, "Animation" always one - so of 13 well-known
+romance anime Cinemeta's meta tags **6** Romance (Toradora!, Horimiya,
+Kaguya-sama, Kimi ni Todoke are "Animation / Comedy / Drama"). His index
+held 1,505 anime rows and 94 said Romance; the catalogue walk that pages
+past them found 2 new titles in 38s, because there were none to find.
+
+`helpers/anime_genres` adds AniList's genres by **exact normalised
+title** from a shipped table (`anime_genre_seed`, its top 2,000 anime,
+TV-shaped only, mapped onto WATCH_GENRES; regenerate with the test
+skill's `make_anime_genre_seed.py`). One function, `merged(row)`, at
+the three places a row's genres are read: `catalog_index.rows_for`,
+discover_video's walk filter, and `server._row_genres` (the card's own
+`pgenres`, which the page filters on - `ROW_GENRES` is 10 so an
+appended genre is not cut). Measured: Romance 94 -> 357, Mystery 52 ->
+155, Sport 16 -> 42; on the frozen build the tick drew "201 of 230" in
+3s and scrolling reached 355 within a second, all tagged Romance.
+**No live AniList refresh, on purpose**: its limit is the network's,
+and a 40-request burst risks the hour of 403s that takes the airing
+schedule with it. Series and movie rows are untouched.
+
+## Series, Movies and Read ticks, the same evening (21 September 2026)
+
+*"the anime page now loads fast and good, but the series and movies and
+read pages are not!"* Measured per route on the frozen build:
+
+- **Series/Movies walked one Cinemeta page at a time.** Romance series:
+  48 rows, then 50 every ~3s (249 in 30s); movies waited 14.5s on one
+  CDN miss. `server._genre_video` asks `VIDEO_GENRE_PAGES` (4) pages at
+  once for those kinds: 199 at 86ms, 876 by 1.9s (series).
+- **Reading ticks had verdicts but no rows.** 211 titles were known
+  Romance and 35 could be drawn - a card needs its site URL, and a
+  browse's rows lived 90s. `helpers/reading_index` keeps every browsed
+  row (seeded from discover_cache.json). **A site browse is its front
+  wall only** - asking for 720 rows returned the same 196 - so
+  `manga_sites.browse_site_page` reads page N, its address found per site
+  once a session (3asq `page/{n}/`, TeamX and Lava `?page={n}`, Azora
+  `series?page={n}`; Mangalek 403s, SWAT is an API) and
+  `discover.reading_deep_browse` walks pages 2-12 three at a time.
+  **Probe with `_get_answered`**: `_read` counts a 404 as a host failure
+  and two put the site on the refusing list for ten minutes - measured.
+- **The continuation compared against `skip`**, which grows by every
+  batch handed over, duplicates included (682 against a page of 44), so
+  the cache was never read again after the first pulls. It compares
+  against `have` now. And a straggler left classifying held
+  `sweep_pending()` at 1, so nothing gated on pending ever started.
+
+After: Read Romance 43 -> 130 in 40s on a cold copy, the next tick 123
+rows in 28ms; Manhwa photographed "118 of 271", Series "201 of 231".
 
 ## A cast chip's page is fetched before the chip is pressed (8 September 2026)
 

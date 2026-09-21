@@ -16,6 +16,7 @@ import concurrent.futures
 import html
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -996,7 +997,34 @@ def _browse_v2_api(base_url: str, limit: int, timeout: int) -> list:
     return rows
 
 
-def _browse_html(base_url: str, path: str, limit: int, timeout: int) -> list:
+def _get_answered(url: str, timeout: int) -> str:
+    """_get for a probe that may well 404: **an HTTP status is the site
+    answering, not refusing.** _read counts every exception as a host
+    failure, and two inside REFUSED_HOST_TTL_S put the host on the
+    refusing list for ten minutes - measured 21 September 2026: TeamX's
+    `page/2/` answered 404, and the very next request to TeamX failed in
+    0.0s with "is refusing connections". A page-address probe that did
+    that would cut the site's search, chapters and covers for ten
+    minutes. Connection failures still count."""
+    if net.host_refusing(url):
+        raise ConnectionError(f"{net._url_host(url)} is refusing connections")
+    req = urllib.request.Request(net.ascii_url(url), headers={
+        "Accept": "text/html, */*", "User-Agent": "Mozilla/5.0 PC-App/1.0"})
+    deadline = net.deadline_in(timeout)
+    try:
+        with net.urlopen(req, timeout=timeout) as resp:
+            text = net.read_text(resp, deadline)
+    except urllib.error.HTTPError:
+        raise
+    except Exception:
+        net.note_host_failure(url)
+        raise
+    net.note_host_success(url)
+    return text
+
+
+def _browse_html(base_url: str, path: str, limit: int, timeout: int,
+                 fetch=None) -> list:
     """Series cards scraped off one listing page.
 
     Deliberately shape-agnostic rather than one parser per theme: every
@@ -1005,7 +1033,7 @@ def _browse_html(base_url: str, path: str, limit: int, timeout: int) -> list:
     title. Where an anchor carries no image, its own text is the title -
     that is the second anchor of the same card (the heading link), which
     is why results are merged by URL rather than taken one per anchor."""
-    body = _get(base_url + path, timeout)
+    body = (fetch or _get)(base_url + path, timeout)
     found = {}
     order = []
     slid = set()
@@ -1140,6 +1168,72 @@ def browse_site(site: dict, limit: int = 30, timeout: int = 8,
         if len(rows) >= 3:
             return rows
     return []
+
+
+# **A listing past the front page.** The owner, 21 September 2026, on the
+# Read pages' genre ticks. A browse reads each site's front wall only,
+# 196 rows across his six sites, and asking browse_all for 720 or 1,440
+# rows returned the same 196 - so a Romance tick could never reach past
+# what the sites happened to update today. Each site pages its listing
+# its own way; measured that day, page 2 against the front page:
+#
+#     3asq        page/2/         21 rows, 21 new
+#     TeamX       ?page=2         59 links, 40 new     (page/2/ 404)
+#     Lava Scans  ?page=2         32 rows, 32 new      (page/2/ = the front again)
+#     Azora       series?page=2   33 links, 30 new     (?page=2 = the front again)
+#     Mangalek    403 to every listing but the front
+#     SWAT        an API site, not reachable that day
+#
+# So the address is found per site, once a session, by asking page 2 in
+# each of these shapes and keeping the first that answers three rows or
+# more and at least half of them not on the front page ("the front
+# again" is the trap). Probed with _get_answered, so a wrong shape's 404
+# never sends the site to the refusing list.
+_PAGE_SHAPES = ("page/{n}/", "?page={n}", "series?page={n}",
+                "manga/?page={n}", "manga/page/{n}/")
+_page_shape = {}            # base_url -> shape, or "" for "does not page"
+_page_shape_lock = threading.Lock()
+
+
+def browse_site_page(site: dict, page: int, limit: int = 60, timeout: int = 8,
+                     deadline=None) -> list:
+    """Page `page` (2 and up) of this site's listing, or [] when the site
+    does not page or the page answered nothing. Never raises."""
+    base_url = site.get("base_url")
+    if not base_url or page < 2:
+        return []
+    step = net.step_timeout(deadline, timeout) if deadline else timeout
+    if step is None:
+        return []
+    with _page_shape_lock:
+        shape = _page_shape.get(base_url)
+    try:
+        if shape is None:
+            front = {r["url"] for r in browse_site(site, 200, timeout, deadline)}
+            if not front:
+                return []           # down right now: ask again next time
+            shape = ""
+            for candidate in _PAGE_SHAPES:
+                try:
+                    rows = _tidy_rows(_browse_html(base_url, candidate.format(n=2),
+                                                   200, step, _get_answered))
+                except Exception:
+                    rows = []
+                new = [r for r in rows if r["url"] not in front]
+                if front and len(rows) >= 3 and len(new) * 2 >= len(rows):
+                    shape = candidate
+                    break
+            with _page_shape_lock:
+                _page_shape[base_url] = shape
+            from . import logs
+            logs.info(f"reading listing pages: {site.get('name') or base_url} "
+                      f"-> {shape or 'does not page'}")
+        if not shape:
+            return []
+        return _tidy_rows(_browse_html(base_url, shape.format(n=int(page)),
+                                       limit, step, _get_answered))
+    except Exception:
+        return []
 
 
 def browse_all(limit: int = 30, timeout: int = 8, deadline=None) -> list:

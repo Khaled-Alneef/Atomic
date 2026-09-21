@@ -338,6 +338,81 @@ def _opensubtitles_v3(query, deadline) -> list:
     return results + english[:4]
 
 
+# The classic opensubtitles.org REST search - the one VLC's VLSub plugin
+# uses. Keyless; it wants an X-User-Agent it knows, and its path segments
+# in alphabetical order (episode, imdbid, query, season, sublanguageid).
+_OSORG_ROOT = "https://rest.opensubtitles.org/search/"
+_OSORG_AGENT = "VLSub 0.10.2"
+
+
+def _opensubtitles_org(query, deadline) -> list:
+    """opensubtitles.org itself, not the Stremio addon in front of it.
+
+    **The owner, 21 September 2026**: *"I am watching Dagashi Kashi and it
+    showed me no arabic subtitles at all, then when I opened the
+    Opensubtitles website I found these!!!!!"* - three Arabic .ass files
+    for S01E02, all imported from Subscene. Measured that evening: every
+    source here answered 0 rows for the episode, and the Stremio addon
+    (_opensubtitles_v3) has **no** subtitles in any language for the show
+    at all - it does not reach what the site carries. This search returned
+    his three in 0.4s, and over his library it found Arabic the addon did
+    not: Frieren S01E01 5 against 1, Jujutsu Kaisen S01E01 6 against an
+    error, Attack on Titan S01E05 16 against 4, Breaking Bad S01E01 13
+    against 3; never fewer. Downloaded through `fetch` unchanged - one
+    WhisperTeam file came back as 416 Arabic cues.
+
+    By IMDb id where there is one; by title otherwise. Every row states
+    its own season and episode, and a row stating another is dropped."""
+    imdb_id = str(query.get("imdb_id") or "")
+    title = str(query.get("title") or "").strip()
+    episode = query.get("episode")
+    parts = []
+    if episode:
+        parts.append(f"episode-{int(episode)}")
+    if imdb_id.startswith("tt") and imdb_id[2:].isdigit():
+        parts.append(f"imdbid-{int(imdb_id[2:])}")
+    elif title:
+        parts.append("query-" + urllib.parse.quote(title.lower(), safe=""))
+    else:
+        return []
+    if episode:
+        parts.append(f"season-{int(query.get('season') or 1)}")
+    parts.append("sublanguageid-ara")
+    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+    if timeout is None:
+        return []
+    request = urllib.request.Request(_OSORG_ROOT + "/".join(parts), headers={
+        "User-Agent": _OSORG_AGENT, "X-User-Agent": _OSORG_AGENT})
+    stop = net.deadline_in(timeout)
+    with net.urlopen(request, timeout=timeout) as response:
+        body = json.loads(net.read_text(response, stop))
+    results = []
+    for item in body if isinstance(body, list) else []:
+        if not isinstance(item, dict) or not item.get("SubDownloadLink"):
+            continue
+        if not is_arabic_code(item.get("SubLanguageID") or item.get("ISO639")):
+            continue
+        if episode:
+            try:
+                if (int(item.get("SeriesEpisode") or 0) != int(episode)
+                        or int(item.get("SeriesSeason") or 0) != int(query.get("season") or 1)):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        fmt = str(item.get("SubFormat") or "").lower()
+        results.append({
+            "source": "OpenSubtitles",
+            "name": str(item.get("SubFileName") or "Arabic subtitle")[:120],
+            # The encode it was timed against, for _timeline_rank.
+            "release": str(item.get("MovieReleaseName") or item.get("SubFileName") or "")[:120],
+            "lang": "ar",
+            "url": item["SubDownloadLink"],
+            "format": "ass" if fmt in ("ssa", "ass") else (fmt or "srt"),
+            "rating": int(float(item.get("SubDownloadsCnt") or 0)),
+        })
+    return results
+
+
 _SC_RESULT_RE = re.compile(r'href="(subs/[^"]+\.html)"[^>]*>(.*?)</a>', re.S | re.I)
 _SC_ROW_RE = re.compile(
     r'<td[^>]*>\s*([A-Za-z؀-ۿ ]{2,24})\s*</td>.{0,400}?href="([^"]+\.srt)"',
@@ -612,14 +687,19 @@ def _search_terms(query) -> str:
 _SOURCES = (
     ("SubDL", _subdl),
     ("OpenSubtitles", _opensubtitles_v3),
+    # The site itself, under the same name its rows carry - the panel
+    # groups by it, SOURCE_PRIORITY puts it first, and the download
+    # dialog's "prefer" choice matches on it (see _opensubtitles_org).
+    ("OpenSubtitles", _opensubtitles_org),
     ("SubtitleCat", _subtitlecat),
     ("AnimeTosho", _animetosho),
 )
 
 
 def sources() -> tuple:
-    """Source names, for the UI to group results under."""
-    return tuple(name for name, _ in _SOURCES)
+    """Source names, for the UI to group results under - each once, as
+    two searches answer under OpenSubtitles."""
+    return tuple(dict.fromkeys(name for name, _ in _SOURCES))
 
 
 def search(title, *, year=None, season=None, episode=None, imdb_id=None,

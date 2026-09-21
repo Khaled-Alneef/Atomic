@@ -25,6 +25,7 @@ The pages themselves are in src/web, served over http://.
 """
 
 import os
+import time
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtGui import QKeyEvent
@@ -63,6 +64,92 @@ def overlay_opened(page):
         page.destroyed.connect(_overlay_gone)
     except Exception:
         _overlay_gone()          # nothing to wait for; do not get stuck
+        return
+    # See _overlay_closing: the pages this overlay covers come back before
+    # it goes, not a turn of the event loop after.
+    closed = getattr(page, "closed", None)
+    if getattr(page, "UNCOVER_ON_CLOSE", False) and closed is not None:
+        try:
+            closed.connect(_overlay_closing)
+        except Exception:
+            pass
+
+
+def _overlay_closing(*_args):
+    """The last overlay is about to hide: put the web pages back now.
+
+    **Back to Home drew the sidebar over a stale details page.** The
+    owner, 21 September 2026, reporting it for the open ("the 1st frames
+    looks as image 1") and then "similar issue happens ... when I go back
+    from the ep/ch list to the main page". Sampled off the screen at 60Hz
+    on the frozen build, back by mouse button 4: one frame 49ms after the
+    press with the folded sidebar painted over the details page, then
+    Home at +69ms. `leave` hides the overlay, which thaws the sidebar at
+    once (widgets._CoveredFreeze), while the view came back only on
+    `destroyed` - after deleteLater, a turn of the event loop later - and
+    everything under it in that turn was whatever Qt last had there.
+
+    `closed` is emitted before the overlay hides, so showing the views
+    here puts the native page over the overlay first (a native child
+    paints above it) and the overlay's hide then uncovers only the
+    sidebar. Depth is still counted on `destroyed`; this only moves the
+    showing earlier, and only when nothing else is open over the page."""
+    if _overlay_depth == 1:
+        _suppress_all(False)
+
+
+def cover_with(view, page):
+    """Swap a web page's native view for the overlay `page` just opened
+    over it, with no frame of neither.
+
+    **The view went down first and the page was built after.** The
+    owner's two screenshots, 21 September 2026: a card on Home opened on
+    an empty page area beside the folded sidebar, or on the *previous*
+    details page with the sidebar drawn over its left edge, for "~200 -
+    1000 ms" before the real one. Sampled at 60Hz on the frozen build:
+    +17ms blank, details at +73ms (sidebar folded); a stale details frame
+    at +828ms then the new one at +867ms (expanded). One cause: the view
+    was hidden before `DetailsPage` was constructed, so for the whole
+    construction and first paint the screen showed what Qt last had under
+    the view - nothing on the first open, the last details page after -
+    with the sidebar thawed over it.
+
+    So the caller builds and shows the overlay while the view is still up
+    (it is native and paints over it), the overlay's layout is settled
+    and its first paint is rendered off screen here, and only then does
+    the view go, followed at once by a synchronous repaint: what the
+    view uncovers is drawn in the same turn it is uncovered."""
+    started = time.perf_counter()
+    try:
+        QApplication.sendPostedEvents(page, QEvent.Type.LayoutRequest)
+        layout = page.layout()
+        if layout is not None:
+            layout.activate()
+        # A render into a throwaway pixmap: the backdrop's scaled copy and
+        # every child's polish are paid here, with Home still on screen,
+        # not between the view going and the page appearing.
+        page.grab()
+    except RuntimeError:
+        return
+    except Exception:
+        logs.exception("could not prepare an overlay's first paint")
+    prepared = time.perf_counter()
+    try:
+        view.suppress(True)
+        page.repaint()
+        # **And the keyboard, in the order it used to happen.** open_details
+        # focuses the page while the view is still up, and the card click
+        # left Windows' focus inside Edge's window: on the frozen build
+        # with only the swap reordered, Esc stopped closing the page 3
+        # times in 12 (GetGUIThreadInfo: the keys reached Atomic's window,
+        # not the page). The view going down first is what the old order
+        # had before this call, so the page takes the focus again after.
+        page.setFocus(Qt.FocusReason.OtherFocusReason)
+    except RuntimeError:
+        pass
+    swapped = time.perf_counter()
+    logs.info(f"overlay swap: prepared={(prepared - started) * 1000:.0f}ms, "
+              f"swapped={(swapped - prepared) * 1000:.0f}ms")
 
 
 def _overlay_gone(*_args):
@@ -1027,19 +1114,25 @@ class _WebPage(GlassPage):
 
     def _open_overlay(self, entry):
         from windows import details
+        view = self.view
         try:
-            # Down before the overlay exists. This page is rebuilt while
+            # Built and shown with this page's view still on top of it,
+            # then swapped in one step - see cover_with, which is why the
+            # view no longer goes down first. This page is rebuilt while
             # the overlay opens, and the rebuilt one's view stays hidden
-            # until it has loaded - so nothing of either is left over the
-            # details page.
-            self.view.suppress(True)
+            # until it has loaded and asks overlay_open() before it shows.
             page = details.open_details(self.app, entry)
+            cover_with(view, page)
             # Registered app-wide, not on this instance: this page is
-            # about to be rebuilt, and the rebuilt one has to know.
+            # about to be rebuilt, and the rebuilt one has to know. After
+            # the swap, because this hides every live view at once.
             overlay_opened(page)
         except Exception:
             logs.exception("Opening a title from a web page failed")
-            self.view.suppress(False)
+            try:
+                view.suppress(False)
+            except RuntimeError:
+                pass
 
 
 

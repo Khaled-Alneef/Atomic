@@ -1483,7 +1483,29 @@ def install():
     #   * No more "'MainWindow' object has no attribute '_current_page'"
     #     at every launch: the first 2.6 build's newer Qt sends a resize
     #     before __init__ has finished (main._fit_current_page).
-    updater.APP_VERSION = "2.6"
+    # 2.6.1
+    #   * No behaviour change - the record corrected. What refused the
+    #     overwrite on his laptop was McAfee: he uninstalled it and the
+    #     same 2.5 -> 2.6 update worked at once (19 September 2026).
+    #     Pausing its real-time scanning had not been enough. 2.6 shipped
+    #     saying the cause "was not found" and that Defender was ruled
+    #     out, on a PC where Defender was never the active antivirus; the
+    #     note above updater._SWAP_SCRIPT has the whole of it. VDD-2.6 is
+    #     a released document and stays as written (docs/RELEASING.md) -
+    #     the next release's VDD is where this belongs.
+    # 2.7
+    #   * A folder build (packaging/Atomic.spec, the COLLECT note): the
+    #     single exe unpacked 290MB into %TEMP% on every launch - Home at
+    #     6.5-7.1s idle and 14.9s after a sign-in, 2.2-2.4s as a folder.
+    #     Installed to %LOCALAPPDATA%\Programs\Atomic by the bridge, which
+    #     is what Atomic.zip carries for every single-file install.
+    #   * Genre ticks: AniList's genres for anime rows, four Cinemeta pages
+    #     at once for series and movies, and kept rows plus deeper listing
+    #     pages for reading (rules/integrations.md, 21 September 2026).
+    #   * The details page swaps with Home in one step each way, the row
+    #     scrollbar keeps its height, sideways touchpad swipes stay native,
+    #     and the medium pages lose their "Most watched" note.
+    updater.APP_VERSION = "2.7"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

@@ -1069,6 +1069,10 @@ class DetailsPage(GlassPage):
     list on the right."""
 
     closed = Signal()
+    # `closed` fires before leave() hides the page, and a web page under
+    # it is shown again on that rather than on `destroyed` - see
+    # web_pages._overlay_closing.
+    UNCOVER_ON_CLOSE = True
 
     def __init__(self, entry, parent=None):
         super().__init__(parent=parent)

@@ -255,9 +255,15 @@ class WebReader(QWidget):
             # native child window, and on Windows a native child paints
             # above every non-native sibling whatever raise_() was told
             # (.claude/rules/ui.md). Raising the details page is not
-            # enough on its own; the web page has to stop painting.
-            self.view.suppress(True)
+            # enough on its own; the web page has to stop painting - in
+            # one step with the page's first paint, not before it
+            # (web_pages.cover_with has the measurement).
+            from windows.web_pages import cover_with
+            cover_with(self.view, page)
             try:
+                # Back on `closed`, which fires before the page hides;
+                # `destroyed` is a turn later - web_pages._overlay_closing.
+                page.closed.connect(self._card_closed)
                 page.destroyed.connect(self._card_closed)
             except Exception:
                 self._card_closed()
