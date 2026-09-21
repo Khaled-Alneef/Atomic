@@ -52,7 +52,10 @@ and is installed last.
 
 ```
 py -3.13 packaging/check_release_notes.py   # fail if this version has no notes
-py -3.13 packaging/build.py --zip           # the real build, ~126MB, for the asset
+py -3.13 packaging/build.py --zip           # the one asset, ~137MB: the bridge as its only
+                                            # .exe + the folder as app.zip (RELEASING.md,
+                                            # "A folder, not one exe") - the root Atomic.zip
+                                            # is the ASSET; the tag's Atomic.zip is bridge-only
 py -3.13 packaging/bridge/build_bridge.py   # the ~10MB Atomic.exe for the tag
 # scan the release exe with Defender (below), then:
 git add -A && git commit -m "Atomic 2.0"    # development

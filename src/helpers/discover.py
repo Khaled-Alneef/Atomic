@@ -611,10 +611,14 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
         if local_genre:
             wanted = local_genre.strip().lower()
 
+            # Cinemeta's genres and AniList's, since the first alone tag
+            # about half of any genre's anime - helpers/anime_genres.
+            from . import anime_genres
+
             def _wanted(batch):
                 return [r for r in batch
                         if any(str(g).strip().lower() == wanted
-                               for g in (r.get("genres") or ()))]
+                               for g in anime_genres.merged(r))]
 
             rows = _wanted(rows)
             # **A page of the anime catalog holds few of any one genre.**
@@ -1288,6 +1292,12 @@ def _browsed_rows(wanted, deadline):
     rows = _serving_sites_only(rows, deadline)
     if rows:
         _SWEEP_ROWS = (time.monotonic(), list(rows))
+        # Kept past SWEEP_ROWS_TTL_S - see helpers/reading_index.
+        try:
+            from . import reading_index
+            reading_index.remember(rows)
+        except Exception:
+            pass
     return rows, CLASSIFY_BUDGET_S
 
 
@@ -1443,6 +1453,18 @@ def reading_genre_cached(genre: str, limit: int = 30) -> list:
                 continue
             seen.add(title.lower())
             rows.append(row)
+    # **And every row browsed before this listing** (helpers/reading_index):
+    # 176 of the 211 titles his verdicts call Romance had no row anywhere
+    # else, measured 21 September 2026.
+    try:
+        from . import reading_index
+        for row in reading_index.rows():
+            title = (row.get("title") or "").strip()
+            if title and title.lower() not in seen:
+                seen.add(title.lower())
+                rows.append(row)
+    except Exception:
+        pass
     kept = []
     with _MEDIUM_LOCK:
         genre_verdicts = dict(_GENRE_CACHE)
@@ -1650,20 +1672,87 @@ def discover_reading_sites(query: str = "", limit: int = 30,
 
         interleaved.sort(key=rank)      # stable: ties keep the interleave
 
-    out = []
-    for row in interleaved[:limit]:
-        out.append({
-            "title": row["title"].strip(),
-            "year": "",
-            "poster": row.get("cover_url") or "",
-            "imdb_id": "",
-            "type": "Manga",
-            # What makes the card open chapters on the site it came from.
-            "url": row.get("url") or "",
-            "site_id": row.get("site_id"),
-            "site_name": row.get("site_name") or "",
-        })
-    return out
+    return [_reading_card(row) for row in interleaved[:limit]]
+
+
+def _reading_card(row) -> dict:
+    """A manga_sites row in the shape a reading card is drawn from."""
+    return {
+        "title": row["title"].strip(),
+        "year": "",
+        "poster": row.get("cover_url") or "",
+        "imdb_id": "",
+        "type": "Manga",
+        # What makes the card open chapters on the site it came from.
+        "url": row.get("url") or "",
+        "site_id": row.get("site_id"),
+        "site_name": row.get("site_name") or "",
+    }
+
+
+# How deep the listing browse goes past the front page, and how many
+# pages each step asks for. Measured 21 September 2026 on his four sites
+# that page: pages 2-4 were 408 rows, 313 of them already classified
+# (76%), 28 of those Romance - against 35 Romance rows on disk before.
+# Each step is sites x READ_DEEP_STEP requests, all at once.
+READ_DEEP_STEP = 3
+READ_DEEP_MAX_PAGE = 12
+READ_DEEP_RESET_S = 6 * 60 * 60     # listings move; start again from page 2
+_deep_lock = threading.Lock()
+_deep_next = [2, 0.0]              # next page to read, when that was set
+
+
+def reading_deep_left() -> bool:
+    """Whether reading_deep_browse still has pages to read."""
+    with _deep_lock:
+        return (_deep_next[0] <= READ_DEEP_MAX_PAGE
+                or time.monotonic() - _deep_next[1] > READ_DEEP_RESET_S)
+
+
+def reading_deep_browse(deadline=None) -> int:
+    """Read the next READ_DEEP_STEP pages of every site that pages its
+    listing, keep the rows (helpers/reading_index), and classify their
+    titles inside the usual budget - the rest classify behind it, as a
+    sweep's do. Returns the rows found, 0 once every page up to
+    READ_DEEP_MAX_PAGE has been read. Never raises."""
+    from . import manga_sites, reading_index
+    with _deep_lock:
+        if time.monotonic() - _deep_next[1] > READ_DEEP_RESET_S:
+            _deep_next[0] = 2
+        first = _deep_next[0]
+        if first > READ_DEEP_MAX_PAGE:
+            return 0
+        last = min(READ_DEEP_MAX_PAGE, first + READ_DEEP_STEP - 1)
+        _deep_next[0], _deep_next[1] = last + 1, time.monotonic()
+    started = time.monotonic()
+    try:
+        sites = manga_sites.list_sites()
+        jobs = [(site, page) for site in sites for page in range(first, last + 1)]
+        found = []
+        if jobs:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(12, len(jobs)),
+                    thread_name_prefix="reading-deep") as pool:
+                answers = pool.map(
+                    lambda job: (job[0], manga_sites.browse_site_page(
+                        job[0], job[1], deadline=deadline)), jobs)
+                for site, rows in answers:
+                    for row in rows or []:
+                        if (row.get("title") or "").strip():
+                            found.append(_reading_card({**row, "site_id": site["id"],
+                                                        "site_name": site["name"]}))
+        found = _serving_sites_only(found, deadline)
+        reading_index.remember(found)
+        pairs = _classify_pairs([r["title"] for r in found], CLASSIFY_BUDGET_S)
+        _save_reading_meta()
+        from . import logs
+        logs.info(f"reading deep browse: pages {first}-{last}, {len(found)} rows, "
+                  f"{len(pairs)} classified, {time.monotonic() - started:.1f}s")
+        return len(found) or 1      # an empty step is not the end of the pages
+    except Exception:
+        from . import logs
+        logs.exception("reading deep browse failed")
+        return 1
 
 
 # ------------------------------------------------------------------

@@ -58,7 +58,7 @@ from . import child_process, net
 # `development`, counting up from the last release; two parts on a build
 # that is being released, bumped in the same commit that tags it - or the
 # new build goes on offering itself an update.
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.7"
 
 # What counts as a release: exactly two numeric parts, with or without the
 # leading v. Development builds are tagged (if at all) with three, and are
@@ -84,6 +84,14 @@ EXE_NAME = "Atomic.exe"
 # published carries the bare exe, and an install updating from one of
 # those has to keep working.
 ZIP_NAME = "Atomic.zip"
+# **The folder build, packed inside Atomic.zip** (21 September 2026 -
+# Atomic.spec's COLLECT note has the startup measurement that made the app
+# a folder). Atomic.zip holds the bridge installer as its only .exe - which
+# is all a single-file install can take out of it - and this, the folder
+# (`Atomic/Atomic.exe` + `Atomic/_internal/...`) zipped, which a folder
+# build unpacks for itself. One asset name, at the owner's ask ("the zip
+# file name is Atomic not Atomic-app"); packaging/build.py writes it.
+APP_PAYLOAD_NAME = "app.zip"
 API_ROOT = f"https://api.github.com/repos/{REPO}"
 
 _HEADERS = {
@@ -121,6 +129,15 @@ def is_frozen() -> bool:
 
 def current_exe() -> Path:
     return Path(sys.executable).resolve()
+
+
+def is_folder_build() -> bool:
+    """A frozen build whose files sit in `_internal` beside the exe."""
+    return is_frozen() and (current_exe().parent / "_internal").is_dir()
+
+
+def _asset_names():
+    return (ZIP_NAME, EXE_NAME)
 
 
 def check_for_update(timeout: int = 10):
@@ -183,7 +200,7 @@ def _from_releases(timeout: int):
         if not RELEASE_TAG_RE.match(tag_name):
             continue
         by_name = {(a.get("name") or ""): a for a in release.get("assets") or []}
-        for name in (ZIP_NAME, EXE_NAME):
+        for name in _asset_names():
             asset = by_name.get(name)
             if not asset or not asset.get("browser_download_url"):
                 continue
@@ -301,6 +318,13 @@ def download_update(update: dict, progress=None, timeout: int = 60) -> Path:
             "The downloaded file didn't match the checksum GitHub reported, "
             "so it hasn't been installed.")
 
+    if is_folder_build() and (update.get("asset") or "").lower().endswith(".zip"):
+        payload = _payload_from_zip(data)
+        if payload is not None:
+            return _stage_folder(payload)
+        # No app.zip inside (a release from before the folder build):
+        # the exe below is swapped in as a single-file build would.
+
     if (update.get("asset") or "").lower().endswith(".zip"):
         # **Unpacked here, not by the swap script.** The verification
         # above is of the bytes GitHub served, so it has to happen on
@@ -318,6 +342,64 @@ def download_update(update: dict, progress=None, timeout: int = 60) -> Path:
     except OSError as exc:
         raise UpdateError(f"Couldn't write the download to disk: {exc}") from exc
     return Path(temp_path)
+
+
+def _payload_from_zip(data: bytes):
+    """The folder build (APP_PAYLOAD_NAME) out of a verified release zip,
+    or None when the zip carries none."""
+    import io as _io
+    import zipfile
+    try:
+        with zipfile.ZipFile(_io.BytesIO(data)) as archive:
+            if APP_PAYLOAD_NAME in archive.namelist():
+                return archive.read(APP_PAYLOAD_NAME)
+    except Exception as exc:
+        raise UpdateError(f"The download could not be unpacked: {exc}") from exc
+    return None
+
+
+def _stage_folder(data: bytes) -> Path:
+    """Unpack the folder build (app.zip) beside the install folder and
+    return the unpacked `Atomic` folder.
+
+    Beside it, not in %TEMP%: the swap is a rename of one folder into the
+    other's place, and a rename across volumes is a copy of 1,600 files
+    made while the old app is exiting. Every entry must sit under
+    `Atomic/` and the folder must hold `Atomic.exe` and `_internal` - a
+    zip shaped otherwise is a packaging mistake, and is refused rather
+    than installed."""
+    import io as _io
+    import shutil
+    import zipfile
+    parent = current_exe().parent.parent
+    staging = parent / f"Atomic.new-{os.getpid()}"
+    try:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True)
+        root = staging.resolve()
+        with zipfile.ZipFile(_io.BytesIO(data)) as archive:
+            names = archive.namelist()
+            if not names or any(not n.startswith("Atomic/") for n in names):
+                raise UpdateError("The download is not an Atomic folder build - "
+                                  "it has not been installed.")
+            for name in names:
+                # No entry may land outside the staging folder.
+                if not (root / name).resolve().is_relative_to(root):
+                    raise UpdateError("The download holds an unsafe path - "
+                                      "it has not been installed.")
+            archive.extractall(root)
+        folder = root / "Atomic"
+        if not (folder / EXE_NAME).is_file() or not (folder / "_internal").is_dir():
+            raise UpdateError("The download is missing Atomic.exe or its "
+                              "_internal folder - it has not been installed.")
+        return folder
+    except UpdateError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise UpdateError(f"The download could not be unpacked: {exc}") from exc
 
 
 def _exe_from_zip(data: bytes) -> bytes:
@@ -454,6 +536,57 @@ if exist "%OLD%" del /f /q "%OLD%" >nul 2>&1
 (goto) 2>nul & del "%~f0"
 """
 
+# **The folder build's swap: the same order, one folder instead of one
+# file.** Wait for this process to be gone (a folder cannot be renamed
+# while any file in it is open - the exe and its DLLs are); step the
+# install folder aside as `<folder>.old`; move the unpacked one into its
+# name; put the old one back if that is refused, retrying the way the
+# file swap does (McAfee's refusal, above, is why there is a retry at
+# all); and whatever happened, start the Atomic.exe that is there. The
+# script's own working folder is %TEMP%, never one being moved.
+#   %1 install folder   %2 unpacked Atomic folder   %3 its staging folder
+#   %4 %5 process ids to wait for
+_FOLDER_SWAP_SCRIPT = r"""@echo off
+cd /d "%TEMP%"
+set "TARGET=%~1"
+set "SOURCE=%~2"
+set "STAGE=%~3"
+set "OLD=%~1.old"
+set "SYS=%SystemRoot%\System32"
+set /a WAITED=0
+:wait
+set "ALIVE="
+for %%P in (%~4 %~5) do (
+    "%SYS%\tasklist.exe" /FI "PID eq %%P" /FI "IMAGENAME eq Atomic.exe" 2>nul | "%SYS%\find.exe" /i "Atomic.exe" >nul && set "ALIVE=1"
+)
+if not defined ALIVE goto swap
+set /a WAITED+=1
+if %WAITED% geq 30 goto swap
+"%SYS%\PING.EXE" -n 2 127.0.0.1 >nul
+goto wait
+:swap
+set /a TRIES=0
+:retry
+if not exist "%SOURCE%\Atomic.exe" goto launch
+if exist "%OLD%" rd /s /q "%OLD%" >nul 2>&1
+move "%TARGET%" "%OLD%" >nul 2>&1
+if errorlevel 1 goto again
+move "%SOURCE%" "%TARGET%" >nul 2>&1
+if not errorlevel 1 goto launch
+move "%OLD%" "%TARGET%" >nul 2>&1
+:again
+set /a TRIES+=1
+if %TRIES% geq 20 goto launch
+"%SYS%\PING.EXE" -n 2 127.0.0.1 >nul
+goto retry
+:launch
+if not exist "%TARGET%\Atomic.exe" if exist "%OLD%\Atomic.exe" move "%OLD%" "%TARGET%" >nul 2>&1
+start "" "%TARGET%\Atomic.exe"
+if exist "%OLD%" rd /s /q "%OLD%" >nul 2>&1
+if exist "%STAGE%" rd /s /q "%STAGE%" >nul 2>&1
+(goto) 2>nul & del "%~f0"
+"""
+
 # What a swap can leave behind, and how old it has to be before a launch
 # clears it - old enough that it cannot belong to an update in flight.
 _LEFTOVER_PATTERNS = ("Atomic-update-*.exe", "atomic-update-*.bat")
@@ -477,6 +610,18 @@ def apply_update(downloaded: Path):
             "Move Atomic somewhere writable, or update it by hand.")
 
     script = Path(tempfile.gettempdir()) / f"atomic-update-{os.getpid()}.bat"
+    if Path(downloaded).is_dir():
+        # A folder build's update (_stage_folder): the whole install
+        # folder is swapped, not the exe inside it.
+        script.write_text(_FOLDER_SWAP_SCRIPT, encoding="utf-8")
+        _allow_foreground_for_relaunch()
+        subprocess.Popen(
+            ["cmd", "/c", str(script), str(target.parent), str(downloaded),
+             str(Path(downloaded).parent), str(os.getpid()), str(os.getppid())],
+            creationflags=child_process.flags(detached=True), close_fds=True,
+            env=child_process.clean_env(),
+        )
+        return
     script.write_text(_SWAP_SCRIPT, encoding="utf-8")
 
     # Windows refuses to let a process that isn't in the foreground raise
@@ -530,6 +675,51 @@ def tidy_leftovers() -> int:
             removed += 1
         except OSError:
             pass            # not there, or still held - the next launch tries again
+    if is_folder_build():
+        removed += _tidy_folders(time)
+    return removed
+
+
+def _tidy_folders(time) -> int:
+    """A folder build's leftovers: `<install>.old` and `Atomic.new-*`
+    beside the install folder from a swap, and the single-file builds'
+    `_MEI*` unpack folders in %TEMP%.
+
+    **The _MEI folders are the reason this exists.** A single-file build
+    unpacked 290MB there on every launch and removed it on a clean exit
+    only; the owner's %TEMP% held 18 of them (~5GB) on 21 September 2026,
+    left by launches that were killed or crashed. Only a folder carrying
+    Atomic's own files (libmpv-2.dll and static/app.js) is touched - other
+    PyInstaller programs use the same prefix - and only one that can be
+    renamed: a folder a running single-file Atomic still uses has its DLLs
+    open, and Windows refuses the rename, so it is never deleted from
+    under that app."""
+    import glob
+    import shutil
+    removed = 0
+    beside = current_exe().parent
+    folders = [str(beside) + ".old"]
+    folders += glob.glob(os.path.join(str(beside.parent), "Atomic.new-*"))
+    for path in folders:
+        try:
+            if os.path.isdir(path) and time.time() - os.path.getmtime(path) >= _LEFTOVER_AGE_S:
+                shutil.rmtree(path)
+                removed += 1
+        except OSError:
+            pass
+    for path in glob.glob(os.path.join(tempfile.gettempdir(), "_MEI*")):
+        try:
+            if not (os.path.isfile(os.path.join(path, "libmpv-2.dll"))
+                    and os.path.isfile(os.path.join(path, "static", "app.js"))):
+                continue
+            if time.time() - os.path.getmtime(path) < _LEFTOVER_AGE_S:
+                continue
+            doomed = path + ".atomic-tidy"
+            os.rename(path, doomed)          # refused while anything in it is open
+            shutil.rmtree(doomed, ignore_errors=True)
+            removed += 1
+        except OSError:
+            pass
     return removed
 
 

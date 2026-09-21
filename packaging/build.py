@@ -1,11 +1,12 @@
-"""Run this to build Atomic.exe: `python build.py`.
+"""Run this to build Atomic: `python build.py` (add `--zip` for a release).
 
 Wraps `pyinstaller Atomic.spec` (which bundles src/assets/app_icon.ico into the
 build - the plain `pyinstaller src/main.py` form skips that and the
 taskbar/title-bar icon comes up blank at runtime). Installs PyInstaller
 first if it isn't already available. PyInstaller's own work/dist folders
-are kept inside this packaging/ directory; the finished exe is then
-copied to the project root so Atomic.exe stays the one loose file there.
+are kept inside this packaging/ directory; the finished folder is then
+copied to the project root as `app\\` (Atomic.exe plus `_internal\\`) -
+a folder build since 21 September 2026, see Atomic.spec's COLLECT note.
 
 Then it proves the exe belongs to the source tree it was built from,
 because a build log that says "completed successfully" does not. 1.4 was
@@ -226,27 +227,29 @@ def _canon(name):
     return str(name).replace("\\", "/").lower()
 
 
-def _verify_bundle(exe_path):
-    """Every promised file is in the exe, and is the file that is on disk
-    now.
+def _verify_bundle(app_dir):
+    """Every promised file is in the build, and is the file that is on
+    disk now.
 
     Byte-comparing rather than checking the name is present: a cached
     build carries the *previous* copy of an asset under the right name,
     which is the failure that would otherwise still get through.
-    """
-    from PyInstaller.archive.readers import CArchiveReader
 
-    archive = CArchiveReader(str(exe_path))
-    bundled = {_canon(n): n for n in archive.toc}
+    A folder build (Atomic.spec's COLLECT) writes the datas as files under
+    `_internal`, not into the exe's archive, so they are read from there.
+    """
+    internal = app_dir / "_internal"
+    bundled = {_canon(p.relative_to(internal)): p
+               for p in internal.rglob("*") if p.is_file()}
 
     problems = []
     for name, source in _required_datas():
         actual = bundled.get(_canon(name))
         if actual is None:
-            problems.append(f"{name} is missing from the executable")
+            problems.append(f"{name} is missing from the build")
             continue
-        if archive.extract(actual) != source.read_bytes():
-            problems.append(f"{name} in the executable differs from {source}")
+        if actual.read_bytes() != source.read_bytes():
+            problems.append(f"{name} in the build differs from {source}")
 
     if problems:
         sys.exit("\nBUILD REJECTED - the executable does not match the source tree:\n  "
@@ -373,37 +376,92 @@ def main():
     if result.returncode != 0:
         sys.exit(result.returncode)
 
-    built_exe = DIST_DIR / "Atomic.exe"
+    built_dir = DIST_DIR / "Atomic"
+    built_exe = built_dir / "Atomic.exe"
     if not built_exe.exists():
         sys.exit(f"\nBuild finished, but {built_exe} wasn't found - check the log above.")
 
     _verify_not_cached()
-    _verify_bundle(built_exe)
+    _verify_bundle(built_dir)
 
-    final_exe = PROJECT_ROOT / "Atomic.exe"
-    shutil.copy2(built_exe, final_exe)
+    # The folder, at the project root as `app\` - a folder build cannot be
+    # one loose file (Atomic.spec, the COLLECT note). Replaced whole, so a
+    # file dropped from the build does not linger from the last one.
+    final_dir = PROJECT_ROOT / APP_DIR_NAME
+    if final_dir.exists():
+        try:
+            shutil.rmtree(final_dir)
+        except OSError as error:
+            sys.exit(f"\nCould not replace {final_dir} ({error}) - close the "
+                     f"Atomic running from it and build again.")
+    shutil.copytree(built_dir, final_dir)
+    final_exe = final_dir / "Atomic.exe"
+    # The single-file build that used to sit here would otherwise go on
+    # being run by mistake: it is stale from this build on.
+    stale = PROJECT_ROOT / "Atomic.exe"
+    if stale.exists():
+        try:
+            stale.unlink()
+            print(f"Removed the old single-file {stale.name} from the project root.")
+        except OSError:
+            print(f"(Could not remove the old {stale} - it is stale; delete it.)")
     _refresh_shell_icon(final_exe)
     print(f"\nDone: {final_exe}")
     if "--zip" in sys.argv[1:]:
-        print(f"Zipped: {_write_zip(final_exe)}")
+        print(f"Zipped: {_write_release_zip(final_dir)}")
 
 
-def _write_zip(exe: Path) -> Path:
-    """`Atomic.zip`, holding the one executable - what a release and the
-    remote-tests branch ship (CLAUDE.md rule 8).
+# Where the finished folder lands, beside src/ and packaging/.
+APP_DIR_NAME = "app"
 
-    Not made on every build: it costs ten seconds and another 95MB on
-    disk, and a local test run needs the exe rather than the archive, so
-    the release and the remote-tests push ask for it with --zip.
 
-    One file, named exactly `Atomic.exe` at the root of the archive -
-    `updater._exe_from_zip` refuses anything else rather than guessing
-    which of several executables to install."""
+# The folder build's name inside the release zip (helpers/updater and
+# packaging/bridge read the same name).
+APP_PAYLOAD_NAME = "app.zip"
+
+
+def _write_release_zip(app_dir: Path) -> Path:
+    """`Atomic.zip`, the one release asset: the bridge installer as its
+    only `Atomic.exe`, and the folder build packed inside as `app.zip`.
+
+    **One name, and the reason it is shaped like this** (the owner, 21
+    September 2026: "make sure that the zip file name is Atomic not
+    Atomic-app"). Every install up to the last single-file release updates
+    by taking *the one .exe* out of Atomic.zip and swapping it in for
+    itself (their updater._exe_from_zip, which refuses a zip with more
+    than one). The folder build holds its own Atomic.exe, so it cannot sit
+    in the zip loose - an old updater would install that launcher without
+    its _internal folder. Packed as app.zip it is invisible to them: they
+    take the bridge, and the bridge installs app.zip. The folder build's
+    updater and a hand-extracted zip read app.zip directly.
+
+    Not made on every build (--zip): it costs time and disk, and a local
+    test run needs the folder, not the archive (CLAUDE.md rule 8)."""
     import zipfile
+    bridge = PACKAGING_DIR / "bridge"
+    result = subprocess.run([sys.executable, str(bridge / "build_bridge.py")])
+    if result.returncode != 0:
+        sys.exit("\nThe bridge installer did not build - Atomic.zip not written.")
+    payload = WORK_DIR / APP_PAYLOAD_NAME
+    with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as inner:
+        for path in sorted(app_dir.rglob("*")):
+            if path.is_file():
+                inner.write(path, "Atomic/" + path.relative_to(app_dir).as_posix())
     archive = PROJECT_ROOT / "Atomic.zip"
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED,
-                         compresslevel=6) as bundle:
-        bundle.write(exe, "Atomic.exe")
+    with zipfile.ZipFile(archive, "w") as outer:
+        outer.write(bridge / "dist" / "Atomic.exe", "Atomic.exe",
+                    compress_type=zipfile.ZIP_DEFLATED)
+        # Stored: it is already compressed, and deflating it again only
+        # costs time.
+        outer.write(payload, APP_PAYLOAD_NAME, compress_type=zipfile.ZIP_STORED)
+    payload.unlink()
+    for stale in (PROJECT_ROOT / "Atomic-app.zip",):
+        if stale.exists():
+            stale.unlink()
+    names = zipfile.ZipFile(archive).namelist()
+    exes = [n for n in names if n.lower().endswith(".exe")]
+    if exes != ["Atomic.exe"]:
+        sys.exit(f"\nAtomic.zip must hold exactly one .exe, the bridge - it holds {exes}.")
     return archive
 
 

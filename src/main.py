@@ -6025,7 +6025,11 @@ def main():
             startup.reconcile()
         except Exception:
             logs.exception("Could not reconcile the startup entry")
-    QTimer.singleShot(2000, _reconcile_startup)
+    # On a thread: reconcile asks schtasks whether the task still names
+    # this exe (the folder build moved it - helpers/startup), which is a
+    # process launch, not something for the UI thread.
+    QTimer.singleShot(2000, lambda: threading.Thread(
+        target=_reconcile_startup, daemon=True, name="startup-reconcile").start())
     # The three overlay modules, imported now rather than inside the
     # click that opens one. **They are imported lazily on purpose** (see
     # tracker.open_in_app) and that is still right - it keeps them off

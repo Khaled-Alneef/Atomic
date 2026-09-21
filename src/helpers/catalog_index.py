@@ -129,15 +129,19 @@ atexit.register(flush)
 
 
 def rows_for(kind: str, genre: str, limit: int = 200) -> list:
-    """The kind's remembered rows carrying `genre`, newest first."""
+    """The kind's remembered rows carrying `genre`, newest first. An
+    anime row carries AniList's genres as well as Cinemeta's
+    (helpers/anime_genres - Cinemeta tags 94 of his 1,505 anime rows
+    Romance, the two together 357)."""
     wanted = str(genre or "").strip().lower()
     if kind not in KINDS or not wanted:
         return []
+    from . import anime_genres
     with _lock:
         bucket = _load().get(kind) or {}
         found = [row for row in reversed(list(bucket.values()))
                  if any(str(g).strip().lower() == wanted
-                        for g in (row.get("genres") or []))]
+                        for g in anime_genres.merged(row))]
     return found[:limit]
 
 

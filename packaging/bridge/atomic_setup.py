@@ -1,4 +1,19 @@
-"""The bridge installer: what a pre-2.0 install downloads as Atomic.exe.
+"""The bridge installer: what an older install downloads as Atomic.exe.
+
+**Since 21 September 2026 it installs the folder build.** The app stopped
+being one exe (packaging/Atomic.spec, the COLLECT note: every launch
+unpacked 290MB into %TEMP%, Home at 6.5-7.1s against 2.0-2.1s as a
+folder). Every install up to the last single-file release updates by
+swapping one .exe into its own place - out of Atomic.zip (2.0 on) or
+committed at the tag (1.0-1.10) - so both now carry this program. It
+takes the folder build out of the release's Atomic.zip (its app.zip -
+or one already beside it, from a zip extracted by hand), installs it into
+%LOCALAPPDATA%\\Programs\\Atomic, puts Atomic.lnk on the Desktop and in
+the Start menu, starts the installed app, and removes its own loose exe.
+The installed app re-points the startup task at itself on its first
+launch (helpers/startup.reconcile).
+
+What follows is the 2.0 history of the same program, which still holds.
 
 **Why this exists at all.** Every Atomic ever released updates itself by
 reading one file out of this repository at the release tag
@@ -50,9 +65,13 @@ from pathlib import Path
 from tkinter import ttk
 
 REPO = "Khaled-Alneef/Atomic"
-API_ROOT = "https://api.github.com/repos/" + REPO
+# ATOMIC_SETUP_API points a harness at a stand-in for GitHub's API.
+API_ROOT = os.environ.get("ATOMIC_SETUP_API") or ("https://api.github.com/repos/" + REPO)
 RELEASES_PAGE = "https://github.com/" + REPO + "/releases/latest"
+# The release asset, and the folder build packed inside it
+# (packaging/build.py _write_release_zip; helpers/updater.APP_PAYLOAD_NAME).
 ZIP_NAME = "Atomic.zip"
+PAYLOAD_NAME = "app.zip"
 EXE_NAME = "Atomic.exe"
 
 # The same test the app itself applies: two numeric parts is a release,
@@ -85,28 +104,6 @@ READ_TIMEOUT = 120
 _BOOTLOADER_VARS = ("_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE",
                     "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC",
                     "_MEIPASS2")
-
-# Identical in shape to the one in helpers/updater.py, and for the same
-# reason: Windows will not let a running executable be replaced, so the
-# swap outlives this process. It retries the move until this program has
-# exited, starts what it moved into place, and deletes itself.
-_SWAP_SCRIPT = """@echo off
-set "TARGET=%~1"
-set "SOURCE=%~2"
-set /a TRIES=0
-:retry
-move /y "%SOURCE%" "%TARGET%" >nul 2>&1
-if not errorlevel 1 goto launch
-set /a TRIES+=1
-if %TRIES% geq 60 goto cleanup
-ping -n 2 127.0.0.1 >nul
-goto retry
-:launch
-start "" "%TARGET%"
-:cleanup
-(goto) 2>nul & del "%~f0"
-"""
-
 
 class InstallError(Exception):
     """Anything that stopped the install, with a message worth showing."""
@@ -222,55 +219,211 @@ def readable(exc) -> str:
     return "Could not reach GitHub - check your connection."
 
 
-def exe_from_zip(data: bytes) -> bytes:
-    """The one executable inside the release zip, and nothing guessed at:
-    a zip holding anything else is a packaging mistake, and installing it
-    would be worse than saying so."""
+def install_dir() -> Path:
+    """%LOCALAPPDATA%\\Programs\\Atomic - where the folder build lives
+    (helpers/startup.install_dir says the same). ATOMIC_SETUP_INSTALL_DIR
+    is how a harness points it at a sandbox."""
+    override = os.environ.get("ATOMIC_SETUP_INSTALL_DIR")
+    if override:
+        return Path(override).resolve()
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
+    return Path(base) / "Programs" / "Atomic"
+
+
+def shortcut_dirs():
+    """The Desktop (following a redirected one) and the per-user Start
+    menu. ATOMIC_SETUP_SHORTCUT_DIRS (';'-separated) overrides both, and
+    an empty value makes none - a harness must not touch the real Desktop."""
+    override = os.environ.get("ATOMIC_SETUP_SHORTCUT_DIRS")
+    if override is not None:
+        return [Path(p) for p in override.split(";") if p.strip()]
+    found = []
+    for csidl in (0x10, 0x02):   # CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS
+        buf = ctypes.create_unicode_buffer(260)
+        try:
+            if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buf) == 0:
+                found.append(Path(buf.value))
+        except Exception:
+            pass
+    return found
+
+
+def unpack_folder(data: bytes, parent: Path) -> Path:
+    """The folder build (app.zip) unpacked into `parent\\Atomic.new-<pid>`;
+    returns that folder's `Atomic`. Every entry must sit under `Atomic/`,
+    land inside the staging folder, and the result must hold Atomic.exe and
+    _internal - anything else is a packaging mistake and is refused."""
+    import shutil
+    staging = parent / "Atomic.new-{}".format(os.getpid())
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        staging.mkdir(parents=True)
+        root = staging.resolve()
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = archive.namelist()
+            if not names or any(not n.startswith("Atomic/") for n in names):
+                raise InstallError("The download is not an Atomic folder "
+                                   "build - it has not been installed.")
+            for name in names:
+                if not (root / name).resolve().is_relative_to(root):
+                    raise InstallError("The download holds an unsafe path - "
+                                       "it has not been installed.")
+            archive.extractall(root)
+        folder = root / "Atomic"
+        if not (folder / EXE_NAME).is_file() or not (folder / "_internal").is_dir():
+            raise InstallError("The download is missing Atomic.exe or its "
+                               "_internal folder - it has not been installed.")
+        return folder
+    except InstallError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise InstallError("The download could not be unpacked: {}".format(exc)) from exc
+
+
+def place_folder(new_folder: Path, target: Path):
+    """Put `new_folder` at `target`: an existing install is stepped aside
+    and removed after, and put back if the new one will not go in. A
+    folder in use (an Atomic already running from it) refuses the rename,
+    which is reported rather than half-installed over."""
+    import shutil
+    old = target.with_name(target.name + ".old")
+    shutil.rmtree(old, ignore_errors=True)
+    stepped = False
+    if target.exists():
+        try:
+            os.replace(target, old)
+            stepped = True
+        except OSError:
+            raise InstallError("Atomic is already installed and running from "
+                               "{}. Close it and open this again.".format(target))
+    try:
+        os.replace(new_folder, target)
+    except OSError as exc:
+        if stepped:
+            try:
+                os.replace(old, target)
+            except OSError:
+                pass
+        raise InstallError("Could not install into {}: {}".format(target, exc)) from exc
+    shutil.rmtree(old, ignore_errors=True)
+    shutil.rmtree(new_folder.parent, ignore_errors=True)
+
+
+def make_shortcuts(exe: Path) -> list:
+    """Atomic.lnk in each of shortcut_dirs(), through the shell's own
+    WScript.Shell (no pywin32 in this program - see the module note).
+    Returns the ones written; a shortcut that cannot be made is not a
+    failed install."""
+    made = []
+    for folder in shortcut_dirs():
+        link = folder / "Atomic.lnk"
+        script = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{link}'); "
+                  "$s.TargetPath = '{exe}'; $s.WorkingDirectory = '{cwd}'; "
+                  "$s.IconLocation = '{exe},0'; $s.Description = 'Atomic'; $s.Save()"
+                  ).format(link=str(link).replace("'", "''"),
+                           exe=str(exe).replace("'", "''"),
+                           cwd=str(exe.parent).replace("'", "''"))
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                            "-ExecutionPolicy", "Bypass", "-Command", script],
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                           timeout=30, capture_output=True)
+            if link.exists():
+                made.append(link)
+        except Exception:
+            pass
+    return made
+
+
+# Removes this program's own loose exe once it has exited - it replaced
+# the old single-file Atomic.exe, and the installed folder plus its
+# shortcut take that place now. %1 the exe, %2 this process id.
+# System32's tools by full path: a PATH carrying Git's usr\bin (measured,
+# 21 September 2026, a harness launched from Git Bash) answers `find` with
+# GNU find, which fails, so the wait ended at once and the delete met a
+# still-running exe and gave up. The delete is retried for the same reason.
+_REMOVE_SELF = """@echo off
+set /a WAITED=0
+:wait
+"%SystemRoot%\\System32\\tasklist.exe" /FI "PID eq %~2" 2>nul | "%SystemRoot%\\System32\\find.exe" "%~2" >nul || goto gone
+set /a WAITED+=1
+if %WAITED% geq 30 goto gone
+"%SystemRoot%\\System32\\ping.exe" -n 2 127.0.0.1 >nul
+goto wait
+:gone
+set /a WAITED=0
+:remove
+del /f /q "%~1" >nul 2>&1
+if not exist "%~1" goto done
+set /a WAITED+=1
+if %WAITED% geq 30 goto done
+"%SystemRoot%\\System32\\ping.exe" -n 2 127.0.0.1 >nul
+goto remove
+:done
+(goto) 2>nul & del "%~f0"
+"""
+
+
+def payload_from_release(data: bytes) -> bytes:
+    """The folder build (app.zip) out of a verified Atomic.zip."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = [n for n in archive.namelist()
-                     if n.lower().endswith(".exe") and not n.endswith("/")]
-            if len(names) != 1:
-                raise InstallError(
-                    "The download should hold exactly one .exe and holds "
-                    "{} - it has not been installed.".format(len(names)))
-            return archive.read(names[0])
+            if PAYLOAD_NAME not in archive.namelist():
+                raise InstallError("The download does not carry the Atomic "
+                                   "app - it has not been installed.")
+            return archive.read(PAYLOAD_NAME)
     except InstallError:
         raise
     except Exception as exc:
-        raise InstallError(
-            "The download could not be unpacked: {}".format(exc)) from exc
+        raise InstallError("The download could not be unpacked: {}".format(exc)) from exc
 
 
-def install(payload: bytes):
-    """Write the new build beside the target and hand the swap over."""
-    target = target_exe()
-    if not os.access(target.parent, os.W_OK):
-        raise InstallError(
-            "No permission to replace {} in {}. Move Atomic somewhere "
-            "writable and open it again.".format(target.name, target.parent))
-
-    # Staged in the target's own folder, not %TEMP%: `move` across
-    # volumes copies rather than renames, and 126MB copied while the old
-    # process is still exiting is where the retry loop would be spent.
-    handle, staged = tempfile.mkstemp(prefix="Atomic-new-", suffix=".exe",
-                                      dir=str(target.parent))
+def local_payload():
+    """app.zip beside this program - a release zip extracted by hand -
+    or None. Installing from it needs no download at all."""
     try:
-        with os.fdopen(handle, "wb") as file:
-            file.write(payload)
-    except OSError as exc:
-        raise InstallError(
-            "Could not write the new build to disk: {}".format(exc)) from exc
+        here = target_exe().parent / PAYLOAD_NAME
+    except InstallError:
+        return None
+    try:
+        return here.read_bytes() if here.is_file() else None
+    except OSError:
+        return None
 
-    script = Path(tempfile.gettempdir()) / "atomic-setup-{}.bat".format(os.getpid())
-    script.write_text(_SWAP_SCRIPT, encoding="utf-8")
+
+def install(data: bytes) -> Path:
+    """Install the folder build (the app.zip bytes) and start it. Returns
+    the installed exe."""
+    target = install_dir()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise InstallError("Could not create {}: {}".format(target.parent, exc)) from exc
+    folder = unpack_folder(data, target.parent)
+    place_folder(folder, target)
+    exe = target / EXE_NAME
+    make_shortcuts(exe)
     allow_foreground()
-    subprocess.Popen(
-        ["cmd", "/c", str(script), str(target), staged],
-        creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                       | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)),
-        close_fds=True, env=clean_env(),
-    )
+    subprocess.Popen([str(exe)], cwd=str(target), close_fds=True, env=clean_env(),
+                     creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    # This program's own exe goes once it has exited - unless it is the
+    # installed one (a build that never should be, but must not delete
+    # the app it just installed).
+    try:
+        me = target_exe()
+        if me.exists() and target not in me.parents:
+            script = Path(tempfile.gettempdir()) / "atomic-setup-{}.bat".format(os.getpid())
+            script.write_text(_REMOVE_SELF, encoding="utf-8")
+            subprocess.Popen(["cmd", "/c", str(script), str(me), str(os.getpid())],
+                             creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)),
+                             close_fds=True, env=clean_env())
+    except InstallError:
+        pass                            # running from source: nothing to remove
+    return exe
 
 
 def allow_foreground():
@@ -309,15 +462,16 @@ class SetupWindow:
         frame = tk.Frame(self.root, bg=BG, padx=32, pady=26)
         frame.pack(fill="both", expand=True)
 
-        self.title = tk.Label(frame, text="Finishing the update to Atomic 2.0",
+        self.title = tk.Label(frame, text="Moving Atomic to its new home",
                               bg=BG, fg=TEXT, font=("Segoe UI", 15, "bold"),
                               anchor="w", justify="left")
         self.title.pack(fill="x")
 
         self.detail = tk.Label(
             frame,
-            text=("Atomic 2.0 is larger than the old update route can carry, "
-                  "so this one-time step downloads it for you.\n"
+            text=("Atomic now installs as a folder so it starts in about two "
+                  "seconds. This one-time step downloads it, puts it in your "
+                  "apps folder and leaves a shortcut on your Desktop.\n"
                   "Your entries, settings and covers are untouched."),
             bg=BG, fg=TEXT_MUTED, font=("Segoe UI", 9), anchor="w",
             justify="left", wraplength=496)
@@ -407,14 +561,15 @@ class SetupWindow:
         self.bar.stop()
         self.bar.configure(mode="determinate", maximum=1000)
         self.bar["value"] = 1000
-        self.title.configure(text="Atomic {} is installed".format(version))
+        self.title.configure(text=("Atomic {} is installed".format(version)
+                                   if version else "Atomic is installed"))
         self.say("Starting it now...")
         self.root.after(1400, self.root.destroy)
 
     # ------------------------------------------------------------------
     def start(self):
         self.hide_buttons()
-        self.title.configure(text="Finishing the update to Atomic 2.0")
+        self.title.configure(text="Moving Atomic to its new home")
         self.bar.configure(mode="indeterminate")
         self.bar.start(12)
         self.say("Asking GitHub for the latest release...")
@@ -423,6 +578,19 @@ class SetupWindow:
     def _work(self):
         release = None
         try:
+            local = local_payload()
+            if local is not None:
+                # From a zip extracted by hand. An app.zip that is not an
+                # Atomic folder build is refused by unpack_folder, and the
+                # install then goes on to the download as if it were not
+                # there.
+                self.root.after(0, self.say, "Installing...")
+                try:
+                    install(local)
+                    self.root.after(0, self.finished, "")
+                    return
+                except InstallError:
+                    pass
             release = newest_release()
             self.root.after(0, self.say,
                             "Downloading Atomic {}...".format(release["version"]))
@@ -433,7 +601,7 @@ class SetupWindow:
                     "The download did not match the checksum GitHub "
                     "reported, so it has not been installed.")
             self.root.after(0, self.say, "Verified. Installing...")
-            install(exe_from_zip(data))
+            install(payload_from_release(data))
         except InstallError as exc:
             self.root.after(0, self.fail, str(exc))
         except Exception as exc:                     # never kill the thread
@@ -478,14 +646,25 @@ def selftest(report: Path) -> int:
     try:
         say(f"python: {sys.version}")
         say(f"frozen: {bool(getattr(sys, 'frozen', False))}")
-        release = newest_release()
-        say(f"release: {release['tag']} {release['size']:,} bytes")
-        say(f"url: {release['url']}")
-        request = urllib.request.Request(release["url"], headers=HEADERS)
-        request.add_header("Range", "bytes=0-3")
-        with urllib.request.urlopen(request, timeout=CONNECT_TIMEOUT) as response:
-            head = response.read(4)
-        say(f"first bytes: {head!r}")
+        head = b"PK"
+        try:
+            release = newest_release()
+        except InstallError as exc:
+            # The bridge is built *before* the first release that carries
+            # app.zip is published, so "none yet" is expected then;
+            # having reached the API and read the list is what is proven.
+            if "No published release carries" not in str(exc):
+                raise
+            release = None
+            say(f"release: none carries {ZIP_NAME} yet - the API answered")
+        if release is not None:
+            say(f"release: {release['tag']} {release['size']:,} bytes")
+            say(f"url: {release['url']}")
+            request = urllib.request.Request(release["url"], headers=HEADERS)
+            request.add_header("Range", "bytes=0-3")
+            with urllib.request.urlopen(request, timeout=CONNECT_TIMEOUT) as response:
+                head = response.read(4)
+            say(f"first bytes: {head!r}")
         if head[:2] != b"PK":
             say("SELFTEST FAILED: that is not a zip")
         else:

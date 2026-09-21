@@ -328,12 +328,26 @@ a.datas = [entry for entry in a.datas
 
 pyz = PYZ(a.pure)
 
+# **A folder, not one file** (21 September 2026). The owner: "when I check
+# the check box of start the app on start up the app takes too long to
+# start". Measured on his laptop: the onefile exe unpacked 290MB in 1,609
+# files into %TEMP% before any app code ran - first log line at 5.1-5.3s
+# and Home at 6.5-7.1s on an idle machine, and 9.8s / 14.9s after sign-in
+# (Task Scheduler had launched it 3s after logon; the rest was the
+# unpack, against every other startup program). The same tree built as a
+# folder: Home at 2.0-2.1s from the second launch on (6.4s on the first,
+# while Windows scans the new files once). It also stopped leaving
+# _MEI folders behind - 18 of them, ~5GB, were in his %TEMP%.
+#
+# The folder is installed to %LOCALAPPDATA%\Programs\Atomic by the bridge
+# (packaging/bridge) and swapped whole by helpers/updater; the release
+# carries it as app.zip inside Atomic.zip, beside the bridge that installs
+# whose updater can only take one exe (docs/RELEASING.md).
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='Atomic',
     debug=False,
     bootloader_ignore_signals=False,
@@ -354,4 +368,15 @@ exe = EXE(
     entitlements_file=None,
     icon=[ICON_FILE],
     version=VERSION_FILE,
+)
+
+# upx=False: upx.exe has never been installed on the build machine
+# (CLAUDE.md rule 8), so compression was never applied anyway.
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='Atomic',
 )

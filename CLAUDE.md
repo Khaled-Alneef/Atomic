@@ -1,7 +1,9 @@
 # Atomic
 
 A PyQt6 desktop dashboard for one person's anime, reading, series, games,
-apps and websites. Ships as `Atomic.zip` - one `Atomic.exe` inside it -
+apps and websites. Built as a folder (`app\Atomic.exe` + `_internal\`,
+since 21 September 2026 - `docs/RELEASING.md`), released as
+one `Atomic.zip` (the bridge installer plus the folder packed as `app.zip`) -
 committed at the repo root, which updates itself from this repository's
 GitHub tags.
 
@@ -121,7 +123,11 @@ GitHub tags.
    was.
 
    `python packaging/build.py --zip` writes it, and from 2.0 it is
-   uploaded as the release's asset rather than committed.
+   uploaded as the release's asset rather than committed. From the
+   first folder release `Atomic.zip` holds the bridge as its only
+   `.exe` and the folder packed as `app.zip`, so single-file installs
+   take the bridge and the folder build takes `app.zip` - `docs/RELEASING.md`, "A folder, not one
+   exe".
    `helpers/updater.py` asks the releases API *and* the old
    tag+contents route and takes the newest, the asset winning a tie -
    **do not remove either half**: the first is how anything from 2.0 on

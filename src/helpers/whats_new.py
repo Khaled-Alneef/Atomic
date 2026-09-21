@@ -30,6 +30,29 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.7": [
+        "Atomic opens about three times faster - around two seconds to "
+        "the home page instead of six or seven, and much sooner when "
+        "Windows starts it at sign-in. It is now installed as a folder "
+        "in your apps, with a shortcut on your Desktop and in the Start "
+        "menu, instead of one file that had to unpack itself every time.",
+        "Filtering by genre finds far more: Romance on the Anime page "
+        "went from about 90 titles to over 350, the Series, Movies and "
+        "reading pages load more straight away, and scrolling keeps "
+        "bringing more instead of stopping.",
+        "Opening a title from the home page, and going back, no longer "
+        "shows a blank or leftover screen for a moment.",
+        "Arabic subtitles are found for many more shows and films - "
+        "Atomic now searches OpenSubtitles.org itself as well, so "
+        "subtitles like the ones on its website show up in the player's "
+        "list (Dagashi Kashi, for one, had none before).",
+        "Scrolling the Discover page is smooth, including while its "
+        "covers are still loading.",
+        "Swiping sideways on a touchpad scrolls rows smoothly, and a "
+        "row's scrollbar no longer jumps up partway along.",
+        "The \"Most watched\" line under the page name is gone from the "
+        "Watch and Read pages.",
+    ],
     "2.6": [
         "Marking an episode as watched or unwatched from the episode "
         "list inside the player now works the same way it does on the "

@@ -2503,7 +2503,16 @@ async function go(route) {
       });
       head.appendChild(tabs);
     }
-    if (data.note) head.appendChild(el('p', null, data.note));
+    /* **No "Most watched" under a medium's name.** The owner, 21
+       September 2026: "remove this label from all read and watch pages
+       under the page name like (Anime, Manga, etc...)". A medium page is
+       one whose `browse` is the medium itself (a genre or cast page's is
+       "genre:..." / "cast:...", and keeps its line). Classed `pnote` so
+       liveBrowse can only ever touch the note: it wrote `header p`, the
+       first paragraph - the page's name - which is how Manhwa read "Most
+       followed manhwa" twice. */
+    const mediumPage = !!data.browse && String(data.browse).indexOf(':') < 0;
+    if (data.note && !mediumPage) head.appendChild(el('p', 'pnote', data.note));
     // A route that raised answers {error} now (server.do_GET) - said
     // here rather than drawn as an empty page.
     if (data.error) head.appendChild(el('p', 'empty', data.error));
@@ -2909,7 +2918,7 @@ const SIDE_CHAIN_MS = 140;    // ...and a stream stays one this long
 const SIDE_MIN_PX = 12;       // below this an isolated blip is not a tick
 const SIDE_TRAIL = 4;         // how many deltas the repeat test looks at
 const SIDE_GESTURE_MS = 400;  // longer than this and it is a new gesture
-let lastSideAt = 0, lastSideWasFinger = false, sideTold = 0;
+let lastSideAt = 0, lastSideWasFinger = false, sideTold = 0, sideSwipe = false;
 let sideTrail = [];
 function sidewaysIsFinger(delta, now) {
   const gap = now - lastSideAt;
@@ -2932,10 +2941,25 @@ function sidewaysIsFinger(delta, now) {
   // same single eased event the first of any swipe already pays.
   const uniform = sideTrail.length >= 2
                   && sideTrail.every(function (d) { return d === sideTrail[0]; });
-  const finger = !uniform
-                 && (gap < SIDE_STREAM_MS
-                     || (lastSideWasFinger && gap < SIDE_CHAIN_MS)
-                     || Math.abs(delta) < SIDE_MIN_PX);
+  /* **A swipe stays a swipe until it ends.** The owner, 21 September
+     2026: "when I scroll using the laptop touch pad HORIZONTALLY only, it
+     stuck and glitch". His own log of that afternoon, 101 sampled events
+     that arrived 6-8ms apart: 10 of them were read as a wheel mid-swipe,
+     every one with `uniform=1` - a slow finger sends 4,4,4,4 or 1,1,1,1
+     as readily as a wheel does. Each such event was eased (6-12 frames
+     writing scrollLeft) while the finger events either side of it
+     scrolled natively, and the two fought: the stick and the jump. So
+     once a gesture has shown itself a finger - a varied stream, which no
+     wheel sends - the rest of it is a finger whatever it repeats, until
+     it pauses past SIDE_CHAIN_MS. A tilt held down never gets here: its
+     stream is uniform from its second event on. */
+  if (gap > SIDE_CHAIN_MS) sideSwipe = false;
+  else if (!uniform && gap < SIDE_STREAM_MS) sideSwipe = true;
+  const finger = sideSwipe
+                 || (!uniform
+                     && (gap < SIDE_STREAM_MS
+                         || (lastSideWasFinger && gap < SIDE_CHAIN_MS)
+                         || Math.abs(delta) < SIDE_MIN_PX));
   lastSideAt = now; lastSideWasFinger = finger;
   return { finger: finger, gap: gap, uniform: uniform,
            trail: sideTrail.join(',') };
@@ -4676,7 +4700,7 @@ function liveBrowse(data, page, grid, stamp) {
         refreshGenres(page);
         applySort(page);
         applyFilter(page);
-        const note = page.querySelector('header p');
+        const note = page.querySelector('header p.pnote');
         if (note) note.textContent = data.note;
         const empty = page.querySelector('.empty');
         if (empty) empty.remove();
@@ -4722,7 +4746,7 @@ function sideScroller(node) {
     node.scrollLeft = from + (to - from) * EASE(done);
     raf = done < 1 ? requestAnimationFrame(step) : 0;
   }
-  return function (delta) {
+  const ease = function (delta) {
     const base = raf ? to : node.scrollLeft;
     const limit = node.scrollWidth - node.clientWidth;
     const wanted = Math.max(0, Math.min(limit, base + delta));
@@ -4733,6 +4757,14 @@ function sideScroller(node) {
     if (!raf) raf = requestAnimationFrame(step);
     return true;
   };
+  /* A finger takes the row from wherever the ease has it. `step` writes
+     an absolute scrollLeft every frame, so left running it undoes each
+     native scroll the finger makes under it - the first event of every
+     swipe starts one (it arrives alone, so it reads as a tick). */
+  ease.stop = function () {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+  };
+  return ease;
 }
 
 page.addEventListener('wheel', function (e) {
@@ -4759,6 +4791,8 @@ page.addEventListener('wheel', function (e) {
   if (!verdict.finger) {
     if (!strip._side) strip._side = sideScroller(strip);
     if (strip._side(delta)) { e.preventDefault(); took = true; }
+  } else if (strip._side) {
+    strip._side.stop();
   }
   /* **The page says what it was handed.** Neither of his two reports
      could be reproduced on this machine - it has no precision touchpad

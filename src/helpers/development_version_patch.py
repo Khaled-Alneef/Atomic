@@ -1493,7 +1493,19 @@ def install():
     #     note above updater._SWAP_SCRIPT has the whole of it. VDD-2.6 is
     #     a released document and stays as written (docs/RELEASING.md) -
     #     the next release's VDD is where this belongs.
-    updater.APP_VERSION = "2.6.1"
+    # 2.7
+    #   * A folder build (packaging/Atomic.spec, the COLLECT note): the
+    #     single exe unpacked 290MB into %TEMP% on every launch - Home at
+    #     6.5-7.1s idle and 14.9s after a sign-in, 2.2-2.4s as a folder.
+    #     Installed to %LOCALAPPDATA%\Programs\Atomic by the bridge, which
+    #     is what Atomic.zip carries for every single-file install.
+    #   * Genre ticks: AniList's genres for anime rows, four Cinemeta pages
+    #     at once for series and movies, and kept rows plus deeper listing
+    #     pages for reading (rules/integrations.md, 21 September 2026).
+    #   * The details page swaps with Home in one step each way, the row
+    #     scrollbar keeps its height, sideways touchpad swipes stay native,
+    #     and the medium pages lose their "Most watched" note.
+    updater.APP_VERSION = "2.7"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

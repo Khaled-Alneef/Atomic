@@ -51,6 +51,46 @@ the release asset winning a tie — so a 2.0 install gets the app and a
 **Do not remove the bridge from a later release tag** until nothing in
 the field predates 2.0, and there is no way to know that.
 
+## A folder, not one exe — changed after 2.6
+
+The app is built as a folder since 21 September 2026 (`Atomic.spec`'s
+COLLECT note): the single exe unpacked 290MB into %TEMP% on every
+launch, Home at 6.5–7.1s idle and 14.9s after a sign-in, against
+2.2–2.4s as a folder. `python packaging/build.py --zip` writes **one**
+asset, `Atomic.zip` (the owner's ask: one name), shaped so every kind
+of install takes the right part of it:
+
+| Inside `Atomic.zip` | What it is | Who takes it |
+|---|---|---|
+| `Atomic.exe` — the **only** `.exe` | the bridge installer (~11MB) | every single-file install, 2.0–2.6: their updater swaps in the one `.exe` a zip holds |
+| `app.zip` | the folder, `Atomic/Atomic.exe` + `Atomic/_internal/…` (~121MB), zipped | the folder build's updater (`updater.APP_PAYLOAD_NAME`), the bridge, and anyone extracting it by hand and running `Atomic.exe` |
+
+The folder must stay packed: loose, its own `Atomic.exe` would be a
+second `.exe` and a 2.x updater refuses the zip - or, worse, installs
+that launcher without `_internal`. `build.py` refuses an `Atomic.zip`
+whose only `.exe` is not the bridge.
+
+The tag keeps carrying the bridge as `Atomic.exe` (and a bridge-only
+`Atomic.zip`) for 1.0–1.10, as above. What the bridge does now: takes
+`app.zip` from beside itself if it is there, else from the release's
+`Atomic.zip`, installs it to `%LOCALAPPDATA%\Programs\Atomic`,
+makes `Atomic.lnk` on the Desktop and in the Start menu, starts it and
+deletes its own loose exe. The installed copy re-points the startup
+task at itself (`startup.reconcile`, installed copy only).
+
+Tested before the first folder release (21 September 2026, a stand-in
+for the releases API serving the real zips, sandboxed install and
+shortcut folders): 2.6's own updater code picked `Atomic.zip` and
+extracted the bridge byte-identical; the bridge installed, started the
+app at 11.2s and removed itself at 13.8s; the folder swap waited for the
+running app, held back while a file in the folder was open, swapped two
+seconds after it was released and relaunched. **Not exercised: a real
+update through GitHub** — the first folder release is that test, so
+watch it on a spare install before announcing it.
+
+The first launch from the new folder raises one Windows Firewall
+prompt (the torrent engine listens for peers, and rules are per path).
+
 ## Two constants carry the version, not one
 
 `updater.APP_VERSION` is the number, and

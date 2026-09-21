@@ -780,7 +780,10 @@ def _genre_choices(side):
 # from what the page's rows actually name, so this only bounds the
 # payload - six is more than any of these sources puts on one title
 # that is worth ticking.
-ROW_GENRES = 6
+# Room for Cinemeta's three and AniList's additions on an anime row (up
+# to five more measured in the seed): at 6 an appended Romance could be
+# the one cut off, and the page's filter would hide the card.
+ROW_GENRES = 10
 
 
 def _row_genres(entry):
@@ -795,6 +798,14 @@ def _row_genres(entry):
     names = entry.get("genres") or entry.get("genre") or []
     if isinstance(names, str):
         names = [names]
+    # An anime row also carries AniList's genres, or the page's own
+    # filter hides the rows the genre route just returned for being
+    # Cinemeta-tagged "Animation / Comedy / Drama" - helpers/anime_genres.
+    try:
+        from helpers import anime_genres
+        names = anime_genres.merged(dict(entry, genres=list(names)))
+    except Exception:
+        pass
     if not names and _row_side(entry.get("type")) == "read":
         names = _reading_genres().get(
             str(entry.get("title") or "").strip().lower(), [])
@@ -3152,6 +3163,28 @@ def _start_reading_sweep(name):
         return True
 
 
+_READING_DEEP = [None]          # the thread reading deeper listing pages
+_READING_DEEP_LOCK = threading.Lock()
+
+
+def _start_reading_deep():
+    """Run discover.reading_deep_browse on a thread, one at a time for the
+    whole app (the pages are the same for every genre). True while one
+    runs or was just started, False once every page has been read."""
+    from helpers import discover
+    with _READING_DEEP_LOCK:
+        thread = _READING_DEEP[0]
+        if thread is not None and thread.is_alive():
+            return True
+        if not discover.reading_deep_left():
+            return False
+        thread = threading.Thread(target=discover.reading_deep_browse,
+                                  name="reading-deep", daemon=True)
+        _READING_DEEP[0] = thread
+        thread.start()
+        return True
+
+
 def _genre_kinds(tab):
     """Which catalogs a tab covers - all three unless it names some."""
     for key, _label, names in BROWSE_TABS:
@@ -3262,12 +3295,39 @@ def _genre_video(name, skip, limit, tab="all", have=0):
         # behind it.
         return indexed, skip, 0
 
-    def _page(kind):
+    def _one(kind, start, count, reached):
         try:
-            return discover.discover_video(kind, genre=name, limit=limit,
-                                           skip=skip, reached=progress) or []
+            return discover.discover_video(kind, genre=name, limit=count,
+                                           skip=start, reached=reached) or []
         except Exception:
             return []
+
+    def _page(kind):
+        if kind == "anime":
+            # The anime kind is the catalogue filtered by genre, and its
+            # walk already fetches LOCAL_GENRE_PAGES at once.
+            return _one(kind, skip, limit, progress)
+        # **Series and movies: VIDEO_GENRE_PAGES pages at once, not one.**
+        # The owner, 21 September 2026, after the Anime tick was fixed:
+        # "the series and movies ... pages are not!". Measured that day on
+        # the frozen build, Romance: the series continuation added 50
+        # rows every ~3s - one Cinemeta page per walk, the page polling
+        # an unchanged answer every 700ms in between - 249 cards in 30s;
+        # movies waited 14.5s on one page that missed Cinemeta's CDN.
+        # Pages are asked together and kept in order up to the first
+        # that answers nothing, so the cursor never skips a hole.
+        starts = [skip + GENRE_PAGE * n for n in range(VIDEO_GENRE_PAGES)]
+        with ThreadPoolExecutor(max_workers=len(starts),
+                                thread_name_prefix="genre-page") as pages:
+            answered = list(pages.map(lambda s: _one(kind, s, GENRE_PAGE, None),
+                                      starts))
+        rows = []
+        for start, got in zip(starts, answered):
+            if not got:
+                break
+            rows.extend(got)
+            discover._note_reached(progress, start + len(got))
+        return rows
 
     # **Three catalogs, not two.** The genre page grew Anime / Series /
     # Movies tabs on 3 September 2026, and the Anime tab came back empty
@@ -3316,6 +3376,10 @@ def _genre_video(name, skip, limit, tab="all", have=0):
 
 
 GENRE_FIRST_WAIT_S = 2.0
+# Cinemeta genre-catalogue pages a series/movie continuation asks for at
+# once - see _genre_video's `_page`. Four is 200 rows per walk, the cost
+# of its slowest page rather than four walks in a row.
+VIDEO_GENRE_PAGES = 4
 # Indexed rows enough to draw a page without waiting on the walk at all,
 # and the most the first answer carries: a Manga page draws 117 rows in
 # 49ms on his machine, so 200 is well inside the second and several
@@ -3413,20 +3477,47 @@ def _more_browse(route, have, skip):
                         body, limit=wanted) or [])
                 except Exception:
                     rows = []
+                cached = list(rows)
                 pending = 0
-                if len(rows) <= max(0, skip):
+                # Against `have`, what the page draws - not `skip`, which
+                # grows by every batch handed over, duplicates included:
+                # measured 21 September 2026, the cursor reached 682
+                # while the cache held 63 Romance rows and the page 44,
+                # so this branch ran on every pull and the cache's rows
+                # were never handed over again.
+                if len(rows) <= max(0, have):
                     # No wait here either (8 September 2026): the rows
                     # whose verdicts are in, and a sweep started behind
                     # if none is running and the browse has gone stale.
-                    rows, unknown = discover.reading_genre_now(body, limit=wanted)
+                    browsed, unknown = discover.reading_genre_now(body, limit=wanted)
+                    known = {str(r.get("title") or "").strip().lower() for r in rows}
+                    rows = rows + [r for r in browsed
+                                   if str(r.get("title") or "").strip().lower() not in known]
                     running = _reading_sweep_running(body)
-                    if not running and (not rows and not unknown):
+                    if not running and (not browsed and not unknown):
                         # Nothing browsed inside SWEEP_ROWS_TTL_S: browse
                         # again behind the answer, once.
                         running = _start_reading_sweep(body)
                     pending = 1 if running else int(discover.sweep_pending() or 0)
                     if not running and unknown and not pending:
                         pending = unknown
+                # **Nothing known beyond what the page draws: read deeper
+                # into the sites' listings.** 21 September 2026: this
+                # branch used to end the walk here - measured, a Romance
+                # continuation answered 2,447 empty batches in 25s with
+                # `pending` 0, while page 2 onwards of four of his six
+                # sites held 28 more Romance titles already classified.
+                # One step at a time, app-wide (_start_reading_deep), until
+                # discover.READ_DEEP_MAX_PAGE; `pending` keeps the page
+                # pulling while it runs and the rows it keeps arrive
+                # through reading_genre_cached above.
+                # Not gated on `pending`: a straggler left classifying by
+                # the front sweep holds sweep_pending() at 1 indefinitely -
+                # measured on the frozen build, "1 still classifying" and
+                # 58 empty pulls in 40s with the deep browse never started.
+                if (len(cached) <= have and not _reading_sweep_running(body)
+                        and _start_reading_deep()):
+                    pending = max(int(pending or 0), 1)
                 skip = skip + len(rows)
             else:
                 # A kind the first answer left running is handed over
@@ -3554,6 +3645,12 @@ def _genre(name, reading, tab="all"):
             if len(rows) < GENRE_PAGE or unknown:
                 _start_reading_sweep(name)
                 pending = 1
+                # And the deeper listing pages at once, rather than after
+                # the page's pulls have run the cache dry: measured on
+                # the frozen build, the first deep rows landed 11.6s
+                # after a cold tick that way. One step, app-wide.
+                if _start_reading_deep():
+                    pending = 1
         else:
             rows, skip, pending = _genre_video(name, 0, GENRE_PAGE, tab)
     except Exception as error:

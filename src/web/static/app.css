@@ -299,6 +299,36 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .strip:hover::-webkit-scrollbar-thumb { background: #3a4761; }
 .strip::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 .strip .card { flex: 0 0 auto; width: 176px; }
+/* **A row card's stand-in is its exact height.** The owner, 21 September
+   2026: "some of the horizontal scrollbars move their position a little
+   up when scrolled to some point". Measured in the running app on
+   Discover's Anime row: a card never drawn stood in at .card's
+   `contain-intrinsic-size` (300px of content, a 320px box), a drawn one
+   is 289px and remembers it, and a row is as tall as its tallest card -
+   so the row was 340px until the last card on the right had been drawn
+   once, then 309px for good, and the scrollbar went up with it. Over 432
+   cards the real content was 268.00 (empty meta), 268.84 and 283.69px
+   (a meta line that wrapped), so no one stand-in could match.
+
+   **The first fix laid every row card out instead, and it cost frames.**
+   The owner the same night: "the scrolling in the discover page seems
+   not smooth like other pages". Measured on Discover at 144Hz with a real
+   wheel, frames over 10ms while moving, alternating runs: that rule 22 of
+   359 and 30 of 352; row cards skipped again 0 of 380 and 0 of 382. His
+   own log said the same over longer use - Discover lost a frame in 44% of
+   its glides against 4-11% on every other page.
+
+   So the cards are skipped off screen as before, and made one height so
+   the stand-in can be exact: the meta line is one line (cut with "..."
+   where it would have wrapped - 9 of 443 cards) and the card's content is
+   the picture 216 + the title's 7 + 31 + this line's 15 = 269px. Measured
+   with it: 0 of 381 frames over 10ms, twice, and each row one height
+   through a full sideways sweep. */
+.strip .card { contain-intrinsic-size: auto 176px auto 269px; }
+.strip .card .m {
+  height: 15px; line-height: 15px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 .empty { padding: 60px 28px; color: var(--dim); }
 /* The page-wide "Looking around..." - in the middle of the page, not at

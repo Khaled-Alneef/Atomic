@@ -17,6 +17,23 @@ from pathlib import Path
 from . import startup, storage
 
 
+def _shortcuts():
+    """The Desktop and Start menu shortcuts packaging/bridge creates."""
+    import ctypes
+    from ctypes import wintypes
+    found = []
+    # CSIDL_DESKTOPDIRECTORY 0x10 (follows a redirected Desktop), and the
+    # per-user Start menu Programs folder, CSIDL_PROGRAMS 0x02.
+    for csidl in (0x10, 0x02):
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        try:
+            if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buf) == 0:
+                found.append(Path(buf.value) / "Atomic.lnk")
+        except Exception:
+            pass
+    return found
+
+
 def run():
     """Deregister the Windows-startup entry (so a stale one doesn't try
     to launch a file that's about to stop existing), wipe the whole data
@@ -38,6 +55,16 @@ def run():
     # (unlike this process's own file, a plain cmd.exe launched detached
     # isn't holding the exe open, so the delete succeeds once we're gone).
     command = f'ping 127.0.0.1 -n 3 >nul & del /f /q "{exe_path}"'
+    if startup.is_installed_copy():
+        # **The installed folder build goes whole** (21 September 2026):
+        # its folder in %LOCALAPPDATA%\Programs and the two shortcuts the
+        # bridge made. Only the installed copy removes a folder - a build
+        # run from anywhere else deletes its own exe, as before.
+        folder = exe_path.parent
+        shortcuts = [p for p in _shortcuts() if p.exists()]
+        command = (f'ping 127.0.0.1 -n 3 >nul & cd /d "%TEMP%" & '
+                   f'rd /s /q "{folder}"'
+                   + "".join(f' & del /f /q "{p}"' for p in shortcuts))
     subprocess.Popen(
         ["cmd", "/c", command],
         creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
