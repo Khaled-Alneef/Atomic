@@ -1505,7 +1505,7 @@ def install():
     #   * The details page swaps with Home in one step each way, the row
     #     scrollbar keeps its height, sideways touchpad swipes stay native,
     #     and the medium pages lose their "Most watched" note.
-    updater.APP_VERSION = "2.7"
+    updater.APP_VERSION = "2.8"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

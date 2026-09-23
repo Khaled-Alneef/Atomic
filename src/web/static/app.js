@@ -2993,6 +2993,55 @@ addEventListener('scroll', function () {
              height: page.scrollHeight, client: page.clientHeight,
              wheel: trailText(), route: location.hash });
 }, true);
+
+/* **Quick Apps and Websites own their wheel too.** Each list is its own
+   `.tiles` scroller (app.css, "make separate scrollable frames to apps
+   and websites") with `overscroll-behavior: contain` so it never hands a
+   scroll on to the page - but the global glide below used to take every
+   non-finger wheel event before the browser ever saw it, so a notch over
+   either box scrolled the whole Home page instead.
+
+   **A fast burst of notches must not restart the ease.** The first cut
+   (below `began = performance.now()` on every call, exactly `.strip`'s
+   `sideScroller`) reproduced the owner's report: "when I scroll it seems
+   super slow but when I scroll slowly it seems good". A single notch
+   showed the full curve and looked fine; a real spin sends several
+   notches inside one `GLIDE_MS` (130ms) window, and restarting `began`
+   each time re-entered the ease at t=0 on every one of them - with
+   `EASE` an ease-*in*-out curve, t=0 is its slowest instant, so a burst
+   never left the slow opening for as long as it kept arriving. The
+   page's own glide (`glideStep`, "A chained notch keeps the frames' own
+   clock", 8 September 2026) solved exactly this for the whole-page case
+   by never resetting its clock while already running; `tilesGlide` is
+   that same shape, generalised off one element's scrollTop instead of
+   `page`'s, with the page's ease-out curve (fast start, no restart
+   penalty) rather than the ease-in-out one `.strip` uses. */
+function tilesGlide(node) {
+  let on = false, remain = 0, start = 0, applied = 0, at = 0, lastNow = 0;
+  function step(now) {
+    if (!on) return;
+    lastNow = now;
+    const t = Math.max(0, Math.min(1, (now - at) / GLIDE_MS));
+    const eased = 1 - Math.pow(1 - t, 3);        // page glideStep's own curve
+    const target = start * eased;
+    node.scrollTop = node.scrollTop + (target - applied);
+    applied = target;
+    remain = start - applied;
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      on = false; remain = 0;
+    }
+  }
+  return function (delta) {
+    const limit = node.scrollHeight - node.clientHeight;
+    const here = node.scrollTop;
+    const want = Math.max(0, Math.min(limit, here + remain + delta));
+    start = want - here; applied = 0; remain = start;
+    at = (on && lastNow) ? lastNow : performance.now();
+    if (!on) { on = true; requestAnimationFrame(step); }
+  };
+}
 addEventListener('wheel', function (e) {
   if (e.ctrlKey || e.shiftKey || e.deltaMode !== 0) return;
   const now = performance.now();
@@ -3001,6 +3050,13 @@ addEventListener('wheel', function (e) {
                     top: Math.round(page.scrollTop) });
   if (wheelTrail.length > 12) wheelTrail.shift();
   if (finger) return;                                   // the browser's own
+  const tiles = e.target.closest ? e.target.closest('.row.quick .tiles') : null;
+  if (tiles && tiles.scrollHeight > tiles.clientHeight + 1) {
+    e.preventDefault();
+    if (!tiles._vert) tiles._vert = tilesGlide(tiles);
+    tiles._vert(e.deltaY);
+    return;
+  }
   /* **The reader too - 5 September 2026.** It used to be the one
      surface this did not take, on the note that its scrolling was
      "already the browser's own and already smooth"; with Chromium's

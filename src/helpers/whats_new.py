@@ -30,6 +30,13 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.8": [
+        "Scrolling the mouse wheel over the Quick Apps or Websites list "
+        "on the Home page now scrolls just that list, instead of "
+        "scrolling the whole page.",
+        "Scrolling those lists quickly is smooth now too - it used to "
+        "feel sluggish compared to scrolling slowly.",
+    ],
     "2.7": [
         "Atomic opens about three times faster - around two seconds to "
         "the home page instead of six or seven, and much sooner when "
