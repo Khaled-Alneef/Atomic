@@ -30,6 +30,13 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.9": [
+        "Videos no longer skip ahead, refuse to seek back, or show broken "
+        "frames when you move on to the next episode of a season pack - "
+        "no refresh needed any more.",
+        "If a video ever does play badly, the app's log now records why, "
+        "so it can be tracked down.",
+    ],
     "2.8": [
         "Scrolling the mouse wheel over the Quick Apps or Websites list "
         "on the Home page now scrolls just that list, instead of "

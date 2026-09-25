@@ -1512,7 +1512,7 @@ def install():
     #     served high-water mark (torrent_engine._serve), the file
     #     fallback holds back unwritten blocks, and mpv's own warnings
     #     reach atomic.log (mpv_proxy.serve).
-    updater.APP_VERSION = "2.8.1"
+    updater.APP_VERSION = "2.9"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
