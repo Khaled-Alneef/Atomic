@@ -41,6 +41,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 
 from . import logs
 
@@ -48,6 +49,13 @@ from . import logs
 # Atomic.exe; from source it is python main.py - either way sys.executable
 # and sys.argv[0] describe how to run it again.
 HOST_FLAG = "--mpv-host"
+
+# What of mpv's own log reaches atomic.log (serve's on_log): warnings and
+# errors, the same text at most once per MPV_LOG_REPEAT_S, and no more
+# than MPV_LOG_PER_MINUTE lines a minute whatever mpv says.
+MPV_LOG_LEVEL = "warn"
+MPV_LOG_REPEAT_S = 10.0
+MPV_LOG_PER_MINUTE = 30
 
 
 def enabled() -> bool:
@@ -177,6 +185,11 @@ class RemoteMPV:
             elif kind == "event":
                 for callback in self._events:
                     _safely(callback, message.get("event"))
+            elif kind == "log":
+                try:
+                    logs.info(str(message.get("text") or ""))
+                except Exception:
+                    pass
         self._alive = False
         # **Every caller still waiting for a reply is released now, not
         # when its 8s runs out.** The wait in _call is bounded, but a
@@ -667,11 +680,42 @@ def serve(port, window_id):
     # signal, and that arrives on a blocking recv as EOF.
     sock.settimeout(None)
     handle = None
+    # Replies go out from this loop, events and properties from mpv's
+    # event thread: two writers on one socket, so one message at a time.
+    send_lock = threading.Lock()
 
     def push(kind, **fields):
         try:
-            _send(sock, dict(kind=kind, **fields))
+            with send_lock:
+                _send(sock, dict(kind=kind, **fields))
         except OSError:
+            pass
+
+    # **mpv's own warnings reach atomic.log.** Nothing listened before 25
+    # September 2026, so the owner's "the frames of the video were not
+    # showing correctly, only the sound was good" left no line at all -
+    # neither the decoder's complaint nor the demuxer's. Throttled: a
+    # broken stretch of HEVC says the same thing once a frame.
+    said = {}
+    budget = [0.0, 0]           # minute started, lines said in it
+
+    def on_log(level, component, text):
+        try:
+            text = str(text).strip()
+            if not text:
+                return
+            now = time.monotonic()
+            key = (component, text[:60])
+            if now - said.get(key, -60.0) < MPV_LOG_REPEAT_S:
+                return
+            if now - budget[0] > 60.0:
+                budget[0], budget[1] = now, 0
+            if budget[1] >= MPV_LOG_PER_MINUTE:
+                return
+            said[key] = now
+            budget[1] += 1
+            push("log", text=f"mpv {level} [{component}] {text[:300]}")
+        except Exception:
             pass
 
     while True:
@@ -699,7 +743,8 @@ def serve(port, window_id):
                 # pre-started, and on the command line otherwise.
                 args = message.get("args") or []
                 target = int(args[0]) if args else int(window_id)
-                handle = mpv.MPV(wid=str(target), **options)
+                handle = mpv.MPV(wid=str(target), log_handler=on_log,
+                                 loglevel=MPV_LOG_LEVEL, **options)
                 handle.register_event_callback(
                     lambda event: push("event", event=_plain(event)))
                 value = True

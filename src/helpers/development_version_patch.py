@@ -1505,7 +1505,14 @@ def install():
     #   * The details page swaps with Home in one step each way, the row
     #     scrollbar keeps its height, sideways touchpad swipes stay native,
     #     and the medium pages lose their "Most watched" note.
-    updater.APP_VERSION = "2.8"
+    # 2.8
+    #   * The Quick Apps and Websites lists on Home take the mouse wheel.
+    # 2.9
+    #   * A season pack's next episode no longer inherits the last one's
+    #     served high-water mark (torrent_engine._serve), the file
+    #     fallback holds back unwritten blocks, and mpv's own warnings
+    #     reach atomic.log (mpv_proxy.serve).
+    updater.APP_VERSION = "2.8.1"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
