@@ -384,6 +384,30 @@ STREAM_STALL_S = 60.0
 # response is ended and the client reopens - _Torrent.wait_for's own
 # default, now waited in slices so the client hanging up is noticed.
 PIECE_WAIT_S = 45.0
+# How long _serve's file fallback holds back a read that still carries an
+# unwritten block. A completed piece reads as zeros from the file for
+# ~0.5s (_Torrent.read_piece has the measurement); past this, whatever
+# the file holds is what the file is, zeros and all, so a genuinely
+# zero-filled stretch (an mkv Void) is still served and never stalls.
+FALLBACK_SETTLE_S = 3.0
+# libtorrent writes a piece in 16KB blocks from the piece's start, so an
+# unwritten stretch is at least one whole block of zeros on that grid.
+DISK_BLOCK = 16 * 1024
+
+
+def _zero_block(data, offset, piece_start):
+    """Whether `data`, read at file `offset`, holds a whole 16KB block of
+    the piece starting at `piece_start` that is all zeros - an unwritten
+    block of a sparse file, which reads back as zeros and full length."""
+    first = offset + (-(offset - piece_start)) % DISK_BLOCK
+    end = offset + len(data)
+    zero = bytes(DISK_BLOCK)
+    while first + DISK_BLOCK <= end:
+        begin = first - offset
+        if data[begin:begin + DISK_BLOCK] == zero:
+            return True
+        first += DISK_BLOCK
+    return False
 
 # The window that belongs to nobody in particular - what add(),
 # set_start_seconds() and a bare focus() move. Every live HTTP read
@@ -887,10 +911,13 @@ class _Torrent:
         self.handle = handle
         self.info_hash = info_hash
         self.lock = threading.Lock()
-        # The highest file offset ever handed to a reader. Bytes below it
-        # have been served once already, which is the proof _serve needs
-        # to read them straight from the file - see the note there.
-        self.served_hwm = 0
+        # The highest file offset ever handed to a reader, **per file of
+        # the torrent**. Bytes below it have been served once already,
+        # which is the proof _serve needs to read them straight from the
+        # file - see the note there. It was one number for the whole
+        # torrent until 25 September 2026, so the next episode of a held
+        # pack inherited the last one's mark - see _serve.
+        self.served_hwm = {}
         self.file_index = None
         self.last_touched = time.time()
         # Byte offset playback is going to *start* at, when a resume
@@ -3986,6 +4013,9 @@ class _Handler(BaseHTTPRequestHandler):
         offset = start
         remaining = length
         path = torrent.file_path()
+        # The file this request serves, pinned with `path`: the high-water
+        # mark below belongs to it and to no other file of the pack.
+        file_index = torrent.file_index
         # Where the window was last pointed. mpv opens one open-ended
         # Range and reads the rest of the file down it, so without this
         # the window only ever moved when a piece was *missing* - that
@@ -3995,6 +4025,9 @@ class _Handler(BaseHTTPRequestHandler):
         # noticing there is a download at all.
         focused_at = start
         cached_piece, cached_bytes = None, None
+        # The piece read_piece last failed on, and since when - the file
+        # fallback's settle is counted from there.
+        failed_piece, failed_since = None, 0.0
         # **This loop had no deadline, and two of its paths never send a
         # byte.** `if not data: time.sleep(0.1); continue` spins forever
         # when the file reads back empty and libtorrent will not answer,
@@ -4108,17 +4141,54 @@ class _Handler(BaseHTTPRequestHandler):
                 # catches up. Unthrottled (OS cache) it is a 10ms blip; at
                 # 1MB/s it was 5.5-8.2s. The re-read was paying the alert
                 # path for every piece it had already been served.
-                if offset + chunk <= torrent.served_hwm:
+                #
+                # **The mark is the file's, not the torrent's.** It was
+                # one number per torrent, and the player moves through a
+                # season pack by switching `file_index` on the torrent it
+                # holds - so the next episode inherited how far the last
+                # one had been read, often past its own end, and every
+                # read of it took this path, fresh pieces included. Those
+                # are the zeros read_piece exists for, served as video:
+                # the owner's "the video skips some seconds and when I try
+                # to go back it does not go back ... it shows a bugged
+                # images from the frames" (25 September 2026), on the
+                # Judas Dagashi Kashi pack, every episode after the first
+                # one opened in it, and gone after a refresh because by
+                # then those pieces were on disk. Measured with a fake
+                # two-file pack through this handler (h_packswitch.py):
+                # the second file served 100% zeros, against 0% for the
+                # same file served first; a zero read now also falls
+                # through to read_piece rather than trusting the mark.
+                if offset + chunk <= torrent.served_hwm.get(file_index, 0):
                     try:
                         with open(path, "rb") as handle:
                             handle.seek(offset)
                             data = handle.read(chunk) or None
                     except (FileNotFoundError, OSError):
                         data = None
+                    if data is not None and not data.strip(b"\x00"):
+                        data = None
                 if data is None and cached_piece != piece:
+                    asked = time.monotonic()
                     blob = torrent.read_piece(piece)
                     if blob is not None:
                         cached_piece, cached_bytes = piece, blob
+                    elif failed_piece != piece:
+                        # Silent until 25 September 2026, and it is the
+                        # one road left to the file's unwritten blocks -
+                        # see the fallback below.
+                        failed_piece, failed_since = piece, time.monotonic()
+                        took = failed_since - asked
+                        try:
+                            logs.info(
+                                f"serve {torrent.info_hash[:8]}: read_piece "
+                                f"answered nothing for piece {piece} at "
+                                f"{offset // (1024 * 1024)}MB after "
+                                f"{took:.1f}s ("
+                                + ("timed out" if took >= 9.5 else
+                                   "libtorrent refused it") + ")")
+                        except Exception:
+                            pass
                 if data is None and cached_piece == piece and cached_bytes is not None:
                     piece_start = piece * piece_length - torrent.file_offset()
                     begin = offset - piece_start
@@ -4134,6 +4204,36 @@ class _Handler(BaseHTTPRequestHandler):
                     except (FileNotFoundError, OSError):
                         time.sleep(0.2)
                         continue
+                    # **A read with an unwritten block in it is held
+                    # back, not streamed.** This path had no check at
+                    # all: a piece read_piece could not answer for went
+                    # out as whatever the file held, and a block not yet
+                    # written reads as zeros at full length. The owner's
+                    # second report of 25 September 2026 - S2E6 of the
+                    # same pack on the build that fixed the per-file
+                    # mark, "the frames of the video were not showing
+                    # correctly, only the sound was good" at ~3:36 -
+                    # left nothing in the log, and the file itself
+                    # decodes clean at that point on d3d11va-copy and in
+                    # software (6,710 frames, 2:30-4:40, no decoder or
+                    # demuxer complaint), so the bytes on the wire are
+                    # what was wrong. And zeros are exactly that picture:
+                    # the same file with 2MB zeroed at 30MB, played over
+                    # it, gave "mkv: Corrupt file detected. Trying to
+                    # resync", a jump from 106.0s to 119.6s, and "hevc:
+                    # Could not find ref with POC ..." frame after frame
+                    # with the audio carrying on - skipped seconds, broken
+                    # frames, good sound. Whether this fallback is the
+                    # road they took is not proven; the line above says
+                    # when it is, and mpv_proxy now logs mpv's own errors.
+                    if data and failed_piece == piece and _zero_block(
+                            data, offset,
+                            piece * piece_length - torrent.file_offset()):
+                        if time.monotonic() - failed_since < FALLBACK_SETTLE_S:
+                            # Ask libtorrent again next pass; failed_since
+                            # stays put, so the settle is counted once.
+                            time.sleep(0.25)
+                            continue
                 if not data:
                     time.sleep(0.1)
                     continue
@@ -4141,8 +4241,8 @@ class _Handler(BaseHTTPRequestHandler):
                 stalled_since = time.monotonic()   # progress, so start over
                 offset += len(data)
                 remaining -= len(data)
-                if offset > torrent.served_hwm:
-                    torrent.served_hwm = offset
+                if offset > torrent.served_hwm.get(file_index, 0):
+                    torrent.served_hwm[file_index] = offset
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
                 OSError):
             # The player moved on - normal, and it happens on every
