@@ -4028,6 +4028,9 @@ class _Handler(BaseHTTPRequestHandler):
         # The piece read_piece last failed on, and since when - the file
         # fallback's settle is counted from there.
         failed_piece, failed_since = None, 0.0
+        # The piece the mark's own read was last held back on, so the line
+        # below is written once per piece rather than once per read.
+        held_piece = None
         # **This loop had no deadline, and two of its paths never send a
         # byte.** `if not data: time.sleep(0.1); continue` spins forever
         # when the file reads back empty and libtorrent will not answer,
@@ -4166,7 +4169,54 @@ class _Handler(BaseHTTPRequestHandler):
                             data = handle.read(chunk) or None
                     except (FileNotFoundError, OSError):
                         data = None
-                    if data is not None and not data.strip(b"\x00"):
+                    # **The mark says "served", not "written".** It moves
+                    # at the write below, and most of those writes came
+                    # out of read_piece - libtorrent's memory - for a
+                    # piece that completed seconds ago, which the file
+                    # holds as zeros for ~0.5s after (read_piece's own
+                    # measurement). So a re-read below the mark can still
+                    # carry an unwritten block - and mpv re-reads below
+                    # the mark on **every exact seek**, because it decodes
+                    # forward from the keyframe before the target.
+                    #
+                    # The owner, 26 September 2026, pressing the right
+                    # arrow back to back at the download edge: "the video
+                    # gets stuck on exactly 8:00 and the sound jumped like
+                    # 5 sec ahead ... then the video continued playing on
+                    # 8:12". His log at that moment, every piece arriving
+                    # 1.3-6.1s late: three `mkv: Corrupt file detected`,
+                    # `hevc: Could not find ref with POC` frame after
+                    # frame, and `Invalid audio PTS: 481.094500 ->
+                    # 485.534500` - 481.09s is 8:01, and the jump is the
+                    # 4.44s he saw. That is the picture 2416dd2
+                    # reproduced the night before by zeroing 2MB of a good
+                    # file; this was the road left to it.
+                    #
+                    # `strip` only rejected a read that was zeros *whole*,
+                    # so a real head with an unwritten tail went out as
+                    # video - and `chunk` runs to the end of the piece,
+                    # which is megabytes of room for one. _zero_block is
+                    # the fallback path's own test, on libtorrent's 16KB
+                    # write grid; read_piece below is the road a piece
+                    # this fresh was always meant to take, and if it
+                    # answers nothing the fallback serves the file's bytes
+                    # after FALLBACK_SETTLE_S - so a genuinely zero-filled
+                    # stretch (an mkv Void) still goes out, just later.
+                    if data is not None and (
+                            _zero_block(data, offset,
+                                        piece * piece_length
+                                        - torrent.file_offset())
+                            or not data.strip(b"\x00")):
+                        if held_piece != piece:
+                            held_piece = piece
+                            try:
+                                logs.info(
+                                    f"serve {torrent.info_hash[:8]}: the file "
+                                    f"still has an unwritten block in piece "
+                                    f"{piece} at {offset // (1024 * 1024)}MB "
+                                    f"- asking libtorrent for it instead")
+                            except Exception:
+                                pass
                         data = None
                 if data is None and cached_piece != piece:
                     asked = time.monotonic()

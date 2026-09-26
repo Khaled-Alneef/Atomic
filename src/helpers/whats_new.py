@@ -30,6 +30,12 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.10": [
+        "Skipping forward with the arrow keys while an episode is still "
+        "downloading no longer freezes the picture while the sound carries "
+        "on ahead of it - the video used to catch up several seconds "
+        "later, with broken frames in between.",
+    ],
     "2.9": [
         "Videos no longer skip ahead, refuse to seek back, or show broken "
         "frames when you move on to the next episode of a season pack - "

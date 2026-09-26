@@ -1512,7 +1512,11 @@ def install():
     #     served high-water mark (torrent_engine._serve), the file
     #     fallback holds back unwritten blocks, and mpv's own warnings
     #     reach atomic.log (mpv_proxy.serve).
-    updater.APP_VERSION = "2.9"
+    # 2.10
+    #   * A re-read below the served mark takes _zero_block too, so an
+    #     exact seek at the download edge cannot stream an unwritten
+    #     block (torrent_engine._serve).
+    updater.APP_VERSION = "2.10"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
