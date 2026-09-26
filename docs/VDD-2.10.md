@@ -17,7 +17,7 @@
 | At the tag | `Atomic.exe` / `Atomic.zip` — the same bridge, for installs predating 2.0 |
 | Asset size | 137,903,336 bytes |
 | Asset SHA-256 | `aba9073fc50bf8a8a21ea099b71ac4b51edb028f68239fb440bd4cc2dd638ab1` |
-| Preceded by | 2.9 (2.8 and 2.9 carry no VDD; the newest before this one is `docs/VDD-2.7.md`) |
+| Preceded by | 2.9 — `docs/VDD-2.9.md`, which like every VDD from 2.8 on lives on `main` only, in the snapshot it describes |
 
 ---
 
