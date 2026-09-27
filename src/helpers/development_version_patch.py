@@ -1516,7 +1516,14 @@ def install():
     #   * A re-read below the served mark takes _zero_block too, so an
     #     exact seek at the download edge cannot stream an unwritten
     #     block (torrent_engine._serve).
-    updater.APP_VERSION = "2.10"
+    # 2.11
+    #   * The web reader raises the saved entry's last_watched_chapter
+    #     on every chapter opened, so a Home card moves with reading
+    #     (backend.mark_read -> tracker.record_progress).
+    #   * No schtasks on launch: startup.reconcile() is gone after
+    #     Defender quarantined the installed app as
+    #     Behavior:Win32/Persistence.A!ml (main.py, where it was called).
+    updater.APP_VERSION = "2.11"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

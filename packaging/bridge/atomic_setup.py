@@ -10,8 +10,8 @@ takes the folder build out of the release's Atomic.zip (its app.zip -
 or one already beside it, from a zip extracted by hand), installs it into
 %LOCALAPPDATA%\\Programs\\Atomic, puts Atomic.lnk on the Desktop and in
 the Start menu, starts the installed app, and removes its own loose exe.
-The installed app re-points the startup task at itself on its first
-launch (helpers/startup.reconcile).
+A startup task naming the old exe is not re-pointed automatically any more
+(helpers/startup, 27 September 2026) - ticking the setting again does it.
 
 What follows is the 2.0 history of the same program, which still holds.
 

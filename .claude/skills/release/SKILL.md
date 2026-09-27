@@ -94,6 +94,24 @@ it has never been in a snapshot, and `read-tree` brings it in silently
 procedure). Anything on `development` that main has never carried is
 worth the same look.
 
+**And the inverse, which is the one that destroys something: every VDD
+lives on `main` only.** `read-tree -u --reset development` replaces
+main's tree wholesale, so every file main carries that `development`
+never has is *deleted* by the snapshot. At 2.10 that was
+`docs/VDD-2.8.md` and `docs/VDD-2.9.md` - written into their own
+snapshots, never onto `development`, and staged for deletion by a
+procedure that looks like it only adds. Restore them before committing:
+
+```
+git diff --cached --name-status --diff-filter=D HEAD   # must be empty
+git checkout HEAD -- docs/VDD-2.8.md docs/VDD-2.9.md   # whatever it named
+```
+
+Run that `--diff-filter=D` check at every release. "Nothing is being
+deleted" is a claim, and it is wrong by default here - a snapshot that
+adds one VDD and silently drops the two before it reads as a normal
+release in every other way.
+
 The release is not published until the asset is attached: the tag alone
 offers 1.10 installs a bridge with nothing to fetch.
 
