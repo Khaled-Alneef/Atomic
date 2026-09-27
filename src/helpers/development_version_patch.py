@@ -1523,7 +1523,7 @@ def install():
     #   * No schtasks on launch: startup.reconcile() is gone after
     #     Defender quarantined the installed app as
     #     Behavior:Win32/Persistence.A!ml (main.py, where it was called).
-    updater.APP_VERSION = "2.11"
+    updater.APP_VERSION = "2.12"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

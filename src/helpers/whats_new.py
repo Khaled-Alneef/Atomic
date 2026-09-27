@@ -30,6 +30,12 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.12": [
+        "Subtitle files you add from your own computer load even when "
+        "they are very large - some fansub .ass files with lots of on-screen "
+        "effects are tens of megabytes and used to be refused as "
+        "\"could not be read\".",
+    ],
     "2.11": [
         "Reading a chapter now moves the chapter number on its Home "
         "card straight away - before, only marking it as read did.",
