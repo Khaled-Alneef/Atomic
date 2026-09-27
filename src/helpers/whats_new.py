@@ -30,6 +30,14 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.11": [
+        "Reading a chapter now moves the chapter number on its Home "
+        "card straight away - before, only marking it as read did.",
+        "Atomic no longer checks its Windows startup entry every time it "
+        "opens. Windows Security had started treating that check as "
+        "suspicious and removing the app. If \"Launch on Windows "
+        "startup\" stopped working, tick it again in Settings.",
+    ],
     "2.10": [
         "Skipping forward with the arrow keys while an episode is still "
         "downloading no longer freezes the picture while the sound carries "
