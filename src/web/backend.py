@@ -907,11 +907,43 @@ def mark_read(entry_id, key, read=True):
         return {"ok": False}
     try:
         from helpers import history
+        chapter = _chapter_of(key) if read else None
+        if chapter is not None:
+            # **The saved entry's own number moves too, forward only.**
+            # The owner, 27 September 2026: "when I read a ch the
+            # progress does not change in the home page card ... but when
+            # I mark as read/unread it works". This used to tick History
+            # and stop there, while a saved reading card reads
+            # `last_watched_chapter` (server._progress_text) - which the
+            # Qt reader raises on every open (_mark_chapter_read) and the
+            # details page's mark menu writes through correct_progress.
+            # Measured on a copy of his data: Kingdom (WAN) at 887, the
+            # reader opened c890, the field stayed 887 and the card
+            # "Ch 888". record_progress is that same forward-only write,
+            # with the History tick and changes.bump in it.
+            # Only for a type record_progress files as reading: any other
+            # would take its episode branch and write no tick at all.
+            from windows import tracker
+            if entry.get("type") in tracker.MANGA_TYPES:
+                tracker.record_progress(entry, chapter=chapter)
+                return {"ok": True}
         history.set_watched(entry, [key], watched=bool(read))
         history.touch(entry)
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:160]}
     return {"ok": True}
+
+
+def _chapter_of(key):
+    """The chapter number in a reader key ("c886", "c24.5" -
+    history.chapter_key), or None for anything else."""
+    text = str(key or "").strip()
+    if text[:1] not in ("c", "C"):
+        return None
+    try:
+        return float(text[1:])
+    except ValueError:
+        return None
 
 
 def read_state(entry_id):
