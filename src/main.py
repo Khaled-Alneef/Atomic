@@ -6014,22 +6014,20 @@ def main():
             torrent_engine.prewarm()
     except Exception:
         logs.exception("Could not warm the torrent session")
-    # Migrate a startup entry from the old registry Run key to a logon
-    # scheduled task, once. Off a timer and cheap: it is one registry read
-    # and returns immediately when there is nothing to migrate (the common
-    # case after the first launch of this version). The task is what makes
-    # a sign-in launch start ~35s sooner - see helpers/startup for the
-    # measurement. Never on the hot path, and never fatal.
-    def _reconcile_startup():
-        try:
-            startup.reconcile()
-        except Exception:
-            logs.exception("Could not reconcile the startup entry")
-    # On a thread: reconcile asks schtasks whether the task still names
-    # this exe (the folder build moved it - helpers/startup), which is a
-    # process launch, not something for the UI thread.
-    QTimer.singleShot(2000, lambda: threading.Thread(
-        target=_reconcile_startup, daemon=True, name="startup-reconcile").start())
+    # **No startup work on launch - the entry is touched only when he
+    # ticks it.** 27 September 2026: Defender quarantined the installed
+    # Atomic.exe as Behavior:Win32/Persistence.A!ml five seconds after a
+    # launch (process start 17:24:30, detection 17:24:35) and took the
+    # Desktop, Start menu and taskbar shortcuts and the \Atomic task with
+    # it. What ran two seconds into every launch was startup.reconcile():
+    # a hidden schtasks.exe, and a /Create /XML <temp> /F when the task
+    # named another exe - an unsigned program re-registering its own
+    # logon task unasked, which is the shape that verdict is named for.
+    # The file itself scans clean. Not proven to be the only trigger (the
+    # verdict is Microsoft's cloud ML and cannot be reproduced on demand),
+    # but it was the one persistence write nobody asked for, so it is
+    # gone; Settings, the setup wizard and uninstall still set the entry
+    # when he acts on them.
     # The three overlay modules, imported now rather than inside the
     # click that opens one. **They are imported lazily on purpose** (see
     # tracker.open_in_app) and that is still right - it keeps them off

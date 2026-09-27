@@ -31,8 +31,15 @@ needs no admin rights to register - the same permission the Run key had.
 The registry Run key stays as the **fallback**: if the Task Scheduler
 service is disabled or refuses the registration, set_enabled(True) writes
 the old Run entry instead, so "Launch on Windows startup" is never silently
-off. reconcile() migrates an existing Run-key install to a task once, on the
-next launch, and is a cheap no-op after that.
+off.
+
+**Nothing here runs on launch any more (27 September 2026).** reconcile(),
+which asked schtasks two seconds into every launch and re-registered the
+task when it named another exe, was removed after Defender quarantined the
+installed app as Behavior:Win32/Persistence.A!ml - see main.py where it was
+called. The entry is written only by set_enabled, from Settings, the setup
+wizard and uninstall. A task left naming an old exe is fixed by ticking the
+setting off and on.
 """
 
 import os
@@ -296,55 +303,12 @@ def install_dir() -> Path:
 
 
 def is_installed_copy() -> bool:
-    """Whether this process is the installed Atomic - the only copy that
-    may take over the startup task. A build run from the repository (or
-    anywhere else) re-pointing the owner's task at itself would start a
-    development build at his next sign-in."""
+    """Whether this process is the installed Atomic (uninstall asks)."""
     try:
         here = Path(sys.executable).resolve().parent
         return os.path.normcase(str(here)) == os.path.normcase(str(install_dir().resolve()))
     except Exception:
         return False
-
-
-def _task_command():
-    """(command, arguments) the registered task runs, or None."""
-    result = _run_schtasks(["/Query", "/TN", _TASK_NAME, "/XML"])
-    if not result or result[0] != 0:
-        return None
-    import re
-    from xml.sax.saxutils import unescape
-    text = result[1] or ""
-    command = re.search(r"<Command>(.*?)</Command>", text, re.S)
-    arguments = re.search(r"<Arguments>(.*?)</Arguments>", text, re.S)
-    return (unescape(command.group(1)).strip() if command else "",
-            unescape(arguments.group(1)).strip() if arguments else "")
-
-
-def reconcile() -> None:
-    """Keep the startup entry pointing at this exe. Called on launch, off
-    the UI thread (it asks schtasks, ~100ms).
-
-    Migrates an existing Run-key install to a scheduled task, once - if
-    there is no Run-key entry that costs one registry read. And **re-points
-    a task that names another exe** (21 September 2026): the folder build
-    lives in %LOCALAPPDATA%\\Programs\\Atomic, while the owner's task named
-    Desktop\\Atomic.exe - the single-file build the bridge replaces - so it
-    would have started nothing at the next sign-in. Only a frozen build
-    re-points: a source run must not take over the installed app's task."""
-    if _run_key_value() is not None:
-        if _create_task():
-            _delete_run_key_values()
-        return
-    if not getattr(sys, "frozen", False) or not is_installed_copy():
-        return
-    registered = _task_command()
-    if registered is None:
-        return                      # startup is off; nothing to keep in step
-    command, arguments = _launch_parts()
-    if (os.path.normcase(os.path.abspath(registered[0])) != os.path.normcase(os.path.abspath(command))
-            or registered[1] != arguments):
-        _create_task()
 
 
 def allow_precise_timers() -> bool:
