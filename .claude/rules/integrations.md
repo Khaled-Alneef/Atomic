@@ -442,6 +442,13 @@ in alphabetical order): his three in 0.4s, and Arabic the addon missed
 across his library - Frieren 5 vs 1, JJK 6 vs an error, AoT 16 vs 4,
 Breaking Bad 13 vs 3, never fewer. Rows go under "OpenSubtitles".
 
+**A browsed .ass can be 36MB** (27 September 2026). A typeset fansub
+(ESPADAS-3ASQ Bleach TYBW 48: 110,273 Dialogue lines of drawn effects,
+22 embedded fonts) was refused by `read_file` on the 8MB download cap,
+and the log's only word was "the file could not be read". mpv lists and
+selects it in 0.45s. A file off his own disk now has its own cap,
+`MAX_LOCAL_SUBTITLE_BYTES` (128MB); downloads keep `MAX_SUBTITLE_BYTES`.
+
 English results ride along (OpenSubtitles addon has 1-2 per anime
 episode) as feedstock for the AI translator: picking one with an AI key
 configured translates it to Arabic on the fly (`player.

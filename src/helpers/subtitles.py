@@ -51,7 +51,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from . import app_settings, net, title_match
+from . import app_settings, logs, net, title_match
 
 # The strict release-name reader, imported the same defensive way
 # streams.py imports it: a build where this fails checks one thing fewer,
@@ -73,6 +73,18 @@ ARABIC_CODES = ("ar", "ara", "arabic", "ar-sa", "ara-sa", "arb")
 # An extracted subtitle is a text file. Anything past this is not one,
 # and unpacking it would be the zip-bomb the cap exists to stop.
 MAX_SUBTITLE_BYTES = 8_000_000
+
+# A file he browsed to himself is not a download from a stranger, and a
+# typeset fansub is not kilobytes. His report, 27 September 2026: "why
+# could not I load the subtitles in my Downloads ???? it is .ass" -
+# [ESPADAS-3ASQ] Bleach Sennen Kessen-hen - 48 is **36,361,125 bytes**:
+# 110,273 Dialogue lines of drawn effects (31.1M chars of [Events]) and
+# 22 embedded fonts (4.9M of [Fonts]). read_file refused it on the 8MB
+# cap twenty times in a row, "the file could not be read". mpv itself
+# lists and selects it in 0.45s (measured on the app's libmpv), so the
+# cap was the whole failure. Still a cap: a picked 2GB video is not a
+# subtitle either.
+MAX_LOCAL_SUBTITLE_BYTES = 128_000_000
 
 
 def _headers(referer=None) -> dict:
@@ -156,16 +168,16 @@ def decode(raw: bytes) -> str:
     return best
 
 
-def _unpack(raw: bytes, name_hint: str = "") -> bytes:
+def _unpack(raw: bytes, name_hint: str = "", limit: int = MAX_SUBTITLE_BYTES) -> bytes:
     """The subtitle out of whatever container it arrived in.
 
     These sources hand back .zip and .gz as often as a bare file, and a
     zip routinely holds a sample video or several releases' subtitles -
     so the largest subtitle-looking member is the one taken, not the
-    first."""
+    first. `limit` is read_file's larger cap for a file off this disk."""
     if raw[:2] == b"\x1f\x8b":
         try:
-            return gzip.decompress(raw)[:MAX_SUBTITLE_BYTES]
+            return gzip.decompress(raw)[:limit]
         except Exception:
             return raw
     # AnimeTosho serves every attachment xz-compressed whatever the
@@ -175,7 +187,7 @@ def _unpack(raw: bytes, name_hint: str = "") -> bytes:
     # being a subtitle.
     if raw[:6] == b"\xfd7zXZ\x00":
         try:
-            return lzma.decompress(raw)[:MAX_SUBTITLE_BYTES]
+            return lzma.decompress(raw)[:limit]
         except Exception:
             return raw
     if raw[:2] == b"PK":
@@ -183,12 +195,12 @@ def _unpack(raw: bytes, name_hint: str = "") -> bytes:
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
                 members = [m for m in archive.infolist()
                            if m.filename.lower().endswith((".srt", ".ass", ".ssa", ".vtt", ".sub"))
-                           and m.file_size <= MAX_SUBTITLE_BYTES]
+                           and m.file_size <= limit]
                 if not members:
                     return raw
                 member = max(members, key=lambda m: m.file_size)
                 with archive.open(member) as handle:
-                    return handle.read(MAX_SUBTITLE_BYTES)
+                    return handle.read(limit)
         except Exception:
             return raw
     return raw
@@ -922,12 +934,14 @@ def read_file(path) -> str:
         return None
     try:
         with open(path, "rb") as handle:
-            raw = handle.read(MAX_SUBTITLE_BYTES + 1)
+            raw = handle.read(MAX_LOCAL_SUBTITLE_BYTES + 1)
     except OSError:
         return None
-    if len(raw) > MAX_SUBTITLE_BYTES:
-        return None             # not a subtitle; a subtitle is kilobytes
-    raw = _unpack(raw, os.path.basename(str(path)))
+    if len(raw) > MAX_LOCAL_SUBTITLE_BYTES:
+        logs.warning(f"subtitle: the file is {len(raw):,} bytes or more - "
+                     f"over the {MAX_LOCAL_SUBTITLE_BYTES:,} cap, not a subtitle")
+        return None
+    raw = _unpack(raw, os.path.basename(str(path)), MAX_LOCAL_SUBTITLE_BYTES)
     text = decode(raw)
     # The same guard fetch uses: a file with no timestamp and no
     # Dialogue line parses to zero cues and would load as a blank track
