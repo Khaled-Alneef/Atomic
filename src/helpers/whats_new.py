@@ -30,6 +30,16 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "2.13": [
+        "Videos no longer play too fast on some computers. On a few "
+        "Windows 10 machines the picture ran at about double speed while "
+        "the sound stayed normal, and changing the playback speed did not "
+        "help. The player now checks this in the first moment of playback "
+        "and, if the screen cannot keep up, remembers it and plays "
+        "normally from then on.",
+        "The playback speed button now shows the whole number - \"0.25x\" "
+        "used to be cut off.",
+    ],
     "2.12": [
         "Subtitle files you add from your own computer load even when "
         "they are very large - some fansub .ass files with lots of on-screen "

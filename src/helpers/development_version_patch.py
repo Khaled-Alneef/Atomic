@@ -1523,7 +1523,7 @@ def install():
     #   * No schtasks on launch: startup.reconcile() is gone after
     #     Defender quarantined the installed app as
     #     Behavior:Win32/Persistence.A!ml (main.py, where it was called).
-    # 2.12.1
+    # 2.13 (2.12.1 - 2.12.4)
     #   * A picture running away from its sound (display-resample with
     #     presents vsync does not pace) switches the session to
     #     video-sync=audio and re-seats at the sound (player.
@@ -1541,7 +1541,7 @@ def install():
     # 2.12.4
     #   * The speed button grows to fit its number - "0.25x" was cut to
     #     ".25x" in the 40px square (player._show_speed_label).
-    updater.APP_VERSION = "2.12.4"
+    updater.APP_VERSION = "2.13"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
