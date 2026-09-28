@@ -105,6 +105,72 @@ def unavailable_reason():
 ARABIC_FONTS = ("Segoe UI", "Tahoma", "Arial", "Noto Naskh Arabic")
 
 
+# **A machine whose presents vsync does not pace stays in
+# video-sync=audio**, remembered per machine. A friend's Windows 10
+# install, 28 September 2026: under display-resample the picture ran
+# about 2x with the sound at 1x (reproduced here at 30.8s of picture in
+# 10s, player._watch_runaway has the numbers). Catching it after the
+# fact took ~2s of fast picture - "the 1st few seconds are still fast
+# then it goes normal ... make it immediate" - and every episode is a new
+# mpv child, so every episode paid it again.
+#
+# So a core starts in audio (above), where nothing can run away but mpv
+# reports no display timing at all - a paced and an unpaced display read
+# identically there, measured. The player then switches to SMOOTH_SYNC at
+# the first frame and reads mpv's display estimate, which answers in
+# 52-53ms unpaced (4,763-5,411Hz against 240Hz, the picture 87-127ms
+# ahead of its sound) and 84-85ms paced (240.0-240.1Hz); the switch itself
+# is seamless on a paced display (1.00x / 1.00x, avsync 0.001). A bad
+# estimate goes back to audio and is written here, so every later open on
+# this machine never leaves audio at all - mpv's own default, giving up
+# display-resample's even cadence (14.6% -> 0.2% uneven on the owner's
+# 240Hz panel) that an unpaced machine was never getting anyway.
+#
+# Keyed by the computer's name, because a data folder can be carried to
+# another machine and this is a fact about the machine, not the library.
+SMOOTH_SYNC = "display-resample"
+SYNC_VERDICT_FILE = "video_sync.json"
+_sync_verdict = None
+
+
+def _machine() -> str:
+    return os.environ.get("COMPUTERNAME") or "this machine"
+
+
+def audio_sync_remembered() -> bool:
+    global _sync_verdict
+    if _sync_verdict is None:
+        try:
+            from . import storage
+            data = storage.load(SYNC_VERDICT_FILE, {})
+            _sync_verdict = bool((data.get(_machine()) or {}).get("audio"))
+        except Exception:
+            _sync_verdict = False
+        if _sync_verdict:
+            from . import logs
+            logs.info("player sync: video-sync=audio, remembered for this "
+                      "machine after a runaway picture")
+    return _sync_verdict
+
+
+def remember_audio_sync(detail: str):
+    """Start every later open on this machine in video-sync=audio."""
+    global _sync_verdict
+    _sync_verdict = True
+    try:
+        import time
+        from . import storage
+        data = storage.load(SYNC_VERDICT_FILE, {})
+        data[_machine()] = {"audio": True, "detail": detail,
+                            "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        storage.save(SYNC_VERDICT_FILE, data)
+    except Exception:
+        # A full disk (his log is full of Errno 28) keeps the verdict for
+        # this run only - the watch still catches the next process's.
+        from . import logs
+        logs.exception("Could not remember the video sync mode")
+
+
 def default_options() -> dict:
     """mpv options every player instance starts with.
 
@@ -174,7 +240,15 @@ def default_options() -> dict:
         # window states, so VRR never engaged - the KTC 27GS950 is a
         # Fast HVA panel with a 48-242Hz range, and anything still seen
         # after this is its overdrive, not these pixels.
-        "video_sync": "display-resample",
+        #
+        # **But a core starts in `audio`, and the player moves it to
+        # SMOOTH_SYNC at the first frame once the display has answered
+        # for itself** (PlayerPage._begin_smooth_sync) - a machine whose
+        # presents vsync does not pace runs the picture away from its
+        # sound under display-resample from the very first frame, and
+        # "the 1st few seconds are still fast" was the owner's word on
+        # catching it afterwards. See audio_sync_remembered below.
+        "video_sync": "audio",
         # **No interpolation, and no control that turns it on.** The
         # owner, 27 August 2026: "remove the smoothing in the vid player
         # and the cadence lock entirely from the app, they are useless!"

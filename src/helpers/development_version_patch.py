@@ -1523,7 +1523,22 @@ def install():
     #   * No schtasks on launch: startup.reconcile() is gone after
     #     Defender quarantined the installed app as
     #     Behavior:Win32/Persistence.A!ml (main.py, where it was called).
-    updater.APP_VERSION = "2.12"
+    # 2.12.1
+    #   * A picture running away from its sound (display-resample with
+    #     presents vsync does not pace) switches the session to
+    #     video-sync=audio and re-seats at the sound (player.
+    #     _watch_runaway) - a friend's Windows 10 machine, "always X2".
+    # 2.12.2
+    #   * A core starts in video-sync=audio and moves to display-resample
+    #     at the first frame only if mpv's display estimate agrees with
+    #     the display (player._begin_smooth_sync, ~60ms); a machine that
+    #     fails is remembered and never leaves audio again
+    #     (video_backend.audio_sync_remembered, video_sync.json).
+    # 2.12.3
+    #   * The first-frame probe watches its whole second for the
+    #     picture-to-sound gap and vsync-ratio too: his display's estimate
+    #     read right (180 against 180) while the picture ran away.
+    updater.APP_VERSION = "2.12.3"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
