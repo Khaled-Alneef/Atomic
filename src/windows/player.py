@@ -193,6 +193,10 @@ VOLUME_DEFAULT = 100
 # (SPEEDS) is gone with the cycling itself.
 SPEED_MIN, SPEED_MAX = 0.25, 4.0
 SPEED_PRESETS = (0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+# The speed button: the bar's 40px square while its number fits, wider
+# when it does not (_show_speed_label), with this much ground either side.
+SPEED_BUTTON_PX = 40
+SPEED_BUTTON_PAD_PX = 12
 
 # A press-release-press-release faster than this over the video is a
 # double-click (fullscreen), not two single clicks (two pause toggles).
@@ -3632,7 +3636,7 @@ class PlayerPage(GlassPage):
         # from the speed button, and make the 1x size exactly the same
         # as other icons in the same bar". The app's own face, because
         # the icon face has no letters.
-        self.speed_btn = _icon_button("1x", "Playback speed", size=40,
+        self.speed_btn = _icon_button("1x", "Playback speed", size=SPEED_BUTTON_PX,
                                       font_pt=14, family=theme.FONT_FAMILY)
         self.speed_btn.clicked.connect(self._open_speed_panel)
         row.addWidget(self.speed_btn)
@@ -7627,8 +7631,24 @@ class PlayerPage(GlassPage):
         # callback, so the panel's number follows the slider under the
         # finger instead of a beat behind it.
         self._speed = speed
-        self.speed_btn.setText(f"{speed:g}x")
+        self._show_speed_label()
         self._sync_speed_panel()
+
+    def _show_speed_label(self):
+        """The speed on its button, the button as wide as the number.
+
+        The button is a 40px square sized for "1x", the owner's ask to
+        match the icons beside it, and "0.25x" at 14pt is wider than
+        that - his screenshot, 28 September 2026, read ").25x" on every
+        device. So it keeps the square for anything that fits and grows
+        sideways for anything that does not; the stretch to its left
+        takes the difference, so nothing to its right moves."""
+        button = self.speed_btn
+        text = f"{self._speed:g}x"
+        button.setText(text)
+        button.ensurePolished()
+        width = QFontMetrics(button.font()).horizontalAdvance(text)
+        button.setFixedWidth(max(SPEED_BUTTON_PX, width + SPEED_BUTTON_PAD_PX))
 
     def _sync_speed_panel(self):
         panel = self._panel
@@ -8136,7 +8156,7 @@ class PlayerPage(GlassPage):
             self.mute_btn.setText(ICON_MUTED if self._muted else ICON_VOLUME)
         elif name == "speed" and value:
             self._speed = float(value)
-            self.speed_btn.setText(f"{self._speed:g}x")
+            self._show_speed_label()
             self._sync_speed_panel()
         elif name == "track-list":
             self._tracks = list(value or [])

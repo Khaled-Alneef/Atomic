@@ -1538,7 +1538,10 @@ def install():
     #   * The first-frame probe watches its whole second for the
     #     picture-to-sound gap and vsync-ratio too: his display's estimate
     #     read right (180 against 180) while the picture ran away.
-    updater.APP_VERSION = "2.12.3"
+    # 2.12.4
+    #   * The speed button grows to fit its number - "0.25x" was cut to
+    #     ".25x" in the 40px square (player._show_speed_label).
+    updater.APP_VERSION = "2.12.4"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
