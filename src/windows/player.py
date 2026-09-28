@@ -137,6 +137,49 @@ POSITION_SAVE_MS = 5000
 CADENCE_FPS_DRIFT = 0.05
 CADENCE_LOST_FRAMES = 12
 CADENCE_BAD_SAMPLES = 2
+# **A picture that runs away from its sound** - see _watch_runaway. 0.5s
+# is mpv's own threshold for "Audio/Video desynchronisation detected",
+# and a runaway grows past it inside the first second (measured 1.9s of
+# gap a second with presents unpaced); the gap must be above it and
+# still widening on this many samples in a row, so the transient a seek
+# leaves - which closes - never counts. The early samples are ms after
+# the first frame, so the picture is put right in about two seconds
+# rather than at the first 5s save tick.
+RUNAWAY_AVSYNC_S = 0.5
+RUNAWAY_SAMPLES = 2
+RUNAWAY_EARLY_MS = (1000, 2000)
+# **The first-frame probe** - see _begin_smooth_sync. mpv's display
+# estimate answered 52-53ms after the switch on an unpaced display and
+# 84-85ms on a paced one, so 15ms polls see it within a frame of its
+# arrival; a second is the limit, after which the runaway watch above is
+# what is left. A paced estimate read 240.0-240.1Hz against 240, an
+# unpaced one 4,763-5,411Hz; the band is wide enough for a laptop's panel
+# and far inside any runaway. Back in audio, a gap under RESEAT_GAP_S is
+# left for mpv to hold the picture through (the probe's was 87-127ms);
+# over it the picture is re-seated at the sound - held 3.8s, it froze 4s.
+#
+# **The estimate alone missed the machine this was written for.** His
+# test-2.12.2 log: display 180Hz estimated against 180Hz (60 against 60
+# on his other screen) - the band passed - while the picture ran away
+# anyway and the avsync watch caught it 1.7s in. What was wrong there:
+# vsync-ratio 68-82 at 180Hz and 27.5 at 60Hz for 23.976fps video, whose
+# right answer is 7.5 and 2.5 (9-11x), and mpv's own desync warning
+# (a gap over 0.5s) 0.03-0.38s after the first frame on every open. So
+# the probe watches the whole second, not just the estimate's arrival:
+#   * the picture-to-sound gap (time-pos - audio-pts): a paced display
+#     held -30..+61ms through the switch; an unpaced one 306-527ms by
+#     83ms. SYNC_PROBE_GAP_S sits four times over the paced worst.
+#   * vsync-ratio against display-fps / container-fps: a paced display
+#     reads 15.5-16 against 10.01 when the estimate arrives and settles
+#     to 11.4 by 390ms (a running average from the switch), so only a
+#     ratio over SYNC_PROBE_RATIO_MAX times its right answer counts -
+#     1.6x paced worst, 2.7-4.4x unpaced, 9-11x his.
+SYNC_PROBE_MS = 15
+SYNC_PROBE_LIMIT_S = 1.0
+SYNC_PROBE_BAND = (0.8, 1.25)
+SYNC_PROBE_GAP_S = 0.25
+SYNC_PROBE_RATIO_MAX = 2.5
+RESEAT_GAP_S = 0.3
 
 SEEK_STEP_S = 5
 VOLUME_STEP = 5
@@ -150,6 +193,10 @@ VOLUME_DEFAULT = 100
 # (SPEEDS) is gone with the cycling itself.
 SPEED_MIN, SPEED_MAX = 0.25, 4.0
 SPEED_PRESETS = (0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
+# The speed button: the bar's 40px square while its number fits, wider
+# when it does not (_show_speed_label), with this much ground either side.
+SPEED_BUTTON_PX = 40
+SPEED_BUTTON_PAD_PX = 12
 
 # A press-release-press-release faster than this over the video is a
 # double-click (fullscreen), not two single clicks (two pause toggles).
@@ -2759,6 +2806,11 @@ class PlayerPage(GlassPage):
         self._cadence_bad = 0
         self._cadence_switched = False
         self._cadence_frames_lost = (0, 0)
+        # How far the picture is from its sound - see _watch_runaway.
+        self._runaway_gap = 0.0
+        self._runaway_bad = 0
+        self._sync_probe = None
+        self._sync_probe_at = 0.0
         # Sources already proven dead this session, so _try_next_source
         # cannot loop back onto one it has just rejected.
         self._dead_sources = set()
@@ -3584,7 +3636,7 @@ class PlayerPage(GlassPage):
         # from the speed button, and make the 1x size exactly the same
         # as other icons in the same bar". The app's own face, because
         # the icon face has no letters.
-        self.speed_btn = _icon_button("1x", "Playback speed", size=40,
+        self.speed_btn = _icon_button("1x", "Playback speed", size=SPEED_BUTTON_PX,
                                       font_pt=14, family=theme.FONT_FAMILY)
         self.speed_btn.clicked.connect(self._open_speed_panel)
         row.addWidget(self.speed_btn)
@@ -7579,8 +7631,24 @@ class PlayerPage(GlassPage):
         # callback, so the panel's number follows the slider under the
         # finger instead of a beat behind it.
         self._speed = speed
-        self.speed_btn.setText(f"{speed:g}x")
+        self._show_speed_label()
         self._sync_speed_panel()
+
+    def _show_speed_label(self):
+        """The speed on its button, the button as wide as the number.
+
+        The button is a 40px square sized for "1x", the owner's ask to
+        match the icons beside it, and "0.25x" at 14pt is wider than
+        that - his screenshot, 28 September 2026, read ").25x" on every
+        device. So it keeps the square for anything that fits and grows
+        sideways for anything that does not; the stretch to its left
+        takes the difference, so nothing to its right moves."""
+        button = self.speed_btn
+        text = f"{self._speed:g}x"
+        button.setText(text)
+        button.ensurePolished()
+        width = QFontMetrics(button.font()).horizontalAdvance(text)
+        button.setFixedWidth(max(SPEED_BUTTON_PX, width + SPEED_BUTTON_PAD_PX))
 
     def _sync_speed_panel(self):
         panel = self._panel
@@ -7970,6 +8038,11 @@ class PlayerPage(GlassPage):
                 # subtitle loaded and mpv no longer has it, put it back.
                 self._reapply_subtitle()
                 self._hide_status()
+                self._runaway_gap = 0.0
+                self._runaway_bad = 0
+                self._begin_smooth_sync()
+                for delay in RUNAWAY_EARLY_MS:
+                    QTimer.singleShot(delay, self._watch_runaway)
                 if BARE_PLAYER:
                     # Now, not at build: the startup gauge and the
                     # loading guards have work to do until this moment.
@@ -8083,7 +8156,7 @@ class PlayerPage(GlassPage):
             self.mute_btn.setText(ICON_MUTED if self._muted else ICON_VOLUME)
         elif name == "speed" and value:
             self._speed = float(value)
-            self.speed_btn.setText(f"{self._speed:g}x")
+            self._show_speed_label()
             self._sync_speed_panel()
         elif name == "track-list":
             self._tracks = list(value or [])
@@ -8466,7 +8539,148 @@ class PlayerPage(GlassPage):
         except Exception:
             logs.exception("Could not switch the video sync mode")
 
+    def _watch_runaway(self):
+        """Step out of display-resample when the picture is running away
+        from its sound.
+
+        A friend's first run on another machine (Windows 10), 28
+        September 2026: "the vid player was always on X2 even if we
+        change the playback speed", the sound normal. His log: mpv's
+        "Audio/Video desynchronisation detected!" within half a second
+        of the first frame on every one of six opens, h264, x265 and AV1
+        alike (this machine's log: 4 in 19), and no `player cadence:`
+        line - _watch_cadence looks for a display rate that moves and
+        frames lost, and a runaway loses none.
+
+        Reproduced here by presenting without waiting for vsync
+        (d3d11-sync-interval=0), the state a driver's forced "vertical
+        sync off" leaves: over 10s of wall clock the picture advanced
+        30.8s, the sound 10.0s, 739 frames shown, avsync -26.6s, mpv's
+        display estimate 8,696Hz. display-resample presents one frame per
+        counted vsync, so when a present does not wait for one the
+        picture runs at whatever rate the presents go - and `speed`
+        cannot touch it, which is his "even if we change the playback
+        speed". Under video-sync=audio the same unpaced presents gave
+        10.01s / 10.00s / 240 frames, avsync 0.000.
+
+        The switch alone froze the picture 4s while the sound caught up
+        to where it had run; a seek to the sound's position after it had
+        both in step within 0.5s. So the seek is part of the switch."""
+        if self._closing or self.handle is None or self._cadence_switched:
+            return
+        avsync = self._mpv_number("avsync")
+        if avsync is None:
+            return
+        gap = abs(avsync)
+        # Strictly widening: paused, the gap stands still and is not a
+        # runaway; after a seek it closes.
+        widening = gap > RUNAWAY_AVSYNC_S and gap > self._runaway_gap
+        self._runaway_gap = gap
+        self._runaway_bad = self._runaway_bad + 1 if widening else 0
+        if self._runaway_bad < RUNAWAY_SAMPLES:
+            return
+        self._fall_back_to_audio_sync(
+            f"picture {avsync:+.2f}s from its sound and widening")
+
+    def _begin_smooth_sync(self):
+        """Move the core from `audio`, where it starts, to display-
+        resample at the first frame - and read the display's answer
+        before the picture can run anywhere.
+
+        His word on the runaway watch catching the fast picture after
+        two seconds: "make it immediate". It cannot be read in audio
+        mode (mpv reports no display timing there, and a paced and an
+        unpaced display measured identical), so it is read the moment
+        display-resample starts: mpv's estimate arrived at 52-53ms on an
+        unpaced display, 4,763-5,411Hz against a 240Hz nominal, the
+        picture 87-127ms ahead of its sound - one frame, then held a
+        tenth of a second in audio. A machine that has failed it once
+        never leaves audio again (video_backend.audio_sync_remembered)."""
+        if (self._closing or self.handle is None or self._cadence_switched
+                or video_backend.audio_sync_remembered()):
+            return
+        try:
+            self.handle["video-sync"] = video_backend.SMOOTH_SYNC
+        except Exception:
+            logs.exception("Could not switch the video sync mode")
+            return
+        if self._sync_probe is None:
+            self._sync_probe = QTimer(self)
+            self._sync_probe.setInterval(SYNC_PROBE_MS)
+            self._sync_probe.timeout.connect(self._probe_smooth_sync)
+        self._sync_probe_at = time.monotonic()
+        self._sync_probe.start()
+
+    def _probe_smooth_sync(self):
+        if self._closing or self.handle is None or self._cadence_switched:
+            self._sync_probe.stop()
+            return
+        into = (f"{(time.monotonic() - self._sync_probe_at) * 1000:.0f}ms "
+                f"into {video_backend.SMOOTH_SYNC}")
+        shown = self._mpv_number("time-pos")
+        heard = self._mpv_number("audio-pts")
+        if shown is not None and heard is not None:
+            gap = shown - heard
+            if abs(gap) > SYNC_PROBE_GAP_S:
+                self._fall_back_to_audio_sync(
+                    f"picture {gap * 1000:+.0f}ms from its sound {into}")
+                return
+        estimate = self._mpv_number("estimated-display-fps")
+        nominal = self._mpv_number("display-fps")
+        if estimate and nominal:
+            low, high = SYNC_PROBE_BAND
+            if not low <= estimate / nominal <= high:
+                self._fall_back_to_audio_sync(
+                    f"display {estimate:.0f}Hz estimated against "
+                    f"{nominal:.0f}Hz {into}")
+                return
+            ratio = self._mpv_number("vsync-ratio")
+            fps = (self._mpv_number("container-fps")
+                   or self._mpv_number("estimated-vf-fps"))
+            if ratio and fps:
+                right = nominal / fps
+                if ratio > right * SYNC_PROBE_RATIO_MAX:
+                    self._fall_back_to_audio_sync(
+                        f"vsync-ratio {ratio:.1f} against {right:.1f} {into}")
+                    return
+        if time.monotonic() - self._sync_probe_at > SYNC_PROBE_LIMIT_S:
+            # A whole second in step: this display paces display-resample.
+            # (No estimate at all means mpv never engaged display sync, and
+            # the avsync watch is what is left to judge it.)
+            self._sync_probe.stop()
+
+    def _fall_back_to_audio_sync(self, why):
+        """Put this core in video-sync=audio for good, remember it for
+        the machine, and bring the picture back to its sound."""
+        self._cadence_switched = True
+        if self._sync_probe is not None:
+            self._sync_probe.stop()
+        heard = self._mpv_number("audio-pts")
+        shown = self._mpv_number("time-pos")
+        gap = abs(shown - heard) if heard is not None and shown is not None else 0.0
+        detail = (
+            f"{why}, sync {self._mpv_text('video-sync', 'N/A')}, display "
+            f"{self._mpv_number('estimated-display-fps') or 0:.0f}Hz "
+            f"estimated against {self._mpv_number('display-fps') or 0:.0f}Hz, "
+            f"vsync-ratio {self._mpv_text('vsync-ratio', 'N/A')}, "
+            f"{self._mpv_text('mistimed-frame-count', 'N/A')} mistimed, "
+            f"vo {self._mpv_text('current-vo', 'N/A')}, hwdec "
+            f"{self._mpv_text('hwdec-current', 'N/A')}")
+        reseat = heard is not None and gap > RESEAT_GAP_S
+        logs.info(f"player runaway: {detail} - switching to video-sync=audio "
+                  f"for this machine, " + (f"back to {heard:.1f}s" if reseat
+                  else f"picture {gap * 1000:.0f}ms ahead, held"))
+        try:
+            self.handle["video-sync"] = "audio"
+        except Exception:
+            logs.exception("Could not switch the video sync mode")
+            return
+        video_backend.remember_audio_sync(detail)
+        if reseat:
+            self._seek_absolute(heard)
+
     def _save_position(self):
+        self._watch_runaway()
         self._watch_cadence()
         if self._closing or not self._duration or self._position <= RESUME_MIN_S:
             return
