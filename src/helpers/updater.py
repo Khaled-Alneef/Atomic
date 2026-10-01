@@ -58,7 +58,7 @@ from . import child_process, net
 # `development`, counting up from the last release; two parts on a build
 # that is being released, bumped in the same commit that tags it - or the
 # new build goes on offering itself an update.
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 
 # What counts as a release: exactly two numeric parts, with or without the
 # leading v. Development builds are tagged (if at all) with three, and are
@@ -647,6 +647,79 @@ def apply_update(downloaded: Path):
         creationflags=child_process.flags(detached=True), close_fds=True,
         env=child_process.clean_env(),
     )
+
+
+# Where Windows keeps the shortcuts an install made - the Desktop, the
+# Start menu and the pinned taskbar, for this user and for everyone.
+_SHORTCUT_DIRS = (
+    r"%USERPROFILE%\Desktop",
+    r"%PUBLIC%\Desktop",
+    r"%APPDATA%\Microsoft\Windows\Start Menu\Programs",
+    r"%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar",
+)
+_SHCNE_UPDATEITEM = 0x00002000
+_SHCNE_ASSOCCHANGED = 0x08000000
+_SHCNF_IDLIST = 0x0000
+_SHCNF_PATHW = 0x0005
+
+
+def refresh_shell_icons() -> int:
+    """Tell Windows the exe's icon may have changed; returns how many
+    shortcuts were named to it.
+
+    **An update replaces the exe at the same path, and Explorer keeps the
+    old picture.** Measured 2 October 2026, after 3.0 brought a new icon:
+    the installed exe carried the new icon in all seven sizes (byte-equal
+    to app_icon.ico), and a fresh process asking the shell for the exe or
+    the Desktop shortcut was handed the new one - but the owner's Desktop
+    and taskbar still showed the old teal "A". The stale copy is
+    Explorer's own, filed by path, and nothing told it the file changed.
+
+    So, on the first launch after an update: SHCNE_UPDATEITEM for the exe
+    and every shortcut pointing at it, then SHCNE_ASSOCCHANGED - the call
+    installers make to have Explorer drop its icon list (Inno Setup's
+    ChangesAssociations is exactly this) - and `ie4uinit -show`, Windows'
+    own icon-cache refresh, started detached and not waited for. Off the
+    UI thread; never raises."""
+    if not is_frozen():
+        return 0
+    named = 0
+    try:
+        import glob
+        shell = ctypes.WinDLL("shell32")
+        shell.SHChangeNotify.argtypes = [ctypes.c_long, ctypes.c_uint,
+                                         ctypes.c_void_p, ctypes.c_void_p]
+        shell.SHChangeNotify.restype = None
+        exe = str(current_exe())
+        paths = [exe]
+        for folder in _SHORTCUT_DIRS:
+            for link in glob.glob(os.path.join(os.path.expandvars(folder),
+                                               "**", "*Atomic*.lnk"),
+                                  recursive=True):
+                paths.append(link)
+                named += 1
+        for path in paths:
+            shell.SHChangeNotify(_SHCNE_UPDATEITEM, _SHCNF_PATHW,
+                                 ctypes.c_wchar_p(path), None)
+        shell.SHChangeNotify(_SHCNE_ASSOCCHANGED, _SHCNF_IDLIST, None, None)
+        refresher = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                 "System32", "ie4uinit.exe")
+        if os.path.exists(refresher):
+            subprocess.Popen([refresher, "-show"],
+                             creationflags=child_process.flags(detached=True),
+                             close_fds=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from . import logs
+        logs.info(f"update: told the shell the icon changed "
+                  f"(exe + {named} shortcut(s), ie4uinit "
+                  f"{'started' if os.path.exists(refresher) else 'missing'})")
+    except Exception as exc:
+        try:
+            from . import logs
+            logs.warning(f"update: icon refresh failed ({type(exc).__name__}: {exc})")
+        except Exception:
+            pass
+    return named
 
 
 def tidy_leftovers() -> int:

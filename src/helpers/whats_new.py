@@ -30,6 +30,11 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.1": [
+        "The new Atomic icon now shows on your Desktop, Start menu and "
+        "taskbar right after updating - Windows used to keep showing the "
+        "old one.",
+    ],
     "3.0": [
         "A whole new look. Atomic is now black and white, in the style of "
         "Netflix: a big banner at the top of Home and Discover, cards that "
