@@ -1556,7 +1556,16 @@ def install():
     #   * The first launch after an update tells Explorer the exe's icon
     #     changed, so the Desktop and taskbar stop showing the old one
     #     (updater.refresh_shell_icons).
-    updater.APP_VERSION = "3.1"
+    # 3.2 (3.1.1 - 3.1.2)
+    #   * The app no longer opens typing into the search bar: the field
+    #     takes no automatic focus (NoFocus), a press or Ctrl+F gives it
+    #     the keyboard, and any other arrival is logged (main.eventFilter).
+    # 3.1.2
+    #   * An announced season is not an aired one: an undated placeholder
+    #     episode counts as unaired (stremio.unaired_episodes), and a
+    #     season whose first episode has no date is not listed at all
+    #     (stremio.unannounced_seasons).
+    updater.APP_VERSION = "3.2"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

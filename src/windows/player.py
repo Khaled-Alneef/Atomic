@@ -3879,9 +3879,12 @@ class PlayerPage(GlassPage):
     @staticmethod
     def _fold_aired(videos):
         """Cinemeta's rows as {season: highest aired episode}: specials
-        stay out, and so does anything dated after now."""
-        import datetime as _dt
-        now = _dt.datetime.now(_dt.timezone.utc)
+        stay out, and so does anything not yet aired - dated after now,
+        or an undated announcement row (stremio.unaired_episodes: the
+        step from Witch Hat Atelier S1E13 into a placeholder S2E1 that
+        played the wrong file, 2 October 2026)."""
+        from helpers import stremio
+        unaired = stremio.unaired_episodes(videos)
         aired = {}
         for video in videos or []:
             if not isinstance(video, dict):
@@ -3890,12 +3893,7 @@ class PlayerPage(GlassPage):
             number = int(video.get("number") or video.get("episode") or 0)
             if season < 1 or number < 1:
                 continue        # specials stay out of the nav's bounds
-            stamp = str(video.get("firstAired") or video.get("released") or "")
-            try:
-                when = _dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-            except ValueError:
-                when = None
-            if when is not None and when > now:
+            if (season, number) in unaired:
                 continue
             aired[season] = max(aired.get(season, 0), number)
         return aired
@@ -4351,6 +4349,17 @@ class PlayerPage(GlassPage):
         if int(key[1]) == season:
             self._fill_episode_bar()
 
+    def _unaired_now(self) -> set:
+        """stremio.unaired_episodes over the rows this page holds, worked
+        out once per list rather than once per drawn row."""
+        videos = getattr(self, "_meta_videos", None) or []
+        cached = getattr(self, "_unaired_cache", None)
+        if cached is None or cached[0] is not videos:
+            from helpers import stremio
+            cached = (videos, stremio.unaired_episodes(videos))
+            self._unaired_cache = cached
+        return cached[1]
+
     def _episode_row(self, number, video=None):
         """One row: number and name, the air date under it, and a badge -
         the details page's list shape, which is what the owner asked this
@@ -4383,15 +4392,15 @@ class PlayerPage(GlassPage):
         title = name or f"Episode {number}"
         stamp = str((video or {}).get("firstAired")
                     or (video or {}).get("released") or "")
-        date_text, upcoming = "", False
+        date_text = ""
         if stamp:
             import datetime as _dt
             try:
                 when = _dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
                 date_text = when.strftime("%b %d, %Y").replace(" 0", " ")
-                upcoming = when > _dt.datetime.now(_dt.timezone.utc)
             except ValueError:
                 pass
+        upcoming = (season, int(number or 0)) in self._unaired_now()
         # An episode that has not aired cannot have been watched, whatever
         # a stale tick says - the title page's list reads it the same way.
         watched = watched and not upcoming

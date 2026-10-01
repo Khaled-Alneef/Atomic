@@ -148,22 +148,20 @@ def _aired_map(entry):
         return hit[1]
     aired = {}
     try:
-        import datetime as _dt
-        now = _dt.datetime.now(_dt.timezone.utc)
+        from helpers import stremio
         body = json.loads(path.read_text(encoding="utf-8-sig"))
-        for video in (body.get("meta") or {}).get("videos") or []:
+        videos = (body.get("meta") or {}).get("videos") or []
+        # Undated announcement rows count as unaired too (2 October 2026,
+        # Witch Hat Atelier's placeholder S2E1 - stremio.unaired_episodes).
+        unaired = stremio.unaired_episodes(videos)
+        for video in videos:
             if not isinstance(video, dict):
                 continue
             season = int(video.get("season") or 0)
             number = int(video.get("number") or video.get("episode") or 0)
             if season < 1 or number < 1:
                 continue
-            stamp_text = str(video.get("firstAired") or video.get("released") or "")
-            try:
-                when = _dt.datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
-            except ValueError:
-                when = None
-            if when is not None and when > now:
+            if (season, number) in unaired:
                 continue
             aired[season] = max(aired.get(season, 0), number)
     except Exception:
@@ -174,8 +172,19 @@ def _aired_map(entry):
 
 def _season_step(entry, season, number):
     """The label for the episode after (season, number) - see _AIRED_CACHE."""
-    following = f"S{season:02d}E{number + 1:02d}"
     aired = _aired_map(entry)
+    # **A mark on an episode that has not aired** is clamped the way
+    # player._apply_meta_bounds clamps a request for one: the last real
+    # season at its last aired episode. 2 October 2026: the player had
+    # stepped into Witch Hat Atelier's undated placeholder S2E1 and
+    # ticked it, and the card read S02E02 for a season that has not
+    # aired (stremio.unaired_episodes).
+    if aired and season > max(aired):
+        season = max(aired)
+        number = int(aired[season])
+    elif aired and season in aired and number > int(aired[season]):
+        number = int(aired[season])
+    following = f"S{season:02d}E{number + 1:02d}"
     if not aired or season not in aired:
         return following
     if number + 1 <= int(aired[season]):

@@ -129,6 +129,95 @@ def _parse_aired(value):
         return None
 
 
+# **An undated episode is usually an announcement, not an episode.**
+# His report, 2 October 2026: Witch Hat Atelier and Family Guy each ended
+# on a season of one episode that had not aired. Cinemeta files an
+# announced season as one row with no date at all (Witch Hat S2E1
+# "Episode 1", Family Guy S25E1), and every reader here took "no date"
+# for "aired" - so the details page offered it, and the player stepped
+# from S1E13 into it and played "[NanakoRaws] Tongari Boushi no Atelier
+# - 14", marking 2:1 watched. Measured over the 912 Cinemeta records on
+# his disk: 700 undated episodes; 252 sit *before* a dated episode that
+# aired (Doraemon, Bullseye - real episodes missing a date), and of the
+# 448 after the last aired one, 44 titles end on exactly this one-row
+# placeholder season - Bocchi the Rock! last aired 2022, Yona of the
+# Dawn 2015 - while old finished shows trail long undated runs that did
+# air (Maya 165 rows after 1975, Doraemon 84 after 2009, Cardcaptor
+# Sakura S3E25 after 2000). So an undated episode counts as unaired only
+# past the last aired one, and only when the show aired recently or the
+# tail is a short new season.
+UNDATED_RECENT_DAYS = 730
+UNDATED_PLACEHOLDER_MAX = 3
+
+
+def unaired_episodes(videos, now=None) -> set:
+    """{(season, number)} of the episodes in Cinemeta's `videos` that have
+    not aired: dated after now, or undated and judged an announcement (see
+    UNDATED_RECENT_DAYS). Specials (season or number 0) are left out of
+    the judgement - they are never counted as aired by anyone. Never
+    raises."""
+    try:
+        now = now or datetime.now(timezone.utc)
+        rows = []
+        for video in videos or []:
+            if not isinstance(video, dict):
+                continue
+            season = int(video.get("season") or 0)
+            number = int(video.get("number") or video.get("episode") or 0)
+            if season < 1 or number < 1:
+                continue
+            when = _parse_aired(str(video.get("firstAired")
+                                    or video.get("released") or ""))
+            rows.append((season, number, when))
+        rows.sort(key=lambda row: (row[0], row[1]))
+        unaired = {(s, n) for s, n, when in rows if when is not None and when > now}
+        aired_at = [i for i, (_s, _n, when) in enumerate(rows)
+                    if when is not None and when <= now]
+        if not any(when is not None for _s, _n, when in rows):
+            return unaired          # no dates at all: nothing to judge by
+        last = aired_at[-1] if aired_at else -1
+        tail = [(s, n) for s, n, when in rows[last + 1:] if when is None]
+        if not tail:
+            return unaired
+        if last < 0:
+            return unaired | set(tail)      # nothing has aired yet
+        last_season, _n, last_when = rows[last]
+        recent = (now - last_when).days <= UNDATED_RECENT_DAYS
+        placeholder = (len(tail) <= UNDATED_PLACEHOLDER_MAX
+                       and all(s > last_season for s, _n in tail))
+        if recent or placeholder:
+            unaired |= set(tail)
+        return unaired
+    except Exception:
+        return set()
+
+
+def unannounced_seasons(videos) -> set:
+    """Seasons whose first episode has no date and has not aired - an
+    announcement, not a season yet. The owner, 2 October 2026: "if there
+    is no announced date for the new season 1st ep do not show the season
+    at all". A season whose first episode carries a date, even a future
+    one, stays and draws as UPCOMING. Never raises."""
+    try:
+        unaired = unaired_episodes(videos)
+        first = {}
+        for video in videos or []:
+            if not isinstance(video, dict):
+                continue
+            season = int(video.get("season") or 0)
+            number = int(video.get("number") or video.get("episode") or 0)
+            if season < 1 or number < 1:
+                continue
+            dated = _parse_aired(str(video.get("firstAired")
+                                     or video.get("released") or "")) is not None
+            if season not in first or number < first[season][0]:
+                first[season] = (number, dated)
+        return {season for season, (number, dated) in first.items()
+                if not dated and (season, number) in unaired}
+    except Exception:
+        return set()
+
+
 def fetch_meta(imdb_id: str, content_type: str = "series", timeout: int = 8):
     """Cinemeta's whole meta record for one title, or None.
 

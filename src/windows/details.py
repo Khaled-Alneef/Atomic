@@ -780,12 +780,10 @@ def _pretty_date(value) -> str:
         return text[:10]
 
 
-def _aired(value):
-    try:
-        return datetime.datetime.fromisoformat(
-            str(value or "").replace("Z", "+00:00"))
-    except ValueError:
-        return None
+def _unaired(videos) -> set:
+    """{(season, number)} not yet aired - stremio.unaired_episodes, which
+    also judges Cinemeta's undated announcement rows (2 October 2026)."""
+    return stremio.unaired_episodes(videos) if stremio is not None else set()
 
 
 # **The redesign's details page** - the owner, 1 October 2026, stage 3
@@ -1898,6 +1896,14 @@ class DetailsPage(GlassPage):
         self._meta = meta
         self._videos = [v for v in (meta.get("videos") or [])
                         if isinstance(v, dict)]
+        # A season announced with no date for its first episode is not
+        # listed at all (stremio.unannounced_seasons - the owner's ask,
+        # 2 October 2026, after Witch Hat Atelier's and Family Guy's).
+        hidden = (stremio.unannounced_seasons(self._videos)
+                  if stremio is not None else set())
+        if hidden:
+            self._videos = [v for v in self._videos
+                            if int(v.get("season") or 0) not in hidden]
         self._fill_facts()
         self._fill_seasons()
         self._fill_rows()
@@ -2380,10 +2386,20 @@ class DetailsPage(GlassPage):
             self._season_box.addItem(f"Season {season}" if season else "Specials",
                                      season)
         # Open on the season being watched, else the newest with anything
-        # aired - the one a returning viewer is actually looking for.
+        # aired - the one a returning viewer is actually looking for. The
+        # code took the last season outright, which for Family Guy is a
+        # season of one announced row (2 October 2026); a season with
+        # nothing aired is skipped either way, so a stray mark on such a
+        # row (Witch Hat Atelier's S2E1) does not open on it either.
         watched_season, _ = self._progress()
-        pick = watched_season if watched_season in seasons else (
-            seasons[-1] if seasons else 0)
+        unaired = _unaired(self._videos)
+        has_aired = {int(v.get("season") or 0) for v in self._videos
+                     if (int(v.get("season") or 0),
+                         int(v.get("number") or v.get("episode") or 0))
+                     not in unaired}
+        live = [s for s in seasons if s in has_aired] or seasons
+        pick = watched_season if watched_season in live else (
+            live[-1] if live else 0)
         index = max(0, self._season_box.findData(pick))
         self._season_box.setCurrentIndex(index)
         self._season = self._season_box.currentData() or 0
@@ -2844,10 +2860,10 @@ class DetailsPage(GlassPage):
         self._blur_stills = app_settings.get_blur_episode_stills()
         wanted = self._search.text().strip().lower()
         season = int(self._season or 0)
-        now = datetime.datetime.now(datetime.timezone.utc)
         watched_season, watched_episode = self._progress()
         rows = [v for v in self._videos if int(v.get("season") or 0) == season]
         rows.sort(key=lambda v: int(v.get("number") or v.get("episode") or 0))
+        unaired = _unaired(self._videos)
         if not rows and self.entry.get("type") == "Movie":
             self._rows.insertWidget(0, self._row_card(
                 "Play Film", _pretty_date((self._meta or {}).get("released")),
@@ -2868,8 +2884,7 @@ class DetailsPage(GlassPage):
             title = f"{number}. {name}" if name else f"{number}. Episode {number}"
             if wanted and wanted not in title.lower():
                 continue
-            aired = _aired(video.get("firstAired") or video.get("released"))
-            upcoming = bool(aired and aired > now)
+            upcoming = (season, number) in unaired
             # Either store may say watched: the entry's progress number
             # (saved titles) or an explicit History tick (which is all
             # an unsaved title has, and what an out-of-order tick on a
@@ -3653,16 +3668,15 @@ class DetailsPage(GlassPage):
     def _aired_last_episode(self, season) -> int:
         """The last already-aired episode number of `season`, from the
         Cinemeta list this page is already holding."""
-        now = datetime.datetime.now(datetime.timezone.utc)
+        unaired = _unaired(self._videos)
         last = 0
         for video in self._videos:
             if int(video.get("season") or 0) != int(season or 0):
                 continue
-            aired = _aired(video.get("firstAired") or video.get("released"))
-            if aired is not None and aired > now:
+            number = int(video.get("number") or video.get("episode") or 0)
+            if (int(season or 0), number) in unaired:
                 continue
-            last = max(last, int(video.get("number")
-                                 or video.get("episode") or 0))
+            last = max(last, number)
         return last
 
     def _episode_menu(self, event, season, episode):

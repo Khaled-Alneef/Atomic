@@ -1126,6 +1126,16 @@ class TitleBar(QWidget):
         centre_row.addWidget(self._centre_balance)
         self.search = search_field("Search everything...")
         self.search.setObjectName("TopSearch")
+        # **Nothing automatic may focus this field** - a press on it and
+        # Ctrl+F do, both explicitly (main.eventFilter, main's Ctrl+F).
+        # When the window activates with no focus widget Qt hands the
+        # keyboard to the first tab-focusable widget, and this was it:
+        # measured 2 October 2026, it took focus 0.64s after launch. Click
+        # focus fixed every launch measured here, and he still saw it on a
+        # full-screen start that would not reproduce; NoFocus shuts every
+        # automatic route at once, and main logs any focus that arrives
+        # some other way so his log names it.
+        self.search.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.search.setFixedHeight(SEARCH_HEIGHT)
         self.search.setMinimumWidth(SEARCH_MIN_WIDTH)
         # One maximum, in both states - see set_fullscreen_search_width

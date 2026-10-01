@@ -2774,6 +2774,10 @@ class MainWindow(QMainWindow):
         # Read and Watch, where two chevrons of different sizes read as
         # two different controls.
         button.setFixedSize(24, 24)
+        # NoFocus like the bar's other buttons: with the search field off
+        # Tab focus, this was the window's first focus pick at launch, and
+        # Space would have folded the sidebar.
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         use_hover_cursor(button)
         button.clicked.connect(self._toggle_sidebar)
         return button
@@ -4389,6 +4393,30 @@ class MainWindow(QMainWindow):
         # QEvent.Type enum member through Python's enum machinery, and
         # this used to ask four times per event.
         kind = event.type()
+        if obj is getattr(self, "top_search", None):
+            if kind == QEvent.Type.MouseButtonPress and not obj.hasFocus():
+                # The field is NoFocus (window_chrome.TitleBar), so a
+                # press is what gives it the keyboard - Qt's half, and
+                # Windows' half from whatever web view holds it (the same
+                # pair Ctrl+F needs). Not consumed: the line edit still
+                # places the caret where the press landed.
+                obj.setFocus(Qt.FocusReason.MouseFocusReason)
+                try:
+                    from helpers import webview2_host
+                    webview2_host.keyboard_to_qt(self)
+                except Exception:
+                    logs.exception("The search field could not take the keyboard")
+            elif kind == QEvent.Type.FocusIn and event.reason() not in (
+                    Qt.FocusReason.MouseFocusReason,
+                    Qt.FocusReason.ShortcutFocusReason):
+                # Expected only when the window comes back to a field he
+                # was typing in. Anything else is the "opens typing in the
+                # search bar" report of 2 October 2026 that no launch here
+                # reproduced - this line is how his log will name it.
+                logs.info(f"search field took the keyboard: "
+                          f"reason={event.reason().name}, "
+                          f"full screen={self.isFullScreen()}, "
+                          f"active={self.isActiveWindow()}")
         if (kind == QEvent.Type.KeyPress
                 and obj is getattr(self, "top_search", None)):
             # **No suggestions any more** - the owner's ask, 26 August
@@ -6071,6 +6099,12 @@ def main():
     # another thread. Off a timer so it lands after the first frame is
     # on screen rather than delaying it.
     QTimer.singleShot(PRELOAD_OVERLAYS_MS, _preload_overlays)
+    # The keyboard starts on the page, chosen here rather than by Qt: with
+    # no focus set, activation hands it to the first tab-focusable widget,
+    # which was the search field (the app opened typing into it, 2 October
+    # 2026). Set before show, so activation restores this instead.
+    if window._current_page is not None:
+        window._current_page.setFocus(Qt.FocusReason.OtherFocusReason)
     # Full screen only for a launch Windows itself started at sign-in
     # (the registered command carries startup.STARTUP_FLAG, nothing else
     # does) - opening the app by hand is unaffected by that setting.
