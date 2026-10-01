@@ -1185,3 +1185,18 @@ boxes still empty (`cast2_05.png`), at 2s every cover of the first two
 rows is in (`cast2_20.png`) - the pictures are TMDB's CDN through the
 proxy and were never the route's wait. `people_cache.json` 57KB on disk
 after it.
+
+## Resume on the newest chapter asks the site first (1 October 2026)
+
+His report: Home's Resume re-opened the last chapter read while a newer
+one was up, and only the list page showed it. `web_pages._continue` read
+only the list on disk (`backend.chapters`: fresh, then any age) and no
+path from the ring ever asked a site. Measured on a copy: Kingdom (WAN)
+read to 888 with 889 on 3asq; six of eight lists 96-623h old, five 2-4
+chapters behind. Now, **only when the list says he is on its newest
+chapter** (anywhere else the next one is already in it), the ring puts
+up "Checking for New Chapters..." and runs the details page's own
+`list_chapters(refresh=True)` on `submit_watched`, then opens whatever
+is next on the refreshed list. A list read in the last `RECHECK_GAP_S`
+(120s) is trusted. Live checks 0.61-3.97s over his eight titles; frozen
+build: 1.97s, the reader on chapter 889.

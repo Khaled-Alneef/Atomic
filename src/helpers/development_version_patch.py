@@ -1541,7 +1541,10 @@ def install():
     # 2.12.4
     #   * The speed button grows to fit its number - "0.25x" was cut to
     #     ".25x" in the 40px square (player._show_speed_label).
-    updater.APP_VERSION = "2.13"
+    # 2.13.1
+    #   * Resume on a reading card asks the site for new chapters first
+    #     when the list on disk has him on its newest (web_pages._continue).
+    updater.APP_VERSION = "2.13.1"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
