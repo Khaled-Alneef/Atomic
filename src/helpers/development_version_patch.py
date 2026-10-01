@@ -1552,7 +1552,11 @@ def install():
     #     palette, the web pages' billboard, cards, Top 10s and reveals,
     #     the page cross-fade and header pill, the details page, the
     #     player's bars and episode list, Settings, and the new icon.
-    updater.APP_VERSION = "3.0"
+    # 3.1 (3.0.1)
+    #   * The first launch after an update tells Explorer the exe's icon
+    #     changed, so the Desktop and taskbar stop showing the old one
+    #     (updater.refresh_shell_icons).
+    updater.APP_VERSION = "3.0.1"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

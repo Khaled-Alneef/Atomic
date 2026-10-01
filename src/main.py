@@ -6115,6 +6115,12 @@ def main():
     # thread, never raises (updater.tidy_leftovers).
     threading.Thread(target=updater.tidy_leftovers, daemon=True,
                      name="update-tidy").start()
+    # An update that changed the icon left Explorer drawing the old one on
+    # the Desktop and the taskbar (3.0, 2 October 2026) - tell it, once,
+    # on the launch that follows an update (updater.refresh_shell_icons).
+    if release_notes:
+        threading.Thread(target=updater.refresh_shell_icons, daemon=True,
+                         name="update-icons").start()
     # Once per SETUP_VERSION, over the visible window. Armed after
     # whats_new on purpose - that dialog is modal, and a timer armed
     # before it would fire inside its nested event loop. The decision
