@@ -4393,6 +4393,30 @@ class MainWindow(QMainWindow):
         # QEvent.Type enum member through Python's enum machinery, and
         # this used to ask four times per event.
         kind = event.type()
+        if obj is getattr(self, "top_search", None):
+            if kind == QEvent.Type.MouseButtonPress and not obj.hasFocus():
+                # The field is NoFocus (window_chrome.TitleBar), so a
+                # press is what gives it the keyboard - Qt's half, and
+                # Windows' half from whatever web view holds it (the same
+                # pair Ctrl+F needs). Not consumed: the line edit still
+                # places the caret where the press landed.
+                obj.setFocus(Qt.FocusReason.MouseFocusReason)
+                try:
+                    from helpers import webview2_host
+                    webview2_host.keyboard_to_qt(self)
+                except Exception:
+                    logs.exception("The search field could not take the keyboard")
+            elif kind == QEvent.Type.FocusIn and event.reason() not in (
+                    Qt.FocusReason.MouseFocusReason,
+                    Qt.FocusReason.ShortcutFocusReason):
+                # Expected only when the window comes back to a field he
+                # was typing in. Anything else is the "opens typing in the
+                # search bar" report of 2 October 2026 that no launch here
+                # reproduced - this line is how his log will name it.
+                logs.info(f"search field took the keyboard: "
+                          f"reason={event.reason().name}, "
+                          f"full screen={self.isFullScreen()}, "
+                          f"active={self.isActiveWindow()}")
         if (kind == QEvent.Type.KeyPress
                 and obj is getattr(self, "top_search", None)):
             # **No suggestions any more** - the owner's ask, 26 August

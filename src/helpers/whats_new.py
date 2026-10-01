@@ -30,6 +30,14 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.2": [
+        "Atomic no longer opens with the search bar selected - typing "
+        "right after launch, in a window or full screen, no longer lands "
+        "in it. Click the bar or press Ctrl+F to search.",
+        "A season that has only been announced no longer shows up. An "
+        "episode with no air date yet is not offered to play, and the "
+        "player no longer moves on into a season that has not aired.",
+    ],
     "3.1": [
         "The new Atomic icon now shows on your Desktop, Start menu and "
         "taskbar right after updating - Windows used to keep showing the "

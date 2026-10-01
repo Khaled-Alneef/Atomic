@@ -230,20 +230,25 @@ def typetext(text):
         u.keybd_event(vk, 0, 0, 0); u.keybd_event(vk, 0, 2, 0); time.sleep(0.02)
 
 def close():
-    # The window's own process, whatever started it (Atomic.exe or a
-    # python.exe running the source tree), then the exe by name.
-    # Every Atomic window, not the first: two source runs were up at once
-    # and the survivor took the next test's clicks.
-    for _ in range(6):
-        f = find()
-        if not f:
-            break
-        pid = w.DWORD(0)
-        u.GetWindowThreadProcessId(f[0], ctypes.byref(pid))
-        if pid.value:
-            subprocess.call(["taskkill", "/PID", str(pid.value), "/F", "/T"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(0.8)
-    subprocess.call(["taskkill", "/IM", "Atomic.exe", "/F", "/T"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # **Only this repository's build or a source run - never by window
+    # title or by exe name.** It used to kill every window titled
+    # "Atomic" and then `taskkill /IM Atomic.exe`, which takes the
+    # owner's installed copy with it (memory: never close his installed
+    # Atomic; found 2 October 2026). Matched by path: app\Atomic.exe
+    # under this repo, or a python.exe whose command line runs this
+    # repo's src/main.py. Every match, not the first: two source runs
+    # were up at once and the survivor took the next test's clicks.
+    repo = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "..", ".."))
+    script = (
+        "$r = '" + repo.replace("'", "''") + "'; "
+        "Get-CimInstance Win32_Process | Where-Object { "
+        "($_.Name -eq 'Atomic.exe' -and $_.ExecutablePath -like \"$r\\*\") -or "
+        "($_.Name -like 'python*.exe' -and $_.CommandLine -like \"*$r*src*main.py*\") "
+        "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+    subprocess.call(["powershell", "-NoProfile", "-Command", script],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.8)
 
 if __name__ == "__main__":
     cmd = sys.argv[1]
