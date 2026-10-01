@@ -701,6 +701,13 @@ class _WebPage(GlassPage):
         if body.get("action") == "pagepress":
             self._leave_search()
             return
+        if body.get("action") == "scrolled":
+            # The page has crossed its top edge (app.js, PILL_AT_PX): the
+            # title bar draws its capsule in or opens it out.
+            bar = getattr(self.window(), "title_bar", None)
+            if bar is not None and hasattr(bar, "set_compact"):
+                bar.set_compact(bool(body.get("on")))
+            return
         if body.get("action") == "diag":
             # The page reporting on itself - see app.js sweepLazy.
             logs.info("web page: " + ", ".join(

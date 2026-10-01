@@ -1547,7 +1547,12 @@ def install():
     # 2.13.2
     #   * A reading card shows the last chapter read, not the next one
     #     (server._progress_text); video cards are unchanged.
-    updater.APP_VERSION = "2.13.2"
+    # 2.13.3
+    #   * The redesign after Netflix, 1367 Studio and A24: a monochrome
+    #     palette, the web pages' billboard, cards, Top 10s and reveals,
+    #     the page cross-fade and header pill, the details page, the
+    #     player's bars and episode list, Settings, and the new icon.
+    updater.APP_VERSION = "2.13.3"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

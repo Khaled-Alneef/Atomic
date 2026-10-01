@@ -2022,6 +2022,14 @@ class SeekBar(QWidget):
     # fraction under the pointer and the fraction drawn still agree.
     EDGE = KNOB_RADIUS + 1
 
+    # **Netflix's strip grows under the pointer** - the redesign, 1
+    # October 2026. Thin while watching, thicker and with a larger knob
+    # while being reached for. Enter and Leave already recompose the live
+    # bar in the same frame (player_top_bar_live_patch._Recompose), so
+    # the change lands with the pointer rather than on the 150ms timer.
+    BAR_HEIGHT_HOVER = 8
+    KNOB_RADIUS_HOVER = KNOB_RADIUS + 1          # still inside EDGE
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(self.KNOB_RADIUS * 2 + 6)
@@ -2031,6 +2039,17 @@ class SeekBar(QWidget):
         self._position = 0.0
         self._buffered = 0.0
         self._dragging = False
+        self._hover = False
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
 
     def set_duration(self, value):
         self._duration = float(value or 0.0)
@@ -2088,13 +2107,17 @@ class SeekBar(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        top = (self.height() - self.BAR_HEIGHT) / 2
+        reached = self._hover or self._dragging
+        bar = self.BAR_HEIGHT_HOVER if reached else self.BAR_HEIGHT
+        knob = self.KNOB_RADIUS_HOVER if reached else self.KNOB_RADIUS
+        top = (self.height() - bar) / 2
         left, span = self._track_span()
-        rect = QRectF(left, top, span, self.BAR_HEIGHT)
-        radius = self.BAR_HEIGHT / 2
+        rect = QRectF(left, top, span, bar)
+        radius = bar / 2
         painter.setPen(Qt.PenStyle.NoPen)
-        # Very light grey for what is not yet played - the owner's ask,
-        # 7 September 2026, against the near-black it used to be.
+        # What is not yet played: theme.SEEK_REST, mid grey since the
+        # accent turned white (see there) - the owner's ask of 7 September
+        # was for light against the near-black it used to be.
         painter.setBrush(QColor(theme.SEEK_REST))
         painter.drawRoundedRect(rect, radius, radius)
 
@@ -2104,16 +2127,18 @@ class SeekBar(QWidget):
             if buffered > played:
                 painter.setBrush(QColor(theme.SEEK_BUFFERED))
                 painter.drawRoundedRect(
-                    QRectF(left, top, span * buffered, self.BAR_HEIGHT),
+                    QRectF(left, top, span * buffered, bar),
                     radius, radius)
             painter.setBrush(QColor(theme.ACCENT))
             painter.drawRoundedRect(
-                QRectF(left, top, span * played, self.BAR_HEIGHT),
+                QRectF(left, top, span * played, bar),
                 radius, radius)
             centre = QPoint(int(left + span * played), int(self.height() / 2))
-            painter.setBrush(QColor(theme.TEXT))
-            painter.setPen(QPen(QColor(theme.ACCENT), 2))
-            painter.drawEllipse(centre, self.KNOB_RADIUS, self.KNOB_RADIUS)
+            # A plain white knob with a soft dark edge, so it reads over a
+            # bright frame - the white ring it had is invisible on white.
+            painter.setBrush(QColor(theme.TEXT_OVER_MEDIA))
+            painter.setPen(QPen(QColor(0, 0, 0, 90), 1.5))
+            painter.drawEllipse(centre, knob, knob)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton or self._duration <= 0:
@@ -3467,9 +3492,12 @@ class PlayerPage(GlassPage):
         # cannot express and therefore cannot overwrite - rides on the
         # widget font (see _hard_edge_font).
         self.title_label.setFont(_hard_edge_font(13.5, bold=True))
+        # The app's display face (Bahnschrift - see app.css --font-serif),
+        # semibold so it holds over a bright frame.
         self.title_label.setStyleSheet(
-            f"color: {theme.TEXT_OVER_MEDIA}; font-size: 13.5pt;"
-            f" font-weight: 700; background: transparent;")
+            f"color: {theme.TEXT_OVER_MEDIA}; font-size: 14pt;"
+            f' font-family: "Bahnschrift", "Segoe UI";'
+            f" font-weight: 600; background: transparent;")
         layout.addWidget(self.title_label)
         self._refresh_title_label()
 
@@ -3553,9 +3581,13 @@ class PlayerPage(GlassPage):
         seek_row.setSpacing(10)
         self.pos_label = QLabel("--:--")
         self.dur_label = QLabel("--:--")
+        # 1367's mono for the times (the redesign, 1 October 2026) - and
+        # a mono face is also one where "1:11" and "8:08" are the same
+        # width, so the strip beside them stops nudging as they count.
         for label in (self.pos_label, self.dur_label):
             label.setStyleSheet(
-                f"color: {theme.TEXT}; font-size: 10.5pt; font-weight: 600;"
+                f"color: {theme.TEXT_OVER_MEDIA}; font-size: 10.5pt; font-weight: 400;"
+                f' font-family: "Cascadia Mono", Consolas, monospace;'
                 f" background: transparent;")
         self.seek_bar = SeekBar()
         self.seek_bar.seeked.connect(self._seek_absolute)
@@ -4028,10 +4060,10 @@ class PlayerPage(GlassPage):
         # cancels it. See helpers/widgets.PickCombo.
         self.season_combo = PickCombo()
         self.season_combo.setStyleSheet(
-            f"QComboBox {{ background: {theme.SURFACE}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER}; border-radius: {theme.RADIUS}px;"
-            f" padding: 6px 14px; font-weight: 700; font-size: 12pt; }}"
-            f"QComboBox:hover {{ border: 1px solid {theme.ACCENT}; }}")
+            f"QComboBox {{ background: transparent; color: {theme.TEXT};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 60)}; border-radius: 16px;"
+            f" padding: 6px 18px; font-weight: 600; font-size: 12pt; }}"
+            f"QComboBox:hover {{ border: 1px solid {theme.TEXT}; }}")
         use_hover_cursor(self.season_combo)
         self.season_combo.activated.connect(self._pick_panel_season)
         header.addWidget(self.season_combo)
@@ -4044,6 +4076,11 @@ class PlayerPage(GlassPage):
         self._episode_search = QLineEdit()
         self._episode_search.setPlaceholderText("search episodes")
         self._episode_search.setClearButtonEnabled(True)
+        self._episode_search.setStyleSheet(
+            f"QLineEdit {{ background: {theme.rgba(theme.TEXT, 12)}; color: {theme.TEXT};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 30)}; border-radius: 16px;"
+            f" padding: 6px 14px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {theme.TEXT}; }}")
         # Debounced like every other search box here: a season list is
         # dozens of rebuilt cards, not something to redo per keystroke.
         self._episode_search_timer = QTimer(self)
@@ -4058,7 +4095,7 @@ class PlayerPage(GlassPage):
         self._episode_list.setStyleSheet("background: transparent;")
         self._episode_list_layout = QVBoxLayout(self._episode_list)
         self._episode_list_layout.setContentsMargins(0, 0, 0, 0)
-        self._episode_list_layout.setSpacing(6)
+        self._episode_list_layout.setSpacing(2)
         area = scroll_area(self._episode_list)
         area.setStyleSheet("background: transparent; border: none;")
         area.viewport().setStyleSheet("background: transparent;")
@@ -4343,7 +4380,7 @@ class PlayerPage(GlassPage):
         # about to be watched, and the player is where that matters most.
         if app_settings.get_hide_entry_names():
             name = ""
-        title = f"{number}. {name}" if name else f"Episode {number}"
+        title = name or f"Episode {number}"
         stamp = str((video or {}).get("firstAired")
                     or (video or {}).get("released") or "")
         date_text, upcoming = "", False
@@ -4359,25 +4396,41 @@ class PlayerPage(GlassPage):
         # a stale tick says - the title page's list reads it the same way.
         watched = watched and not upcoming
 
+        # **Netflix's episode list, in monochrome** - the owner, 1 October
+        # 2026: "change the ep list window in the player it seems old".
+        # Rows, not boxes: no resting fill, a hairline under each, a soft
+        # fill under the pointer; the episode on screen is the one row
+        # with a fill of its own. Watched no longer wears a green ring - it
+        # is a quiet tick and a dimmer title, the way the title page's
+        # list says it now. UPCOMING keeps its green; that one means
+        # something.
         if current:
-            fill, edge, text = theme.ACCENT_SOFT, theme.ACCENT, theme.ACCENT
+            fill, text = theme.rgba(theme.TEXT, 30), theme.TEXT_OVER_MEDIA
         elif watched:
-            fill, edge, text = theme.SURFACE_HOVER, theme.SUCCESS, theme.TEXT
+            fill, text = "transparent", theme.TEXT_MUTED
         else:
-            # Borderless at rest (the Harbor pass): the states that mean
-            # something keep their edges - accent for playing, SUCCESS
-            # for watched - and the plain rows stop competing with them.
-            # 1px transparent so no row is a pixel taller than another.
-            fill, edge, text = theme.SURFACE_HOVER, "transparent", theme.TEXT
+            fill, text = "transparent", theme.TEXT
         card = Card(matte=True, hoverable=not upcoming)
         card.setStyleSheet(
-            f"QFrame#Card {{ background: {fill};"
-            f" border: 1px solid {edge};"
-            f" border-radius: {theme.RADIUS}px; }}")
-        card.setProperty("searchText", title.lower())
+            f"QFrame#Card {{ background: {fill}; border: 1px solid transparent;"
+            f" border-bottom: 1px solid {theme.rgba(theme.TEXT, 18)};"
+            f" border-radius: {8 if current else 0}px; }}"
+            f"QFrame#Card:hover {{ background: {theme.rgba(theme.TEXT, 22)};"
+            f" border: 1px solid transparent; border-radius: 8px; }}")
+        card.setProperty("searchText", f"{number} {title}".lower())
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 14, 10)
+        layout.setSpacing(12)
+        # The episode's number, large and dim at the row's head, as
+        # Netflix's list sets it - the title beside it is the name alone.
+        numeral = QLabel(str(number))
+        numeral.setFixedWidth(34)
+        numeral.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        numeral.setStyleSheet(
+            f"color: {theme.TEXT_OVER_MEDIA if current else theme.TEXT_DIM};"
+            f' font-family: "Bahnschrift", "Segoe UI"; font-size: 17pt;'
+            f" font-weight: 300; background: transparent; border: none;")
+        layout.addWidget(numeral)
         column = QVBoxLayout()
         column.setSpacing(2)
         label = _ElidedLabel(title)
@@ -4422,7 +4475,7 @@ class PlayerPage(GlassPage):
             # answerable at a glance.
             mark = QLabel(ICON_PLAY if current else ICON_WATCHED)
             mark.setStyleSheet(
-                f"color: {theme.ACCENT if current else theme.SUCCESS};"
+                f"color: {theme.TEXT_OVER_MEDIA if current else theme.TEXT_DIM};"
                 f" font-family: {theme.FONT_STACK_ICONS};"
                 f" font-size: 11.5pt; background: transparent; border: none;")
             layout.addWidget(mark)
@@ -4527,7 +4580,14 @@ class PlayerPage(GlassPage):
         until they are already hovering it. A filled, bordered square is
         the same shape the stepper's +/- buttons carry, which is the
         panel's existing vocabulary for "small discrete control"."""
-        button = QPushButton(glyph)
+        # **The icon font's chevron, not the text's.** The owner, 1 October
+        # 2026, with a picture: "why are the arrows going more down?". "‹"
+        # and "›" are punctuation and sit on the text's baseline, so in a
+        # round button they hung below its middle; Segoe Fluent's
+        # ChevronLeft/Right (U+E76B/E76C) are drawn centred in their box.
+        icon = {GLYPH_CHEVRON_LEFT: "",
+                GLYPH_CHEVRON_RIGHT: ""}.get(glyph, glyph)
+        button = QPushButton(icon)
         button.setToolTip(tooltip)
         # 36, up from 30, with the rest of the list (the owner's ask).
         button.setFixedSize(36, 36)
@@ -4535,11 +4595,14 @@ class PlayerPage(GlassPage):
             # padding:0 - see PlayPauseButton; without it the app-wide
             # 8px 16px padding clips the ‹ › glyph to nothing on a small
             # button, which is exactly how the arrows first went missing.
-            f"QPushButton {{ background: {theme.SURFACE_HOVER}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER}; padding: 0px; font-size: 18pt;"
-            f" font-weight: 700; border-radius: {theme.RADIUS_SM}px; }}"
-            f"QPushButton:hover {{ background: {theme.ACCENT_SOFT};"
-            f" border: 1px solid {theme.ACCENT}; }}"
+            # Still framed (his ask), now the redesign's round hairline
+            # button that turns white with black ink under the pointer.
+            f"QPushButton {{ background: transparent; color: {theme.TEXT};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 60)}; padding: 0px;"
+            f" font-family: {theme.FONT_STACK_ICONS}; font-size: 10pt;"
+            f" border-radius: 18px; }}"
+            f"QPushButton:hover {{ background: {theme.ACCENT_HOVER};"
+            f" color: {theme.ON_ACCENT}; border: 1px solid {theme.ACCENT_HOVER}; }}"
             f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}"
             f"QPushButton:disabled {{ color: {theme.TEXT_DIM};"
             f" background: transparent; border: 1px solid {theme.BORDER}; }}")

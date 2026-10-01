@@ -493,6 +493,19 @@ def _plain_scroller(body: QWidget) -> QScrollArea:
     return area
 
 
+def _pointing_hands(page):
+    """The pointing hand over everything on `page` that can be pressed -
+    the owner, 1 October 2026: "in the settings change the mouse cursor
+    hover, to finger pointing". Only a few buttons here had asked for it
+    one by one; a page is swept once, when it is first built, and a
+    control that already has the hand is left alone."""
+    for widget in page.findChildren((QPushButton, QCheckBox, QComboBox)):
+        if widget.property("pointingHand"):
+            continue
+        widget.setProperty("pointingHand", True)
+        use_hover_cursor(widget)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -623,6 +636,14 @@ class SettingsDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
         save_btn = QPushButton("Save", objectName="Accent")
+        # Its own sheet, which outranks both the app's #Accent rule and
+        # the dialog's: through the dialog alone it kept square corners
+        # (photographed, 1 October 2026).
+        save_btn.setStyleSheet(
+            f"QPushButton#Accent {{ background: {theme.ACCENT_HOVER};"
+            f" color: {theme.ON_ACCENT}; border: none; border-radius: 16px;"
+            f" padding: 7px 22px; font-weight: 700; }}"
+            f"QPushButton#Accent:hover {{ background: {theme.rgba(theme.ACCENT_HOVER, 205)}; }}")
         save_btn.clicked.connect(self.accept)
         save_btn.setDefault(True)
         btn_row.addWidget(save_btn)
@@ -641,6 +662,39 @@ class SettingsDialog(QDialog):
         # _build_reading_page instead now - that page may not exist yet,
         # and a list nobody has built has nothing to fill.
 
+        # **The redesign's Settings** - the owner, 1 October 2026: "change
+        # the settings window design, it seems old and not good". One
+        # sheet scoped to this dialog, written with selectors so it
+        # cascades nowhere else: the display face for the title, quiet
+        # rows in the category list, hairline fields, pill buttons with
+        # Save white on black - the language of the rest of the app.
+        self.setStyleSheet(
+            f'QLabel#PanelTitle {{ font-family: "Bahnschrift", "Segoe UI";'
+            f" font-size: 24pt; font-weight: 300; color: {theme.TEXT}; }}"
+            f"QLabel#SectionTitle {{ font-size: 12pt; font-weight: 600;"
+            f" color: {theme.TEXT}; padding-top: 14px; }}"
+            f"QLabel#Muted {{ color: {theme.TEXT_DIM}; font-size: 9.5pt; }}"
+            f"QWidget#Sidebar {{ background: {theme.SIDEBAR};"
+            f" border-right: 1px solid {theme.rgba(theme.TEXT, 18)}; }}"
+            f"QListWidget#SettingsNav::item {{ padding: 9px 12px; border-radius: 10px; }}"
+            f"QListWidget#SettingsNav::item:hover {{ background: {theme.rgba(theme.TEXT, 12)}; }}"
+            # border: none - the app-wide rule draws a left accent bar on
+            # the selected row, which the rounding here bent into a hook.
+            f"QListWidget#SettingsNav::item:selected {{ background: {theme.rgba(theme.TEXT, 22)};"
+            f" color: {theme.TEXT}; border: none; }}"
+            f"QLineEdit {{ background: {theme.rgba(theme.TEXT, 10)};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 30)}; border-radius: 10px;"
+            f" padding: 7px 12px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {theme.TEXT}; }}"
+            f"QPushButton {{ border-radius: 17px; padding: 7px 20px;"
+            f" background: transparent; border: 1px solid {theme.rgba(theme.TEXT, 60)}; }}"
+            f"QPushButton:hover {{ border: 1px solid {theme.TEXT}; }}"
+            # The radius again on #Accent: the app-wide #Accent rule is the
+            # more specific one and kept its square corners (photographed).
+            f"QPushButton#Accent {{ background: {theme.ACCENT_HOVER}; color: {theme.ON_ACCENT};"
+            f" border: none; border-radius: 17px; font-weight: 700; }}"
+            f"QPushButton#Accent:hover {{ background: {theme.rgba(theme.ACCENT_HOVER, 205)}; }}"
+            f"QPushButton#Danger {{ color: {theme.DANGER}; border: 1px solid {theme.DANGER}; }}")
         # No title heading: the content column already opens with its
         # own "Settings" PanelTitle.
         frameless_dialog(self)
@@ -757,6 +811,8 @@ class SettingsDialog(QDialog):
             rows * (row_height + spacing * 2) + frame + CATEGORY_LIST_PADDING)
         layout.addWidget(self.category_list)
         layout.addStretch()
+        # The rows are pressable, so the pointer says so over them.
+        use_hover_cursor(self.category_list.viewport())
 
         return sidebar
 
@@ -776,8 +832,9 @@ class SettingsDialog(QDialog):
         if row in self._built_pages:
             return
         self._built_pages.add(row)
-        self.stack.widget(row).layout().addWidget(
-            _plain_scroller(self._page_builders[row]()))
+        page = self._page_builders[row]()
+        self.stack.widget(row).layout().addWidget(_plain_scroller(page))
+        _pointing_hands(page)
 
     # ------------------------------------------------------------------
     def _build_general_page(self):
@@ -872,6 +929,20 @@ class SettingsDialog(QDialog):
         )
         home_hint.setWordWrap(True)
         form.addWidget(home_hint)
+
+        form.addSpacing(8)
+        self.hide_from_discover_check = QCheckBox("Hide them from Discover page too")
+        self.hide_from_discover_check.setChecked(
+            app_settings.get_hide_sections_from_discover())
+        self.hide_from_discover_check.toggled.connect(self._toggle_hide_from_discover)
+        form.addWidget(self.hide_from_discover_check)
+
+        discover_hint = QLabel(
+            "Also keeps hidden sections' titles off the Discover page.",
+            objectName="Muted",
+        )
+        discover_hint.setWordWrap(True)
+        form.addWidget(discover_hint)
 
         form.addSpacing(24)
         add_spoiler_controls(form, self)
@@ -1028,6 +1099,10 @@ class SettingsDialog(QDialog):
 
     def _toggle_hide_from_home(self, enabled):
         app_settings.set_hide_sections_from_home(enabled)
+        self._apply_section_visibility()
+
+    def _toggle_hide_from_discover(self, enabled):
+        app_settings.set_hide_sections_from_discover(enabled)
         self._apply_section_visibility()
 
     def _apply_section_visibility(self):

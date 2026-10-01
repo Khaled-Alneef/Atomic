@@ -48,22 +48,23 @@ MAGIC = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8"}
 # {at, rows} - reading it as a list walks the keys instead, which are
 # strings, so every row is filtered out and the page shows nothing
 # against 1,287 cached titles. That was the bug.
+# **No Latest Chapters and no Reading row** - the owner, 1 October 2026:
+# "remove the Latest Ch row in discover page also the Reading row, and
+# make the Other as Other Readings". Both caches stay (the reading
+# catalogue and the schedule read them, and _PREWARMED_SECTIONS still
+# warms them); only the rows are gone from this page.
 DISCOVER_SECTIONS = (
     ("anime", "Anime"),
     ("series", "Series"),
     ("movie", "Movies"),
-    ("reading_latest", "Latest chapters"),
-    ("reading", "Reading"),
     ("medium:Manga", "Manga"),
     ("medium:Manhwa", "Manhwa"),
     ("medium:Manhua", "Manhua"),
-    ("medium:Other", "Other"),
+    ("medium:Other", "Other Readings"),
 )
 
-# Per section, not per page. The cache holds well over a thousand rows,
-# and a strip that long is a thousand pictures fetched for a row nobody
-# scrolls sideways.
-DISCOVER_LIMIT = 60
+# How many titles a Discover row holds - Netflix's Top 10 (see _discover).
+TOP10 = 10
 
 
 def _rows(name):
@@ -1692,6 +1693,30 @@ def _home_key(entry) -> str:
     return _HOME_KEYS.get(str((entry or {}).get("type") or "").lower(), "")
 
 
+# The Discover sections whose whole content is one nav page's medium -
+# hidden with that page when "Hide them from Discover page too" is on.
+# The reading blocks that mix mediums (Reading, Latest chapters, Other)
+# are not here: their rows are dropped one by one, by type (_home_key).
+_DISCOVER_KEYS = {"anime": "series:cat_anime", "series": "series:cat_series",
+                  "movie": "series:cat_movies",
+                  "medium:Manga": "manga:cat_manga",
+                  "medium:Manhwa": "manga:cat_manhwa",
+                  "medium:Manhua": "manga:cat_manhua"}
+
+
+def _hidden_on_discover() -> set:
+    """The owner, 1 October 2026: "in the preferences settings add a
+    checkbox says Hide them from Discover page too" - the Home rule
+    (_hidden_on_home) for the Discover page, with its own switch."""
+    try:
+        from helpers import app_settings
+        if not app_settings.get_hide_sections_from_discover():
+            return set()
+        return {str(k) for k in (app_settings.get_hidden_sections() or [])}
+    except Exception:
+        return set()
+
+
 def _hidden_on_home() -> set:
     try:
         from helpers import app_settings
@@ -1823,12 +1848,36 @@ def _discover():
 
     sections, total, newest, banner = [], 0, 0.0, None
     pools = {}
+    hidden = _hidden_on_discover()
+
+    def shown(key, rows):
+        """`rows` with a hidden page's titles taken out - all of them when
+        the section is that page's medium, one by one by type when it
+        mixes mediums."""
+        if not hidden:
+            return rows
+        if _DISCOVER_KEYS.get(key) in hidden:
+            return []
+        return [r for r in rows if _home_key(r) not in hidden]
     for key, label in DISCOVER_SECTIONS:
         block = cached.get(key)
         if not isinstance(block, dict):
             continue
-        rows = [r for r in (block.get("rows") or [])
-                if isinstance(r, dict) and r.get("title")]
+        rows = shown(key, [r for r in (block.get("rows") or [])
+                           if isinstance(r, dict) and r.get("title")])
+        # **One title, one place in a Top 10.** The same series listed by
+        # two reading sites is two cached rows - photographed 1 October
+        # 2026, "The Crimson Dragon Martial Emperor" at both #1 and #2 of
+        # Top 10 Other Readings. The first (higher-ranked) one is kept.
+        seen = set()
+        unique = []
+        for row in rows:
+            name = " ".join(str(row.get("title") or "").casefold().split())
+            if name in seen:
+                continue
+            seen.add(name)
+            unique.append(row)
+        rows = unique
         if not rows:
             continue
         total += len(rows)
@@ -1837,8 +1886,18 @@ def _discover():
         except (TypeError, ValueError):
             pass
         pools.setdefault(_BANNER_POOL.get(key, "reading"), []).extend(rows)
-        sections.append({"title": f"{label}  ({len(rows)})",
-                         "rows": [_row(e) for e in rows[:DISCOVER_LIMIT]]})
+        # **Every Discover row is a numbered Top 10** - the owner, 1
+        # October 2026: first "make sure that the card numbering design in
+        # the discovery page is applied to all rows ALL", then "make sure
+        # that the Discover page rows show Top 10 ONLY, like Top 10 Manga
+        # Top 10 Anime and so on". The order is the catalogue's own
+        # (Cinemeta's `top`, the reading sites' browse order), so the
+        # rank is a place in that list - nothing is invented. app.js
+        # draws `style: "top10"` with the rank as an outlined numeral.
+        # The banner still draws from the whole cached section (`pools`).
+        sections.append({"title": f"Top 10 {label}", "style": "top10",
+                         "key": f"discover:{key}",
+                         "rows": [_row(e) for e in rows[:TOP10]]})
 
     # **A different banner every visit, weighted by medium.** The owner,
     # 2 September 2026: "make the banner in the discover changes when I
@@ -1908,7 +1967,7 @@ def _discover():
     faces = _cast_section()
     if faces is not None:
         sections.append(faces)
-    note = f"{total} titles in {len(sections)} sections"
+    note = f"Ranked from {total} titles"
     if newest:
         age = (time.time() - newest) / 3600.0
         note += f", found {age:.0f}h ago" if age >= 1 else ", found just now"
@@ -3045,9 +3104,8 @@ def _schedule(side="watch"):
 
 # How many rows one "load more" asks for. tracker._category_more_worker
 # passes its own DISCOVER_LIMIT (30) for both halves of this, and the
-# measurement quoted below was taken with that number - so this is 30 and
-# deliberately *not* this module's DISCOVER_LIMIT, which is 60 because it
-# caps a Discover *section* rather than a page.
+# measurement quoted below was taken with that number - so this is 30,
+# and not Discover's per-row TOP10, which caps a row rather than a page.
 #
 # **It went missing, and that is worth recording.** A block of this file
 # was duplicated - eleven functions defined twice, the stale copy

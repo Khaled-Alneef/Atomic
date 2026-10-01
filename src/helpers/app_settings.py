@@ -85,6 +85,19 @@ def set_hide_sections_from_home(enabled: bool):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_hide_sections_from_discover() -> bool:
+    """Whether hiding a section also leaves its titles off Discover - the
+    owner's ask, 1 October 2026, beside the Home one above. Off by
+    default for the same reason that one is."""
+    return bool(_load().get("hide_sections_from_discover", False))
+
+
+def set_hide_sections_from_discover(enabled: bool):
+    data = _load()
+    data["hide_sections_from_discover"] = bool(enabled)
+    storage.save(SETTINGS_FILE, data)
+
+
 
 
 

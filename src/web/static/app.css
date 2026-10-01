@@ -1,15 +1,42 @@
 /* Atomic's look, in one place. The values are helpers/theme.py's, so the
-   web pages and the Qt build agree. */
+   web pages and the Qt build agree.
+
+   **Monochrome, after three references** - the owner, 1 October 2026:
+   Netflix, 1367 Studio and A24, "Dark, Netflix + 1367" with a monochrome
+   accent. Black ground, white as the one accent (a pressed or chosen
+   thing is white with black ink, Netflix's Play button), and motion
+   borrowed by its own curves, read off the three sites' stylesheets:
+   1367's expo-out at 0.5-0.9s for things arriving, A24's drawer curve for
+   things opening, Netflix's card curve at 0.25-0.3s for hover. */
 :root {
-  --bg: #0a0e16; --surface: #141b28; --hover: #1c2534;
-  --text: #e8eef6; --dim: #64718a; --accent: #2fb9a6;
-  --border: #2a3548; --rail: 216px; --danger: #ff5470;
+  --bg: #0a0a0a; --surface: #151515; --hover: #1f1f1f;
+  --text: #f2f2f2; --dim: #8c8c8c; --accent: #f2f2f2;
+  --border: #2a2a2a; --rail: 216px; --danger: #ff5470;
+  --ink: #0a0a0a;                 /* theme.ON_ACCENT - ink on the accent */
+  --active: #2b2b2b;              /* theme.SURFACE_ACTIVE */
+  --muted: #a3a3a3;               /* theme.TEXT_MUTED */
+  --hi: rgba(255, 255, 255, .42); /* a hovered outline, quieter than white */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);      /* 1367: arrivals */
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);  /* A24: things opening */
+  --ease-card: cubic-bezier(0.32, 0.94, 0.6, 1);  /* Netflix: card hover */
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  /* The display face for titles. **Bahnschrift, not a serif** - the
+     owner, 1 October 2026: "change the Times New Roman font to another
+     good font of your choice". The serif asked for "Sitka Display", and
+     Windows ships Sitka only as one variable family ("Sitka"), so the
+     name resolved to nothing and Chromium fell back to Times. Bahnschrift
+     ships with Windows too, as a real family, and its light weight is
+     the A24 restraint in a cleaner cut. */
+  --font-serif: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  /* 1367's eyebrows are a mono face in capitals, widely tracked. */
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
 }
 * { box-sizing: border-box; }
 html, body {
   margin: 0; height: 100%; overflow: hidden;
   background: var(--bg); color: var(--text);
-  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+  font: 13px/1.35 var(--font);
   user-select: none; -webkit-user-drag: none;
 }
 
@@ -29,7 +56,7 @@ html, body {
   color: var(--text); font-size: 13.5px; font-weight: 500;
 }
 .nav:hover { background: var(--hover); }
-.nav.on { background: var(--surface); color: var(--accent); }
+.nav.on { background: var(--surface); color: var(--text); }
 .nav i { width: 16px; text-align: center; font-style: normal; opacity: .85; }
 
 /* ---- embedded in the Qt app --------------------------------------
@@ -55,12 +82,12 @@ body.embed #page { inset: 0; }
 #page::-webkit-scrollbar { width: 12px; }
 #page::-webkit-scrollbar-track { background: transparent; }
 #page::-webkit-scrollbar-thumb {
-  background: #263143;                   /* theme.SURFACE_ACTIVE */
+  background: var(--active);              /* theme.SURFACE_ACTIVE */
   border-radius: 6px;
   border: 3px solid var(--bg);           /* insets the thumb to 6px */
 }
-#page:hover::-webkit-scrollbar-thumb { background: #3a4761; }
-#page::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+#page:hover::-webkit-scrollbar-thumb { background: #3d3d3d; }
+#page::-webkit-scrollbar-thumb:hover { background: #8c8c8c; }
 
 /* ---- the banner --------------------------------------------------
    widgets.HeroBanner and widgets.hero_split, by their own numbers:
@@ -94,9 +121,9 @@ body.embed #page { inset: 0; }
   /* A scrim across the left, where the text is - not a fade into the
      page, which is what made it look like a background. */
   content: ""; position: absolute; inset: 0;
-  background: linear-gradient(90deg, rgba(8, 11, 18, .92) 0%,
-              rgba(8, 11, 18, .72) 38%, rgba(8, 11, 18, .12) 72%,
-              rgba(8, 11, 18, 0) 100%);
+  background: linear-gradient(90deg, rgba(10, 10, 10, .92) 0%,
+              rgba(10, 10, 10, .72) 38%, rgba(10, 10, 10, .12) 72%,
+              rgba(10, 10, 10, 0) 100%);
 }
 .hero .inner {
   position: relative; z-index: 2;
@@ -107,12 +134,11 @@ body.embed #page { inset: 0; }
 .hero .herocover {
   width: 196px; height: 264px;           /* HERO_COVER_SIZE */
   object-fit: cover; border-radius: 10px;
-  flex: 0 0 auto; background: #0e131d;
+  flex: 0 0 auto; background: #121212;
   border: 1px solid rgba(255, 255, 255, .12);
   box-shadow: 0 8px 26px rgba(0, 0, 0, .55);
 }
 .hero .col { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-.hero.clickable { cursor: pointer; }
 .hero img.logo {
   /* **Height first, then the width cap** - hero_logo_label's own words.
      `max-height` only shrank a large treatment and left a small one
@@ -123,7 +149,7 @@ body.embed #page { inset: 0; }
   display: block;
 }
 .hero h1 { margin: 0; font-size: 32px; font-weight: 700; letter-spacing: .2px; }
-.hero p { margin: 0; color: #c7d2e2; font-size: 12.5px; }
+.hero p { margin: 0; color: #d0d0d0; font-size: 12.5px; }
 /* The four fact lines, stacked - see _bullets for what each one is. */
 .hero .bullets { display: flex; flex-direction: column; gap: 3px; }
 
@@ -136,14 +162,14 @@ body.embed #page { inset: 0; }
   display: inline-flex; align-items: center;
 }
 .hero .act.go {
-  background: var(--accent); color: #062521; border: 0;
+  background: var(--accent); color: var(--ink); border: 0;
 }
-.hero .act.go:hover { background: #3fd0bb; }
+.hero .act.go:hover { background: #ffffff; }
 .hero .act.quiet {
   background: rgba(255, 255, 255, .06); color: var(--text);
   border: 1px solid rgba(255, 255, 255, .35);
 }
-.hero .act.quiet:hover { border-color: var(--accent); color: var(--accent); }
+.hero .act.quiet:hover { border-color: var(--hi); color: var(--accent); }
 
 /* ---- the banner's pager pills -------------------------------------
    windows.home._HeroDash's own numbers: 18px at rest, 30px lit, 6px
@@ -158,17 +184,17 @@ body.embed #page { inset: 0; }
 }
 .pill {
   width: 18px; height: 6px; border-radius: 3px; cursor: pointer;
-  background: #263143;                     /* theme.SURFACE_ACTIVE */
+  background: var(--active);                     /* theme.SURFACE_ACTIVE */
   transition: width .2s ease, background-color .2s ease;
 }
-.pill:hover { background: #93a1b5; }        /* theme.TEXT_MUTED */
+.pill:hover { background: var(--muted); }     /* theme.TEXT_MUTED */
 .pill.on {
   width: 30px;
   /* theme.accent_stops(), along the length */
-  background: linear-gradient(90deg, #63c8bc 0%, #2fb9a6 7%, #1c8f80 100%);
+  background: linear-gradient(90deg, #ffffff 0%, #f2f2f2 7%, #c8c8c8 100%);
 }
 .pill.on:hover {
-  background: linear-gradient(90deg, #75dace 0%, #48d2be 7%, #26a795 100%);
+  background: linear-gradient(90deg, #75dace 0%, #ffffff 7%, #26a795 100%);
 }
 
 header { padding: 22px 28px 10px; }
@@ -190,7 +216,7 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
      honest while they are unrealised. */
   content-visibility: auto; contain-intrinsic-size: 300px;
 }
-.card:hover { background: var(--hover); border-color: var(--accent); }
+.card:hover { background: var(--hover); border-color: var(--hi); }
 /* **Saved's select mode** - the owner, 4 September 2026: "add a select
    button in saved to select multi then delete!". The same 20px box the
    shelf cards wear (.sc .spick), placed against the poster rather than
@@ -214,7 +240,7 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .card .spick {
   position: absolute; top: 18px; right: 18px; width: 20px; height: 20px;
   border-radius: 6px; border: 1px solid var(--text);
-  background: rgba(8, 11, 18, .55);
+  background: rgba(10, 10, 10, .55);
 }
 .card .spick.on { background: var(--accent); border-color: var(--accent); }
 .card .spick.on::after {
@@ -226,7 +252,7 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .card.picked img { outline: 2px solid var(--accent); outline-offset: 1px; }
 .card img {
   display: block; width: 160px; height: 216px; margin: 0 auto;
-  object-fit: cover; border-radius: 7px; background: #0e131d;
+  object-fit: cover; border-radius: 7px; background: #121212;
 }
 
 /* ---- the continue ring --------------------------------------------
@@ -237,7 +263,7 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .art { position: relative; width: 160px; margin: 0 auto; }
 .art::after {
   content: ""; position: absolute; inset: 0; border-radius: 7px;
-  background: rgba(8, 11, 18, .45);
+  background: rgba(10, 10, 10, .45);
   backdrop-filter: blur(2px);
   opacity: 0; transition: opacity .22s ease; pointer-events: none;
   z-index: 1;
@@ -253,12 +279,12 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
   width: 46px; height: 46px; margin: -23px 0 0 -23px;
   border-radius: 50%; cursor: pointer;
   border: 2px solid var(--accent);
-  background: rgba(8, 11, 18, .35);
+  background: rgba(10, 10, 10, .35);
   opacity: 0; transform: scale(.82);
   transition: opacity .22s ease, transform .22s ease, background-color .22s ease;
 }
 .card:hover .ring { opacity: 1; transform: scale(1); }
-.ring:hover { background: rgba(47, 185, 166, .28); }
+.ring:hover { background: rgba(255, 255, 255, .18); }
 .ring::before {
   /* A play triangle, drawn rather than typed: a glyph would size itself
      off the font and sit slightly off-centre.
@@ -296,8 +322,8 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
 .strip::-webkit-scrollbar-thumb {
   background: var(--border); border-radius: 4px;
 }
-.strip:hover::-webkit-scrollbar-thumb { background: #3a4761; }
-.strip::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+.strip:hover::-webkit-scrollbar-thumb { background: #3d3d3d; }
+.strip::-webkit-scrollbar-thumb:hover { background: #8c8c8c; }
 .strip .card { flex: 0 0 auto; width: 176px; }
 /* **A row card's stand-in is its exact height.** The owner, 21 September
    2026: "some of the horizontal scrollbars move their position a little
@@ -352,7 +378,7 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
   position: fixed; top: 0; left: 0; right: 0; z-index: 12;
   height: 48px;                          /* reader.BAR_HEIGHT */
   display: flex; align-items: center; gap: 10px; padding: 0 18px;
-  background: rgba(10, 14, 22, .94);
+  background: rgba(10, 10, 10, .9);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(10px);
   transform: translateY(-104%);
@@ -373,7 +399,7 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
   border: 1px solid var(--border); border-radius: 8px;
   padding: 6px 14px; font: inherit; font-size: 12.5px;
 }
-.rbtn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.rbtn:hover:not(:disabled) { border-color: var(--hi); color: var(--accent); }
 .rbtn:disabled { opacity: .38; cursor: default; }
 .rlabel { position: absolute; right: 18px; bottom: -18px;
           color: var(--dim); font-size: 11px; pointer-events: none; }
@@ -433,7 +459,7 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
   font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px;
   padding: 6px 10px; max-width: 560px; cursor: pointer;
 }
-.rjump:hover { border-color: var(--accent); }
+.rjump:hover { border-color: var(--hi); }
 
 /* **Centred on the window, not between the two clusters.** The same
    reasoning `.rtitle` carried when it held the chapter's number: the
@@ -486,16 +512,16 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 12;
   height: 60px; display: flex; align-items: center;
   justify-content: space-between; padding: 0 18px;
-  background: rgba(10, 14, 22, .94);
+  background: rgba(10, 10, 10, .9);
   border-top: 1px solid var(--border);
   backdrop-filter: blur(10px);
   transform: translateY(104%);
   transition: transform .16s ease-out;
 }
 .rreach-b:hover ~ .rfloor, .rfloor:hover { transform: translateY(0); }
-.rbtn.go { background: var(--accent); color: #062521; border-color: var(--accent);
+.rbtn.go { background: var(--accent); color: var(--ink); border-color: var(--accent);
            font-weight: 600; }
-.rbtn.go:hover:not(:disabled) { background: #3fd0bb; color: #062521; }
+.rbtn.go:hover:not(:disabled) { background: #ffffff; color: var(--ink); }
 /* **The same containment the grid's cards have.** The owner, 4
    September 2026: "make the scrolling in the reader view exactly the
    same as in the movies page EXACTLY."
@@ -524,7 +550,7 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
      max-width is the same ceiling once more, as Madara's own
      `.reading-content img{max-width:100%}` is. */
   display: block; width: min(var(--pagew, 1100px), 100%); max-width: 100%;
-  background: #0e131d;
+  background: #121212;
   /* Its own shape once loaded (a double-page spread is twice as wide as
      a single one); the shared --ar, or reader.PLACEHOLDER_RATIO's 1.45,
      only estimates boxes that have not arrived yet so nothing below
@@ -538,7 +564,7 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
       padding: 9px 12px; border-radius: 8px; background: var(--surface);
       border: 1px solid transparent;
       content-visibility: auto; contain-intrinsic-size: 38px; }
-.ep:hover { background: var(--hover); border-color: var(--accent); }
+.ep:hover { background: var(--hover); border-color: var(--hi); }
 .ep.done, .ep.done .epn { color: var(--dim); }
 .epn { font-size: 12.5px; min-width: 116px; flex: 0 0 auto; }
 .eps { color: var(--dim); font-size: 11.5px; overflow: hidden;
@@ -587,7 +613,7 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
   contain-intrinsic-size: 282px;
   contain: layout paint style;
 }
-.gc:hover { background: var(--hover); border-color: var(--accent); }
+.gc:hover { background: var(--hover); border-color: var(--hi); }
 .gc .p {
   width: 160px; height: 216px; margin: 0 auto; border-radius: 7px;
   background: var(--bg); object-fit: cover; display: block;
@@ -641,12 +667,12 @@ header p.ptitle { margin: 0 0 22px; }
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border);
 }
-.roundbtn:hover { border-color: var(--accent); color: var(--accent); }
+.roundbtn:hover { border-color: var(--hi); color: var(--accent); }
 .roundbtn.accent {
-  background: var(--accent); color: #021815; border-color: var(--accent);
+  background: var(--accent); color: var(--ink); border-color: var(--accent);
   font-family: inherit; font-size: 21px; font-weight: 600;
 }
-.roundbtn.accent:hover { background: #48d2be; color: #021815; }
+.roundbtn.accent:hover { background: #ffffff; color: var(--ink); }
 
 .sortrow { display: flex; align-items: center; gap: 10px; padding: 0 30px 12px; }
 .sortlabel { color: var(--text); font-size: 13px; }
@@ -656,7 +682,7 @@ header p.ptitle { margin: 0 0 22px; }
   padding: 7px 12px; cursor: pointer;
 }
 .sortbox { min-width: 168px; }
-.sortbox:hover, .plainbtn:hover, .selbtn:hover { border-color: var(--accent); }
+.sortbox:hover, .plainbtn:hover, .selbtn:hover { border-color: var(--hi); }
 .selbtn { margin-left: auto; }
 .selbtn.on { border-color: var(--accent); color: var(--accent); }
 .plainbtn.small { padding: 5px 10px; font-size: 12px; }
@@ -684,7 +710,7 @@ header p.ptitle { margin: 0 0 22px; }
   border: 1px solid var(--border); border-radius: 4px;
   background-color: var(--bg); position: relative; cursor: pointer;
 }
-.selall:hover input { border-color: var(--accent); }
+.selall:hover input { border-color: var(--hi); }
 .selall input:checked {
   background-color: var(--accent); border-color: var(--accent);
 }
@@ -720,7 +746,7 @@ header p.ptitle { margin: 0 0 22px; }
   background: transparent; border: 1px solid transparent; border-radius: 10px;
   content-visibility: auto; contain-intrinsic-size: 262px;
 }
-.sc:hover { background: var(--hover); border-color: var(--accent); }
+.sc:hover { background: var(--hover); border-color: var(--hi); }
 .sc .sart {
   width: 160px; height: 216px; object-fit: cover;      /* CARD_COVER_SIZE */
   display: block; margin: 0 auto; border-radius: 7px; background: var(--bg);
@@ -755,7 +781,7 @@ header p.ptitle { margin: 0 0 22px; }
 .sc .spick {
   position: absolute; top: 12px; right: 12px; width: 20px; height: 20px;
   border-radius: 6px; border: 1px solid var(--text);
-  background: rgba(8, 11, 18, .55);
+  background: rgba(10, 10, 10, .55);
 }
 .sc .spick.on { background: var(--accent); border-color: var(--accent); }
 /* The card's tick is the same shape a size up - 20px of box against the
@@ -782,12 +808,12 @@ header p.ptitle { margin: 0 0 22px; }
 .dldetail { color: var(--dim); font-size: 11.5px; margin-top: 3px; }
 .dlacts { display: flex; gap: 8px; flex: 0 0 auto; }
 .dlbar {
-  height: 6px; border-radius: 3px; background: #263143; margin-top: 8px;
+  height: 6px; border-radius: 3px; background: var(--active); margin-top: 8px;
   overflow: hidden;
 }
 .dlfill {
   height: 100%; border-radius: 3px;
-  background: linear-gradient(90deg, #63c8bc 0%, #2fb9a6 7%, #1c8f80 100%);
+  background: linear-gradient(90deg, #ffffff 0%, #f2f2f2 7%, #c8c8c8 100%);
   transition: width .3s ease-out;
 }
 
@@ -818,15 +844,15 @@ header p.ptitle { margin: 0 0 22px; }
 .row.quick .tiles::-webkit-scrollbar { width: 8px; }
 .row.quick .tiles::-webkit-scrollbar-track { background: transparent; }
 .row.quick .tiles::-webkit-scrollbar-thumb {
-  background: #263143; border-radius: 4px;
+  background: var(--active); border-radius: 4px;
 }
-.row.quick .tiles:hover::-webkit-scrollbar-thumb { background: #3a4761; }
+.row.quick .tiles:hover::-webkit-scrollbar-thumb { background: #3d3d3d; }
 .tile {
   display: flex; align-items: center; gap: 10px;
   padding: 6px 8px; border-radius: 8px; cursor: pointer;
   border: 1px solid transparent; min-width: 0; flex: 0 0 auto;
 }
-.tile:hover { background: var(--hover); border-color: var(--accent); }
+.tile:hover { background: var(--hover); border-color: var(--hi); }
 .tart {
   width: 28px; height: 28px; flex: 0 0 auto;      /* home.ROW_ICON_SIZE */
   display: flex; align-items: center; justify-content: center;
@@ -861,8 +887,8 @@ header p.ptitle { margin: 0 0 22px; }
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border);
 }
-.pill2:hover { border-color: var(--accent); }
-.pill2.on { background: var(--accent); color: #021815; border-color: var(--accent);
+.pill2:hover { border-color: var(--hi); }
+.pill2.on { background: var(--accent); color: var(--ink); border-color: var(--accent);
             font-weight: 600; }
 .tabnote { margin: 0; padding: 0 30px 8px; color: var(--dim); font-size: 12px; }
 
@@ -886,7 +912,7 @@ header p.ptitle { margin: 0 0 22px; }
   background: var(--surface); border: 1px solid transparent;
   margin-bottom: 8px;
 }
-.schedrow:hover { background: var(--hover); border-color: var(--accent); }
+.schedrow:hover { background: var(--hover); border-color: var(--hi); }
 .schedart {
   width: 56px; height: 56px; flex: 0 0 auto; border-radius: 7px;
   object-fit: cover; background: var(--bg);
@@ -895,7 +921,7 @@ header p.ptitle { margin: 0 0 22px; }
 .schedname { display: flex; align-items: center; gap: 8px; font-size: 14.5px;
              overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .savedtag {
-  background: var(--accent); color: #021815; border-radius: 10px;
+  background: var(--accent); color: var(--ink); border-radius: 10px;
   padding: 2px 9px; font-size: 11px; font-weight: 700; flex: 0 0 auto;
 }
 .schednum { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
@@ -945,7 +971,7 @@ header p.ptitle { margin: 0 0 22px; }
   background: var(--surface); border: 1px solid transparent;
   margin-bottom: 9px;
 }
-.histrow:hover { background: var(--hover); border-color: var(--accent); }
+.histrow:hover { background: var(--hover); border-color: var(--hi); }
 /* The Qt row's 46x62 cover, a size up with it - the poster is how a
    title is picked out of a list, so it leads the change. */
 .histart {
@@ -992,7 +1018,7 @@ header .pback {
   font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
   font-size: 14px; line-height: 1; cursor: pointer;
 }
-header .pback:hover { border-color: var(--accent); background: var(--hover); }
+header .pback:hover { border-color: var(--hi); background: var(--hover); }
 /* What the genre and cast pages say while their rows are being fetched -
    the door above is drawn immediately and this stands in for the count
    until there is one (see go()). */
@@ -1004,8 +1030,17 @@ header .pwait { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
    card - what changes is that the picture is a face, which reads as a
    face when it is round. The name stays on two lines like every other
    card's title so a row of faces lines up with the rows above it. */
-.strip.faces .card .art { border-radius: 50%; overflow: hidden; }
-.strip.faces .card img { border-radius: 50%; object-fit: cover; }
+/* **Rounded squares, not circles** - the owner, 1 October 2026: "change
+   the cast images to square shape with rounded edges". The picture is a
+   2:3 portrait, so the square is cut from its top - where the face is -
+   rather than squeezed. */
+.strip.faces .card .art {
+  border-radius: 14px; overflow: hidden; height: 160px;
+}
+.strip.faces .card img {
+  border-radius: 14px; object-fit: cover; object-position: center 18%;
+  height: 160px;
+}
 
 /* ---- the person at the head of their own page ---------------------
    His ask, 12 September 2026: "in the cast page, I want you to add the
@@ -1020,7 +1055,8 @@ header .pwait { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
    the genre page, which shares this header, is untouched. */
 header.gridhead .pface {
   display: block; margin: 2px auto 12px;
-  width: 132px; height: 132px; border-radius: 50%;
+  width: 132px; height: 132px; border-radius: 18px;
+  object-position: center 18%;
   object-fit: cover; background: var(--hover);
 }
 header.gridhead.withface { text-align: center; }
@@ -1071,7 +1107,7 @@ header .btabs { display: flex; gap: 8px; margin: 2px 0 10px; }
   font-size: 12.5px; border: 1px solid var(--border); border-radius: 8px;
   padding: 6px 10px; cursor: pointer;
 }
-.filterrow .sortpick select:hover { border-color: var(--accent); }
+.filterrow .sortpick select:hover { border-color: var(--hi); }
 /* Its own left margin rather than `auto`, so that a page with no Sort
    control (the reading catalogues still get one, but a future page may
    not) still finds this at the right-hand end. */
@@ -1094,7 +1130,7 @@ header .btabs { display: flex; gap: 8px; margin: 2px 0 10px; }
   color: var(--dim); font-size: 11.5px; cursor: pointer;
   user-select: none;
 }
-.genrebox .gpick:hover { border-color: var(--accent); }
+.genrebox .gpick:hover { border-color: var(--hi); }
 .genrebox .gpick.on { color: var(--text); border-color: var(--accent); }
 /* **Drawn, not the platform's.** The owner, 4 September 2026: "make
    the check box use a color matches the app theme not white."
@@ -1117,7 +1153,7 @@ header .btabs { display: flex; gap: 8px; margin: 2px 0 10px; }
      inline. */
   background-color: var(--bg); position: relative; cursor: pointer;
 }
-.genrebox .gpick:hover input { border-color: var(--accent); }
+.genrebox .gpick:hover input { border-color: var(--hi); }
 .genrebox .gpick input:checked {
   background-color: var(--accent); border-color: var(--accent);
 }
@@ -1180,4 +1216,392 @@ header .btabs { display: flex; gap: 8px; margin: 2px 0 10px; }
 .hero .act.danger {
   background: var(--danger); border-color: var(--danger); color: #2a0710;
   font-weight: 600;
+}
+
+
+/* =====================================================================
+   THE REDESIGN - the owner, 1 October 2026: "use these sites as
+   reference for transitioning and animation for the whole app design"
+   (netflix.com, 1367studio.com, a24.raviklaassens.com). He chose: dark,
+   Netflix + 1367; monochrome; Netflix hover cards, 1367 reveals, page
+   cross-fades and Netflix's numbered Top 10.
+
+   What was taken from where, read off each site's own computed styles
+   that day rather than guessed:
+     Netflix  black ground; a tall billboard that fades into the page;
+              cards that grow on hover at 0.25s on (.32,.94,.6,1);
+              round arrow buttons that page a row; the Top 10 numerals.
+     1367     things arrive by rising and fading on (.16,1,.3,1) over
+              0.5-0.9s, one after another; mono capitals as eyebrows;
+              pill-shaped controls.
+     A24      a serif display face for page titles; the drawer curve
+              (.32,.72,0,1) for anything that opens.
+   Everything that moves here is opacity or transform, so it runs on the
+   compositor and costs the scroll nothing (rule 7's 16.7ms); a reveal
+   runs once per element per arrival and never on a redraw (app.js
+   reveal()).
+   ===================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0s !important;
+                           animation-duration: 0s !important; }
+}
+
+/* ---- type -------------------------------------------------------- */
+.row h2, .schedblock h2 {
+  font-family: var(--font-display); font-size: 19px; font-weight: 600;
+  letter-spacing: -.01em; margin-bottom: 12px;
+}
+/* The page name stays small and dim (his ask of 22 August: a large name
+   "sat stacked" over its note) - set as 1367's mono eyebrow instead. */
+header p.ptitle, .tabrow .ptitle {
+  font-family: var(--font-mono); text-transform: uppercase;
+  letter-spacing: .16em; font-size: 11px; color: var(--dim);
+}
+header.gridhead.withface p.ptitle {
+  font-family: var(--font-serif); text-transform: none; letter-spacing: 0;
+  font-size: 30px; font-weight: 300; color: var(--text);
+}
+header h1, .paneltitle {
+  font-family: var(--font-serif); font-weight: 300;
+  font-size: 40px; letter-spacing: -.01em; line-height: 1.05;
+}
+.paneltitle { font-size: 36px; }
+
+/* ---- the billboard (Netflix) --------------------------------------
+   Full width and tall, the art running to the page's edges and fading
+   into the ground below it, the text at the bottom left. The cover
+   beside the text stays only while there is no wide art (`.poster`) -
+   a billboard with a still has no use for a second picture of the same
+   title. Slides cross-fade rather than swap. */
+.herobox {
+  position: relative; height: clamp(360px, 54vh, 540px);
+  overflow: hidden; margin-bottom: 6px;
+}
+.herobox .slide, .herobox .slide.on {
+  display: flex; position: absolute; inset: 0;
+}
+.herobox .slide {
+  opacity: 0; visibility: hidden;
+  transition: opacity .9s var(--ease-out), visibility 0s linear .9s;
+}
+.herobox .slide.on {
+  opacity: 1; visibility: visible;
+  transition: opacity .9s var(--ease-out), visibility 0s;
+}
+.hero {
+  height: auto; margin: 0; border-radius: 0; background: var(--bg);
+  align-items: flex-end;
+}
+.hero .hart { transition: transform 7s linear; }
+.herobox .slide.on .hart { transform: scale(1.04); }
+.hero.poster .hart, .herobox .slide.on.poster .hart { transform: scale(1.18); }
+.hero::after {
+  background:
+    linear-gradient(0deg, var(--bg) 0%, rgba(10, 10, 10, .72) 18%,
+                    rgba(10, 10, 10, .3) 36%, rgba(10, 10, 10, 0) 56%),
+    linear-gradient(90deg, rgba(10, 10, 10, .92) 0%, rgba(10, 10, 10, .62) 34%,
+                    rgba(10, 10, 10, 0) 68%);
+}
+.hero .inner { padding: 0 48px 64px; max-width: 980px; align-items: flex-end; }
+.hero:not(.poster) .herocover { display: none; }
+.hero .herocover { border-radius: 6px; width: 168px; height: 226px; }
+.hero img.logo { height: 112px; max-width: 520px; object-position: left bottom; }
+.hero h1 {
+  font-family: var(--font-serif); font-weight: 300; font-size: 56px;
+  line-height: 1; letter-spacing: -.01em; max-width: 760px;
+}
+.hero .col { gap: 10px; }
+.hero p { font-size: 13px; }
+.hero .acts { gap: 12px; margin-top: 12px; }
+.hero .act { height: 44px; padding: 0 26px; border-radius: 6px;
+             font-size: 14px; font-weight: 600;
+             transition: background-color .2s ease, color .2s ease; }
+.hero .act.go { background: #ffffff; color: var(--ink); }
+.hero .act.go:hover { background: rgba(255, 255, 255, .78); }
+.hero .act.quiet {
+  background: rgba(109, 109, 110, .55); color: #ffffff; border: 0;
+}
+.hero .act.quiet:hover { background: rgba(109, 109, 110, .38);
+                         color: #ffffff; border: 0; }
+/* **No arc under the billboard.** The owner, 1 October 2026: "I did
+   not like that curve line in the banners home and discover make it
+   another design of your choice". The billboard now simply sinks into
+   the page (the deeper bottom fade above), and the slide is told the
+   way 1367 tells its testimonials - a mono "01 / 06" beside the dashes.
+
+   **The dashes are buttons you can hit.** His ask the same day, "make
+   the bullets in the home page banner clickable": the dash was the
+   whole target, 3px tall. Each one is now a 22px-tall hit box with the
+   dash drawn inside it. */
+.pager {
+  justify-content: flex-end; align-items: center; gap: 4px;
+  right: 48px; left: auto; bottom: 22px;
+}
+.pill {
+  position: relative; width: 22px; height: 22px; border-radius: 0;
+  background: transparent; cursor: pointer;
+  transition: width .5s var(--ease-out);
+}
+.pill::after {
+  content: ""; position: absolute; left: 4px; right: 4px; top: 50%;
+  height: 3px; margin-top: -1.5px; border-radius: 2px;
+  background: rgba(255, 255, 255, .3);
+  transition: background-color .25s ease, height .25s ease;
+}
+.pill:hover { background: transparent; }
+.pill:hover::after { background: rgba(255, 255, 255, .7); }
+.pill.on, .pill.on:hover { width: 42px; background: transparent; }
+.pill.on::after { background: #ffffff; }
+.pagecount {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .14em;
+  color: rgba(255, 255, 255, .7); margin-right: 10px; user-select: none;
+}
+.pagecount b { color: #ffffff; font-weight: 400; }
+
+/* Entering: the still eases in from a little larger, the words rise
+   one after another (1367). One-shot animations, so a slide change or a
+   redraw does not replay them - app.js adds `.enter` only on arrival. */
+@keyframes rise { from { opacity: 0; transform: translate3d(0, 26px, 0); }
+                  40% { opacity: 1; }
+                  to { opacity: 1; transform: none; } }
+@keyframes settle { from { transform: scale(1.12); } to { transform: scale(1.04); } }
+/* The still is *visible* at once and only its scale takes the long
+   curve: rule 7 counts a page as arrived when its content is on screen,
+   and a 1.6s fade-in would have been most of a second of nothing. */
+.herobox.enter .slide.on .hart {
+  animation: settle 1.6s var(--ease-out) both, pagein .35s ease-out both;
+}
+.herobox.enter .slide.on.poster .hart { animation: none; }
+.herobox.enter .slide.on .col > * { animation: rise .9s var(--ease-out) both; }
+.herobox.enter .slide.on .col > :nth-child(2) { animation-delay: .08s; }
+.herobox.enter .slide.on .col > :nth-child(3) { animation-delay: .16s; }
+.herobox.enter .slide.on .herocover { animation: rise .9s var(--ease-out) both; }
+
+/* ---- cards (Netflix) ----------------------------------------------
+   No frame and no fill on hover any more: the picture grows and takes a
+   white edge, which is what says "this is the thing you would open".
+   Scaled inside the card's own padding (8px against 160 * .05 / 2 =
+   4px), because `content-visibility` contains the card's paint and a
+   larger growth would be clipped at its box. */
+.card:hover, .gc:hover, .sc:hover {
+  background: transparent; border-color: transparent;
+}
+/* **The picture leans toward the pointer** - the owner, 1 October 2026:
+   "make the cards on all pages hover animation rotate towards cursor".
+   app.js tilt() writes --rx/--ry from where the pointer is on the card;
+   --s is the Netflix growth. One transform, so it stays on the
+   compositor. While the pointer moves the transition is short (.tilting)
+   so the lean follows the hand; when it leaves, the long card curve
+   settles it back flat. The perspective is on the picture itself, so a
+   card's lean never depends on where the card sits in its grid. */
+.card .art, .gc .p, .sc .sart {
+  border-radius: 6px;
+  transform: perspective(760px) rotateX(var(--rx, 0deg))
+             rotateY(var(--ry, 0deg)) scale(var(--s, 1));
+  transition: transform .45s var(--ease-card), box-shadow .3s var(--ease-card);
+}
+.card .art.tilting, .gc .p.tilting, .sc .sart.tilting {
+  transition: transform .12s linear, box-shadow .3s var(--ease-card);
+}
+.card img, .art::after { border-radius: 6px; }
+.card:hover .art, .gc:hover .p, .sc:hover .sart {
+  --s: 1.05;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .88);
+}
+.card .t, .gc .t, .sc .sname { color: #d6d6d6; transition: color .2s ease; }
+.card:hover .t, .gc:hover .t, .sc:hover .sname { color: #ffffff; }
+.card.picking:hover .art { --s: 1; --rx: 0deg; --ry: 0deg; box-shadow: none; }
+/* **Home's apps and websites, hovered** - the owner, 1 October 2026:
+   "change the hover on the websites and apps in the main page". 1367's
+   list hover: the row draws a little to the right, a thin white rule
+   rises at its left, the icon grows a touch and the name goes white -
+   no slab of fill. All transform and opacity, so it costs the scroll
+   nothing. */
+.tile {
+  position: relative; border-color: transparent;
+  transition: transform .35s var(--ease-out), background-color .25s ease;
+}
+.tile::before {
+  content: ""; position: absolute; left: 0; top: 22%; bottom: 22%;
+  width: 2px; border-radius: 1px; background: #ffffff;
+  transform: scaleY(0); opacity: 0;
+  transition: transform .35s var(--ease-out), opacity .25s ease;
+}
+.tile .tart img { transition: transform .35s var(--ease-out); }
+.tile .tname { color: #cfcfcf; transition: color .2s ease; }
+.tile:hover {
+  background: rgba(255, 255, 255, .04); border-color: transparent;
+  transform: translateX(6px);
+}
+.tile:hover::before { transform: scaleY(1); opacity: 1; }
+.tile:hover .tart img { transform: scale(1.1); }
+.tile:hover .tname { color: #ffffff; }
+.ring { border-color: #ffffff; }
+.ring::before { border-left-color: #ffffff; }
+
+/* ---- rows: arrows that page them (Netflix) ------------------------ */
+.row { position: relative; }
+.rowarrow {
+  position: absolute; z-index: 4; top: 50%; width: 44px; height: 44px;
+  margin-top: -6px; border-radius: 50%; cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 15px; color: #ffffff;
+  background: rgba(20, 20, 20, .78); border: 1px solid rgba(255, 255, 255, .22);
+  opacity: 0; transform: scale(.86); pointer-events: none;
+  transition: opacity .25s var(--ease-card), transform .25s var(--ease-card),
+              background-color .2s ease, color .2s ease;
+}
+.rowarrow.l { left: 14px; }
+.rowarrow.r { right: 14px; }
+.row:hover .rowarrow.can { opacity: 1; transform: none; pointer-events: auto; }
+.rowarrow:hover { background: rgba(255, 255, 255, .92); color: var(--ink); }
+
+/* ---- Top 10 (Netflix) ---------------------------------------------
+   The rank is a numeral the height of the poster, outlined, sitting
+   behind the poster's left edge. The card is wider by the numeral, and
+   its stand-in size says so, for the reason the row card's note gives
+   (a stand-in that is wrong moves the row's scrollbar). */
+.strip.top10 { gap: 4px; }
+.strip.top10 .card {
+  width: 268px; position: relative; padding-left: 100px;
+  contain-intrinsic-size: auto 268px auto 269px;
+}
+.strip.top10 .card .art { margin: 0; z-index: 1; }
+/* The words sit above the numeral: it is positioned, so without their
+   own stacking it painted its ground-coloured body over the titles (the
+   first screenshot, 1 October 2026). */
+/* Centred under the poster, as every other card's are - the owner, 1
+   October 2026: "make the names under the cards in the mid not in the
+   left". The card's padding is the numeral's, so its content box is the
+   poster's width and centring here centres under the picture. */
+.strip.top10 .card .t, .strip.top10 .card .m {
+  text-align: center; position: relative; z-index: 1;
+}
+/* **The names sit lower under Discover's cards** - the owner, 1 October
+   2026: "in the discover page, move the names under all cards a bit
+   lower". Every Discover row is a Top 10 or the Cast row, so it is those
+   two that move: 7px more between the picture and the name. The cards'
+   stand-in heights move with them (the row card's note says why a wrong
+   one moves the scrollbar), and the numeral still stands on the
+   poster's bottom edge. */
+.strip.top10 .card .t, .strip.faces .card .t { margin-top: 14px; }
+.strip.top10 .card { contain-intrinsic-size: auto 268px auto 276px; }
+.strip.top10 .card.two { contain-intrinsic-size: auto 336px auto 276px; }
+.strip.top10 .rankn { bottom: 70px; }
+/* The Cast row's picture is the 160px square now, so its card's stand-in
+   is that square plus the name and the line under it - it was still
+   sized for the 216px poster, the mismatch the row card's note warns
+   about. */
+.strip.faces .card { contain-intrinsic-size: auto 176px auto 220px; }
+/* `bottom: 63px` is the poster's own bottom edge: the card's 10px pad,
+   the 15px meta line and the title's 7 + 31 below it (the stand-in note
+   above has the same sum). The numeral stands on that line, as Netflix's
+   does, rather than on the text under it. */
+/* **A little further left** - the owner, 1 October 2026, with a picture
+   of Top 10 Series: "make the numbers a bit more to left". The numeral
+   used to run 36px under the poster; it now runs 20px under it, so
+   more of each digit stands clear beside the picture. */
+.rankn {
+  position: absolute; left: 0; bottom: 63px; z-index: 0;
+  width: 120px; text-align: right;
+  font-family: "Segoe UI Black", "Arial Black", var(--font-display);
+  font-weight: 900; font-size: 188px; line-height: .74;
+  letter-spacing: -14px; color: var(--bg);
+  -webkit-text-stroke: 3px rgba(255, 255, 255, .6);
+  pointer-events: none; user-select: none;
+  transition: -webkit-text-stroke-color .3s ease;
+}
+.strip.top10 .card:hover .rankn { -webkit-text-stroke-color: #ffffff; }
+/* The rank "10" - every Discover row is a Top 10 (the owner, 1 October
+   2026, server.TOP10). Two digits at the single digit's size would be
+   ~256px of numeral, so the pair is set smaller and tighter and the card
+   made wider to hold it, with its own stand-in size for the same
+   scrollbar reason. */
+.strip.top10 .card.two {
+  width: 336px; padding-left: 168px;
+  contain-intrinsic-size: auto 336px auto 269px;
+}
+/* 22px under the poster, not the single digit's 36: at 36 the poster
+   hid more than half of the second digit (photographed, "10" read as
+   "1"), and Netflix's own "10" reads whole. */
+.strip.top10 .card.two .rankn {
+  width: 178px; font-size: 146px; letter-spacing: -14px;
+}
+
+/* ---- controls: 1367's pills --------------------------------------- */
+.rbtn, .plainbtn, .sortbox, .selbtn, .histclear, .filterrow input,
+.filterrow .sortpick select, .rjump, .pill2 {
+  border-radius: 999px;
+  transition: background-color .2s ease, border-color .2s ease, color .2s ease;
+}
+.sortbox, .plainbtn, .selbtn { padding: 7px 16px; }
+.filterrow input { padding: 0 16px; }
+.pill2 { padding: 6px 20px; }
+.pill2.on, .selbtn.on { background: #ffffff; color: var(--ink);
+                        border-color: #ffffff; font-weight: 600; }
+.roundbtn { transition: background-color .2s ease, border-color .2s ease; }
+.roundbtn.accent { background: #ffffff; border-color: #ffffff; }
+.roundbtn.accent:hover { background: rgba(255, 255, 255, .8); }
+.genrebox .gpick { transition: border-color .2s ease, color .2s ease; }
+.genrebox .gpick.on { border-color: #ffffff; }
+.schedrow, .histrow, .ep {
+  border-radius: 8px;
+  transition: background-color .2s ease, border-color .2s ease;
+}
+.schedleft, .cnum, .gc .m.s, .histtag.in { color: #ffffff; }
+.savedtag { background: #ffffff; }
+.shelfpanel { background: transparent; padding-top: 8px; }
+/* With the panel gone, a download row carries its own plate - it was
+   drawn in the page colour on the panel's, and on the bare page the
+   list stopped reading as rows (the first screenshot of it). */
+.dlrow { background: var(--surface); border-radius: 8px; }
+
+/* ---- arriving (1367) -----------------------------------------------
+   `.rv` is anything that rises into place the first time it scrolls into
+   view; `.rvrow` is a row whose heading and cards rise one after another
+   (--i is the card's place in the row, capped so a long row does not
+   keep the last cards waiting). app.js puts these on only when a page
+   *arrives* - never on a redraw, which must not replay an entrance under
+   a page the owner is reading (rule 13 redraws a page on every change). */
+.rv { opacity: 0; transform: translate3d(0, 30px, 0); }
+.rv.in {
+  opacity: 1; transform: none;
+  /* Opaque in .45s, still rising for .9s: on screen inside rule 7's
+     second, with the long settle 1367 has. Measured against the old
+     build: Discover's first frame of content is 0.6s after the click
+     either way - the page's own load - so the fade must not add to it. */
+  transition: opacity .45s var(--ease-out), transform .9s var(--ease-out);
+  transition-delay: var(--d, 0ms);
+}
+.rvrow > h2, .rvrow .card, .rvrow .tile {
+  opacity: 0; transform: translate3d(0, 26px, 0);
+}
+.rvrow.in > h2, .rvrow.in .card, .rvrow.in .tile {
+  opacity: 1; transform: none;
+  transition: opacity .45s var(--ease-out), transform .9s var(--ease-out);
+  transition-delay: calc(var(--i, 0) * 30ms);
+}
+/* A page drawn inside the same document (a tab, a search) cross-fades in
+   rather than swapping in one frame - the in-page half of the page
+   cross-fade; the Qt pages' own transition is the shell's. */
+@keyframes pagein { from { opacity: 0; } to { opacity: 1; } }
+#page.pagein { animation: pagein .45s var(--ease-out) both; }
+
+
+/* **A select's arrow, drawn and placed.** The owner, 1 October 2026,
+   with a picture of Custom Order: "why is the arrow right shifted more?".
+   The platform draws its own arrow hard against the box's right edge,
+   and once the box became a pill that edge curves away under it. The
+   native arrow is taken out (appearance: none) and a chevron drawn 16px
+   in from the end, with the padding to keep the text off it. Longhand
+   background-color, for the reason the genre ticks record. */
+.sortbox, .filterrow .sortpick select {
+  appearance: none; -webkit-appearance: none;
+  padding-right: 38px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23f2f2f2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 16px center;
+  background-size: 10px 6px;
 }

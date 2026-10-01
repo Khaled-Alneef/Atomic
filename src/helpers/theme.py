@@ -37,25 +37,25 @@ from . import storage
 # computed 25 August 2026, not eyeballed). Anything filled with the
 # accent (or with ACCENT_GRADIENT) takes ON_ACCENT for its text/glyph,
 # never white.
-BG = "#0a0e16"           # app background - near-black, cool navy
-BG_ALT = "#10151f"       # secondary background (page panels)
+BG = "#0a0a0a"           # app background - near-black, cool navy
+BG_ALT = "#101010"       # secondary background (page panels)
 # The two lobes of the nebula the page backdrop paints in from its right
 # edge (widgets.GlassPage): a teal core with a blue bloom off it.
-GLOW = "#14515a"         # deep teal core of the backdrop glow
-SIDEBAR = "#070a11"      # sidebar column
-SIDEBAR_SHEEN = "#121824"  # subtle highlight at the sidebar's top edge
-SIDEBAR_DEEP = "#05070c"   # ...fading darker toward its bottom
-SURFACE = "#141b28"      # cards / inputs ("card background")
-SURFACE_HOVER = "#1c2534"  # ...lifted on hover ("card elevated")
-SURFACE_ACTIVE = "#263143"
+GLOW = "#1c1c1c"         # deep teal core of the backdrop glow
+SIDEBAR = "#070707"      # sidebar column
+SIDEBAR_SHEEN = "#141414"  # subtle highlight at the sidebar's top edge
+SIDEBAR_DEEP = "#050505"   # ...fading darker toward its bottom
+SURFACE = "#151515"      # cards / inputs ("card background")
+SURFACE_HOVER = "#1f1f1f"  # ...lifted on hover ("card elevated")
+SURFACE_ACTIVE = "#2b2b2b"
 # The lit top lip a "glass" panel catches - one step above SURFACE_HOVER
 # and used only as a gradient's first stop, never as a fill on its own.
-SURFACE_SHEEN = "#2f3b4f"
-BORDER = "#2a3548"
+SURFACE_SHEEN = "#353535"
+BORDER = "#2a2a2a"
 
-TEXT = "#e8eef6"
-TEXT_MUTED = "#93a1b5"
-TEXT_DIM = "#64718a"
+TEXT = "#f2f2f2"
+TEXT_MUTED = "#a3a3a3"
+TEXT_DIM = "#737373"
 # Pure white, for text sitting directly over video/artwork (the player's
 # top bar) where the palette's blue-tinted TEXT reads as dingy against a
 # bright frame. Not for text on the app's own surfaces - TEXT is
@@ -65,25 +65,32 @@ VOLUME_OSD_KNOB_RING = "#c9ced6"
 # The seek strip's unplayed part and its buffered band, over video: "very
 # light gray, not the current colour" (7 September 2026). The bar's
 # volume groove takes the same rest colour.
-SEEK_REST = "#dfe3e9"
-SEEK_BUFFERED = "#aeb6c2"
+#
+# **Mid grey now, under a white played part** - the redesign, 1 October
+# 2026 (stage 4, after Netflix's strip). The played part is the accent,
+# and the accent is white: over the old very light rest (#dfe3e9) the
+# played part had almost nothing to stand against. Netflix's own strip is
+# a grey rest, a lighter buffered band and a solid played part; this is
+# that in monochrome, and the volume groove follows it.
+SEEK_REST = "#6e6e6e"
+SEEK_BUFFERED = "#b4b4b4"
 # A text entry inside a panel: lighter than the panel so it reads as a
 # field that can be typed into (the subtitle steppers, 7 September 2026).
-INPUT_BG = "#243044"
+INPUT_BG = "#262626"
 
-ACCENT = "#2fb9a6"        # primary action - teal
-ACCENT_HOVER = "#48d2be"
-ACCENT_ACTIVE = "#1f9a89"
+ACCENT = "#f2f2f2"        # primary action - teal
+ACCENT_HOVER = "#ffffff"
+ACCENT_ACTIVE = "#d4d4d4"
 # The deeper sea-green end every accent gradient runs into. The name
 # keeps the "blue" it had when the gradient ran cyan->blue, on purpose:
 # every consumer refers to the token, and renaming it would touch files
 # this values-only re-theme must not.
-ACCENT_BLUE = "#1c8f80"
-ACCENT_BLUE_HOVER = "#26a795"
-ACCENT_SOFT = "#102a2c"   # tinted background for the active nav item
+ACCENT_BLUE = "#c8c8c8"
+ACCENT_BLUE_HOVER = "#dedede"
+ACCENT_SOFT = "#1c1c1c"   # tinted background for the active nav item
 # Text/glyph color on any accent-filled surface. See the note above -
 # white on teal is the one combination this palette cannot use.
-ON_ACCENT = "#021815"
+ON_ACCENT = "#0a0a0a"
 
 # Green, but deliberately not the old #2ee0a4: that one sits at hue 160,
 # 12 deg off the new teal accent (172), and would read as a second
@@ -231,14 +238,14 @@ ACCENT_SOFT_TEXT = ACCENT_HOVER
 # every indicator still filled with it - ArtChip, the reader's language
 # badge, the details page's watched markers, both progress chunks -
 # keeps that pairing on purpose.
-ACCENT_DEEP = "#1a7568"
-ACCENT_DEEP_LIP = "#22897c"
-ACCENT_DEEP_FOOT = "#13594f"
-ACCENT_DEEP_HOVER = "#1e8375"
-ACCENT_DEEP_LIP_HOVER = "#279486"
-ACCENT_DEEP_FOOT_HOVER = "#166459"
-ACCENT_DEEP_ACTIVE = "#12524a"
-ON_ACCENT_DEEP = "#ffffff"
+ACCENT_DEEP = "#ebebeb"
+ACCENT_DEEP_LIP = "#ffffff"
+ACCENT_DEEP_FOOT = "#d0d0d0"
+ACCENT_DEEP_HOVER = "#f7f7f7"
+ACCENT_DEEP_LIP_HOVER = "#ffffff"
+ACCENT_DEEP_FOOT_HOVER = "#e0e0e0"
+ACCENT_DEEP_ACTIVE = "#bdbdbd"
+ON_ACCENT_DEEP = "#0a0a0a"
 
 
 def accent_button_stops(hover=False):
@@ -925,6 +932,16 @@ QLineEdit#TopSearch {{
 }}
 QLineEdit#TopSearch:hover {{ border: 1px solid {mix(BORDER, ACCENT, 0.4)}; }}
 QLineEdit#TopSearch:focus {{ border: 1px solid {ACCENT}; background: {SURFACE_HOVER}; }}
+/* Inside the title bar's capsule (window_chrome.TitleBar.set_compact) the
+   field gives up its own box: the capsule is the one shape, as 1367's
+   header pill is. Left boxed, the owner saw "the search bar looks
+   separated" - a rounded field inside a rounded capsule, on two shades. */
+QLineEdit#TopSearch[compact="true"] {{
+    background: transparent; border: 1px solid transparent;
+}}
+QLineEdit#TopSearch[compact="true"]:focus {{
+    background: {rgba(TEXT, 14)}; border: 1px solid transparent;
+}}
 
 /* ---- Generic page chrome --------------------------------------------- */
 QWidget#Panel {{
