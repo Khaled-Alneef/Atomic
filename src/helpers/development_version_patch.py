@@ -1544,7 +1544,10 @@ def install():
     # 2.13.1
     #   * Resume on a reading card asks the site for new chapters first
     #     when the list on disk has him on its newest (web_pages._continue).
-    updater.APP_VERSION = "2.13.1"
+    # 2.13.2
+    #   * A reading card shows the last chapter read, not the next one
+    #     (server._progress_text); video cards are unchanged.
+    updater.APP_VERSION = "2.13.2"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

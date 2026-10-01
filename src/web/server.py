@@ -184,7 +184,7 @@ def _season_step(entry, season, number):
     return f"S{season:02d}E{number:02d}"
 
 
-def _last_mark(marks, kind="", said="", entry=None):
+def _last_mark(marks, kind="", said="", entry=None, following=True):
     """**The episode or chapter he is on, not the one he finished.**
 
     The owner, 3 September 2026: *"make the ep and season number on the
@@ -288,12 +288,13 @@ def _last_mark(marks, kind="", said="", entry=None):
     if chapters and (reading or not kind):
         # ":g" so 1185.0 reads "1186" and a half chapter (1185.5) reads
         # "1186.5" rather than being rounded into a chapter that is not
-        # the next one.
-        return f"Ch {max(chapters) + 1:g}"
+        # the next one. `following=False` is the reading card's rule
+        # (see _progress_text): the chapter itself, not the one after.
+        return f"Ch {max(chapters) + (1 if following else 0):g}"
     return ""
 
 
-def _marked_progress(entry):
+def _marked_progress(entry, following=True):
     """This entry's furthest tick, or "" if it has none.
 
     The id is asked first and the title second: an id names one work,
@@ -311,7 +312,7 @@ def _marked_progress(entry):
             # row's - either is an answer a season-0 mark must beat.
             found = _last_mark(marks, kind,
                                str(entry.get("progress") or "").strip() or said,
-                               entry=entry)
+                               entry=entry, following=following)
             if found:
                 return found
     return ""
@@ -513,7 +514,21 @@ def _progress_text(entry):
             # entry keeps the site's release count bare ("884").
             raw = str(entry.get("progress") or "").strip()
             said = raw if raw[:1].lower() == "c" else ""
-        return _one_on(said, True, entry) or _marked_progress(entry)
+        # **The chapter he last read, not the next one.** The owner, 1
+        # October 2026: "make the readings in the cards, show the last ch
+        # watched not the next to watch". Reading only - a video card
+        # still says the episode Continue plays (his 3 September rule
+        # above stands for those). Continue itself is unchanged: it opens
+        # the chapter after this one, asking the site first when this is
+        # the newest it knows (web_pages._continue).
+        if said:
+            try:
+                number = float(said.split()[-1].lstrip("Cch "))
+            except (TypeError, ValueError):
+                return said if said.lower().startswith("ch") else f"Ch {said}"
+            if number > 0:
+                return f"Ch {number:g}"
+        return _marked_progress(entry, following=False)
 
     # Video. Only a *confirmed* number counts, and it counts as finished,
     # so the card says the one after it - which is the one Continue
