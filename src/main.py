@@ -2774,6 +2774,10 @@ class MainWindow(QMainWindow):
         # Read and Watch, where two chevrons of different sizes read as
         # two different controls.
         button.setFixedSize(24, 24)
+        # NoFocus like the bar's other buttons: with the search field off
+        # Tab focus, this was the window's first focus pick at launch, and
+        # Space would have folded the sidebar.
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         use_hover_cursor(button)
         button.clicked.connect(self._toggle_sidebar)
         return button
@@ -6071,6 +6075,12 @@ def main():
     # another thread. Off a timer so it lands after the first frame is
     # on screen rather than delaying it.
     QTimer.singleShot(PRELOAD_OVERLAYS_MS, _preload_overlays)
+    # The keyboard starts on the page, chosen here rather than by Qt: with
+    # no focus set, activation hands it to the first tab-focusable widget,
+    # which was the search field (the app opened typing into it, 2 October
+    # 2026). Set before show, so activation restores this instead.
+    if window._current_page is not None:
+        window._current_page.setFocus(Qt.FocusReason.OtherFocusReason)
     # Full screen only for a launch Windows itself started at sign-in
     # (the registered command carries startup.STARTUP_FLAG, nothing else
     # does) - opening the app by hand is unaffected by that setting.
