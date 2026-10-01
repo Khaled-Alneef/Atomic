@@ -1556,7 +1556,7 @@ def install():
     #   * The first launch after an update tells Explorer the exe's icon
     #     changed, so the Desktop and taskbar stop showing the old one
     #     (updater.refresh_shell_icons).
-    updater.APP_VERSION = "3.0.1"
+    updater.APP_VERSION = "3.1"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
