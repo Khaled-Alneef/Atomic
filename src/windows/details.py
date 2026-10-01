@@ -30,6 +30,7 @@ same thing for video and the owner rightly called that broken.
 
 import copy
 import datetime
+import math
 import re
 import threading
 import time
@@ -40,7 +41,7 @@ from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt,
                           QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QBrush, QColor, QCursor, QIcon, QLinearGradient,
-                         QPainter, QPainterPath, QPixmap, QTransform)
+                         QPainter, QPainterPath, QPixmap, QRegion, QTransform)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QPushButton, QVBoxLayout, QWidget,
@@ -787,14 +788,23 @@ def _aired(value):
         return None
 
 
+# **The redesign's details page** - the owner, 1 October 2026, stage 3
+# of "change the whole app UI design" after Netflix, 1367 Studio and A24.
+# Chips are 1367's outline pills (no fill, a hairline, fully round), and
+# a pressable one answers hover the way Netflix's controls do: it turns
+# white with black ink. Monochrome throughout - the accent is white now.
+CHIP_EDGE = theme.rgba(theme.TEXT, 70)
+
+
 def _chip(text, accent=False) -> QLabel:
     label = QLabel(text)
+    fill = theme.ACCENT if accent else "transparent"
     label.setStyleSheet(
         f"color: {theme.ON_ACCENT if accent else theme.TEXT};"
-        f" background: {theme.ACCENT_GRADIENT if accent else theme.SURFACE_HOVER};"
-        f" border: 1px solid {theme.ACCENT if accent else theme.BORDER};"
-        f" border-radius: {theme.RADIUS}px; padding: 5px 14px;"
-        f" font-weight: 600; font-size: 10.5pt;")
+        f" background: {fill};"
+        f" border: 1px solid {theme.ACCENT if accent else CHIP_EDGE};"
+        f" border-radius: 15px; padding: 5px 15px;"
+        f" font-weight: 500; font-size: 10.5pt;")
     return label
 
 
@@ -806,12 +816,12 @@ def _chip_button(text) -> QPushButton:
     button = QPushButton(text)
     use_hover_cursor(button)
     button.setStyleSheet(
-        f"QPushButton {{ color: {theme.TEXT}; background: {theme.SURFACE_HOVER};"
-        f" border: 1px solid {theme.BORDER};"
-        f" border-radius: {theme.RADIUS}px; padding: 5px 14px;"
-        f" font-weight: 600; font-size: 10.5pt; }}"
-        f"QPushButton:hover {{ border: 1px solid {theme.ACCENT};"
-        f" color: {theme.ACCENT}; }}")
+        f"QPushButton {{ color: {theme.TEXT}; background: transparent;"
+        f" border: 1px solid {CHIP_EDGE};"
+        f" border-radius: 15px; padding: 5px 15px;"
+        f" font-weight: 500; font-size: 10.5pt; }}"
+        f"QPushButton:hover {{ border: 1px solid {theme.ACCENT_HOVER};"
+        f" background: {theme.ACCENT_HOVER}; color: {theme.ON_ACCENT}; }}")
     button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     use_hover_cursor(button)
     return button
@@ -825,7 +835,12 @@ def _badge(text, kind) -> QLabel:
     # ON_ACCENT on both fills: it computes 10.5:1 on SUCCESS (25 August
     # 2026) - this held a hand-typed near-black green before, which the
     # navy re-theme would have stranded.
-    colours = {"watched": (theme.ON_ACCENT, theme.ACCENT_GRADIENT, theme.ACCENT),
+    # **Watched is quiet now.** With the accent turned white, a filled
+    # DONE was the brightest thing on every finished row - a column of
+    # white slabs down a long chapter list. It is an outline, the way
+    # the redesign's other states are; UPCOMING keeps its green, which
+    # means something.
+    colours = {"watched": (theme.TEXT_MUTED, "transparent", CHIP_EDGE),
                "upcoming": (theme.ON_ACCENT, theme.SUCCESS, theme.SUCCESS)}
     fg, bg, border = colours[kind]
     label = QLabel(text)
@@ -1064,6 +1079,187 @@ class _PanelNote(QLabel):
 # Imported above; every `PickCombo(...)` here still resolves.
 
 
+# The display face: Bahnschrift, light (see app.css --font-serif for why
+# not Sitka - the name resolved to nothing and Qt fell back to Times).
+DISPLAY_SERIF = '"Bahnschrift", "Segoe UI Variable Display", "Segoe UI"'
+EYEBROW_MONO = '"Cascadia Mono", Consolas, "Courier New", monospace'
+
+# The entrance (DetailsPage.prepare_entrance, started by open_details). 1367's things-rise-into-place
+# for the identity column - expo-out, from ENTER_RISE_PX below - and A24's
+# drawer for the list panel, sliding in from ENTER_SLIDE_PX to the right
+# a beat later. Short of rule 7's second: the page is on screen from the
+# first frame, only its two halves are still settling.
+ENTER_MS = 620
+ENTER_RISE_PX = 28
+ENTER_SLIDE_PX = 64
+ENTER_PANEL_DELAY = 0.12          # of ENTER_MS
+
+
+class _Entrance(QWidget):
+    """The details page arriving, as three pictures: the backdrop, the
+    identity column and the list panel.
+
+    **Pictures, not the widgets.** Moving or fading the real widgets would
+    repaint every label, chip and row on both halves every frame - the
+    cost widgets.PageSlide measured at 64-109 paints a tick. Each half is
+    rendered once, the overlay blits them (one opaque, two at an alpha),
+    and the real page is uncovered when it lands. Anything that arrives
+    while it runs (the logo, the list) is in the real page by then."""
+
+    def __init__(self, page, backdrop, identity, panel):
+        super().__init__(page)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._page = page
+        self._backdrop = backdrop
+        self._parts = identity, panel
+        self._at = 0.0
+        self._frames = 0
+        self._worst = 0.0
+        from helpers.widgets import SmoothTween
+        self._tween = SmoothTween(self, self._step, ENTER_MS,
+                                  on_done=self._land, curve=lambda t: t)
+
+    def start(self):
+        self.setGeometry(self._page.rect())
+        self.show()
+        self.raise_()
+        self._tween.start(0.0, 1.0)
+
+    def _step(self, at):
+        self._at = float(at)
+        self.update()
+
+    def _land(self):
+        logs.info(f"details entrance: frames={self._frames} "
+                  f"worst={self._worst:.1f}ms")
+        self._backdrop = None
+        self._parts = None, None
+        self.hide()
+        self.deleteLater()
+
+    @staticmethod
+    def _expo(t):
+        t = max(0.0, min(1.0, t))
+        return 1.0 if t >= 1.0 else 1.0 - 2.0 ** (-10.0 * t)
+
+    @staticmethod
+    def _drawer(t):
+        # A24's (.32,.72,0,1) is a strong ease-out; cubic matches it to
+        # within a few percent over the part the eye follows.
+        t = max(0.0, min(1.0, t))
+        return 1.0 - (1.0 - t) ** 3
+
+    def paintEvent(self, event):
+        started = time.perf_counter()
+        painter = QPainter(self)
+        if self._backdrop is not None:
+            painter.drawPixmap(0, 0, self._backdrop)
+        identity, panel = self._parts
+        rise = self._expo(self._at)
+        if identity is not None:
+            picture, where = identity
+            painter.setOpacity(min(1.0, rise * 1.4))
+            painter.drawPixmap(QPoint(where.x(),
+                                      where.y() + round(ENTER_RISE_PX * (1.0 - rise))),
+                               picture)
+        if panel is not None:
+            picture, where = panel
+            local = (self._at - ENTER_PANEL_DELAY) / (1.0 - ENTER_PANEL_DELAY)
+            slide = self._drawer(local)
+            painter.setOpacity(max(0.0, min(1.0, slide * 1.3)))
+            painter.drawPixmap(QPoint(where.x() + round(ENTER_SLIDE_PX * (1.0 - slide)),
+                                      where.y()), picture)
+        painter.end()
+        self._frames += 1
+        self._worst = max(self._worst, (time.perf_counter() - started) * 1000.0)
+
+
+# The way out (DetailsPage.leave) - the owner, 1 October 2026: "when I
+# hit back add small smooth animation like the one when I enter the ep/ch
+# list page". The entrance run backwards and shorter: a way out should be
+# quicker than a way in.
+EXIT_MS = 380
+
+
+class _Exit(QWidget):
+    """The details page leaving, as pictures over a picture of the page
+    it is leaving to.
+
+    The page underneath is a web view, which cannot be grabbed, so it was
+    taken **off the screen when this page opened** (open_details,
+    widgets.PageFade.capture) - the moment it was last uncovered. Over it:
+    the backdrop fading out, the identity column sinking and fading, the
+    list panel sliding back out to the right. Not transparent to the
+    mouse, on purpose - a press during the way out must not land on a
+    page that is already going."""
+
+    def __init__(self, page, under, backdrop, identity, panel, on_done):
+        super().__init__(page)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._page = page
+        self._under = under
+        self._backdrop = backdrop
+        self._parts = identity, panel
+        self._at = 0.0
+        self._on_done = on_done
+        self._frames = 0
+        self._worst = 0.0
+        from helpers.widgets import SmoothTween
+        self._tween = SmoothTween(self, self._step, EXIT_MS,
+                                  on_done=self._land, curve=lambda t: t)
+
+    def start(self):
+        self.setGeometry(self._page.rect())
+        self.show()
+        self.raise_()
+        self.repaint()
+        self._tween.start(0.0, 1.0)
+
+    def _step(self, at):
+        self._at = float(at)
+        self.update()
+
+    def _land(self):
+        logs.info(f"details exit: frames={self._frames} "
+                  f"worst={self._worst:.1f}ms")
+        self._under = self._backdrop = None
+        self._parts = None, None
+        done, self._on_done = self._on_done, None
+        if done is not None:
+            done()
+
+    def paintEvent(self, event):
+        started = time.perf_counter()
+        painter = QPainter(self)
+        if self._under is not None:
+            painter.drawPixmap(self.rect(), self._under)
+        else:
+            painter.fillRect(self.rect(), QColor(theme.BG))
+        t = max(0.0, min(1.0, self._at))
+        ease_in = t * t                       # leaving: slow, then away
+        if self._backdrop is not None:
+            painter.setOpacity(1.0 - (0.5 - 0.5 * math.cos(math.pi * t)))
+            painter.drawPixmap(0, 0, self._backdrop)
+        identity, panel = self._parts
+        if identity is not None:
+            picture, where = identity
+            painter.setOpacity(max(0.0, 1.0 - t * 1.6))
+            painter.drawPixmap(QPoint(where.x(),
+                                      where.y() + round(ENTER_RISE_PX * ease_in)),
+                               picture)
+        if panel is not None:
+            picture, where = panel
+            painter.setOpacity(max(0.0, 1.0 - t * 1.4))
+            painter.drawPixmap(QPoint(where.x() + round(ENTER_SLIDE_PX * ease_in),
+                                      where.y()), picture)
+        painter.end()
+        self._frames += 1
+        self._worst = max(self._worst, (time.perf_counter() - started) * 1000.0)
+
+
 class DetailsPage(GlassPage):
     """One entry, full screen: facts on the left, the episode or chapter
     list on the right."""
@@ -1183,8 +1379,11 @@ class DetailsPage(GlassPage):
 
         # Left: identity. Kept on plain transparent widgets so the
         # backdrop shows through - the scrim in paintEvent is what keeps
-        # the text readable over it.
-        left = QVBoxLayout()
+        # the text readable over it. In a widget of its own (#Bare, so it
+        # paints nothing) so the entrance can take it as one picture.
+        self._identity = QWidget(objectName="Bare")
+        left = QVBoxLayout(self._identity)
+        left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(10)
 
         top_row = QHBoxLayout()
@@ -1201,8 +1400,11 @@ class DetailsPage(GlassPage):
         self._title_label = QLabel(self.entry.get("title") or "",
                                    objectName="PanelTitle")
         self._title_label.setWordWrap(True)
+        # A24's titles are a serif display face (Sitka ships with
+        # Windows), set large and light rather than heavy.
         self._title_label.setStyleSheet(
-            "font-size: 26pt; font-weight: 800; background: transparent;")
+            f"font-family: {DISPLAY_SERIF}; font-size: 34pt; font-weight: 300;"
+            f" background: transparent;")
         left.addWidget(self._title_label)
 
         self._facts = QLabel("")
@@ -1242,11 +1444,16 @@ class DetailsPage(GlassPage):
         # Much larger than the app's stock accent button, at the owner's
         # ask - this is the page's one primary action and it was sized
         # like a form's Save.
-        self._continue_btn = QPushButton(f"  Continue {verb}", objectName="Accent")
-        self._continue_btn.setFixedHeight(58)
+        self._continue_btn = QPushButton(f"\u25B6   Continue {verb}", objectName="Accent")
+        self._continue_btn.setFixedHeight(56)
         self._continue_btn.setMinimumWidth(280)
+        # Netflix's Play: white, black ink, a small radius, and hover is
+        # the same white let through a little.
         self._continue_btn.setStyleSheet(
-            "QPushButton { font-size: 14pt; padding: 10px 30px; }")
+            f"QPushButton {{ font-size: 14pt; font-weight: 700;"
+            f" padding: 10px 30px; border: none; border-radius: 6px;"
+            f" background: {theme.ACCENT_HOVER}; color: {theme.ON_ACCENT}; }}"
+            f"QPushButton:hover {{ background: {theme.rgba(theme.ACCENT_HOVER, 200)}; }}")
         use_hover_cursor(self._continue_btn)
         self._continue_btn.clicked.connect(self._continue)
         continue_row = QHBoxLayout()
@@ -1267,12 +1474,13 @@ class DetailsPage(GlassPage):
         self._download_btn = QPushButton(label)
         self._download_btn.setFixedHeight(44)
         self._download_btn.setMinimumWidth(280)
+        # Netflix's secondary: grey, translucent over the backdrop, no
+        # border; hover lets more of the backdrop through.
         self._download_btn.setStyleSheet(
-            f"QPushButton {{ font-size: 11.5pt; padding: 8px 24px;"
-            f" background: {theme.SURFACE_HOVER}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER};"
-            f" border-radius: {theme.RADIUS}px; }}"
-            f"QPushButton:hover {{ border: 1px solid {theme.ACCENT}; }}")
+            f"QPushButton {{ font-size: 11.5pt; font-weight: 600; padding: 8px 24px;"
+            f" background: rgba(109, 109, 110, 140); color: {theme.TEXT_OVER_MEDIA};"
+            f" border: none; border-radius: 6px; }}"
+            f"QPushButton:hover {{ background: rgba(109, 109, 110, 95); }}")
         use_hover_cursor(self._download_btn)
         self._download_btn.clicked.connect(self._download_current)
         download_row = QHBoxLayout()
@@ -1283,14 +1491,17 @@ class DetailsPage(GlassPage):
 
         left.addStretch(2)
 
-        root.addLayout(left, stretch=1)
-        root.addWidget(self._build_panel())
+        root.addWidget(self._identity, stretch=1)
+        self._panel = self._build_panel()
+        root.addWidget(self._panel)
 
     def _section_label(self, text) -> QLabel:
         label = QLabel(text)
+        # 1367's eyebrow: a mono face in capitals, widely tracked, dim.
         label.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-size: 10pt; font-weight: 700;"
-            f" letter-spacing: 1px; background: transparent; padding-top: 8px;")
+            f"color: {theme.TEXT_DIM}; font-family: {EYEBROW_MONO};"
+            f" font-size: 9pt; font-weight: 400; letter-spacing: 3px;"
+            f" background: transparent; padding-top: 10px;")
         return label
 
     def _round_button(self, glyph, tooltip):
@@ -1301,12 +1512,12 @@ class DetailsPage(GlassPage):
         # padding: 0 or the app-wide button padding clips the glyph to a
         # sliver (the measured trap reader._glyph_button records).
         button.setStyleSheet(
-            f"QPushButton {{ background: {theme.PANEL_FILL}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER}; padding: 0px;"
+            f"QPushButton {{ background: rgba(20, 20, 20, 190); color: {theme.TEXT};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 56)}; padding: 0px;"
             f" font-family: {theme.FONT_STACK_ICONS}; font-size: 13pt;"
             f" border-radius: 20px; }}"
-            f"QPushButton:hover {{ border: 1px solid {theme.ACCENT};"
-            f" background: {theme.SURFACE_HOVER}; }}")
+            f"QPushButton:hover {{ border: 1px solid {theme.ACCENT_HOVER};"
+            f" background: {theme.ACCENT_HOVER}; color: {theme.ON_ACCENT}; }}")
         use_hover_cursor(button)
         return button
 
@@ -1316,9 +1527,11 @@ class DetailsPage(GlassPage):
         # theme.rgba over BG_ALT, not a hand-typed rgba: the old literal
         # was a warm near-black the navy re-theme would have stranded as
         # a brown pane over a cool backdrop.
+        # A dark glass over the backdrop with a hairline edge, rather
+        # than a bordered box.
         panel.setStyleSheet(
-            f"QFrame {{ background: {theme.rgba(theme.BG_ALT, 210)};"
-            f" border: 1px solid {theme.BORDER};"
+            f"QFrame {{ background: {theme.rgba(theme.BG, 205)};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 22)};"
             f" border-radius: {theme.RADIUS_LG}px; }}")
         column = QVBoxLayout(panel)
         column.setContentsMargins(14, 14, 14, 14)
@@ -1456,9 +1669,24 @@ class DetailsPage(GlassPage):
         # theme.py's QScrollArea and #Bare rules already make the area
         # and host transparent without touching their children.
         self._rows_host = QWidget(objectName="Bare")
+        # **Netflix's episode list: rows, not boxes.** No resting fill, a
+        # hairline under each row, a soft fill under the pointer. Written
+        # with selectors, so it reaches the rows and cascades nowhere else
+        # (the note above is why a bare declaration would not do). A row
+        # that writes its own sheet (_row_sheet: the back row, the
+        # resolution headings) keeps it - a widget's own sheet outranks
+        # this one.
+        self._rows_host.setStyleSheet(
+            f'QFrame#Card[matte="true"] {{ background: transparent;'
+            f" border: 1px solid transparent;"
+            f" border-bottom: 1px solid {theme.rgba(theme.TEXT, 18)};"
+            f" border-radius: 0px; }}"
+            f'QFrame#Card[matte="true"][hoverable="true"]:hover {{'
+            f" background: {theme.rgba(theme.TEXT, 16)};"
+            f" border: 1px solid transparent; border-radius: 8px; }}")
         self._rows = QVBoxLayout(self._rows_host)
         self._rows.setContentsMargins(0, 0, 6, 0)
-        self._rows.setSpacing(6)
+        self._rows.setSpacing(2)
         self._rows.addStretch(1)
         self._rows_area = scroll_area(self._rows_host, ground=theme.BG)
         # Rows that have not been built yet - see _queue_rows. Kept on
@@ -2843,7 +3071,11 @@ class DetailsPage(GlassPage):
 
         if badge:
             kind, text = badge
-            row.addWidget(_badge(text, kind))
+            # Centred at its own height: as an outline it showed what the
+            # filled chip hid - the layout stretched it to the whole row,
+            # a tall box down every finished episode (photographed).
+            row.addWidget(_badge(text, kind),
+                          alignment=Qt.AlignmentFlag.AlignVCenter)
         if on_click is not None:
             card.clicked.connect(on_click)
         if on_menu is not None:
@@ -4504,6 +4736,31 @@ class DetailsPage(GlassPage):
         host.installEventFilter(self)
         self.setGeometry(host.rect())
 
+    def prepare_entrance(self):
+        """The page's entrance (_Entrance), pictured and ready to start,
+        or None - a page that cannot be pictured simply appears. See
+        open_details for when this is called and why there."""
+        try:
+            layout = self.layout()
+            if layout is not None:
+                layout.activate()
+            ratio = self.devicePixelRatioF() or 1.0
+            backdrop = QPixmap(round(self.width() * ratio),
+                               round(self.height() * ratio))
+            backdrop.setDevicePixelRatio(ratio)
+            backdrop.fill(QColor(theme.BG))
+            # The page's own paint only - its backdrop and scrim, none of
+            # its children - so the two halves can arrive over it.
+            self.render(backdrop, QPoint(), QRegion(),
+                        QWidget.RenderFlag.DrawWindowBackground)
+            parts = []
+            for widget in (self._identity, self._panel):
+                parts.append((widget.grab(), widget.geometry().topLeft()))
+            return _Entrance(self, backdrop, parts[0], parts[1])
+        except Exception:
+            logs.exception("details entrance could not be prepared")
+            return None
+
     def eventFilter(self, obj, event):
         if obj is getattr(self, "_host", None) and event.type() == QEvent.Type.Resize:
             self.setGeometry(obj.rect())
@@ -4541,14 +4798,62 @@ class DetailsPage(GlassPage):
         super().mousePressEvent(event)
 
     def leave(self):
+        if self._closed or getattr(self, "_leaving", False):
+            return
+        # The way out first (_Exit), and the page closes when it lands.
+        # Without a picture of the page underneath there is nothing to
+        # leave *to*, and the page simply closes as it always did.
+        exit_ = self._prepare_exit()
+        if exit_ is not None:
+            self._leaving = True
+            exit_.start()
+            return
+        self._close_now()
+
+    def _prepare_exit(self):
+        under = getattr(self, "_under_picture", None)
+        if under is None or not self.isVisible():
+            return None
+        try:
+            ratio = self.devicePixelRatioF() or 1.0
+            backdrop = QPixmap(round(self.width() * ratio),
+                               round(self.height() * ratio))
+            backdrop.setDevicePixelRatio(ratio)
+            backdrop.fill(QColor(theme.BG))
+            self.render(backdrop, QPoint(), QRegion(),
+                        QWidget.RenderFlag.DrawWindowBackground)
+            parts = [(w.grab(), w.geometry().topLeft())
+                     for w in (self._identity, self._panel)]
+            return _Exit(self, under, backdrop, parts[0], parts[1],
+                         self._close_now)
+        except Exception:
+            logs.exception("details exit could not be prepared")
+            return None
+
+    def _close_now(self):
         if self._closed:
             return
         self._closed = True
+        self._under_picture = None
         self._run += 1
         host = getattr(self, "_host", None)
         if host is not None:
             host.removeEventFilter(self)
         self.closed.emit()
+        # **The keyboard goes back to the page, not to the search field.**
+        # The owner, 1 October 2026: "why when I enter ch/ep list page then
+        # go back it always make me typing in the search bar!". Hidden
+        # while it held the focus, this page let Qt hand it to the next
+        # widget in the chain, and the first one is the title bar's
+        # field - reproduced: Escape out of a details page, type "x", and
+        # the field reads "x". The page underneath takes it first, the
+        # way main._leave_top_search gives it back after a search.
+        try:
+            page = getattr(self.window(), "_current_page", None)
+            if page is not None:
+                page.setFocus(Qt.FocusReason.OtherFocusReason)
+        except RuntimeError:
+            pass
         self.hide()
         self.deleteLater()
 
@@ -4947,7 +5252,34 @@ def open_details(window, entry, host=None):
         pass
     page = DetailsPage(entry, host)
     page.follow(host)
+    # The page this one covers, as it is on screen now - the ground the
+    # way out (_Exit) leaves to. Off the screen because it is a web view.
+    try:
+        from helpers.widgets import PageFade
+        page._under_picture = PageFade.capture(host)
+    except Exception:
+        page._under_picture = None
+    # **Pictured off screen, then shown with the entrance already over
+    # it.** Pictured before show() (the first cut), every picture came
+    # back blank - 620ms of ground, then the whole page at once - because
+    # a page never shown has not been polished or laid out. Pictured just
+    # after show() (the second), the ~58ms the two grabs take was a frame
+    # of bare ground on screen in 3 runs of 3, where a control with no
+    # entrance showed none. Shown with WA_DontShowOnScreen the page is
+    # polished and laid out without being presented.
+    entrance = None
+    try:
+        page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        page.show()
+        entrance = page.prepare_entrance()
+        page.hide()
+    except Exception:
+        logs.exception("details entrance could not be pictured")
+    finally:
+        page.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
     page.show()
+    if entrance is not None:
+        entrance.start()
     page.raise_()
     freeze_covered(page)   # see widgets._CoveredFreeze
     page.setFocus()

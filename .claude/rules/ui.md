@@ -916,3 +916,103 @@ testing.md's "a wrapper that replaced the patched function outright";
 when a fix in `open_player`, `_start` or any other patched entry point
 seems to do nothing, print `player.open_player.__qualname__` before
 reading the code.
+
+## The redesign: monochrome, Netflix + 1367 (1 October 2026)
+
+His ask: redesign the whole app's look and motion after netflix.com,
+1367studio.com and a24.raviklaassens.com. His picks: dark (Netflix +
+1367), **monochrome** accent, all surfaces in stages (web pages, then
+the Qt shell, then the details page, then the player's bars), and four
+effects - Netflix hover cards, 1367 reveals + pill header, page
+cross-fades, Netflix's numbered Top 10. Stage 1 (palette + web pages)
+landed first; the curves are app.css's `--ease-out` (1367, arrivals),
+`--ease-drawer` (A24, things opening), `--ease-card` (Netflix, hover),
+read off each site's computed styles, not guessed.
+
+- **White is the accent.** A pressed or chosen thing is white with
+  `--ink` (black) on it - theme.ON_ACCENT / ON_ACCENT_DEEP are black now.
+  DANGER and SUCCESS keep their hues; they mean something.
+- **A reveal never plays on a redraw.** Rule 13 redraws list pages on
+  every change; app.js `go(route, {quiet: true})` is a redraw and
+  `reveal()` does nothing during it. Grid cards rise whenever they are
+  new; rows, shelf cards and list rows only when the route arrives.
+- **Visible fast, settle slow.** Opacity over .45s, transform over .9s:
+  measured, Discover's first content is 0.6s after the click warm and
+  0.8-0.9s cold on both the old and the new build - the fade must not
+  add to the page's own load (rule 7). Glides measured gapMax 4-8ms.
+- **A colour baked into a file does not follow the theme.**
+  game_art's letterboxed tiles carried the old navy panel; a launch pass
+  (`repaint_posters`) refills it in place, and `backend.local_url` puts
+  the file's mtime in the image token because the route's day-long
+  max-age kept the old picture after a restart.
+- **A test copy's games.json points into his real image cache.** Cover
+  paths are absolute, so a copy shows his real files, not the copy's -
+  repoint them into the copy before judging a cached image.
+
+**Stage 2, the Qt shell (same day).** Page changes cross-fade
+(widgets.PageFade) and the title bar draws its search group into a
+capsule once a page scrolls (window_chrome.TitleBar.set_compact, fed by
+app.js `{action:'scrolled'}` on crossing PILL_AT_PX only). What it cost
+to get right, so it is not re-paid:
+
+- **A web page cannot be grabbed, so the old slide moved blank ground.**
+  PageFade reads the old page off the screen (QScreen.grabWindow(0),
+  25-26ms) and paints it with the ground laid over at a rising alpha -
+  2.0-3.3ms a frame, 64-78 frames.
+- **A layered native child (WS_EX_LAYERED + SetLayeredWindowAttributes)
+  is never drawn in this window**, styled before or after its first
+  paint. The player's bars get away with it; a page-sized child did not.
+- **Order is everything.** The picture goes up before the new page is
+  built (building creates native windows and flashed ground for a
+  frame), the new page stays hidden until the fade lands (shown
+  underneath, its native host stacks above any fade), and the fade is
+  repainted in the same call that hides the old page (Qt skips a widget
+  obscured by a native window, so the uncovered area was empty for a
+  frame). Sampled at the panel's rate: no ground frame in 8 + 6 switches.
+- **Measure a fade by brightness per distinct frame (sampler.py on a
+  band), never by a "lit pixel" threshold or by full-window grabs.** The
+  threshold read a half-faded dark page as black, and a 40ms full-window
+  grab tears (old page on top, new below); both sent the work down a
+  wrong path for an hour.
+- The fade is ease-in-out (`SmoothTween(curve=)`): on the default
+  ease-out the old page was gone by 70-100ms of 280.
+
+**Stage 3, the details page (same day).** Serif display title, mono
+eyebrows, outline pills, Netflix's white Play and grey secondary, rows
+with hairlines instead of boxes (a selector sheet on `_rows_host`), an
+outlined DONE, and an entrance: `_Entrance` blits the backdrop and the
+two halves (identity rises, panel slides in on A24's drawer) for 620ms.
+The page is pictured **off screen** - shown with WA_DontShowOnScreen,
+grabbed, hidden, then shown for real with the entrance on it. Grabbed
+before any show the pictures were blank; grabbed after the real show,
+the 58ms of grabbing was a frame of bare ground (3 of 3 runs, 0 of 3 in
+a control with no entrance). The same day the old page slide's vertical
+half and ANIM_DURATION_MS were removed at his word (rule 11);
+PageSlide remains for the sidebar swap, which still uses it.
+
+**Stage 4 and his round of fixes (same day).** The player's seek strip
+is Netflix's in monochrome (theme.SEEK_REST mid grey, buffered light,
+played white) and grows under the pointer; times are Cascadia Mono, the
+episode title Bahnschrift. The display face everywhere is **Bahnschrift**
+- "Sitka Display" resolved to nothing in Chromium (Times fallback) and
+to a serif in Qt, and he read both as Times New Roman. Also from his
+list: Discover keeps only medium Top 10s (no Latest Chapters / Reading,
+"Other Readings"), deduplicated by title; cast pictures are rounded
+squares; banners open nothing and their dashes are 22px hit boxes with
+a 1367 "01 / 06" counter, no arc; select arrows are drawn 16px in; the
+details page has an exit (`_Exit`) over a screen capture of the page it
+covers, taken at open. **The full-screen bar's click mask also clips its
+painting** - the capsule must be in the mask (`apply_fullscreen_mask`)
+or it shows only inside the field's and the buttons' own rects.
+Rig trap paid for: Home keeps its scroll across F11, and a click aimed
+at a Watching card landed on the Games row and launched Battle.net on
+his machine - scroll Home to the top and check the target before a
+click on Home.
+
+**Cards lean toward the pointer (same day, his ask).** app.js `tiltStep`:
+one pointermove listener on the page, one rAF update, the *card's* rect
+only (never the picture's - content-visibility), writing --rx/--ry on the
+hovered picture; app.css composes them with the Netflix growth (--s) in
+one transform. 9 degrees at 760px perspective moves a picture's near edge
+3-7px, inside the card's 8px padding, so paint containment never clips
+it. Measured with a lean live under the pointer: glides 4-8ms, as before.

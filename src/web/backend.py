@@ -103,7 +103,16 @@ def local_url(path):
     path = str(path or "").strip()
     if not path or not os.path.isfile(path):
         return ""
-    token = _token(path)
+    # **The file's age is part of its address.** The route answers with a
+    # day's max-age, so a picture rewritten in place under the same path
+    # was served from WebView2's cache for a day: measured 1 October 2026,
+    # the game tiles game_art.repaint_posters had re-coloured on disk
+    # (21,21,21) still drew in the old navy (20,27,40) after a restart.
+    try:
+        stamp = int(os.path.getmtime(path))
+    except OSError:
+        stamp = 0
+    token = _token(f"{path}|{stamp}")
     with _lock:
         _sources[token] = (path, None)
     return "/img/" + token

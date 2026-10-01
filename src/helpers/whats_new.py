@@ -30,6 +30,27 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.0": [
+        "A whole new look. Atomic is now black and white, in the style of "
+        "Netflix: a big banner at the top of Home and Discover, cards that "
+        "grow and tilt toward your mouse, and rows you can page through "
+        "with the arrows at their ends.",
+        "Discover shows Top 10 rows for every kind - Anime, Series, Movies, "
+        "Manga, Manhwa, Manhua and Other Readings - with big numbers beside "
+        "each poster.",
+        "Pages fade into each other, things slide gently into place as you "
+        "scroll, and the search bar shrinks into a rounded pill when you "
+        "scroll down.",
+        "The episode and chapter page, the player's controls and episode "
+        "list, and the Settings window all have the new design, and the "
+        "app has a new icon.",
+        "Pressing Resume on a reading card checks the site for a new "
+        "chapter first, and reading cards show the last chapter you read.",
+        "Leaving an episode or chapter list no longer sends your typing "
+        "into the search bar.",
+        "New setting: \"Hide them from Discover page too\" keeps hidden "
+        "sections off Discover.",
+    ],
     "2.13": [
         "Videos no longer play too fast on some computers. On a few "
         "Windows 10 machines the picture ran at about double speed while "

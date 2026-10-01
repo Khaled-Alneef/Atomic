@@ -2771,11 +2771,14 @@ class SmoothTween(QObject):
     lands, if given. Both are held on this object, which is parented to
     the widget it animates, so the pair die with it."""
 
-    def __init__(self, owner, apply, duration_ms, on_done=None):
+    def __init__(self, owner, apply, duration_ms, on_done=None, curve=None):
         super().__init__(owner)
         self._owner = owner
         self._apply = apply
         self._on_done = on_done
+        # The shape of the run; ease_out_cubic unless a caller needs the
+        # change spread out (PageFade - see its note).
+        self._curve = curve or ease_out_cubic
         self._duration = max(1, int(duration_ms))
         self._from = 0.0
         self._to = 0.0
@@ -2814,7 +2817,7 @@ class SmoothTween(QObject):
             return
         elapsed = (time.monotonic() - self._started_at) * 1000.0
         fraction = min(1.0, elapsed / float(self._duration))
-        value = self._from + (self._to - self._from) * ease_out_cubic(fraction)
+        value = self._from + (self._to - self._from) * self._curve(fraction)
         try:
             self._apply(value)
         except RuntimeError:
@@ -2966,7 +2969,14 @@ class CardTextLabel(QLabel):
 
 
 class PageSlide(QWidget):
-    """Two pages sliding past each other, painted as two flat pictures.
+    """Two sidebars sliding past each other, painted as two flat pictures.
+
+    **The page stack no longer uses this** - its slide was replaced by
+    PageFade on 1 October 2026 and, at the owner's word the same day
+    ("remove the old slide code"), the vertical half that only the page
+    stack used went with it (CLAUDE.md rule 11). What is left is the
+    sidebar swap's horizontal slide. The measurement below is the page
+    stack's, and it is kept because it is why the sidebar is blitted too.
 
     **This is the owner's "the page transition stutters", and the cause
     was never the curve.** Measured 22 August 2026 in a real window on
@@ -2995,13 +3005,12 @@ class PageSlide(QWidget):
     whatever the panel does, so an animation can never have more
     positions than 60 a second. SmoothTween runs at screen_tick_ms.
 
-    `direction` is +1 when the new page comes up from below (or in from
-    the right), -1 when it comes down from above (or in from the left).
-    `axis` is "y" for the page stack and "x" for the sidebar swap, which
-    slides two full bars over each other and had exactly the same cost."""
+    `direction` is +1 when the new bar comes in from the right, -1 when
+    it comes in from the left. Two full bars sliding over each other had
+    exactly the page stack's cost."""
 
     def __init__(self, parent, old_pixmap, new_pixmap, direction, duration_ms,
-                 on_done=None, axis="y"):
+                 on_done=None):
         super().__init__(parent)
         # Opaque and no system background: this covers the whole
         # container and paints every pixel of it, so telling Qt that
@@ -3011,8 +3020,7 @@ class PageSlide(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self._old = old_pixmap
         self._new = new_pixmap
-        self._dy = direction
-        self._axis = axis
+        self._dx = direction
         self._offset = 0.0
         self._on_done = on_done
         self._tween = SmoothTween(self, self._apply, duration_ms,
@@ -3062,24 +3070,148 @@ class PageSlide(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        span = self.height() if self._axis == "y" else self.width()
-        # The new page travels from `dy * span` to 0; the old one from 0
-        # to `-dy * span`. Rounded to whole pixels: a pixmap drawn at a
+        span = self.width()
+        # The new bar travels from `dx * span` to 0; the old one from 0
+        # to `-dx * span`. Rounded to whole pixels: a pixmap drawn at a
         # fractional offset is resampled, which is both slower and
         # visibly soft on text.
         travel = int(round(self._offset * span))
-        if self._dy > 0:
+        if self._dx > 0:
             new_at, old_at = span - travel, -travel
         else:
             new_at, old_at = travel - span, travel
         for pixmap, at in ((self._old, old_at), (self._new, new_at)):
             if pixmap is None or pixmap.isNull():
                 continue
-            if self._axis == "y":
-                painter.drawPixmap(0, at, pixmap)
-            else:
-                painter.drawPixmap(at, 0, pixmap)
+            painter.drawPixmap(at, 0, pixmap)
         painter.end()
+
+
+def ease_in_out_sine(t):
+    """0..1 in, 0..1 out: slow at both ends, fastest in the middle."""
+    return 0.5 - 0.5 * math.cos(math.pi * max(0.0, min(1.0, t)))
+
+
+class PageFade(QWidget):
+    """The page you leave, as a picture, fading to the ground before the
+    page you arrive at rises in - the page cross-fade of the owner's
+    redesign, 1 October 2026 (references: 1367 Studio's page-to-page
+    fade, Netflix's).
+
+    **Why not PageSlide.** The pages are web views now, and a WebView2
+    page is a native window Qt cannot grab: `page.grab()` returns the
+    widget's ground with a hole where the document is (rules/ui.md). So
+    the slide had been moving two blank grounds - what was actually seen
+    was the old page vanishing at once, ground for 0.3-0.6s (measured on
+    Discover, the old build and the new alike), then the new page.
+
+    So the old page is taken **off the screen** (QScreen.grabWindow(0),
+    the composed desktop, which has the document in it) and painted here
+    with the ground laid over it at a rising opacity; the new page is
+    shown as this lands and runs its own entrance (app.js reveal).
+
+    **Painted, not layered.** The first version had DWM blend a
+    WS_EX_LAYERED child, which would cost the CPU nothing per frame - and
+    in this window it was never drawn, styled before or after its first
+    paint. So a frame here is one opaque blit and one solid-colour blend
+    (measured 2.0-2.8ms, 64-78 frames a fade), and `_finish` logs the
+    worst of them. Sampled at the panel's rate on Home -> Movies: the old
+    page eases from 74 to 17 over ~250ms, ground, and the new page rises
+    in from ~430ms and is whole by ~900ms."""
+
+    def __init__(self, parent, picture, duration_ms, on_done=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._picture = picture
+        self._on_done = on_done
+        self._amount = 0.0
+        self._frames = 0
+        self._worst_ms = 0.0
+        self._ground = QColor(theme.BG)
+        # **Ease in and out, not out.** On the tween's own ease-out the
+        # old page was at the ground by 70-100ms of a 280ms run (mean
+        # brightness 23 -> 11 -> 10, photographed frame by frame), so the
+        # fade was over before it was seen. In-out holds the old page for
+        # the first third and lets it go through the middle.
+        self._tween = SmoothTween(self, self._apply, duration_ms,
+                                  on_done=self._finish, curve=ease_in_out_sine)
+
+    @staticmethod
+    def capture(widget):
+        """`widget`'s rectangle as it is on the screen right now, or None.
+
+        Global position from the window's own geometry plus the widget's
+        offset inside it - never mapToGlobal, which is wrong on mixed-DPI
+        monitors (rules/ui.md). Measured on the source tree: 25-26ms for
+        the 2267x1316 page area."""
+        try:
+            window = widget.window()
+            screen = window.screen()
+            if screen is None:
+                return None
+            corner = window.geometry().topLeft() + widget.mapTo(window, QPoint(0, 0))
+            corner -= screen.geometry().topLeft()
+            shot = screen.grabWindow(0, corner.x(), corner.y(),
+                                     widget.width(), widget.height())
+            return None if shot.isNull() else shot
+        except Exception:
+            logs.exception("page fade: the screen could not be read")
+            return None
+
+    def cover(self):
+        """Put the still picture up, painted now - before the new page is
+        built. Building it creates native web-view windows, and that
+        exposed one frame of bare ground in every run sampled (10-22ms at
+        brightness 10, between the page at 74 and the fade's first frame
+        at 74) whatever this widget did after it; covered first, that
+        frame is this picture instead."""
+        self.setGeometry(self.parent().rect())
+        self.show()
+        self.raise_()
+        self.repaint()
+
+    def start(self, on_done=None):
+        if on_done is not None:
+            self._on_done = on_done
+        if not self.isVisible():
+            self.cover()
+        self._tween.start(0.0, 1.0)
+
+    def _apply(self, fraction):
+        self._amount = float(fraction)
+        self.update()
+
+    def _finish(self):
+        done, self._on_done = self._on_done, None
+        self._picture = None          # 22MB at his size - see PageSlide
+        try:
+            logs.info(f"page fade: frames={self._frames} "
+                      f"worst={self._worst_ms:.1f}ms")
+        except Exception:
+            pass
+        if done is not None:
+            done()
+
+    def stop(self):
+        self._tween.stop()
+        self._finish()
+
+    def paintEvent(self, event):
+        started = time.perf_counter()
+        painter = QPainter(self)
+        if self._picture is not None and not self._picture.isNull():
+            painter.drawPixmap(self.rect(), self._picture)
+            veil = QColor(self._ground)
+            veil.setAlphaF(max(0.0, min(1.0, self._amount)))
+            painter.fillRect(self.rect(), veil)
+        else:
+            painter.fillRect(self.rect(), self._ground)
+        painter.end()
+        self._frames += 1
+        self._worst_ms = max(self._worst_ms,
+                             (time.perf_counter() - started) * 1000.0)
 
 
 # ---------------------------------------------------------------------

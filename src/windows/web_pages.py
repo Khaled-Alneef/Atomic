@@ -27,7 +27,8 @@ The pages themselves are in src/web, served over http://.
 import os
 import time
 
-from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6 import sip
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -700,6 +701,13 @@ class _WebPage(GlassPage):
         if body.get("action") == "pagepress":
             self._leave_search()
             return
+        if body.get("action") == "scrolled":
+            # The page has crossed its top edge (app.js, PILL_AT_PX): the
+            # title bar draws its capsule in or opens it out.
+            bar = getattr(self.window(), "title_bar", None)
+            if bar is not None and hasattr(bar, "set_compact"):
+                bar.set_compact(bool(body.get("on")))
+            return
         if body.get("action") == "diag":
             # The page reporting on itself - see app.js sweepLazy.
             logs.info("web page: " + ", ".join(
@@ -1202,13 +1210,17 @@ def _covered(page) -> bool:
 READING_MEDIA = ("manga", "manhwa", "manhua", "other")
 
 
-def _next_chapter_index(entry):
+def _next_chapter_index(entry, with_newest=False):
     """Where "continue" should open a reading entry, or None.
 
     **The chapter list runs newest first** - measured on the owner's
     Kingdom, index 0 is chapter 886 and index 380 is chapter 1 - so the
     chapter *after* the furthest one he has read is at a *lower* index.
     Nothing read at all opens the oldest, which is where a series starts.
+
+    `with_newest` answers `(index, on_newest)` instead: whether the
+    furthest chapter read is the newest this list holds, which is the one
+    case where the list on disk can be wrong about where to go next.
     """
     try:
         from web import backend
@@ -1219,18 +1231,79 @@ def _next_chapter_index(entry):
         # same entry read fine once the reader registered it.
         entry_id = web_reader._entry_id_for(entry)
         items = backend.chapters(entry_id).get("items") or []
-        if not items:
-            return None
-        marks = set(backend.read_state(entry_id).get("watched") or [])
-        read_at = [item["i"] for item in items if item.get("key") in marks]
-        if not read_at:
-            return len(items) - 1
-        following = min(read_at) - 1
-        # Already on the newest: re-open it rather than refusing.
-        return following if following >= 0 else min(read_at)
+        index, on_newest = None, False
+        if items:
+            marks = set(backend.read_state(entry_id).get("watched") or [])
+            read_at = [item["i"] for item in items if item.get("key") in marks]
+            if not read_at:
+                index = len(items) - 1
+            else:
+                following = min(read_at) - 1
+                on_newest = following < 0
+                # Already on the newest: re-open it rather than refusing.
+                index = following if following >= 0 else min(read_at)
     except Exception:
         logs.exception("Working out the next chapter failed")
-        return None
+        index, on_newest = None, False
+    return (index, on_newest) if with_newest else index
+
+
+# **Resume on the newest chapter asks the site first.** The owner, 1
+# October 2026: "when I press resume button on the cards in main page, it
+# does not refresh and check if there is a new ch uploaded, it plays the
+# last ch I watched ... ONLY when I enter the ch list page it checks".
+# The ring read only the list on disk (backend.chapters: fresh cache, then
+# any age), and nothing on that path ever asked a site - the details page
+# is what refreshes the list. Measured on a copy of his data: Kingdom
+# (WAN) read to 888 with 889 on 3asq; six of his eight lists were 96-623
+# hours old, five of them 2-4 chapters behind the site.
+#
+# Only the newest-chapter case can be answered wrongly - anywhere else
+# the next chapter is already in the list, and new ones only add to its
+# head - so only that case pays for a request: 0.61-3.97s live over his
+# eight titles (One Piece's 511-chapter page the slowest), with a toast
+# up at once (rule 7). The same list_chapters call and deadline as the
+# details page, so what lands on disk is what the list page would store,
+# and the reader's indices read the refreshed list. A list read off the
+# site in the last RECHECK_GAP_S - the details page just open, say - is
+# trusted as it is.
+RECHECK_GAP_S = 120
+_checking = set()
+
+
+class _ChapterCheck(QObject):
+    done = pyqtSignal(object)
+
+
+def _check_chapters_job(signals, entry):
+    """The site's chapter list, into the shared cache. Never raises."""
+    found = None
+    started = time.perf_counter()
+    try:
+        from helpers import chapter_source, net
+        from windows import details
+        found = chapter_source.list_chapters(
+            entry, deadline=net.deadline_in(details.CHAPTER_LIST_TIMEOUT),
+            refresh=True) or []
+    except Exception:
+        logs.exception("Checking for new chapters failed")
+    logs.info(f"resume chapter check: title={entry.get('title')!r} "
+              f"ms={int((time.perf_counter() - started) * 1000)} "
+              f"found={len(found) if found is not None else 'failed'}")
+    try:
+        signals.done.emit(found)
+    except RuntimeError:
+        pass            # the window went first - nothing left to open
+
+
+def _open_next_chapter(page, window, entry):
+    """The reader on the next chapter, or False when it could not open."""
+    index = _next_chapter_index(entry)
+    if index is None:
+        return False
+    from windows import web_reader
+    return (web_reader.available()
+            and web_reader.open_reader(window, entry, index) is not None)
 
 
 def _continue(page, entry):
@@ -1243,16 +1316,62 @@ def _continue(page, entry):
     """
     medium = str(entry.get("type") or "").strip().lower()
     if medium in READING_MEDIA:
-        index = _next_chapter_index(entry)
-        if index is not None:
-            from windows import web_reader
-            if web_reader.available():
-                window = page.window()
-                if web_reader.open_reader(window, entry, index) is not None:
-                    return
+        window = page.window()
+        _index, on_newest = _next_chapter_index(entry, with_newest=True)
+        if on_newest and _stale_for_resume(entry):
+            _check_then_continue(page, window, entry)
+            return
+        if _open_next_chapter(page, window, entry):
+            return
+    _continue_fallback(page, entry)
+
+
+def _stale_for_resume(entry):
+    try:
+        from helpers import chapter_source
+        at = chapter_source.listed_at(entry)
+    except Exception:
+        at = None
+    return not at or time.time() - at > RECHECK_GAP_S
+
+
+def _continue_fallback(page, entry):
     from windows.tracker import open_tracker_entry
     if not open_tracker_entry(page, entry, resume=True):
         logs.info(f"nothing to resume for {entry.get('title')!r}")
+
+
+def _check_then_continue(page, window, entry):
+    """Ask the site for the list, then open whatever is next on it."""
+    from helpers import lookup_pool
+    from helpers.widgets import finish_toast, show_toast
+    key = str(entry.get("id") or entry.get("url") or entry.get("title") or "")
+    if key in _checking:
+        return          # a second press while the first is still asking
+    _checking.add(key)
+    toast = show_toast(window, "Checking for New Chapters...", duration_ms=None)
+    signals = _ChapterCheck(window)
+
+    def landed(found):
+        _checking.discard(key)
+        signals.deleteLater()
+        # Not an index comparison: a new chapter lands at index 0 and
+        # pushes the one he read to 1, so "next" is 0 before and after.
+        index, still_newest = _next_chapter_index(entry, with_newest=True)
+        fresh = bool(found) and index is not None and not still_newest
+        finish_toast(toast, window,
+                     "New Chapter Found" if fresh else "No New Chapters",
+                     duration_ms=1600)
+        try:
+            if _open_next_chapter(page, window, entry):
+                return
+        except Exception:
+            logs.exception("Opening the next chapter failed")
+        if not sip.isdeleted(page):
+            _continue_fallback(page, entry)
+
+    signals.done.connect(landed)
+    lookup_pool.submit_watched(_check_chapters_job, signals, dict(entry))
 
 
 def _launch_game(entry):

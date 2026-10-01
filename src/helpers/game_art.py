@@ -720,21 +720,78 @@ def _as_poster(path):
             target = source.with_name(source.stem + "-poster.png")
             if target.exists():
                 return str(target)
-            scale = min(POSTER_W * POSTER_INSET / width,
-                        POSTER_H * POSTER_INSET / height)
-            art = art.resize((max(1, round(width * scale)),
-                              max(1, round(height * scale))),
-                             Image.Resampling.LANCZOS)
-            panel = Image.new("RGBA", (POSTER_W, POSTER_H),
-                              _panel_rgb() + (255,))
-            panel.alpha_composite(art, ((POSTER_W - art.width) // 2,
-                                        (POSTER_H - art.height) // 2))
-            temporary = target.with_suffix(".png.part")
-            panel.save(temporary, "PNG")
-            os.replace(temporary, target)
+            _compose_poster(art, target)
             return str(target)
     except Exception:
         return str(path)
+
+
+def _compose_poster(art, target):
+    """`art` (RGBA) centred on a POSTER_W x POSTER_H panel of
+    theme.SURFACE, written to `target` atomically."""
+    from PIL import Image
+    width, height = art.size
+    scale = min(POSTER_W * POSTER_INSET / width,
+                POSTER_H * POSTER_INSET / height)
+    art = art.resize((max(1, round(width * scale)),
+                      max(1, round(height * scale))),
+                     Image.Resampling.LANCZOS)
+    panel = Image.new("RGBA", (POSTER_W, POSTER_H), _panel_rgb() + (255,))
+    panel.alpha_composite(art, ((POSTER_W - art.width) // 2,
+                                (POSTER_H - art.height) // 2))
+    temporary = target.with_suffix(".png.part")
+    panel.save(temporary, "PNG")
+    os.replace(temporary, target)
+
+
+def repaint_posters(cache_dir) -> int:
+    """Re-compose every letterboxed tile whose panel is not today's
+    theme.SURFACE, in place. Returns how many were repainted. Never raises.
+
+    **The panel colour is baked into the file.** Found on the redesign's
+    first screenshot, 1 October 2026: VALORANT and How to Fish sat on the
+    old navy SURFACE (#141b28) on a page that had gone black, because the
+    composite is made once and its path is what games.json keeps as the
+    cover - so a theme change never reached it. Same name, same path, so
+    nothing that stored it has to change; the panel's corner pixel says
+    which colour it was made with, and the source picture is the sibling
+    file the composite was named after.
+
+    **The source is usually gone** - measured on his data the same day:
+    both composites survive and neither download beside them does (the
+    cache trim takes the original once the tile exists). So the tile is
+    repainted from itself: the panel is one flat colour, the art is the
+    box of pixels that differ from it, and everything outside that box is
+    refilled with today's panel."""
+    count = 0
+    try:
+        from pathlib import Path
+        from PIL import Image, ImageChops
+        want = _panel_rgb()
+        for target in Path(cache_dir).glob("*-poster.png"):
+            try:
+                with Image.open(target) as opened:
+                    tile = opened.convert("RGB")
+                corner = tile.getpixel((1, 1))
+                if tuple(corner) == tuple(want):
+                    continue
+                flat = Image.new("RGB", tile.size, corner)
+                # Over a small tolerance, so the panel's own encoding
+                # noise is not read as art.
+                spread = ImageChops.difference(tile, flat).convert("L")
+                box = spread.point(lambda v: 255 if v > 6 else 0).getbbox()
+                fresh = Image.new("RGB", tile.size, want)
+                if box:
+                    fresh.paste(tile.crop(box), box[:2])
+                temporary = target.with_suffix(".png.part")
+                fresh.save(temporary, "PNG")
+                os.replace(temporary, target)
+                count += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return count
 
 
 def _panel_rgb():

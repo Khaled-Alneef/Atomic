@@ -448,7 +448,7 @@ function hostMessage(ev) {
     // the browser paints, so the redraw neither flashes nor bounces to
     // the top for a frame. (The old rAF restore was a visible one-frame
     // jump on Home when a launch stamped last_used.)
-    go(currentRoute()).then(function () {
+    go(currentRoute(), { quiet: true }).then(function () {
       page.scrollTop = at;
       requestAnimationFrame(function () { page.scrollTop = at; });
     }, function () { /* the route failed; nothing to restore into */ });
@@ -1058,16 +1058,11 @@ function heroFor(hero) {
       .catch(function () { /* keep what the entry already told us */ });
   }
   inner.appendChild(text);
-  // The backdrop itself opens the list, as a card body does everywhere
-  // else here. Lost when the buttons went on; the buttons stop their own
-  // clicks so the two never both fire.
-  box.classList.add('clickable');
-  box.addEventListener('click', function () {
-    tellHost({ action: 'open', kind: 'title', id: hero.id || '',
-               title: hero.title || '', type: hero.type || '',
-               url: hero.url || '', poster: hero.cover || '',
-               imdb: hero.imdb || '' });
-  });
+  // **The billboard itself opens nothing** - the owner, 1 October 2026:
+  // "make the banner images in the home and discover pages not
+  // clickable". Its two buttons are the way in; a press anywhere else on
+  // the picture used to open the list, which is what the second button
+  // already does.
 
   // Home's two hero actions: Continue resumes where the entry stopped,
   // the outlined one opens the episode or chapter list. Same pair the Qt
@@ -1216,6 +1211,9 @@ const HERO_SLIDE_MS = 6000;
 
 function heroCarousel(heroes) {
   const box = el('div', 'herobox');
+  // The billboard's entrance (app.css .herobox.enter): on arrival, and on
+  // every slide change after it - a slide's words rise as it fades in.
+  if (drawArrive && !REDUCED_MOTION) box.classList.add('enter');
   const slides = heroes.map(function (hero, i) {
     const slide = heroFor(hero);
     slide.classList.add('slide');
@@ -1226,9 +1224,20 @@ function heroCarousel(heroes) {
 
   let at = 0, timer = 0;
   const pager = el('div', 'pager');
+  // 1367's "01 / 03": where the billboard is, in mono, before the dashes.
+  const count = el('span', 'pagecount');
+  const two = function (n) { return (n < 10 ? '0' : '') + n; };
+  const writeCount = function () {
+    count.innerHTML = '';
+    count.appendChild(el('b', null, two(at + 1)));
+    count.appendChild(document.createTextNode(' / ' + two(heroes.length)));
+  };
+  writeCount();
+  pager.appendChild(count);
   const pills = heroes.map(function (_hero, i) {
     const pill = el('div', 'pill' + (i === 0 ? ' on' : ''));
-    pill.addEventListener('click', function () { show(i); });
+    pill.title = 'Slide ' + (i + 1);
+    pill.addEventListener('click', function (e) { e.stopPropagation(); show(i); });
     pager.appendChild(pill);
     return pill;
   });
@@ -1241,6 +1250,8 @@ function heroCarousel(heroes) {
     at = (next + slides.length) % slides.length;
     slides[at].classList.add('on');
     pills[at].classList.add('on');
+    writeCount();
+    if (!REDUCED_MOTION) box.classList.add('enter');
     arm();
   }
 
@@ -1342,17 +1353,224 @@ function sectionsInto(parent, sections) {
       section.rows.forEach(function (row) { list.appendChild(tileFor(row)); });
       block.appendChild(list);
     } else {
-      const strip = el('div', 'strip' + (section.style === 'person' ? ' faces' : ''));
+      const strip = el('div', 'strip' + (section.style === 'person' ? ' faces' : '')
+                       + (section.style === 'top10' ? ' top10' : ''));
       // A face is never a status card: the Cast row lands on Saved's
       // page style nowhere today, and pinning it here means it cannot
       // start to.
       const make = (parent.dataset.cardstyle === 'status'
                     && section.style !== 'person') ? statusCard : cardFor;
-      section.rows.forEach(function (row) { strip.appendChild(make(row)); });
+      section.rows.forEach(function (row, i) {
+        const card = make(row);
+        // Netflix's rank, an outlined numeral behind the poster's edge.
+        if (section.style === 'top10') {
+          card.insertBefore(el('span', 'rankn', String(i + 1)), card.firstChild);
+          // Every Discover row is numbered now, so ranks run past 9 -
+          // a two-digit numeral takes a wider card (app.css .two).
+          if (i + 1 >= 10) card.classList.add('two');
+        }
+        // Its place in the row, for the stagger (app.css .rvrow).
+        card.style.setProperty('--i', String(Math.min(i + 1, 12)));
+        strip.appendChild(card);
+      });
       block.appendChild(strip);
+      rowArrows(block, strip);
     }
+    reveal(block, 'arrive', 'rvrow');
     parent.appendChild(block);
   });
+}
+
+/* ---- arriving (the redesign, 1 October 2026) -----------------------
+   The owner's references were Netflix, 1367 Studio and A24, and what he
+   picked from them was motion: 1367's things-rise-into-place, Netflix's
+   hover cards and paged rows. app.css carries the curves (THE REDESIGN);
+   this decides *when* anything moves, which is the part that can go
+   wrong in this app in particular:
+
+   - **A redraw is not an arrival.** Rule 13 redraws a list page on every
+     change the owner makes ({redraw:1} from web_pages), and replaying an
+     entrance under a page he is reading would be the "blink" he reported
+     on 16 September all over again. go(route, {quiet:true}) is a redraw:
+     nothing it draws rises.
+   - **Two policies.** Grid cards rise whenever they are *new* - the first
+     screen and every batch scrolled into after it - but not on a quiet
+     redraw. Rows, shelf cards and list rows rise only when the page
+     *arrives* (a different route from the last one drawn), so a sort, a
+     Select toggle or a reorder redraws without replaying anything.
+   - The flags hold for the synchronous render only; a microtask clears
+     them, so a later batch is judged on its own.
+
+   An element rises the first time it intersects the scroller, so a page
+   pays only for what is on screen; the observer drops each one as it
+   goes. Cards that arrive together are staggered by their position on
+   screen (top, then left), the way 1367 lets a list come in one after
+   another rather than as one block. */
+let drawnRoute = null;
+let drawQuiet = false;
+let drawArrive = false;
+
+function beginDraw(route, quiet) {
+  drawQuiet = !!quiet;
+  drawArrive = !quiet && route !== drawnRoute;
+  // A page drawn into the same document over another (a search, a tab
+  // inside a page) cross-fades in; the very first draw is the shell's
+  // own page transition and is left to it.
+  if (drawArrive && drawnRoute !== null) {
+    page.classList.remove('pagein');
+    void page.offsetWidth;                 // restart the one-shot animation
+    page.classList.add('pagein');
+  }
+  drawnRoute = route;
+  Promise.resolve().then(function () { drawQuiet = false; drawArrive = false; });
+}
+
+const revealIO = ('IntersectionObserver' in window) ? new IntersectionObserver(
+  function (entries) {
+    const coming = entries.filter(function (e) { return e.isIntersecting; });
+    coming.sort(function (a, b) {
+      return (a.boundingClientRect.top - b.boundingClientRect.top)
+          || (a.boundingClientRect.left - b.boundingClientRect.left);
+    });
+    coming.forEach(function (e, n) {
+      const node = e.target;
+      revealIO.unobserve(node);
+      if (!node.classList.contains('rvrow')) {
+        node.style.setProperty('--d', Math.min(n, 12) * 30 + 'ms');
+      }
+      node.classList.add('in');
+    });
+  }, { root: page, rootMargin: '0px 0px -4% 0px' }) : null;
+
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* `when` is 'new' (rises unless this is a quiet redraw) or 'arrive'
+   (rises only when the page has just arrived). Returns the node. */
+function reveal(node, when, cls) {
+  if (!revealIO || REDUCED_MOTION || drawQuiet) return node;
+  if (when === 'arrive' && !drawArrive) return node;
+  node.classList.add(cls || 'rv');
+  revealIO.observe(node);
+  return node;
+}
+
+/* ---- the header pill (1367) ----------------------------------------
+   The window's title bar draws its search group into a capsule once the
+   page has left its top (window_chrome.TitleBar.set_compact). The page
+   says so only when it *crosses* PILL_AT_PX - one message per crossing,
+   never one per scroll event - and a page drawn fresh, which starts at
+   its top, reports that too. */
+const PILL_AT_PX = 48;
+let pillOn = false;
+function reportPill() {
+  const on = page.scrollTop > PILL_AT_PX;
+  if (on === pillOn) return;
+  pillOn = on;
+  tellHost({ action: 'scrolled', on: on ? 1 : 0 });
+}
+page.addEventListener('scroll', reportPill, { passive: true });
+
+/* ---- the card tilt --------------------------------------------------
+   The owner, 1 October 2026: "make the cards on all pages hover
+   animation rotate towards cursor". One listener for the whole page,
+   at most one update a frame (the pointer reports faster than the panel
+   draws), writing two custom properties on the one hovered picture;
+   app.css turns them into the lean.
+
+   **The card's rect, never the picture's.** A card carries
+   content-visibility, and reading a rect *inside* one forces its
+   skipped subtree to lay out (rules/ui.md, 890ms measured once); the
+   card's own rect is free, and the picture is centred in it. A card in
+   select mode does not lean - its tick is what is being aimed at. */
+const TILT_MAX_DEG = 9;
+let tiltArt = null, tiltEvent = null, tiltFrame = 0;
+
+function tiltRelease() {
+  if (!tiltArt) return;
+  tiltArt.classList.remove('tilting');
+  tiltArt.style.removeProperty('--rx');
+  tiltArt.style.removeProperty('--ry');
+  tiltArt = null;
+}
+
+function tiltStep() {
+  tiltFrame = 0;
+  const e = tiltEvent;
+  const card = e && e.target && e.target.closest
+    ? e.target.closest('.card, .gc, .sc') : null;
+  const art = card && !card.classList.contains('picking')
+    && !card.classList.contains('dragging')
+    ? card.querySelector('.art, .p, .sart') : null;
+  if (art !== tiltArt) tiltRelease();
+  if (!art) return;
+  const box = card.getBoundingClientRect();
+  if (!box.width || !box.height) return;
+  const x = Math.max(-0.5, Math.min(0.5, (e.clientX - box.left) / box.width - 0.5));
+  const y = Math.max(-0.5, Math.min(0.5, (e.clientY - box.top) / box.height - 0.5));
+  tiltArt = art;
+  art.classList.add('tilting');
+  // Leaning *toward* the pointer: the side under it comes forward.
+  art.style.setProperty('--ry', (x * 2 * TILT_MAX_DEG).toFixed(2) + 'deg');
+  art.style.setProperty('--rx', (-y * 2 * TILT_MAX_DEG).toFixed(2) + 'deg');
+}
+
+if (!REDUCED_MOTION) {
+  page.addEventListener('pointermove', function (e) {
+    if (e.pointerType && e.pointerType !== 'mouse' && e.pointerType !== 'pen') return;
+    tiltEvent = e;
+    if (!tiltFrame) tiltFrame = requestAnimationFrame(tiltStep);
+  }, { passive: true });
+  page.addEventListener('pointerleave', tiltRelease, { passive: true });
+  // A scroll moves the card out from under a still pointer without a
+  // pointermove, so the lean is let go rather than left behind.
+  page.addEventListener('scroll', tiltRelease, { passive: true });
+}
+
+/* ---- a row's arrows (Netflix) --------------------------------------
+   Two round buttons over the row's ends, shown on hover when there is
+   somewhere to go, paging the strip by most of its width on Netflix's
+   own pace (~0.7s, ease-in-out) rather than the wheel's 6-12 frame
+   ease, which is sized for a notch. A wheel or a finger takes the row
+   back from it at once (the wheel handler stops strip._side; this
+   stops itself when scrollLeft moves under it). */
+const PAGE_ROW_MS = 700;
+const PAGE_ROW_EASE = bezier(0.65, 0, 0.35, 1);
+
+function pageStrip(strip, dir) {
+  if (strip._side) strip._side.stop();
+  if (strip._paging) cancelAnimationFrame(strip._paging);
+  const from = strip.scrollLeft;
+  const limit = strip.scrollWidth - strip.clientWidth;
+  const to = Math.max(0, Math.min(limit, from + dir * strip.clientWidth * 0.85));
+  if (to === from) return;
+  const began = performance.now();
+  let last = from;
+  function step(now) {
+    if (Math.abs(strip.scrollLeft - last) > 2) { strip._paging = 0; return; }
+    const done = Math.min(1, (now - began) / PAGE_ROW_MS);
+    last = from + (to - from) * PAGE_ROW_EASE(done);
+    strip.scrollLeft = last;
+    strip._paging = done < 1 ? requestAnimationFrame(step) : 0;
+  }
+  strip._paging = requestAnimationFrame(step);
+}
+
+function rowArrows(block, strip) {
+  const left = el('button', 'rowarrow l', '');
+  const right = el('button', 'rowarrow r', '');
+  left.title = 'Previous'; right.title = 'Next';
+  function sync() {
+    const limit = strip.scrollWidth - strip.clientWidth;
+    left.classList.toggle('can', strip.scrollLeft > 2);
+    right.classList.toggle('can', limit > 2 && strip.scrollLeft < limit - 2);
+  }
+  left.addEventListener('click', function (e) { e.stopPropagation(); pageStrip(strip, -1); });
+  right.addEventListener('click', function (e) { e.stopPropagation(); pageStrip(strip, 1); });
+  // Read on hover and as the row moves, never per frame of the page.
+  block.addEventListener('mouseenter', sync);
+  strip.addEventListener('scroll', sync, { passive: true });
+  block.appendChild(left);
+  block.appendChild(right);
 }
 
 /* ---- the reader ---------------------------------------------------
@@ -2301,7 +2519,7 @@ async function openChapter(id, index) {
 /* ---- routing ------------------------------------------------------ */
 let token = 0;
 
-async function go(route) {
+async function go(route, opts) {
   // currentRoute is a *function* (see the bottom of this file). Compared
   // as a value it never equals a string, so this reset ran on every
   // go() - the shelf sort and Select were undone before shelfInto drew
@@ -2346,6 +2564,7 @@ async function go(route) {
       const found = await (await fetch('/api/search?q=' +
         encodeURIComponent(term))).json();
       if (mine !== token) return;
+      beginDraw(route, opts && opts.quiet);
       page.innerHTML = '';
       const done = el('header');
       done.appendChild(el('h1', null, 'Search'));
@@ -2403,6 +2622,7 @@ async function go(route) {
     return;
   }
   if (mine !== token) return;              // a later click won
+  beginDraw(route, opts && opts.quiet);
 
   // The swap. For every route but the draw-early two, the page still
   // shows the old cards at this point - clear and refill happen in one
@@ -3230,7 +3450,7 @@ function historyInto(parent, data) {
 
   const list = el('div', 'histlist');
   rows.forEach(function (row) {
-    const line = el('div', 'histrow');
+    const line = reveal(el('div', 'histrow'), 'arrive');
     const art = el('img', 'histart');
     art.alt = '';
     lazyArt(art, row.cover, 60);
@@ -3356,7 +3576,7 @@ function scheduleInto(parent, data) {
         day = row.day;
         wrap.appendChild(el('div', 'schedday', day));
       }
-      const line = el('div', 'schedrow');
+      const line = reveal(el('div', 'schedrow'), 'arrive');
       const art = el('img', 'schedart');
       art.alt = '';
       lazyArt(art, row.cover, 56);
@@ -3410,7 +3630,8 @@ let savedState = { selecting: false, picked: new Set() };
 let shelfState = { sort: 'Custom Order', selecting: false, picked: new Set() };
 
 function shelfCard(row, shelf) {
-  const card = el('div', 'sc' + (row.shape === 'square' ? ' square' : ''));
+  const card = reveal(el('div', 'sc' + (row.shape === 'square' ? ' square' : '')),
+                      'arrive');
   // Its id on the node, so Select All can repaint the marks without
   // redrawing the grid - see the tick's handler in shelfInto.
   card.dataset.pid = row.id || '';
@@ -3799,7 +4020,7 @@ function redrawDownloads() {
    One card, shaped exactly as helpers/web_grid.py builds it: cover,
    title, meta, and the meta in ACCENT when the title is already his. */
 function gridCard(row) {
-  const card = el('div', 'gc');
+  const card = reveal(el('div', 'gc'), 'new');
   const img = el('img', 'p');
   img.width = 160; img.height = 216;
   img.alt = '';

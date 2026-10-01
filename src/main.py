@@ -133,7 +133,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from helpers.settings_dialog import SettingsDialog
-from helpers.widgets import (PageSlide, SmoothTween, confirm, hold_hover_cursor,
+from helpers.widgets import (PageFade, PageSlide, SmoothTween, confirm, hold_hover_cursor,
                              install_edge_wheel,
                              install_horizontal_wheel_guard,
                              release_hover_cursor,
@@ -272,7 +272,11 @@ ADD_ITEMS = [
     ("Website", "websites", lambda page: page._open_add_form()),
 ]
 
-ANIM_DURATION_MS = 220
+# The page cross-fade (widgets.PageFade): long enough to read as the old
+# page handing over to the new one, the way 1367's do, and short of
+# rule 7's second by a wide margin - the new page is on screen under it
+# from the first frame.
+PAGE_FADE_MS = 320
 # How far the sidebar's mark leans and draws in at the midpoint of a
 # fold. Small on purpose - it is the app's own mark, and a logo that
 # spins reads as a loading spinner.
@@ -2053,8 +2057,9 @@ class MainWindow(QMainWindow):
         self._history = ["home"]
         self._history_index = 0
         self._current_page = None
-        # The page-slide compositor while one is running (see
-        # widgets.PageSlide), so a second navigation can end it.
+        # The page cross-fade while one is running (widgets.PageFade), so
+        # a second navigation can end it. The name is the slide's, which
+        # the fade replaced.
         self._page_slide = None
         self._was_maximized = False
         self._last_pointer_pos = QCursor.pos()
@@ -3215,10 +3220,10 @@ class MainWindow(QMainWindow):
             self._settle_swap()
             return
         # **Painted once each and blitted, for the same reason the page
-        # stack is** - see widgets.PageSlide. Animating two full
+        # stack was** - see widgets.PageSlide. Animating two full
         # sidebars' `pos` repainted every nav row, glyph and button on
         # both bars on every step, and it runs *concurrently* with the
-        # page slide: with the pages already composited, the bars were
+        # page transition: with the pages already composited, the bars were
         # still contributing 70 QPushButton and 43 QLabel paints to a
         # 220ms transition (measured 22 August 2026).
         incoming.move(-width, 0)
@@ -3233,8 +3238,7 @@ class MainWindow(QMainWindow):
         # geometry, so an interrupted swap and a completed one land
         # identically.
         slide = PageSlide(holder, outgoing_shot, incoming_shot, -1,
-                          SIDEBAR_ANIM_MS, axis="x",
-                          on_done=self._settle_swap)
+                          SIDEBAR_ANIM_MS, on_done=self._settle_swap)
         self._bar_slide = slide
         slide.start()
 
@@ -5673,6 +5677,18 @@ class MainWindow(QMainWindow):
                 _web.start_at(route_section(page_name) and page_name)
             except Exception:
                 pass
+        # The page cross-fade's picture goes up first (widgets.PageFade.
+        # cover): building the new page below creates native windows, and
+        # that flashed the bare ground for a frame when nothing covered it.
+        fade = None
+        if animate and old_page is not None:
+            if self._page_slide is not None:
+                self._page_slide.stop()
+                self._page_slide = None
+            picture = PageFade.capture(self.container)
+            if picture is not None:
+                fade = PageFade(self.container, picture, PAGE_FADE_MS)
+                fade.cover()
         logs.memtrace_mark(f"before building {page_name}")
         new_page = PAGES[_page_name(page_name)](self)
         logs.memtrace_mark(f"built {page_name}")
@@ -5709,49 +5725,61 @@ class MainWindow(QMainWindow):
                 old_page.deleteLater()
             return
 
-        # A navigation arriving while one is still running: end the old
-        # slide immediately (its callback puts its page in place) rather
-        # than leaving two compositors stacked.
-        if self._page_slide is not None:
-            self._page_slide.stop()
-            self._page_slide = None
+        # A navigation arriving while one is still running was ended above,
+        # before the new picture was taken - its callback puts its page in
+        # place rather than leaving two compositors stacked.
 
-        # **Both pages are painted once, into pixmaps, and the slide is
-        # two blits per frame.** Animating the widgets' `pos` re-rendered
-        # every child on both pages every step - 64 to 109 paint events
-        # per tick, measured, which is the whole of the owner's
-        # "stuttering". See widgets.PageSlide for the numbers.
+        # **A cross-fade, not a slide** - the owner's redesign, 1 October
+        # 2026 ("page cross-fades", after 1367 Studio and Netflix). The
+        # slide moved two pictures of pages that are web views, and a
+        # web view cannot be grabbed (widgets.PageFade has the
+        # measurement), so it had been sliding blank ground. The old
+        # page is read off the screen instead and fades to the ground,
+        # and the new page is shown as it lands and rises in on its own
+        # entrance (app.js reveal). `direction` no longer moves anything;
+        # it is kept in the signature because every caller passes it.
         #
-        # "down" = the target sits below the source in the sidebar, so
-        # the new page enters from below and slides up into place (like
-        # scrolling down a page); "up" is the mirror image.
+        # **Hidden while the fade runs, not shown under it.** The first
+        # version showed the new page at once beneath the fade and the
+        # fade was never seen - measured, the capture took 26ms and the
+        # window went layered, and still the old page was gone by the
+        # second frame: the new page's native web host stacked above the
+        # fade. Hidden, it loads the same and nothing native is above.
         new_page.setGeometry(rect)
-        old_shot = old_page.grab()
-        new_shot = new_page.grab()
-        # Hidden, not moved: nothing behind the compositor should be
-        # painting at all while it runs.
         new_page.hide()
-        old_page.hide()
+        # A new page starts at its top, so the bar starts open.
+        try:
+            self.title_bar.set_compact(False)
+        except Exception:
+            pass
 
         def landed(page=new_page, previous=old_page):
             self._page_slide = None
-            if slide is not None:
-                slide.hide()
-                slide.deleteLater()
+            if fade is not None:
+                fade.hide()
+                fade.deleteLater()
             page.setGeometry(self.container.rect())
             page.show()
-            # Same reason as the immediate path above - and the slide
-            # compositor is a sibling too, so this runs after it is gone.
             self._bind_page_scroll()
             self._position_fullscreen_bar()
             previous.deleteLater()
             logs.memtrace_mark("previous page scheduled for deletion")
 
-        slide = PageSlide(self.container, old_shot, new_shot,
-                          1 if direction == "down" else -1,
-                          ANIM_DURATION_MS, on_done=landed)
-        self._page_slide = slide
-        slide.start()
+        if fade is None:
+            old_page.hide()
+            landed()
+            return
+        # **The fade is up before the old page comes down** (it went up
+        # before the new page was even built - see above).
+        self._page_slide = fade
+        fade.start(on_done=landed)
+        old_page.hide()
+        # Painted in the same call as the hide. While the old page's web
+        # view was on top, Qt skipped the fade's paint as obscured, so the
+        # area it uncovers had nothing in it until the next pass of the
+        # event loop - one frame of bare ground in 1 run of 3 on the
+        # frozen build (9ms at brightness 10).
+        fade.repaint()
 
     def resizeEvent(self, event):
         # A snap changes the size without changing the window *state*,
@@ -6110,6 +6138,15 @@ def main():
                 web_backend.heal_shrunk_pages()
             except Exception:
                 logs.exception("page cache heal failed")
+            # Letterboxed game tiles carry the theme's panel colour in
+            # their pixels; a re-theme repaints them (game_art).
+            try:
+                from helpers import game_art
+                repainted = game_art.repaint_posters(images.CACHE_DIR)
+                if repainted:
+                    logs.info(f"game tiles repainted on the theme: {repainted}")
+            except Exception:
+                logs.exception("game tile repaint failed")
             images.shrink_existing()
             images.trim_cache()
         except Exception:

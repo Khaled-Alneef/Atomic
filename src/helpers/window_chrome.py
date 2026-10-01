@@ -963,6 +963,66 @@ class DragStrip(QWidget):
         super().mousePressEvent(event)
 
 
+# **1367's header pill** - the owner's redesign, 1 October 2026. On 1367
+# Studio's site the header is open at the top of a page and draws itself
+# into a frosted capsule once the page scrolls (its own transition, read
+# off the site: 0.6s on (.65,0,.35,1) for the size, 0.3s for the glass).
+# The pages here are native web views, which paint over any Qt sibling,
+# so this bar cannot float over the content the way 1367's does; the
+# capsule forms *in place*, round the search field and its three
+# buttons, and the group draws in by PILL_INSET as it does.
+PILL_MS = 420
+PILL_INSET = 12          # px the group draws in at full compaction
+PILL_FILL_ALPHA = 20     # white over the bar ground, 0-255
+PILL_EDGE_ALPHA = 46
+
+
+class _PillGroup(QWidget):
+    """The centred group, with the capsule painted behind it at `amount`
+    (0 open, 1 compact). Paint only - the layout's margins are moved by
+    TitleBar.set_compact."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, objectName="Bare")
+        self.amount = 0.0
+        # The two ends the capsule hugs - set by TitleBar. The group also
+        # holds an empty balance holder left of the field (it keeps the
+        # field centred in the window), and a capsule round the whole
+        # group carried three buttons' width of nothing on its left
+        # (photographed on the frozen build, 1 October 2026).
+        self.first = None
+        self.last = None
+
+    def pill_rect(self) -> QRectF:
+        """Where the capsule is drawn, in this widget's coordinates."""
+        bounds = QRectF(self.rect()).adjusted(1.5, 3.5, -1.5, -3.5)
+        box = QRectF(bounds)
+        if self.first is not None and self.last is not None:
+            pad = 7.0 * self.amount
+            # Clamped to the group's own rect: a widget cannot paint
+            # outside itself, and the buttons sit flush with its right
+            # edge, so `+ pad` there drew a capsule with its end sheared
+            # off - the owner's picture, 1 October 2026, "the search bar
+            # seems not to be fully shown in the right side".
+            box.setLeft(max(bounds.left(), self.first.geometry().left() - pad))
+            box.setRight(min(bounds.right(), self.last.geometry().right() + pad))
+        return box
+
+    def paintEvent(self, event):
+        if self.amount <= 0.001:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        box = self.pill_rect()
+        radius = box.height() / 2.0
+        fill = QColor(255, 255, 255, int(PILL_FILL_ALPHA * self.amount))
+        edge = QColor(255, 255, 255, int(PILL_EDGE_ALPHA * self.amount))
+        painter.setPen(QPen(edge, 1.0))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(box, radius, radius)
+        painter.end()
+
+
 class TitleBar(QWidget):
     """Back on the left, one search field in the middle, the window
     buttons on the right.
@@ -1045,7 +1105,7 @@ class TitleBar(QWidget):
         row.addStretch(1)
         # The field and the three section buttons beside it, in both
         # states - see set_fullscreen.
-        centre = QWidget(objectName="Bare")
+        centre = _PillGroup()
         centre_row = QHBoxLayout(centre)
         centre_row.setContentsMargins(0, 0, 0, 0)
         centre_row.setSpacing(8)
@@ -1087,6 +1147,8 @@ class TitleBar(QWidget):
         for button in self.section_buttons.values():
             buttons_row.addWidget(button)
         centre_row.addWidget(self._centre_buttons)
+        centre.first = self.search
+        centre.last = self._centre_buttons
         self._centre_group = centre
         row.addWidget(centre, stretch=3)
         row.addStretch(1)
@@ -1354,6 +1416,18 @@ class TitleBar(QWidget):
             # A couple of pixels of slack, so a click on the very edge
             # of the field is not lost to rounding.
             region = region.united(QRegion(rect.adjusted(-2, -2, 2, 2)))
+        # **The capsule is part of the bar while it shows.** The owner, 1
+        # October 2026, with a picture of full screen: "the search bar in
+        # FS is still separated". The mask also clips *painting*, so the
+        # capsule showed only inside the field's and the buttons' own
+        # rects - a boxed field with its end cut square, and a capsule
+        # round the buttons alone. One rounded rect covering both, from
+        # the capsule's own geometry, joins them.
+        group = getattr(self, "_centre_group", None)
+        if group is not None and getattr(group, "amount", 0.0) > 0.001:
+            pill = group.pill_rect().toAlignedRect()
+            pill.translate(group.mapTo(self, QPoint(0, 0)))
+            region = region.united(QRegion(pill.adjusted(-1, -1, 1, 1)))
         if region.isEmpty():
             self.clearMask()
         else:
@@ -1401,6 +1475,42 @@ class TitleBar(QWidget):
             self.search.setMaximumWidth(wanted)
         self.search.setFixedWidth(wanted)
         return wanted
+
+    def set_compact(self, on: bool):
+        """Draw the capsule in (the page has scrolled) or open it out
+        (back at the top). Retargets from wherever it is, so a page that
+        crosses the line twice in a second does not queue two runs."""
+        target = 1.0 if on else 0.0
+        if getattr(self, "_compact_to", 0.0) == target:
+            return
+        self._compact_to = target
+        tween = getattr(self, "_pill_tween", None)
+        if tween is None:
+            tween = SmoothTween(self, self._apply_compact, PILL_MS)
+            self._pill_tween = tween
+        tween.start(self._centre_group.amount, target)
+
+    def _apply_compact(self, amount):
+        amount = max(0.0, min(1.0, float(amount)))
+        self._centre_group.amount = amount
+        # The field drops its own box halfway in, and takes it back
+        # halfway out (theme, TopSearch[compact]). Once per crossing - a
+        # re-polish is a style pass, not something to do every frame.
+        boxed = amount < 0.5
+        if boxed != getattr(self, "_search_boxed", True):
+            self._search_boxed = boxed
+            self.search.setProperty("compact", not boxed)
+            self.search.style().unpolish(self.search)
+            self.search.style().polish(self.search)
+            self.search.update()
+        # Full screen pins the field to a width (set_fullscreen_search_
+        # width), so drawing the group in there only squeezed the field
+        # against the buttons; the capsule alone does the work.
+        inset = 0 if getattr(self, "_fullscreen", False)             else int(round(PILL_INSET * amount))
+        self._centre_row.setContentsMargins(inset, 0, inset, 0)
+        self._centre_group.update()
+        if getattr(self, "_fullscreen", False):
+            self.apply_fullscreen_mask()
 
     def fullscreen_width(self) -> int:
         """How wide the bar needs to be when it is overlaying a page -

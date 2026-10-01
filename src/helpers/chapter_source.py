@@ -662,6 +662,14 @@ def stale_chapters(entry):
     return row.get("chapters") or None
 
 
+def listed_at(entry):
+    """When this entry's chapter list was last read off a site (epoch
+    seconds), or None if it never was. Touches no network."""
+    key = _cache_key(entry)
+    row = _load_store().get(key) if key else None
+    return (row or {}).get("at") or None
+
+
 def list_chapters(entry, *, deadline=None, refresh=False,
                   on_partial=None) -> list:
     """Chapters for this entry, newest first. Never raises.
