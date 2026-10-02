@@ -326,6 +326,20 @@ def get_blur_episode_stills() -> bool:
     return bool(_load().get("blur_episode_stills", False))
 
 
+def get_subtitle_font() -> str:
+    """The family the player draws subtitles in, or "" for mpv's own and
+    each .ass script's own styles (the player's Subtitles panel, Font -
+    the owner's ask, 2 October 2026). One choice for every title, unlike
+    the per-episode delay and size: a typeface is taste, not timing."""
+    return str(_load().get("subtitle_font") or "").strip()
+
+
+def set_subtitle_font(family: str):
+    data = _load()
+    data["subtitle_font"] = str(family or "").strip()
+    storage.save(SETTINGS_FILE, data)
+
+
 def set_blur_episode_stills(enabled: bool):
     data = _load()
     data["blur_episode_stills"] = bool(enabled)

@@ -749,7 +749,7 @@ class _WebPage(GlassPage):
                 self._run(lambda: _open_links(self, entry))
             return
 
-        entry = _find(entry_id, title, body.get("type"))
+        entry = _find(entry_id, title, body.get("type"), body.get("imdb"))
         if entry is None:
             # A Discover title is not in the library, so there is nothing
             # to look up - the details page takes the row itself, which
@@ -815,7 +815,7 @@ class _WebPage(GlassPage):
             from helpers.widgets import show_toast
             from windows import details
             want = bool(body.get("save"))
-            found = _find("", entry["title"], entry["type"])
+            found = _find("", entry["title"], entry["type"], entry["imdb_id"])
             if want:
                 if found is not None and found.get("id"):
                     show_toast(self.window(), "Already In Your List")
@@ -1434,8 +1434,23 @@ def entry_side(kind) -> str:
     return ""
 
 
-def _find(entry_id, title, kind=""):
-    """The saved entry behind a clicked card, by id and then by title.
+def _find(entry_id, title, kind="", imdb=""):
+    """The saved entry behind a clicked card: by id, then by IMDb id,
+    then by title.
+
+    **A title match never crosses an IMDb id or a film/series line.**
+    The owner, 2 October 2026: *"when I tried to watch series what women
+    want, it shows me the movie and in my friends device the movie
+    showed him the series ep"*. Three series and eight films carry that
+    name; Series and Movie are both the Watch side, so the side rule
+    below let a click on the series match the 2000 film in his history
+    by its title alone, and the reverse on his friend's. Harnessed
+    (scratch `h_find.py`): with the film in history every one of four
+    clicks - series tt7848370, film tt0207201, series tt0375497, a
+    series card with no id - opened the film, and with the series there
+    every one opened the series. The card carries its IMDb id, so a row
+    with a different one is another work, and a Movie card never takes a
+    series row or the reverse.
 
     **A title only matches on its own side of the Watch/Read split.**
     Measured 3 September 2026 on the owner's data: the search page's
@@ -1449,12 +1464,30 @@ def _find(entry_id, title, kind=""):
     """
     wanted = title.strip().lower()
     side = entry_side(kind)
+    imdb = str(imdb or "").strip()
+    film = str(kind or "").strip().lower() in ("movie", "movies")
 
     def agrees(row):
         other = entry_side(row.get("type"))
-        return not side or not other or other == side
+        if side and other and other != side:
+            return False
+        theirs = str(row.get("imdb_id") or "").strip()
+        if imdb and theirs and theirs != imdb:
+            return False
+        row_kind = str(row.get("type") or "").strip().lower()
+        if kind and row_kind and side == "watch" \
+                and film != (row_kind in ("movie", "movies")):
+            return False
+        return True
 
-    for name in ("tracker.json", "series.json", "games.json"):
+    files = ("tracker.json", "series.json", "games.json")
+    if imdb:
+        for name in files + ("history.json",):
+            for row in storage.load(name, []):
+                if isinstance(row, dict) and \
+                        str(row.get("imdb_id") or "").strip() == imdb:
+                    return row
+    for name in files:
         rows = storage.load(name, [])
         for row in rows:
             if isinstance(row, dict) and entry_id \

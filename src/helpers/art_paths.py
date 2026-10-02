@@ -152,7 +152,13 @@ def shelf_file(entry) -> str:
         return ""
     if entry.get("targets"):
         return "apps.json" if _first_target(entry, "app") else "websites.json"
-    if entry.get("path") and "cover" in entry:
+    # Not `"cover" in entry` alone: launchers.import_scanned_games and the
+    # Add button write a new game with no `cover` key at all (the Qt
+    # page's backfill added it, and that page no longer runs), so a game
+    # imported since read as no shelf and was never asked for art - his
+    # TheWitcher3, 2 October 2026, an exe icon for ever. `last_played`
+    # is written by both, and by nothing outside the games shelf.
+    if entry.get("path") and ("cover" in entry or "last_played" in entry):
         return "games.json"
     return ""
 

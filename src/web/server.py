@@ -109,10 +109,16 @@ def _marks():
             # The row's own progress travels with its marks - see
             # _last_mark for the one case where it outranks them.
             said = str(row.get("progress") or "").strip()
+            imdb = str(row.get("imdb_id") or "").strip()
+            # By IMDb id as well, and the title key remembers whose id
+            # it was: two works of one name (What Women Want, the film
+            # and the series - the owner, 2 October 2026) must not share
+            # ticks through the title. See _marked_progress's lookup.
             for key in (str(row.get("entry_id") or ""),
+                        f"imdb:{imdb}" if imdb else "",
                         str(row.get("title") or "").strip().lower()):
                 if key:
-                    found[key] = (marks, said)
+                    found[key] = (marks, said, imdb)
         _MARKS["index"] = found
         _MARKS["at"] = stamp
     return _MARKS["index"]
@@ -314,10 +320,14 @@ def _marked_progress(entry, following=True):
     """
     index = _marks()
     kind = str(entry.get("type") or "")
+    imdb = str(entry.get("imdb_id") or "").strip()
     for key in (str(entry.get("id") or entry.get("entry_id") or ""),
+                f"imdb:{imdb}" if imdb else "",
                 str(entry.get("title") or "").strip().lower()):
         if key and key in index:
-            marks, said = index[key]
+            marks, said, theirs = index[key]
+            if imdb and theirs and theirs != imdb:
+                continue        # another work that shares the name
             # The entry's own progress, if it has one, else the history
             # row's - either is an answer a season-0 mark must beat.
             found = _last_mark(marks, kind,
@@ -453,10 +463,22 @@ def _saved_twin(entry):
     if not side:
         return None
     index = _twin_index()[side]
+    imdb = str(entry.get("imdb_id") or "").strip()
+    film = str(entry.get("type") or "").strip().lower() in ("movie", "movies")
     for key in (str(entry.get("id") or entry.get("entry_id") or ""),
                 str(entry.get("title") or "").strip().lower()):
         if key and key in index:
-            return index[key]
+            saved = index[key]
+            # A title hit is not a twin across an IMDb id or the film/
+            # series line - What Women Want is a 2000 film and three
+            # series (the owner, 2 October 2026; web_pages._find).
+            theirs = str(saved.get("imdb_id") or "").strip()
+            if imdb and theirs and theirs != imdb:
+                continue
+            kind = str(saved.get("type") or "").strip().lower()
+            if side == "watch" and entry.get("type") and kind                     and film != (kind in ("movie", "movies")):
+                continue
+            return saved
     return None
 
 

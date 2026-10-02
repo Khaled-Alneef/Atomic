@@ -61,7 +61,7 @@ import uuid
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF,
                           QRegularExpression, Qt, QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
+from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QImage,
                          QLinearGradient, QPainter, QPen, QPixmap,
                          QPolygonF, QRegion, QRegularExpressionValidator)
 from PyQt6.QtWidgets import (
@@ -270,6 +270,24 @@ MARK_WATCHED_ON_OPEN = True
 # jumped past the size he wanted. The buttons print the step
 # (add_stepper's step_text), so nothing else encodes this number.
 SUB_SIZE_DEFAULT = 55          # mpv's own default for sub-font-size
+# The Subtitles panel's Font row (the owner, 2 October 2026: "an option
+# to change the subtitles font? especially for arabic"). A curated list
+# rather than every family: 79 installed fonts here can draw Arabic and
+# most of them are display faces (outlined, striped, LED) nobody reads a
+# film in. Readable Windows faces first, then free Arabic families he
+# may install; each is offered only where it is installed (QFontDatabase,
+# Arabic writing system), so another machine shows its own subset.
+# SUB_FONT_DEFAULT is mpv's own: "sans-serif" for text tracks and each
+# .ass style's own font - the row's "Default".
+SUB_FONT_DEFAULT = "sans-serif"
+SUB_FONT_CHOICES = (
+    "Segoe UI", "Arial", "Tahoma", "Calibri", "Sakkal Majalla",
+    "Simplified Arabic", "Traditional Arabic", "Arabic Typesetting",
+    "Andalus", "Aldhabi", "Microsoft Sans Serif", "Times New Roman",
+    "Dubai", "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Kufi Arabic",
+    "Cairo", "Tajawal", "Almarai", "IBM Plex Sans Arabic", "Amiri",
+    "Scheherazade New", "Lateef", "Readex Pro",
+)
 # **The stepper moves in whole percentage points of that default**, so
 # the number on screen really changes by what the button says - the
 # owner's ask, 26 August 2026: "make the font +/- in 5% not 4% and make
@@ -439,8 +457,18 @@ CHAPTER_OPENING_MIN_START_S = 5.0
 # the panel's natural height.
 SUBS_PANEL_COLUMN_H = 380
 
-SKIP_BUTTON_SIZE = (168, 44)
+SKIP_BUTTON_SIZE = (184, 48)
 SKIP_BUTTON_MARGIN = 28
+# Out of full screen (his ask, 2 October 2026): further in from the edge.
+SKIP_BUTTON_MARGIN_WINDOWED = 96
+# SkipOfferButton's face (2 October 2026): the details page's Play
+# radius, and a solid near-black under a white outline at 70%, which is
+# Netflix's translucent skip box made solid.
+SKIP_BUTTON_RADIUS = 6
+SKIP_BUTTON_GROUND = "#141414"
+SKIP_BUTTON_OUTLINE = "#b3b3b3"
+SKIP_BUTTON_OUTLINE_W = 1.5
+SKIP_NEXT_HOVER = "#d9d9d9"
 # How long before the end of the file "Next Episode" appears even with no
 # ending interval known - most releases run credits over the last minute.
 NEXT_TAIL_S = 60.0
@@ -686,9 +714,8 @@ ICON_SUBTITLES = "\uf2b7"   # Translate - this opens the
 # and the details page's back button now carry it too, so one shape
 # means "back" everywhere.
 ICON_EXIT = "\ue76b"
-# The episode-list opener, immediately right of the door. E8FD is
-# BulletedList, the same glyph the reader's chapter-list button carries.
-ICON_EPISODE_LIST = "\ue8fd"
+# The episode-list opener, immediately right of the door, is drawn now
+# (drawn_icons.paint_episodes, 2 October 2026), not E8FD BulletedList.
 # Marks an episode already watched in the episode list. E73E is
 # CheckMark - the tick alone, not the boxed E73A, which would read as a
 # checkbox waiting to be clicked rather than a state already reached.
@@ -1677,6 +1704,223 @@ def _round_overlay(widget, radius=BAR_RADIUS, square=()):
     widget.setMask(region)
 
 
+class _ChevronButton(QPushButton):
+    """A stepper button whose ‹ or › is drawn, not typed.
+
+    The owner, 2 October 2026, of the Font row: *"the arrows are lowered
+    more a bit needs to be moved a bit higher to be in the center of the
+    button"*. A text ‹ is centred by the font's line box, and the
+    guillemet's ink sits below that box's middle, so no amount of
+    padding centres it at every ratio. A path is centred on the button
+    itself. The stylesheet still draws the disc, its hover and press."""
+
+    def __init__(self, direction, parent=None):
+        super().__init__("", parent)
+        self._direction = direction
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(theme.TEXT), 2.2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        cx, cy = self.width() / 2, self.height() / 2
+        half_w, half_h = 3.2, 6.0
+        # The point sits a little past the centre and the arms a little
+        # before it, so the chevron's mass - not its bounding box's
+        # corner - is what lands on the middle.
+        lean = -1 if self._direction == "left" else 1
+        tip = QPointF(cx + lean * half_w, cy)
+        painter.drawPolyline(QPolygonF([QPointF(cx - lean * half_w, cy - half_h),
+                                        tip,
+                                        QPointF(cx - lean * half_w, cy + half_h)]))
+        painter.end()
+
+
+_SUB_FONTS_INSTALLED = None
+
+
+def _installed_sub_fonts():
+    """SUB_FONT_CHOICES that this machine has and that draw Arabic, in
+    the table's order. Read once a process: QFontDatabase is the system's
+    list, which does not change under a running player."""
+    global _SUB_FONTS_INSTALLED
+    if _SUB_FONTS_INSTALLED is None:
+        try:
+            from PyQt6.QtGui import QFontDatabase
+            have = {family.casefold() for family in
+                    QFontDatabase.families(QFontDatabase.WritingSystem.Arabic)}
+            _SUB_FONTS_INSTALLED = [name for name in SUB_FONT_CHOICES
+                                    if name.casefold() in have]
+        except Exception:
+            _SUB_FONTS_INSTALLED = []
+    return list(_SUB_FONTS_INSTALLED)
+
+
+class SkipOfferButton(QPushButton):
+    """The Skip Intro / Skip Recap / Next Episode offer, painted.
+
+    The owner, 2 October 2026: *"change the design of next ep and skip
+    intro or skip recap buttons, it seems old and bad"*. It was the
+    pre-redesign accent gradient from regression_fixes_145 and a text
+    "→" for an arrow, on a page the 1 October redesign had made Netflix
+    monochrome everywhere else (ui.md, "The redesign").
+
+    So it is Netflix's pair, kept solid (his 24 August ask, "make them
+    solid, not transparent at all"): a skip is a dark box with a white
+    outline and a fast-forward mark that fills white under the pointer,
+    and Next Episode is the details page's white Play - white, black ink,
+    SKIP_BUTTON_RADIUS - with a skip-to-next mark. The marks are drawn
+    paths, not glyphs or a QIcon: a QIcon on a bar button came out soft
+    on his 125% panel (ui.md, "Nine more"), a path is sharp at any ratio.
+
+    Painted rather than styled, so nothing a stylesheet patch sets on it
+    changes the look; `kind` ("seek" or "next") picks the face. Composed
+    with per-pixel alpha - see compose()."""
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self._kind = "seek"
+        self._hover = False
+        self.pressed.connect(self.compose)
+        self.released.connect(self.compose)
+
+    def set_kind(self, kind):
+        if kind != self._kind:
+            self._kind = kind
+            self.compose()
+
+    def setText(self, text):
+        changed = text != self.text()
+        super().setText(text)
+        if changed:
+            self.compose()
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.compose()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.compose()
+        super().leaveEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # drop_composition clears the layered bit when a page goes, and
+        # a window shown again with nothing pushed would show nothing.
+        self.compose()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.compose()
+
+    def compose(self):
+        """Push the face through UpdateLayeredWindow with real alpha.
+
+        **Why not a window mask.** The owner's picture, 2 October 2026:
+        the corners "are not fully rounded ... it becomes clear when
+        hover the button". _round_overlay's mask is one bit per pixel in
+        logical coordinates, so at 125% each corner was a staircase, and
+        a white face over a dark frame is exactly where a staircase
+        shows. The bars have composed per-pixel since 7 September
+        (player_top_bar_live_patch); this is the same push, so the
+        rounded edge is antialiased into the video. Never mixed with
+        _set_window_alpha/_veil on this window - SLWA and ULW are
+        exclusive modes of one window (the patch's own note)."""
+        if not self.isVisible() or os.name != "nt":
+            return
+        try:
+            from helpers import player_top_bar_live_patch as live
+            dpr = float(self.devicePixelRatioF() or 1.0)
+            pw = max(1, int(round(self.width() * dpr)))
+            ph = max(1, int(round(self.height() * dpr)))
+            image = QImage(pw, ph, QImage.Format.Format_ARGB32_Premultiplied)
+            image.setDevicePixelRatio(dpr)
+            # Alpha 0 outside the face: the corners are then
+            # click-through as well as see-through, which is right.
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            self._paint_face(painter, QRectF(0, 0, pw / dpr, ph / dpr))
+            painter.end()
+            live._push_layered(self, image, pw, ph)
+        except Exception:
+            pass
+
+    def paintEvent(self, _event):
+        # A layered window shows only what compose() pushed; this is the
+        # face for the moment before the first push.
+        painter = QPainter(self)
+        self._paint_face(painter, QRectF(self.rect()))
+        painter.end()
+
+    def _paint_face(self, painter, rect):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        down = self.isDown()
+        if self._kind == "next":
+            # The details page's Play: white, black ink; hover lets the
+            # white down a step, a press a step further. Not theme.ACCENT
+            # for the hover: #f2f2f2 against #ffffff did not read as a
+            # change on the frozen build's screenshot.
+            fill = QColor(theme.ACCENT_DEEP_ACTIVE if down else
+                          (SKIP_NEXT_HOVER if self._hover else "#ffffff"))
+            ink, edge = QColor(theme.ON_ACCENT), None
+        elif self._hover or down:
+            fill = QColor(theme.ACCENT_DEEP_ACTIVE if down else "#ffffff")
+            ink, edge = QColor(theme.ON_ACCENT), None
+        else:
+            fill, ink = QColor(SKIP_BUTTON_GROUND), QColor("#ffffff")
+            edge = QColor(SKIP_BUTTON_OUTLINE)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, SKIP_BUTTON_RADIUS, SKIP_BUTTON_RADIUS)
+        if edge is not None:
+            pen = QPen(edge, SKIP_BUTTON_OUTLINE_W)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            inset = SKIP_BUTTON_OUTLINE_W / 2
+            painter.drawRoundedRect(rect.adjusted(inset, inset, -inset, -inset),
+                                    SKIP_BUTTON_RADIUS - inset,
+                                    SKIP_BUTTON_RADIUS - inset)
+
+        font = QFont("Bahnschrift")
+        font.setPointSizeF(12.5)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        text = self.text()
+        metrics = QFontMetrics(font)
+        mark_w, gap = 14.0, 10.0
+        text_w = metrics.horizontalAdvance(text)
+        left = (rect.width() - (mark_w + gap + text_w)) / 2
+        mid = rect.height() / 2
+        self._draw_mark(painter, QRectF(left, mid - 7.0, mark_w, 14.0), ink)
+        painter.setPen(ink)
+        painter.drawText(QRectF(left + mark_w + gap, 0, text_w + 2, rect.height()),
+                         int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                         text)
+
+    def _draw_mark(self, painter, box, ink):
+        """A skip's two triangles (fast forward), or Next's triangle and
+        bar (skip to next) - the marks a player's own controls use."""
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ink)
+        x, y, w, h = box.x(), box.y(), box.width(), box.height()
+        if self._kind == "next":
+            bar = 2.4
+            painter.drawPolygon(QPolygonF([QPointF(x, y), QPointF(x + w - bar - 1, y + h / 2),
+                                           QPointF(x, y + h)]))
+            painter.drawRect(QRectF(x + w - bar, y, bar, h))
+        else:
+            half = w / 2
+            for start in (x, x + half):
+                painter.drawPolygon(QPolygonF([QPointF(start, y),
+                                               QPointF(start + half + 0.5, y + h / 2),
+                                               QPointF(start, y + h)]))
+
+
 def _radius_css(radius=BAR_RADIUS, square=()):
     """The border-radius block matching `_round_overlay`'s mask, so the
     painted fill ends where the window does."""
@@ -2556,7 +2800,7 @@ class OverlayPanel(QFrame):
         return value.setText
 
     def add_stepper(self, name, value_text, on_left, on_right, step_text="",
-                    into=None, on_typed=None, signed=True):
+                    into=None, on_typed=None, signed=True, chevrons=False):
         """A stepper as the owner sketched it: the name small above, then
         a full-width row of − button, the value centred between them,
         + button.
@@ -2589,9 +2833,12 @@ class OverlayPanel(QFrame):
 
         row = QHBoxLayout()
         row.setSpacing(8)
+        # `chevrons` for a row that steps through a list rather than a
+        # number - the Font row - drawn ‹ › instead of − +.
         minus = self._stepper_button(
             f"{GLYPH_MINUS}{step_text}" if step_text else GLYPH_MINUS,
-            f"Less {name.lower()}", wide=bool(step_text))
+            f"Less {name.lower()}", wide=bool(step_text),
+            chevron="left" if chevrons else None)
         minus.clicked.connect(on_left)
         row.addWidget(minus)
 
@@ -2654,7 +2901,8 @@ class OverlayPanel(QFrame):
 
         plus = self._stepper_button(
             f"{GLYPH_PLUS}{step_text}" if step_text else GLYPH_PLUS,
-            f"More {name.lower()}", wide=bool(step_text))
+            f"More {name.lower()}", wide=bool(step_text),
+            chevron="right" if chevrons else None)
         plus.clicked.connect(on_right)
         row.addWidget(plus)
         column.addLayout(row)
@@ -2665,13 +2913,13 @@ class OverlayPanel(QFrame):
         return value.setText
 
     @staticmethod
-    def _stepper_button(glyph, tooltip, wide=False):
+    def _stepper_button(glyph, tooltip, wide=False, chevron=None):
         """A round, clearly-tappable stepper button - circular because
         that is the owner's sketch, and because a disc reads as "tap me"
         where a square reads as a key. `wide` is the pill variant for a
         button carrying the step amount ("-0.1"), which cannot fit a
         36px disc; the smaller font is for the same reason."""
-        button = QPushButton(glyph)
+        button = _ChevronButton(chevron) if chevron else QPushButton(glyph)
         button.setToolTip(tooltip)
         use_hover_cursor(button)
         button.setFixedSize(64 if wide else 36, 36)
@@ -2879,6 +3127,12 @@ class PlayerPage(GlassPage):
         # Said once per player, not once per nudge - see _apply_sub_delay.
         self._delay_warned = False
         self._sub_size = SUB_SIZE_DEFAULT
+        # The Font row's family, "" for Default - Settings, not the
+        # episode record (see app_settings.get_subtitle_font).
+        try:
+            self._sub_font = app_settings.get_subtitle_font()
+        except Exception:
+            self._sub_font = ""
         # None, not SUB_POS_CLEAR: the first _set_sub_position must reach
         # mpv even if it asks for what mpv's default already is.
         self._sub_pos = None
@@ -3130,21 +3384,12 @@ class PlayerPage(GlassPage):
         # was told. A plain QPushButton here would be drawn every frame
         # and never once be visible - which is exactly what happened to
         # the loading logo before StartupBackdrop existed.
-        self.skip_btn = QPushButton("", self)
+        self.skip_btn = SkipOfferButton(self)
         _make_native(self.skip_btn)
         self.skip_btn.setFixedSize(*SKIP_BUTTON_SIZE)
         self.skip_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # Solid - the owner, 24 August 2026: "make them solid, not
-        # transparent at all". BG rather than SURFACE: over a bright
-        # frame the near-black panel colour read as see-through even
-        # when the window itself was opaque.
-        self.skip_btn.setStyleSheet(
-            f"QPushButton {{ background: {theme.BG}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER};"
-            f" border-radius: {BAR_RADIUS}px; padding: 0px;"
-            f" font-size: 11pt; font-weight: 700; }}"
-            f"QPushButton:hover {{ background: {theme.ACCENT};"
-            f" color: {theme.ON_ACCENT}; border: 1px solid {theme.ACCENT}; }}")
+        # transparent at all". The face is painted; see SkipOfferButton.
         self.skip_btn.clicked.connect(self._take_skip_offer)
         self.skip_btn.hide()
         use_hover_cursor(self.skip_btn)
@@ -3478,8 +3723,10 @@ class PlayerPage(GlassPage):
         layout.addWidget(exit_btn)
         self.exit_btn = exit_btn
 
-        self.episodes_btn = _icon_button(ICON_EPISODE_LIST, "Episodes",
-                                         size=38, font_pt=14)
+        # Drawn, not the Segoe list glyph (his "it seems old!", 2 October
+        # 2026) - drawn_icons.paint_episodes.
+        self.episodes_btn = _drawn_button(drawn_icons.paint_episodes, "Episodes",
+                                          size=38, icon_px=22)
         self.episodes_btn.clicked.connect(self.toggle_episode_bar)
         self.episodes_btn.setVisible(bool(self.episode))
         layout.addWidget(self.episodes_btn)
@@ -9186,6 +9433,12 @@ class PlayerPage(GlassPage):
             lambda: self._nudge_size(SUB_SIZE_STEP),
             step_text=f"{round(SUB_SIZE_STEP * 100 / SUB_SIZE_DEFAULT)}%",
             into=settings_col, on_typed=self._set_size_percent, signed=False)
+        set_font = panel.add_stepper(
+            "Font", self._sub_font_text(),
+            lambda: self._cycle_sub_font(-1),
+            lambda: self._cycle_sub_font(1),
+            into=settings_col,
+            chevrons=True)
         # Left raises the line, right lowers it - the arrows point the
         # way the text moves rather than the way mpv's number goes.
         set_pos = panel.add_stepper(
@@ -9200,6 +9453,7 @@ class PlayerPage(GlassPage):
         # belonging to a deleted QLabel would take the process with it.
         panel.set_delay_text = set_delay
         panel.set_size_text = set_size
+        panel.set_font_text = set_font
         panel.set_pos_text = set_pos
         panel.finish()
         self._show_panel(panel)
@@ -9215,6 +9469,25 @@ class PlayerPage(GlassPage):
 
     def _delay_text(self):
         return f"{self._sub_delay:+.1f}s"
+
+    def _sub_font_text(self):
+        return self._sub_font or "Default"
+
+    def _cycle_sub_font(self, step):
+        """Step the Font row through "Default" and the installed choices,
+        wrapping at either end, and remember it for every title."""
+        options = [""] + _installed_sub_fonts()
+        try:
+            index = options.index(self._sub_font)
+        except ValueError:
+            index = 0
+        self._sub_font = options[(index + step) % len(options)]
+        try:
+            app_settings.set_subtitle_font(self._sub_font)
+        except Exception:
+            logs.exception("Could not remember the subtitle font")
+        self._apply_sub_font()
+        self._update_stepper("set_font_text", self._sub_font_text())
 
     def _subtitles_off(self):
         if self.handle is not None:
@@ -9522,6 +9795,37 @@ class PlayerPage(GlassPage):
                 self._sub_size / float(SUB_SIZE_DEFAULT), 3)
         except Exception:
             logs.exception("Subtitle scale change failed")
+        self._apply_sub_font()
+
+    def _apply_sub_font(self):
+        """Draw subtitles in the Font row's family, or in their own.
+
+        Two levers, for the same reason size has two (_apply_sub_style):
+        `sub-font` reaches text tracks only, and an .ass - what most
+        Arabic fansubs are - is drawn by libass in each style's own font.
+        `sub-ass-style-overrides=FontName=...` swaps the styles' font and
+        keeps every position. Measured 2 October 2026 on this build's
+        libmpv with a generated Arabic .ass (a dialogue line and a pos()
+        sign) and .srt: the override changed both lines and the sign kept
+        its place; `sub-ass-override=force`, the other way to reach an
+        .ass, shrank the dialogue to the text tracks' size and was not
+        used. Set live in 1.5ms, and clearing both restores the file's
+        own picture exactly (screenshot diff, zero pixels). A sign that
+        names its font inline (an fn tag) keeps it; one that only names a
+        style takes the chosen font too - the cost of the one lever that
+        does not move anything."""
+        if self.handle is None:
+            return
+        family = self._sub_font
+        try:
+            self.handle["sub-font"] = family or SUB_FONT_DEFAULT
+        except Exception:
+            logs.exception("Subtitle font change failed")
+        try:
+            self.handle["sub-ass-style-overrides"] = (
+                [f"FontName={family}"] if family else [])
+        except Exception:
+            logs.exception("Subtitle style font change failed")
 
     def _update_stepper(self, name, text):
         """Write a new value into a stepper row if that row is still on
@@ -11952,7 +12256,7 @@ class PlayerPage(GlassPage):
             if row["start"] <= position < row["end"] - 0.5:
                 if row["type"] == skiptimes.ENDING:
                     if self._has_next_episode():
-                        return ("next", "Next Episode  →", row["end"])
+                        return ("next", "Next Episode", row["end"])
                     continue
                 # **A recap is not an intro, and calling it one is the
                 # owner's "in JJK s1ep3 the skip intro was appearing
@@ -11975,7 +12279,7 @@ class PlayerPage(GlassPage):
                 return ("seek", "Skip Intro", row["end"])
         if (self._duration and self._has_next_episode()
                 and position >= self._duration - NEXT_TAIL_S):
-            return ("next", "Next Episode  →", self._duration)
+            return ("next", "Next Episode", self._duration)
         return None
 
     def _has_next_episode(self) -> bool:
@@ -12068,8 +12372,9 @@ class PlayerPage(GlassPage):
             # _wake_controls: the button shows itself with the bars
             # hidden, and a native window that was never given its
             # alpha keeps whatever DWM last had for it.
-            if offer is not None:
-                _set_window_alpha(self.skip_btn, 255)
+            # No _set_window_alpha here any more: the button composes
+            # its own per-pixel alpha (SkipOfferButton.compose), and the
+            # SLWA mode would take it out of that one.
             if offer is None:
                 self.skip_btn.hide()
                 return
@@ -12088,24 +12393,28 @@ class PlayerPage(GlassPage):
             # the window handle itself has changed.
             was_hidden = not self.skip_btn.isVisible()
             self.skip_btn.setText(offer[1])
+            self.skip_btn.set_kind(offer[0])
             self._place_skip_button()
             self.skip_btn.show()
             if was_hidden:
                 _raise_native(self.skip_btn)
-                self._veil(self.skip_btn, 255)
-                # Size is fixed (SKIP_BUTTON_SIZE) so the cut only has to
-                # follow the window, not every move.
-                _round_overlay(self.skip_btn)
         except RuntimeError:
             pass        # torn down between the tick and here
 
     def _place_skip_button(self):
         rect = self.rect()
         width, height = SKIP_BUTTON_SIZE
+        # Further in from the edge in a window than in full screen - the
+        # owner, 2 October 2026: "move the buttons skip and next ep more
+        # to the left while NOT in Fullscreen mode". Re-placed on every
+        # layout, which a full screen toggle's resize runs.
+        window = self.window()
+        full = window is not None and window.isFullScreen()
+        margin = SKIP_BUTTON_MARGIN if full else SKIP_BUTTON_MARGIN_WINDOWED
         # Above the controls bar whether or not it is showing, so the
         # button never moves while someone is aiming at it.
         self.skip_btn.setGeometry(
-            rect.width() - width - SKIP_BUTTON_MARGIN,
+            rect.width() - width - margin,
             rect.height() - CONTROLS_HEIGHT - height - 12,
             width, height)
 

@@ -386,6 +386,42 @@ def appid_from_install_path(install_path) -> int:
     return None
 
 
+# **Epic's manifest names the game; its folder does not.** The owner's
+# report, 2 October 2026: *"why is thewitcher3 not detecting a good
+# poster image?????"*. An Epic install has no appmanifest to read, so the
+# name search got the folder - "TheWitcher3" - and Steam's only row for
+# the game, "The Witcher 3: Wild Hunt \u2014 Remastered", scored -0.111
+# against it (the extra-word penalty, working as designed). Wikipedia
+# found nothing either, and the miss was cached. Epic's own manifest
+# for that folder says DisplayName "The Witcher 3: Wild Hunt -
+# Remastered", which squashes to Steam's row exactly (1.000 -> 292030).
+EPIC_MANIFESTS = (Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+                  / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests")
+
+
+def epic_display_name(install_path):
+    """The store title Epic's launcher records for the game installed at
+    `install_path`, or None. Offline, exact: the .item whose
+    InstallLocation holds the path. Never raises."""
+    try:
+        target = os.path.normcase(os.path.abspath(str(install_path)))
+        for item in EPIC_MANIFESTS.glob("*.item"):
+            try:
+                data = json.loads(item.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                continue
+            location = str(data.get("InstallLocation") or "")
+            name = str(data.get("DisplayName") or "").strip()
+            if not location or not name:
+                continue
+            root = os.path.normcase(os.path.abspath(location))
+            if target == root or target.startswith(root.rstrip("\\/") + os.sep):
+                return name
+    except Exception:
+        return None
+    return None
+
+
 # --------------------------------------------------------------------
 # the search route
 
@@ -398,14 +434,18 @@ def _get_json(url: str, timeout: float):
         return json.loads(net.read_text(response, deadline))
 
 
-def search_appid(name: str, deadline=None):
+def search_appid(name: str, deadline=None, exact=False):
     """The Steam appid for a game called `name`, or None.
 
     Returns None for three different things on purpose - no rows, no row
     good enough, and the request failing - because a caller can do
     nothing different about any of them. What the *cache* needs to tell
     apart is handled by `_resolve_appid`, which only records a miss when
-    Steam actually answered."""
+    Steam actually answered.
+
+    `exact` accepts only a 1.000 identity - for a name already trimmed
+    of its edition phrase, which must never be matched fuzzily (see
+    _EDITION_RE: "Hogwarts" would take any game of that name)."""
     term = _search_term(name)
     if not term:
         return None
@@ -427,7 +467,7 @@ def search_appid(name: str, deadline=None):
         if score > best_score:
             best_id, best_score = row.get("id"), score
 
-    if best_id is None or best_score < MATCH_THRESHOLD:
+    if best_id is None or best_score < (1.0 if exact else MATCH_THRESHOLD):
         return None
     try:
         return int(best_id)
@@ -639,6 +679,21 @@ def _resolve_appid(name: str, install_path, deadline):
         if appid:
             return appid, True
     try:
+        # Epic's recorded title first - see EPIC_MANIFESTS. The saved
+        # name stays the fallback, so a game Epic names oddly loses
+        # nothing it had before.
+        # Steam's search answers **zero rows** for "The Witcher 3: Wild
+        # Hunt - Remastered" (measured) and finds the game for "The
+        # Witcher 3: Wild Hunt", so the edition-trimmed form is asked
+        # next - exact matches only.
+        store_name = epic_display_name(install_path) if install_path else None
+        if store_name and _squash(store_name) != _squash(name):
+            appid = search_appid(store_name, deadline)
+            trimmed = _EDITION_RE.sub("", store_name).strip(" -:–—")
+            if not appid and trimmed and trimmed != store_name:
+                appid = search_appid(trimmed, deadline, exact=True)
+            if appid:
+                return appid, True
         return search_appid(name, deadline), True
     except Exception:
         return None, False       # network/parse failure - do not cache
@@ -823,7 +878,14 @@ def fetch_cover_url(name: str, deadline=None, install_path=None):
     try:
         if not (name or "").strip():
             return None
-        cached = _read_cached(name)
+        # Keyed on Epic's title when it has one, not by bumping the key
+        # version: TheWitcher3 carried a `.none` written before Epic's
+        # manifest was read, and a bump would have re-resolved every hit
+        # too (measured: VALORANT came back as a different Wikipedia
+        # file). A new key retires only the miss it was wrong about.
+        store_name = epic_display_name(install_path) if install_path else None
+        key = store_name or name
+        cached = _read_cached(key)
         if cached is not None:
             return cached or None
 
@@ -835,12 +897,13 @@ def fetch_cover_url(name: str, deadline=None, install_path=None):
             # ones it has never heard of. See the note beside WIKI_API:
             # this is the whole of what makes VALORANT resolve, and it
             # runs only here, after Steam has already said no.
-            found = _wikipedia_art(name, deadline)
+            found = (_wikipedia_art(store_name, deadline) if store_name else None) \
+                or _wikipedia_art(name, deadline)
             if found:
-                _write_cached(name, found)
+                _write_cached(key, found)
                 return found
             if answered:
-                _write_cached(name, None)
+                _write_cached(key, None)
             return None
 
         url, definite = _art_url(appid, deadline)
@@ -849,7 +912,7 @@ def fetch_cover_url(name: str, deadline=None, install_path=None):
         # moment pins a game to the wrong resolution - or to nothing -
         # for as long as the cache stands.
         if definite:
-            _write_cached(name, url)
+            _write_cached(key, url)
         return url
     except Exception:
         return None

@@ -1565,7 +1565,14 @@ def install():
     #     episode counts as unaired (stremio.unaired_episodes), and a
     #     season whose first episode has no date is not listed at all
     #     (stremio.unannounced_seasons).
-    updater.APP_VERSION = "3.2"
+    # 3.3
+    #   * Two works of one name stay apart: a card opens its own title
+    #     (web_pages._find by IMDb id), its number and art are its own
+    #     (server._marked_progress/_saved_twin, artwork._tmdb_id).
+    #   * Skip Intro / Skip Recap / Next Episode redesigned and composed
+    #     per-pixel; the episode-list button is drawn; the Subtitles
+    #     panel has a Font row; Epic games find their Steam poster.
+    updater.APP_VERSION = "3.3"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
