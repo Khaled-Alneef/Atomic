@@ -315,19 +315,37 @@ def _tmdb_id(imdb_id: str, timeout, title: str = "", kind: str = ""):
     # below could run - and a title with no IMDb id at all (every
     # reading row, and any catalogue row Cinemeta filed without one) is
     # exactly the case `poster_url` needs answered.
+    # **Read before the id lookup, and never shadowed by it.** The
+    # owner, 2 October 2026: the series What Women Want opened on the
+    # 2000 film's backdrop and logo. `find/tt26915551` (a 2022 talk
+    # show) answers no row in any list - TMDB has not linked it - and
+    # the loop below used to be `for kind, field in ...`, which left
+    # `kind` as "movie" whatever the caller passed, so every title
+    # fallback after an id miss searched the movie list: a Series asked
+    # for "What Women Want" got movie 3981, Mel Gibson. Same for all
+    # three series of that name (tt26915551, tt7848370, tt0375497).
+    lists, animated = _KIND_SEARCH.get((kind or "").strip().lower(),
+                                       (("tv", "movie"), None))
     if imdb_id:
+        # Only from a list the caller's kind allows - the same table the
+        # title fallback obeys. An id TMDB files under the other kind is
+        # answered with nothing rather than searched by title.
         url = f"{API}/find/{urllib.parse.quote(imdb_id)}?external_source=imdb_id"
         body = _get_json(url, timeout)
-        for kind, field in (("tv", "tv_results"), ("movie", "movie_results")):
+        elsewhere = False
+        for media, field in (("tv", "tv_results"), ("movie", "movie_results")):
             rows = (body or {}).get(field) or []
+            if rows and media not in lists:
+                elsewhere = True
+                continue
             if rows:
-                return kind, rows[0].get("id")
+                return media, rows[0].get("id")
+        if elsewhere:
+            return None, None
     title = (title or "").strip()
     if not title:
         return None, None
     from . import title_match
-    lists, animated = _KIND_SEARCH.get((kind or "").strip().lower(),
-                                       (("tv", "movie"), None))
     stamped = _TITLE_YEAR_RE.search(title)
     year = int(stamped.group(1)) if stamped else 0
     if stamped:
@@ -351,7 +369,7 @@ def _tmdb_id(imdb_id: str, timeout, title: str = "", kind: str = ""):
         # the anime and, under the same name, nothing else animated, but
         # a title shared by a Western cartoon would otherwise be decided
         # by TMDB's popularity order alone.
-        best, best_rank = None, None
+        candidates = []
         for row in (found or {}).get("results") or []:
             name = str(row.get("name") or row.get("title") or "").strip()
             if not name or row.get("id") is None:
@@ -369,11 +387,36 @@ def _tmdb_id(imdb_id: str, timeout, title: str = "", kind: str = ""):
             rank = (0 if exact else 1,
                     0 if (animated and "JP" in (row.get("origin_country") or []))
                     else 1)
-            if best_rank is None or rank < best_rank:
-                best, best_rank = row, rank
-        if best is not None:
-            return media, best.get("id")
+            parent = prefix and len(lowered) < len(asked)
+            candidates.append((rank, parent, row))
+        candidates.sort(key=lambda item: item[0])
+        for _rank, parent, row in candidates:
+            # **A namesake after an id miss proves itself by its id.**
+            # With the shadowing fixed, What Women Want's three series
+            # met TMDB's only tv show of that name - Malaysian, no IMDb
+            # id (tv 6057) - a stranger's art for all three. So when the
+            # caller has an IMDb id, an exact-name row is taken only if
+            # TMDB links it to that same id: one request per candidate,
+            # on this rare path only. A franchise parent (a strict
+            # prefix - "Bleach" for TYBW, the case this fallback exists
+            # for) is taken as before: it is not the title and never
+            # claimed to be.
+            if imdb_id and not parent \
+                    and _linked_imdb(media, row.get("id"), timeout) != imdb_id:
+                continue
+            return media, row.get("id")
     return None, None
+
+
+def _linked_imdb(media, tmdb_id, timeout) -> str:
+    """The IMDb id TMDB links this tv show or film to, or ""."""
+    try:
+        body = _get_json(f"{API}/{media}/{tmdb_id}/external_ids", timeout)
+        return str((body or {}).get("imdb_id") or "")
+    except Unreachable:
+        raise
+    except Exception:
+        return ""
 
 
 def get_json(url, timeout: int = DEFAULT_TIMEOUT):
@@ -878,6 +921,70 @@ def cached(entry):
     return backdrop, found[2]
 
 
+# IMDb ids whose cached art has been checked against the kind its own
+# entry says it is - see _recheck_kind. Kept beside the art.
+_KIND_CHECKED_FILE = "kind_checked.json"
+_kind_checked = None
+_kind_lock = threading.Lock()
+
+
+def _recheck_kind(entry, timeout):
+    """Retire art the shadowed `kind` fetched for a non-film, once.
+
+    Until 2 October 2026 every title fallback in _tmdb_id searched the
+    movie list (see the note there), and its answer is on disk under the
+    id it was fetched for - the series What Women Want's backdrop and
+    logo were the 2000 film's - and the cache never asks again. Only a
+    non-film whose `find` answers no row in a list its kind allows can
+    have come that way, so the first delivery for such an id with art on
+    disk drops the three files and their markers, and they are fetched
+    again below through the fixed lookup. One `find` per title, once per
+    install, on the worker; recorded so it is never asked twice. A
+    failed request records nothing and is asked next time."""
+    global _kind_checked
+    imdb_id = str((entry or {}).get("imdb_id") or "").strip()
+    kind = str((entry or {}).get("type") or "").strip().lower()
+    if not imdb_id or kind not in _KIND_SEARCH or not token() \
+            or kind in ("movie", "movies"):
+        return
+    try:
+        folder = _cache_dir()
+        with _kind_lock:
+            if _kind_checked is None:
+                try:
+                    _kind_checked = set(json.loads(
+                        (folder / _KIND_CHECKED_FILE).read_text(encoding="utf-8")))
+                except (OSError, ValueError):
+                    _kind_checked = set()
+            if imdb_id in _kind_checked:
+                return
+        files = [_cached_file(imdb_id, suffix)
+                 for suffix in (".bg2.jpg", ".bgq.jpg", ".png")]
+        if any(path.exists() for path, _marker in files):
+            lists = _KIND_SEARCH[kind][0]
+            body = _get_json(f"{API}/find/{urllib.parse.quote(imdb_id)}"
+                             f"?external_source=imdb_id", timeout)
+            answered = [media for media, field in
+                        (("tv", "tv_results"), ("movie", "movie_results"))
+                        if (body or {}).get(field)]
+            if not any(media in lists for media in answered):
+                for path, marker in files:
+                    for stale in (path, marker):
+                        try:
+                            stale.unlink()
+                        except OSError:
+                            pass
+                logs.info(f"artwork: {imdb_id} ({kind}) was cached through the "
+                          f"title fallback's movie list - fetched again")
+        with _kind_lock:
+            _kind_checked.add(imdb_id)
+            temporary = folder / (_KIND_CHECKED_FILE + ".tmp")
+            temporary.write_text(json.dumps(sorted(_kind_checked)), encoding="utf-8")
+            os.replace(temporary, folder / _KIND_CHECKED_FILE)
+    except Exception:
+        return
+
+
 def deliver(entry, on_backdrop=None, on_logo=None, timeout=DEFAULT_TIMEOUT):
     """A title's artwork, handed over piece by piece as it lands.
 
@@ -915,6 +1022,8 @@ def deliver(entry, on_backdrop=None, on_logo=None, timeout=DEFAULT_TIMEOUT):
     `on_logo(path)` is called exactly once, with "" when there is none -
     callers need the negative to decide whether to keep the typed title.
     Callbacks run on worker threads. Never raises."""
+    _recheck_kind(entry, timeout)
+
     def _logo():
         found = None
         try:

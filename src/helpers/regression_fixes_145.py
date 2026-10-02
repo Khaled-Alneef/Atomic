@@ -4,7 +4,8 @@ Scope is intentionally narrow:
 - make the live player top bar actually drop its full-width native background;
 - remove resume-only startup waits so playback can start from a tiny buffer;
 - make Settings Cancel restore settings without rebuilding the current page;
-- give Skip Intro / Next Episode the same deep-teal action colours as Continue.
+- (the Skip Intro / Next Episode colours that were here are retired - see
+  player.SkipOfferButton).
 
 No scroll cadence, wheel physics, chapter logic or unrelated UI is changed.
 """
@@ -121,25 +122,6 @@ def _speed_up_resume_start():
         pass
 
 
-def _style_skip_action(player, page):
-    """Match Continue Watching's deep-teal action palette, size untouched."""
-    button = getattr(page, "skip_btn", None)
-    if button is None:
-        return
-    try:
-        # Same palette and hover/press states as theme's #Accent rule used by
-        # the Continue Watching action.  Geometry is not changed here.
-        button.setStyleSheet(
-            f"QPushButton {{ background: {player.theme.ACCENT_BUTTON_GRADIENT};"
-            f" color: {player.theme.ON_ACCENT_DEEP}; border: none;"
-            f" border-radius: {player.BAR_RADIUS}px; padding: 0px;"
-            f" font-size: 11pt; font-weight: 700; }}"
-            f"QPushButton:hover {{ background: {player.theme.ACCENT_BUTTON_GRADIENT_HOVER}; }}"
-            f"QPushButton:pressed {{ background: {player.theme.ACCENT_DEEP_ACTIVE}; }}")
-    except (AttributeError, RuntimeError):
-        pass
-
-
 def _patch_player(module):
     key = id(module)
     if key in _PATCHED_PLAYER:
@@ -147,12 +129,10 @@ def _patch_player(module):
     _PATCHED_PLAYER.add(key)
     Page = module.PlayerPage
 
-    old_init = Page.__init__
+    # The Skip Intro / Next Episode restyle that wrapped __init__ here is
+    # gone (2 October 2026, at the owner's word): player.SkipOfferButton
+    # paints its own face, so a stylesheet on it drew nothing.
     old_property = Page._on_property
-
-    def init(self, *args, **kwargs):
-        old_init(self, *args, **kwargs)
-        _style_skip_action(module, self)
 
     def on_property(self, name, value):
         was_waiting = bool(getattr(self, "_awaiting_first_frame", False))
@@ -167,7 +147,6 @@ def _patch_player(module):
                 pass
         return result
 
-    Page.__init__ = init
     Page._on_property = on_property
 
 

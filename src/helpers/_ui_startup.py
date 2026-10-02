@@ -149,8 +149,8 @@ _regression_fixes_144.install()
 
 # 1.10.145 follow-up: actually apply the live top-bar clip at first frame,
 # remove resume-only startup waits, keep Settings Cancel from rebuilding the
-# page behind it, and give Skip Intro / Next Episode the same deep-teal action
-# colours as Continue Watching. No size or scroll changes.
+# page behind it. (Its Skip Intro / Next Episode colours are retired -
+# player.SkipOfferButton paints its own face.) No size or scroll changes.
 from . import regression_fixes_145 as _regression_fixes_145
 
 _regression_fixes_145.install()

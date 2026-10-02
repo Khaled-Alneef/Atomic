@@ -30,6 +30,21 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.3": [
+        "Pick the subtitle font: the Subtitles panel in the player has a "
+        "new Font row, with the Arabic-friendly fonts on your computer. "
+        "It works on styled Arabic subtitles too and is remembered for "
+        "everything you watch.",
+        "Titles that share a name no longer get mixed up - opening a "
+        "series called the same as a film (like What Women Want) now "
+        "opens that series, with its own episodes and artwork.",
+        "Skip Intro, Skip Recap and Next Episode have a new look, with "
+        "smooth rounded corners, and sit further in from the edge when "
+        "Atomic is not full screen. The episode list button in the player "
+        "is new too.",
+        "Games from Epic now get their proper cover picture - The Witcher "
+        "3 used to show its small icon.",
+    ],
     "3.2": [
         "Atomic no longer opens with the search bar selected - typing "
         "right after launch, in a window or full screen, no longer lands "

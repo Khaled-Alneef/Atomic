@@ -1200,3 +1200,34 @@ up "Checking for New Chapters..." and runs the details page's own
 is next on the refreshed list. A list read in the last `RECHECK_GAP_S`
 (120s) is trusted. Live checks 0.61-3.97s over his eight titles; frozen
 build: 1.97s, the reader on chapter 889.
+
+## Two works of one name: a title is never an identity (2 October 2026)
+
+His report: *"when I tried to watch series what women want, it shows me
+the movie and in my friends device the movie showed him the series
+ep"*. One 2000 film and three series carry that name. Three places
+matched by title, and each had to be closed on its own:
+
+- **`web_pages._find`** (every card click) matched a history row by
+  title within the Watch side, and Series and Movie are both Watch:
+  whichever work was in history won every click of that name
+  (harnessed, 4 of 4 clicks both ways). It takes the card's `imdb` now:
+  an IMDb hit first, and a title hit never across a different id or the
+  film/series line. Control: his 53 library and history titles resolve
+  exactly as before.
+- **`server._marked_progress` / `_saved_twin`** - the card's number and
+  its saved twin - did the same, so the film's card read the series'
+  S01E03. Same rule.
+- **`artwork._tmdb_id`'s fallback searched the movie list for every
+  kind.** The find loop was `for kind, field in ...`, overwriting the
+  caller's `kind`; `find/tt26915551` answers nothing, so the series got
+  movie 3981 (Mel Gibson) as its backdrop and logo. With that fixed, the
+  fallback met TMDB's one tv show of the name (Malaysian, no IMDb id),
+  so an exact-name fallback after an id miss must link back to that id
+  (`_linked_imdb`); a franchise prefix (TYBW) is taken as before.
+  `_recheck_kind` drops art cached that way, once per id per install.
+
+Left alone, said out loud: `server._saved_titles` (the card's "saved"
+tint) is still by title, so a saved series tints a same-named film's
+card. Fixing it means app.js comparing ids.
+

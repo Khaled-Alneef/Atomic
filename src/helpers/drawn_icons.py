@@ -24,7 +24,7 @@ at the edges on his 125% panel, which was his "the Audio is blurred".
 import base64
 
 from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import QPushButton
 
 from . import theme
@@ -121,6 +121,47 @@ def paint_waveform(painter, rect: QRectF, colour=None):
         x = left + gap * index
         half = tall * height / 2
         painter.drawLine(QPointF(x, cy - half), QPointF(x, cy + half))
+    painter.restore()
+
+
+def paint_episodes(painter, rect: QRectF, colour=None):
+    """The player's episode-list button: a stack of episode cards - one
+    framed card with a play mark, two receding edges behind it.
+
+    The owner, 2 October 2026, of the Segoe list glyph (E8FD) it
+    replaces: "change the ep list icon button in the player it seems
+    old!". A stack is Netflix's picture for its episode drawer, and
+    drawing it keeps it as sharp as the waveform beside the other bar's
+    buttons at 125%. The stroke is the waveform's 0.075 of the box."""
+    ink = QColor(colour or theme.TEXT)
+    size = min(rect.width(), rect.height())
+    stroke = size * 0.075
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(ink, stroke)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    x0, y0 = rect.left(), rect.top()
+    # The front card: the lower two thirds of the box, nearly its width.
+    card = QRectF(x0 + size * 0.08, y0 + size * 0.40,
+                  size * 0.84, size * 0.52)
+    painter.drawRoundedRect(card, size * 0.07, size * 0.07)
+    # Two cards behind it, each narrower and higher: only their top
+    # edges show, which is what reads as a stack rather than a frame.
+    for inset, rise in ((0.16, 0.25), (0.26, 0.09)):
+        y = y0 + size * rise
+        painter.drawLine(QPointF(x0 + size * inset, y),
+                         QPointF(x0 + size * (1 - inset), y))
+    # A small play mark centred in the front card.
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(ink)
+    cx, cy = card.center().x(), card.center().y()
+    h = size * 0.24
+    painter.drawPolygon(QPolygonF([QPointF(cx - h * 0.38, cy - h / 2),
+                                   QPointF(cx + h * 0.50, cy),
+                                   QPointF(cx - h * 0.38, cy + h / 2)]))
     painter.restore()
 
 
