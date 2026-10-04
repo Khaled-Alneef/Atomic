@@ -1897,6 +1897,20 @@ class _RailDelegate(QStyledItemDelegate):
             painter.restore()
 
 
+def _screen_for_rect(rect):
+    """The screen `rect` overlaps most, or the primary when it overlaps
+    none - the monitor a saved rectangle means, for
+    _fit_to_available_screen and for a sign-in launch's full screen."""
+    best = None
+    best_area = 0
+    for screen in QApplication.screens():
+        overlap = screen.availableGeometry().intersected(rect)
+        area = overlap.width() * overlap.height()
+        if area > best_area:
+            best, best_area = screen, area
+    return best or QApplication.primaryScreen()
+
+
 def _fit_to_available_screen(rect):
     """`rect` moved, and shrunk if it has to be, until it sits wholly
     inside the usable area of a screen that exists right now.
@@ -1913,15 +1927,7 @@ def _fit_to_available_screen(rect):
     availableGeometry(), not geometry(): the taskbar's strip is not
     somewhere a window should be restored underneath.
     """
-    best = None
-    best_area = 0
-    for screen in QApplication.screens():
-        overlap = screen.availableGeometry().intersected(rect)
-        area = overlap.width() * overlap.height()
-        if area > best_area:
-            best, best_area = screen, area
-    if best is None:
-        best = QApplication.primaryScreen()
+    best = _screen_for_rect(rect)
     if best is None:
         # No screens at all is not a real desktop state, but reporting a
         # rectangle is still better than raising during startup.
@@ -4679,14 +4685,29 @@ class MainWindow(QMainWindow):
         (measured). So a maximized window updates the flag and keeps the
         size it was last given by hand.
 
-        Nothing at all is written while minimized or full screen:
-        neither is a size anyone chose, and what is already stored is. A
-        minimized window reports an off-screen position on Windows, and
-        full screen is an F11 mode rather than a shape to reopen at."""
-        if self.isMinimized() or self.isFullScreen():
+        Nothing at all is written while minimized: it reports an
+        off-screen position on Windows. Full screen is an F11 mode rather
+        than a shape to reopen at, so its rectangle is never stored - but
+        **the monitor it is on is** (see _save_fullscreen_screen)."""
+        if self.isMinimized():
             return
-        if self.isMaximized():
-            saved = app_settings.get_window_geometry()
+        if self.isFullScreen():
+            self._save_fullscreen_screen()
+            return
+        # **_looks_maximised, never isMaximized.** After the bar's restore
+        # button (or a double-click on the bar) Qt goes on reporting
+        # isMaximized() True over a window that is visibly normal - see
+        # _looks_maximised - so a window brought down that way and moved
+        # to the other monitor was saved as a maximized one, and the
+        # check below then threw the save away. The owner's report, 4
+        # October 2026: "it does not save the app window place until I
+        # use the Fullscreen" - F11 is what put Qt's state right again.
+        # Measured on a copy of his data before the fix: restored with the
+        # bar's button on the left monitor, moved to the primary, closed
+        # - the file still said left monitor, maximized.
+        maximized = self._looks_maximised()
+        if maximized:
+            stored = app_settings.get_window_geometry()
             # **Prefer where the window actually was**, which
             # _remember_normal_rect keeps current, over the rectangle
             # stored at the end of the last session. Without this the
@@ -4696,15 +4717,22 @@ class MainWindow(QMainWindow):
             # the window had two sessions ago.
             live = getattr(self, "_restore_rect", None)
             if live is not None and live.isValid() and live.width() > 0:
-                saved = {"x": live.x(), "y": live.y(),
-                         "width": live.width(), "height": live.height(),
-                         "maximized": bool(saved and saved.get("maximized"))}
-            if saved:
-                kept = self._restored_rect_for_current_screen(
-                    QRect(saved["x"], saved["y"],
-                          saved["width"], saved["height"]))
-                if saved["maximized"] and kept == QRect(
-                        saved["x"], saved["y"], saved["width"], saved["height"]):
+                base = QRect(live)
+            elif stored:
+                base = QRect(stored["x"], stored["y"],
+                             stored["width"], stored["height"])
+            else:
+                base = None
+            if base is not None:
+                kept = self._restored_rect_for_current_screen(base)
+                # Against what is in the file, not against `live`: the
+                # comparison used to be made with the stored values
+                # already overwritten by the live ones, so whenever the
+                # window was where it had last been normal it read
+                # "nothing has changed" and never wrote at all.
+                if stored and stored["maximized"] and kept == QRect(
+                        stored["x"], stored["y"],
+                        stored["width"], stored["height"]):
                     return  # nothing has changed - don't rewrite the file
                 app_settings.set_window_geometry(kept.x(), kept.y(),
                                                  kept.width(), kept.height(),
@@ -4727,7 +4755,36 @@ class MainWindow(QMainWindow):
             return
         app_settings.set_window_geometry(rect.x(), rect.y(),
                                          rect.width(), rect.height(),
-                                         self.isMaximized())
+                                         maximized)
+
+    def _save_fullscreen_screen(self):
+        """Keep the stored rectangle, moved onto the monitor the full
+        screen window is on, with the state F11 would go back to.
+
+        **Writing nothing here is why the app kept reopening on the
+        other monitor** - the owner's report, 4 October 2026. With
+        "Fullscreen mode when launch on startup" on, a sign-in launch
+        lived its whole session full screen; closed that way it saved
+        nothing, so the next launch by hand reopened on whatever monitor
+        a session days earlier had stored. Measured on a copy of his
+        data: stored rectangle on the left monitor (-1859,54), a sign-in
+        launch full screen on the primary and closed there, the next
+        launch maximized on the left monitor again."""
+        saved = app_settings.get_window_geometry()
+        live = getattr(self, "_restore_rect", None)
+        if live is not None and live.isValid() and live.width() > 0:
+            rect = QRect(live)
+        elif saved:
+            rect = QRect(saved["x"], saved["y"], saved["width"], saved["height"])
+        else:
+            rect = QRect(0, 0, 1280, 840)
+        kept = self._restored_rect_for_current_screen(rect)
+        maximized = bool(getattr(self, "_was_maximized", True))
+        if saved and saved["maximized"] == maximized and kept == QRect(
+                saved["x"], saved["y"], saved["width"], saved["height"]):
+            return  # nothing has changed - don't rewrite the file
+        app_settings.set_window_geometry(kept.x(), kept.y(), kept.width(),
+                                         kept.height(), maximized)
 
     def _restored_rect_for_current_screen(self, rect):
         """`rect` centred on the screen this window is actually on, if it
@@ -5045,6 +5102,18 @@ class MainWindow(QMainWindow):
         # No restore rectangle to keep: this window has never been shown
         # in another state, so there is nothing for it to go back to.
         self._fs_normal_rect = None
+        # **On the monitor it was last left on.** showFullScreen fills
+        # the QWindow's screen, and this window's is the primary whatever
+        # setGeometry was told - measured 4 October 2026: stored
+        # rectangle on the left monitor, every sign-in launch full screen
+        # at 0,0 2560x1440 on the primary. window_chrome.
+        # move_hidden_to_screen has why, and why setScreen does not help.
+        rect = getattr(self, "_restore_rect", None)
+        handle = self.windowHandle()
+        if rect is not None and handle is not None:
+            screen = _screen_for_rect(rect)
+            if screen is not None and screen is not handle.screen():
+                window_chrome.move_hidden_to_screen(self, screen)
         self.showFullScreen()
 
     def toggle_fullscreen(self):
@@ -5053,8 +5122,9 @@ class MainWindow(QMainWindow):
             return
         # Remembered so leaving full screen puts the window back the way
         # it was found, rather than dropping a maximized window down to a
-        # restored one.
-        self._was_maximized = self.isMaximized()
+        # restored one. _looks_maximised, not isMaximized: the latter is
+        # still True after the bar's restore button (see there).
+        self._was_maximized = self._looks_maximised()
         # Windows overwrites its own restore rectangle with the
         # full-screen one the moment the next line runs, so the way back
         # to a real window has to be copied out first - see
