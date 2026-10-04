@@ -30,6 +30,12 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.4": [
+        "\"Launch on Windows startup\" now sets Atomic up through Windows' "
+        "own Task Scheduler, which should stop Windows Security flagging "
+        "and removing Atomic when the box is ticked. Startup stays just "
+        "as fast.",
+    ],
     "3.3": [
         "Pick the subtitle font: the Subtitles panel in the player has a "
         "new Font row, with the Arabic-friendly fonts on your computer. "

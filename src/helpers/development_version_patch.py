@@ -1572,7 +1572,12 @@ def install():
     #   * Skip Intro / Skip Recap / Next Episode redesigned and composed
     #     per-pixel; the episode-list button is drawn; the Subtitles
     #     panel has a Font row; Epic games find their Steam poster.
-    updater.APP_VERSION = "3.3"
+    # 3.4
+    #   * "Launch on Windows startup" registers its logon task through
+    #     Task Scheduler's COM API in-process - no hidden schtasks.exe,
+    #     no temp XML - after Defender quarantined the app as
+    #     Behavior:Win32/Persistence.A!ml on that tick (startup.py).
+    updater.APP_VERSION = "3.4"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

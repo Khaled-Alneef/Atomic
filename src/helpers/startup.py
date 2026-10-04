@@ -40,13 +40,31 @@ installed app as Behavior:Win32/Persistence.A!ml - see main.py where it was
 called. The entry is written only by set_enabled, from Settings, the setup
 wizard and uninstall. A task left naming an old exe is fixed by ticking the
 setting off and on.
+
+**The task is registered through Task Scheduler's own COM API, not
+schtasks.exe (4 October 2026).** Defender quarantined the installed app
+as Behavior:Win32/Persistence.A!ml a second time, and the owner placed it
+exactly: right after ticking "Launch on Windows startup". Defender's event
+1116 at 05:28:55 names Atomic.exe (started 05:28:33) as the process and
+lists what set_enabled(True) had just written - System32\\Tasks\\Atomic
+and its two TaskCache keys. The tick spawned a hidden schtasks.exe with
+/Create /XML <a temp file> /F: an unsigned program in AppData driving the
+console tool to plant its own logon task, which is the textbook shape of
+that verdict. The owner chose to keep the fast task over going back to
+the Run key, so the same definition now goes to ITaskFolder::RegisterTask
+as a string, in-process - no child process, no temp file, no console -
+and the queries and deletes that also spawned schtasks (Settings asked
+is_enabled every time it opened) go the same way. Whether Defender's
+cloud model is satisfied by that cannot be proven on demand; what is
+certain is that the pattern it was shown is gone.
 """
 
+import ctypes
 import os
-import subprocess
 import sys
-import tempfile
+import uuid
 import winreg
+from contextlib import contextmanager
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -56,11 +74,6 @@ _LEGACY_VALUE_NAME = "PC App"  # this app's old name - cleaned up opportunistica
 
 # The scheduled task's name (registered in the root folder, "\Atomic").
 _TASK_NAME = "Atomic"
-
-# CREATE_NO_WINDOW: schtasks.exe is a console program, and without this a
-# black console box flashes on screen every time the setting is toggled or
-# migrated. DETACHED would lose us the exit code; NO_WINDOW keeps it.
-_NO_WINDOW = 0x08000000
 
 # Passed by the registered startup command and by nothing else, so the
 # app can tell "Windows started me at sign-in" from "the user opened me"
@@ -97,21 +110,128 @@ def launched_on_startup(argv=None) -> bool:
 
 # ---- the scheduled task ------------------------------------------------
 
-def _schtasks() -> str:
-    root = os.environ.get("SystemRoot", r"C:\Windows")
-    return os.path.join(root, "System32", "schtasks.exe")
+# Task Scheduler 2.0 over raw COM vtables - no pywin32 or comtypes in the
+# bundle, and both would be a dependency for four calls. Private WinDLLs:
+# ctypes signatures are process-global (testing.md), and another module
+# declaring CoCreateInstance differently must not change these.
+_CLSID_TASK_SCHEDULER = "{0f87369f-a4e5-4cfc-bd3e-73e6154572dd}"
+_IID_ITASK_SERVICE = "{2faba4c7-4da9-4013-9697-20cc3fd40f85}"
+_CLSCTX_INPROC_SERVER = 0x1
+_COINIT_APARTMENTTHREADED = 0x2
+_TASK_CREATE_OR_UPDATE = 6
+_TASK_LOGON_INTERACTIVE_TOKEN = 3
+
+# Vtable slots (taskschd.h; IUnknown is 0-2, IDispatch 3-6).
+_RELEASE = 2
+_SERVICE_GET_FOLDER = 7
+_SERVICE_CONNECT = 10
+_FOLDER_GET_TASK = 13
+_FOLDER_DELETE_TASK = 15
+_FOLDER_REGISTER_TASK = 16
 
 
-def _run_schtasks(args):
-    """Run schtasks with the given args; return (rc, stdout, stderr) or
-    None if it could not be launched at all. Never raises."""
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+    @classmethod
+    def of(cls, text):
+        return cls.from_buffer_copy(uuid.UUID(text).bytes_le)
+
+
+class _VARIANT(ctypes.Structure):
+    """An empty VARIANT (VT_EMPTY, all zero) - every VARIANT argument here
+    is "not given". 24 bytes on x64, 16 on x86, as oaidl.h has it."""
+    _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort),
+                ("r2", ctypes.c_ushort), ("r3", ctypes.c_ushort),
+                ("data", ctypes.c_ubyte * (2 * ctypes.sizeof(ctypes.c_void_p)))]
+
+
+def _call(obj, slot, argtypes, *args) -> int:
+    """Call slot `slot` of a COM object's vtable; returns the HRESULT."""
+    vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    proto = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)
+    return proto(vtable[slot])(obj, *args)
+
+
+def _release(obj) -> None:
+    if obj:
+        _call(obj, _RELEASE, ())
+
+
+class _Bstr:
+    """A BSTR for the life of a with-block."""
+
+    def __init__(self, text):
+        self._oleaut = ctypes.WinDLL("oleaut32")
+        self._oleaut.SysAllocString.restype = ctypes.c_void_p
+        self._oleaut.SysAllocString.argtypes = [ctypes.c_wchar_p]
+        self._oleaut.SysFreeString.argtypes = [ctypes.c_void_p]
+        self.value = ctypes.c_void_p(self._oleaut.SysAllocString(text))
+
+    def __enter__(self):
+        return self.value
+
+    def __exit__(self, *_exc):
+        self._oleaut.SysFreeString(self.value)
+
+
+class _TaskError(Exception):
+    def __init__(self, step, hr):
+        super().__init__(f"{step} answered 0x{hr & 0xFFFFFFFF:08X}")
+
+
+@contextmanager
+def _root_folder():
+    """The scheduler's root folder ("\\"), connected as this user. Raises
+    _TaskError on any failing step; releases everything on the way out.
+
+    CoInitializeEx is asked for an STA, which is what Qt's main thread
+    already is: S_OK/S_FALSE are paired with CoUninitialize, and
+    RPC_E_CHANGED_MODE (a thread already in the MTA) is used as it is."""
+    ole = ctypes.WinDLL("ole32")
+    ole.CoInitializeEx.restype = ctypes.c_long
+    ole.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    ole.CoCreateInstance.restype = ctypes.c_long
+    ole.CoCreateInstance.argtypes = [ctypes.POINTER(_GUID), ctypes.c_void_p,
+                                     ctypes.c_ulong, ctypes.POINTER(_GUID),
+                                     ctypes.POINTER(ctypes.c_void_p)]
+    ole.CoUninitialize.argtypes = []
+    initialised = ole.CoInitializeEx(None, _COINIT_APARTMENTTHREADED) in (0, 1)
+    service = ctypes.c_void_p()
+    folder = ctypes.c_void_p()
     try:
-        proc = subprocess.run(
-            [_schtasks(), *args],
-            capture_output=True, text=True, creationflags=_NO_WINDOW)
-        return proc.returncode, proc.stdout, proc.stderr
+        clsid = _GUID.of(_CLSID_TASK_SCHEDULER)
+        iid = _GUID.of(_IID_ITASK_SERVICE)
+        hr = ole.CoCreateInstance(ctypes.byref(clsid), None, _CLSCTX_INPROC_SERVER,
+                                  ctypes.byref(iid), ctypes.byref(service))
+        if hr < 0:
+            raise _TaskError("CoCreateInstance", hr)
+        empty = _VARIANT()
+        hr = _call(service, _SERVICE_CONNECT, (_VARIANT,) * 4,
+                   empty, empty, empty, empty)
+        if hr < 0:
+            raise _TaskError("Connect", hr)
+        with _Bstr("\\") as root:
+            hr = _call(service, _SERVICE_GET_FOLDER,
+                       (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
+                       root, ctypes.byref(folder))
+        if hr < 0:
+            raise _TaskError("GetFolder", hr)
+        yield folder
+    finally:
+        _release(folder)
+        _release(service)
+        if initialised:
+            ole.CoUninitialize()
+
+
+def _log(message) -> None:
+    try:
+        from . import logs
+        logs.info(f"startup: {message}")
     except Exception:
-        return None
+        pass
 
 
 def _current_user() -> str:
@@ -199,35 +319,56 @@ def _task_xml() -> str:
     )
 
 
-def _task_exists() -> bool:
-    result = _run_schtasks(["/Query", "/TN", _TASK_NAME])
-    return bool(result) and result[0] == 0
-
-
-def _create_task() -> bool:
-    """Register (or replace) the logon task. Returns True on success.
-
-    schtasks /Create /XML reads a file, and it must be UTF-16 - the XML
-    declares that encoding and schtasks rejects a mismatch."""
-    xml = _task_xml()
-    handle, path = tempfile.mkstemp(prefix="atomic-task-", suffix=".xml")
+def _task_exists(name=_TASK_NAME) -> bool:
     try:
-        with os.fdopen(handle, "w", encoding="utf-16") as fh:
-            fh.write(xml)
-        result = _run_schtasks(
-            ["/Create", "/TN", _TASK_NAME, "/XML", path, "/F"])
-        return bool(result) and result[0] == 0
+        with _root_folder() as folder, _Bstr(name) as path:
+            task = ctypes.c_void_p()
+            hr = _call(folder, _FOLDER_GET_TASK,
+                       (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
+                       path, ctypes.byref(task))
+            _release(task)
+            return hr >= 0
     except Exception:
         return False
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
 
 
-def _delete_task() -> None:
-    _run_schtasks(["/Delete", "/TN", _TASK_NAME, "/F"])
+def _create_task(name=_TASK_NAME, xml=None) -> bool:
+    """Register (or replace) the logon task. Returns True on success.
+
+    RegisterTask takes the XML as text, so the definition is never written
+    to disk; TASK_CREATE_OR_UPDATE is what schtasks' /F was."""
+    try:
+        with _root_folder() as folder, _Bstr(name) as path, \
+                _Bstr(xml or _task_xml()) as text:
+            registered = ctypes.c_void_p()
+            empty = _VARIANT()
+            hr = _call(folder, _FOLDER_REGISTER_TASK,
+                       (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long,
+                        _VARIANT, _VARIANT, ctypes.c_int, _VARIANT,
+                        ctypes.POINTER(ctypes.c_void_p)),
+                       path, text, _TASK_CREATE_OR_UPDATE, empty, empty,
+                       _TASK_LOGON_INTERACTIVE_TOKEN, empty,
+                       ctypes.byref(registered))
+            _release(registered)
+            if hr < 0:
+                raise _TaskError("RegisterTask", hr)
+        _log(f"logon task registered ({name})")
+        return True
+    except Exception as exc:
+        _log(f"logon task not registered ({type(exc).__name__}: {exc})")
+        return False
+
+
+def _delete_task(name=_TASK_NAME) -> None:
+    """Remove the task if it is there; a missing one is not an error."""
+    try:
+        with _root_folder() as folder, _Bstr(name) as path:
+            hr = _call(folder, _FOLDER_DELETE_TASK,
+                       (ctypes.c_void_p, ctypes.c_long), path, 0)
+        if hr >= 0:
+            _log(f"logon task removed ({name})")
+    except Exception as exc:
+        _log(f"logon task not removed ({type(exc).__name__}: {exc})")
 
 
 # ---- the registry Run key (legacy + fallback) --------------------------
