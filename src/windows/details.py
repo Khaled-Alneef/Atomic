@@ -1476,9 +1476,9 @@ class DetailsPage(GlassPage):
         # border; hover lets more of the backdrop through.
         self._download_btn.setStyleSheet(
             f"QPushButton {{ font-size: 11.5pt; font-weight: 600; padding: 8px 24px;"
-            f" background: rgba(109, 109, 110, 140); color: {theme.TEXT_OVER_MEDIA};"
+            f" background: {theme.SECONDARY_FILL}; color: {theme.TEXT_OVER_MEDIA};"
             f" border: none; border-radius: 6px; }}"
-            f"QPushButton:hover {{ background: rgba(109, 109, 110, 95); }}")
+            f"QPushButton:hover {{ background: {theme.SECONDARY_FILL_HOVER}; }}")
         use_hover_cursor(self._download_btn)
         self._download_btn.clicked.connect(self._download_current)
         download_row = QHBoxLayout()
@@ -4302,9 +4302,9 @@ class DetailsPage(GlassPage):
         if saved:
             glyph = TRASH_GLYPH if hovering else CHECK_GLYPH
             # The bin reads on the red ground, so it takes the same
-            # colour the words do - see the objectName below.
+            # colour the words do - see the faces below.
             self._save_btn.setIcon(glyph_icon(
-                glyph, theme.ON_ACCENT if hovering else theme.TEXT))
+                glyph, theme.ON_DANGER if hovering else theme.TEXT_OVER_MEDIA))
             self._save_btn.setIconSize(QSize(TRASH_ICON_SIZE, TRASH_ICON_SIZE))
         else:
             self._save_btn.setIcon(glyph_icon(PLUS_GLYPH, theme.ON_ACCENT))
@@ -4320,17 +4320,34 @@ class DetailsPage(GlassPage):
         # Only while hovered, and that is still the rule the note above
         # states: a resting saved title says what *is*, and the
         # destructive reading appears on the control that would do it.
-        # #Danger is the app's one red button - the same style the
-        # selection bar's bin wears - so this needed no new colour.
-        self._save_btn.setObjectName(
-            ("Danger" if hovering else "") if saved else "Accent")
-        # A QSS objectName change is not re-applied on its own - the
-        # style has already been computed for the old name. Measured the
-        # hard way once on the sidebar: unpolish/polish is what makes it
-        # take, and the repaint after it is what makes it show.
-        self._save_btn.style().unpolish(self._save_btn)
-        self._save_btn.style().polish(self._save_btn)
-        self._save_btn.update()
+        #
+        # **The faces are the Discover banner's, not #Accent/#Danger.**
+        # The owner, 5 October 2026: "make the save to list button modern
+        # like other buttons it seems old!". The redesign (1 October)
+        # gave Continue and Download Netflix's Play and secondary, and
+        # the banner's Save the same three faces (app.css `.hero .act.go
+        # / .quiet / .danger`), while this button kept the old app-wide
+        # gradient ramp at RADIUS 12 - the one pre-redesign control left
+        # on the page. Unsaved is Play (white, black ink), saved is the
+        # grey secondary, and hovered-saved is the banner's flat red with
+        # its dark ink. A widget sheet rather than an objectName: it is
+        # re-applied by setStyleSheet itself, no unpolish/polish needed.
+        if not saved:
+            fill, hover, ink = (theme.ACCENT_HOVER,
+                                theme.rgba(theme.ACCENT_HOVER, 200),
+                                theme.ON_ACCENT)
+        elif hovering:
+            fill, hover, ink = theme.DANGER, theme.DANGER, theme.ON_DANGER
+        else:
+            fill, hover, ink = (theme.SECONDARY_FILL,
+                                theme.SECONDARY_FILL_HOVER,
+                                theme.TEXT_OVER_MEDIA)
+        self._save_btn.setStyleSheet(
+            f"QPushButton {{ font-size: 11.5pt; font-weight: 600;"
+            f" padding: 8px 24px; border: none; border-radius: 6px;"
+            f" background: {fill}; color: {ink}; }}"
+            f"QPushButton:hover {{ background: {hover}; }}"
+            f"QPushButton:pressed {{ background: {hover}; }}")
 
     def _toggle_saved(self):
         """The button's one handler: keep it, or stop keeping it."""
