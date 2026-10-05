@@ -1577,7 +1577,15 @@ def install():
     #     Task Scheduler's COM API in-process - no hidden schtasks.exe,
     #     no temp XML - after Defender quarantined the app as
     #     Behavior:Win32/Persistence.A!ml on that tick (startup.py).
-    updater.APP_VERSION = "3.4"
+    # 3.5
+    #   * New seasons and episodes Cinemeta has not filed yet come from
+    #     TMDB where the two number the show alike, upcoming seasons get
+    #     TMDB's date, Home keeps every saved/recent list current in the
+    #     background, and a title page asks TMDB fresh on every open
+    #     (stremio.fill_from_tmdb, server._refresh_episode_lists).
+    #   * The Save to My List button wears the redesign's three faces.
+    #   * The window reopens on the monitor it was last on.
+    updater.APP_VERSION = "3.5"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

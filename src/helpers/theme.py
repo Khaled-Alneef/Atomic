@@ -101,6 +101,13 @@ ON_ACCENT = "#0a0a0a"
 SUCCESS = "#4ade80"
 DANGER = "#ff5470"
 DANGER_HOVER = "#ff7285"
+# Ink on a DANGER fill - the web banner's `.hero .act.danger` colour, so
+# the Qt and web "Remove from My List" read as one control.
+ON_DANGER = "#2a0710"
+# Netflix's secondary button (Download, a saved title's Save): grey let
+# through over the backdrop, more of it let through under the pointer.
+SECONDARY_FILL = "rgba(109, 109, 110, 140)"
+SECONDARY_FILL_HOVER = "rgba(109, 109, 110, 95)"
 # The volume flyout's track is a fixed gradient - the owner, 7 September
 # 2026: "its idea is to show the levels of vol after the 100% (yellow
 # orange red in a smooth way)". White to the middle (100% of a 0-200

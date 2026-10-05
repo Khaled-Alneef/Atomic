@@ -30,6 +30,17 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.5": [
+        "New seasons and episodes show up as soon as they air - Black "
+        "Clover's Season 2 is there now - and seasons that have a "
+        "release date appear as Upcoming. Your shows' episode lists "
+        "keep themselves up to date in the background, and a title's "
+        "list checks for new episodes every time you open it.",
+        "The Save to My List button has the new look of the buttons "
+        "beside it.",
+        "Atomic reopens on the monitor you last used it on, whether you "
+        "closed it in a window, maximised or full screen.",
+    ],
     "3.4": [
         "\"Launch on Windows startup\" now sets Atomic up through Windows' "
         "own Task Scheduler, which should stop Windows Security flagging "

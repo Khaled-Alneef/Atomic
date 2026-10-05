@@ -361,6 +361,38 @@ def ensure_snap_styles(window) -> bool:
     return True
 
 
+def move_hidden_to_screen(window, screen) -> bool:
+    """Put a not-yet-shown window's native window on `screen`, so a
+    showFullScreen that follows fills that screen.
+
+    **Qt's own setGeometry cannot do this.** The main window's HWND is
+    created early (keep_snap_styles needs it), and setGeometry on a
+    hidden window only records the rectangle - the HWND stays where it
+    was created, the QWindow's screen stays the primary, and full screen
+    fills the primary. Measured 4 October 2026 on a bare QMainWindow:
+    native window created first, then setGeometry onto the left monitor
+    -> full screen on the primary; QWindow.setScreen, QWidget.setScreen
+    and processEvents all the same; SetWindowPos on the hidden HWND ->
+    the screen changes at once (no event flush needed) and full screen
+    lands on the left monitor.
+
+    Qt keeps a screen's origin in device pixels and scales only its
+    size, so the native rectangle is the origin as given and the size
+    times the ratio. No SWP_SHOWWINDOW: the window stays hidden."""
+    if not WINDOWS or screen is None:
+        return False
+    try:
+        geo = screen.geometry()
+        ratio = float(screen.devicePixelRatio() or 1.0)
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        #   NOZORDER 0x0004  NOACTIVATE 0x0010
+        return bool(ctypes.windll.user32.SetWindowPos(
+            hwnd, None, geo.x(), geo.y(), int(geo.width() * ratio),
+            int(geo.height() * ratio), 0x0004 | 0x0010))
+    except Exception:
+        return False
+
+
 def keep_snap_styles(window):
     """Re-apply the snap bits whenever the window changes state.
 
