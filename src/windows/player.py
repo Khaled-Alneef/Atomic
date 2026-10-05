@@ -4072,7 +4072,7 @@ class PlayerPage(GlassPage):
             # is no file.
             meta = stremio.fetch_meta_cached(
                 imdb_id, "movie" if self.entry.get("type") == "Movie"
-                else "series")
+                else "series", tmdb=True)
         except Exception:
             logs.exception("episode-map lookup failed")
             meta = None

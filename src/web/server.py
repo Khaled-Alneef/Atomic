@@ -1618,6 +1618,9 @@ def _home():
     # draw - see _refresh_stale_schedules.
     _refresh_stale_schedules(watching, "series.json")
     _refresh_stale_schedules(reading, "tracker.json")
+    # And every episode list a card reads, from the APIs, behind it too -
+    # see _refresh_episode_lists.
+    _refresh_episode_lists(watching + _history(("Anime", "Series"))[:EPISODE_LISTS_PER_DRAW])
 
     recent = {}
     for position, row in enumerate(_history(("Anime", "Series", "Movie"))):
@@ -1798,6 +1801,64 @@ def _refresh_stale_schedules(entries, file_name):
             lookup_pool.submit(_refresh_schedule_worker, dict(entry), file_name)
         except Exception:
             logs.exception("Could not queue a schedule refresh")
+
+
+# imdb id -> when its episode list was last sent for a refresh from here
+_EPISODES_ASKED = {}
+# How many history rows a Home draw looks at past the saved ones: the
+# Watching row and the banner draw from the newest, and a history of a
+# few hundred titles must not queue a few hundred lookups per launch.
+EPISODE_LISTS_PER_DRAW = 40
+
+
+def _refresh_episode_lists(entries):
+    """Every show a Home card reads keeps its episode list current from
+    Cinemeta and TMDB, in the background - stremio.EPISODE_LIST_REFRESH_S.
+
+    The owner, 5 October 2026: "make the app updates auto from APIs".
+    A card's next episode (_season_step) reads the list on disk, and
+    that list was fetched only when the title's page or the player
+    asked for it - so a saved show whose new season had appeared on
+    TMDB (Black Clover S2) kept reading "season finished" on Home until
+    he opened it. Each list older than EPISODE_LIST_REFRESH_S is fetched
+    again on lookup_pool, once per title per that interval from here,
+    and only a list that changed bumps helpers/changes so the page
+    redraws (CLAUDE.md rule 13) - an unchanged refresh costs no redraw."""
+    try:
+        from helpers import lookup_pool, stremio
+    except Exception:
+        return
+    now = time.monotonic()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type") or "").strip().lower() == "movie":
+            continue
+        imdb = str(entry.get("imdb_id") or "").strip()
+        if not imdb.startswith("tt"):
+            continue
+        if now - _EPISODES_ASKED.get(imdb, -1e9) < stremio.EPISODE_LIST_REFRESH_S:
+            continue
+        age = stremio.meta_age_s(imdb)
+        _EPISODES_ASKED[imdb] = now
+        if age is not None and age < stremio.EPISODE_LIST_REFRESH_S:
+            continue
+        try:
+            lookup_pool.submit(_refresh_episodes_worker, imdb,
+                               str(entry.get("title") or ""))
+        except Exception:
+            logs.exception("Could not queue an episode-list refresh")
+
+
+def _refresh_episodes_worker(imdb, title):
+    """Never raises - a lookup_pool worker dies silently."""
+    try:
+        from helpers import changes, stremio
+        if stremio.refresh_meta(imdb, "series"):
+            changes.bump()
+            logs.info(f"episode list refreshed from Home: {title[:40]} - changed")
+    except Exception:
+        logs.exception("An episode-list refresh from Home failed")
 
 
 def _refresh_schedule_worker(entry, file_name):
