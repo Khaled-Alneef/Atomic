@@ -43,7 +43,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import child_process
+from . import child_process, logs
 
 # Steam's appmanifest_<appid>.acf is a Valve KeyValues file; only two of
 # its fields matter here, so it is read with a regex rather than pulling
@@ -164,10 +164,13 @@ def _riot_command(index: dict, game_dir: Path):
 # ------------------------------------------------------------ Epic
 def _epic_index() -> dict:
     """{install location -> Epic's internal AppName} from the launcher's
-    manifest folder. Unverified against a real game: no Epic titles are
-    installed here, so this path has been written to the documented
-    manifest shape and left to fall back to the exe if it finds nothing
-    rather than guessing an AppName from the folder."""
+    manifest folder. Written blind (no Epic title was installed then);
+    checked 8 October 2026 against the owner's The Witcher 3 manifest -
+    AppName 725a22e15ed74735bb0d6a19f3cc82d0, InstallLocation
+    G:\\Epic Games\\TheWitcher3 - and the bare-AppName URI is what Epic's
+    LogUriHandler accepts. What broke that game was how the URI was
+    opened (see run), not this. Falls back to the exe if nothing is
+    found rather than guessing an AppName from the folder."""
     index = {}
     if not _EPIC_MANIFESTS.is_dir():
         return index
@@ -272,12 +275,32 @@ def run(game):
     command = game.get("launch") or {}
     uri = command.get("uri")
     if uri:
-        # os.startfile, not `cmd /c start`: a launcher URI carries query
-        # parameters (Epic's has an &) that cmd would read as its own
-        # syntax. ShellExecute hands the child this process's
-        # environment, hence the strip - see helpers/child_process.
-        with child_process.clean_environ():
-            os.startfile(uri)
+        # **Handed to Explorer, never opened from this process.** The
+        # owner, 8 October 2026: "why the Witcher 3 does not open the
+        # game when I click on it?" - his first Epic game, on a path
+        # written blind (see _epic_index). The URI was right; what
+        # opened it was not. Atomic starts at login from Task Scheduler
+        # (`--startup`), which puts the process in a job object, and a
+        # child of os.startfile is born in the same job. Epic's launcher
+        # will not run inside one: measured from a job, os.startfile ->
+        # no Epic process and no line in its own log after 20s, the
+        # same URI through explorer.exe -> the launcher up and logging,
+        # and with no job both work. His click at 13:04:24 that day left
+        # Epic's log untouched. explorer.exe forwards the URI to the
+        # shell that is already running, outside any job of ours.
+        #
+        # **Quoted by hand.** Unquoted, Explorer opened Epic's store URI
+        # and silently dropped one with a query (`?action=launch&
+        # silent=true`) - with no job at all; a list argument has no
+        # space in it, so subprocess never quotes it. Quoted, Epic's own
+        # log reads the whole URI back. Not `cmd /c start` either: cmd
+        # reads the & as its own syntax. Explorer gives no exit code to
+        # read, hence the log line.
+        logs.info(f"game launch: {game.get('name') or '?'} through "
+                  f"{uri.split(':', 1)[0]} (explorer)")
+        subprocess.Popen(f'explorer.exe "{uri.replace(chr(34), "")}"',
+                         env=child_process.clean_env(),
+                         creationflags=child_process.flags())
         return
     resolved = command.get("path")
     path = resolved or game.get("path")
