@@ -1585,7 +1585,19 @@ def install():
     #     (stremio.fill_from_tmdb, server._refresh_episode_lists).
     #   * The Save to My List button wears the redesign's three faces.
     #   * The window reopens on the monitor it was last on.
-    updater.APP_VERSION = "3.5"
+    # 3.6
+    #   * Launcher games (Epic) start from an Atomic launched at login:
+    #     the URI is handed to Explorer, outside Task Scheduler's job
+    #     (game_launch.run).
+    #   * Opening a game, app or website from Home no longer blanks the
+    #     cards and restarts the banner (app.js keepArt / keptHero).
+    #   * Games, Apps and Websites remember their sort
+    #     (app_settings.get_shelf_sort).
+    #   * A clicked game, app or website moves to the front 1.5s after
+    #     the click (game_launch.stamp_later).
+    #   * A reading details page names its site (details._show_source);
+    #     the Reading Websites editor left Settings.
+    updater.APP_VERSION = "3.6"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
