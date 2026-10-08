@@ -1613,6 +1613,18 @@ class _WebShelfPage(_WebPage):
         if action in ("add", "import", "menu", "delete", "reorder"):
             self._shelf_action(action, body)
             return
+        if action == "sort":
+            # The sort picked on this shelf, kept for its next visit -
+            # app_settings.get_shelf_sort. Not reloaded: the page has
+            # already redrawn itself in the new order.
+            sort = str(body.get("sort") or "")
+            if sort:
+                try:
+                    from helpers import app_settings
+                    app_settings.set_shelf_sort(self.SHELF, sort)
+                except Exception:
+                    logs.exception("Saving a shelf's sort failed")
+            return
         super()._from_page(body)
 
     def _shelf_action(self, action, body):

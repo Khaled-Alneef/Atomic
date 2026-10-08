@@ -2629,8 +2629,17 @@ def _shelf_row(entry, shelf):
 def _shelf(route):
     shelf = SHELVES[route]
     entries = _rows(shelf["file"])
+    # The sort he last picked here (app_settings.get_shelf_sort), so the
+    # page opens in it rather than in Custom Order every visit.
+    try:
+        from helpers import app_settings
+        sort = app_settings.get_shelf_sort(route)
+    except Exception:
+        sort = ""
+    if sort not in shelf["sorts"]:
+        sort = shelf["sorts"][0]
     return {"kind": "shelf", "shelf": route, "hero": None,
-            "title": shelf["title"], "sorts": shelf["sorts"],
+            "title": shelf["title"], "sorts": shelf["sorts"], "sort": sort,
             "noun": list(shelf["noun"]),
             "rows": [_shelf_row(e, shelf) for e in entries],
             "note": ""}

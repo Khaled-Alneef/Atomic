@@ -43,7 +43,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import child_process
+from . import child_process, logs
 
 # Steam's appmanifest_<appid>.acf is a Valve KeyValues file; only two of
 # its fields matter here, so it is read with a regex rather than pulling
@@ -164,10 +164,13 @@ def _riot_command(index: dict, game_dir: Path):
 # ------------------------------------------------------------ Epic
 def _epic_index() -> dict:
     """{install location -> Epic's internal AppName} from the launcher's
-    manifest folder. Unverified against a real game: no Epic titles are
-    installed here, so this path has been written to the documented
-    manifest shape and left to fall back to the exe if it finds nothing
-    rather than guessing an AppName from the folder."""
+    manifest folder. Written blind (no Epic title was installed then);
+    checked 8 October 2026 against the owner's The Witcher 3 manifest -
+    AppName 725a22e15ed74735bb0d6a19f3cc82d0, InstallLocation
+    G:\\Epic Games\\TheWitcher3 - and the bare-AppName URI is what Epic's
+    LogUriHandler accepts. What broke that game was how the URI was
+    opened (see run), not this. Falls back to the exe if nothing is
+    found rather than guessing an AppName from the folder."""
     index = {}
     if not _EPIC_MANIFESTS.is_dir():
         return index
@@ -237,6 +240,42 @@ def resolve(launcher_key: str, root_dir, game_dir):
     return command_for(launcher_key, index_for(launcher_key, root_dir), game_dir)
 
 
+# **The move to the front waits 1.5s.** The owner, 8 October 2026: "the
+# games websites and apps in the main page, make the most recent clicked
+# goes 1st after 1.5 sec not immediately! same for their pages when the
+# order is last Played or Visited!" Home and the three shelf pages both
+# re-order off this stamp (they watch the files at 150ms), so delaying
+# the write delays every one of them, and a card does not jump out from
+# under the pointer that has just clicked it.
+STAMP_DELAY_S = 1.5
+
+
+def stamp_later(entry, field, files):
+    """Write `field` = now onto `entry` in the first of `files` that holds
+    it, STAMP_DELAY_S from now, on a timer thread. The time recorded is
+    the click's, not the write's. A daemon thread: quitting inside the
+    1.5s loses the stamp, which is bookkeeping, never the launch."""
+    import threading
+    from . import storage
+    entry_id = entry.get("id")
+    if not entry_id:
+        return
+    stamp = storage.now_iso()
+
+    def write():
+        entry[field] = stamp
+        for name in files:
+            try:
+                if storage.update_entry(name, entry_id, {field: stamp}):
+                    return
+            except Exception:
+                return          # a launch must never fail on bookkeeping
+
+    timer = threading.Timer(STAMP_DELAY_S, write)
+    timer.daemon = True
+    timer.start()
+
+
 def _stamp_played(game):
     """Record that this game was just started.
 
@@ -253,14 +292,8 @@ def _stamp_played(game):
     list back - the write that once erased freshly imported games
     (rules/ui.md).
     """
-    entry_id = game.get("id")
-    if not entry_id:
-        return
     try:
-        from . import storage
-        stamp = storage.now_iso()
-        game["last_played"] = stamp
-        storage.update_entry("games.json", entry_id, {"last_played": stamp})
+        stamp_later(game, "last_played", ("games.json",))
     except Exception:
         pass            # a launch must never fail on bookkeeping
 
@@ -272,12 +305,32 @@ def run(game):
     command = game.get("launch") or {}
     uri = command.get("uri")
     if uri:
-        # os.startfile, not `cmd /c start`: a launcher URI carries query
-        # parameters (Epic's has an &) that cmd would read as its own
-        # syntax. ShellExecute hands the child this process's
-        # environment, hence the strip - see helpers/child_process.
-        with child_process.clean_environ():
-            os.startfile(uri)
+        # **Handed to Explorer, never opened from this process.** The
+        # owner, 8 October 2026: "why the Witcher 3 does not open the
+        # game when I click on it?" - his first Epic game, on a path
+        # written blind (see _epic_index). The URI was right; what
+        # opened it was not. Atomic starts at login from Task Scheduler
+        # (`--startup`), which puts the process in a job object, and a
+        # child of os.startfile is born in the same job. Epic's launcher
+        # will not run inside one: measured from a job, os.startfile ->
+        # no Epic process and no line in its own log after 20s, the
+        # same URI through explorer.exe -> the launcher up and logging,
+        # and with no job both work. His click at 13:04:24 that day left
+        # Epic's log untouched. explorer.exe forwards the URI to the
+        # shell that is already running, outside any job of ours.
+        #
+        # **Quoted by hand.** Unquoted, Explorer opened Epic's store URI
+        # and silently dropped one with a query (`?action=launch&
+        # silent=true`) - with no job at all; a list argument has no
+        # space in it, so subprocess never quotes it. Quoted, Epic's own
+        # log reads the whole URI back. Not `cmd /c start` either: cmd
+        # reads the & as its own syntax. Explorer gives no exit code to
+        # read, hence the log line.
+        logs.info(f"game launch: {game.get('name') or '?'} through "
+                  f"{uri.split(':', 1)[0]} (explorer)")
+        subprocess.Popen(f'explorer.exe "{uri.replace(chr(34), "")}"',
+                         env=child_process.clean_env(),
+                         creationflags=child_process.flags())
         return
     resolved = command.get("path")
     path = resolved or game.get("path")

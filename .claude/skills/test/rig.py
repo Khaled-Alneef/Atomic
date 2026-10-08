@@ -26,6 +26,8 @@ u.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
 
 k32 = ctypes.windll.kernel32
 k32.OpenProcess.restype = w.HANDLE
+k32.GetExitCodeProcess.argtypes = [w.HANDLE, ctypes.POINTER(w.DWORD)]
+k32.CloseHandle.argtypes = [w.HANDLE]
 k32.QueryFullProcessImageNameW.argtypes = [
     w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD)]
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -49,6 +51,26 @@ def _owning_exe_name(hwnd):
     finally:
         k32.CloseHandle(handle)
 
+_PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rig_pid.txt")
+
+
+def _pinned_pid():
+    """The pid `launch` started; 0 when nothing was pinned; None when the
+    pinned launch is gone - fail closed, never fall back to any window
+    titled Atomic (that is how the owner's own copy would take a click)."""
+    try:
+        pid = int(open(_PID_FILE).read().strip())
+    except (OSError, ValueError):
+        return 0
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    code = w.DWORD(0)
+    alive = k32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259
+    k32.CloseHandle(handle)
+    return pid if alive else None
+
+
 def find():
     found = []
     @ctypes.WINFUNCTYPE(ctypes.c_bool, w.HWND, w.LPARAM)
@@ -70,6 +92,18 @@ def find():
         # owning process (Atomic.exe, or py/python for a source run) is
         # what a title match alone cannot do.
         if buf.value.strip() == "Atomic":
+            # **Only the process this rig launched**, when it launched one.
+            # 8 October 2026: the owner's installed Atomic was open beside
+            # the test build, both "Atomic", both Atomic.exe - and the
+            # first match takes the clicks.
+            pinned = _pinned_pid()
+            if pinned is None:
+                return True             # pinned to a launch that is gone: match nothing
+            if pinned:
+                owner = w.DWORD(0)
+                u.GetWindowThreadProcessId(h, ctypes.byref(owner))
+                if owner.value != pinned:
+                    return True
             exe = _owning_exe_name(h)
             if exe not in ("atomic.exe", "python.exe", "py.exe", "pythonw.exe"):
                 return True
@@ -258,8 +292,14 @@ if __name__ == "__main__":
         cmd = ["py", "-3.13", exe] if exe.endswith(".py") else [exe]
         env["PYTHONIOENCODING"] = "utf-8"
         log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_stdout.log"), "ab")
-        subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe) or ".", stdout=log, stderr=log,
-                         creationflags=0x00000008 | 0x00000200)   # DETACHED_PROCESS | NEW_PROCESS_GROUP
+        child = subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe) or ".", stdout=log, stderr=log,
+                                 creationflags=0x00000008 | 0x00000200)   # DETACHED_PROCESS | NEW_PROCESS_GROUP
+        # A source run's window belongs to the python under py.exe, so
+        # only a frozen launch is pinned.
+        if not exe.endswith(".py"):
+            open(_PID_FILE, "w").write(str(child.pid))
+        elif os.path.exists(_PID_FILE):
+            os.remove(_PID_FILE)        # a stale pin would match nothing
         f = wait(60)
         print("window:", f)
     elif cmd == "wait": print(wait(float(sys.argv[2]) if len(sys.argv) > 2 else 30))

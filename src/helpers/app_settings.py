@@ -626,6 +626,27 @@ def set_last_auto_sync(key: str, when: float):
     storage.save(SETTINGS_FILE, data)
 
 
+def get_shelf_sort(shelf: str) -> str:
+    """The sort last picked on the Games, Apps or Websites page, or "".
+
+    **Kept here because the page cannot keep it.** The owner, 8 October
+    2026: "the order I selected in the games, apps and websites pages is
+    not being saved, when I go to other page then go back it is always
+    on Custom Order!!!!". The pick lived in app.js's `shelfState`, and
+    every visit is a new document (the view is disposed on each switch),
+    so it was gone the moment he left - rules/ui.md: state that must
+    survive lives in the saved JSON or it doesn't exist."""
+    return str((_load().get("shelf_sorts") or {}).get(shelf) or "")
+
+
+def set_shelf_sort(shelf: str, sort: str):
+    data = _load()
+    sorts = data.get("shelf_sorts") or {}
+    sorts[shelf] = sort or ""
+    data["shelf_sorts"] = sorts
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_launcher_dirs() -> dict:
     """{"steam": "G:\\Steam", ...} for whichever game launchers have a
     directory configured in Settings > Games - see helpers.launchers."""

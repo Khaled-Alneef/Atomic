@@ -30,6 +30,19 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.6": [
+        "Epic Games titles like The Witcher 3 now start when you click "
+        "them, including when Atomic was opened at Windows startup.",
+        "Opening a game, app or website from the main page no longer "
+        "makes the cards and the banner flicker.",
+        "The Games, Apps and Websites pages remember the sort you picked "
+        "instead of going back to Custom Order.",
+        "A game, app or website you open moves to the front of its row a "
+        "moment after you click it, instead of jumping away at once.",
+        "Each reading title's chapter page shows which website its "
+        "chapters come from, under the genres.",
+        "The reading websites list has been removed from Settings.",
+    ],
     "3.5": [
         "New seasons and episodes show up as soon as they air - Black "
         "Clover's Season 2 is there now - and seasons that have a "
@@ -498,6 +511,9 @@ class UpdateSummaryDialog(QDialog):
         done = QPushButton("Got It", objectName="Accent")
         done.setDefault(True)
         done.clicked.connect(self.accept)
+        # The pointing hand, as on every other button he presses (the
+        # owner, 8 October 2026, about this one).
+        widgets.use_hover_cursor(done)
         button_row.addWidget(done)
         body.addLayout(button_row)
 

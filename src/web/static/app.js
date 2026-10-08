@@ -566,9 +566,51 @@ function resetLazy() { lazyPending.clear(); lazySince = 0; lazyTold = false; }
 let lazySince = 0;
 let lazyTold = false;
 
+/* **A redraw keeps the pictures it already had.** The owner, 8 October
+   2026: "why when I open a game, website or app in the main page the
+   page cards and banner flickers !!!!". A launch stamps the entry, Home
+   redraws (rule 13) - and the redraw emptied the page and built every
+   card again with an <img> that only gets its address on the next
+   lazy sweep. Sampled at the panel's rate on 3.5, clicking a game on
+   Home: **one whole frame with every cover of Watching, Reading and
+   Games empty** (64-73 levels off the settled picture), and the banner
+   back on "01 / 06" with no art. So before a quiet redraw empties the
+   page, every decoded picture is kept by the address it was asked for
+   (keepArt), and the rebuilt card asking for the same address gets it
+   at once, decoded synchronously from the memory cache it is already
+   in. A first arrival is untouched - it has nothing to hand over. */
+let keptArt = null;
+
+function keepArt() {
+  keptArt = new Map();
+  page.querySelectorAll('img').forEach(function (im) {
+    if (!im.complete || !im.naturalWidth) return;
+    // The element itself, not its address: holding it keeps its decoded
+    // picture alive until the rebuilt card has taken it.
+    if (im._want) keptArt.set(im._want, im);
+    if (im._coverKey) keptArt.set(im._coverKey, im);
+  });
+  // Only the render that follows may use it.
+  Promise.resolve().then(function () { keptArt = null; });
+}
+
+function takeKept(img, key) {
+  const had = keptArt && key ? keptArt.get(key) : null;
+  if (!had) return false;
+  lazyPending.delete(img);
+  img.removeAttribute('data-src');
+  img.classList.remove('blank');
+  img._askCover = null;           // already the final picture
+  img.decoding = 'sync';
+  img.src = had.currentSrc || had.src;
+  return true;
+}
+
 function lazyArt(img, src, cssWidth) {
   img.decoding = 'async';
   if (!lazySince) { lazySince = Date.now(); lazyTold = false; }
+  if (src) img._want = cssWidth ? artURL(src, cssWidth) : src;
+  if (src && drawQuiet && takeKept(img, img._want)) return img;
   if (!src) {
     // **A flat slab, not an empty outline.** images.blank_tile is what
     // Qt draws with nothing to show, at the owner's own instruction -
@@ -762,6 +804,14 @@ function askForCover(img, row, width) {
      url has nothing to ask about. */
   if (!row.url && !row.title) return;
   const drawn = width || 160;
+  // Keyed so a quiet redraw can hand this card the cover it ended with
+  // (keepArt) - the card's own address may be empty or a thin file.
+  img._coverKey = 'cover:' + (row.title || '') + '|' + (row.url || '');
+  if (drawQuiet && keptArt) {
+    const had = keptArt.get(img._coverKey);
+    if (had && (had.currentSrc || had.src) !== img.getAttribute('src')
+        && takeKept(img, img._coverKey)) return;
+  }
   function ask() {
     fetch('/api/cover?title=' + encodeURIComponent(row.title || '') +
           '&url=' + encodeURIComponent(row.url || '') +
@@ -2529,7 +2579,9 @@ async function go(route, opts) {
     // A shelf remembers its sort and its picks only while it is the page
     // being looked at - the Qt pages rebuild from scratch on every visit
     // and keep no state either (.claude/rules/ui.md).
-    shelfState = { sort: 'Custom Order', selecting: false, picked: new Set() };
+    // `sort: ''` takes the one the server saved for this shelf
+    // (shelfInto) - see app_settings.get_shelf_sort.
+    shelfState = { sort: '', selecting: false, picked: new Set() };
     savedState = { selecting: false, picked: new Set() };
   }
   const mine = ++token;
@@ -2628,17 +2680,43 @@ async function go(route, opts) {
   // shows the old cards at this point - clear and refill happen in one
   // task from here down (the render below is synchronous; the only
   // awaits after this are background pulls), so no empty frame paints.
+  const heroes = data.heroes || (data.hero ? [data.hero] : []);
+  /* **An unchanged banner is not rebuilt.** The same report as keepArt:
+     a new carousel starts on its first slide, fetches its art again and
+     replays its drift, which is the banner half of "the cards and banner
+     flickers". When a quiet redraw brings the very same banner, the
+     drawn one stays where it is - not even detached, since putting a
+     node back restarts its CSS animations - and the rest of the page is
+     rebuilt after it. It also stops each redraw leaving the old
+     carousel's slide timer running on a detached box. */
+  // Compared without its countdown words: `meta` carries "Countdown: 11d
+  // 3h 30m", which changes every minute and so never matched (measured
+  // on the first build of this - the banner still went back to 01 / 06),
+  // and the drawn banner already rewrites them itself (tickCountdowns).
+  const heroKey = heroes.length ? JSON.stringify(heroes, function (_k, v) {
+    return typeof v === 'string' ? v.replace(/Countdown: [^·\n]*/g, '') : v;
+  }) : '';
+  let keptHero = null;
+  if (opts && opts.quiet && heroKey && page._heroKey === heroKey) {
+    const first = page.firstElementChild;
+    if (first && first.classList.contains('herobox')) keptHero = first;
+  }
+  if (opts && opts.quiet) keepArt();
   if (!drawEarly) {
     page.scrollTop = 0;
-    page.innerHTML = '';
+    if (keptHero) {
+      while (keptHero.nextSibling) page.removeChild(keptHero.nextSibling);
+    } else {
+      page.innerHTML = '';
+    }
     // The tick list is a child that was just removed; the reference to
     // it is not, and a page without a filter would otherwise keep
     // writing into the last page's box.
     page._genreBox = null;
   }
+  page._heroKey = heroKey;
 
-  const heroes = data.heroes || (data.hero ? [data.hero] : []);
-  if (heroes.length) page.appendChild(heroCarousel(heroes));
+  if (heroes.length && !keptHero) page.appendChild(heroCarousel(heroes));
   // The shelves and the queue draw their own title, in their own
   // header with the buttons opposite it - this generic one would print
   // the word a second time above it (it did, in the first screenshot).
@@ -3627,7 +3705,18 @@ function scheduleInto(parent, data) {
    object for both meant leaving a page mid-selection carried the picks
    onto the other. Both are cleared by go(). */
 let savedState = { selecting: false, picked: new Set() };
-let shelfState = { sort: 'Custom Order', selecting: false, picked: new Set() };
+let shelfState = { sort: '', selecting: false, picked: new Set() };
+
+/* **A sort he picks is kept.** The owner, 8 October 2026: "the order I
+   selected in the games, apps and websites pages is not being saved,
+   when I go to other page then go back it is always on Custom Order!!!!"
+   Every visit is a new document, so shelfState cannot carry it; the
+   host writes it to settings.json and the shelf's answer brings it
+   back as `data.sort`. */
+function keepShelfSort(shelf, sort) {
+  shelfState.sort = sort;
+  tellHost({ action: 'sort', shelf: shelf, sort: sort });
+}
 
 function shelfCard(row, shelf) {
   const card = reveal(el('div', 'sc' + (row.shape === 'square' ? ' square' : '')),
@@ -3721,7 +3810,7 @@ function shelfCard(row, shelf) {
       if (!moved || moved === row.id) return;
       // The order on screen is about to become the file's, so the sort
       // has to say so before the redraw reads it.
-      shelfState.sort = 'Custom Order';
+      keepShelfSort(shelf, 'Custom Order');
       tellHost({ action: 'reorder', shelf: shelf,
                  moved: moved, target: row.id });
     });
@@ -3746,6 +3835,7 @@ function sortShelf(rows) {
 
 function shelfInto(parent, data) {
   const shelf = data.shelf;
+  if (!shelfState.sort) shelfState.sort = data.sort || 'Custom Order';
   const head = el('div', 'shelfhead');
   head.appendChild(el('h1', 'paneltitle', data.title || ''));
   const acts = el('div', 'shelfacts');
@@ -3775,7 +3865,7 @@ function shelfInto(parent, data) {
     box.appendChild(opt);
   });
   box.addEventListener('change', function () {
-    shelfState.sort = box.value;
+    keepShelfSort(shelf, box.value);
     go(shelf);
   });
   sortRow.appendChild(box);
