@@ -498,6 +498,9 @@ class UpdateSummaryDialog(QDialog):
         done = QPushButton("Got It", objectName="Accent")
         done.setDefault(True)
         done.clicked.connect(self.accept)
+        # The pointing hand, as on every other button he presses (the
+        # owner, 8 October 2026, about this one).
+        widgets.use_hover_cursor(done)
         button_row.addWidget(done)
         body.addLayout(button_row)
 

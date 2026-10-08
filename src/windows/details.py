@@ -1443,6 +1443,19 @@ class DetailsPage(GlassPage):
         self._genres_row.addStretch(1)
         left.addLayout(self._genres_row)
 
+        # **Which website the chapters come from**, under the genres. The
+        # owner, 8 October 2026: "on each reading ch list page, add the
+        # name of the website that this is from (on the left side under
+        # the genres)". Reading only; hidden until a site is known - a
+        # Discover title has none until one is picked on this page.
+        self._source_head = self._section_label("SOURCE")
+        left.addWidget(self._source_head)
+        self._source = QLabel("")
+        self._source.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 600;"
+            f" background: transparent;")
+        left.addWidget(self._source)
+
         self._cast_head = self._section_label("CAST")
         left.addWidget(self._cast_head)
         self._cast_row = QHBoxLayout()
@@ -1461,6 +1474,7 @@ class DetailsPage(GlassPage):
         for widget in (self._genres_head, self._cast_head, self._summary_head,
                        self._summary):
             widget.setVisible(False)
+        self._show_source()
 
         left.addSpacing(14)
         verb = "Reading" if self._is_reading else "Watching"
@@ -1517,6 +1531,35 @@ class DetailsPage(GlassPage):
         root.addWidget(self._identity, stretch=1)
         self._panel = self._build_panel()
         root.addWidget(self._panel)
+
+    def _source_name(self) -> str:
+        """The configured reading site this entry's chapters come from:
+        by its site_id, else by the host of its url against each site's
+        base_url (an entry saved before site_id was written carries only
+        the url). "" when neither names a configured site."""
+        if not self._is_reading:
+            return ""
+        try:
+            from helpers import manga_sites
+            site = manga_sites.get_site(self.entry.get("site_id") or "")
+            if site is None:
+                from urllib.parse import urlparse
+                def host(url):
+                    name = (urlparse(str(url or "")).hostname or "").lower()
+                    return name[4:] if name.startswith("www.") else name
+                mine = host(self.entry.get("url"))
+                site = next((s for s in manga_sites.list_sites()
+                             if mine and host(s.get("base_url")) == mine), None)
+            return str((site or {}).get("name") or "")
+        except Exception:
+            logs.exception("details page could not name the reading site")
+            return ""
+
+    def _show_source(self):
+        name = self._source_name()
+        self._source.setText(name)
+        self._source_head.setVisible(bool(name))
+        self._source.setVisible(bool(name))
 
     def _section_label(self, text) -> QLabel:
         label = QLabel(text)
@@ -2803,6 +2846,7 @@ class DetailsPage(GlassPage):
         # later (the Save button), the binding rides along; if it is
         # already saved, record it now so the pick survives the page.
         self.entry.update(fields)
+        self._show_source()
         if self.entry.get("id"):
             try:
                 from windows.tracker import _progress_data_file
@@ -3671,6 +3715,7 @@ class DetailsPage(GlassPage):
                           if e.get("id") == self.entry.get("id")), None)
             if fresh:
                 self.entry.update(fresh)
+                self._show_source()
         except Exception:
             logs.exception("details page could not re-read the entry")
         # The ticks too: playing an episode writes one whether or not

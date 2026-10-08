@@ -35,13 +35,11 @@ from PyQt6.QtWidgets import (
 )
 
 from . import (
-    anime_sites, app_settings, global_search, launchers, logs, lookup_pool,
-    manga_sites, nav_config, startup, storage, theme, uninstall,
-    updater,
+    app_settings, global_search, launchers, logs, nav_config, startup,
+    storage, theme, uninstall, updater,
 )
 from .widgets import (confirm, finish_toast, frameless_dialog, inform,
-                      show_toast, smooth_combo,
-                      smooth_scrolling, use_hover_cursor)
+                      show_toast, smooth_combo, use_hover_cursor)
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
 # and the page's settings serve all three media. The
@@ -258,62 +256,6 @@ def _read_backup(path: Path) -> dict:
             "only partly downloaded. Nothing was changed.")
 
 
-class _SiteProbeSignals(QObject):
-    done = Signal(str, str)  # which list ("reading"/"video"), site name
-
-
-# A verdict per row, in the owner's own words - they wrote these after
-# reading the previous two attempts. The first described the resolver
-# ("opens title pages", "search links only") and had to be explained; the
-# second explained itself on every row, which said the same thing five
-# times over. A row now carries the verdict alone and _VERDICT_LEGEND
-# below says what each one means, once, under the buttons.
-#
-# engine/streaming and generic all land on the entry's own page, but
-# generic gets there by reading the site's own search results, which is
-# the first thing to break when a site is redesigned - hence "may break"
-# rather than a fifth way of saying "works". Collapsing it into
-# "Works perfectly" would hide the case that fails first.
-_RESOLVES_LABELS = {
-    "engine": "Works perfectly",
-    "generic": "Works, but may break",
-    "streaming": "Works perfectly",
-    "search-only": "Works, but directed to search page",
-    "unreachable": "Site not responding",
-    "unknown": "Check failed",
-    "checking": "checking...",
-}
-
-# The same verdicts spelled out once, under the buttons, rather than
-# repeated on every row - a row says which verdict, this says what the
-# verdict means. {kind} is the medium the list is for, so it reads as
-# the thing being tracked there rather than as "content".
-_VERDICT_LEGEND = (
-    "<b>Works perfectly</b>: you'll be taken to the added {kind} page.<br>"
-    "<b>Works, but may break</b>: same, but the page is found through the "
-    "site's own search - it stops working when that changes.<br>"
-    "<b>Works, but directed to search page</b>: you'll be taken to the "
-    "site's {kind} search page and pick it yourself.<br>"
-    "<b>Site not responding</b>: nothing answered - the site may be down.<br>"
-    "<b>Check failed</b>: the check didn't finish - try Check again."
-)
-
-# Site ids whose verdict was actually measured during this run of the
-# app. A verdict is a measurement of a remote site at one moment, not a
-# property of the site, and nothing on the record says when it was taken
-# - so a check run weeks ago read as current forever. The stored
-# "resolves" field is still written (probe_site is unchanged) and still
-# read; it is just not shown until this run measured it again. Module
-# level rather than on SettingsDialog because the dialog is rebuilt on
-# every open and the lifetime wanted is the process, not the dialog.
-_CHECKED_THIS_RUN = set()
-
-# How many of the user's own titles one Check asks a site for. Three:
-# enough that a site missing one particular series still gets a fair
-# hearing, few enough that a site answering nothing is still bounded
-# (see probe_site's deadline).
-_PROBE_TITLE_LIMIT = 3
-
 # The Stremio account sign-in that used to live on the Watching page is
 # gone entirely, at the owner's ask. A session saved before the removal
 # keeps working - app_settings still holds and serves the auth key and
@@ -416,12 +358,6 @@ def add_spoiler_controls(form, owner=None):
     return blur_check, names_check
 
 
-def _verdict_legend(kind: str) -> QLabel:
-    label = QLabel(_VERDICT_LEGEND.format(kind=kind), objectName="Muted")
-    label.setWordWrap(True)
-    return label
-
-
 class _LauncherImportSignals(QObject):
     done = Signal(str, int)  # launcher key, number of games added
 
@@ -506,6 +442,18 @@ def _pointing_hands(page):
         use_hover_cursor(widget)
 
 
+def _round_save(button):
+    """The white pill Save. Its own sheet, which outranks both the app's
+    #Accent rule and a dialog's: through the dialog alone it kept square
+    corners (photographed, 1 October 2026)."""
+    button.setStyleSheet(
+        f"QPushButton#Accent {{ background: {theme.ACCENT_HOVER};"
+        f" color: {theme.ON_ACCENT}; border: none; border-radius: 16px;"
+        f" padding: 7px 22px; font-weight: 700; }}"
+        f"QPushButton#Accent:hover {{ background: {theme.rgba(theme.ACCENT_HOVER, 205)}; }}")
+    return button
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -540,12 +488,6 @@ class SettingsDialog(QDialog):
         content_col.setContentsMargins(28, 24, 28, 20)
         content_col.setSpacing(14)
         content_col.addWidget(QLabel("Settings", objectName="PanelTitle"))
-
-        self._site_probe_signals = _SiteProbeSignals()
-        self._site_probe_signals.done.connect(self._on_site_probed)
-        # Sites currently being checked, so the list can say so instead of
-        # showing nothing for the ~10s a probe can take.
-        self._probing_sites = set()
 
         self._launcher_import_signals = _LauncherImportSignals()
         self._launcher_import_signals.done.connect(self._on_launcher_import_done)
@@ -635,15 +577,7 @@ class SettingsDialog(QDialog):
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
-        save_btn = QPushButton("Save", objectName="Accent")
-        # Its own sheet, which outranks both the app's #Accent rule and
-        # the dialog's: through the dialog alone it kept square corners
-        # (photographed, 1 October 2026).
-        save_btn.setStyleSheet(
-            f"QPushButton#Accent {{ background: {theme.ACCENT_HOVER};"
-            f" color: {theme.ON_ACCENT}; border: none; border-radius: 16px;"
-            f" padding: 7px 22px; font-weight: 700; }}"
-            f"QPushButton#Accent:hover {{ background: {theme.rgba(theme.ACCENT_HOVER, 205)}; }}")
+        save_btn = _round_save(QPushButton("Save", objectName="Accent"))
         save_btn.clicked.connect(self.accept)
         save_btn.setDefault(True)
         btn_row.addWidget(save_btn)
@@ -1212,7 +1146,7 @@ class SettingsDialog(QDialog):
         form.addSpacing(24)
         # The Stremio Account sign-in that lived here (email/password,
         # Sign In/Disconnect) is removed entirely at the owner's ask -
-        # see the module-level note near _PROBE_TITLE_LIMIT. The progress
+        # see the module-level note on the Stremio sign-in. The progress
         # note below survives it: it describes the in-app player, which
         # is the only thing recording progress now.
         progress_note = QLabel(
@@ -1234,52 +1168,12 @@ class SettingsDialog(QDialog):
         form.setContentsMargins(4, 4, 12, 4)
         form.setSpacing(6)
 
-        form.addWidget(QLabel("Reading Websites", objectName="SectionTitle"))
-        sites_hint = QLabel(
-            "Sites reading entries are searched on and opened to. Add name and URL.",
-            objectName="Muted",
-        )
-        sites_hint.setWordWrap(True)
-        form.addWidget(sites_hint)
-
-        self.sites_list = QListWidget()
-        # A list is a scroll area like any other: without this it has
-        # Qt's raw thumb drag and Qt's three-lines wheel, neither of
-        # which is what the rest of the app does - see ScrollBarDrag.
-        smooth_scrolling(self.sites_list)
-        self.sites_list.setMinimumHeight(160)
-        self.sites_list.itemDoubleClicked.connect(self._edit_site)
-        form.addWidget(self.sites_list, stretch=1)
-        # Filled here rather than from __init__: this page builds on
-        # first visit, so this is the moment the list exists.
-        self._refresh_sites()
-
-        sites_btn_row = QHBoxLayout()
-        add_site_btn = QPushButton("Add...")
-        add_site_btn.clicked.connect(self._add_site)
-        sites_btn_row.addWidget(add_site_btn)
-        edit_site_btn = QPushButton("Edit...")
-        edit_site_btn.clicked.connect(self._edit_site)
-        sites_btn_row.addWidget(edit_site_btn)
-        check_site_btn = QPushButton("Check")
-        check_site_btn.setToolTip(
-            "Searches this site for a title it should have, then says which "
-            "of the verdicts below you would get by opening an entry here.")
-        check_site_btn.clicked.connect(self._check_site)
-        sites_btn_row.addWidget(check_site_btn)
-        check_all_sites_btn = QPushButton("Check All")
-        check_all_sites_btn.setToolTip("Check every site in this list. Verdicts clear "
-                                       "when Atomic restarts, so this is how to fill "
-                                       "them back in.")
-        check_all_sites_btn.clicked.connect(lambda: self._check_all_sites("reading"))
-        sites_btn_row.addWidget(check_all_sites_btn)
-        remove_site_btn = QPushButton("Remove", objectName="Danger")
-        remove_site_btn.clicked.connect(self._remove_site)
-        sites_btn_row.addWidget(remove_site_btn)
-        form.addLayout(sites_btn_row)
-        form.addWidget(_verdict_legend("reading"))
-
-        form.addSpacing(24)
+        # **No Reading Websites list.** The owner, 8 October 2026: "remove
+        # the websites section entirely from the settings I do not want the
+        # user to edit or add or remove any sites!" - the list, Add, Edit,
+        # Check, Check All, Remove, the verdict legend and the Add/Edit
+        # form went with it. The sites themselves are untouched: they are
+        # manga_sites' saved list, which every search and reader reads.
         form.addWidget(QLabel("Reading Music URL", objectName="SectionTitle"))
         self.manga_music_edit = QLineEdit(app_settings.get_manga_music_url())
         self.manga_music_edit.setPlaceholderText("https://example.com/lofi-playlist")
@@ -1743,193 +1637,6 @@ class SettingsDialog(QDialog):
         uninstall.run()
         QApplication.instance().quit()
 
-    # ------------------------------------------------------------------
-    def _site_label(self, site) -> str:
-        """One row of a websites list, with what the site can actually
-        do. Without this the only way to learn that a site never resolves
-        to title pages was to use it for a while and notice that every
-        entry opened a search page.
-
-        A verdict shows only while it is this run's own measurement (see
-        _CHECKED_THIS_RUN) - a stale one is a claim the app cannot stand
-        behind after a restart."""
-        label = f"{site['name']}  —  {site['base_url']}"
-        if site["id"] in self._probing_sites:
-            state = "checking"
-        elif site["id"] in _CHECKED_THIS_RUN:
-            state = site.get("resolves")
-        else:
-            state = None
-        note = _RESOLVES_LABELS.get(state)
-        return f"{label}   ·   {note}" if note else label
-
-    def _probe_site_async(self, which: str, site_id: str):
-        """Check what a site resolves to, in the background - it makes
-        real requests and takes seconds."""
-        module = manga_sites if which == "reading" else anime_sites
-        site = module.get_site(site_id)
-        if not site:
-            return
-        self._probing_sites.add(site_id)
-        # Reading is the only list on screen now (the Video Websites one
-        # is gone), so it is the only one with a row to repaint.
-        if which == "reading":
-            self._refresh_sites()
-        # Pooled, not a thread of its own: Check All fires one of these
-        # per configured site, and a bare thread each is the shape that
-        # once put 651 simultaneous connections on this user's network
-        # (.claude/rules/integrations.md).
-        #
-        # submit_watched, not submit: the shared queue is drained by
-        # three tracker pages' worth of page-load backfill, and a Check
-        # pressed after visiting one of them sat behind all of it.
-        # Crunchyroll made that plain - its verdict is decided from a
-        # table with no request at all, and the row still never filled
-        # in, because the job had not started yet.
-        lookup_pool.submit_watched(self._probe_site_worker, which, site_id, dict(site),
-                                   self._probe_titles(which, site_id))
-
-    def _probe_titles(self, which: str, site_id: str) -> list:
-        """Titles to check a site with: ones the user actually tracks,
-        preferring any already pointed at this very site, since those are
-        certain to exist there.
-
-        A single fixed title was the whole bug behind "directed to search
-        page" on sites that resolve fine - three of the four reading
-        sites here are Arabic scanlation sites that do not carry "One
-        Piece" under that name, so the probe found nothing and blamed the
-        site. Read off disk rather than from a page: Settings opens over
-        whichever page is showing, and none of them may be a tracker one.
-
-        Reading entries are "everything in tracker.json that isn't
-        Anime" - that file holds Anime and the reading types, and
-        films/series live in series.json - which avoids restating the
-        list of reading types (it belongs to windows.tracker, and helpers
-        must not import from windows)."""
-        tracked = storage.load("tracker.json", [])
-        if which == "reading":
-            entries = [e for e in tracked if e.get("type") != "Anime"]
-        else:
-            entries = [e for e in tracked if e.get("type") == "Anime"]
-            entries += storage.load("series.json", [])
-        entries.sort(key=lambda e: e.get("site_id") != site_id)
-        titles = []
-        for entry in entries:
-            title = (entry.get("title") or "").strip()
-            if title and title not in titles:
-                titles.append(title)
-            if len(titles) >= _PROBE_TITLE_LIMIT:
-                break
-        return titles
-
-    def _probe_site_worker(self, which, site_id, site, titles=None):
-        # Must never raise - a dead thread would leave the row stuck on
-        # "checking..." forever.
-        module = manga_sites if which == "reading" else anime_sites
-        try:
-            verdict = module.probe_site(site, titles=titles)
-        except Exception:
-            verdict = module.RESOLVES_UNKNOWN
-        try:
-            module.record_resolution(site_id, verdict)
-        except Exception:
-            # Only a verdict that reached the record is shown - if the
-            # write failed, what is on disk is some older run's answer,
-            # which is exactly what is being kept off the screen. set.add
-            # off the UI thread is fine (atomic); the redraw itself still
-            # goes through the signal below.
-            #
-            # Logged rather than passed over in silence: swallowing it is
-            # why Check All looked like it simply skipped Crunchyroll for
-            # so long - two probes finishing at once collided in
-            # storage.save (fixed there), and the row's blankness was the
-            # only symptom anywhere.
-            logs.exception(f"Could not record the check result for {site.get('name')}")
-        else:
-            _CHECKED_THIS_RUN.add(site_id)
-        self._site_probe_signals.done.emit(which, site_id)
-
-    def _on_site_probed(self, which, site_id):
-        self._probing_sites.discard(site_id)
-        if which == "reading":
-            self._refresh_sites()
-
-    def _refresh_sites(self):
-        # The Reading page builds on first visit, and a probe started
-        # before that (Add Website, or one still running from an earlier
-        # visit) reports back through _on_site_probed regardless. An
-        # AttributeError raised in a Qt slot takes the whole process down
-        # (planning.md, defect #5) - so ask whether the list exists
-        # rather than assuming it does. Nothing is lost: the page fills
-        # itself from disk when it is finally built.
-        if getattr(self, "sites_list", None) is None:
-            return
-        self.sites_list.clear()
-        for site in manga_sites.list_sites():
-            item = QListWidgetItem(self._site_label(site))
-            item.setData(Qt.ItemDataRole.UserRole, site["id"])
-            self.sites_list.addItem(item)
-
-    def _selected_site_id(self):
-        items = self.sites_list.selectedItems()
-        return items[0].data(Qt.ItemDataRole.UserRole) if items else None
-
-    def _add_site(self):
-        dialog = SiteForm(self, "Website")
-        if dialog.result_data:
-            site = manga_sites.add_site(*dialog.result_data)
-            self._refresh_sites()
-            self._probe_site_async("reading", site["id"])
-
-    def _edit_site(self):
-        site_id = self._selected_site_id()
-        if not site_id:
-            inform(self, "Reading Websites", "Select a website first.")
-            return
-        dialog = SiteForm(self, "Website", manga_sites.get_site(site_id))
-        if dialog.result_data:
-            manga_sites.update_site(site_id, *dialog.result_data)
-            self._refresh_sites()
-            # Re-checked, not kept: the URL may be the thing that changed.
-            self._probe_site_async("reading", site_id)
-
-    def _check_all_sites(self, which: str):
-        """Re-probe every site in one list.
-
-        Worth having because a verdict now only shows while the run that
-        measured it is still going (see _CHECKED_THIS_RUN), so after a
-        restart the whole list is blank and clicking Check once per site
-        is the only way back. Already-running probes are skipped rather
-        than queued twice."""
-        module = manga_sites if which == "reading" else anime_sites
-        sites = [site for site in module.list_sites()
-                 if site["id"] not in self._probing_sites]
-        for site in sites:
-            self._probe_site_async(which, site["id"])
-
-    def _check_site(self):
-        site_id = self._selected_site_id()
-        if not site_id:
-            inform(self, "Reading Websites", "Select a website first.")
-            return
-        self._probe_site_async("reading", site_id)
-
-    def _remove_site(self):
-        site_id = self._selected_site_id()
-        if not site_id:
-            inform(self, "Reading Websites", "Select a website first.")
-            return
-        site = manga_sites.get_site(site_id)
-        if confirm(self, "Remove Website", f"Remove '{site['name']}'?"):
-            manga_sites.remove_site(site_id)
-            self._refresh_sites()
-
-    # The Add/Edit/Check/Remove set for Video Websites lived here. It went
-    # with the list itself: there is nothing to add a video site *to* any
-    # more. anime_sites keeps its saved sites and its whole API - entries
-    # still carry site_id, and streaming_provider is what tells the player
-    # a Netflix or Crunchyroll entry is DRM - it simply has no editor.
-
     def _toggle_startup(self, checked):
         try:
             startup.set_enabled(checked)
@@ -1966,57 +1673,3 @@ class SettingsDialog(QDialog):
 
     def _save_manga_music_url(self):
         app_settings.set_manga_music_url(self.manga_music_edit.text().strip())
-
-
-class SiteForm(QDialog):
-    """Add/edit one site: just a name + URL - shared by Reading Websites
-    and Video Websites, which both store a plain base URL now (video
-    sites used to want a hand-typed "/search?q=" prefix here; the search
-    pattern is derived per site in anime_sites instead). `result_data`
-    is a (name, url) tuple after a successful Save, else None."""
-
-    def __init__(self, parent, kind, site=None):
-        super().__init__(parent)
-        self.result_data = None
-        self.setWindowTitle(f"Edit {kind}" if site else f"Add {kind}")
-        # 240 tall, up from the 210 the natively-framed version needed:
-        # the panel now carries its own heading where the title bar was.
-        self.setFixedSize(360, 240)
-
-        form = QVBoxLayout(self)
-        form.setContentsMargins(20, 18, 20, 16)
-        form.setSpacing(6)
-
-        form.addWidget(QLabel("Name"))
-        self.name_edit = QLineEdit(site["name"] if site else "")
-        form.addWidget(self.name_edit)
-
-        form.addSpacing(8)
-        form.addWidget(QLabel("Website URL"))
-        self.url_edit = QLineEdit(site.get("base_url", "") if site else "")
-        self.url_edit.setPlaceholderText("https://example.com/")
-        form.addWidget(self.url_edit)
-
-        form.addStretch()
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        save_btn = QPushButton("Save", objectName="Accent")
-        save_btn.setDefault(True)
-        save_btn.clicked.connect(self._save)
-        btn_row.addWidget(save_btn)
-        form.addLayout(btn_row)
-
-        frameless_dialog(self, title=self.windowTitle())
-        self.exec()
-
-    def _save(self):
-        name = self.name_edit.text().strip()
-        url = self.url_edit.text().strip()
-        if not name or not url:
-            inform(self, "Websites", "Name and URL are required.")
-            return
-        self.result_data = (name, url)
-        self.accept()
