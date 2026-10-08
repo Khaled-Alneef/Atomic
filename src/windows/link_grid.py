@@ -127,16 +127,17 @@ def _stamp_used(entry):
             if any(str(t.get("type") or "") != "app"
                    for t in (entry.get("targets") or []))
             else "apps.json")
-    stamp = storage.now_iso()
-    entry["last_used"] = stamp
     # The entry may live in either file - an id is unique across both,
     # so writing the wrong one is a no-op rather than a wrong row.
-    for name in (kind, "apps.json" if kind != "apps.json" else "websites.json"):
-        try:
-            if storage.update_entry(name, entry_id, {"last_used": stamp}):
-                return
-        except Exception:
-            return          # a launch must never fail on bookkeeping
+    # Written 1.5s after the click, his ask of 8 October 2026 -
+    # game_launch.STAMP_DELAY_S.
+    try:
+        from helpers import game_launch
+        game_launch.stamp_later(
+            entry, "last_used",
+            (kind, "apps.json" if kind != "apps.json" else "websites.json"))
+    except Exception:
+        pass                # a launch must never fail on bookkeeping
 
 
 def open_link_entry(parent, entry, label="Links"):

@@ -240,6 +240,42 @@ def resolve(launcher_key: str, root_dir, game_dir):
     return command_for(launcher_key, index_for(launcher_key, root_dir), game_dir)
 
 
+# **The move to the front waits 1.5s.** The owner, 8 October 2026: "the
+# games websites and apps in the main page, make the most recent clicked
+# goes 1st after 1.5 sec not immediately! same for their pages when the
+# order is last Played or Visited!" Home and the three shelf pages both
+# re-order off this stamp (they watch the files at 150ms), so delaying
+# the write delays every one of them, and a card does not jump out from
+# under the pointer that has just clicked it.
+STAMP_DELAY_S = 1.5
+
+
+def stamp_later(entry, field, files):
+    """Write `field` = now onto `entry` in the first of `files` that holds
+    it, STAMP_DELAY_S from now, on a timer thread. The time recorded is
+    the click's, not the write's. A daemon thread: quitting inside the
+    1.5s loses the stamp, which is bookkeeping, never the launch."""
+    import threading
+    from . import storage
+    entry_id = entry.get("id")
+    if not entry_id:
+        return
+    stamp = storage.now_iso()
+
+    def write():
+        entry[field] = stamp
+        for name in files:
+            try:
+                if storage.update_entry(name, entry_id, {field: stamp}):
+                    return
+            except Exception:
+                return          # a launch must never fail on bookkeeping
+
+    timer = threading.Timer(STAMP_DELAY_S, write)
+    timer.daemon = True
+    timer.start()
+
+
 def _stamp_played(game):
     """Record that this game was just started.
 
@@ -256,14 +292,8 @@ def _stamp_played(game):
     list back - the write that once erased freshly imported games
     (rules/ui.md).
     """
-    entry_id = game.get("id")
-    if not entry_id:
-        return
     try:
-        from . import storage
-        stamp = storage.now_iso()
-        game["last_played"] = stamp
-        storage.update_entry("games.json", entry_id, {"last_played": stamp})
+        stamp_later(game, "last_played", ("games.json",))
     except Exception:
         pass            # a launch must never fail on bookkeeping
 
