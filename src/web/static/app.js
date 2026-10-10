@@ -1634,6 +1634,27 @@ function rowArrows(block, strip) {
    one and everything below moves - once per page, twenty to two hundred
    times a chapter, which is the reader "jumping" as it loads. */
 let readerState = { id: '', index: 0, key: '', total: 0, zoom: 1 };
+// A novel's text at 100%: about what a reading site sets (kolnovel's own
+// column is 16px at 200% line height; this is a little larger for a
+// desktop window read from further away).
+const NOVEL_TEXT_PX = 19;
+/* **The novel's typeface, the reader's choice** - the owner, 10 October
+   2026: "make the font size and font type customizable in the novels".
+   Faces that ship with Windows, so every pick renders without a
+   download; Arabic and English keep separate lists and separate
+   remembered picks, since no Latin book face carries Arabic. "" is the
+   stylesheet's own (.ntext). */
+const NOVEL_FONTS = {
+  ar: [['', 'Default'], ['Segoe UI', 'Segoe UI'], ['Tahoma', 'Tahoma'],
+       ['Arial', 'Arial'], ['Sakkal Majalla', 'Sakkal Majalla'],
+       ['Traditional Arabic', 'Traditional Arabic'],
+       ['Simplified Arabic', 'Simplified Arabic'],
+       ['Times New Roman', 'Times New Roman']],
+  en: [['', 'Default'], ['Georgia', 'Georgia'],
+       ['Palatino Linotype', 'Palatino'], ['Cambria', 'Cambria'],
+       ['Constantia', 'Constantia'], ['Calibri', 'Calibri'],
+       ['Bahnschrift', 'Bahnschrift'], ['Consolas', 'Consolas']],
+};
 // The reader's key handler, so re-opening a chapter replaces it
 // rather than stacking a second one that also changes chapter.
 let readerKeys = null;
@@ -1764,10 +1785,18 @@ async function openChapter(id, index) {
   // nothing, said nothing, and marked the chapter read. The bars, the
   // previous/next buttons and the browser button below are still wired,
   // so the reader is left, not abandoned.
-  const noPages = !(data.pages && data.pages.length);
+  /* **A novel's chapter is text** (server: backend.pages answers `text`
+     instead of `pages` for helpers/novel_sites). Everything around the
+     page - the bar, the jump list, Previous/Next, the keys and the read
+     mark - is the same reader; only the column is different, and the
+     zoom is the text's size. */
+  const isText = Array.isArray(data.text);
+  const noPages = isText ? !data.text.length : !(data.pages && data.pages.length);
   if (noPages) {
     const box = el('div', 'empty rnopages');
-    box.appendChild(el('div', 'rnopages-head', 'This chapter has no pages here'));
+    box.appendChild(el('div', 'rnopages-head', isText
+      ? 'This chapter has no text here'
+      : 'This chapter has no pages here'));
     box.appendChild(el('div', 'rnopages-why', data.reason === 'locked'
       ? 'The site lists it as a paid or locked chapter.'
       : (data.reason === 'unreachable'
@@ -2312,6 +2341,12 @@ async function openChapter(id, index) {
 
   function applyZoom() {
     zoomLabel.textContent = Math.round(readerState.zoom * 100) + '%';
+    if (isText) {
+      // A text size reads as a size, not a zoom.
+      zoomLabel.textContent = Math.round(NOVEL_TEXT_PX * readerState.zoom) + 'px';
+      strip.style.fontSize = (NOVEL_TEXT_PX * readerState.zoom).toFixed(1) + 'px';
+      return;
+    }
     // The estimate box moves with the pages, or a chapter re-sized
     // mid-load steps around whatever has not arrived yet.
     if (single) {
@@ -2333,17 +2368,23 @@ async function openChapter(id, index) {
 
   function changeZoom(step) {
     readerState.zoom = Math.min(4, Math.max(0.25, readerState.zoom + step));
-    try { localStorage.setItem('atomic.reader.zoom', String(readerState.zoom)); }
+    try { localStorage.setItem(ZOOM_KEY, String(readerState.zoom)); }
     catch (err) { /* a private window; the zoom still holds this session */ }
     applyZoom();
   }
   /* **The zoom is remembered between sessions.** It survived a chapter
      change already; it did not survive closing the app, so a size he
      had set by hand was gone the next morning and the argument started
-     again. Kept in settings beside everything else he sets once. */
+     again. Kept in settings beside everything else he sets once.
+
+     **A novel's text size is its own setting.** A manga page zoomed out
+     to 70% is a reasonable page and an unreadable paragraph, so text
+     keeps a separate remembered size and always starts from it. */
+  const ZOOM_KEY = isText ? 'atomic.reader.textzoom' : 'atomic.reader.zoom';
+  if (isText) readerState.zoom = 0;
   if (!readerState.zoom) {
     try {
-      const kept = parseFloat(localStorage.getItem('atomic.reader.zoom'));
+      const kept = parseFloat(localStorage.getItem(ZOOM_KEY));
       readerState.zoom = (kept > 0.2 && kept < 5) ? kept : 1;
     } catch (err) { readerState.zoom = 1; }
   }
@@ -2354,7 +2395,7 @@ async function openChapter(id, index) {
   zoomOut.addEventListener('click', function () { changeZoom(-ZOOM_STEP); });
   zoomLabel.addEventListener('click', function () {
     readerState.zoom = 1;
-    try { localStorage.setItem('atomic.reader.zoom', '1'); } catch (err) {}
+    try { localStorage.setItem(ZOOM_KEY, '1'); } catch (err) {}
     applyZoom();
   });
 
@@ -2367,6 +2408,14 @@ async function openChapter(id, index) {
   // mid top bar instead of the reading name".
   num.textContent = data.title || '';
   label.textContent = (data.count || 0) + ' pages';
+  if (isText) {
+    let words = 0;
+    data.text.forEach(function (line) { words += line.split(/\s+/).length; });
+    label.textContent = words.toLocaleString('en') + ' words';
+    zoomLabel.title = 'Text size (0 resets)';
+    // A chapter download is page images into a .cbz (helpers/downloads).
+    download.style.display = 'none';
+  }
 
   // **The list runs newest first**, so the next chapter is a *lower*
   // index and the previous one a higher. Measured on the owner's
@@ -2514,6 +2563,49 @@ async function openChapter(id, index) {
     // width applies from the first page rather than the second.
     strip.querySelectorAll('img.rpage').forEach(sizePage);
   }
+  /* **The text column.** Paragraphs as the site wrote them, in its
+     direction - right to left for the two Arabic sites - with the
+     chapter's own name above them, since a novel chapter has no title
+     page the way a scanlated one does. textContent only: this is a
+     site's text, never markup. */
+  if (isText && data.text.length) {
+    strip.classList.add('novel');
+    strip.dir = data.dir === 'rtl' ? 'rtl' : 'ltr';
+    strip.lang = data.dir === 'rtl' ? 'ar' : 'en';
+    const column = el('article', 'ntext');
+    column.appendChild(el('h1', 'nhead', data.label || ''));
+    // The typeface picker, in the bar beside the size - see NOVEL_FONTS.
+    const lang = data.dir === 'rtl' ? 'ar' : 'en';
+    const fontKey = 'atomic.reader.font.' + lang;
+    let face = '';
+    try { face = localStorage.getItem(fontKey) || ''; } catch (err) {}
+    const fontPick = el('select', 'rjump rfont');
+    fontPick.title = 'Font';
+    NOVEL_FONTS[lang].forEach(function (pair) {
+      const opt = el('option', null, pair[1]);
+      opt.value = pair[0];
+      if (pair[0]) opt.style.fontFamily = '"' + pair[0] + '"';
+      if (pair[0] === face) opt.selected = true;
+      fontPick.appendChild(opt);
+    });
+    function applyFace(name) {
+      column.style.fontFamily = name ? '"' + name + '", sans-serif' : '';
+    }
+    applyFace(face);
+    fontPick.addEventListener('change', function () {
+      applyFace(fontPick.value);
+      try { localStorage.setItem(fontKey, fontPick.value); } catch (err) {}
+      fontPick.blur();      // let the bar hide again (.rbar:focus-within)
+    });
+    right.insertBefore(fontPick, zoomOut);
+    zoomOut.title = 'Smaller text (\u2212)';
+    zoomIn.title = 'Bigger text (+)';
+    data.text.forEach(function (line) {
+      column.appendChild(el('p', line === '* * *' ? 'nbreak' : null, line));
+    });
+    strip.appendChild(column);
+  }
+
   (data.pages || []).forEach(function (src, i) {
     const img = el('img', 'rpage');
     img.alt = '';
@@ -2555,6 +2647,25 @@ async function openChapter(id, index) {
     if (img.getAttribute('src') && img.complete) learn(img);
     strip.appendChild(img);
   });
+
+  /* **Previous and Next at the end of every chapter** - the owner, 10
+     October 2026: "add the Previous btn also as the next in the ch
+     bottom also add these in the manga manhua and manhwa". Where the eye
+     already is when a chapter runs out; the floor's pair stays for a
+     reach to the bottom edge. `ltr` on the row: English words with
+     arrows inside an Arabic column had the bidi algorithm put the arrow
+     first (photographed). */
+  const ending = el('div', 'rendnav');
+  ending.dir = 'ltr';
+  const prevHere = el('button', 'rbtn', '\u2039  Previous Chapter');
+  const nextHere = el('button', 'rbtn go', 'Next Chapter  \u203A');
+  prevHere.disabled = prev.disabled;
+  nextHere.disabled = next.disabled;
+  prevHere.addEventListener('click', function () { openChapter(id, index + 1); });
+  nextHere.addEventListener('click', function () { openChapter(id, index - 1); });
+  ending.appendChild(prevHere);
+  ending.appendChild(nextHere);
+  strip.appendChild(ending);
 
   // Marked read on open, which is what the Qt reader records too - never
   // for a chapter that showed nothing (see noPages above: the pass that

@@ -742,6 +742,7 @@ ICON_HOVER_MOTION = {
     "manga":     (0.0, -1.0,  -4.0, 0.00, 0.0),
     "manhwa":    (0.0, -1.0,  -4.0, 0.00, 0.0),
     "manhua":    (0.0, -1.0,  -4.0, 0.00, 0.0),
+    "novels":    (0.0, -1.0,  -4.0, 0.00, 0.0),
     "games":     (0.0,  0.0,   5.0, 0.00, 0.0),
     "websites":  (0.0,  0.0,   6.0, 0.02, 0.0),
     "saved":     (0.0, -2.0,   0.0, 0.00, 0.0),
@@ -866,6 +867,7 @@ SECTION_ICONS = {
     "cat_manga": theme.rail_icon("manga"),
     "cat_manhwa": theme.rail_icon("manhwa"),
     "cat_manhua": theme.rail_icon("manhua"),
+    "cat_novels": theme.rail_icon("novels"),
     "cat_other": theme.rail_icon("addons"),
 }
 
@@ -6297,6 +6299,13 @@ def main():
         _prewarm_anime_identity()
     except Exception:
         logs.exception("Could not prewarm the anime season maps")
+    # The Novels catalogue's first page, if the one on disk is missing or
+    # stale - see novel_sites.warm_async.
+    try:
+        from helpers import novel_sites
+        novel_sites.warm_async()
+    except Exception:
+        logs.exception("Could not warm the novels catalogue")
     # Last, and on its own delay: the one thing here nobody is waiting
     # for. After whats_new deliberately - that dialog is modal, so a
     # timer armed before it would tick inside its nested event loop.

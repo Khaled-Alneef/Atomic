@@ -92,6 +92,10 @@ NAV_GROUPS = [
         ("Manga", "manga:cat_manga"),
         ("Manhwa", "manga:cat_manhwa"),
         ("Manhua", "manga:cat_manhua"),
+        # The owner, 10 October 2026: "add a new section on the sidebar,
+        # named Novels". In the reading block, after the three it reads
+        # beside; the page is the Read page's `novels` route.
+        ("Novels", "manga:cat_novels"),
     ],
     [
         ("Games", "games"),

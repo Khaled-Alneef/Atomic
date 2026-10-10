@@ -526,6 +526,36 @@ class WebCastBrowse(WebReader):
         return f"cast?name={quote(str(entry.get('person') or ''), safe='')}"
 
 
+class WebNovelGenreBrowse(WebReader):
+    """One novel site's genre list - the genre shell with the
+    `novelgenre` route (web/server._novel_genre)."""
+
+    def __init__(self, base_url, name, site_id, url, host):
+        super().__init__(base_url,
+                         {"title": str(name), "genre": str(name),
+                          "site": str(site_id), "url": str(url)},
+                         None, host)
+
+    def _route_for(self, entry, chapter_index):
+        return (f"novelgenre?site={quote(str(entry.get('site') or ''), safe='')}"
+                f"&url={quote(str(entry.get('url') or ''), safe='')}"
+                f"&name={quote(str(entry.get('genre') or ''), safe='')}")
+
+
+def open_novel_genre_browse(window, name, site_id, url):
+    """Put a novel site's genre page over `window`. Returns it, or None."""
+    if not available():
+        return None
+    try:
+        from windows.web_pages import base_url
+        host = _overlay_host(window)
+        return _show_over(WebNovelGenreBrowse(base_url(), name, site_id, url, host),
+                          host)
+    except Exception:
+        logs.exception("Opening a novel genre page failed")
+        return None
+
+
 def _overlay_host(window):
     host = None
     for name in ("immersive_host", "overlay_host"):

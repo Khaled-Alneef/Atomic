@@ -5723,6 +5723,16 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
             index = None
             if chapter_number is not None:
                 index = _web_chapter_index(entry, chapter_number)
+            elif resume and entry.get("type") == "Novel":
+                # **A novel resumes after its furthest read chapter, or at
+                # chapter 1** - the rule the Home ring already uses
+                # (web_pages._next_chapter_index). `progress` names
+                # nothing for a novel, and an index of None opens the
+                # list's head, which is its *newest* chapter: measured on
+                # the frozen build, Continue on an unread The Beginning
+                # After the End opened volume 12.5's extra chapter.
+                from windows import web_pages
+                index = web_pages._next_chapter_index(entry)
             elif resume:
                 index = _web_chapter_index(entry, entry.get("progress"))
             page = web_reader.open_reader(window, entry, index)

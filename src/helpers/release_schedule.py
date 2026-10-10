@@ -87,6 +87,13 @@ def needs_refresh(entry: dict, force: bool = False) -> bool:
     """Whether this entry's schedule is worth (re-)looking up now."""
     if entry.get("status") in FINISHED_STATUSES:
         return False
+    # **Never for a novel.** Nobody publishes a novel's next chapter date,
+    # and the reading source here is MangaDex, which answers for the
+    # *manga* adaptation of the same name - "The Beginning After the End"
+    # the novel would inherit the manga's schedule, the worst failure the
+    # integrations rules name. No lookup, no line on the card.
+    if entry.get("type") == "Novel":
+        return False
     if force:
         return True
     stored = entry.get("next_release")

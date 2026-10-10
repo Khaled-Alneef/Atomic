@@ -33,7 +33,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from . import manga_sites, mangadex, net, storage, title_match
+from . import manga_sites, mangadex, net, novel_sites, storage, title_match
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
@@ -685,6 +685,32 @@ def list_chapters(entry, *, deadline=None, refresh=False,
         cached = _cached(key)
         if cached:
             return cached
+    # **A novel is listed by its own site, and only there.** The rungs
+    # below are image sources: another reading site "with the same title"
+    # and MangaDex would both answer for the *manga* of a novel's name,
+    # which is a list of picture chapters the text reader cannot open.
+    if novel_sites.is_novel(entry):
+        def partial(rows):
+            # **Stored, not only drawn.** Novel Fire's whole numbered list
+            # is known after its first page (0.6s) and its titles after
+            # all of them (9.1s for Kill the Sun's 992, measured on the
+            # frozen build) - and the reader indexes into the *stored*
+            # list (backend.pages), so a Continue pressed in between sat
+            # on "loading..." until the last page answered. The two lists
+            # hold the same chapters at the same positions; only titles
+            # differ, and the complete one overwrites this.
+            if rows and key:
+                try:
+                    _store(key, rows)
+                except Exception:
+                    pass
+            if on_partial is not None:
+                on_partial(rows)
+
+        chapters = novel_sites.chapters(entry, deadline, on_partial=partial)
+        if chapters and key:
+            _store(key, chapters)
+        return chapters
     chapters = []
     try:
         chapters = _site_chapters(entry, deadline, on_partial)
@@ -917,6 +943,13 @@ def chapter_pages(chapter, deadline=None) -> dict:
         deadline = net.deadline_in(25)
     chapter = chapter or {}
     direction = chapter.get("direction") or "ltr"
+
+    if chapter.get("source") == "novel":
+        # Text, not pictures - see novel_sites.chapter_text.
+        answer = novel_sites.chapter_text(chapter, deadline=deadline)
+        return {"pages": [], "headers": {}, "direction": answer.get("dir"),
+                "text": answer.get("text") or [],
+                "reason": answer.get("reason") or ""}
 
     if chapter.get("source") == "MangaDex":
         pages = _mangadex_pages(chapter, deadline)

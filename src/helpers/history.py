@@ -40,7 +40,7 @@ HISTORY_FILE = "history.json"
 
 # The reading types, repeated rather than imported: windows.tracker
 # imports this module, so importing it back would be a cycle.
-MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
+MANGA_TYPES = ("Manga", "Manhwa", "Manhua", "Novel")
 
 # How many titles the file keeps. Bounded because nothing here ever gets
 # deleted by hand and a details page reads the whole file; 500 titles is

@@ -1207,7 +1207,7 @@ def _covered(page) -> bool:
                 return True
     return False
 
-READING_MEDIA = ("manga", "manhwa", "manhua", "other")
+READING_MEDIA = ("manga", "manhwa", "manhua", "other", "novel")
 
 
 def _next_chapter_index(entry, with_newest=False):
@@ -1811,6 +1811,7 @@ class WebTrackerPage(_WebPage):
     SECTION_ROUTES = {
         "cat_movies": "movies", "cat_series": "series", "cat_anime": "anime",
         "cat_manga": "manga", "cat_manhwa": "manhwa", "cat_manhua": "manhua",
+        "cat_novels": "novels",
         # The window's bar opens these three (main.open_section). Without
         # them set_active_section returned early and left the page on its
         # own ROUTE, which is why every one of them showed Series.

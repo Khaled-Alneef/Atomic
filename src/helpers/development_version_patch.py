@@ -1597,7 +1597,15 @@ def install():
     #     the click (game_launch.stamp_later).
     #   * A reading details page names its site (details._show_source);
     #     the Reading Websites editor left Settings.
-    updater.APP_VERSION = "3.6"
+    # 3.7
+    #   * Novels: a sidebar section over kolnovel, rewayat.club,
+    #     ReadNovelFull and Novel Fire (helpers/novel_sites), read as text
+    #     in the reader with a font and size of its own; a Top 10 Novels
+    #     row on Discover in place of Other Readings; Novels in search.
+    #   * Previous/Next at the end of every chapter; reading cards name
+    #     their site; LANGUAGE above SOURCE on reading pages.
+    #   * The cast row left Discover.
+    updater.APP_VERSION = "3.7"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:

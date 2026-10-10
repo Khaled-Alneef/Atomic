@@ -60,7 +60,11 @@ DISCOVER_SECTIONS = (
     ("medium:Manga", "Manga"),
     ("medium:Manhwa", "Manhwa"),
     ("medium:Manhua", "Manhua"),
-    ("medium:Other", "Other Readings"),
+    # **Novels, where Other Readings was** - the owner, 10 October 2026:
+    # "in the discover, remove the other readings row and replace it with
+    # Novels!". Not a discover_cache.json section: _discover lays the
+    # Novels page's own cache (novel_sites.CACHE_FILE) in under this key.
+    ("novels", "Novels"),
 )
 
 # How many titles a Discover row holds - Netflix's Top 10 (see _discover).
@@ -1039,6 +1043,14 @@ def _card_cover(title, page_url, thin=False, imdb_id="", kind=""):
     if kind == "person":
         _CARD_COVERS[key] = ""
         return {"cover": ""}
+    # **Nor is a novel a manga.** The reading chain below asks MangaDex
+    # and AniList by title, and for a novel they answer with its manga
+    # adaptation's cover - a different work's picture on the card. A
+    # novel's cover is its own site's; when that fails the card stays
+    # blank, which is the honest answer.
+    if kind == "novel":
+        _CARD_COVERS[key] = ""
+        return {"cover": ""}
     if kind and kind not in READING_KINDS:
         found = ""
         try:
@@ -1507,7 +1519,37 @@ def _grid_row(entry, saved_titles):
     except (TypeError, ValueError):
         row["rating"] = 0.0
     row["saved"] = _is_saved(entry, saved_titles)
+    # **The site under the title, on every reading card.** The owner, 10
+    # October 2026: "add in the manhwa manga and manhua the site name
+    # under the read name like the novels!" A reading row has no year or
+    # rating, so the meta line was empty; the sweep's rows already carry
+    # `site_name` (3asq, SWAT...), and an older row is named by its
+    # site_id or its url's host.
+    if not row["meta"] and str(entry.get("type") or "").strip().lower() in READING_KINDS:
+        row["meta"] = _site_label(entry)
     return row
+
+
+def _site_label(entry) -> str:
+    name = str(entry.get("site_name") or "").strip()
+    if name:
+        return name
+    try:
+        if str(entry.get("type") or "") == "Novel":
+            from helpers import novel_sites
+            return novel_sites.site_name(entry)
+        from helpers import manga_sites
+        site = manga_sites.get_site(str(entry.get("site_id") or ""))
+        if site is None:
+            import urllib.parse as _up
+            host = (_up.urlsplit(str(entry.get("url") or "")).hostname or "").lower()
+            host = host[4:] if host.startswith("www.") else host
+            site = next((s for s in manga_sites.list_sites()
+                         if host and host == ((_up.urlsplit(str(s.get("base_url") or "")).hostname
+                                               or "").lower().removeprefix("www."))), None)
+        return str((site or {}).get("name") or "")
+    except Exception:
+        return ""
 
 
 # How many titles the banner rotates through. Home shows one at a time
@@ -1720,7 +1762,8 @@ def _home():
 
 _HOME_KEYS = {"movie": "series:cat_movies", "series": "series:cat_series",
               "anime": "series:cat_anime", "manga": "manga:cat_manga",
-              "manhwa": "manga:cat_manhwa", "manhua": "manga:cat_manhua"}
+              "manhwa": "manga:cat_manhwa", "manhua": "manga:cat_manhua",
+              "novel": "manga:cat_novels"}
 
 
 def _home_key(entry) -> str:
@@ -1735,7 +1778,8 @@ _DISCOVER_KEYS = {"anime": "series:cat_anime", "series": "series:cat_series",
                   "movie": "series:cat_movies",
                   "medium:Manga": "manga:cat_manga",
                   "medium:Manhwa": "manga:cat_manhwa",
-                  "medium:Manhua": "manga:cat_manhua"}
+                  "medium:Manhua": "manga:cat_manhua",
+                  "novels": "manga:cat_novels"}
 
 
 def _hidden_on_discover() -> set:
@@ -1938,6 +1982,14 @@ def _discover():
     if not isinstance(cached, dict):
         cached = {}
 
+    try:
+        from helpers import novel_sites
+        block = storage.load(novel_sites.CACHE_FILE, {})
+        if isinstance(block, dict) and block.get("rows"):
+            cached = dict(cached, novels=block)
+    except Exception:
+        pass
+
     sections, total, newest, banner = [], 0, 0.0, None
     pools = {}
     hidden = _hidden_on_discover()
@@ -2052,13 +2104,9 @@ def _discover():
                                   _row_side(first.get("type"))),
                       "id": ""}
 
-    # **Cast, at the foot of the page.** Last rather than first: the
-    # sections above are this machine's own cached catalogue and answer
-    # with no network at all, and a TMDB call must never hold them up
-    # (rule 7). The section is dropped entirely when TMDB says nothing.
-    faces = _cast_section()
-    if faces is not None:
-        sections.append(faces)
+    # **No cast row.** The owner, 10 October 2026: "remove the cast row
+    # from Discover page". It sat at the foot of the page (_cast_section,
+    # which the search page still uses for its own Cast section).
     note = f"Ranked from {total} titles"
     if newest:
         age = (time.time() - newest) / 3600.0
@@ -2279,6 +2327,16 @@ def _search(text, more=False):
                         "type": "Manga", "imdb_id": "", "year": ""})
         return out[:30]
 
+    def novels():
+        """The four novel sites - helpers/novel_sites, under its own
+        deadline. Interleaved there, so a short section still holds both
+        languages."""
+        try:
+            from helpers import novel_sites
+            return novel_sites.search_all(text) or []
+        except Exception:
+            return []
+
     # **Cast is asked with the rest, not after them.** One more worker
     # rather than a fifth round trip: people.search is a single TMDB
     # call (0.2-0.4s measured) and running it after the others would add
@@ -2313,7 +2371,7 @@ def _search(text, more=False):
     # The pool is not waited on: a straggler finishes into a result
     # nobody reads, on a daemon-less worker that ends with it. Shutting
     # down with wait=True here would put the whole 18s back.
-    job = _search_job(text, video, reading, faces)
+    job = _search_job(text, video, reading, faces, novels)
     # **The first answer waits SEARCH_FIRST_WAIT_S, not for the slowest
     # source.** Measured 7 September 2026 on "kingdom": every source but
     # three had answered inside 1.1s, and the route took 5.9s because it
@@ -2347,7 +2405,8 @@ def _search(text, more=False):
     # arrives (app.js mergeSections).
     anime_ids = {str(r.get("imdb_id") or "") for r in found.get("Anime") or []
                  if isinstance(r, dict) and r.get("imdb_id")}
-    for order, name in enumerate(("Anime", "Series", "Movies", "Reading")):
+    for order, name in enumerate(("Anime", "Series", "Movies", "Reading",
+                                  "Novels")):
         rows = [r for r in found.get(name) or [] if isinstance(r, dict)
                 and r.get("title")]
         if name == "Series" and anime_ids:
@@ -2357,12 +2416,17 @@ def _search(text, more=False):
         if not rows:
             continue
         total += len(rows)
+        shaped = [_row(e) for e in rows]
+        if name in ("Novels", "Reading"):
+            # The site under each title, as on the catalogue pages.
+            for row, e in zip(shaped, rows):
+                row["meta"] = row.get("meta") or _site_label(e)
         sections.append({"title": f"{name}  ({len(rows)})", "key": name.lower(),
-                         "order": order, "rows": [_row(e) for e in rows]})
+                         "order": order, "rows": shaped})
     if cast:
         total += len(cast)
         sections.append({"title": f"Cast  ({len(cast)})", "style": "person",
-                         "key": "cast", "order": 4,
+                         "key": "cast", "order": 5,
                          "rows": [_person_row(r) for r in cast]})
     if pending:
         note = (f"{total} so far for “{text}” · still searching "
@@ -2383,7 +2447,7 @@ SEARCH_MORE_WAIT_S = 0.6
 SEARCH_JOB_TTL_S = 120.0
 
 
-def _search_job(text, video, reading, faces):
+def _search_job(text, video, reading, faces, novels):
     from concurrent.futures import ThreadPoolExecutor
     now = time.monotonic()
     with _SEARCH_LOCK:
@@ -2393,12 +2457,13 @@ def _search_job(text, video, reading, faces):
         job = _SEARCH_JOBS.get(text)
         if job is not None:
             return job
-        pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="search")
+        pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="search")
         job = {"at": now,
                "jobs": {"Anime": pool.submit(video, "anime"),
                         "Series": pool.submit(video, "series"),
                         "Movies": pool.submit(video, "movie"),
                         "Reading": pool.submit(reading),
+                        "Novels": pool.submit(novels),
                         "Cast": pool.submit(faces)}}
         pool.shutdown(wait=False)
         _SEARCH_JOBS[text] = job
@@ -2416,6 +2481,7 @@ SECTIONS = {
     "manga": ("tracker.json", ("Manga",)),
     "manhwa": ("tracker.json", ("Manhwa",)),
     "manhua": ("tracker.json", ("Manhua",)),
+    "novels": ("tracker.json", ("Novel",)),
 }
 
 # Which discover-cache section holds each medium's catalogue. The cache
@@ -2441,7 +2507,8 @@ def _cached_browse(key):
 
 
 MEDIUM_TITLE = {"movies": "Movies", "series": "Series", "anime": "Anime",
-                "manga": "Manga", "manhwa": "Manhwa", "manhua": "Manhua"}
+                "manga": "Manga", "manhwa": "Manhwa", "manhua": "Manhua",
+                "novels": "Novels"}
 
 
 def _category_note(route):
@@ -2508,6 +2575,8 @@ def _medium(route):
     CSS carries `content-visibility`, so the rows below the fold cost
     nothing until they are scrolled to.
     """
+    if route == "novels":
+        return _novels_page()
     rows = _cached_browse(BROWSE_CACHE.get(route, ""))
     saved = _saved_sides()
     side = _row_side(MEDIUM_TITLE.get(route, route))
@@ -2521,6 +2590,73 @@ def _medium(route):
             "title": MEDIUM_TITLE.get(route, route.title()),
             "note": _category_note(route),
             "rows": [_grid_row(e, saved) for e in rows]}
+
+
+# ---- the Novels page --------------------------------------------------
+#
+# The owner, 10 October 2026: a Novels section "like the manga and
+# others". Its catalogue is not the reading sweep (that is image sites
+# classified by MangaDex) but helpers/novel_sites' four text sites, two
+# Arabic and two English, interleaved so both languages are on the first
+# screen. The page is the same grid with the same three calls: the disk
+# cache drawn at once (_novels_page), the live first page appended behind
+# it (/api/browse), and the sites' further pages on scroll (/api/more),
+# where `skip` counts *pages*, not rows - each site pages on its own.
+NOVELS_NOTE = "Popular on Kolnovel, Rewayat Club, ReadNovelFull and Novel Fire"
+
+
+def _novel_row(entry, saved):
+    """A grid row whose meta line is the site it comes from - the only
+    way to tell the Arabic Shadow Slave from the English one at a glance."""
+    row = _grid_row(entry, saved)
+    if not row.get("meta"):
+        row["meta"] = str(entry.get("site_name") or "")
+    return row
+
+
+def _novels_page():
+    try:
+        from helpers import novel_sites
+        rows = novel_sites.cached_rows()
+    except Exception:
+        rows = []
+    saved = _saved_sides()
+    # No genre filter: its vocabulary is the reading catalogue's, read off
+    # MangaDex, and a novel row's genres are its site's own words in its
+    # own language. `None` and not [] - app.js tests the key for truth.
+    return {"kind": "grid", "hero": None, "browse": "novels",
+            "genrechoices": None, "genrereading": 1, "genrekind": "all",
+            "title": "Novels", "note": NOVELS_NOTE,
+            "skip": 1 if rows else 0,
+            "rows": [_novel_row(e, saved) for e in rows]}
+
+
+def _novel_genre(site, url, name):
+    """One site's genre listing - a novel's genre chip opened (the owner,
+    10 October 2026: "make the genres clickable like other watch and
+    read!"). The genre is the site's own word, so the page is that site's
+    list; `browse` carries site and address so scrolling pages it."""
+    try:
+        from helpers import novel_sites
+        rows = novel_sites.genre_page(site, url, 1)
+        where = novel_sites._BY_ID.get(site, {}).get("name", "")
+    except Exception:
+        rows, where = [], ""
+    saved = _saved_sides()
+    return {"kind": "grid", "hero": None, "title": str(name or ""),
+            "note": (f"{where} · " if where else "") + f"{len(rows)} novels so far",
+            "browse": f"novelgenre:{site}:{url}", "skip": 1, "back": True,
+            "rows": [_novel_row(e, saved) for e in rows]}
+
+
+def _novels_live(page):
+    try:
+        from helpers import novel_sites
+        rows = novel_sites.browse(max(1, int(page)))
+    except Exception as error:
+        return [], str(error)[:120]
+    saved = _saved_sides()
+    return [_novel_row(e, saved) for e in rows], ""
 
 
 def _browse(route):
@@ -2537,6 +2673,9 @@ def _browse(route):
     Imported here rather than at module scope: tracker pulls in Qt, and
     run.py serves these same routes with no Qt in the process at all.
     """
+    if route == "novels":
+        rows, error = _novels_live(1)
+        return {"rows": rows, "error": error} if error else {"rows": rows}
     kind = BROWSE_CACHE.get(route, "")
     if not kind:
         return {"rows": []}
@@ -2743,7 +2882,7 @@ def _download_folder():
 # default - the owner's "the history/saved/schedule pages take me to the
 # series page when I click on them".
 VIDEO_KINDS = ("anime", "series", "movie")
-READING_KINDS = ("manga", "manhwa", "manhua", "other")
+READING_KINDS = ("manga", "manhwa", "manhua", "other", "novel")
 
 # The two pills every one of these three pages opens with.
 TABS = [{"key": "watch", "label": "Watch"}, {"key": "read", "label": "Read"}]
@@ -3233,6 +3372,22 @@ def _more(route, have, skip):
     """
     if route.startswith(("genre:", "cast:")):
         return _more_browse(route, have, skip)
+    if route == "novels":
+        rows, error = _novels_live(skip + 1)
+        answer = {"rows": rows, "skip": skip + 1, "pending": 0}
+        if error:
+            answer["error"] = error
+        return answer
+    if route.startswith("novelgenre:"):
+        _kind, site, url = route.split(":", 2)
+        try:
+            from helpers import novel_sites
+            found = novel_sites.genre_page(site, url, max(1, skip) + 1)
+        except Exception:
+            found = []
+        saved = _saved_sides()
+        return {"rows": [_novel_row(e, saved) for e in found],
+                "skip": max(1, skip) + 1, "pending": 0}
     kind = BROWSE_CACHE.get(route, "")
     if not kind:
         return {"rows": [], "skip": skip}
@@ -3895,6 +4050,8 @@ def answer(route, query=None):
         return _genre(one("name"), one("reading") == "1", one("tab", "all"))
     if route == "cast":
         return _cast(one("name"), one("tab", "all"))
+    if route == "novelgenre":
+        return _novel_genre(one("site"), one("url"), one("name"))
     if route == "saved":
         return _saved(one("tab", "watch"))
     if route == "history":
