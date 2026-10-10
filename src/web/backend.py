@@ -73,7 +73,7 @@ try:
 except Exception:
     net = None
 
-READING = ("manga", "manhwa", "manhua")
+READING = ("manga", "manhwa", "manhua", "novel")
 COVERS = DATA_DIR / "image_cache"
 
 # token -> (where it came from, headers it needs). Remote pictures and
@@ -192,6 +192,14 @@ def cover_url(entry):
     for key in ("art", "cover_url", "poster", "cover", "image"):
         value = str(entry.get(key) or "")
         if value.startswith("http"):
+            if str(entry.get("type") or "") == "Novel":
+                # A novel site's cover wants a browser's headers - see
+                # novel_sites.image_headers for the measurement.
+                try:
+                    from helpers import novel_sites
+                    return remote_url(value, novel_sites.image_headers(value))
+                except Exception:
+                    pass
             return remote_url(value)
     # Nothing on disk and nothing remote: restore it. An app's exe icon
     # is made here, on the server thread, because this page is answered
@@ -821,6 +829,13 @@ def _chapter_row(chapter, index):
     number = chapter.get("number")
     name = str(chapter.get("title") or "").strip()
     label = f"Chapter {number}" if number not in (None, "") else (name or "?")
+    if chapter.get("label"):
+        # A novel's chapter is named as its site names it - the number
+        # behind it is a position (novel_sites.chapters), which reads
+        # wrong beside a site that says "volume 12, chapter 532".
+        return {"i": index,
+                "key": f"c{number}" if number not in (None, "") else "",
+                "label": str(chapter["label"]), "sub": ""}
     return {"i": index,
             "key": f"c{number}" if number not in (None, "") else "",
             "label": label,
@@ -883,6 +898,34 @@ def pages(entry_id, index):
     head = dict(answer.get("headers") or {})
     urls = [remote_url(u, head) for u in (answer.get("pages") or [])]
     row = _chapter_row(chapter, index)
+    if chapter.get("source") == "novel":
+        # **Text, drawn by the reader's text column** (app.js
+        # openChapter). The same keys as a picture chapter, so the jump
+        # list, Previous/Next and the read mark are the ones already
+        # there; `text` instead of `pages`, and the site's direction.
+        # The next chapter (a lower index - the list runs newest first)
+        # is read behind this one - novel_sites.prefetch.
+        if index > 0:
+            try:
+                from helpers import novel_sites
+                novel_sites.prefetch(found[index - 1])
+            except Exception:
+                pass
+        text = [str(t) for t in (answer.get("text") or [])]
+        reason = "" if text else str(answer.get("reason") or "empty")
+        if not text:
+            try:
+                from helpers import logs
+                logs.info(f"novel chapter has no text: "
+                          f"site={chapter.get('site_id')} "
+                          f"label={row['label']!r} reason={reason}")
+            except Exception:
+                pass
+        return {"pages": [], "text": text, "count": len(text),
+                "dir": str(answer.get("direction") or "ltr"),
+                "label": row["label"], "key": row["key"], "index": index,
+                "total": len(found), "medium": "novel",
+                "title": str(entry.get("title") or ""), "reason": reason}
     reason = ""
     if not urls:
         # Found by the aggressive reader pass of 6 September 2026: two

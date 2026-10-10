@@ -67,7 +67,7 @@ try:
 except Exception:                                   # pragma: no cover
     chapter_source = None
 
-MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
+MANGA_TYPES = ("Manga", "Manhwa", "Manhua", "Novel")
 
 # The right-hand list panel. Wide enough for an episode name, a date and
 # a badge on one row; the rest of the window belongs to the artwork.
@@ -226,6 +226,9 @@ class _Signals(QObject):
     # A reading title's MangaDex genre tags - run, [names]. Video pages
     # get genres free with the Cinemeta meta; this is the reading pair.
     reading_genres = Signal(int, object)
+    # A novel's facts from its own site - run, {"summary", "genres", ...}
+    # (helpers/novel_sites.details). See _novel_meta_worker.
+    novel_meta = Signal(int, object)
     # One episode's still, decoded and ready to draw - row key, the
     # local path (the blurred copy when that setting is on). Keyed by
     # row rather than by episode because the list is rebuilt on every
@@ -602,6 +605,25 @@ def _reading_genres_worker(signals, run, title):
     except Exception:
         names = []
     signals.reading_genres.emit(run, list(names or []))
+
+
+def _novel_meta_worker(signals, run, entry):
+    """A novel's summary and genres, read off the page its chapters come
+    from. Never raises - the pool's worker thread dies silently otherwise.
+
+    Not the reading pair (_reading_genres_worker, _reading_logo_worker):
+    those ask MangaDex and TMDB by title, and for a novel the title is
+    also its manga's or its anime's - The Beginning After the End would
+    wear the manga's tags and the anime's logo."""
+    try:
+        from helpers import novel_sites
+        found = novel_sites.details(entry) or {}
+    except Exception:
+        found = {}
+    try:
+        signals.novel_meta.emit(run, dict(found))
+    except RuntimeError:
+        pass        # the page went first
 
 
 def _site_resolve_worker(signals, run, site, title):
@@ -1321,6 +1343,11 @@ class DetailsPage(GlassPage):
         self._chapters = []
         self._season = 0
         self._is_reading = self.entry.get("type") in MANGA_TYPES
+        # A novel reads like the rest but is text from one of four sites
+        # (helpers/novel_sites), so the lookups that answer by title -
+        # MangaDex's genres, TMDB's logo, the catalogue covers - are not
+        # asked for it: they answer for its manga or anime.
+        self._is_novel = self.entry.get("type") == "Novel"
         # One-shot latches for the silent retry each list lookup gets
         # (see _on_meta/_on_chapters); re-armed by every fresh start.
         self._meta_retried = False
@@ -1373,6 +1400,7 @@ class DetailsPage(GlassPage):
         self._signals.sources.connect(self._on_sources)
         self._signals.saved_cover.connect(self._on_saved_cover)
         self._signals.reading_genres.connect(self._on_reading_genres)
+        self._signals.novel_meta.connect(self._on_novel_meta)
         self._signals.episode_still.connect(self._on_episode_still)
         self._signals.site_resolved.connect(self._on_site_resolved)
         self._signals.resolved_id.connect(self._on_resolved_id)
@@ -1428,6 +1456,14 @@ class DetailsPage(GlassPage):
         self._title_label.setStyleSheet(
             f"font-family: {DISPLAY_SERIF}; font-size: 34pt; font-weight: 300;"
             f" background: transparent;")
+        # **From the left, whatever the script.** Qt starts an Arabic
+        # title at the right edge on its own; the owner, 10 October 2026,
+        # after trying the mirrored page: "make the arabic novels as
+        # before ... make the arabic title appear from the left!".
+        # AlignAbsolute is what stops Qt reading "left" as "leading".
+        self._title_label.setAlignment(Qt.AlignmentFlag.AlignLeft
+                                       | Qt.AlignmentFlag.AlignAbsolute
+                                       | Qt.AlignmentFlag.AlignVCenter)
         left.addWidget(self._title_label)
 
         self._facts = QLabel("")
@@ -1448,6 +1484,18 @@ class DetailsPage(GlassPage):
         # name of the website that this is from (on the left side under
         # the genres)". Reading only; hidden until a site is known - a
         # Discover title has none until one is picked on this page.
+        # **And the language it is read in, above the site** - the owner,
+        # 10 October 2026: "above the source in the novels, manga, manhwa
+        # and manhua ch pages add Language and it should be Arabic or
+        # English based on the reading language!". See _reading_language.
+        self._language_head = self._section_label("LANGUAGE")
+        left.addWidget(self._language_head)
+        self._language = QLabel("")
+        self._language.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 11.5pt; font-weight: 600;"
+            f" background: transparent;")
+        left.addWidget(self._language)
+
         self._source_head = self._section_label("SOURCE")
         left.addWidget(self._source_head)
         self._source = QLabel("")
@@ -1525,6 +1573,9 @@ class DetailsPage(GlassPage):
         download_row.addStretch(1)
         left.addSpacing(8)
         left.addLayout(download_row)
+        # Not for a novel: the chapter download writes page images into a
+        # .cbz (helpers/downloads), and a novel's chapter is text.
+        self._download_btn.setVisible(not self._is_novel)
 
         left.addStretch(2)
 
@@ -1539,6 +1590,12 @@ class DetailsPage(GlassPage):
         the url). "" when neither names a configured site."""
         if not self._is_reading:
             return ""
+        if self._is_novel:
+            try:
+                from helpers import novel_sites
+                return novel_sites.site_name(self.entry)
+            except Exception:
+                return ""
         try:
             from helpers import manga_sites
             site = manga_sites.get_site(self.entry.get("site_id") or "")
@@ -1555,11 +1612,34 @@ class DetailsPage(GlassPage):
             logs.exception("details page could not name the reading site")
             return ""
 
+    def _reading_language(self, source) -> str:
+        """"Arabic" or "English" for a reading title, or "" when nothing
+        says. A novel is its site's language (two Arabic sites, two
+        English - novel_sites.SITES). Every configured manga site is an
+        Arabic scanlation site (3asq, TeamX, Lava Scans, SWAT, Mangalek,
+        Azora - read off manga_sites.list_sites, none carries a language
+        of its own), and the MangaDex fallback asks for Arabic chapters,
+        so a manga, manhwa or manhua with a known source reads Arabic."""
+        if not self._is_reading:
+            return ""
+        if self._is_novel:
+            try:
+                from helpers import novel_sites
+                site = novel_sites.site_for(self.entry) or {}
+                return {"ar": "Arabic", "en": "English"}.get(site.get("lang"), "")
+            except Exception:
+                return ""
+        return "Arabic" if source else ""
+
     def _show_source(self):
         name = self._source_name()
         self._source.setText(name)
         self._source_head.setVisible(bool(name))
         self._source.setVisible(bool(name))
+        language = self._reading_language(name)
+        self._language.setText(language)
+        self._language_head.setVisible(bool(language))
+        self._language.setVisible(bool(language))
 
     def _section_label(self, text) -> QLabel:
         label = QLabel(text)
@@ -1826,11 +1906,15 @@ class DetailsPage(GlassPage):
             # _art_worker; anything else keeps its typed name, which is
             # what _on_art leaves up when nothing lands. Disk-cached by
             # title, so a revisit is one stat and no request.
-            threading.Thread(target=_reading_logo_worker,
-                             args=(self._signals, self._run, dict(self.entry)),
-                             daemon=True).start()
-            lookup_pool.submit_watched(_reading_genres_worker, self._signals,
-                               self._run, self.entry.get("title") or "")
+            if self._is_novel:
+                lookup_pool.submit_watched(_novel_meta_worker, self._signals,
+                                           self._run, dict(self.entry))
+            else:
+                threading.Thread(target=_reading_logo_worker,
+                                 args=(self._signals, self._run, dict(self.entry)),
+                                 daemon=True).start()
+                lookup_pool.submit_watched(_reading_genres_worker, self._signals,
+                                   self._run, self.entry.get("title") or "")
             if chapter_source is None:
                 self._panel_note.setText("No chapter source in this build.")
             elif (not self.entry.get("url") and not self.entry.get("site_id")
@@ -2120,7 +2204,8 @@ class DetailsPage(GlassPage):
         Never raises: no match, no network, no ground, same as before.
         """
         title = str(self.entry.get("title") or "").strip()
-        if not title:
+        if not title or self._is_novel:
+            # A novel's catalogue match would be its manga's art.
             return None
         for source in ("anilist", "mangadex", "mangaupdates"):
             try:
@@ -2336,16 +2421,22 @@ class DetailsPage(GlassPage):
             self._summary.setText(description)
 
     # ---- genres as doors --------------------------------------------
-    def _fill_genre_buttons(self, genres):
+    def _fill_genre_buttons(self, genres, doors=True):
         """The genre chips, pressable: each one opens everything else
         filed under that genre (the owner's ask). Replaces whatever the
-        row held - the reading lookup can land after a rebuild."""
+        row held - the reading lookup can land after a rebuild. `doors`
+        False draws them as labels (a novel's - see _on_novel_meta)."""
         while self._genres_row.count() > 1:
             item = self._genres_row.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
         for genre in genres:
+            if not doors:
+                # The same look, as a label: no press, no pointing hand.
+                self._genres_row.insertWidget(self._genres_row.count() - 1,
+                                              _chip(genre))
+                continue
             button = _chip_button(genre)
             button.clicked.connect(
                 lambda _checked=False, g=genre: self._open_genre_browse(g))
@@ -2356,6 +2447,31 @@ class DetailsPage(GlassPage):
             return
         self._genres_head.setVisible(True)
         self._fill_genre_buttons([str(n) for n in names][:5])
+
+    def _on_novel_meta(self, run, found):
+        """A novel's own summary and genres. The genre chips are labels,
+        not doors: the genre page browses the reading catalogue, which is
+        manga, and a novel's genres are its site's words in its own
+        language."""
+        if run != self._run or self._closed or not isinstance(found, dict):
+            return
+        # **Doors now** - the owner, 10 October 2026: "make the genres
+        # clickable like other watch and read!" A novel genre opens its
+        # own site's list of that genre (web_reader.open_novel_genre_browse),
+        # since the word is the site's and only that site files by it.
+        self._novel_genre_links = {
+            str(link.get("name")): str(link.get("url"))
+            for link in (found.get("genre_links") or [])
+            if isinstance(link, dict) and link.get("name") and link.get("url")}
+        genres = [str(g) for g in (found.get("genres") or []) if g][:5]
+        if genres:
+            self._genres_head.setVisible(True)
+            self._fill_genre_buttons(genres)
+        summary = str(found.get("summary") or "").strip()
+        if summary:
+            self._summary_head.setVisible(True)
+            self._summary.setVisible(True)
+            self._summary.setText(summary)
 
     # ---- the cast as doors too ---------------------------------------
     def _fill_cast_buttons(self, names):
@@ -2401,6 +2517,21 @@ class DetailsPage(GlassPage):
         dialog (the owner's ask). Hosted on the central widget like this
         page is, so it covers the sidebar the same way and Back/Escape
         lands here again."""
+        if self._is_novel:
+            url = (getattr(self, "_novel_genre_links", {}) or {}).get(str(genre))
+            if not url:
+                return
+            try:
+                from helpers import novel_sites
+                from windows import web_reader
+                site = (novel_sites.site_for(self.entry) or {}).get("id", "")
+                page = web_reader.open_novel_genre_browse(
+                    self.window(), genre, site, url)
+                if page is not None:
+                    self._genre_page = page
+            except Exception:
+                logs.exception("could not open a novel genre page")
+            return
         window = self.window()
         host = (window.overlay_host() if hasattr(window, "overlay_host")
                 else (window.centralWidget() if hasattr(window, "centralWidget")

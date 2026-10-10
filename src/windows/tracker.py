@@ -72,7 +72,10 @@ SORT_OPTIONS = ["Custom Order", "Name (A-Z)", "Date Added (Newest)", "Last Updat
 # Manga/Manhwa/Manhua are just regional flavors of the same reading
 # medium - same statuses, same search/open behavior - so they're treated
 # as one group everywhere except the Type dropdown itself.
-MANGA_TYPES = ("Manga", "Manhwa", "Manhua")
+# **Novel** (10 October 2026, the owner's Novels section) reads like
+# the other three - chapters, "Reading" statuses, the Read side of
+# Saved/History - and is text rather than pages: helpers/novel_sites.
+MANGA_TYPES = ("Manga", "Manhwa", "Manhua", "Novel")
 
 # Types that are watched rather than read. Stremio, the Video Website
 # list and the progress sync all apply to exactly these - written once

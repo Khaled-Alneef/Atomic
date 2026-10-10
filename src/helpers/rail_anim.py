@@ -157,6 +157,14 @@ ANIME_FIT = ('transform="translate(1.35 0.55) scale(0.9)"'
 
 
 LAYERS = {
+    # The closed book of assets/icons/novels.svg, and a ribbon bookmark
+    # that is not in the file: it only exists while hovered.
+    "novels": {
+        "book": _svg('<path d="M5 19.5v-15A2.5 2.5 0 0 1 7.5 2H19v15H7.5'
+                     'A2.5 2.5 0 0 0 5 19.5 2.5 2.5 0 0 0 7.5 22H19v-5"/>'
+                     '<path d="M9 6.5h6"/><path d="M9 10h4"/>'),
+        "mark": _filled('<path d="M8 16h3.2v7.2l-1.6-1.4-1.6 1.4Z"/>'),
+    },
     # The compass, split at the one seam that matters: a ring that stays
     # put and a needle that can point somewhere.
     "discover": {
@@ -697,6 +705,22 @@ def _manga(p, box, t, layer):
     _draw(p, layer("panel_bl"), box, opacity=0.75 * _stagger(t, 0.40, 0.30))
     _draw(p, layer("panel_br"), box, opacity=0.75 * _stagger(t, 0.58, 0.34))
 
+def _novels(p, box, t, layer):
+    """A bookmark slips out of the bottom-left of the book. The owner, 10
+    October 2026: "add to its animation a bookmark like appears at the
+    bottom left of the book in the icon when hover!" The book holds still;
+    the ribbon slides down from inside its pages and fades in as it
+    goes, so at rest the icon is exactly novels.svg.
+
+    And the book tips to the left as it does (the owner, the same day:
+    "make the novels Icon also rotate to the left with the book mark
+    appearing"), the ribbon turning with it about the same centre so it
+    stays tucked in the same corner."""
+    tilt = -12.0 * t
+    _draw(p, layer("book"), box, degrees=tilt)
+    _draw(p, layer("mark"), box, dy=-3.0 * (1.0 - t), degrees=tilt, opacity=t)
+
+
 def _manhwa(p, box, t, layer):
     """A strip scrolls: the frame holds, the content travels up inside
     it and is clipped by the frame's own opening."""
@@ -783,6 +807,7 @@ PROFILES = {
     "manga": _manga,
     "manhwa": _manhwa,
     "manhua": _manhua,
+    "novels": _novels,
     "websites": _websites,
     "settings": _settings,
     "downloads": _downloads,
