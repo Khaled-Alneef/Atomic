@@ -30,6 +30,24 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.7": [
+        "New Novels section in the sidebar, with novels from two Arabic "
+        "sites (Kolnovel, Rewayat Club) and two English ones "
+        "(ReadNovelFull, Novel Fire). Search finds them too, and Discover "
+        "has a Top 10 Novels row in place of Other Readings.",
+        "Novels open in the reader as text, right to left for Arabic. Pick "
+        "the font from the reader's top bar and change the size with the "
+        "- and + buttons; both are remembered.",
+        "A novel's page shows its summary, genres you can click and the "
+        "website it comes from, and Continue starts at chapter 1 or where "
+        "you stopped.",
+        "Previous Chapter and Next Chapter buttons now wait at the end of "
+        "every chapter, in novels, manga, manhwa and manhua.",
+        "Manga, manhwa and manhua cards show their website under the "
+        "title, and reading pages show the reading language above the "
+        "source.",
+        "The Cast row has been removed from Discover.",
+    ],
     "3.6": [
         "Epic Games titles like The Witcher 3 now start when you click "
         "them, including when Atomic was opened at Windows startup.",
