@@ -140,8 +140,7 @@ def rows_for(kind: str, genre: str, limit: int = 200) -> list:
     with _lock:
         bucket = _load().get(kind) or {}
         found = [row for row in reversed(list(bucket.values()))
-                 if any(str(g).strip().lower() == wanted
-                        for g in anime_genres.merged(row))]
+                 if anime_genres.wanted_row(row, wanted)]
     return found[:limit]
 
 

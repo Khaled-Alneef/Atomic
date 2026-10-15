@@ -23,7 +23,7 @@ import threading
 import time
 import urllib.parse
 
-from . import artwork, logs, storage, title_match
+from . import artwork, content_words, logs, storage, title_match
 
 # Poster width for a grid tile. artwork.POSTER_SIZE_PATH is w500 for the
 # tracker's own cards; w342 is the next size down and still twice what a
@@ -418,7 +418,7 @@ def search(query, limit=20):
         return []
     try:
         url = (f"{artwork.API}/search/person"
-               f"?query={urllib.parse.quote(query)}&include_adult=false")
+               f"?query={urllib.parse.quote(query)}&{content_words.TMDB_FLAG}=false")
         body = artwork._get_json(url, TIMEOUT) or {}
     except Exception:
         return []

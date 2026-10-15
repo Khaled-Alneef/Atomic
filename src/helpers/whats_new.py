@@ -30,6 +30,15 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.8": [
+        "Genre filters on the Anime page now show their cards right away "
+        "instead of loading slowly, and War, Crime, History, Western and "
+        "Family find many more anime.",
+        "Anime genres are more accurate: each anime's page shows the genres "
+        "of that exact show, and the genre filters use them too.",
+        "Opening a movie or show for the first time no longer gets stuck "
+        "loading its information and episode list until you press refresh.",
+    ],
     "3.7": [
         "New Novels section in the sidebar, with novels from two Arabic "
         "sites (Kolnovel, Rewayat Club) and two English ones "
