@@ -791,10 +791,10 @@ download". And the speeds:
     a plain HTTPS file (proof.ovh.net)        7.9 MB/s   one stream
     the swarm, Attack on Titan S1E4, 28 peers 15.5 MB/s  peak, 0.4 in the first 10s
     Real-Debrid's CDN, the same episode       21.1 MB/s
-    Real-Debrid's CDN, Adults S2E3            16.8 MB/s
+    Real-Debrid's CDN, a second series S2E3   16.8 MB/s
 
 `debrid.cached_hashes` called 4 of Attack on Titan's 30 releases held
-and 0 of Adults' 16 while the service served every one at once, so
+and 0 of the second series' 16 while the service served every one at once, so
 anything that asked the cache check first fell to the swarm.
 
 `downloads._run_video` now asks the service for the best candidates

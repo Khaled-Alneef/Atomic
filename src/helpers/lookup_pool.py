@@ -25,6 +25,7 @@ behaviour of the app closing instantly.
 
 import queue
 import threading
+import time
 
 # Deliberately small. This is unprompted background metadata refresh that
 # fires on page load, not something the user asked for and is waiting on,
@@ -46,6 +47,34 @@ _workers_lock = threading.Lock()
 # row still sat blank, because the job had not started. Two workers - a
 # Check All overlaps a little without turning into a burst.
 WATCHED_WORKERS = 2
+WATCHED_WAIT_NOTE_S = 1.0
+WATCHED_RUN_NOTE_S = 5.0
+# A watched job still running after this is stuck, not slow - every
+# request it can make is bounded well inside it - so every thread's
+# stack goes to the log once, which is what names the lock or the call
+# it is stuck on (nothing can attach to a frozen build on his machine).
+WATCHED_STUCK_S = 20.0
+
+
+def _log_stacks(name):
+    try:
+        import sys
+        import traceback
+        from . import logs
+        names = {t.ident: t.name for t in threading.enumerate()}
+        parts = [f"watched job {name} still running after {WATCHED_STUCK_S:.0f}s; threads:"]
+        for ident, frame in sys._current_frames().items():
+            stack = traceback.extract_stack(frame)[-8:]
+            parts.append(f"-- {names.get(ident, ident)}: " + " <- ".join(
+                f"{pathlib_name(f.filename)}:{f.lineno} {f.name}" for f in reversed(stack)))
+        logs.info("\n".join(parts))
+    except Exception:
+        pass
+
+
+def pathlib_name(path):
+    return str(path).replace("\\", "/").rsplit("/", 1)[-1]
+
 
 _watched_queue = queue.Queue()
 _watched_workers = []
@@ -61,7 +90,35 @@ def submit_watched(fn, *args, **kwargs):
     """Queue one job the user is watching for an answer to, on its own
     workers - never behind the backfill draining the shared queue."""
     _ensure_workers(_watched_workers, _watched_queue, WATCHED_WORKERS, "lookup-watched")
-    _watched_queue.put((fn, args, kwargs))
+    queued = time.monotonic()
+
+    def timed(*a, **k):
+        # **A watched job that waited or ran long says so** (15 October
+        # 2026, the owner: "sometimes it gets stuck loading the
+        # information and the episodes forever but when I click the
+        # refresh it loads immediately"). Two workers serve every
+        # details page, and a page's list job queues behind whatever the
+        # pages before it left running; this line is what tells a slow
+        # source from a full queue on his machine.
+        began = time.monotonic()
+        stuck = threading.Timer(WATCHED_STUCK_S, _log_stacks,
+                                args=(getattr(fn, "__name__", str(fn)),))
+        stuck.daemon = True
+        stuck.start()
+        try:
+            fn(*a, **k)
+        finally:
+            stuck.cancel()
+            waited, ran = began - queued, time.monotonic() - began
+            if waited > WATCHED_WAIT_NOTE_S or ran > WATCHED_RUN_NOTE_S:
+                try:
+                    from . import logs
+                    logs.info(f"watched job {getattr(fn, '__name__', fn)}: waited "
+                              f"{waited:.1f}s, ran {ran:.1f}s, {_watched_queue.qsize()} queued")
+                except Exception:
+                    pass
+
+    _watched_queue.put((timed, args, kwargs))
 
 
 # The third queue: whole-catalogue fan-outs. These are *slow by nature* -

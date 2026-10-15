@@ -474,7 +474,7 @@ def _video_row(meta: dict, label: str):
     if not imdb_id.startswith("tt"):
         imdb_id = ""
 
-    return {
+    row = {
         "title": title,
         "year": str(year).strip(),
         "poster": meta.get("poster") or "",
@@ -490,6 +490,16 @@ def _video_row(meta: dict, label: str):
                    (meta.get("genres") or meta.get("genre") or [])
                    if str(g).strip()],
     }
+    # **A title this app does not show is never a row** - not on a page,
+    # in a search, in the catalogue index or the Qt surfaces that ask here
+    # (the owner, 15 October 2026; helpers/anime_genres.is_restricted).
+    try:
+        from . import anime_genres
+        if anime_genres.is_restricted(row):
+            return None
+    except Exception:
+        pass
+    return row
 
 
 def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
@@ -616,9 +626,7 @@ def discover_video(kind: str, query: str = "", limit: int = 30, deadline=None,
             from . import anime_genres
 
             def _wanted(batch):
-                return [r for r in batch
-                        if any(str(g).strip().lower() == wanted
-                               for g in anime_genres.merged(r))]
+                return [r for r in batch if anime_genres.wanted_row(r, wanted)]
 
             rows = _wanted(rows)
             # **A page of the anime catalog holds few of any one genre.**

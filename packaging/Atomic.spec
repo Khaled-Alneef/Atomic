@@ -301,7 +301,13 @@ if os.path.isfile(RD_TOKEN_FILE):
 # machine this cannot be tested on. 20MB is not worth a blank window
 # somebody else gets.
 _DEAD_WEIGHT = ("/pil/_avif", "/qt6pdf.dll", "/imageformats/qpdf.dll",
-                "/qt6webengine", "/qtwebengine", "/qt6/resources/icudtl.dat")
+                "/qt6webengine", "/qtwebengine", "/qt6/resources/icudtl.dat",
+                # 15 October 2026: Qt's text-to-speech and Pillow's font
+                # module, neither reached (no QtTextToSpeech import, no
+                # ImageFont or ImageDraw.text anywhere in src/) - their
+                # built-in word lists spell words the owner wants in no
+                # file of a release.
+                "/qt6/qml/qttexttospeech/", "/qt6texttospeech.dll", "/pil/_imagingft")
 a.binaries = [entry for entry in a.binaries
               if not any(dead in "/" + entry[0].lower().replace("\\", "/")
                          for dead in _DEAD_WEIGHT)]
@@ -322,7 +328,11 @@ a.binaries = [entry for entry in a.binaries
 #
 # Datas rather than binaries: these arrive through PyQt6's hook as data
 # files, which `excludes=` cannot reach either.
-_DEAD_DATA = ("qtwebengine", "/qt6/translations/", "/qt6/resources/icudtl.dat")
+# Qt's QML text-to-speech plugin goes too (15 October 2026): nothing here
+# loads QML, and its type list spells words the owner wants in no file
+# of a release.
+_DEAD_DATA = ("qtwebengine", "/qt6/translations/", "/qt6/resources/icudtl.dat",
+              "/qt6/qml/qttexttospeech/")
 a.datas = [entry for entry in a.datas
            if not any(dead in "/" + entry[0].lower().replace("\\", "/")
                       for dead in _DEAD_DATA)]

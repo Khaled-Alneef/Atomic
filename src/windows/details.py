@@ -226,6 +226,8 @@ class _Signals(QObject):
     # A reading title's MangaDex genre tags - run, [names]. Video pages
     # get genres free with the Cinemeta meta; this is the reading pair.
     reading_genres = Signal(int, object)
+    # An anime's own AniList genres - run, [names] (_anime_genres_worker).
+    anime_genres = Signal(int, object)
     # A novel's facts from its own site - run, {"summary", "genres", ...}
     # (helpers/novel_sites.details). See _novel_meta_worker.
     novel_meta = Signal(int, object)
@@ -332,6 +334,7 @@ def _meta_worker(signals, run, imdb_id, content_type, drawn=False):
     cached = _cached_meta(imdb_id, content_type, any_age=bool(drawn))
     if cached is not None and not drawn:
         signals.meta.emit(run, cached)
+    began = time.monotonic()
     try:
         meta = stremio.fetch_meta(imdb_id, content_type) if stremio else None
         if meta is not None and content_type == "series":
@@ -339,12 +342,24 @@ def _meta_worker(signals, run, imdb_id, content_type, drawn=False):
     except Exception:
         logs.exception("details meta lookup failed")
         meta = None
+    took = time.monotonic() - began
+    if meta is None or took > 2.0:
+        logs.info(f"details meta: {imdb_id} {content_type} "
+                  f"{'answered' if meta else 'nothing'} in {took:.1f}s (run {run})")
     if meta is None:
         if cached is None:
             signals.meta.emit(run, None)
         return
     showing = cached.get("videos") if cached is not None else None
-    if meta.get("videos") != showing:
+    # **A page showing nothing is always answered.** The owner, 15
+    # October 2026: "sometimes it gets stuck loading the information and
+    # the episodes forever but when I click the refresh it loads
+    # immediately". A film's meta carries no `videos`, so on a first open
+    # (no disk copy) None was compared with None, read as "unchanged",
+    # and nothing was emitted - while the save below wrote the file the
+    # refresh then drew at once. Measured on 16 cold films: 14 stuck on
+    # "Loading..." on the frozen build; the worker emitted 0 times in 0.61s.
+    if cached is None or meta.get("videos") != showing:
         # A copy: the fill below reassigns `videos` on this dict, and the
         # queued signal hands the UI thread a reference, not a snapshot.
         signals.meta.emit(run, dict(meta))
@@ -605,6 +620,19 @@ def _reading_genres_worker(signals, run, title):
     except Exception:
         names = []
     signals.reading_genres.emit(run, list(names or []))
+
+
+def _anime_genres_worker(signals, run, title, year):
+    """This anime's own AniList genres (helpers/anime_genres.lookup), for
+    the genre buttons. Never raises; emits [] when there is no answer,
+    which leaves the buttons as they are."""
+    try:
+        from helpers import anime_genres
+        found = anime_genres.lookup(title, year) or {}
+        names = list(found.get("genres") or []) if found.get("exact") else []
+    except Exception:
+        names = []
+    signals.anime_genres.emit(run, names)
 
 
 def _novel_meta_worker(signals, run, entry):
@@ -1400,6 +1428,7 @@ class DetailsPage(GlassPage):
         self._signals.sources.connect(self._on_sources)
         self._signals.saved_cover.connect(self._on_saved_cover)
         self._signals.reading_genres.connect(self._on_reading_genres)
+        self._signals.anime_genres.connect(self._on_anime_genres)
         self._signals.novel_meta.connect(self._on_novel_meta)
         self._signals.episode_still.connect(self._on_episode_still)
         self._signals.site_resolved.connect(self._on_site_resolved)
@@ -2017,6 +2046,12 @@ class DetailsPage(GlassPage):
 
     def _on_meta(self, run, meta):
         if run != self._run or self._closed:
+            if not self._closed and self._meta is None:
+                # The answer this page was waiting for, thrown away: the
+                # page moved to another run before it landed and nothing
+                # asked again (the refresh button does).
+                logs.info(f"details meta dropped: run {run}, page on run {self._run}, "
+                          f"meta={'yes' if meta else 'none'}")
             return
         self._list_answered()
         if not meta:
@@ -2407,6 +2442,30 @@ class DetailsPage(GlassPage):
             self.entry["country"] = str(meta.get("country") or "")
         except Exception:
             pass
+        # **An anime's genres are AniList's, for this one work.** The
+        # owner, 15 October 2026: "make it really accurate the genres on
+        # each anime ep list page !!!! it is inaccurate or missing some
+        # now!". Cinemeta's are IMDb's three, "Animation" always one:
+        # what the seed knows by title is drawn at once, and the work's
+        # own AniList answer replaces it when it lands (one request a
+        # title a month, helpers/anime_genres.lookup).
+        from helpers import stremio as _stremio
+        if _stremio.is_anime_entry(dict(self.entry, genres=meta.get("genres") or [],
+                                        country=meta.get("country") or "")):
+            try:
+                from helpers import anime_genres
+                title = str(meta.get("name") or self.entry.get("title") or "")
+                found = re.search(r"\d{4}", str(meta.get("releaseInfo") or meta.get("year")
+                                                  or self.entry.get("year") or ""))
+                year = int(found.group()) if found else None
+                known = anime_genres.cached(title, year)
+                if known and known.get("genres"):
+                    genres = list(known["genres"])
+                if not (known and known.get("exact")):
+                    lookup_pool.submit_watched(_anime_genres_worker, self._signals,
+                                               self._run, title, year)
+            except Exception:
+                logs.exception("details: anime genres")
         if genres:
             self._genres_head.setVisible(True)
             self._fill_genre_buttons(genres)
@@ -2441,6 +2500,12 @@ class DetailsPage(GlassPage):
             button.clicked.connect(
                 lambda _checked=False, g=genre: self._open_genre_browse(g))
             self._genres_row.insertWidget(self._genres_row.count() - 1, button)
+
+    def _on_anime_genres(self, run, names):
+        if run != self._run or self._closed or not names:
+            return
+        self._genres_head.setVisible(True)
+        self._fill_genre_buttons([str(n) for n in names])
 
     def _on_reading_genres(self, run, names):
         if run != self._run or self._closed or not names:

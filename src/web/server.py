@@ -658,7 +658,38 @@ def _row(entry, kind="title", resume=False):
         "art": _remote_art(entry),
         "url": str(entry.get("url") or ""),
         "imdb": str(entry.get("imdb_id") or ""),
+        # Read by _drop_restricted on the way out and never sent.
+        "restricted": _restricted_entry(entry),
     }
+
+
+def _restricted_entry(entry) -> bool:
+    if _row_side(entry.get("type")) == "read":
+        return False
+    try:
+        from helpers import anime_genres
+        return anime_genres.is_restricted(entry)
+    except Exception:
+        return False
+
+
+def _drop_restricted(body):
+    """Every card an answer carries, without the titles this app does not
+    show - the owner, 15 October 2026: "do not even show them or show
+    their cards anywhere at all". Every /api/ answer passes through here,
+    so a row from the catalogue index, the browse cache, a cast page or a
+    search is caught whatever route built it (anime_genres.is_restricted
+    decides; _row marks). Measured on his data: 14 rows of 7,218."""
+    if isinstance(body, dict):
+        body.pop("restricted", None)
+        for value in body.values():
+            _drop_restricted(value)
+    elif isinstance(body, list):
+        body[:] = [item for item in body
+                   if not (isinstance(item, dict) and item.get("restricted"))]
+        for item in body:
+            _drop_restricted(item)
+    return body
 
 
 def _remote_art(entry):
@@ -3682,9 +3713,13 @@ def _genre_video(name, skip, limit, tab="all", have=0):
     futures = {kind: pool.submit(_page, kind) for kind in kinds}
     pool.shutdown(wait=False)
     # With the index answering, the page has rows to draw now and the
-    # walk's rows arrive on its pull; nothing waits.
+    # walk's rows arrive on its pull; nothing waits. **Any indexed row is
+    # enough** (15 October 2026, the owner: "when I select some filter
+    # like War in the anime page it takes ages"): his Western tick had 6
+    # anime rows in the index and still paid the whole 2.0s for a walk
+    # that found nothing to add. Only an empty index waits for it.
     wait(list(futures.values()),
-         timeout=0.05 if len(indexed) >= GENRE_INDEX_ENOUGH else GENRE_FIRST_WAIT_S)
+         timeout=0.05 if indexed else GENRE_FIRST_WAIT_S)
     rows, advanced, late = list(indexed), 0, 0
     for kind, future in futures.items():
         if not future.done():
@@ -3709,11 +3744,11 @@ GENRE_FIRST_WAIT_S = 2.0
 # once - see _genre_video's `_page`. Four is 200 rows per walk, the cost
 # of its slowest page rather than four walks in a row.
 VIDEO_GENRE_PAGES = 4
-# Indexed rows enough to draw a page without waiting on the walk at all,
-# and the most the first answer carries: a Manga page draws 117 rows in
-# 49ms on his machine, so 200 is well inside the second and several
-# screens deep; the walk's rows follow on the pull.
-GENRE_INDEX_ENOUGH = 12
+# The most the first answer carries: a Manga page draws 117 rows in 49ms
+# on his machine, so 200 is well inside the second and several screens
+# deep; the walk's rows follow on the pull. (GENRE_INDEX_ENOUGH, the 12
+# rows that once had to be indexed before the walk was not waited on,
+# went 15 October 2026 - any indexed row is enough now.)
 GENRE_INDEX_LIMIT = 200
 # What a *continuation* may carry. The page drops what it already draws,
 # so a batch is a superset of the rows beyond it and this only bounds
@@ -4409,7 +4444,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # registered by backend.cover_url as the rows are made)
                 # and *before* it is sent, so the fetches are already
                 # under way when the browser starts asking.
-                body = json.dumps(_warm_covers(answer(path[5:], query)),
+                body = json.dumps(_warm_covers(_drop_restricted(answer(path[5:], query))),
                                   ensure_ascii=False)
                 # **A slow answer says so in his log.** The page reports
                 # when it drew (app.js sayRender) and nothing reported

@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import net, title_match
+from . import content_words, net, title_match
 
 API_URL = "https://graphql.anilist.co"
 
@@ -92,12 +92,14 @@ query ($from: Int, $to: Int, $perPage: Int) {
         synonyms
         coverImage { large }
         format
-        isAdult
+        {flag}
       }
     }
   }
 }
 """
+# The explicit-work flag, by its encoded name (helpers/content_words).
+_UPCOMING_QUERY = _UPCOMING_QUERY.replace("{flag}", content_words.ANILIST_FLAG)
 
 
 def fetch_upcoming_airing(hours: int = 168, limit: int = 40,
@@ -108,7 +110,7 @@ def fetch_upcoming_airing(hours: int = 168, limit: int = 40,
     owner's own saved shows. Each row is
     {title, episode, at (aware UTC datetime), cover_url}.
 
-    Adult titles are dropped, and so are the formats nobody schedules a
+    Explicit titles are dropped, and so are the formats nobody schedules a
     week around (music videos above all). Fails soft to [] and lets
     RateLimited through for the caller to say out loud, exactly as
     fetch_next_episode does - a schedule that quietly shows only saved
@@ -127,7 +129,7 @@ def fetch_upcoming_airing(hours: int = 168, limit: int = 40,
     out = []
     for row in page.get("airingSchedules") or []:
         media = row.get("media") or {}
-        if media.get("isAdult") or media.get("format") in ("MUSIC",):
+        if media.get(content_words.ANILIST_FLAG) or media.get("format") in ("MUSIC",):
             continue
         titles = media.get("title") or {}
         title = (titles.get("english") or titles.get("romaji")

@@ -815,8 +815,8 @@ def _order_by_audio(candidates, audio):
 # speeds, same machine, same episode: a plain HTTPS file 7.9MB/s on one
 # stream; the swarm 15.5MB/s at its peak and 0.4MB/s in its first ten
 # seconds with 28 peers; Real-Debrid's CDN 21.1MB/s, and 16.8MB/s on
-# Adults S2E3 - a release debrid.cached_hashes called uncached, as it
-# called 0 of Adults' 16 and 4 of Attack on Titan's 30 while the
+# a second series' S2E3 - a release debrid.cached_hashes called uncached,
+# as it called 0 of that show's 16 and 4 of Attack on Titan's 30 while the
 # service served every one at once. So the job asks the service for the
 # best candidates outright (debrid.fetch_url, waiting while it fetches
 # with the percentage in the detail line), pulls the link it gets over

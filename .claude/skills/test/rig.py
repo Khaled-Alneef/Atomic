@@ -61,7 +61,7 @@ def _pinned_pid():
     try:
         pid = int(open(_PID_FILE).read().strip())
     except (OSError, ValueError):
-        return 0
+        return None     # nothing launched by this rig: drive nothing
     handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return None
@@ -289,18 +289,26 @@ if __name__ == "__main__":
     if cmd == "launch":
         exe, appdata = sys.argv[2], sys.argv[3]
         env = dict(os.environ, APPDATA=appdata)
-        cmd = ["py", "-3.13", exe] if exe.endswith(".py") else [exe]
+        # A source run starts python.exe itself, not the py launcher, so
+        # the pid below is the window's owner and can be pinned. Unpinned,
+        # a source run that failed to start (15 October 2026: a relative
+        # path) left find() free to take the owner's own open Atomic, and
+        # eighteen clicks landed in it.
+        if exe.endswith(".py"):
+            exe = os.path.abspath(exe)
+            python = subprocess.run(["py", "-3.13", "-c", "import sys; print(sys.executable)"],
+                                    capture_output=True, text=True).stdout.strip()
+            cmd = [python, exe]
+        else:
+            cmd = [exe]
         env["PYTHONIOENCODING"] = "utf-8"
         log = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_stdout.log"), "ab")
         child = subprocess.Popen(cmd, env=env, cwd=os.path.dirname(exe) or ".", stdout=log, stderr=log,
                                  creationflags=0x00000008 | 0x00000200)   # DETACHED_PROCESS | NEW_PROCESS_GROUP
-        # A source run's window belongs to the python under py.exe, so
-        # only a frozen launch is pinned.
-        if not exe.endswith(".py"):
-            open(_PID_FILE, "w").write(str(child.pid))
-        elif os.path.exists(_PID_FILE):
-            os.remove(_PID_FILE)        # a stale pin would match nothing
+        open(_PID_FILE, "w").write(str(child.pid))
         f = wait(60)
+        if child.poll() is not None:
+            sys.exit(f"launch failed: the process exited ({child.returncode}); nothing is pinned")
         print("window:", f)
     elif cmd == "wait": print(wait(float(sys.argv[2]) if len(sys.argv) > 2 else 30))
     elif cmd == "shot": shot(sys.argv[2], [int(v) for v in sys.argv[3:7]] if len(sys.argv) >= 7 else None)
