@@ -3098,6 +3098,16 @@ class DetailsPage(GlassPage):
         if tmdb:
             self._tmdb_ratings = tmdb
             self._tmdb_ratings_key = key
+            # A hit is drawn at once, but it is not proof the numbers are
+            # current: before 17 October 2026 a hit was never re-asked and
+            # his cached seasons sat 47-53 days old against a week's TTL
+            # (ratings.needs_refresh). The worker redraws only on a change.
+            if (key not in self._tmdb_ratings_asked
+                    and ratings.needs_refresh(imdb, season, self._videos)):
+                self._tmdb_ratings_asked.add(key)
+                lookup_pool.submit_watched(
+                    _episode_ratings_worker, self._signals, self._run, imdb,
+                    season, list(self._videos))
             return dict(tmdb), "TMDB"
         if key not in self._tmdb_ratings_asked:
             self._tmdb_ratings_asked.add(key)
@@ -3115,6 +3125,8 @@ class DetailsPage(GlassPage):
             return
         if not mapping:
             return          # TMDB had nothing; the Cinemeta draw stands
+        if key == self._tmdb_ratings_key and dict(mapping) == self._tmdb_ratings:
+            return          # a refresh of a hit that changed nothing
         self._tmdb_ratings = dict(mapping)
         self._tmdb_ratings_key = key
         if key[1] == int(self._season or 0) and self._source_pick is None:

@@ -448,6 +448,45 @@ def cached_episode_ratings(imdb_id: str, season, videos) -> dict:
         return {}
 
 
+def needs_refresh(imdb_id: str, season, videos) -> bool:
+    """Whether `episode_ratings` would ask the network for this season -
+    the series record or one of the TMDB seasons it would read is past
+    its TTL, or missing. Reads the cache only, never a socket.
+
+    Why it exists (17 October 2026): both lists that print this column
+    asked the network only when `cached_episode_ratings` came back
+    empty, so a season that had *any* cached answer was never asked
+    again and TTL_SECONDS never fired. Measured on a copy of his rating
+    cache that day: 162 series, the newest seasons of what he watches
+    47-53 days old (Attack on Titan, Reacher, Demon Slayer), and
+    Brooklyn Nine-Nine - watched the night before - at 7.3-10.7 days.
+    A hit is still drawn at once; this decides whether a worker also
+    goes to fetch the current numbers behind it."""
+    try:
+        imdb_id = str(imdb_id or "").strip()
+        rows = _season_rows(videos, season)
+        dates = [row[1] for row in rows if row[1]]
+        if not imdb_id or not dates:
+            return False
+        record = _load(imdb_id)
+        if not record.get("tmdb_id"):
+            return not _fresh(record.get("checked"), MISS_TTL_SECONDS)
+        if not _fresh(record.get("checked"),
+                      TTL_SECONDS if record.get("seasons") else MISS_TTL_SECONDS):
+            return True
+        numbers = _candidate_seasons(record.get("seasons") or [],
+                                     min(dates), max(dates), season)
+        for number in numbers:
+            cached = (record.get("episodes") or {}).get(str(number)) or {}
+            ttl = TTL_SECONDS if cached.get("rows") else MISS_TTL_SECONDS
+            if not _fresh(cached.get("checked"), ttl):
+                return True
+        return False
+    except Exception:
+        logs.exception("episode ratings freshness check failed")
+        return False
+
+
 def episode_ratings(imdb_id: str, season, videos,
                     timeout: int = DEFAULT_TIMEOUT) -> dict:
     """TMDB's rating for each episode of one season: `{number: 8.4}`.
