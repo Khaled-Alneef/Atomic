@@ -30,6 +30,12 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.9": [
+        "Episode ratings stay up to date: ratings saved more than a week "
+        "ago are refreshed in the background when you open a show or the "
+        "player's episode list, instead of staying as they were first "
+        "fetched.",
+    ],
     "3.8": [
         "Genre filters on the Anime page now show their cards right away "
         "instead of loading slowly, and War, Crime, History, Western and "

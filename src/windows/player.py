@@ -4548,6 +4548,14 @@ class PlayerPage(GlassPage):
         if tmdb:
             self._tmdb_ratings = tmdb
             self._tmdb_ratings_key = key
+            # A stale hit is drawn and re-asked behind it - see
+            # ratings.needs_refresh and details._season_ratings.
+            if (key not in self._tmdb_ratings_asked
+                    and ratings.needs_refresh(imdb, season,
+                                              self._meta_videos or [])):
+                self._tmdb_ratings_asked.add(key)
+                self._spawn(self._ratings_worker, key,
+                            list(self._meta_videos or []))
             return dict(tmdb), "TMDB"
         if key not in self._tmdb_ratings_asked:
             self._tmdb_ratings_asked.add(key)
@@ -4590,6 +4598,8 @@ class PlayerPage(GlassPage):
         again is what the next open is for."""
         if self._closing or not mapping:
             return
+        if key == self._tmdb_ratings_key and dict(mapping) == self._tmdb_ratings:
+            return                  # a refresh of a hit that changed nothing
         self._tmdb_ratings = dict(mapping)
         self._tmdb_ratings_key = key
         season = int(self._panel_season or self.season or 1)
