@@ -809,6 +809,32 @@ def _quality_label(value) -> str:
     return "2160p" if quality == "4k" else quality
 
 
+# "11", "11.5", "ep 11", "ch. 11", "#11" - a query that names a number.
+_NUMBER_QUERY_RE = re.compile(
+    r"^(?:ep(?:isode)?|ch(?:apter)?|#)?\.?\s*(\d+(?:\.\d+)?)$")
+
+
+def number_query(wanted):
+    """The episode or chapter number a search names, or None.
+
+    **A number is a number, not a substring.** The owner, 18 October
+    2026: "when I search 11 ONLY show ch or ep 11 not everything that
+    has 11 like 110". The rows were matched by `wanted in title`, and a
+    title starts with its number, so "11" kept 11, 110-119, 211, 311...
+    - on a 386-chapter list, 31 rows for one chapter. A query that is
+    only a number (optionally "ep"/"ch"/"#" before it) now matches the
+    row whose number equals it, and anything else is the substring
+    search it always was. The sources list keeps substring on purpose:
+    "2160" there means 4K, not release number 2160."""
+    match = _NUMBER_QUERY_RE.match(str(wanted or "").strip().lower())
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def _year_text(value) -> str:
     """A release year as it should read, or "".
 
@@ -3136,6 +3162,7 @@ class DetailsPage(GlassPage):
         self._clear_rows()
         self._blur_stills = app_settings.get_blur_episode_stills()
         wanted = self._search.text().strip().lower()
+        wanted_number = number_query(wanted)
         season = int(self._season or 0)
         watched_season, watched_episode = self._progress()
         rows = [v for v in self._videos if int(v.get("season") or 0) == season]
@@ -3159,7 +3186,10 @@ class DetailsPage(GlassPage):
             if app_settings.get_hide_entry_names():
                 name = ""
             title = f"{number}. {name}" if name else f"{number}. Episode {number}"
-            if wanted and wanted not in title.lower():
+            if wanted_number is not None:
+                if number != wanted_number:
+                    continue
+            elif wanted and wanted not in title.lower():
                 continue
             upcoming = (season, number) in unaired
             # Either store may say watched: the entry's progress number
@@ -3220,6 +3250,7 @@ class DetailsPage(GlassPage):
                                     chapter_published, is_arabic)
         self._clear_rows()
         wanted = self._search.text().strip().lower()
+        wanted_number = number_query(wanted)
         read_up_to = self._last_read()
         shown = 0
         builders = []
@@ -3232,7 +3263,10 @@ class DetailsPage(GlassPage):
             title = f"{head}. {name}" if name else f"Chapter {head}"
             if is_arabic(chapter):
                 title = f"{title}  · عربي"
-            if wanted and wanted not in title.lower():
+            if wanted_number is not None:
+                if number is None or float(number) != wanted_number:
+                    continue
+            elif wanted and wanted not in title.lower():
                 continue
             # Same two stores as the episode rows - see there.
             read = number is not None and (

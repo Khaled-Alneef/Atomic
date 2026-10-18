@@ -1210,6 +1210,36 @@ def _covered(page) -> bool:
 READING_MEDIA = ("manga", "manhwa", "manhua", "other", "novel")
 
 
+def _place_index(backend, entry_id, items):
+    """`(index, on_newest)` from where the reader last stopped, or None.
+
+    **A chapter left half-way is reopened, a finished one is not.** The
+    owner, 18 October 2026: "make sure it takes me to the exact place I
+    stopped in the ch not the next one! and if I finished the ch make
+    sure that it takes me to the next ch". Every chapter is marked read
+    on open, so the marks alone cannot tell the two apart - the reader's
+    place can (web/backend.reading_place): `done` is set once the
+    chapter's end came on screen. Not done -> that chapter (the reader
+    scrolls back to the page and the spot itself); done -> the one after
+    it, which is the lower index, the list running newest first. None
+    when there is no place or its chapter is not in this list."""
+    try:
+        place = backend.reading_place(entry_id) or {}
+    except Exception:
+        return None
+    key = str(place.get("key") or "")
+    if not key:
+        return None
+    at = next((item.get("i") for item in items if item.get("key") == key), None)
+    if at is None:
+        return None
+    if not place.get("done"):
+        return at, False
+    if at - 1 >= 0:
+        return at - 1, False
+    return at, True             # finished the newest: check the site
+
+
 def _next_chapter_index(entry, with_newest=False):
     """Where "continue" should open a reading entry, or None.
 
@@ -1232,7 +1262,10 @@ def _next_chapter_index(entry, with_newest=False):
         entry_id = web_reader._entry_id_for(entry)
         items = backend.chapters(entry_id).get("items") or []
         index, on_newest = None, False
-        if items:
+        placed = _place_index(backend, entry_id, items)
+        if placed is not None:
+            index, on_newest = placed
+        elif items:
             marks = set(backend.read_state(entry_id).get("watched") or [])
             read_at = [item["i"] for item in items if item.get("key") in marks]
             if not read_at:

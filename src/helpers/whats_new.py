@@ -30,6 +30,21 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.10": [
+        "Continue opens the exact spot where you stopped reading a "
+        "chapter, and goes on to the next chapter once you have reached "
+        "the end of one.",
+        "Continue plays the episode you last opened, even if you pressed "
+        "Next and left within a few seconds - and once you finish an "
+        "episode it moves on to the next one.",
+        "Highlight text in novels: select it, right-click and choose "
+        "Highlight. Select it again and right-click to Unhighlight. "
+        "Highlights stay in the chapter until you remove them.",
+        "Searching a number in an episode or chapter list, like 11, shows "
+        "only episode or chapter 11 - not 110 or 211.",
+        "Leaving a chapter quickly, with mouse button 4 or otherwise, now "
+        "always closes the reading music.",
+    ],
     "3.9": [
         "Episode ratings stay up to date: ratings saved more than a week "
         "ago are refreshed in the background when you open a show or the "

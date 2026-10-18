@@ -1126,21 +1126,53 @@ def resume_point(entry):
     identities = set(entry_identities(entry))
     if not identities:
         return None
-    best = None
+    best, best_at = None, ""
     for record in storage.load(RESUME_FILE, []):
         if record.get("entry_id") not in identities:
             continue
         position = float(record.get("position") or 0.0)
         duration = float(record.get("duration") or 0.0)
-        if position < RESUME_MIN_S:
-            continue
-        if duration and position > duration * RESUME_MAX_FRACTION:
-            continue
-        if best is None or str(record.get("updated_at") or "") > str(best.get("updated_at") or ""):
-            best = record
-    if best is None:
+        # **The episode last opened counts from its first second.** The
+        # owner, 18 October 2026: "when I go next ep then leave and then
+        # hit continue, it takes me to the previous ep, it seems that it
+        # needs ~30 sec then it will catch where I stopped in the new
+        # ep". It was exactly RESUME_MIN_S: _save_position writes nothing
+        # under 30s, so E06 had no record and E05's half-watched one was
+        # the newest. `opened_at` (mark_opened, stamped when the file
+        # loads) answers for an episode under 30s; it is cleared with
+        # the position when the episode is finished or progress is
+        # corrected, so a finished episode still steps to the next.
+        #
+        # **And the newest record decides, finished or not.** E05 left
+        # half-way, then E06 watched to the end: E06's record is the
+        # newest and offers nothing, and skipping it handed Continue
+        # E05's old one - the previous episode again. A finished newest
+        # record answers None, which plays the episode after progress.
+        opened = str(record.get("opened_at") or "")
+        resumable = (position >= RESUME_MIN_S
+                     and not (duration and position > duration * RESUME_MAX_FRACTION))
+        just_opened = bool(opened) and position < RESUME_MIN_S
+        at = max(str(record.get("updated_at") or ""), opened)
+        if best is None or at > best_at:
+            best, best_at = (record if (resumable or just_opened) else {}), at
+    if not best:
         return None
     return best.get("season"), best.get("episode")
+
+
+def mark_opened(entry, season, episode):
+    """Stamp this episode as the one last opened - see resume_point.
+    The position, release and subtitle settings on the record are left
+    as they are. Never raises."""
+    try:
+        keys = _resume_keys(entry, season, episode)
+        if not keys:
+            return
+        _put_record(keys[0], {"entry_id": entry_identities(entry)[0],
+                              "season": season, "episode": episode,
+                              "opened_at": storage.now_iso()})
+    except Exception:
+        logs.exception("Could not mark the episode opened")
 
 
 def clear_resume(entry, season, episode):
@@ -1184,13 +1216,14 @@ def clear_resume(entry, season, episode):
         # there was no release to keep - a debrid or direct play has
         # none - so the one thing that guaranteed the settings were lost
         # was watching the episode to the end.
-        release = record.get("release")
-        if not release and not record.get(SUB_PREF_FIELD):
-            changed = True
-            continue        # nothing worth keeping - drop it as before
+        # **Kept even when it holds nothing else** (18 October 2026):
+        # a finished episode's zeroed record is what tells resume_point
+        # it was the last one watched. Dropped, an older half-watched
+        # episode became the newest record and Continue went back to it.
         trimmed = dict(record)
         trimmed["position"] = 0.0
         trimmed["duration"] = 0.0
+        trimmed["opened_at"] = ""       # finished: Continue steps on
         trimmed["updated_at"] = storage.now_iso()
         kept.append(trimmed)
         changed = True
@@ -1228,7 +1261,8 @@ def clear_entry_resume(entry):
         if record.get("entry_id") not in identities:
             kept.append(record)
             continue
-        if not float(record.get("position") or 0.0):
+        if (not float(record.get("position") or 0.0)
+                and not record.get("opened_at")):
             kept.append(record)     # already offers nothing - no churn
             continue
         # Same as clear_resume: this record may be the only place this
@@ -1242,6 +1276,7 @@ def clear_entry_resume(entry):
         trimmed = dict(record)
         trimmed["position"] = 0.0
         trimmed["duration"] = 0.0
+        trimmed["opened_at"] = ""
         trimmed["updated_at"] = storage.now_iso()
         kept.append(trimmed)
         changed = True
@@ -4417,8 +4452,13 @@ class PlayerPage(GlassPage):
             if row is None:
                 continue
             if wanted:
-                text = row.property("searchText") or ""
-                if wanted not in text:
+                # "11" is episode 11, not 110 - details.number_query.
+                from windows.details import number_query
+                exact = number_query(wanted)
+                if exact is not None:
+                    if number != exact:
+                        continue
+                elif wanted not in (row.property("searchText") or ""):
                     continue
             self._episode_rows[number] = row
             layout.addWidget(row)
@@ -7506,6 +7546,9 @@ class PlayerPage(GlassPage):
         # time, and ignoring the question for twelve seconds meant
         # starting over, so the default was the option nobody wanted.
         seat = self._prime_seat(resume_at)[0]
+        # This episode is now the one Continue goes back to, from its
+        # first second rather than its thirtieth - see resume_point.
+        mark_opened(self.entry, self.season, self.episode)
 
         # Headers before the load, not after: many of these hosts answer
         # 403 to a request without the Referer the page carried, and mpv
