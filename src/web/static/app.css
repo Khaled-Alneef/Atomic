@@ -16,6 +16,7 @@
   --active: #2b2b2b;              /* theme.SURFACE_ACTIVE */
   --muted: #a3a3a3;               /* theme.TEXT_MUTED */
   --hi: rgba(255, 255, 255, .42); /* a hovered outline, quieter than white */
+  --hl: rgba(255, 196, 0, .34);   /* a highlight in a novel's text */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);      /* 1367: arrivals */
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);  /* A24: things opening */
   --ease-card: cubic-bezier(0.32, 0.94, 0.6, 1);  /* Netflix: card hover */
@@ -536,6 +537,19 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
 .rendnav { display: flex; justify-content: center; gap: 16px;
            width: 100%; margin: 48px auto 0; }
 .ntext ::selection { background: var(--active); }
+/* A highlight in a novel's text (openChapter's startHighlights): a
+   reading highlighter's warm wash under the text, the text's own colour
+   kept. --hl is the one colour in the reader that is not grey, because
+   a highlight has to read as one at a glance. */
+.ntext mark.nhl { background: var(--hl); color: inherit;
+                  border-radius: 2px; padding: 0 1px; }
+.hlitem {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  font: inherit; font-size: 13px; white-space: nowrap;
+  color: var(--text); background: transparent; border: 0;
+  border-radius: 7px; padding: 9px 16px;
+}
+.hlitem:hover { background: var(--hover); }
 
 /* The chapter controls, pinned to the floor - reader.BOTTOM_HEIGHT 60,
    previous and next hard against the two edges with the list between

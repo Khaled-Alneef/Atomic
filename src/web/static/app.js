@@ -1763,6 +1763,12 @@ async function openChapter(id, index) {
   const strip = el('div', 'reader');
   page.appendChild(strip);
 
+  // Asked beside the pages, not after them - see startPlace.
+  stopPlace();
+  const placeAsk = fetch('/api/place?id=' + encodeURIComponent(id))
+    .then(function (r) { return r.json(); })
+    .catch(function () { return {}; });
+
   let data;
   try {
     data = await (await fetch('/api/pages?id=' + encodeURIComponent(id) +
@@ -2604,6 +2610,7 @@ async function openChapter(id, index) {
       column.appendChild(el('p', line === '* * *' ? 'nbreak' : null, line));
     });
     strip.appendChild(column);
+    if (data.key) startHighlights(id, data.key, column);
   }
 
   (data.pages || []).forEach(function (src, i) {
@@ -2674,8 +2681,319 @@ async function openChapter(id, index) {
     fetch('/api/mark?id=' + encodeURIComponent(id) +
           '&key=' + encodeURIComponent(readerState.key))
       .catch(function () {});
+    startPlace(id, readerState.key, strip, ending, placeAsk);
   }
 }
+
+/* **Highlights in a novel's text.** The owner, 18 October 2026: "make
+   the user select the text then right click then Highlight, then the
+   text will be highlighted until the user select it again then right
+   click then unhighlight it". A right click over a selection in the
+   column opens a small menu - Highlight when any of the selection is
+   not highlighted yet, Unhighlight when any of it is - and a right click
+   on a highlight with nothing selected offers Unhighlight for that one.
+
+   A selection is sent as character ranges inside each paragraph it
+   touches ("p:start-end", web/backend.set_novel_highlight), measured
+   off the paragraph's text so the marks drawn into it change nothing;
+   the server merges or cuts and answers with the chapter's ranges, and
+   those are what gets drawn. The spans are taken at the right click,
+   not at the menu press: pressing a button can move the selection. */
+let novelMarks = null;
+
+function startHighlights(id, key, column) {
+  const nm = { id: id, key: key, column: column, ranges: {} };
+  novelMarks = nm;
+  column.addEventListener('contextmenu', function (e) { highlightMenu(e, nm); });
+  fetch('/api/highlights?id=' + encodeURIComponent(id) +
+        '&key=' + encodeURIComponent(key))
+    .then(function (r) { return r.json(); })
+    .then(function (answer) {
+      if (nm !== novelMarks) return;
+      nm.ranges = (answer && answer.ranges) || {};
+      drawHighlights(nm);
+    })
+    .catch(function () {});
+}
+
+function novelParagraphs(nm) {
+  return nm.column.getElementsByTagName('p');
+}
+
+/* Each touched paragraph is rebuilt from its own text: plain text nodes
+   and <mark class="nhl"> runs, textContent only - a site's text is never
+   markup. Only paragraphs whose ranges changed are touched. */
+function drawHighlights(nm, only) {
+  const ps = novelParagraphs(nm);
+  for (let i = 0; i < ps.length; i++) {
+    if (only && !only.has(i)) continue;
+    const p = ps[i];
+    const ranges = nm.ranges[String(i)] || [];
+    if (!ranges.length && !p.querySelector('mark.nhl')) continue;
+    const text = p.textContent;
+    p.textContent = '';
+    let at = 0;
+    ranges.forEach(function (r) {
+      const s = Math.max(at, Math.min(text.length, r[0]));
+      const e = Math.min(text.length, r[1]);
+      if (e <= s) return;
+      if (s > at) p.appendChild(document.createTextNode(text.slice(at, s)));
+      const mark = document.createElement('mark');
+      mark.className = 'nhl';
+      mark.dataset.p = String(i);
+      mark.dataset.s = String(s);
+      mark.dataset.e = String(e);
+      mark.textContent = text.slice(s, e);
+      p.appendChild(mark);
+      at = e;
+    });
+    if (at < text.length) p.appendChild(document.createTextNode(text.slice(at)));
+  }
+}
+
+function textOffsetIn(p, node, offset) {
+  const r = document.createRange();
+  r.setStart(p, 0);
+  r.setEnd(node, offset);
+  return r.toString().length;
+}
+
+function selectionSpans(nm) {
+  const sel = getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return [];
+  const range = sel.getRangeAt(0);
+  const ps = novelParagraphs(nm);
+  const spans = [];
+  for (let i = 0; i < ps.length; i++) {
+    const p = ps[i];
+    if (!range.intersectsNode(p)) continue;
+    const s = p.contains(range.startContainer)
+      ? textOffsetIn(p, range.startContainer, range.startOffset) : 0;
+    const e = p.contains(range.endContainer)
+      ? textOffsetIn(p, range.endContainer, range.endOffset) : p.textContent.length;
+    if (e > s) spans.push([i, s, e]);
+  }
+  return spans;
+}
+
+// How much of [s, e) the paragraph's ranges already cover, in characters.
+function coveredBy(ranges, s, e) {
+  let n = 0;
+  (ranges || []).forEach(function (r) {
+    n += Math.max(0, Math.min(e, r[1]) - Math.max(s, r[0]));
+  });
+  return n;
+}
+
+function highlightMenu(e, nm) {
+  let spans = selectionSpans(nm);
+  if (!spans.length) {
+    const mark = e.target.closest && e.target.closest('mark.nhl');
+    if (!mark) return;
+    spans = [[+mark.dataset.p, +mark.dataset.s, +mark.dataset.e]];
+  }
+  let total = 0, covered = 0;
+  spans.forEach(function (sp) {
+    total += sp[2] - sp[1];
+    covered += coveredBy(nm.ranges[String(sp[0])], sp[1], sp[2]);
+  });
+  e.preventDefault();
+  closeHighlightMenu();
+  const menu = el('div', 'histmenu');
+  const add = function (label, on) {
+    const b = el('button', 'hlitem', label);
+    b.addEventListener('pointerdown', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeHighlightMenu();
+      setHighlight(nm, spans, on);
+    });
+    menu.appendChild(b);
+  };
+  if (covered < total) add('Highlight', true);
+  if (covered > 0) add('Unhighlight', false);
+  document.body.appendChild(menu);
+  const box = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(e.clientX, innerWidth - box.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(e.clientY, innerHeight - box.height - 8)) + 'px';
+  window._hlMenu = menu;
+  const away = function (ev) {
+    if (ev && ev.target && menu.contains(ev.target)) return;
+    closeHighlightMenu();
+  };
+  window._hlAway = away;
+  setTimeout(function () {
+    addEventListener('pointerdown', away, true);
+    addEventListener('wheel', away, true);
+    page.addEventListener('scroll', away, { passive: true });
+  }, 0);
+}
+
+function closeHighlightMenu() {
+  if (window._hlMenu) { window._hlMenu.remove(); window._hlMenu = null; }
+  const away = window._hlAway;
+  if (away) {
+    removeEventListener('pointerdown', away, true);
+    removeEventListener('wheel', away, true);
+    page.removeEventListener('scroll', away);
+    window._hlAway = null;
+  }
+}
+
+function setHighlight(nm, spans, on) {
+  const touched = new Set(spans.map(function (sp) { return sp[0]; }));
+  const sel = getSelection();
+  if (sel) sel.removeAllRanges();
+  fetch('/api/highlight?id=' + encodeURIComponent(nm.id) +
+        '&key=' + encodeURIComponent(nm.key) +
+        '&on=' + (on ? '1' : '0') + '&spans=' +
+        encodeURIComponent(spans.map(function (sp) {
+          return sp[0] + ':' + sp[1] + '-' + sp[2];
+        }).join(',')))
+    .then(function (r) { return r.json(); })
+    .then(function (answer) {
+      if (nm !== novelMarks) return;
+      nm.ranges = (answer && answer.ranges) || {};
+      drawHighlights(nm, touched);
+    })
+    .catch(function () {});
+}
+
+/* **Where reading stopped, kept and given back.** The owner, 18 October
+   2026: "when I continue reading make sure it takes me to the exact
+   place I stopped in the ch not the next one! and if I finished the ch
+   make sure that it takes me to the next ch". A chapter is marked read
+   the moment it opens, so Continue could not tell a chapter left half-way
+   from a finished one and always stepped past it.
+
+   The place is the strip child at the top of the view (a page, or a
+   paragraph of a novel), how far down it the view starts, and whether
+   the chapter's end - the Previous/Next row - has come on screen. A
+   child and a fraction rather than a scrollTop, because pages above it
+   load at their own pace and a pixel offset taken now names a different
+   page once they have; the fraction is re-applied against the child's
+   real box until the pictures settle. Written 400ms after scrolling
+   stops (web/backend.save_reading_place, no redraw), and `done` sticks
+   for this open once reached. Continue then reopens the chapter at this
+   spot, or the next one when `done` (web_pages._place_index). */
+let readerPlace = null;
+const PLACE_SAVE_MS = 400;
+// How long a restore keeps re-applying itself while the pages above the
+// spot load; any wheel, key, press or touch of his ends it at once.
+const PLACE_RESTORE_MS = 8000;
+
+function stopPlace() {
+  if (!readerPlace) return;
+  clearTimeout(readerPlace.timer);
+  readerPlace.restoring = false;
+  readerPlace = null;
+}
+
+function placeTopOf(node, base) {
+  return node.getBoundingClientRect().top - base + page.scrollTop;
+}
+
+function placeNow(rp) {
+  const kids = rp.strip.children;
+  if (!kids.length) return null;
+  const base = page.getBoundingClientRect().top;
+  const top = page.scrollTop;
+  // The strip runs top to bottom, so the child at the view's top is
+  // found by bisection - a few rect reads, not one per page.
+  let lo = 0, hi = kids.length - 1, at = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (placeTopOf(kids[mid], base) <= top + 1) { at = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  const kid = kids[at];
+  const height = kid.getBoundingClientRect().height || 1;
+  const frac = Math.min(1, Math.max(0, (top - placeTopOf(kid, base)) / height));
+  // The end counts only once he has scrolled to it over real pages:
+  // before the first picture arrives every box is a guess, and on a
+  // short guess the end row is on screen the moment the chapter opens.
+  if (!rp.done && rp.scrolled && top > 0 && placeLaidOut(rp)
+      && rp.ending.getBoundingClientRect().top < page.clientHeight) {
+    rp.done = true;
+  }
+  return { page: at, frac: frac };
+}
+
+function placeLaidOut(rp) {
+  const imgs = rp.strip.getElementsByTagName('img');
+  if (!imgs.length) return true;              // a novel's text
+  for (let i = 0; i < imgs.length; i++) {
+    if (imgs[i].naturalWidth > 0) return true;
+  }
+  return false;
+}
+
+function savePlace(rp) {
+  if (rp !== readerPlace || rp.restoring || !rp.ready) return;
+  const now = placeNow(rp);
+  if (!now) return;
+  fetch('/api/place_set?id=' + encodeURIComponent(rp.id) +
+        '&key=' + encodeURIComponent(rp.key) +
+        '&page=' + now.page + '&frac=' + now.frac.toFixed(4) +
+        '&done=' + (rp.done ? '1' : '0'), { keepalive: true })
+    .catch(function () {});
+}
+
+function startPlace(id, key, strip, ending, placeAsk) {
+  const rp = { id: id, key: key, strip: strip, ending: ending,
+               done: false, restoring: false, timer: 0,
+               ready: false, scrolled: false };
+  readerPlace = rp;
+  placeAsk.then(function (place) {
+    if (rp !== readerPlace) return;           // another chapter since
+    rp.ready = true;      // nothing is written over the place before it is read
+    place = place || {};
+    const resume = place.key === key && !place.done
+      && ((place.page | 0) > 0 || (+place.frac || 0) > 0);
+    if (!resume) { savePlace(rp); return; }   // this chapter, from its top
+    restorePlace(rp, place.page | 0, +place.frac || 0);
+  });
+}
+
+function restorePlace(rp, index, frac) {
+  rp.restoring = true;
+  const started = performance.now();
+  let stopped = false;
+  const stop = function () {
+    if (stopped) return;
+    stopped = true;
+    rp.restoring = false;
+    ['wheel', 'keydown', 'pointerdown', 'touchstart'].forEach(function (name) {
+      removeEventListener(name, stop, true);
+    });
+    tellHost({ action: 'diag', what: 'reader place restored', page: index,
+               frac: frac.toFixed(3), top: Math.round(page.scrollTop),
+               ms: Math.round(performance.now() - started) });
+  };
+  ['wheel', 'keydown', 'pointerdown', 'touchstart'].forEach(function (name) {
+    addEventListener(name, stop, true);
+  });
+  const step = function () {
+    if (rp !== readerPlace || !rp.restoring) return;
+    const kid = rp.strip.children[Math.min(index, rp.strip.children.length - 1)];
+    if (kid) {
+      const base = page.getBoundingClientRect().top;
+      const want = placeTopOf(kid, base) + frac * kid.getBoundingClientRect().height;
+      if (Math.abs(page.scrollTop - want) > 1) page.scrollTop = want;
+    }
+    if (performance.now() - started < PLACE_RESTORE_MS) requestAnimationFrame(step);
+    else stop();
+  };
+  requestAnimationFrame(step);
+}
+
+page.addEventListener('scroll', function () {
+  const rp = readerPlace;
+  if (!rp || rp.restoring || !rp.ready) return;
+  rp.scrolled = true;
+  clearTimeout(rp.timer);
+  rp.timer = setTimeout(function () { savePlace(rp); }, PLACE_SAVE_MS);
+}, { passive: true });
 
 /* ---- routing ------------------------------------------------------ */
 let token = 0;

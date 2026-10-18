@@ -1145,6 +1145,13 @@ def _forget_contradicted_resume(entry, *, chapter=None):
     if entry_type in MANGA_TYPES:
         if chapter is None:
             return
+        # The web reader's place (web/backend.reading_place) goes on any
+        # correction: the number just typed is where reading is now.
+        try:
+            from web import backend
+            backend.forget_reading_place(entry)
+        except Exception:
+            logs.exception("Could not drop the reading place")
         saved = entry.get("reader_position")
         if not isinstance(saved, dict):
             return

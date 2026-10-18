@@ -5755,6 +5755,20 @@ def _release_edge_reach(window):
 
 
 
+def _web_place_index(entry):
+    """The chapter index the reader's saved place resumes at, or None."""
+    try:
+        from web import backend
+        from windows import web_pages, web_reader
+        entry_id = web_reader._entry_id_for(entry)
+        items = backend.chapters(entry_id).get("items") or []
+        placed = web_pages._place_index(backend, entry_id, items)
+        return placed[0] if placed is not None else None
+    except Exception:
+        logs.exception("Could not read the reading place")
+        return None
+
+
 def _web_chapter_index(entry, number):
     """Which position in the chapter list a chapter number sits at.
 
@@ -5835,7 +5849,13 @@ def open_reader(window, entry, data_file="tracker.json", resume=True,
                 from windows import web_pages
                 index = web_pages._next_chapter_index(entry)
             elif resume:
-                index = _web_chapter_index(entry, entry.get("progress"))
+                # Where the reader last stopped wins when it knows -
+                # the chapter left half-way, or the one after a finished
+                # one (web_pages._place_index); the saved progress
+                # number is the answer for a title read before that.
+                index = _web_place_index(entry)
+                if index is None:
+                    index = _web_chapter_index(entry, entry.get("progress"))
             page = web_reader.open_reader(window, entry, index)
             if page is not None:
                 return page

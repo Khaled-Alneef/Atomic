@@ -986,6 +986,186 @@ def mark_read(entry_id, key, read=True):
     return {"ok": True}
 
 
+# **Where in a chapter reading stopped.** The owner, 18 October 2026:
+# "when I continue reading make sure it takes me to the exact place I
+# stopped in the ch not the next one! and if I finished the ch make sure
+# that it takes me to the next ch". A chapter is marked read the moment
+# it opens (mark_read, the Qt reader's rule), so Continue - which opens
+# the chapter after the furthest mark - stepped past a chapter left
+# half-way. The reader now reports its place: which chapter (`key`),
+# which page of it (`page`, the strip's child index), how far down that
+# page (`frac`) and whether it reached the chapter's end (`done`). One
+# record per title, the last chapter opened. Its own file and no
+# changes.bump, because it is written on every scroll pause and no page
+# draws it - a bump would redraw Home under the reader each time.
+PLACE_FILE = "reading_place.json"
+_place_lock = threading.Lock()
+
+
+def _place_key(entry, entry_id):
+    try:
+        from helpers import history
+        return history.title_key(entry) or str(entry_id)
+    except Exception:
+        return str(entry_id)
+
+
+def reading_place(entry_id):
+    """The last place reading stopped in this title, or {}."""
+    entry = entry_by_id(entry_id)
+    if entry is None:
+        return {}
+    with _place_lock:
+        places = storage.load(PLACE_FILE, {})
+    if not isinstance(places, dict):
+        return {}
+    place = places.get(_place_key(entry, entry_id))
+    return dict(place) if isinstance(place, dict) else {}
+
+
+def save_reading_place(entry_id, key, page=0, frac=0.0, done=False):
+    """Remember where in chapter `key` reading is. Never raises."""
+    entry = entry_by_id(entry_id)
+    if entry is None or not key:
+        return {"ok": False}
+    try:
+        page = max(0, int(page))
+        frac = min(1.0, max(0.0, float(frac)))
+    except (TypeError, ValueError):
+        page, frac = 0, 0.0
+    try:
+        with _place_lock:
+            places = storage.load(PLACE_FILE, {})
+            if not isinstance(places, dict):
+                places = {}
+            places[_place_key(entry, entry_id)] = {
+                "key": str(key), "page": page, "frac": round(frac, 4),
+                "done": bool(done), "at": time.time()}
+            # The 200 most recent titles - nobody reads more at once.
+            if len(places) > 200:
+                for old in sorted(places, key=lambda k: places[k].get("at", 0))[:-200]:
+                    places.pop(old, None)
+            storage.save(PLACE_FILE, places)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:160]}
+    return {"ok": True}
+
+
+# **Highlights in a novel's text.** The owner, 18 October 2026: "make the
+# user select the text then right click then Highlight, then the text
+# will be highlighted until the user select it again then right click
+# then unhighlight it". Kept per title (history.title_key, the place's
+# key) and per chapter key, as character ranges inside each paragraph:
+# {"<paragraph index>": [[start, end], ...]}, sorted and never
+# overlapping. Offsets into the paragraph's text rather than anything
+# about the page, so a font or size change moves nothing. The page asks
+# for a change and draws what comes back - this is the one place ranges
+# are merged and cut.
+HIGHLIGHT_FILE = "novel_highlights.json"
+
+
+def _parse_spans(text):
+    """"3:0-12,4:5-9" -> [(3, 0, 12), (4, 5, 9)], bad parts dropped."""
+    spans = []
+    for part in str(text or "").split(","):
+        try:
+            para, _, rest = part.partition(":")
+            start, _, end = rest.partition("-")
+            p, s, e = int(para), int(start), int(end)
+        except ValueError:
+            continue
+        if p >= 0 and 0 <= s < e:
+            spans.append((p, s, e))
+    return spans
+
+
+def _merge(ranges):
+    out = []
+    for s, e in sorted(ranges):
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return out
+
+
+def _cut(ranges, s, e):
+    out = []
+    for a, b in ranges:
+        if b <= s or a >= e:
+            out.append([a, b])
+            continue
+        if a < s:
+            out.append([a, s])
+        if b > e:
+            out.append([e, b])
+    return out
+
+
+def novel_highlights(entry_id, key):
+    """This chapter's highlights, as {"ranges": {...}}."""
+    entry = entry_by_id(entry_id)
+    if entry is None or not key:
+        return {"ranges": {}}
+    with _place_lock:
+        marks = storage.load(HIGHLIGHT_FILE, {})
+    if not isinstance(marks, dict):
+        return {"ranges": {}}
+    chapter = (marks.get(_place_key(entry, entry_id)) or {}).get(str(key))
+    return {"ranges": chapter if isinstance(chapter, dict) else {}}
+
+
+def set_novel_highlight(entry_id, key, spans, on=True):
+    """Highlight (`on`) or clear `spans` in this chapter; returns what the
+    chapter now holds. Never raises."""
+    entry = entry_by_id(entry_id)
+    parsed = _parse_spans(spans)
+    if entry is None or not key or not parsed:
+        return novel_highlights(entry_id, key)
+    title = _place_key(entry, entry_id)
+    try:
+        with _place_lock:
+            marks = storage.load(HIGHLIGHT_FILE, {})
+            if not isinstance(marks, dict):
+                marks = {}
+            book = marks.setdefault(title, {})
+            chapter = book.get(str(key))
+            chapter = dict(chapter) if isinstance(chapter, dict) else {}
+            for p, s, e in parsed:
+                current = [list(r) for r in chapter.get(str(p)) or []]
+                current = _merge(current + [[s, e]]) if on else _cut(current, s, e)
+                if current:
+                    chapter[str(p)] = current
+                else:
+                    chapter.pop(str(p), None)
+            if chapter:
+                book[str(key)] = chapter
+            else:
+                book.pop(str(key), None)
+            if not book:
+                marks.pop(title, None)
+            storage.save(HIGHLIGHT_FILE, marks)
+    except Exception as exc:
+        from helpers import logs
+        logs.warning(f"novel highlight not saved: {str(exc)[:160]}")
+    return novel_highlights(entry_id, key)
+
+
+def forget_reading_place(entry):
+    """Drop a title's place - a progress correction outranks it."""
+    try:
+        from helpers import history
+        key = history.title_key(entry)
+    except Exception:
+        key = ""
+    if not key:
+        return
+    with _place_lock:
+        places = storage.load(PLACE_FILE, {})
+        if isinstance(places, dict) and places.pop(key, None) is not None:
+            storage.save(PLACE_FILE, places)
+
+
 def _chapter_of(key):
     """The chapter number in a reader key ("c886", "c24.5" -
     history.chapter_key), or None for anything else."""

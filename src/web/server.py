@@ -4139,6 +4139,17 @@ def answer(route, query=None):
     if route == "mark":
         return backend.mark_read(one("id"), one("key"),
                                  one("read", "1") == "1")
+    if route == "highlights":
+        return backend.novel_highlights(one("id"), one("key"))
+    if route == "highlight":
+        return backend.set_novel_highlight(one("id"), one("key"),
+                                           one("spans"), one("on", "1") == "1")
+    if route == "place":
+        return backend.reading_place(one("id"))
+    if route == "place_set":
+        return backend.save_reading_place(
+            one("id"), one("key"), one("page", "0"), one("frac", "0"),
+            one("done", "0") == "1")
     return {"kind": "rows", "sections": [], "note": "not built yet"}
 
 
