@@ -4417,8 +4417,13 @@ class PlayerPage(GlassPage):
             if row is None:
                 continue
             if wanted:
-                text = row.property("searchText") or ""
-                if wanted not in text:
+                # "11" is episode 11, not 110 - details.number_query.
+                from windows.details import number_query
+                exact = number_query(wanted)
+                if exact is not None:
+                    if number != exact:
+                        continue
+                elif wanted not in (row.property("searchText") or ""):
                     continue
             self._episode_rows[number] = row
             layout.addWidget(row)

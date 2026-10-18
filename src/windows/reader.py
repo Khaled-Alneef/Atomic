@@ -4458,7 +4458,8 @@ def _origin_page_name(window):
 # the owner's other tabs would be a far worse bug than music that keeps
 # playing.
 _music = {"key": None, "hwnd": None, "pid": None, "settled": False,
-          "gesture_sent": False, "pressed_at": None, "reviving": False}
+          "gesture_sent": False, "pressed_at": None, "reviving": False,
+          "launch": 0}
 
 # Every browser pid this session ever spawned for music, so a stuck
 # close can prove a process is ours before ending it - see
@@ -5158,7 +5159,44 @@ def _refront(window):
         pass        # a closed window mid-timer is not worth a log
 
 
-def _hush_browser_window(window, was_foreground):
+def _top_level_windows():
+    """Every top-level window handle right now, as a set - what was
+    already on screen before a music launch, so a window this launch did
+    not bring up is never mistaken for its own. Never raises."""
+    if os.name != "nt":
+        return set()
+    try:
+        import ctypes
+        from ctypes import wintypes
+        handles = set()
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def enum(hwnd, _lparam):
+            handles.add(int(hwnd or 0))
+            return True
+
+        ctypes.windll.user32.EnumWindows(enum, 0)
+        return handles
+    except Exception:
+        return set()
+
+
+def _close_abandoned_music(hwnd):
+    """Close a music window whose reader was left before it appeared."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        if user32.IsWindow(hwnd):
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)     # WM_CLOSE
+            QTimer.singleShot(900, lambda: _force_close_music(hwnd))
+        logs.info("music: closed a window that appeared after its reader "
+                  "was left")
+    except Exception:
+        logs.exception("could not close the abandoned music window")
+
+
+def _hush_browser_window(window, was_foreground, launch_id=None,
+                         launch_state=None):
     """Watch for the music window, leave it alone while it starts, then
     put it down.
 
@@ -5178,15 +5216,46 @@ def _hush_browser_window(window, was_foreground):
     foreground window before the launch. A browser the owner was reading
     when the reader opened is left where it was, and no other
     application can be caught by this at all. With no association to
-    read, nothing is touched and the behaviour is what it always was."""
+    read, nothing is touched and the behaviour is what it always was.
+
+    **A reader left before the window appears still closes it.** The
+    owner, 18 October 2026: leaving a chapter with mouse button 4 left
+    the music playing. His log: a reader opened at 11:08:30 and was left
+    at 11:08:32, and its music started at 11:08:42 - the window is only
+    found by this sweep, seconds after the launch, and a close before
+    that had no handle to close (`stop_music` and `close_music_now` read
+    `_music["hwnd"]`, still None) while the sweep went on to find the
+    window, record it and press play. Button 4 is simply the fast way
+    out, which is why it met this and the bar's chevron, a reach away,
+    mostly did not. A stop now bumps `_music["launch"]`, and a sweep
+    whose launch is no longer current closes its window when it sees it
+    rather than playing it - only a window that did not exist before the
+    launch (`launch_state["before"]`), and only while nothing else has
+    taken the music since (`_music["key"]` still empty)."""
     exe = _default_browser_exe()
     if not exe or os.name != "nt":
         return
     import ctypes
     user32 = ctypes.windll.user32
     deadline = time.monotonic() + _MUSIC_HUSH_S
+    state = launch_state if launch_state is not None else {
+        "pid": None, "seen": False, "before": set()}
+
+    def abandoned():
+        return launch_id is not None and _music.get("launch") != launch_id
+
+    def new_music_window():
+        """This launch's window, if it is up: the foreground window of
+        the browser (not one that was there before), or its own child's."""
+        hwnd = user32.GetForegroundWindow()
+        if hwnd and hwnd != was_foreground and _window_exe(hwnd) == exe:
+            return int(hwnd)
+        if state.get("pid"):
+            return _find_window_of_pid(state["pid"]) or 0
+        return 0
 
     def first_sighting(hwnd):
+        state["seen"] = True
         # **Minimize first, then play - the order is the owner's, 24
         # August 2026:** "open URL - minimize - play the music". The old
         # order (leave it visible, press `k`, tuck once audible) existed
@@ -5205,6 +5274,20 @@ def _hush_browser_window(window, was_foreground):
 
     def sweep():
         try:
+            if abandoned():
+                # Stopped before its window was seen, and nothing has
+                # taken the music since: close it when it shows up. Seen
+                # already means stop_music had the handle and closed it.
+                if state.get("seen") or _music.get("key") is not None:
+                    return
+                hwnd = new_music_window()
+                if (hwnd and hwnd != was_foreground
+                        and hwnd not in state.get("before", ())):
+                    _close_abandoned_music(hwnd)
+                    return
+                if time.monotonic() < deadline:
+                    QTimer.singleShot(_MUSIC_HUSH_STEP_MS, sweep)
+                return
             hwnd = user32.GetForegroundWindow()
             if hwnd and hwnd != was_foreground and _window_exe(hwnd) == exe:
                 if _music.get("hwnd") is None:
@@ -5219,11 +5302,13 @@ def _hush_browser_window(window, was_foreground):
                     # and this sweep must not slam it shut mid-press.
                     user32.ShowWindow(hwnd, 6)         # SW_MINIMIZE
                     _refront(window)
-            elif _music.get("hwnd") is None and _music.get("pid"):
+            elif _music.get("hwnd") is None and (state.get("pid")
+                                                 or _music.get("pid")):
                 # Not foreground - which a fresh profile's first launch
                 # never was, measured 22 August 2026 - but the process
                 # is our own child, so ask for its window directly.
-                hwnd = _find_window_of_pid(_music["pid"])
+                hwnd = _find_window_of_pid(state.get("pid")
+                                           or _music["pid"])
                 if hwnd and hwnd != was_foreground:
                     first_sighting(hwnd)
             if time.monotonic() < deadline:
@@ -5333,6 +5418,14 @@ def _open_music_quietly(window, entry):
         return
     # Opened in a form that starts itself - see _autoplay_url.
     url = _autoplay_url(url)
+    # This launch's own number, and what it learns about itself, kept
+    # apart from `_music` - which stop_music clears - so a launch that
+    # is stopped before its window has appeared can still find that
+    # window and close it (see _hush_browser_window's `abandoned`).
+    _music["launch"] = _music.get("launch", 0) + 1
+    launch_id = _music["launch"]
+    launch_state = {"pid": None, "seen": False,
+                    "before": _top_level_windows()}
     # Resolved here, on this thread, before anything else can want it:
     # both the launch below and _hush_browser_window ask for it, and the
     # order they used to ask in is what silenced the first open of every
@@ -5420,8 +5513,13 @@ def _open_music_quietly(window, entry):
                         # (see _find_window_of_pid); on a handoff it
                         # exits at once and the foreground sweep is
                         # what finds the window.
-                        _music["pid"] = proc.pid
+                        launch_state["pid"] = proc.pid
                         _music_pids.add(proc.pid)
+                        # Not over a stop: a reader left while the
+                        # browser was still starting has cleared this,
+                        # and the launch's own state is what remembers.
+                        if _music.get("launch") == launch_id:
+                            _music["pid"] = proc.pid
                     else:
                         ctypes.windll.shell32.ShellExecuteW(
                             None, "open", url, None, None, 7)
@@ -5438,7 +5536,7 @@ def _open_music_quietly(window, entry):
     _music["settled"] = False
     _music["gesture_sent"] = False
     _music["pressed_at"] = None
-    _hush_browser_window(window, was_foreground)
+    _hush_browser_window(window, was_foreground, launch_id, launch_state)
     # Fallback only - see the docstring above, and they stand down the
     # moment the sweep has identified the window: from then on the tuck
     # owns the refront, and it may still be *waiting* (the keystroke
@@ -5485,6 +5583,8 @@ def close_music_now():
     _music["hwnd"] = None
     _music["key"] = None
     _music["pid"] = None
+    _music["launch"] = _music.get("launch", 0) + 1   # abandon a pending sweep
+    logs.info(f"music: closed now (window {'known' if hwnd else 'not seen yet'})")
     if not hwnd or os.name != "nt":
         return
     try:
@@ -5518,6 +5618,7 @@ def stop_music(delay_ms: int = 0):
     _cancel_music_stop()
     hwnd, _music["hwnd"], _music["key"] = _music["hwnd"], None, None
     _music["pid"] = None
+    _music["launch"] = _music.get("launch", 0) + 1   # abandon a pending sweep
     _music["settled"] = False
     _music["gesture_sent"] = False
     _music["pressed_at"] = None
