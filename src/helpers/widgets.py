@@ -4704,6 +4704,71 @@ def smooth_scrolling(area, notch_scale: float = 1.0):
     return _SmoothWheel(area)
 
 
+POPUP_RADIUS = 12
+
+
+def _round_popup_window(window):
+    """Make a popup's own window frameless and see-through, so the
+    radius its stylesheet draws is the shape on screen - an opaque popup
+    window paints square corners round any rounded frame inside it.
+    Done once per window, before it is first shown: translucency set on
+    a native window that already exists does not take."""
+    if window is None or window.property("atomicRounded"):
+        return
+    window.setProperty("atomicRounded", True)
+    window.setWindowFlags(window.windowFlags()
+                          | Qt.WindowType.FramelessWindowHint
+                          | Qt.WindowType.NoDropShadowWindowHint)
+    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+
+def install_rounded_popups():
+    """Every drop-down list and menu in the Qt side rounded, its rows
+    under a pointing hand - the owner, 19 October 2026, with a picture of
+    a square Sort popup: "change all lists to rounded edges instead of the
+    sharp and make the cursor hover finger pointing, do that to all lists
+    in the app". The web pages' half is app.js openDrop.
+
+    At the class, once, so no combo or menu built anywhere needs to know:
+    QComboBox.showPopup prepares its container window and its list on the
+    first open (PickCombo's override still runs, and calls this through
+    super()), and QMenu.__init__ does the same for every menu built from
+    Python. The shapes are theme.py's (QComboBox QAbstractItemView,
+    QComboBoxPrivateContainer, QMenu).
+
+    The hand goes on the list's viewport, not set and left on a widget
+    that also has plain parts (.claude/rules/ui.md's cursor trap): every
+    row of a popup list is something to pick, and the viewport goes away
+    with the popup."""
+    if getattr(QComboBox, "_atomic_rounded", False):
+        return
+    QComboBox._atomic_rounded = True
+    original_show = QComboBox.showPopup
+
+    def showPopup(self):
+        try:
+            view = self.view()
+            if view is not None:
+                _round_popup_window(view.window())
+                view.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        except RuntimeError:
+            pass
+        original_show(self)
+
+    QComboBox.showPopup = showPopup
+    original_init = QMenu.__init__
+
+    def __init__(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        try:
+            _round_popup_window(self)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        except RuntimeError:
+            pass
+
+    QMenu.__init__ = __init__
+
+
 def smooth_combo(box):
     """Give a drop-down's popup the app's scrolling.
 

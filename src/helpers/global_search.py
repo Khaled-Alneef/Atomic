@@ -66,7 +66,6 @@ SHORTCUTS = (
         ("Ctrl+N", "Add something"),
         ("Ctrl+Z", "Undo the last action"),
         ("Ctrl+Y", "Redo the last action"),
-        ("Ctrl+1-9", "Jump to a sidebar page"),
         ("Ctrl+,", "Settings"),
         # Two rows, not one "Alt+Left / Alt+Right": measured at 247px of
         # caps against a 124px column, which would have been clipped in
@@ -89,7 +88,10 @@ SHORTCUTS = (
         ("Left / Right", "Seek back / forward"),
         ("Up / Down", "Volume"),
         ("M", "Mute"),
-        ("N / P", "Next / previous episode"),
+        # Ctrl+N / Ctrl+P, the owner, 19 October 2026: "as it really works
+        # in the video player". player.keyPressEvent matches the key and
+        # not its modifiers, so plain N / P still work too.
+        ("Ctrl+N / Ctrl+P", "Next / previous episode"),
         ("F", "Full screen"),
         # Same key, same idea, on all three surfaces that can be showing
         # a stale answer - the reader reloads its chapter, the episode

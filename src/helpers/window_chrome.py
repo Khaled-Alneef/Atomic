@@ -65,11 +65,12 @@ import sys
 from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize,
                           Qt, QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QRegion
+from PyQt6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap,
+                         QRegion)
 from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QPushButton,
                              QSizePolicy, QVBoxLayout, QWidget)
 
-from . import images, theme
+from . import images, rail_anim, theme
 from .widgets import SmoothTween, search_field, use_hover_cursor
 
 WINDOWS = sys.platform == "win32"
@@ -182,6 +183,13 @@ SEARCH_MAX_WIDTH = 760
 # clamped to the cap and nothing moved at all.
 FULLSCREEN_SEARCH_SHARE = 0.58
 SEARCH_MIN_WIDTH = 320
+# With the page menu on the bar's left (set_nav) the field shares the row
+# with ~500px of menu; at the 1280px default window 320 overflowed it.
+SEARCH_MIN_WIDTH_WITH_NAV = 220
+# Below this bar width (logical px) the menu tightens its segments and
+# drops the mark - at the window's minimum, ~1045 logical, the menu, the
+# field and five buttons did not fit at full padding.
+NAV_DENSE_BELOW = 1300
 SEARCH_HEIGHT = theme.TOP_SEARCH_HEIGHT
 
 # Segoe Fluent Icons, the faces every other chrome button in this app
@@ -922,6 +930,170 @@ class DriftButton(QPushButton):
         super().paintEvent(event)
 
 
+# **Saved / Schedule / History move like the sidebar** - the owner, 19
+# October 2026: "add a cool animation to saved history and schedule like
+# the sidebar and add the white frame when selected like the sidebar!".
+# Two pieces, each the sidebar's own:
+#   * the icon tells its story under the pointer - the bookmark commits
+#     its tick, the clock's hand winds back, the calendar turns a page -
+#     drawn by rail_anim, the same profiles the rail's rows use;
+#   * the section on screen sits in a white capsule that slides from
+#     button to button, with its icon in black wherever the capsule is
+#     (main._RailPill and _RailDelegate do the same down the sidebar).
+SECTION_STORY_MS = 520
+SECTION_SLIDE_MS = 340
+SECTION_FADE_MS = 200
+
+
+class _SectionButton(DriftButton):
+    """A Saved / Schedule / History button whose icon is rail_anim's,
+    animated on hover. A key with no profile keeps its flat QIcon."""
+
+    def __init__(self, key, parent=None, **kwargs):
+        super().__init__("", parent, **kwargs)
+        self.key = key
+        self.profile = key if rail_anim.has_profile(key) else ""
+        self.story = 0.0
+        self._story_tween = SmoothTween(self, self._set_story, SECTION_STORY_MS)
+
+    def _set_story(self, value):
+        self.story = float(value)
+        self.update()
+
+    def enterEvent(self, event):
+        self._story_tween.start(self.story, 1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._story_tween.start(self.story, 0.0)
+        super().leaveEvent(event)
+
+    def icon_rect(self) -> QRectF:
+        rect = QRectF(0, 0, SECTION_ICON, SECTION_ICON)
+        rect.moveCenter(QRectF(self.rect()).center())
+        return rect
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.profile:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        colour = theme.mix(theme.TEXT_MUTED, theme.TEXT, self._hover)
+        # SmoothTween has eased the story already; handed over as it is.
+        rail_anim.paint(painter, self.profile, self.icon_rect(), self.story,
+                        colour, SECTION_ICON, float(self.devicePixelRatioF() or 1.0))
+        painter.end()
+
+
+class _SectionPill(QWidget):
+    """The white capsule over the section on screen, laid *over* the
+    three buttons (it paints their icons again in black, clipped to
+    itself), so the ink inverts exactly where the capsule is mid-slide.
+    Mouse-transparent; the buttons under it still take every click."""
+
+    def __init__(self, host, buttons):
+        super().__init__(host, objectName="Bare")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._host = host
+        self._buttons = buttons
+        self._key = None
+        self._from = None
+        self._t = 1.0
+        self._alpha = 0.0
+        self._slide = SmoothTween(self, self._set_t, SECTION_SLIDE_MS)
+        self._fade = SmoothTween(self, self._set_alpha, SECTION_FADE_MS)
+        self.setGeometry(host.rect())
+        host.installEventFilter(self)
+        self.raise_()
+
+    def _target(self):
+        button = self._buttons.get(self._key)
+        if button is None or not button.isVisible():
+            return None
+        return QRectF(button.geometry())
+
+    def _rect(self):
+        target = self._target()
+        if target is None:
+            return None
+        start = self._from
+        if start is None or self._t >= 1.0:
+            return target
+        t = self._t
+        return QRectF(start.x() + (target.x() - start.x()) * t, target.y(),
+                      start.width() + (target.width() - start.width()) * t,
+                      target.height())
+
+    def move_to(self, key):
+        key = key if key in self._buttons else None
+        if key == self._key:
+            return
+        # From wherever the capsule is, even mid-fade-in: a second press
+        # inside the first one's 200ms still slides rather than jumps.
+        was = self._rect() if self._key is not None else None
+        self._key = key
+        if key is not None and was is not None and self.isVisible():
+            self._from = was
+            self._t = 0.0
+            self._slide.start(0.0, 1.0)
+        else:
+            self._slide.stop()
+            self._from, self._t = None, 1.0
+        target = 1.0 if key is not None else 0.0
+        if self.isVisible():
+            self._fade.start(self._alpha, target)
+        else:
+            self._fade.stop()
+            self._alpha = target
+        self.update()
+
+    def _set_t(self, value):
+        self._t = float(value)
+        self.update()
+
+    def _set_alpha(self, value):
+        self._alpha = float(value)
+        self.update()
+
+    def eventFilter(self, obj, event):
+        if obj is self._host and event.type() == QEvent.Type.Resize:
+            self.setGeometry(self._host.rect())
+            self.raise_()
+        return False
+
+    def paintEvent(self, _event):
+        rect = self._rect()
+        if rect is None or self._alpha <= 0.004:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        radius = float(theme.RADIUS_SM)
+        fill = QColor(theme.ACCENT)
+        fill.setAlphaF(self._alpha)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, radius, radius)
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, radius, radius)
+        painter.setClipPath(clip)
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        for button in self._buttons.values():
+            box = QRectF(button.geometry())
+            if not box.intersects(rect):
+                continue
+            icon = button.icon_rect().translated(box.topLeft())
+            if button.profile:
+                rail_anim.paint(painter, button.profile, icon, button.story,
+                                theme.ON_ACCENT, SECTION_ICON, dpr)
+            else:
+                ink = images.tinted_asset(theme.rail_icon(button.key),
+                                          theme.ON_ACCENT, SECTION_ICON, dpr)
+                if not ink.isNull():
+                    painter.drawPixmap(icon.topLeft(), ink)
+        painter.end()
+
+
 def begin_window_drag(widget, event) -> bool:
     """Hand a left-press to Windows as a window move. Returns whether it
     started one.
@@ -1046,7 +1218,9 @@ class _PillGroup(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         box = self.pill_rect()
-        radius = box.height() / 2.0
+        # A rounded box round the field and its buttons, not a capsule
+        # (theme.RADIUS_CTL's note).
+        radius = float(theme.RADIUS_CTL)
         fill = QColor(255, 255, 255, int(PILL_FILL_ALPHA * self.amount))
         edge = QColor(255, 255, 255, int(PILL_EDGE_ALPHA * self.amount))
         painter.setPen(QPen(edge, 1.0))
@@ -1102,15 +1276,21 @@ class TitleBar(QWidget):
         left_row.setSpacing(2)
         self.section_buttons = {}
         for key, label in SECTION_BUTTONS:
-            button = DriftButton("", radius=theme.RADIUS_SM,
-                                 tint=theme.SURFACE, objectName="BarSection")
+            # The same rounded square as the white one that slides over
+            # them, so the hover wash and the lit state are one shape (a
+            # wash of another shape peeked out behind it on the frozen
+            # build). Not a capsule - theme.RADIUS_CTL's note.
+            button = _SectionButton(key, radius=float(theme.RADIUS_SM),
+                                    tint=theme.SURFACE, objectName="BarSection")
             button.setFixedSize(QSize(SECTION_BUTTON_WIDTH, 34))
             button.setToolTip(label)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             icon = images.tinted_asset(theme.rail_icon(key), theme.TEXT_MUTED,
                                        SECTION_ICON,
                                        float(self.devicePixelRatioF() or 1.0))
-            if not icon.isNull():
+            if button.profile:
+                pass        # drawn by rail_anim in its paintEvent
+            elif not icon.isNull():
                 button.setIcon(QIcon(icon))
                 button.setIconSize(QSize(SECTION_ICON, SECTION_ICON))
             else:
@@ -1189,6 +1369,10 @@ class TitleBar(QWidget):
         for button in self.section_buttons.values():
             buttons_row.addWidget(button)
         centre_row.addWidget(self._centre_buttons)
+        # The sliding white capsule over whichever of the three is the
+        # section on screen (set_active_section).
+        self._section_pill = _SectionPill(self._centre_buttons,
+                                          self.section_buttons)
         centre.first = self.search
         centre.last = self._centre_buttons
         self._centre_group = centre
@@ -1260,9 +1444,28 @@ class TitleBar(QWidget):
         on = bool(on)
         if on == getattr(self, "_fullscreen", False):
             return
+        # The page menu travels with the field: the left group is hidden
+        # in full screen, and a full-screen app with no way to change
+        # page would be a trap. Moved, not duplicated, for the reason the
+        # section buttons below are.
+        nav = getattr(self, "_nav", None)
+        if nav is not None:
+            if on:
+                self._left_row.removeWidget(nav)
+                self._centre_row.insertWidget(0, nav)
+                nav.mark.hide()
+            else:
+                self._centre_row.removeWidget(nav)
+                self._left_row.insertWidget(0, nav)
+                nav.mark.setVisible(not getattr(nav, "_dense", False))
+            nav.show()
         if not on:
-            # Back to being laid out rather than pinned.
-            self.search.setMinimumWidth(0)
+            # Back to being laid out rather than pinned. With the page menu
+            # on the bar the field keeps a floor: at 0 it squeezed to "S..."
+            # beside the menu (photographed on the frozen build, 19 October
+            # 2026, after one trip through full screen).
+            self.search.setMinimumWidth(
+                SEARCH_MIN_WIDTH_WITH_NAV if getattr(self, "_nav", None) else 0)
             self.search.setMaximumWidth(SEARCH_MAX_WIDTH)
         self._fullscreen = on
         # **The arrangement no longer changes with the state**, 28 August
@@ -1279,10 +1482,13 @@ class TitleBar(QWidget):
         # no use for: minimise, maximise and close, since there is no
         # frame to restore and Escape and F11 both leave. Everything
         # below this line is still keyed on `on` for that reason.
+        # Already in that row since __init__ - re-adding them here was for
+        # an older windowed layout that kept them elsewhere, and once the
+        # row also holds Downloads and Settings (add_utility) a re-add
+        # would move the three to its end.
         for button in self.section_buttons.values():
-            self._centre_buttons_row.addWidget(button)
             button.show()
-        self._centre_balance.setVisible(True)
+        self._centre_balance.setVisible(getattr(self, "_nav", None) is None)
         self._centre_buttons.setVisible(True)
         self.search.setMaximumWidth(SEARCH_MAX_WIDTH)
         # **The stretch still differs, and that is not an arrangement.**
@@ -1326,6 +1532,40 @@ class TitleBar(QWidget):
         style.polish(self)
         self.update()
 
+    def set_active_section(self, key):
+        """Light Saved, Schedule or History - or none, for any other
+        page. The capsule slides from the one lit before."""
+        self._section_pill.move_to(key)
+
+    def set_nav(self, nav):
+        """Put the page menu (helpers/top_nav) at the bar's left end -
+        the sidebar's replacement, 19 October 2026.
+
+        The left group was an empty holder the width of the window
+        buttons, kept only to centre the field in the window. The menu
+        takes it, so it stops being fixed-width, and the balance holder
+        beside the field goes too: with a menu on the left there is no
+        symmetry left to keep, and at the 1280px default window the
+        balance alone was the 232px the field needed."""
+        self._nav = nav
+        left = self._left_group
+        left.setMinimumWidth(0)
+        left.setMaximumWidth(16777215)
+        self._left_row.insertWidget(0, nav)
+        self._centre_balance.setVisible(False)
+        self.search.setMinimumWidth(SEARCH_MIN_WIDTH_WITH_NAV)
+
+    def add_utility(self, button):
+        """Downloads or Settings, after Saved / Schedule / History - they
+        lived at the foot of the sidebar, and they are in this row rather
+        than by the window buttons because this row survives full screen
+        and the window buttons do not."""
+        self._centre_buttons_row.addWidget(button)
+        grown = self._centre_buttons.width() + button.width() + \
+            self._centre_buttons_row.spacing()
+        self._centre_buttons.setFixedWidth(grown)
+        self._centre_balance.setFixedWidth(grown)
+
     def _remember_search_width(self):
         """Keep the windowed field's width, for full screen to match.
 
@@ -1344,6 +1584,9 @@ class TitleBar(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        nav = getattr(self, "_nav", None)
+        if nav is not None:
+            nav.set_dense(self.width() < NAV_DENSE_BELOW)
         # Off a zero timer: the field's own width is not settled until
         # the layout has run, and this fires before it.
         QTimer.singleShot(0, self._remember_search_width)
@@ -1450,7 +1693,8 @@ class TitleBar(QWidget):
         if layout is not None:
             layout.activate()
         region = QRegion()
-        for widget in (self.search, self._centre_buttons):
+        for widget in (self.search, self._centre_buttons,
+                       getattr(self, "_nav", None)):
             if widget is None or not widget.isVisible():
                 continue
             top_left = widget.mapTo(self, QPoint(0, 0))
@@ -1563,7 +1807,11 @@ class TitleBar(QWidget):
         follows the page width now (see set_fullscreen_search_width) and
         a bar sized from the cap would leave a dead margin whenever the
         field is under it."""
-        balance = self._centre_balance.width() or SECTION_BUTTON_WIDTH * 3 + 12
+        nav = getattr(self, "_nav", None)
+        if nav is not None:
+            balance = nav.sizeHint().width()
+        else:
+            balance = self._centre_balance.width() or SECTION_BUTTON_WIDTH * 3 + 12
         return (balance
                 + self.search.maximumWidth()
                 + self._centre_buttons.width()

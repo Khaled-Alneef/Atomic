@@ -32,6 +32,10 @@
   --font-serif: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI", sans-serif;
   /* 1367's eyebrows are a mono face in capitals, widely tracked. */
   --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  /* A control's corner. No pills: the owner, 19 October 2026: 'change all buttons or lists or all that has the shape of a stretched egg to a square with rounded edges' -
+     every stadium (999px, or a radius of half the height) is this now.
+     Circles stay circles; they are not stretched. */
+  --radius-ctl: 8px;
 }
 * { box-sizing: border-box; }
 html, body {
@@ -708,7 +712,6 @@ header p.ptitle { margin: 0 0 22px; }
   padding: 18px 30px 10px;
 }
 .paneltitle { margin: 0; font-size: 25px; font-weight: 700; flex: 1; }
-.shelfacts { display: flex; gap: 8px; }
 .roundbtn {
   width: 40px; height: 40px; border-radius: 20px;   /* setFixedSize(40, 40) */
   font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
@@ -845,9 +848,18 @@ header p.ptitle { margin: 0 0 22px; }
 
 /* ---- Downloads ---------------------------------------------------- */
 .dlfolder { display: flex; align-items: center; gap: 10px; padding: 0 30px 12px; }
-.dlpath { color: var(--dim); font-size: 12px; flex: 1;
+/* No `flex: 1`: it stretched the path across the row and pushed Change to
+   the far right edge - the owner, 19 October 2026: "move the change button
+   ... directly next right to the directory". It still shrinks and elides
+   when the path is longer than the room. */
+.dlpath { color: var(--dim); font-size: 12px; flex: 0 1 auto; min-width: 0;
           overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dllist { display: flex; flex-direction: column; gap: 10px; }
+/* The empty queue's line, centred in what is left of the window under the
+   header and the folder row (about 200px of them) - his ask, 19 October
+   2026: "move the Nothing downloading to the page center". */
+.dlempty { display: flex; align-items: center; justify-content: center;
+           min-height: calc(100vh - 260px); padding: 0; text-align: center; }
 .dlrow {
   display: flex; align-items: center; gap: 14px;
   padding: 10px 12px; border-radius: 10px; background: var(--bg);
@@ -932,7 +944,7 @@ header p.ptitle { margin: 0 0 22px; }
 .tabrow { display: flex; align-items: center; gap: 10px; padding: 18px 30px 6px; }
 .tabrow .ptitle { margin: 0 8px 0 0; color: var(--dim); font-size: 12px; }
 .pill2 {
-  padding: 5px 18px; border-radius: 14px; cursor: pointer;
+  padding: 5px 18px; border-radius: var(--radius-ctl); cursor: pointer;
   font: inherit; font-size: 12.5px;
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border);
@@ -971,7 +983,7 @@ header p.ptitle { margin: 0 0 22px; }
 .schedname { display: flex; align-items: center; gap: 8px; font-size: 14.5px;
              overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .savedtag {
-  background: var(--accent); color: var(--ink); border-radius: 10px;
+  background: var(--accent); color: var(--ink); border-radius: 5px;   /* a tag, not a pill */
   padding: 2px 9px; font-size: 11px; font-weight: 700; flex: 0 0 auto;
 }
 .schednum { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
@@ -1175,7 +1187,7 @@ header .btabs { display: flex; gap: 8px; margin: 2px 0 10px; }
             padding: 0 42px 12px; max-width: 1100px; }
 .genrebox .gpick {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 9px 3px 6px; border-radius: 999px;
+  padding: 3px 9px 3px 6px; border-radius: 6px;   /* a chip, not a pill */
   border: 1px solid var(--border); background: var(--surface);
   color: var(--dim); font-size: 11.5px; cursor: pointer;
   user-select: none;
@@ -1580,10 +1592,12 @@ header h1, .paneltitle {
   width: 178px; font-size: 146px; letter-spacing: -14px;
 }
 
-/* ---- controls: 1367's pills --------------------------------------- */
+/* ---- controls: rounded squares, not pills (19 October 2026) --------
+   They were 1367's pills; the owner asked for every stretched egg to be
+   a square with rounded edges (--radius-ctl). */
 .rbtn, .plainbtn, .sortbox, .selbtn, .histclear, .filterrow input,
 .filterrow .sortpick select, .rjump, .pill2 {
-  border-radius: 999px;
+  border-radius: var(--radius-ctl);
   transition: background-color .2s ease, border-color .2s ease, color .2s ease;
 }
 .sortbox, .plainbtn, .selbtn { padding: 7px 16px; }
@@ -1594,6 +1608,20 @@ header h1, .paneltitle {
 .roundbtn { transition: background-color .2s ease, border-color .2s ease; }
 .roundbtn.accent { background: #ffffff; border-color: #ffffff; }
 .roundbtn.accent:hover { background: rgba(255, 255, 255, .8); }
+/* The shelves' +, beside Select (app.js shelfInto): a square of Select's
+   own height with the control corner, not a disc. Its own font stack -
+   the disc's icon face draws "+" thin and low. */
+.roundbtn.addsq {
+  width: 33px; height: 33px; border-radius: var(--radius-ctl);
+  font-family: var(--font); font-size: 18px; font-weight: 600; color: var(--ink);
+  padding: 0 0 2px;
+}
+/* Games' Refresh beside it: the same square on the surface, not white,
+   and back on the icon face its glyph lives in. */
+.roundbtn.scansq {
+  font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
+  font-size: 14px; font-weight: 400; color: var(--text); padding: 0;
+}
 .genrebox .gpick { transition: border-color .2s ease, color .2s ease; }
 .genrebox .gpick.on { border-color: #ffffff; }
 .schedrow, .histrow, .ep {
@@ -1655,3 +1683,39 @@ header h1, .paneltitle {
   background-position: right 16px center;
   background-size: 10px 6px;
 }
+
+/* ---- Every dropdown's list (app.js openDrop, 19 October 2026) --------
+   The owner: rounded edges and the pointing hand on every list, after a
+   picture of the native Sort popup - square, and Chromium's own. Drawn
+   as the details page's panels are: the surface colour, one hairline,
+   the 12px radius; the row under the pointer lifts like a nav row and
+   the chosen one carries a dot, as the sidebar menu's did. */
+.dropmenu {
+  position: fixed; z-index: 9999; overflow-y: auto; overscroll-behavior: contain;
+  padding: 6px; box-sizing: border-box;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .55);
+  opacity: 0; transform: translateY(-4px);
+  transition: opacity .14s var(--ease-out), transform .22s var(--ease-drawer);
+  font-family: var(--font); font-size: 13px; color: var(--muted);
+  scrollbar-width: thin;
+}
+.dropmenu.up { transform: translateY(4px); }
+.dropmenu::-webkit-scrollbar { width: 8px; }
+.dropmenu::-webkit-scrollbar-track { background: transparent; }
+.dropmenu::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .16); border-radius: 4px; }
+.dropmenu::-webkit-scrollbar-button { display: none; height: 0; }
+.dropmenu.open { opacity: 1; transform: none; }
+.dropitem {
+  position: relative; padding: 9px 34px 9px 14px; border-radius: 8px;
+  white-space: nowrap; cursor: pointer; user-select: none;
+  transition: background-color .12s, color .12s;
+}
+.dropitem:hover { background-color: rgba(255, 255, 255, .07); color: var(--text); }
+.dropitem.on { color: var(--text); background-color: rgba(255, 255, 255, .1); }
+.dropitem.on::after {
+  content: ''; position: absolute; right: 14px; top: 50%; width: 6px; height: 6px;
+  margin-top: -3px; border-radius: 50%; background: var(--text);
+}
+.dropitem.off { opacity: .4; cursor: default; }
+select { cursor: pointer; }

@@ -1010,8 +1010,8 @@ class _WebPage(GlassPage):
     # What each forwarded name is, as Qt. Sent to the window as a real
     # key event rather than each being wired to the method it happens to
     # call today: main.keyPressEvent is where the app's keyboard is
-    # defined - Ctrl+1-9 reads the *visible* sidebar order, Escape leaves
-    # the search field before it leaves full screen - and a second copy
+    # defined - Escape leaves the search field before it leaves full
+    # screen - and a second copy
     # of that here would be wrong the first time either changed.
     _AS_QT = {
         "F11": (Qt.Key.Key_F11, Qt.KeyboardModifier.NoModifier),
@@ -1024,11 +1024,8 @@ class _WebPage(GlassPage):
         "Alt+Left": (Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier),
         "Alt+Right": (Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier),
     }
-    _AS_QT.update({
-        f"Ctrl+{n}": (getattr(Qt.Key, f"Key_{n}"),
-                      Qt.KeyboardModifier.ControlModifier)
-        for n in range(1, 10)
-    })
+    # No Ctrl+1-9 any more (removed at the owner's word, 19 October 2026 -
+    # main.keyPressEvent has the note).
 
     def _app_key(self, name):
         """A key the window owns, forwarded out of the page.
