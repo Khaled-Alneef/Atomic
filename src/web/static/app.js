@@ -97,7 +97,8 @@ addEventListener('keydown', function (e) {
      window's own block goes down the proven path.
 
      Inside a text field (the pages' own "Filter by name") only Ctrl+F
-     and the page numbers are taken, so undo, redo and the editing keys
+     is taken (Ctrl+1-9 is gone - removed at the owner's word, 19
+     October 2026), so undo, redo and the editing keys
      stay with whatever he is typing in. */
   if (e.ctrlKey && !e.altKey && !e.metaKey) {
     const typed = String(e.key || '').toLowerCase();
@@ -106,7 +107,6 @@ addEventListener('keydown', function (e) {
     const editing = tag === 'input' || tag === 'textarea' || node.isContentEditable;
     let name = '';
     if (typed === 'f') name = 'Ctrl+F';
-    else if (/^[1-9]$/.test(typed)) name = 'Ctrl+' + typed;
     else if (!editing && (typed === 'n' || typed === 'z' || typed === 'y'))
       name = 'Ctrl+' + typed.toUpperCase();
     else if (!editing && typed === ',') name = 'Ctrl+,';
@@ -3239,7 +3239,10 @@ async function go(route, opts) {
        first paragraph - the page's name - which is how Manhwa read "Most
        followed manhwa" twice. */
     const mediumPage = !!data.browse && String(data.browse).indexOf(':') < 0;
-    if (data.note && !mediumPage) head.appendChild(el('p', 'pnote', data.note));
+    // An empty, finished cast or genre tab says its note in the middle of
+    // the page instead (gridSettledEmpty), not twice.
+    if (data.note && !mediumPage && !gridSettledEmpty(data))
+      head.appendChild(el('p', 'pnote', data.note));
     // A route that raised answers {error} now (server.do_GET) - said
     // here rather than drawn as an empty page.
     if (data.error) head.appendChild(el('p', 'empty', data.error));
@@ -3329,7 +3332,15 @@ async function go(route, opts) {
       // Centred - the owner, 6 September 2026, with a picture of it at
       // the left edge of an empty Manhwa page: "make the looking around
       // in the mid, not left!" (app.css .empty.looking).
-      page.appendChild(el('div', 'empty looking', 'Looking around...'));
+      //
+      // **"Looking around" only while something is.** The owner, 19
+      // October 2026, with a picture of Tom Holland's Anime tab reading
+      // "nothing under this name" under the tabs and "Looking around..."
+      // in the middle for ever: a cast tab has every row it will get in
+      // this answer, and a genre tab says when it is still walking
+      // (`pending`). Finished and empty, the note takes the middle.
+      page.appendChild(el('div', 'empty looking', gridSettledEmpty(data)
+        ? (data.note || 'Nothing here.') : 'Looking around...'));
     }
     sayRender(route, performance.now() - routeAt, (data.rows || []).length);
     // The ticks are built from the cards, so they can only be built once
@@ -3354,6 +3365,15 @@ async function go(route, opts) {
             (data.sections || []).reduce(function (n, s) {
               return n + (s.rows || []).length; }, 0));
   if (data.pending && early === 'discover') pullDiscover(page, mine, data);
+}
+
+/* An empty grid that will not fill: a cast or genre tab (their `browse`
+   is "cast:..." / "genre:...") whose answer is not still `pending`. A
+   catalogue page's own sweep fills an empty grid later, so it never is. */
+function gridSettledEmpty(data) {
+  if ((data.rows || []).length || data.pending) return false;
+  const browse = String(data.browse || '');
+  return browse.indexOf('cast:') === 0 || browse.indexOf('genre:') === 0;
 }
 
 /* **Discover fills in where it stands.** The owner, 6 September 2026:
@@ -4267,22 +4287,6 @@ function shelfInto(parent, data) {
   if (!shelfState.sort) shelfState.sort = data.sort || 'Custom Order';
   const head = el('div', 'shelfhead');
   head.appendChild(el('h1', 'paneltitle', data.title || ''));
-  const acts = el('div', 'shelfacts');
-  if (shelf === 'games') {
-    const scan = el('button', 'roundbtn', '\ue72c');       // Refresh
-    scan.title = 'Import from Launchers';
-    scan.addEventListener('click', function () {
-      tellHost({ action: 'import', shelf: shelf });
-    });
-    acts.appendChild(scan);
-  }
-  const add = el('button', 'roundbtn accent', '+');
-  add.title = 'Add ' + (data.noun ? data.noun[0] : 'item');
-  add.addEventListener('click', function () {
-    tellHost({ action: 'add', shelf: shelf });
-  });
-  acts.appendChild(add);
-  head.appendChild(acts);
   parent.appendChild(head);
 
   const sortRow = el('div', 'sortrow');
@@ -4306,6 +4310,27 @@ function shelfInto(parent, data) {
     go(shelf);
   });
   sortRow.appendChild(pick);
+  // **+ sits right after Select, as a rounded square** - the owner, 19
+  // October 2026: "make the + button same square with round corners and
+  // make it next right to the Select button". It was a white disc up in
+  // the title row beside Refresh (app.css .addsq).
+  const add = el('button', 'roundbtn accent addsq', '+');
+  add.title = 'Add ' + (data.noun ? data.noun[0] : 'item');
+  add.addEventListener('click', function () {
+    tellHost({ action: 'add', shelf: shelf });
+  });
+  sortRow.appendChild(add);
+  // Games' Refresh (import from the launchers) after it, the same
+  // rounded square - his next ask the same day: "make also the refresh
+  // button same and next right to the + btn".
+  if (shelf === 'games') {
+    const scan = el('button', 'roundbtn addsq scansq', '\ue72c');       // Refresh
+    scan.title = 'Import from Launchers';
+    scan.addEventListener('click', function () {
+      tellHost({ action: 'import', shelf: shelf });
+    });
+    sortRow.appendChild(scan);
+  }
   parent.appendChild(sortRow);
 
   const rows = sortShelf(data.rows || []);
@@ -4452,7 +4477,9 @@ function downloadsInto(parent, data) {
     list.appendChild(row);
   });
   if (!(data.rows || []).length) {
-    list.appendChild(el('div', 'empty', 'Nothing downloading.'));
+    // In the middle of the page - the owner, 19 October 2026, with a
+    // picture of it sitting at the top left (app.css .dlempty).
+    list.appendChild(el('div', 'empty dlempty', 'Nothing downloading.'));
   }
   panel.appendChild(list);
   parent.appendChild(panel);
@@ -5677,3 +5704,104 @@ go(currentRoute());
    to be compared with the app side by side - so it asks for itself, at
    a rate that is a comparison aid rather than a mechanism. */
 if (!EMBED) setInterval(progressInto, 1500);
+
+/* ---- Every dropdown is ours, not Chromium's (19 October 2026) --------
+   The owner, with a picture of the Sort list: "change all lists to
+   rounded edges instead of the sharp and make the cursor hover finger
+   pointing, do that to all lists in the app". A <select>'s popup is drawn
+   by the browser outside the page - no CSS reaches its corners or its
+   cursor - so the native popup is never let open: a press (or the keys
+   that open one) is taken here and this list is drawn instead. The
+   <select> stays the source of truth; a pick sets its value and fires
+   the same `change` the code that built it already listens for, so no
+   builder of a select needed to change - sort boxes, the reader's
+   chapter and font pickers, every one. */
+let dropMenu = null;
+
+function closeDrop() {
+  if (!dropMenu) return;
+  const menu = dropMenu;
+  dropMenu = null;
+  menu.classList.remove('open');
+  setTimeout(function () { menu.remove(); }, 140);
+}
+
+function openDrop(sel) {
+  closeDrop();
+  const box = sel.getBoundingClientRect();
+  const menu = el('div', 'dropmenu');
+  Array.prototype.forEach.call(sel.options, function (opt, i) {
+    if (opt.hidden) return;
+    const item = el('div', 'dropitem' + (i === sel.selectedIndex ? ' on' : '')
+                    + (opt.disabled ? ' off' : ''), opt.textContent);
+    if (!opt.disabled) {
+      item.addEventListener('click', function (e) {
+        e.stopPropagation();
+        closeDrop();
+        if (sel.selectedIndex !== i) {
+          sel.selectedIndex = i;
+          sel.dispatchEvent(new Event('input', { bubbles: true }));
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+    }
+    menu.appendChild(item);
+  });
+  /* The list scrolls itself. The page's wheel glide (above) takes every
+     wheel event on the window and would scroll the page behind an open
+     list - the reader's chapter picker is hundreds of rows. */
+  menu.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    menu.scrollTop += e.deltaY;
+  }, { passive: false });
+  menu.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+  document.body.appendChild(menu);
+  // Under the select, or above it when there is no room below; never
+  // narrower than the select, never off the right edge.
+  const width = Math.max(box.width, menu.offsetWidth);
+  menu.style.minWidth = box.width + 'px';
+  const below = innerHeight - box.bottom - 12;
+  const above = box.top - 12;
+  // offsetHeight, not scrollHeight: the box is border-box, and the 2px of
+  // border scrollHeight leaves out put a scrollbar on a list that fits
+  // (photographed on the frozen build's Sort list).
+  const natural = menu.offsetHeight;
+  const tall = Math.min(natural, Math.max(below, above, 160));
+  menu.style.maxHeight = tall + 'px';
+  const up = below < Math.min(natural, 240) && above > below;
+  menu.style.top = (up ? box.top - tall - 6 : box.bottom + 6) + 'px';
+  menu.style.left = Math.max(8, Math.min(box.left, innerWidth - width - 8)) + 'px';
+  menu.classList.toggle('up', up);
+  const on = menu.querySelector('.dropitem.on');
+  if (on) menu.scrollTop = on.offsetTop - (tall - on.offsetHeight) / 2;
+  dropMenu = menu;
+  requestAnimationFrame(function () { menu.classList.add('open'); });
+}
+
+document.addEventListener('mousedown', function (e) {
+  const sel = e.target && e.target.closest ? e.target.closest('select') : null;
+  if (sel && e.button === 0 && !sel.disabled) {
+    e.preventDefault();               // the native popup never opens
+    if (dropMenu && dropMenu._for === sel) { closeDrop(); return; }
+    openDrop(sel);
+    dropMenu._for = sel;
+    return;
+  }
+  if (dropMenu && !(e.target.closest && e.target.closest('.dropmenu'))) closeDrop();
+}, true);
+document.addEventListener('keydown', function (e) {
+  if (dropMenu && e.key === 'Escape') {
+    e.stopPropagation(); e.preventDefault(); closeDrop(); return;
+  }
+  const sel = e.target && e.target.tagName === 'SELECT' ? e.target : null;
+  if (sel && (e.key === 'Enter' || e.key === ' ' || e.key === 'F4'
+              || (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')))) {
+    e.preventDefault();
+    openDrop(sel);
+    dropMenu._for = sel;
+  }
+}, true);
+addEventListener('resize', closeDrop);
+addEventListener('blur', closeDrop);
+addEventListener('hashchange', closeDrop);

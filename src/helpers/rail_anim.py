@@ -293,7 +293,11 @@ LAYERS = {
         "body": _svg('<rect x="3" y="5" width="18" height="16" rx="2"/>'
                      '<path d="M3 10h18"/>'),
         "tabs": _svg('<path d="M16 3v4M8 3v4"/>'),
-        "hand": _svg('<path d="M12 13.5V16l1.8 1.1"/>'),
+        # The clock's two legs apart, so the long one can turn on its own
+        # (_schedule). Together they are schedule.svg's one stroke; round
+        # caps on both close the joint at the centre (12, 16).
+        "long": _svg('<path d="M12 13.5V16"/>'),
+        "short": _svg('<path d="M12 16l1.8 1.1"/>'),
     },
     # Three books that can move independently.
     "library": {
@@ -596,11 +600,19 @@ def _calendar(p, box, t, layer):
 
 
 def _schedule(p, box, t, layer):
-    """The same page, with the hand sweeping instead of a date."""
+    """The page's tabs lift and the clock's long hand goes once round.
+
+    The owner, 19 October 2026: "make the long leg of the clock inside it
+    rotate 360 degree" - it was the whole hand sweeping 28 degrees about
+    its tip. Now the short leg holds and the long one turns a full
+    revolution about the clock's centre, clockwise (positive in Qt's
+    y-down frame), as a minute hand does."""
     _draw(p, layer("body"), box)
     _draw(p, layer("tabs"), box, dy=-1.6 * t)
-    _draw(p, layer("hand"), box, degrees=28.0 * t, pivot=(12.0, 13.5),
-          opacity=0.5 + 0.5 * t)
+    ink = 0.5 + 0.5 * t
+    _draw(p, layer("short"), box, opacity=ink)
+    _draw(p, layer("long"), box, degrees=360.0 * t, pivot=(12.0, 16.0),
+          opacity=ink)
 
 
 def _library(p, box, t, layer):
@@ -785,9 +797,18 @@ def _saved(p, box, t, layer):
 
 
 def _history(p, box, t, layer):
-    """The hand winds backwards; the face holds still."""
-    _draw(p, layer("face"), box)
-    _draw(p, layer("hand"), box, degrees=-26.0 * t, pivot=(12.0, 12.0))
+    """The arrow runs round to its head; the hands hold still.
+
+    The owner, 19 October 2026: "make the arrow rotate to its head!" -
+    it was the hand winding back 26 degrees with the arrow fixed. The arc
+    runs counter-clockwise into its arrowhead, so the turn is negative in
+    Qt's y-down frame, a whole revolution about the face's centre with a
+    small overshoot. A full turn lands on the resting pose, which suits a
+    circle with an arrow in it: the travel is the story, and a held hover
+    shows the icon as it is."""
+    angle = -360.0 * t - 10.0 * (t * (1.0 - t) * 4.0)
+    _draw(p, layer("face"), box, degrees=angle, pivot=(12.0, 12.0))
+    _draw(p, layer("hand"), box)
 
 
 PROFILES = {

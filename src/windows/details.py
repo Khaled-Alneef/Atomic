@@ -902,7 +902,7 @@ def _chip(text, accent=False) -> QLabel:
         f"color: {theme.ON_ACCENT if accent else theme.TEXT};"
         f" background: {fill};"
         f" border: 1px solid {theme.ACCENT if accent else CHIP_EDGE};"
-        f" border-radius: 15px; padding: 5px 15px;"
+        f" border-radius: {theme.RADIUS_SM}px; padding: 5px 15px;"
         f" font-weight: 500; font-size: 10.5pt;")
     return label
 
@@ -917,7 +917,7 @@ def _chip_button(text) -> QPushButton:
     button.setStyleSheet(
         f"QPushButton {{ color: {theme.TEXT}; background: transparent;"
         f" border: 1px solid {CHIP_EDGE};"
-        f" border-radius: 15px; padding: 5px 15px;"
+        f" border-radius: {theme.RADIUS_SM}px; padding: 5px 15px;"
         f" font-weight: 500; font-size: 10.5pt; }}"
         f"QPushButton:hover {{ border: 1px solid {theme.ACCENT_HOVER};"
         f" background: {theme.ACCENT_HOVER}; color: {theme.ON_ACCENT}; }}")

@@ -43,8 +43,6 @@ BG_ALT = "#101010"       # secondary background (page panels)
 # edge (widgets.GlassPage): a teal core with a blue bloom off it.
 GLOW = "#1c1c1c"         # deep teal core of the backdrop glow
 SIDEBAR = "#070707"      # sidebar column
-SIDEBAR_SHEEN = "#141414"  # subtle highlight at the sidebar's top edge
-SIDEBAR_DEEP = "#050505"   # ...fading darker toward its bottom
 SURFACE = "#151515"      # cards / inputs ("card background")
 SURFACE_HOVER = "#1f1f1f"  # ...lifted on hover ("card elevated")
 SURFACE_ACTIVE = "#2b2b2b"
@@ -417,6 +415,9 @@ NAV_ICONS = {
 SETTINGS_ICON = ""   # Setting (gear) - a button, not a rail row
 
 RADIUS_SM = 8
+# A control's corner where it used to be a pill (half its height) - the owner, 19 October 2026: "change all buttons or lists or all that has the shape of a stretched egg to a square with rounded edges".
+# Circles (a fixed square at half its side) stay circles.
+RADIUS_CTL = 10
 RADIUS = 12
 RADIUS_LG = 18
 
@@ -663,10 +664,11 @@ QLabel {{
    edge. Corners only - the sidebar's width, its border and everything
    inside it are untouched, so nothing moves. */
 QWidget#Sidebar {{
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 {SIDEBAR_SHEEN},
-        stop:0.35 {SIDEBAR},
-        stop:1 {SIDEBAR_DEEP});
+    /* One matte colour, top to bottom - the owner, 19 October 2026:
+       "make the sidebar color all the same (matte) remove the white
+       gloss in the top". It was a sheen into a deeper bottom, and for a
+       day a spotlight; both are gone. */
+    background: {SIDEBAR};
     border-right: 1px solid {BORDER};
     border-top-right-radius: {RADIUS_LG}px;
     border-bottom-right-radius: {RADIUS_LG}px;
@@ -705,7 +707,7 @@ QPushButton#NavButton {{
     background: transparent;
     color: {TEXT_MUTED};
     border: none;
-    border-radius: {RADIUS}px;
+    border-radius: {RADIUS_CTL}px;
     text-align: left;
     padding: 7px 12px;
     font-family: {FONT_STACK_ICONS};
@@ -734,10 +736,10 @@ QPushButton#NavButton[collapsed="true"] {{
    sidebar of one active row and six muted ones reading calm the way
    the reference does. */
 QPushButton#NavButton:checked {{
-    background: {SURFACE_HOVER};
-    color: {TEXT};
+    background: {ACCENT};
+    color: {ON_ACCENT};
     border: none;
-    border-radius: {RADIUS}px;
+    border-radius: {RADIUS_CTL}px;
 }}
 /* Just a centered "+" now, so it reads the same at either sidebar width
    instead of having a label that only fits when expanded. Gold into
@@ -933,7 +935,7 @@ QLineEdit#TopSearch {{
     background: {SURFACE};
     color: {TEXT};
     border: 1px solid {BORDER};
-    border-radius: {TOP_SEARCH_HEIGHT // 2}px;
+    border-radius: {RADIUS_SM}px;   /* not a pill - RADIUS_CTL's note */
     padding: 4px 14px;
     font-size: 10pt;
 }}
@@ -1307,14 +1309,36 @@ QComboBox::down-arrow {{
     width: 12px;
     height: 12px;
 }}
+/* The list's window is see-through and frameless (widgets.
+   install_rounded_popups), so this radius is the shape on screen - the
+   owner, 19 October 2026: "change all lists to rounded edges". The row
+   under the pointer lifts and the chosen one is lit, as the web pages'
+   lists (app.css .dropmenu) do. */
+QComboBoxPrivateContainer {{
+    background: transparent;
+    border: none;
+}}
 QComboBox QAbstractItemView {{
     background: {SURFACE};
     color: {TEXT};
     border: 1px solid {BORDER};
-    selection-background-color: {ACCENT};
-    selection-color: {ON_ACCENT};
+    border-radius: 12px;
+    selection-background-color: {SURFACE_ACTIVE};
+    selection-color: {TEXT};
     outline: none;
-    padding: 4px;
+    padding: 6px;
+}}
+QComboBox QAbstractItemView::item {{
+    padding: 7px 12px;
+    border-radius: 8px;
+    min-height: 22px;
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background: {SURFACE_HOVER};
+}}
+QComboBox QAbstractItemView::item:selected {{
+    background: {SURFACE_ACTIVE};
+    color: {TEXT};
 }}
 QCheckBox {{ spacing: 8px; background: transparent; }}
 QCheckBox::indicator {{
@@ -1420,7 +1444,7 @@ QMenu {{
     background: {SURFACE};
     color: {TEXT};
     border: 1px solid {BORDER};
-    border-radius: {RADIUS_SM}px;
+    border-radius: 12px;
     padding: 6px;
 }}
 QMenu::item {{

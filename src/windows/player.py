@@ -2973,7 +2973,9 @@ class OverlayPanel(QFrame):
             f"QPushButton {{ background: {theme.SURFACE_HOVER}; color: {theme.TEXT};"
             f" border: 1px solid {theme.BORDER}; padding: 0px;"
             f" font-size: {'11pt' if wide else '15pt'};"
-            f" font-weight: 700; border-radius: 18px; }}"
+            # A 36px key stays round; the 64px-wide one was a pill, and
+            # is a rounded square now (theme.RADIUS_CTL's note).
+            f" font-weight: 700; border-radius: {theme.RADIUS_SM if wide else 18}px; }}"
             f"QPushButton:hover {{ background: {theme.ACCENT_SOFT};"
             f" border: 1px solid {theme.ACCENT}; }}"
             f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}")
@@ -4341,7 +4343,7 @@ class PlayerPage(GlassPage):
         self.season_combo = PickCombo()
         self.season_combo.setStyleSheet(
             f"QComboBox {{ background: transparent; color: {theme.TEXT};"
-            f" border: 1px solid {theme.rgba(theme.TEXT, 60)}; border-radius: 16px;"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 60)}; border-radius: {theme.RADIUS_SM}px;"
             f" padding: 6px 18px; font-weight: 600; font-size: 12pt; }}"
             f"QComboBox:hover {{ border: 1px solid {theme.TEXT}; }}")
         use_hover_cursor(self.season_combo)
@@ -4358,7 +4360,7 @@ class PlayerPage(GlassPage):
         self._episode_search.setClearButtonEnabled(True)
         self._episode_search.setStyleSheet(
             f"QLineEdit {{ background: {theme.rgba(theme.TEXT, 12)}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.rgba(theme.TEXT, 30)}; border-radius: 16px;"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 30)}; border-radius: {theme.RADIUS_SM}px;"
             f" padding: 6px 14px; }}"
             f"QLineEdit:focus {{ border: 1px solid {theme.TEXT}; }}")
         # Debounced like every other search box here: a season list is

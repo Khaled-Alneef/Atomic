@@ -42,7 +42,7 @@ make its ratio the same as the atomic icon in the sidebar".
 import time
 
 from PyQt6.QtCore import QRectF, Qt, QTimer
-from PyQt6.QtGui import QColor, QPainter, QPixmap, QRadialGradient
+from PyQt6.QtGui import QColor, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import images, theme
@@ -67,9 +67,9 @@ PANEL_PX = 320
 # The mark's height inside it. Its width follows from the artwork's own
 # ratio - never assumed here, read off the file.
 LOGO_HEIGHT_PX = 132
-# The glow behind it, as a fraction of the panel, and its strength.
-GLOW_FRACTION = 0.86
-GLOW_ALPHA = 42
+# **No glow.** A radial wash of the accent sat behind the mark; the
+# owner, 19 October 2026: "make this startup matte" - one flat ground,
+# as the sidebar was made the same day.
 # The panel's corners - the same radius every other surface in the app
 # rounds to, so the launch screen and the window it hands over to are
 # cut from the same shape.
@@ -131,34 +131,18 @@ class Splash(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        centre = self.rect().center()
 
         # **The app's own ground, not the desktop's.** The window is
         # translucent so its corners can be round, which left the mark
         # floating on whatever happened to be behind it - fine over a
         # dark desktop, wrong over anything else, and not what the
-        # reference shows: a dark field with the mark on it. Painted
-        # first, so the glow and the mark sit on it.
+        # reference shows: a dark field with the mark on it. Matte - one
+        # colour, nothing lit behind the mark (see the note above
+        # PANEL_RADIUS).
         panel = QColor(theme.BG)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(panel)
         painter.drawRoundedRect(QRectF(self.rect()), PANEL_RADIUS, PANEL_RADIUS)
-
-        # The glow first: a radial wash of the accent behind the mark, so
-        # the panel reads as lit from the logo rather than as a grey box
-        # with a picture on it. Static, like everything else here.
-        glow_r = PANEL_PX * GLOW_FRACTION * 0.5
-        gradient = QRadialGradient(float(centre.x()), float(centre.y()), glow_r)
-        lit = QColor(theme.ACCENT)
-        lit.setAlpha(GLOW_ALPHA)
-        gradient.setColorAt(0.0, lit)
-        clear = QColor(theme.ACCENT)
-        clear.setAlpha(0)
-        gradient.setColorAt(1.0, clear)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(gradient)
-        painter.drawEllipse(QRectF(centre.x() - glow_r, centre.y() - glow_r,
-                                   glow_r * 2, glow_r * 2))
 
         if not self._logo.isNull():
             painter.drawPixmap(self._logo_rect().topLeft(), self._logo)

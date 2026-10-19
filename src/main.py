@@ -88,7 +88,7 @@ if "--mpv-host" in sys.argv:
     raise SystemExit(0)
 
 from helpers import (app_settings, downloads, frame_pacing, images, layout, logs,
-                     rail_anim, rail_icons, splash, window_chrome,
+                     rail_anim, rail_icons, splash, top_nav, window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
 from helpers.nav_config import (nav_position, route_page,
@@ -110,8 +110,8 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal as Signal,
 )
-from PyQt6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPalette,
-                         QPixmap)
+from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter,
+                         QPainterPath, QPalette, QPen, QPixmap)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
@@ -350,6 +350,10 @@ DOWNLOAD_IDLE_POLL_MS = 2500
 FULLSCREEN_BAR_TOP = 29
 
 SIDEBAR_WIDTH = 220
+# The page menu in the window's bar instead of the sidebar (helpers/
+# top_nav, 19 October 2026). False puts the sidebar back exactly as it
+# was - it is still built either way, only hidden.
+TOP_NAV = False
 # Wide enough for the nav bullets and the +/gear buttons once the text
 # labels are dropped (see _set_sidebar_collapsed).
 # **84, up from 68, alongside RAIL_ICON_SIZE 26 -> 40** (the owner, 24
@@ -709,6 +713,39 @@ RAIL_NUDGE_PX = 2
 RAIL_TINT_STOPS = 8
 RAIL_TINTS = tuple(theme.mix(theme.TEXT_MUTED, theme.TEXT, i / RAIL_TINT_STOPS)
                    for i in range(RAIL_TINT_STOPS + 1))
+
+# ---- The sidebar redesign, 19 October 2026 ------------------------------
+# The owner: *"keep it sidebar but change the whole design and make it
+# super super super cool"* - after a top bar was built and set aside
+# (TOP_NAV). It follows the monochrome redesign of 1 October (white is
+# the accent, ui.md "The redesign"), and what it took from where:
+#
+#   the lit row      Apple TV's and Netflix's selected tab - an inverted
+#                    white capsule with black ink, not a grey lift. The
+#                    one bright thing on the column says where you are.
+#   block headings   1367's and A24's mono eyebrows (details.py already
+#                    speaks it: EYEBROW_MONO) - WATCH / READ / LIBRARY in
+#                    the gaps that used to be blank, so the blocks say
+#                    what they are instead of only being apart.
+#
+# Two more pieces were built that day and taken out at his word the same
+# day: a Ctrl+number hint on the hovered row - and Ctrl+1-9 itself, from
+# the window and from Settings > Keybinds - and a spotlight at the top of
+# the column ("make the sidebar color all the same (matte) remove the
+# white gloss in the top"; theme.py's #Sidebar is one flat colour now).
+#
+# No bar down the pill's left edge: he had one removed on 26 August
+# (see the note in _RailDelegate.paint) and that stands.
+RAIL_INK_TINTS = tuple(
+    tuple(theme.mix(base, theme.ON_ACCENT, j / RAIL_TINT_STOPS)
+          for j in range(RAIL_TINT_STOPS + 1))
+    for base in RAIL_TINTS)
+RAIL_HEADING_FONT = ("Cascadia Mono", "Consolas", "Courier New")
+RAIL_HEADING_PT = 7
+RAIL_HEADING_SPACING = 180      # QFont letter spacing, percent
+# By nav_config.NAV_GROUPS' index - the third block is the launchers.
+RAIL_BLOCK_TITLES = ("Watch", "Read", "Library")
+RAIL_HEADING_MIN_PX = 18
 
 # **What each icon *does* when the pointer arrives.** The owner's ask,
 # 26 August 2026: not just a pill fading in behind a brightening glyph,
@@ -1481,6 +1518,10 @@ class _MotionIconButton(QPushButton):
             rect.moveTo(self.TEXT_INSET, (self.height() - size) / 2.0)
         lit = max(self._hover, 1.0 if self.isChecked() else 0.0)
         colour = QColor(theme.mix(theme.TEXT_MUTED, theme.TEXT, lit))
+        if self.isChecked():
+            # Checked is the redesign's inverted capsule (theme.py,
+            # NavButton:checked) - white ground, so black ink.
+            colour = QColor(theme.ON_ACCENT)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         if self._glyph:
@@ -1753,7 +1794,9 @@ class _RailDelegate(QStyledItemDelegate):
         # which no amount of easing makes look deliberate.
         inset = press
         pill = QRectF(opt.rect).adjusted(inset, inset, -inset, -inset)
-        radius = float(theme.RADIUS)
+        # A rounded square, not a capsule - theme.RADIUS_CTL's note (it
+        # was a stadium for a day, 19 October 2026).
+        radius = min(float(theme.RADIUS_CTL), min(pill.height(), pill.width()) / 2.0)
         # Hover wash first, faded out by `active` rather than added to
         # it: a selected row that is also hovered should read as one
         # pill at its own strength, not as two fills stacked into a
@@ -1762,8 +1805,13 @@ class _RailDelegate(QStyledItemDelegate):
         if lift > 0.004:
             painter.setBrush(_rail_wash(theme.SURFACE, lift))
             painter.drawRoundedRect(pill, radius, radius)
-        if active > 0.004:
-            painter.setBrush(_rail_wash(theme.SURFACE_HOVER, active))
+        layer = _rail_pill_for(widget)
+        if active > 0.004 and layer is None:
+            # Inverted: the page you are on is a white capsule with black
+            # ink (see the redesign note above RAIL_INK_TINTS). Drawn here
+            # only for a rail with no sliding layer (_RailPill) - the
+            # section bar's.
+            painter.setBrush(_rail_wash(theme.ACCENT, active))
             painter.drawRoundedRect(pill, radius, radius)
         if press > 0.004:
             painter.setBrush(_rail_wash(theme.SURFACE_ACTIVE, press * 0.45))
@@ -1778,10 +1826,46 @@ class _RailDelegate(QStyledItemDelegate):
         # without asking.
         painter.restore()
 
+        if layer is None:
+            tint = RAIL_INK_TINTS[int(round(max(hover, active) * RAIL_TINT_STOPS))][
+                int(round(active * RAIL_TINT_STOPS))]
+            self._draw_row(painter, QStyleOptionViewItem(opt), index, widget,
+                           style, hover, tint, active)
+            return
+        # **Ink that inverts exactly where the capsule is.** The row is
+        # drawn once in its resting ink, then again in black clipped to
+        # the part of the row the sliding capsule covers - so as the
+        # capsule passes over a row mid-slide, the half it has reached
+        # is already black on white and the half it has not is still
+        # light on dark. Apple TV's segmented control does this; a fade
+        # on each row would have put black text on the dark ground for
+        # the length of the slide.
+        rest = RAIL_TINTS[int(round(hover * RAIL_TINT_STOPS))]
+        self._draw_row(painter, QStyleOptionViewItem(opt), index, widget,
+                       style, hover, rest, active)
+        cover = layer.rect_in(widget.viewport())
+        if cover is not None:
+            if not QRectF(opt.rect).intersected(cover).isEmpty():
+                painter.save()
+                clip = QPainterPath()
+                r = min(float(theme.RADIUS_CTL), min(cover.height(), cover.width()) / 2.0)
+                clip.addRoundedRect(cover, r, r)
+                painter.setClipPath(clip)
+                self._draw_row(painter, QStyleOptionViewItem(opt), index,
+                               widget, style, hover, theme.ON_ACCENT, active)
+                painter.restore()
+
+    def _draw_row(self, painter, opt, index, widget, style, hover, tint,
+                  active=0.0):
+        """The row's icon and label in `tint` - everything paint() draws
+        after the fills. Split out so paint() can draw it twice, the
+        second time clipped to the sliding capsule (see _RailPill)."""
         # One quantised step for the icon *and* the label, so they can
         # never brighten out of step - see RAIL_TINTS for why the ramp is
         # quantised at all.
-        tint = RAIL_TINTS[int(round(max(hover, active) * RAIL_TINT_STOPS))]
+        # The second step moves the ink toward black as the white capsule
+        # arrives, quantised for the same reason as the first (every tint
+        # is a cached recoloured pixmap).
         colour = QColor(tint)
         # **The label fades with the fold** - the owner's ask, 26 August
         # 2026: "make the transition of the text and the icons in the
@@ -1897,6 +1981,248 @@ class _RailDelegate(QStyledItemDelegate):
             painter.restore()
         if offset:
             painter.restore()
+
+
+def _rail_pill_for(widget):
+    """The sliding capsule that serves this rail, or None - only the main
+    sidebar's column has one (MainWindow._rail_pill)."""
+    if widget is None:
+        return None
+    try:
+        window = widget.window()
+    except RuntimeError:
+        return None
+    layer = getattr(window, "_rail_pill", None)
+    if layer is None or not layer.serves(widget):
+        return None
+    return layer
+
+
+class _RailPill(QWidget):
+    """The white capsule behind the current page's row, as one widget
+    that **slides** from row to row - the sidebar redesign, 19 October
+    2026. The rows used to light up where they stood; a fade at one row
+    and a fade at another reads as two things happening, and a capsule
+    that travels reads as one choice moving.
+
+    It sits *under* the rails in their scrolling column (lowered, and
+    every rail's ground is transparent - theme.py's #NavList), so the
+    rows draw over it and _RailDelegate inverts their ink where it is.
+    It holds no geometry of its own: where it is drawn is always read off
+    the target row's live visualRect, so a fold, a scroll, a refit or a
+    drag that moves the row moves the capsule with it, mid-slide too.
+
+    Folded or not, it is the same capsule - at rail width it is the
+    lozenge round the icon."""
+
+    SLIDE_MS = 360
+    FADE_MS = 200
+
+    def __init__(self, body, rails):
+        super().__init__(body, objectName="Bare")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._body = body
+        self._rails = list(rails)
+        self._rail = None
+        self._row = -1
+        self._from = None
+        self._t = 1.0
+        self._alpha = 0.0
+        self._slide = SmoothTween(self, self._set_t, self.SLIDE_MS)
+        self._fade = SmoothTween(self, self._set_alpha, self.FADE_MS)
+        self.setGeometry(body.rect())
+        body.installEventFilter(self)
+        self.lower()
+
+    def set_rails(self, rails):
+        self._rails = list(rails)
+
+    def serves(self, rail) -> bool:
+        return rail in self._rails
+
+    # ---- where ------------------------------------------------------------
+    def _target(self):
+        rail, row = self._rail, self._row
+        if rail is None or row < 0:
+            return None
+        try:
+            if row >= rail.count() or not rail.isVisible():
+                return None
+            rect = rail.visualRect(rail.model().index(row, 0))
+            # Through the column both share: mapTo() only walks *up* to an
+            # ancestor, and this layer is the rails' sibling - mapped to it
+            # directly, the capsule landed on the Manga row for Movies
+            # (photographed on the source run). The layer covers the
+            # column exactly, so column coordinates are its own.
+            origin = rail.viewport().mapTo(self._body, QPoint(0, 0))
+        except RuntimeError:
+            return None
+        if rect.isEmpty():
+            return None
+        return QRectF(rect).translated(origin.x(), origin.y())
+
+    def current_rect(self):
+        target = self._target()
+        if target is None:
+            return None
+        start = self._from
+        if start is None or self._t >= 1.0:
+            return target
+        # SmoothTween has eased the run already; used as it stands.
+        t = self._t
+        return QRectF(start.x() + (target.x() - start.x()) * t,
+                      start.y() + (target.y() - start.y()) * t,
+                      start.width() + (target.width() - start.width()) * t,
+                      start.height() + (target.height() - start.height()) * t)
+
+    def rect_in(self, viewport):
+        """The capsule in `viewport`'s coordinates, for the delegate's
+        clip - None while it is not showing."""
+        if self._alpha < 0.5:
+            return None
+        rect = self.current_rect()
+        if rect is None:
+            return None
+        try:
+            origin = viewport.mapFrom(self._body, QPoint(0, 0))
+        except RuntimeError:
+            return None
+        return rect.translated(origin.x(), origin.y())
+
+    # ---- moving -----------------------------------------------------------
+    def move_to(self, rail, row, animate=True):
+        if rail is self._rail and row == self._row:
+            self.refresh()
+            return
+        was = self.current_rect() if self._alpha > 0.0 else None
+        self._rail, self._row = rail, row
+        showing = rail is not None and row >= 0
+        if showing and was is not None and animate and self.isVisible():
+            self._from = was
+            self._t = 0.0
+            self._slide.start(0.0, 1.0)
+        else:
+            self._slide.stop()
+            self._from = None
+            self._t = 1.0
+        target = 1.0 if showing else 0.0
+        if animate and self.isVisible():
+            self._fade.start(self._alpha, target)
+        else:
+            self._fade.stop()
+            self._set_alpha(target)
+        self.refresh()
+
+    def _set_t(self, value):
+        self._t = float(value)
+        self.refresh()
+
+    def _set_alpha(self, value):
+        self._alpha = float(value)
+        self.refresh()
+
+    def refresh(self):
+        """Repaint the capsule and the rows over it. The rows are
+        repainted explicitly rather than trusted to come along: a rail's
+        viewport is a sibling's child, and the ink inversion must follow
+        the capsule on every frame of the slide."""
+        self.update()
+        for rail in self._rails:
+            try:
+                if rail.isVisible():
+                    rail.viewport().update()
+            except RuntimeError:
+                pass
+
+    def eventFilter(self, obj, event):
+        if obj is self._body and event.type() == QEvent.Type.Resize:
+            self.setGeometry(self._body.rect())
+            self.lower()
+        return False
+
+    def paintEvent(self, _event):
+        if self._alpha <= 0.004:
+            return
+        rect = self.current_rect()
+        if rect is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        # A soft bloom first - three wider, fainter capsules. Light from
+        # the one bright thing on a black column, which is what the
+        # spotlight above the mark is answering.
+        for grow, alpha in ((7, 7), (4, 13), (2, 22)):
+            halo = rect.adjusted(-grow, -grow, grow, grow)
+            r = float(theme.RADIUS_CTL) + grow
+            painter.setBrush(_rail_wash(theme.ACCENT, alpha / 255.0 * self._alpha))
+            painter.drawRoundedRect(halo, r, r)
+        r = min(float(theme.RADIUS_CTL), min(rect.height(), rect.width()) / 2.0)
+        painter.setBrush(_rail_wash(theme.ACCENT, self._alpha))
+        painter.drawRoundedRect(rect, r, r)
+        painter.end()
+
+
+class _RailHeading(QWidget):
+    """A block gap that says what the block below it is - WATCH, READ,
+    LIBRARY in the redesign's mono eyebrow, with a hairline running to
+    the column's edge. Folded there is no room for a word, so it is a
+    short centred dash: still a gap, still the same height.
+
+    It is the gap widget itself (_make_rail_gap), not a row: the rails'
+    fit arithmetic (_fit_rails, _sync_rail_gaps) sizes it as a gap, and
+    a heading that took a row's height would have pushed the column into
+    a scroll at the window heights that function exists for."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, objectName="Bare")
+        self.title = ""
+
+    def set_title(self, title):
+        title = str(title or "").upper()
+        if title != self.title:
+            self.title = title
+            self.update()
+
+    def paintEvent(self, _event):
+        window = self.window()
+        folded = bool(getattr(window, "_sidebar_collapsed", False))
+        fade = max(0.0, min(1.0, float(getattr(window, "_fold_text_alpha", 1.0))))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        mid = self.height() / 2.0
+        line = QColor(theme.TEXT)
+        if folded or not self.title or fade < 0.05:
+            line.setAlpha(34)
+            painter.setPen(QPen(line, 1.0))
+            centre = self.width() / 2.0
+            painter.drawLine(QPointF(centre - 8, mid), QPointF(centre + 8, mid))
+            painter.end()
+            return
+        font = QFont()
+        font.setFamilies(list(RAIL_HEADING_FONT))
+        font.setPointSize(RAIL_HEADING_PT)
+        font.setLetterSpacing(QFont.SpacingType.PercentageSpacing,
+                              RAIL_HEADING_SPACING)
+        painter.setFont(font)
+        ink = QColor(theme.TEXT_MUTED)
+        ink.setAlphaF(0.62 * fade)
+        painter.setPen(ink)
+        # 12px in: the row label's own inset (the item's 8px padding plus
+        # its transparent 1px border, rounded to the icon's left edge).
+        x = 12.0
+        metrics = QFontMetrics(font)
+        width = metrics.horizontalAdvance(self.title)
+        painter.drawText(QRectF(x, 0, width + 4, self.height()),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         self.title)
+        line.setAlphaF(0.13 * fade)
+        painter.setPen(QPen(line, 1.0))
+        start = x + width + 10
+        if start < self.width() - 12:
+            painter.drawLine(QPointF(start, mid + 0.5),
+                             QPointF(self.width() - 12, mid + 0.5))
+        painter.end()
 
 
 def _screen_for_rect(rect):
@@ -2046,12 +2372,25 @@ class MainWindow(QMainWindow):
         self.top_search.textEdited.connect(self._on_top_search)
         self.top_search.installEventFilter(self)
         root_layout.addWidget(self.title_bar)
+        # **The page menu is in the bar now, not in a sidebar** - the
+        # owner's redesign, 19 October 2026 (helpers/top_nav has what was
+        # looked at and why a top bar won). The sidebar below is still
+        # built and only hidden, so everything that reads its rows keeps
+        # working; removing it is his call (CLAUDE.md rule 11).
+        self.top_nav = None
+        if TOP_NAV:
+            self.top_nav = top_nav.TopNav(self.title_bar)
+            self.top_nav.navigate.connect(self.navigate_to)
+            self.title_bar.set_nav(self.top_nav)
 
         body = QWidget(objectName="Bare")
         body_row = QHBoxLayout(body)
         body_row.setContentsMargins(0, 0, 0, 0)
         body_row.setSpacing(0)
         body_row.addWidget(self._build_sidebars())
+        if TOP_NAV:
+            self.sidebar_holder.hide()
+            self._build_bar_utilities()
 
         self.container = QWidget()
         body_row.addWidget(self.container, stretch=1)
@@ -2311,6 +2650,96 @@ class MainWindow(QMainWindow):
         self._style_settings_btn()
         return pair
 
+    def _build_bar_utilities(self):
+        """Downloads and Settings as icon buttons on the window's bar,
+        for when the sidebar that carried them is hidden (TOP_NAV).
+
+        Registered in `_utility_bars` as one more pair with the same keys,
+        so the download badge, its progress strip and the update dot are
+        driven by exactly the code that drove the sidebar's pair - only
+        `compact` tells the label-styling passes to leave them alone. They
+        become the primary pair, the attributes the rest of the window
+        talks to, because these are the ones on screen."""
+        dpr = float(self.devicePixelRatioF() or 1.0)
+
+        def bar_button(tip, icon_name=None, glyph=""):
+            button = window_chrome.DriftButton(
+                glyph, radius=theme.RADIUS_SM, tint=theme.SURFACE,
+                objectName="BarSection")
+            button.setFixedSize(QSize(window_chrome.SECTION_BUTTON_WIDTH, 34))
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            if icon_name:
+                icon = images.tinted_asset(theme.rail_icon(icon_name),
+                                           theme.TEXT_MUTED,
+                                           window_chrome.SECTION_ICON, dpr)
+                if not icon.isNull():
+                    button.setIcon(QIcon(icon))
+                    button.setIconSize(QSize(window_chrome.SECTION_ICON,
+                                             window_chrome.SECTION_ICON))
+            if glyph:
+                # The Segoe download arrow - no file in the icon sheet
+                # draws it. The QSS family is the icon stack's, since a
+                # styled button resolves its font from the rule, not
+                # from setFont (theme.FONT_STACK_ICONS).
+                button.setStyleSheet(f"font-family: {theme.FONT_STACK_ICONS};"
+                                     f" font-size: 17px;")
+            use_hover_cursor(button)
+            self.title_bar.add_utility(button)
+            return button
+
+        downloads = bar_button("Downloads", glyph="\ue896")
+        downloads.setCheckable(True)
+        downloads.clicked.connect(lambda: self.navigate_to("downloads"))
+        dot = QLabel(downloads)
+        dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dot.setFixedSize(16, 16)
+        dot.setStyleSheet(
+            f"background: {theme.ACCENT}; border: 1px solid {theme.BG};"
+            f" border-radius: 8px; color: {theme.ON_ACCENT};"
+            f" font-size: 8pt; font-weight: 700;")
+        dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        dot.hide()
+        # The sidebar's strip under the button, as a hairline along the
+        # button's own foot - there is no row below it to put one in.
+        bar = QProgressBar(downloads)
+        bar.setRange(0, 1000)
+        bar.setTextVisible(False)
+        bar.setGeometry(8, 34 - DOWNLOAD_BAR_HEIGHT - 1,
+                        window_chrome.SECTION_BUTTON_WIDTH - 16,
+                        DOWNLOAD_BAR_HEIGHT)
+        bar.setStyleSheet(
+            f"QProgressBar {{ background: {theme.SURFACE_HOVER};"
+            f" border: none; border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}"
+            f"QProgressBar::chunk {{ background: {theme.ACCENT};"
+            f" border-radius: {DOWNLOAD_BAR_HEIGHT // 2}px; }}")
+        bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        bar.hide()
+
+        settings = bar_button("Settings", icon_name="settings")
+        settings.clicked.connect(self._open_settings)
+        update_dot = QLabel(settings)
+        update_dot.setFixedSize(UPDATE_DOT_SIZE, UPDATE_DOT_SIZE)
+        update_dot.setStyleSheet(
+            f"background: {theme.ACCENT}; border-radius: {UPDATE_DOT_SIZE // 2}px;")
+        update_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        update_dot.hide()
+        update_dot.move(window_chrome.SECTION_BUTTON_WIDTH - UPDATE_DOT_SIZE
+                        - UPDATE_DOT_MARGIN, UPDATE_DOT_MARGIN)
+
+        pair = {"downloads": downloads, "dot": dot, "bar": bar,
+                "settings": settings, "update_dot": update_dot,
+                "compact": True}
+        self._utility_bars.append(pair)
+        self.downloads_btn = downloads
+        self.downloads_dot = dot
+        self.downloads_bar = bar
+        self.settings_btn = settings
+        self._update_dot = update_dot
+        self._style_downloads_btn()
+        self._style_settings_btn()
+        self.refresh_download_indicator()
+
     def _make_rail_list(self, *, draggable):
         """One block of rail rows - the widget both sidebars are built
         out of. Every property here used to be spelled out three times
@@ -2377,7 +2806,7 @@ class MainWindow(QMainWindow):
         (the icon font's metrics are shorter than the nav face's), and a
         gap frozen at the expanded height would leave the folded rail
         with two holes in it."""
-        gap = QWidget(objectName="Bare")
+        gap = _RailHeading()
         gap.setFixedHeight(RAIL_GAP_FALLBACK)
         gap.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._rail_gaps.append(gap)
@@ -2405,7 +2834,13 @@ class MainWindow(QMainWindow):
             row = self.home_list.sizeHintForRow(0)
             pitch = (row if row > 0 else RAIL_GAP_FALLBACK)
             pitch += self.home_list.spacing() * 2
-        return max(1, int(pitch * RAIL_GAP_FRACTION) - RAIL_GAP_SLACK)
+        # **Never shorter than a heading.** The gaps carry the block names
+        # now (_RailHeading), and half a row less the slack measured 10px
+        # on the source run - the mono capitals came out as a row of
+        # clipped dots (19 October 2026). Folded too, so a row sits at
+        # the same y at both widths and the fold moves nothing vertically.
+        return max(RAIL_HEADING_MIN_PX,
+                   int(pitch * RAIL_GAP_FRACTION) - RAIL_GAP_SLACK)
 
     def _sync_rail_gaps(self):
         """Every block gap set to half a row's height."""
@@ -2957,6 +3392,9 @@ class MainWindow(QMainWindow):
             self.nav_lists.append(nav_list)
             column.addWidget(nav_list)
         column.addStretch()
+        # The sliding capsule under the main bar's rails (_RailPill).
+        self._rail_pill = _RailPill(column.parentWidget(),
+                                    [self.home_list, *self.nav_lists])
         self._populate_nav_list()
 
         # Add and Settings both sit at the very bottom. The scrolling
@@ -3441,6 +3879,11 @@ class MainWindow(QMainWindow):
         count = f" ({self._download_count})" if self._download_count else ""
         for pair in getattr(self, "_utility_bars", ()):
             button = pair["downloads"]
+            if pair.get("compact"):
+                # The bar's icon button: no label to carry a count, so
+                # the badge does that, and the tooltip says the rest.
+                button.setToolTip(self._download_tooltip or "Downloads")
+                continue
             # No glyph in the text: _MotionIconButton draws the icon
             # itself so it can animate. The spaces are the room it is
             # drawn in - TEXT_INSET plus ICON_UNITS, in the label's own
@@ -3536,6 +3979,11 @@ class MainWindow(QMainWindow):
         # the collapsed rail's 14pt, matching the size the emoji had.
         for pair in getattr(self, "_utility_bars", ()):
             button = pair["settings"]
+            if pair.get("compact"):
+                button.setToolTip(
+                    f"Atomic {self._pending_update_version} is available"
+                    if self._pending_update_version else "Settings")
+                continue
             button.set_collapsed(collapsed)
             button.setText("" if collapsed else "        Settings")
             # A waiting update outranks the usual tooltip at either
@@ -4071,6 +4519,13 @@ class MainWindow(QMainWindow):
             # hidden while a tracker page was showing and stayed hidden
             # after it (measured with the hide/restore probe).
             gap.setVisible(rail is not None and rail.count() > 0)
+        # Gap i sits above block i, so it carries block i's name - and
+        # none when that block is empty (gap 0 always shows, see above).
+        for index, gap in enumerate(getattr(self, "_nav_gaps", ())):
+            rows = groups[index] if index < len(groups) else []
+            title = RAIL_BLOCK_TITLES[index] if index < len(RAIL_BLOCK_TITLES) else ""
+            if hasattr(gap, "set_title"):
+                gap.set_title(title if rows else "")
         self._sync_rail_gaps()
         self._fit_rails()
 
@@ -4086,6 +4541,8 @@ class MainWindow(QMainWindow):
         self._populate_nav_list()
         for rail in self.nav_lists:
             rail.blockSignals(False)
+        if getattr(self, "top_nav", None) is not None:
+            self.top_nav.rebuild()
         self._sync_nav_highlight(self._history[self._history_index])
 
     def _on_nav_item_clicked(self, item):
@@ -4285,6 +4742,8 @@ class MainWindow(QMainWindow):
         frame = self.geometry()
         sidebar = getattr(self, "sidebar", None)
         width = sidebar.width() if sidebar is not None else SIDEBAR_WIDTH
+        if not self.sidebar_holder.isVisibleTo(self):
+            width = 24          # no sidebar on screen to sit beside
         self._add_menu.popup(QPoint(frame.x() + width,
                                     frame.y() + frame.height() - 120))
 
@@ -5521,15 +5980,10 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key.Key_Comma:
                 self._open_settings()
                 return
-            if Qt.Key.Key_1 <= event.key() <= Qt.Key.Key_9:
-                # Sidebar order, not a fixed map: the sidebar is
-                # drag-to-reorder and hideable, so Ctrl+3 has to mean the
-                # third row the user can actually see. Home is row 1.
-                pages = ["home", *(page for _label, page in visible_nav_items())]
-                index = event.key() - Qt.Key.Key_1
-                if index < len(pages):
-                    self.navigate_to(pages[index])
-                return
+            # **No Ctrl+1-9** - the owner, 19 October 2026: "remove this
+            # shortcut entirely even from the settings Keybinds". It
+            # jumped to the nth visible sidebar row; app.js no longer
+            # forwards the digits and Keybinds no longer lists them.
         # **Ctrl+K does nothing**, 28 August 2026, the owner's ask:
         # "remove the Ctrl+K and make it does nothing". It used to open
         # the global search - but the search box moved into the window's
@@ -5694,6 +6148,16 @@ class MainWindow(QMainWindow):
             self._show_page(target, direction=self._direction_between(current, target))
 
     def _sync_nav_highlight(self, page_name):
+        # Saved / Schedule / History on the window's bar light like the
+        # sidebar's rows (window_chrome._SectionPill).
+        bar = getattr(self, "title_bar", None)
+        if bar is not None and hasattr(bar, "set_active_section"):
+            section = route_section(page_name)
+            bar.set_active_section(
+                section if section in ("saved", "schedule", "history") else None)
+        nav = getattr(self, "top_nav", None)
+        if nav is not None:
+            nav.set_current(page_name)
         for pair in getattr(self, "_utility_bars", ()):
             pair["downloads"].setChecked(page_name == "downloads")
         pinned = None
@@ -5720,6 +6184,17 @@ class MainWindow(QMainWindow):
                 rail.setCurrentItem(match)
             else:
                 rail.clearSelection()
+        layer = getattr(self, "_rail_pill", None)
+        if layer is not None:
+            target = (None, -1)
+            for rail in (self.home_list, *self.nav_lists):
+                for i in range(rail.count()):
+                    if rail.item(i).data(Qt.ItemDataRole.UserRole) == page_name:
+                        target = (rail, i)
+                        break
+                if target[0] is not None:
+                    break
+            layer.move_to(*target)
 
     def _apply_route_section(self, page, route):
         """Put `page` on the section its route names, if it names one.
@@ -5741,8 +6216,8 @@ class MainWindow(QMainWindow):
     def _show_page(self, page_name, direction="down", animate=True):
         if ":" not in str(page_name):
             page_name = _page_name(page_name)
-        # A navigation arriving mid-fold (Ctrl+3 while the sidebar is
-        # still folding) would otherwise leave the outgoing page's
+        # A navigation arriving mid-fold (a row pressed while the sidebar
+        # is still folding) would otherwise leave the outgoing page's
         # picture sitting over the incoming one - the fold's own tween
         # carries on, it is only the freeze that has to end here.
         self._settle_fold()
@@ -6059,6 +6534,10 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     theme.apply_theme(app)
+    # Rounded drop-down lists and menus with the hand on their rows,
+    # everywhere in the Qt side (widgets.install_rounded_popups).
+    from helpers import widgets as _widgets
+    _widgets.install_rounded_popups()
     # **The mark, before anything else is built.** The owner's ask, 28
     # August 2026, pointing at Stremio's launch screen. It goes here and
     # not later because everything below is the 1.29-1.57s the frozen

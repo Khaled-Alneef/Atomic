@@ -448,7 +448,7 @@ def _round_save(button):
     corners (photographed, 1 October 2026)."""
     button.setStyleSheet(
         f"QPushButton#Accent {{ background: {theme.ACCENT_HOVER};"
-        f" color: {theme.ON_ACCENT}; border: none; border-radius: 16px;"
+        f" color: {theme.ON_ACCENT}; border: none; border-radius: {theme.RADIUS_SM}px;"
         f" padding: 7px 22px; font-weight: 700; }}"
         f"QPushButton#Accent:hover {{ background: {theme.rgba(theme.ACCENT_HOVER, 205)}; }}")
     return button
@@ -620,13 +620,13 @@ class SettingsDialog(QDialog):
             f" border: 1px solid {theme.rgba(theme.TEXT, 30)}; border-radius: 10px;"
             f" padding: 7px 12px; }}"
             f"QLineEdit:focus {{ border: 1px solid {theme.TEXT}; }}"
-            f"QPushButton {{ border-radius: 17px; padding: 7px 20px;"
+            f"QPushButton {{ border-radius: {theme.RADIUS_SM}px; padding: 7px 20px;"
             f" background: transparent; border: 1px solid {theme.rgba(theme.TEXT, 60)}; }}"
             f"QPushButton:hover {{ border: 1px solid {theme.TEXT}; }}"
             # The radius again on #Accent: the app-wide #Accent rule is the
             # more specific one and kept its square corners (photographed).
             f"QPushButton#Accent {{ background: {theme.ACCENT_HOVER}; color: {theme.ON_ACCENT};"
-            f" border: none; border-radius: 17px; font-weight: 700; }}"
+            f" border: none; border-radius: {theme.RADIUS_SM}px; font-weight: 700; }}"
             f"QPushButton#Accent:hover {{ background: {theme.rgba(theme.ACCENT_HOVER, 205)}; }}"
             f"QPushButton#Danger {{ color: {theme.DANGER}; border: 1px solid {theme.DANGER}; }}")
         # No title heading: the content column already opens with its

@@ -30,6 +30,22 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.11": [
+        "A redesigned sidebar: the page you are on is a white box that "
+        "slides to the next page you open, the rows are grouped under "
+        "Watch, Read and Library, and the sidebar is one matte colour.",
+        "Saved, Schedule and History light up the same way when open, and "
+        "their icons animate when you point at them.",
+        "Buttons, filters and dropdown lists have rounded corners instead "
+        "of pill shapes, and every dropdown list shows a pointing hand.",
+        "On Games, Apps and Websites the + and Refresh buttons sit next to "
+        "Select. On Downloads, Change sits right next to the folder.",
+        "An empty tab on an actor's page says so in the middle of the "
+        "page instead of looking around forever.",
+        "Ctrl+1 to Ctrl+9 no longer switch pages. Settings > Keybinds now "
+        "lists Ctrl+N and Ctrl+P for the next and previous episode.",
+        "The startup screen is matte.",
+    ],
     "3.10": [
         "Continue opens the exact spot where you stopped reading a "
         "chapter, and goes on to the next chapter once you have reached "
