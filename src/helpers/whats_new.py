@@ -30,6 +30,10 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.12": [
+        "Novel Fire chapters open with their text again - they had "
+        "started opening blank.",
+    ],
     "3.11": [
         "A redesigned sidebar: the page you are on is a white box that "
         "slides to the next page you open, the rows are grouped under "

@@ -680,8 +680,32 @@ def _nf_chapters(site, entry, deadline, partial=None):
     return listed()
 
 
+# **A chapter address is a hand-off now, not the chapter.** Measured 21
+# October 2026 after his report that Novel Fire showed no chapter: every
+# `novelfire.net/book/<slug>/chapter-<N>` answered a 302 to readnovel.site,
+# whose 2,156-byte "Loading..." page holds no text - only a script that
+# sends a browser on to `novelphoenix.com/novel/<slug>/chapter-<N>`. That
+# host is the same engine (`id="content"`, 97 paragraphs of Reverend
+# Insanity 2308) and answers a plain request in 0.3s. The script's target
+# is read off the page rather than written here, so the next change of
+# mirror is followed too. Two hops at most: a page that keeps handing off
+# is a loop, not a chapter.
+_SCRIPT_REDIRECT = re.compile(
+    r"""(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']""")
+_NF_HOPS = 2
+
+
 def _nf_text(site, chapter, deadline):
-    return _paragraphs(_until_div(_get(chapter["url"], deadline), 'id="content"'))
+    url = chapter["url"]
+    for _hop in range(_NF_HOPS + 1):
+        body = _get(url, deadline)
+        lines = _paragraphs(_until_div(body, 'id="content"'))
+        moved = None if lines else _SCRIPT_REDIRECT.search(body)
+        if not moved:
+            return lines
+        url = urllib.parse.urljoin(url, moved.group(1).replace("\\/", "/"))
+        logs.info(f"novels: novelfire chapter handed off to {_host(url)}")
+    return []
 
 
 # ------------------------------------------------------------ the shape
