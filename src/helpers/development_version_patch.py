@@ -1605,7 +1605,7 @@ def install():
     #   * Previous/Next at the end of every chapter; reading cards name
     #     their site; LANGUAGE above SOURCE on reading pages.
     #   * The cast row left Discover.
-    updater.APP_VERSION = "3.11"
+    updater.APP_VERSION = "3.12"
     try:
         updater._HEADERS["User-Agent"] = f"Atomic/{updater.APP_VERSION}"
     except Exception:
