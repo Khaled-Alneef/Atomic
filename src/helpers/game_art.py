@@ -165,6 +165,20 @@ HEADER_SHAPE = ART_SHAPES[2]
 DETAILS_URL = ("https://store.steampowered.com/api/appdetails"
                "?appids={appid}&cc=us&l=en")
 
+# **A new title's portrait, by name rather than by guess** - the owner,
+# 29 October 2026: "why is Aion 2 and Phantom Blade Zero has images like
+# this!!!! they have a great poster image in the steam library!". Both
+# are recent (3393110 and 4115450), so every guessable portrait path
+# 404s and the ladder above fell to appdetails' header - the landscape
+# banner _as_poster letterboxes. appdetails names no portrait at all;
+# the store's own browse API does, keyless: `assets` carries the hashed
+# folder (`asset_url_format`) and `library_capsule_2x`. Measured that
+# evening: 0.8-1.8s, and the files it names are 600x900 for AION2 and
+# PBZ, and for Guild Wars 2 the same 2x file the guessed path serves.
+STORE_ITEMS_URL = ("https://api.steampowered.com/IStoreBrowseService/"
+                   "GetItems/v1/?input_json={query}")
+STORE_ASSET_URL = "https://shared.akamai.steamstatic.com/store_item_assets/{path}"
+
 # **No SteamGridDB rung, deliberately - removed 28 August 2026.** It was
 # added that morning for exactly the case below and taken out the same
 # day at the owner's ask ("remove the SteamGridDB key from the settings
@@ -529,6 +543,35 @@ def _details_header(appid: int, deadline=None):
     return url.split("?", 1)[0] or None
 
 
+def _store_capsule(appid: int, deadline=None):
+    """(the portrait Steam's store names for `appid` or None, whether
+    Steam actually answered) - see STORE_ITEMS_URL.
+
+    The second half is the cache's question, as everywhere here: "no
+    capsule" from a working API is an answer, a failed request is not."""
+    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+    if timeout is None:
+        return None, False
+    query = json.dumps({"ids": [{"appid": int(appid)}],
+                        "context": {"language": "english", "country_code": "US"},
+                        "data_request": {"include_assets": True}},
+                       separators=(",", ":"))
+    try:
+        payload = _get_json(
+            STORE_ITEMS_URL.format(query=urllib.parse.quote(query)), timeout)
+    except Exception:
+        return None, False
+    items = ((payload or {}).get("response") or {}).get("store_items") or []
+    assets = ((items[0] if items else {}) or {}).get("assets") or {}
+    template = str(assets.get("asset_url_format") or "")
+    for key in ("library_capsule_2x", "library_capsule"):
+        name = str(assets.get(key) or "")
+        if name and "${FILENAME}" in template:
+            path = template.replace("${FILENAME}", name).split("?", 1)[0]
+            return STORE_ASSET_URL.format(path=path), True
+    return None, True
+
+
 def _art_url(appid: int, deadline=None):
     """(best art URL that exists for `appid` or None, whether that is a
     real answer).
@@ -562,6 +605,12 @@ def _art_url(appid: int, deadline=None):
         if exists:
             return url, True
 
+    # Not at the guessed path: ask the store where the portrait is
+    # before settling for the landscape header (STORE_ITEMS_URL).
+    capsule, asked = _store_capsule(appid, deadline)
+    if capsule:
+        return capsule, True
+
     url = CDN.format(appid=appid, shape=HEADER_SHAPE)
     exists = _probe(url, deadline)
     if exists is None:
@@ -573,7 +622,10 @@ def _art_url(appid: int, deadline=None):
     # where it keeps the files rather than guessing a seventh time.
     header = _details_header(appid, deadline)
     if header:
-        return header, True
+        # Only a verdict when the store was asked and named no portrait:
+        # with that request failed, the header is shown but not kept, so
+        # the next lookup asks the store again.
+        return header, asked
     return None, True               # asked properly; Steam has no art
 
 
@@ -916,6 +968,55 @@ def fetch_cover_url(name: str, deadline=None, install_path=None):
         return url
     except Exception:
         return None
+
+
+def upgrade_letterboxed_covers() -> int:
+    """Swap a saved letterboxed Steam header for the real portrait, once
+    one can be found. Returns how many games changed. Never raises.
+
+    The cover is kept on the game (games.json `cover`), and nothing asks
+    again while that file exists - so AION2 and PBZ, resolved before
+    STORE_ITEMS_URL was a rung, would have kept the banner for good. Only
+    a game whose tile is a composite (`-poster.png`) made from a Steam
+    `header.jpg` is asked again; a Wikipedia logo (VALORANT) is left
+    alone. Its cached header is retired and the ladder run once more."""
+    changed = 0
+    try:
+        games = storage.load("games.json", [])
+    except Exception:
+        return 0
+    for game in games:
+        try:
+            if not isinstance(game, dict):
+                continue
+            if not str(game.get("cover") or "").endswith("-poster.png"):
+                continue
+            name = str(game.get("name") or "")
+            install = game.get("path")
+            store_name = epic_display_name(install) if install else None
+            key = store_name or name
+            cached = _read_cached(key) or ""
+            if not cached.split("?", 1)[0].endswith("/header.jpg"):
+                continue
+            resolved, _missing = _cache_files(key)
+            try:
+                resolved.unlink()
+            except OSError:
+                pass
+            path = fetch_cover(name, install_path=install)
+            if path and not str(path).endswith("-poster.png"):
+                storage.update_entry("games.json", game.get("id"),
+                                     {"cover": str(path)})
+                changed += 1
+        except Exception:
+            continue
+    if changed:
+        try:
+            from . import changes
+            changes.bump()          # every page redraws (rule 13)
+        except Exception:
+            pass
+    return changed
 
 
 def fetch_cover(name: str, deadline=None, install_path=None):

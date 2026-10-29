@@ -30,6 +30,25 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.13": [
+        "Open your apps, websites and games from inside the video player "
+        "and the reader: a new button lists them in Apps, Websites and "
+        "Games tabs, the ones you used last at the top.",
+        "AION2, Phantom Blade Zero and other new Steam games show their "
+        "Steam library poster instead of a wide banner.",
+        "The video player's panels and episode list look and move like the "
+        "Apps and Websites list, its buttons and hovers match the rest of "
+        "the app, and the playback speed buttons look like tabs.",
+        "The player's panels and episode list turn solid while the video "
+        "is paused.",
+        "The corners of the player's windows are smooth curves.",
+        "Round buttons are squares with rounded corners, except the "
+        "continue button on covers.",
+        "Arabic names in the apps and websites list sit next to their "
+        "icons, like English ones.",
+        "The player's buttons look the same while a video loads as while "
+        "it plays.",
+    ],
     "3.12": [
         "Novel Fire chapters open with their text again - they had "
         "started opening blank.",

@@ -128,8 +128,17 @@ def _clean_controls(player, page) -> None:
                     style + "\n/* AtomicTopBarLive */"
                     + "\nQPushButton { background: transparent;"
                     + " border: none; }"
+                    # The player's glass hover, not the old grey box -
+                    # this rule is appended after the button's own and
+                    # so wins; it was what kept the top bar's hover
+                    # "old" after the restyle of 29 October 2026. White
+                    # ink, because a pill's own hover would otherwise
+                    # leave black words on the glass.
                     + "\nQPushButton:hover { background: "
-                    + f"{player.theme.SURFACE_HOVER}; border: none; }}")
+                    + f"{player._GLASS_HOVER}; border: none;"
+                    + f" color: {player.theme.TEXT_OVER_MEDIA}; }}"
+                    + "\nQPushButton:pressed { background: "
+                    + f"{player._GLASS_PRESSED}; border: none; }}")
     except RuntimeError:
         pass
 

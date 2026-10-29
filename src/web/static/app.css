@@ -34,7 +34,10 @@
   --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
   /* A control's corner. No pills: the owner, 19 October 2026: 'change all buttons or lists or all that has the shape of a stretched egg to a square with rounded edges' -
      every stadium (999px, or a radius of half the height) is this now.
-     Circles stay circles; they are not stretched. */
+     No circle buttons either (29 October 2026, "change any circle button
+     ... into square rounded edges"); round indicators - a dot, a knob,
+     a selection tick - stay round, and so does the cover's continue
+     button (.ring), at his word the same evening. */
   --radius-ctl: 8px;
 }
 * { box-sizing: border-box; }
@@ -282,6 +285,10 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
   z-index: 2;
   position: absolute; left: 50%; top: 50%;
   width: 46px; height: 46px; margin: -23px 0 0 -23px;
+  /* **A circle - the one round button left.** Squared with every other
+     round button on 29 October 2026 ("change any circle button in the
+     app ... into square rounded edges"), and put back the same evening:
+     "make the continue buttons circles again not squares". */
   border-radius: 50%; cursor: pointer;
   border: 2px solid var(--accent);
   background: rgba(10, 10, 10, .35);
@@ -464,6 +471,44 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
 }
 .rglyph:hover { background: var(--hover); border-color: var(--border); }
 .rglyph:disabled { opacity: .38; cursor: default; }
+/* The launcher button while its menu is down. */
+.rglyph.on { background: var(--active); border-color: var(--border); }
+
+/* **The reader's Apps & Websites menu** (app.js launcherMenu). Hung from
+   the bar, so hovering it holds the bar down; Home's own tiles inside
+   (.tile/.tart/.tname above), on the bar's own glass. Not a drag region:
+   a press on it must reach the rows, never move the window. */
+.rlaunch {
+  position: absolute; top: 52px; width: 300px;
+  max-height: min(70vh, 560px);
+  display: flex; flex-direction: column;
+  padding: 8px 8px 8px;
+  background: rgba(10, 10, 10, .96);
+  border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+  app-region: no-drag; -webkit-app-region: no-drag;
+  z-index: 2;
+}
+/* Apps | Websites, above the list and outside its scroller. The chosen
+   one is white with black on it - the monochrome accent. */
+.rlaunch-tabs { display: flex; gap: 6px; padding: 0 0 8px; flex: 0 0 auto; }
+.rlaunch-tab {
+  background: transparent; color: var(--text); cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-ctl);
+  padding: 5px 14px; font: inherit; font-size: 12px; font-weight: 700;
+}
+.rlaunch-tab:hover { border-color: var(--hi); }
+.rlaunch-tab.on { background: var(--accent); color: var(--ink);
+                  border-color: var(--accent); }
+.rlaunch-list {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.rlaunch-list::-webkit-scrollbar { width: 8px; }
+.rlaunch-list::-webkit-scrollbar-track { background: transparent; }
+.rlaunch-list::-webkit-scrollbar-thumb { background: var(--active); border-radius: 4px; }
+.rlaunch-none { color: var(--dim); font-size: 12px; padding: 4px 8px 6px; }
 
 /* The chapter list, now in the middle of the top bar. */
 .rjump {
@@ -713,7 +758,8 @@ header p.ptitle { margin: 0 0 22px; }
 }
 .paneltitle { margin: 0; font-size: 25px; font-weight: 700; flex: 1; }
 .roundbtn {
-  width: 40px; height: 40px; border-radius: 20px;   /* setFixedSize(40, 40) */
+  width: 40px; height: 40px;                         /* setFixedSize(40, 40) */
+  border-radius: var(--radius-ctl);                  /* not a circle (app.css :root) */
   font-family: "Segoe MDL2 Assets", "Segoe UI Symbol", system-ui, sans-serif;
   font-size: 14px; line-height: 1; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
@@ -1506,7 +1552,8 @@ header h1, .paneltitle {
 .row { position: relative; }
 .rowarrow {
   position: absolute; z-index: 4; top: 50%; width: 44px; height: 44px;
-  margin-top: -6px; border-radius: 50%; cursor: pointer; padding: 0;
+  margin-top: -6px; border-radius: var(--radius-ctl);   /* not a circle (app.css :root) */
+  cursor: pointer; padding: 0;
   display: flex; align-items: center; justify-content: center;
   font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
   font-size: 15px; color: #ffffff;

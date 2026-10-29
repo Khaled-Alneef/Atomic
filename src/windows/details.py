@@ -1716,7 +1716,8 @@ class DetailsPage(GlassPage):
             f"QPushButton {{ background: rgba(20, 20, 20, 190); color: {theme.TEXT};"
             f" border: 1px solid {theme.rgba(theme.TEXT, 56)}; padding: 0px;"
             f" font-family: {theme.FONT_STACK_ICONS}; font-size: 13pt;"
-            f" border-radius: 20px; }}"
+            # A rounded square, not the circle it was - the owner, 29 October 2026: "change any circle button in the app ... into square rounded edges".
+            f" border-radius: {theme.RADIUS_SM}px; }}"
             f"QPushButton:hover {{ border: 1px solid {theme.ACCENT_HOVER};"
             f" background: {theme.ACCENT_HOVER}; color: {theme.ON_ACCENT}; }}")
         use_hover_cursor(button)

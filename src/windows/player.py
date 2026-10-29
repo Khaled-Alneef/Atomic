@@ -58,8 +58,9 @@ import threading
 import time
 import uuid
 
-from PyQt6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF,
-                          QRegularExpression, Qt, QTimer)
+from PyQt6.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPointF,
+                          QRect, QRectF, QRegularExpression, Qt, QTimer,
+                          QVariantAnimation)
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QImage,
                          QLinearGradient, QPainter, QPen, QPixmap,
@@ -516,6 +517,11 @@ SUBTITLE_LANGUAGE_NAMES = {
 CONTROLS_HEIGHT = 96
 TOPBAR_HEIGHT = 50
 PANEL_WIDTH = 460
+# The launcher's row icons, logical px - Home's list draws its app and
+# site icons at 28 (app.css .tart).
+LAUNCH_ICON_PX = 28
+# app.css .rlaunch's 300px plus the panel's own 16px margins each side.
+LAUNCH_PANEL_WIDTH = 332
 PANEL_MAX_HEIGHT = 520
 
 # How far the overlay bars' corners are rounded, and the one place the
@@ -606,6 +612,7 @@ _VEIL_FACTOR = 200 / 255
 
 _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
 _LWA_ALPHA = 0x00000002
 _VK_LBUTTON = 0x01
 # The two side buttons. Polled with the left one and for the same reason:
@@ -735,6 +742,9 @@ ICON_DOWNLOAD = "\ue896"
 # rather than the bare character, for the reason every glyph in this
 # file is one: a re-encoding tool turns them into mojibake.
 ICON_STATS = "\ue701"
+# AllApps, the grid of squares - the Apps & Websites launcher (29 October
+# 2026). The reader's bar carries the same glyph (app.js launcherMenu).
+ICON_LAUNCH = "\ue71d"
 ICON_RELOAD = "\ue72c"      # Refresh - the circular arrow, the same
                             # picture every other reload in this app
                             # uses. Not ICON_SYNC (\ue895), which is the
@@ -1413,6 +1423,27 @@ def _set_video_shown(page, shown):
         pass
 
 
+def _native_hwnd(widget) -> int:
+    """`widget`'s HWND when it already has one of its own, else 0 - and
+    never one made by asking.
+
+    **This replaced `internalWinId()`, which PyQt6 does not have.** The
+    call raised AttributeError inside _raise_native's own `try`, so the
+    "only when something is above it" test below never ran in this build
+    and every call was a real SetWindowPos - found 29 October 2026 when
+    the smooth corners' pieces depended on that test (a test window: 10
+    pointer ticks, 10 raises). `winId()` on a widget whose native window
+    is already created only reads the handle; the two attributes are
+    what make sure that is the case."""
+    try:
+        if (widget.testAttribute(Qt.WidgetAttribute.WA_WState_Created)
+                and widget.testAttribute(Qt.WidgetAttribute.WA_NativeWindow)):
+            return int(widget.winId())
+    except (RuntimeError, AttributeError):
+        pass
+    return 0
+
+
 def _raise_native(widget) -> None:
     """`raise_()`, but only when something is actually above it.
 
@@ -1446,21 +1477,35 @@ def _raise_native(widget) -> None:
     the thing that raises."""
     try:
         if os.name == "nt" and widget.isVisible():
-            # internalWinId, never winId: winId *creates* the native
+            # Never a bare winId: winId *creates* the native
             # window if there is not one, and promoting a widget that was
             # meant to stay a plain child tears down and rebuilds windows
             # under a running video. Measured the hard way - it took the
             # process out at the first call. 0 means "not native", which
             # is not this function's business, so fall through.
-            hwnd = int(widget.internalWinId() or 0)
-            if hwnd and not ctypes.windll.user32.GetWindow(hwnd, _GW_HWNDPREV):
-                return          # already top of its siblings
+            hwnd = _native_hwnd(widget)
+            if hwnd:
+                # Its own smooth corners sit just above it on purpose
+                # (_SmoothCorners); they are not something covering it.
+                # Counted as covering, they made every pointer tick raise
+                # the panel and then its corners again - the flicker the
+                # owner reported on 29 October 2026.
+                corners = getattr(widget, "_atomic_corners", None)
+                own = corners.piece_hwnds() if corners is not None else set()
+                above = ctypes.windll.user32.GetWindow(hwnd, _GW_HWNDPREV)
+                while above and int(above) in own:
+                    above = ctypes.windll.user32.GetWindow(above, _GW_HWNDPREV)
+                if not above:
+                    return      # already top of its siblings
     except Exception:
         pass
     try:
         widget.raise_()
     except RuntimeError:
         pass                    # torn down under us
+    corners = getattr(widget, "_atomic_corners", None)
+    if corners is not None:
+        corners.raise_pieces()
 
 
 def _left_button_down() -> bool:
@@ -1586,8 +1631,13 @@ def _set_window_alpha(widget, alpha) -> bool:
         # returns the *previous* style, and 0 is a legitimate previous
         # value, so it cannot be tested for success without clearing
         # GetLastError first.
-        return bool(user32.SetLayeredWindowAttributes(
+        took = bool(user32.SetLayeredWindowAttributes(
             hwnd, 0, int(max(0, min(255, alpha))), _LWA_ALPHA))
+        # Its smooth corners blend at the same alpha (_SmoothCorners).
+        corners = getattr(widget, "_atomic_corners", None)
+        if took and corners is not None:
+            corners.set_alpha(alpha)
+        return took
     except Exception:
         logs.exception("Could not make the player bar translucent")
         return False
@@ -1629,9 +1679,54 @@ def _icon_button_style(font_pt, family=None):
     return (f"QPushButton {{ background: transparent; border: none; padding: 0px;"
             f" color: {theme.TEXT}; font-family: {face};"
             f" font-size: {font_pt}pt; border-radius: {theme.RADIUS_SM}px; }}"
-            f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
-            f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}"
+            f"QPushButton:hover {{ background: {_GLASS_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {_GLASS_PRESSED}; }}"
             f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}")
+
+
+# **A hover is white let through, never a grey box** - the owner, 29
+# October 2026: "the buttons and hover inside the video player seems old,
+# make them match the rest of the app design!". The bars are composed per
+# pixel over the picture (player_top_bar_live_patch._compose renders the
+# children over transparency), so the old SURFACE_HOVER fill landed as an
+# opaque #1f1f1f square on the video - the Harbor look the redesign of 1
+# October 2026 retired everywhere else. A translucent white is glass over
+# the frame, the same "white let through" the web pages' hovers are.
+_GLASS_HOVER = theme.rgba(theme.TEXT_OVER_MEDIA, 38)
+_GLASS_PRESSED = theme.rgba(theme.TEXT_OVER_MEDIA, 64)
+
+
+def _tab_style(chosen, padding="5px 14px"):
+    """The launcher's tab button, number for number with app.css
+    .rlaunch-tab: an 8px-cornered outline in the border grey, white with
+    black ink when chosen, the outline brightening under the pointer.
+    The speed presets wear it too."""
+    return (f"QPushButton {{ background: {theme.ACCENT if chosen else 'transparent'};"
+            f" color: {theme.ON_ACCENT if chosen else theme.TEXT};"
+            f" border: 1px solid {theme.ACCENT if chosen else theme.BORDER};"
+            f" padding: {padding}; font-size: 12px; font-weight: 700;"
+            f" border-radius: {theme.RADIUS_SM}px; }}"
+            f"QPushButton:hover {{ border: 1px solid"
+            f" {theme.ACCENT if chosen else theme.rgba(theme.TEXT, 107)}; }}")
+
+
+def _chip_style(font_pt=10.5, padding="5px 14px", rest=None):
+    """The redesign's chip (details._chip_button): a hairline outline on
+    a rounded square - never a pill (theme.RADIUS_CTL's note) - that turns
+    white with black ink under the pointer. `rest` is the ground at rest;
+    over the video it is a dark glass so the words hold over a bright
+    frame."""
+    ground = rest or "transparent"
+    return (f"QPushButton {{ background: {ground}; color: {theme.TEXT_OVER_MEDIA};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 70)};"
+            f" padding: {padding}; font-size: {font_pt}pt; font-weight: 600;"
+            f" border-radius: {theme.RADIUS_SM}px; }}"
+            f"QPushButton:hover {{ background: {theme.ACCENT_HOVER};"
+            f" color: {theme.ON_ACCENT}; border: 1px solid {theme.ACCENT_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {theme.rgba(theme.ACCENT_HOVER, 200)};"
+            f" color: {theme.ON_ACCENT}; }}"
+            f"QPushButton:disabled {{ color: {theme.TEXT_DIM};"
+            f" background: transparent; border: 1px solid {theme.BORDER}; }}")
 
 
 def _icon_button(glyph, tooltip, size=44, font_pt=16, family=None):
@@ -1664,13 +1759,7 @@ def _drawn_button(paint, tooltip, size=40, icon_px=24):
 def _text_button(text, tooltip=""):
     button = QPushButton(text)
     button.setToolTip(tooltip)
-    button.setStyleSheet(
-        f"QPushButton {{ background: transparent; border: 1px solid {theme.BORDER};"
-        f" color: {theme.TEXT}; padding: 7px 13px; font-size: 11pt;"
-        f" border-radius: {theme.RADIUS_SM}px; }}"
-        f"QPushButton:hover {{ background: {theme.SURFACE_HOVER};"
-        f" border: 1px solid {theme.ACCENT}; }}"
-        f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}")
+    button.setStyleSheet(_chip_style(11, "7px 13px"))
     use_hover_cursor(button)
     return button
 
@@ -1681,16 +1770,15 @@ def _pill_button(text, tooltip=""):
     than a label, but styled to read as a status pill, not a control."""
     button = QPushButton(text)
     button.setToolTip(tooltip)
-    button.setStyleSheet(
-        f"QPushButton {{ background: {theme.SURFACE_HOVER}; color: {theme.TEXT};"
-        f" border: 1px solid {theme.BORDER}; padding: 3px 12px; font-size: 10pt;"
-        f" font-weight: 700; border-radius: {theme.RADIUS_LG}px; }}"
-        f"QPushButton:hover {{ border: 1px solid {theme.ACCENT}; color: {theme.TEXT}; }}")
+    # A rounded square now, not the stadium it was (RADIUS_LG on a 26px
+    # chip) - the owner's no-pills rule of 19 October 2026 had missed it.
+    button.setStyleSheet(_chip_style(10, "3px 12px",
+                                     rest=theme.rgba(theme.BG, 150)))
     use_hover_cursor(button)
     return button
 
 
-def _round_overlay(widget, radius=BAR_RADIUS, square=()):
+def _round_overlay(widget, radius=BAR_RADIUS, square=(), smooth=True):
     """Cut `widget`'s window to a rounded rectangle.
 
     Every bar on this page is a *native* child window (see the module
@@ -1709,6 +1797,15 @@ def _round_overlay(widget, radius=BAR_RADIUS, square=()):
     rounded-rect constructor: an ellipse region is what gives the corner
     its curve, where a QPainterPath would have to be flattened to a
     polygon first.
+
+    **`smooth` (the default) cuts the rounded corners out square and
+    lays an anti-aliased corner over each** (_SmoothCorners) - the
+    owner, 29 October 2026, with a close-up of a panel's corner: "they
+    do not have smooth curve". A window region is all-or-nothing per
+    pixel, so the ellipse above can only ever be a staircase; and
+    Windows 11's own rounded corners are for top-level windows, not
+    children. Per-pixel alpha is the one smooth edge a native child
+    can have, which is what the bars already use.
     """
     w, h = widget.width(), widget.height()
     if w <= 0 or h <= 0:
@@ -1717,6 +1814,17 @@ def _round_overlay(widget, radius=BAR_RADIUS, square=()):
     if radius == 0:
         return
     rect_kind = QRegion.RegionType.Rectangle
+    if smooth and os.name == "nt":
+        region = QRegion(0, 0, w, h, rect_kind)
+        for name, (x, y) in _corner_origins(w, h, radius).items():
+            if name not in square:
+                region = region.subtracted(QRegion(x, y, radius, radius, rect_kind))
+        # Every layout pass lands here, and a SetWindowRgn that changes
+        # nothing still repaints the window.
+        if widget.mask() != region:
+            widget.setMask(region)
+        _SmoothCorners.attach(widget, radius, square).refresh()
+        return
     ellipse = QRegion.RegionType.Ellipse
     region = QRegion(0, radius, w, h - 2 * radius, rect_kind)
     region = region.united(QRegion(radius, 0, w - 2 * radius, h, rect_kind))
@@ -1737,6 +1845,247 @@ def _round_overlay(widget, radius=BAR_RADIUS, square=()):
         else:
             region = region.united(QRegion(disc[0], disc[1], span, span, ellipse))
     widget.setMask(region)
+
+
+def _corner_origins(w, h, radius):
+    """Each corner's r x r square, by name, in the widget's coordinates."""
+    return {"tl": (0, 0), "tr": (w - radius, 0),
+            "bl": (0, h - radius), "br": (w - radius, h - radius)}
+
+
+class _CornerPiece(QWidget):
+    """One smooth corner: a native, per-pixel-alpha window the size of
+    the square _round_overlay cut out, click-through, so a press in it
+    reaches what is under it exactly as the cut-out did.
+
+    Layered windows outlive a hidden parent - DWM keeps presenting them
+    (player_top_bar_live_patch.drop_composition has the frames) - so the
+    layered bit is cleared on every hide and set again by the next push."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        _make_native(self)
+
+    def hideEvent(self, event):
+        _drop_layered(self)
+        super().hideEvent(event)
+
+
+def _drop_layered(widget):
+    if os.name != "nt":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = int(widget.winId())
+        style = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+        if style & _WS_EX_LAYERED:
+            user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, style & ~_WS_EX_LAYERED)
+    except Exception:
+        pass
+
+
+class _SmoothCorners(QObject):
+    """The anti-aliased corners of one masked overlay (_round_overlay).
+
+    Each piece is rendered from the owner itself - its own ground and
+    border at that corner, so a panel's gradient, the episode list's fill
+    and the message box's flat ground all come out right without knowing
+    which is which - and multiplied by a rounded rectangle drawn with
+    antialiasing, which is the curve. The owner's DWM alpha
+    (_set_window_alpha: 180 playing, 255 paused) rides on the pieces'
+    own alpha so the corner and the panel blend the same.
+
+    Rendered on placement, show and alpha change only: the corners of
+    every window here hold nothing but ground and border (the panels'
+    content sits 14-16px in, inside the 16px radius), so a hover or a
+    scroll never needs them again.
+
+    **Not from the corner itself.** Qt clips a widget's own rendering to
+    its window mask, and the mask is exactly what cut these squares out -
+    measured, a render of the panel's top-left square came back with an
+    alpha sum of 0 of 112,455, which is why the first build drew square
+    notches. The ground is read from the one-pixel column just beside
+    the square instead (inside the mask, same rows, so the same gradient
+    and the same top and bottom border), stretched across the corner,
+    cut to the rounded outline by an antialiased mask image, and the
+    side border stroked along the curve in the colour the column's top
+    pixel carries."""
+
+    @classmethod
+    def attach(cls, owner, radius, square):
+        found = getattr(owner, "_atomic_corners", None)
+        if found is None:
+            found = cls(owner)
+            owner._atomic_corners = found
+        found.radius = radius
+        found.square = set(square)
+        return found
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.radius = BAR_RADIUS
+        self.square = set()
+        self.alpha = 255
+        self.pieces = {}
+        self._drawn = None          # what the pieces were last pushed for
+        owner.installEventFilter(self)
+        owner.destroyed.connect(self._drop)
+
+    def eventFilter(self, watched, event):
+        kind = event.type()
+        if kind == QEvent.Type.Show:
+            QTimer.singleShot(0, self.refresh)
+        elif kind == QEvent.Type.Hide:
+            for piece in self.pieces.values():
+                try:
+                    piece.hide()
+                except RuntimeError:
+                    pass
+        return False
+
+    def _drop(self, *_args):
+        for piece in self.pieces.values():
+            try:
+                _drop_layered(piece)
+                piece.hide()
+                piece.deleteLater()
+            except RuntimeError:
+                pass
+        self.pieces = {}
+
+    def set_alpha(self, alpha):
+        alpha = int(max(0, min(255, alpha)))
+        if alpha != self.alpha:
+            self.alpha = alpha      # part of refresh's key, so it redraws
+            self.refresh()
+
+    def piece_hwnds(self):
+        found = set()
+        for piece in self.pieces.values():
+            try:
+                hwnd = _native_hwnd(piece)
+            except RuntimeError:
+                continue
+            if hwnd:
+                found.add(hwnd)
+        return found
+
+    def raise_pieces(self):
+        for piece in self.pieces.values():
+            try:
+                if piece.isVisible():
+                    _raise_native(piece)
+            except RuntimeError:
+                pass
+
+    def refresh(self):
+        try:
+            owner = self.owner
+            parent = owner.parentWidget()
+            w, h = owner.width(), owner.height()
+            visible = owner.isVisible()
+        except RuntimeError:
+            return
+        if parent is None or w <= 0 or h <= 0:
+            return
+        radius = max(0, min(self.radius, w // 2, h // 2))
+        wanted = [name for name in ("tl", "tr", "bl", "br")
+                  if name not in self.square]
+        for name in list(self.pieces):
+            if name not in wanted or radius == 0:
+                self.pieces.pop(name).deleteLater()
+        if radius == 0:
+            return
+        if not visible:
+            for piece in self.pieces.values():
+                piece.hide()
+            self._drawn = None
+            return
+        dpr = float(owner.devicePixelRatioF() or 1.0)
+        geometry = owner.geometry()
+        key = (geometry.getRect(), radius, tuple(sorted(self.square)),
+               self.alpha, dpr)
+        if key == self._drawn and all(name in self.pieces
+                                      and self.pieces[name].isVisible()
+                                      for name in wanted):
+            return          # nothing moved: no render, no push, no raise
+        side = max(1, int(round(radius * dpr)))
+        origins = _corner_origins(w, h, radius)
+        columns = {}
+        for name in wanted:
+            x, y = origins[name]
+            # The ground beside the square, inside the mask (see above).
+            col_x = radius if name in ("tl", "bl") else w - radius - 1
+            if col_x not in columns:
+                column = QImage(max(1, int(round(dpr))),
+                                max(1, int(round(h * dpr))),
+                                QImage.Format.Format_ARGB32_Premultiplied)
+                column.fill(0)
+                column.setDevicePixelRatio(dpr)
+                painter = QPainter(column)
+                owner.render(painter, QPoint(0, 0), QRegion(col_x, 0, 1, h),
+                             QWidget.RenderFlag.DrawChildren)
+                painter.end()
+                columns[col_x] = column
+            column = columns[col_x]
+            edge = QColor.fromRgba(column.pixel(0, 0))
+            image = QImage(side, side, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            image.setDevicePixelRatio(dpr)
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+            painter.translate(-x, -y)
+            # The column stretched across: every row its own ground.
+            painter.drawImage(QRectF(0, 0, w, h), column)
+            # The outline's side border, along the curve.
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            pen = QPen(edge)
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1),
+                                    radius - 0.5, radius - 0.5)
+            painter.end()
+            # The curve, antialiased, at the owner's DWM alpha: a mask
+            # image over the whole piece, so the pixels outside the
+            # outline go to nothing too.
+            mask = QImage(side, side, QImage.Format.Format_ARGB32_Premultiplied)
+            mask.fill(0)
+            mask.setDevicePixelRatio(dpr)
+            painter = QPainter(mask)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, self.alpha))
+            painter.translate(-x, -y)
+            painter.drawRoundedRect(QRectF(0, 0, w, h), radius, radius)
+            painter.end()
+            painter = QPainter(image)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_DestinationIn)
+            painter.drawImage(0, 0, mask)
+            painter.end()
+            piece = self.pieces.get(name)
+            if piece is None:
+                piece = _CornerPiece(parent)
+                self.pieces[name] = piece
+            piece.setGeometry(geometry.x() + x, geometry.y() + y, radius, radius)
+            try:
+                hwnd = int(piece.winId())
+                user32 = ctypes.windll.user32
+                style = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, _GWL_EXSTYLE,
+                                      style | _WS_EX_LAYERED | _WS_EX_TRANSPARENT)
+                from helpers import player_top_bar_live_patch as live_bar
+                live_bar._push_layered(piece, image, side, side)
+            except Exception:
+                logs.exception("A smooth corner could not be drawn")
+                continue
+            if not piece.isVisible():
+                piece.show()
+            _raise_native(piece)
+        self._drawn = key
 
 
 class _ChevronButton(QPushButton):
@@ -2471,8 +2820,8 @@ class PlayPauseButton(QPushButton):
             # width (measured: the season arrows vanished under it).
             f"QPushButton {{ background: transparent;"
             f" border: none; padding: 0px; border-radius: {theme.RADIUS_SM}px; }}"
-            f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
-            f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}")
+            f"QPushButton:hover {{ background: {_GLASS_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {_GLASS_PRESSED}; }}")
         use_hover_cursor(self)
 
     def set_paused(self, paused):
@@ -2546,6 +2895,240 @@ def _clear_layout(layout):
             child.deleteLater()
 
 
+# app.css .tile, the reader's Apps & Websites row: rest name colour,
+# hover ground, how far the row draws right and how long it takes.
+TILE_REST_NAME = "#cfcfcf"
+TILE_HOVER_GROUND = round(255 * 0.04)
+TILE_SHIFT_PX = 6
+TILE_MOTION_MS = 350
+
+
+def _tile_motion(owner, on_step):
+    """The tile hover's clock: TILE_MOTION_MS on --ease-out,
+    cubic-bezier(0.16, 1, 0.3, 1) - the curve itself, not Qt's OutExpo,
+    which is a different shape near the end."""
+    anim = QVariantAnimation(owner)
+    anim.setDuration(TILE_MOTION_MS)
+    curve = QEasingCurve(QEasingCurve.Type.BezierSpline)
+    curve.addCubicBezierSegment(QPointF(0.16, 1.0), QPointF(0.3, 1.0),
+                                QPointF(1.0, 1.0))
+    anim.setEasingCurve(curve)
+    anim.valueChanged.connect(lambda value: on_step(float(value)))
+    return anim
+
+
+def _tile_mix(rest, lit, t):
+    rest, lit = QColor(rest), QColor(lit)
+    return QColor(round(rest.red() + (lit.red() - rest.red()) * t),
+                  round(rest.green() + (lit.green() - rest.green()) * t),
+                  round(rest.blue() + (lit.blue() - rest.blue()) * t))
+
+
+def _paint_tile_hover(widget, t):
+    """The hover's ground and the white rule at the left edge, at
+    progress `t`, shifted with the row. Shared by _LaunchTile and
+    _TileCard so the launcher and every other panel row move alike."""
+    if t <= 0:
+        return
+    painter = QPainter(widget)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.translate(TILE_SHIFT_PX * t, 0)
+    painter.setPen(Qt.PenStyle.NoPen)
+    height = widget.height()
+    painter.setBrush(QColor(255, 255, 255, round(TILE_HOVER_GROUND * t)))
+    painter.drawRoundedRect(QRectF(0.5, 0.5, widget.width() - 1, height - 1), 8, 8)
+    # 22% from top and bottom, grown from its middle (.tile::before).
+    span = height * 0.56 * t
+    painter.setBrush(QColor(255, 255, 255, round(255 * t)))
+    painter.drawRoundedRect(QRectF(0, (height - span) / 2, 2, span), 1, 1)
+    painter.end()
+
+
+class _TileCard(Card):
+    """A panel row with the launcher's hover - the owner, 29 October
+    2026: "apply the apps and websites buttons design to all sub windows
+    in the video player like the translation and the playback speed and
+    all !!!!". Every row of every panel (OverlayPanel.add_row) and of
+    the episode list is one of these.
+
+    The row keeps its own widgets (titles that wrap, a dot, a chevron, a
+    badge), so the slide is done by the layout's margins - left grows by
+    TILE_SHIFT_PX as right gives the same back, so the content width and
+    therefore every wrapped line stays put - and the ground and rule are
+    painted over the QSS fill. `light()` hands over a label whose colour
+    rides the same clock, from TILE_REST_NAME to white."""
+
+    def __init__(self, hoverable=True):
+        super().__init__(hoverable=hoverable, matte=True)
+        self._t = 0.0
+        self._hoverable = hoverable
+        self._follow = None
+        self._lit = []
+        self._anim = _tile_motion(self, self._step)
+
+    def follow(self, layout):
+        """The row's own layout, whose margins carry the slide."""
+        margins = layout.contentsMargins()
+        self._follow = (layout, margins.left(), margins.top(),
+                        margins.right(), margins.bottom())
+
+    def light(self, label, style, rest=TILE_REST_NAME):
+        """`label` takes `style` with its colour going rest -> white on
+        hover. Replaces any earlier hand-over of the same label, so a
+        row repainted for selection does not stack them."""
+        self._lit = [entry for entry in self._lit if entry[0] is not label]
+        self._lit.append((label, style, rest, None))
+        self._paint_lit()
+
+    def _paint_lit(self):
+        lit = []
+        for label, style, rest, shown in self._lit:
+            colour = _tile_mix(rest, theme.TEXT_OVER_MEDIA, self._t).name()
+            if colour != shown:
+                try:
+                    label.setStyleSheet(f"color: {colour}; {style}")
+                except RuntimeError:
+                    continue
+            lit.append((label, style, rest, colour))
+        self._lit = lit
+
+    def _step(self, t):
+        self._t = t
+        if self._follow is not None:
+            layout, left, top, right, bottom = self._follow
+            shift = round(TILE_SHIFT_PX * t)
+            layout.setContentsMargins(left + shift, top,
+                                      max(0, right - shift), bottom)
+        self._paint_lit()
+        self.update()
+
+    def _run_to(self, end):
+        if not self._hoverable:
+            return
+        self._anim.stop()
+        self._anim.setStartValue(self._t)
+        self._anim.setEndValue(float(end))
+        self._anim.start()
+
+    def enterEvent(self, event):
+        self._run_to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._run_to(0.0)
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)       # the QSS fill: a selected row's band
+        _paint_tile_hover(self, self._t)
+
+
+class _LaunchTile(QWidget):
+    """One app or website in the launcher, drawn as the reader's list
+    draws it - the owner, 29 October 2026: "still not same as the list of
+    apps and websites in the reader view!! make the same animation inside
+    the video player".
+
+    app.css `.tile`, number for number: a 28px icon with 6px corners,
+    10px to the name, 6px 8px of padding in an 8px-cornered box, the name
+    13px in #cfcfcf. And its hover (Home's, 1 October 2026 - 1367's list
+    hover): over .35s on 1367's expo-out the row draws 6px to the right,
+    a 2px white rule rises at its left edge from the middle, the icon
+    grows to 110%, the name goes white and a 4% white ground comes up.
+    Painted here rather than styled, because QSS has no transform; one
+    QVariantAnimation drives all of it, run forward on Enter and back on
+    Leave from wherever it stands."""
+
+    clicked = Signal()
+
+    HEIGHT = 42            # 28 + 6 + 6 + the 1px border each side
+    ICON = 28
+    PAD_X = 8
+    GAP = 10
+
+    def __init__(self, name, icon, note="", parent=None):
+        super().__init__(parent)
+        self._name = name
+        self._icon = icon
+        self._note = note
+        self._t = 0.0
+        self.setFixedHeight(self.HEIGHT)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        use_hover_cursor(self)
+        self._anim = _tile_motion(self, self._step)
+
+    def _step(self, value):
+        self._t = value
+        self.update()
+
+    def _run_to(self, end):
+        self._anim.stop()
+        self._anim.setStartValue(self._t)
+        self._anim.setEndValue(float(end))
+        self._anim.start()
+
+    def enterEvent(self, event):
+        self._run_to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._run_to(0.0)
+        super().leaveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.rect().contains(event.position().toPoint())):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, _event):
+        t = self._t
+        # The whole row draws right, ground and rule included, and is cut
+        # at the list's edge - the list's overflow-x: hidden.
+        _paint_tile_hover(self, t)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        height = self.height()
+        painter.translate(TILE_SHIFT_PX * t, 0)
+        # The icon, grown about its own centre.
+        side = self.ICON * (1 + 0.1 * t)
+        centre = QPointF(1 + self.PAD_X + self.ICON / 2, height / 2)
+        if self._icon is not None and not self._icon.isNull():
+            painter.drawPixmap(
+                QRectF(centre.x() - side / 2, centre.y() - side / 2, side, side),
+                self._icon, QRectF(self._icon.rect()))
+        left = 1 + self.PAD_X + self.ICON + self.GAP
+        right = self.width() - 1 - self.PAD_X
+        if self._note:
+            note_font = QFont(self.font())
+            note_font.setPixelSize(11)
+            note_font.setWeight(QFont.Weight.Bold)
+            painter.setFont(note_font)
+            painter.setPen(QColor(theme.DANGER))
+            width = QFontMetrics(note_font).horizontalAdvance(self._note)
+            painter.drawText(QRectF(right - width, 0, width, height),
+                             int(Qt.AlignmentFlag.AlignVCenter), self._note)
+            right -= width + self.GAP
+        font = QFont(self.font())
+        font.setFamilies(["Segoe UI Variable Text", "Segoe UI"])
+        font.setPixelSize(13)
+        painter.setFont(font)
+        painter.setPen(_tile_mix(TILE_REST_NAME, theme.TEXT_OVER_MEDIA, t))
+        text = QFontMetrics(font).elidedText(
+            self._name, Qt.TextElideMode.ElideRight, int(max(0, right - left)))
+        # **Beside the icon whatever the script** - his picture of
+        # "سورة الكهف" at the row's far edge (29 October 2026). Qt mirrors
+        # a plain AlignLeft for right-to-left text; AlignAbsolute keeps
+        # left meaning left, and the words still run right-to-left.
+        painter.drawText(
+            QRectF(left, 0, max(0, right - left), height),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignAbsolute
+                | Qt.AlignmentFlag.AlignVCenter),
+            text)
+        painter.end()
+
+
 class OverlayPanel(QFrame):
     """The popup the subtitle/track/quality buttons open.
 
@@ -2585,6 +3168,12 @@ class OverlayPanel(QFrame):
         close_btn.clicked.connect(self.closed.emit)
         header.addWidget(close_btn)
         outer.addLayout(header)
+
+        # Tabs above the list, outside its scroller (add_tabs). Empty -
+        # and so taking no room - on every panel that has none.
+        self.tabs_layout = QHBoxLayout()
+        self.tabs_layout.setSpacing(6)
+        outer.addLayout(self.tabs_layout)
 
         self.body = QWidget()
         self.body.setStyleSheet("background: transparent; border: none;")
@@ -2634,6 +3223,7 @@ class OverlayPanel(QFrame):
         offset = bar.value() if bar is not None else 0
         _clear_layout(self.body_layout)
         _clear_layout(self.footer_layout)
+        _clear_layout(self.tabs_layout)
         if title:
             self.title_label.setText(title)
         if bar is not None and offset:
@@ -2694,6 +3284,19 @@ class OverlayPanel(QFrame):
             # not left scrolled somewhere arbitrary.
             QTimer.singleShot(250, lambda: (_restore(), _finish()))
 
+    def add_tabs(self, tabs, current, on_pick):
+        """A row of tabs over the list - `tabs` is [(key, label)], the
+        chosen one white with black on it (the monochrome accent), and a
+        press calls on_pick(key). Above the scroller, so a long list
+        scrolls under its tabs rather than taking them with it."""
+        for key, label in tabs:
+            button = QPushButton(label)
+            button.setStyleSheet(_tab_style(key == current))
+            use_hover_cursor(button)
+            button.clicked.connect(lambda _=False, k=key: on_pick(k))
+            self.tabs_layout.addWidget(button)
+        self.tabs_layout.addStretch(1)
+
     def add_group(self, name, into=None):
         label = QLabel(name)
         label.setStyleSheet(
@@ -2711,11 +3314,10 @@ class OverlayPanel(QFrame):
 
     def add_row(self, title, subtitle, on_click, selected=False, chevron=False,
                 index=None, into=None, dot=False):
-        card = Card(matte=True)
+        card = _TileCard()
 
-        # Rows are borderless at rest now (the Harbor pass); the border
-        # stays 1px in every state so picking one shifts nothing, and
-        # the accent ring remains what says "this is the one in use".
+        # The border stays 1px in every state so picking one shifts
+        # nothing, and the white edge says "this is the one in use".
         #
         # **The hover rule has to be written here.** A widget's own
         # stylesheet beats the application one for that widget, so the
@@ -2725,26 +3327,29 @@ class OverlayPanel(QFrame):
         # SURFACE_HOVER already, hovering changed nothing at all: the
         # owner's "add a hover when the mouse touch the buttons".
         #
-        # Hover deliberately does *not* borrow the accent ring the way
-        # the app rule does. Selection is the accent; hover is a lift in
-        # the fill plus a neutral edge, so a row under the pointer can
-        # never be mistaken for the row in use.
+        # Hover deliberately does *not* borrow the edge. Selection is
+        # the edge; hover is a lift in the fill alone, so a row under the
+        # pointer can never be mistaken for the row in use.
+        #
+        # **Hairline rows, not boxes** - the owner, 29 October 2026
+        # ("make them match the rest of the app design"), and since the
+        # same evening the launcher's rows (_TileCard): no box and no
+        # hairline at rest, the reader's tile hover under the pointer,
+        # and the row in use a lit band with a white edge - so selection
+        # is still told from the browse position the dot marks.
         def paint(is_selected):
-            rest = theme.SURFACE_HOVER if is_selected else theme.SURFACE
-            hover = theme.SURFACE_ACTIVE if is_selected else theme.SURFACE_HOVER
-            ring = theme.ACCENT if is_selected else "transparent"
-            hover_ring = theme.ACCENT if is_selected else theme.BORDER
+            if is_selected:
+                rest = theme.rgba(theme.TEXT, 30)
+                edge = theme.rgba(theme.TEXT, 150)
+            else:
+                rest = edge = "transparent"
             card.setStyleSheet(
-                f"QFrame#Card {{ background: {rest};"
-                f" border: 1px solid {ring};"
-                f" border-radius: {theme.RADIUS}px; }}"
-                f"QFrame#Card:hover {{ background: {hover};"
-                f" border: 1px solid {hover_ring};"
-                f" border-radius: {theme.RADIUS}px; }}")
-            head.setStyleSheet(
-                f"color: {theme.ACCENT if is_selected else theme.TEXT};"
-                f" font-size: 11pt; font-weight: 600;"
-                f" background: transparent; border: none;")
+                f"QFrame#Card {{ background: {rest}; border: 1px solid {edge};"
+                f" border-radius: {theme.RADIUS_SM}px; }}")
+            card.light(head, "font-size: 11pt; font-weight: 600;"
+                             " background: transparent; border: none;",
+                       rest=(theme.TEXT_OVER_MEDIA if is_selected
+                             else TILE_REST_NAME))
 
         # Handed back on the card so a caller can move the highlight
         # without rebuilding the panel. Rebuilding is what made picking a
@@ -2757,6 +3362,7 @@ class OverlayPanel(QFrame):
         outer = QHBoxLayout(card)
         outer.setContentsMargins(12, 9, 12, 9)
         outer.setSpacing(8)
+        card.follow(outer)
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(2)
@@ -2970,15 +3576,17 @@ class OverlayPanel(QFrame):
         button.setStyleSheet(
             # padding:0 - see PlayPauseButton; the app-wide 8px 16px padding
             # would otherwise clip a glyph on a button this small.
-            f"QPushButton {{ background: {theme.SURFACE_HOVER}; color: {theme.TEXT};"
-            f" border: 1px solid {theme.BORDER}; padding: 0px;"
+            f"QPushButton {{ background: transparent; color: {theme.TEXT};"
+            f" border: 1px solid {theme.rgba(theme.TEXT, 60)}; padding: 0px;"
             f" font-size: {'11pt' if wide else '15pt'};"
-            # A 36px key stays round; the 64px-wide one was a pill, and
-            # is a rounded square now (theme.RADIUS_CTL's note).
-            f" font-weight: 700; border-radius: {theme.RADIUS_SM if wide else 18}px; }}"
-            f"QPushButton:hover {{ background: {theme.ACCENT_SOFT};"
-            f" border: 1px solid {theme.ACCENT}; }}"
-            f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}")
+            # A rounded square, the 36px key too - it was a circle until
+            # the owner, 29 October 2026: "change any circle button in the app ... into square rounded edges".
+            f" font-weight: 700; border-radius: {theme.RADIUS_SM}px; }}"
+            # The season arrows' hover (_season_arrow): white, black ink.
+            f"QPushButton:hover {{ background: {theme.ACCENT_HOVER};"
+            f" color: {theme.ON_ACCENT}; border: 1px solid {theme.ACCENT_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {theme.rgba(theme.ACCENT_HOVER, 200)};"
+            f" color: {theme.ON_ACCENT}; }}")
         use_hover_cursor(button)
         return button
 
@@ -3756,6 +4364,9 @@ class PlayerPage(GlassPage):
         # reader's arrow is the same).
         exit_btn = GlyphButton(ICON_EXIT, "Leave the player (Esc)",
                                size=(38, 38), font_pt=18)
+        # The bar's glass hover, not GlyphButton's grey box (see
+        # _GLASS_HOVER); it paints its own arrow over whatever QSS fills.
+        exit_btn.setStyleSheet(_icon_button_style(18))
         exit_btn.clicked.connect(self.close_player)
         layout.addWidget(exit_btn)
         self.exit_btn = exit_btn
@@ -3943,6 +4554,14 @@ class PlayerPage(GlassPage):
         # The middle is empty air now that the seek strip has its own
         # row - transport and volume left, everything else right.
         row.addStretch(1)
+
+        # Apps and Websites, first on the right and apart from everything
+        # that acts on this episode - the owner, 29 October 2026: "open
+        # my apps and websites from inside the video player and reader".
+        self.launch_btn = _icon_button(ICON_LAUNCH, "Apps and websites",
+                                       size=40, font_pt=14)
+        self.launch_btn.clicked.connect(self._open_launch_panel)
+        row.addWidget(self.launch_btn)
 
         # Opens the speed panel (slider + presets) rather than cycling
         # through a fixed ring: cycling meant six clicks past 2x to get
@@ -4718,17 +5337,17 @@ class PlayerPage(GlassPage):
             fill, text = "transparent", theme.TEXT_MUTED
         else:
             fill, text = "transparent", theme.TEXT
-        card = Card(matte=True, hoverable=not upcoming)
+        # The launcher's row since 29 October 2026 (_TileCard): no
+        # hairline, the reader's tile hover under the pointer.
+        card = _TileCard(hoverable=not upcoming)
         card.setStyleSheet(
             f"QFrame#Card {{ background: {fill}; border: 1px solid transparent;"
-            f" border-bottom: 1px solid {theme.rgba(theme.TEXT, 18)};"
-            f" border-radius: {8 if current else 0}px; }}"
-            f"QFrame#Card:hover {{ background: {theme.rgba(theme.TEXT, 22)};"
-            f" border: 1px solid transparent; border-radius: 8px; }}")
+            f" border-radius: 8px; }}")
         card.setProperty("searchText", f"{number} {title}".lower())
         layout = QHBoxLayout(card)
         layout.setContentsMargins(10, 10, 14, 10)
         layout.setSpacing(12)
+        card.follow(layout)
         # The episode's number, large and dim at the row's head, as
         # Netflix's list sets it - the title beside it is the name alone.
         numeral = QLabel(str(number))
@@ -4742,10 +5361,14 @@ class PlayerPage(GlassPage):
         column = QVBoxLayout()
         column.setSpacing(2)
         label = _ElidedLabel(title)
-        label.setStyleSheet(
-            f"color: {text}; font-size: 12pt;"
-            f" font-weight: {700 if current else 500};"
-            f" background: transparent; border: none;")
+        title_style = (f"font-size: 12pt; font-weight: {700 if current else 500};"
+                       f" background: transparent; border: none;")
+        if current or watched or upcoming:
+            label.setStyleSheet(f"color: {text}; {title_style}")
+        else:
+            # An ordinary row's name rests at the tile's grey and goes
+            # white with the hover, as the launcher's names do.
+            card.light(label, title_style)
         column.addWidget(label)
         # The episode's own rating, beside the date - the same line the
         # title page's list carries (details._fill_episode_rows), and the
@@ -4903,12 +5526,13 @@ class PlayerPage(GlassPage):
             # padding:0 - see PlayPauseButton; without it the app-wide
             # 8px 16px padding clips the ‹ › glyph to nothing on a small
             # button, which is exactly how the arrows first went missing.
-            # Still framed (his ask), now the redesign's round hairline
-            # button that turns white with black ink under the pointer.
+            # Still framed (his ask), the redesign's hairline button that
+            # turns white with black ink under the pointer - a rounded
+            # square since owner, 29 October 2026: "change any circle button in the app ... into square rounded edges".
             f"QPushButton {{ background: transparent; color: {theme.TEXT};"
             f" border: 1px solid {theme.rgba(theme.TEXT, 60)}; padding: 0px;"
             f" font-family: {theme.FONT_STACK_ICONS}; font-size: 10pt;"
-            f" border-radius: 18px; }}"
+            f" border-radius: {theme.RADIUS_SM}px; }}"
             f"QPushButton:hover {{ background: {theme.ACCENT_HOVER};"
             f" color: {theme.ON_ACCENT}; border: 1px solid {theme.ACCENT_HOVER}; }}"
             f"QPushButton:pressed {{ background: {theme.SURFACE_ACTIVE}; }}"
@@ -4956,7 +5580,7 @@ class PlayerPage(GlassPage):
         self._layout_overlays()         # geometry first - see _show_status
         self._episode_bar.show()
         self._episode_bar.raise_()
-        _set_window_alpha(self._episode_bar, BAR_ALPHA)
+        _set_window_alpha(self._episode_bar, self._list_alpha())
         self._wake_controls()
 
     # ---- start-up ----------------------------------------------------
@@ -8058,7 +8682,7 @@ class PlayerPage(GlassPage):
         # enough that the number stays readable while dragging.
         slider.setSingleStep(5)
         slider.setStyleSheet(
-            f"QSlider::groove:horizontal {{ height: 5px; background: {theme.SURFACE_HOVER};"
+            f"QSlider::groove:horizontal {{ height: 5px; background: {theme.SEEK_REST};"
             f" border-radius: 2px; }}"
             f"QSlider::sub-page:horizontal {{ background: {theme.ACCENT}; border-radius: 2px; }}"
             f"QSlider::handle:horizontal {{ background: {theme.TEXT}; width: 14px;"
@@ -8073,12 +8697,11 @@ class PlayerPage(GlassPage):
         chip_rows = []
 
         def paint_chip(chip, current):
-            chip.setStyleSheet(
-                f"QPushButton {{ background: {theme.SURFACE_HOVER if current else 'transparent'};"
-                f" color: {theme.ACCENT if current else theme.TEXT};"
-                f" border: none; padding: 5px 7px; font-size: 10pt; font-weight: 600;"
-                f" border-radius: {theme.RADIUS_SM}px; }}"
-                f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}")
+            # The launcher's tab buttons (OverlayPanel.add_tabs, app.css
+            # .rlaunch-tab) - the owner, 29 October 2026, "the playback
+            # speed and all": an outline at rest, white with black ink
+            # when chosen. The padding is narrower so six fit the row.
+            chip.setStyleSheet(_tab_style(current, padding="5px 8px"))
 
         def pick_speed(preset):
             # Repainted at the press, not at the next reopen - the
@@ -8513,6 +9136,7 @@ class PlayerPage(GlassPage):
         elif name == "pause":
             self._paused = bool(value)
             self.play_btn.set_paused(self._paused)
+            self._apply_pause_opacity()
             if self._paused:
                 self._wake_controls()
                 # A pause mpv took by itself while a seat is still owed
@@ -10579,7 +11203,115 @@ class PlayerPage(GlassPage):
         panel.finish()
         self._show_panel(panel)
 
+    def _open_launch_panel(self, rebuild=False):
+        """Apps and Websites, launched without leaving the episode.
 
+        The rows Home lists, in Home's order - most recently opened
+        first, never-opened ones in his own order behind them
+        (server._recent_first, restated here because importing the web
+        server into the player is not worth one sort) - and a press is
+        Home's own launch, link_grid.open_link_entry: the same stamp,
+        the same "Not Found" toast. Playback is left alone; whatever
+        opens comes up in front, and the episode is where it was."""
+        panel = self._new_panel("Apps, Websites & Games", "launch",
+                                rebuild=rebuild)
+        if panel is None:
+            return          # the same button closed it
+        from helpers import images
+        from windows import link_grid
+        # **Two tabs, one list each** - the owner, 29 October 2026:
+        # "make the Apps and Websites has different tabs not in the same
+        # scrollable small window". The tab he was on is kept for the
+        # next opening.
+        tab = getattr(self, "_launch_tab", "apps")
+        # Games beside them - his ask the same evening, "add games tab
+        # with the apps and websites in reader and video player".
+        panel.add_tabs([("apps", "Apps"), ("websites", "Websites"),
+                        ("games", "Games")], tab, self._pick_launch_tab)
+        name = f"{tab}.json"
+        stamp = "last_played" if tab == "games" else "last_used"
+        try:
+            entries = [e for e in storage.load(name, [])
+                       if isinstance(e, dict)]
+        except Exception:
+            logs.exception(f"The launcher could not read {name}")
+            entries = []
+        entries = (sorted((e for e in entries if e.get(stamp)),
+                          key=lambda e: str(e[stamp]), reverse=True)
+                   + [e for e in entries if not e.get(stamp)])
+        # The reader menu's own width and its 2px between rows.
+        panel.panel_width = LAUNCH_PANEL_WIDTH
+        tiles = QWidget()
+        tiles.setStyleSheet("background: transparent; border: none;")
+        column = QVBoxLayout(tiles)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        panel.body_layout.addWidget(tiles)
+        if not entries:
+            panel.add_message("None added yet")
+        for entry in entries:
+            label = str(entry.get("name") or entry.get("title") or "")
+            targets = [t for t in (entry.get("targets") or [])
+                       if isinstance(t, dict) and t.get("target")]
+            # A game has no link targets; whether it starts is
+            # game_launch's to say, at the press (_launch_game).
+            missing = ([] if tab == "games"
+                       else link_grid.missing_app_targets(entry))
+            # link_grid's wording: "Not found" only when nothing on
+            # the entry can launch.
+            note = ""
+            if missing:
+                note = ("Not found" if len(missing) >= len(targets)
+                        else f"{len(missing)} of {len(targets)} not found")
+            # Square art first: a game's poster squeezed into a 28px
+            # square reads as nothing, its exe icon reads as the game.
+            keys = (("icon", "cover", "art") if tab == "games"
+                    else ("art", "image"))
+            art = next((found for found in
+                        (images.resolve_art_path(entry.get(k)) for k in keys)
+                        if found), None)
+            icon = images.thumbnail_or_avatar(
+                art, label, (LAUNCH_ICON_PX, LAUNCH_ICON_PX))
+            tile = _LaunchTile(label, icon, note)
+            if missing:
+                tile.setToolTip("No longer on disk:\n" + "\n".join(missing))
+            if tab == "games":
+                tile.clicked.connect(lambda e=entry: self._launch_game(e))
+            else:
+                tile.clicked.connect(lambda e=entry: self._launch_link(e))
+            column.addWidget(tile)
+        panel.finish()
+        self._show_panel(panel)
+
+    def _pick_launch_tab(self, tab):
+        self._launch_tab = tab
+        # rebuild=True: a tab is the panel refilling itself, not its
+        # button pressed again (_new_panel).
+        self._open_launch_panel(rebuild=True)
+
+    def _launch_game(self, entry):
+        """A game from the launcher: Home's own launch (game_launch.run,
+        which stamps last_played), its OSError said as a toast."""
+        self._close_panel()
+        try:
+            from helpers import game_launch
+            game_launch.run(entry)
+            logs.info(f"player: launched {entry.get('name')!r} from the launcher")
+        except OSError as error:
+            reason = getattr(error, "strerror", None) or "It Wouldn't Start"
+            show_toast(self, f"Couldn't Open '{entry.get('name') or 'the game'}'"
+                             f" - {reason}", 5000)
+        except Exception:
+            logs.exception("A game launch from the player's launcher failed")
+
+    def _launch_link(self, entry):
+        self._close_panel()
+        try:
+            from windows import link_grid
+            link_grid.open_link_entry(self, entry)
+            logs.info(f"player: launched {entry.get('name')!r} from the launcher")
+        except Exception:
+            logs.exception("A launch from the player's launcher failed")
 
     def _open_streams_root(self):
         """Open the resolution panel at its top level (the pill / gear).
@@ -11279,7 +12011,7 @@ class PlayerPage(GlassPage):
         # so a list being read is restacked several times per lookup,
         # under the pointer that is about to press a row.
         _raise_native(panel)
-        _set_window_alpha(panel, BAR_ALPHA)
+        _set_window_alpha(panel, self._list_alpha())
         self._wake_controls()
 
     # ---- status ------------------------------------------------------
@@ -11591,6 +12323,32 @@ class PlayerPage(GlassPage):
         return self._window or self
 
     # ---- controls visibility -----------------------------------------
+    def _list_alpha(self) -> int:
+        """The panels' and the episode list's DWM alpha: glass while the
+        picture moves, solid while it is paused - the owner, 29 October
+        2026: "make the windows ... inside the video player goes full
+        opacity when paused". The windows only; the two bars stay bare
+        over the frame either way (he had the bars made solid too, for
+        one build, and asked for that back)."""
+        return 255 if getattr(self, "_paused", False) else BAR_ALPHA
+
+    def _apply_pause_opacity(self):
+        """Re-alpha whatever window is up the moment pause flips - an
+        open panel and the episode list otherwise keep the alpha they
+        were shown with."""
+        if self._panel is not None:
+            try:
+                _set_window_alpha(self._panel, self._list_alpha())
+            except RuntimeError:
+                pass
+        bar = getattr(self, "_episode_bar", None)
+        if bar is not None:
+            try:
+                if bar.isVisible():
+                    self._veil(bar, self._list_alpha())
+            except RuntimeError:
+                pass
+
     def _veil(self, widget, alpha):
         """Give `widget` its DWM alpha, but only when that is actually
         needed.
@@ -11675,7 +12433,7 @@ class PlayerPage(GlassPage):
         # numbers; the order these produce is unchanged.
         if self._episode_bar is not None and self._episode_bar.isVisible():
             _raise_native(self._episode_bar)
-            self._veil(self._episode_bar, BAR_ALPHA)
+            self._veil(self._episode_bar, self._list_alpha())
         if self._panel is not None:
             _raise_native(self._panel)
         # The lower controls wear the low-alpha near-black veil; the top
@@ -12710,7 +13468,7 @@ class PlayerPage(GlassPage):
             else:
                 # No logo art for this title: the badge is all there is
                 # to show, so it keeps its rounded frame.
-                _round_overlay(self.backdrop)
+                _round_overlay(self.backdrop, smooth=False)
         else:
             self.backdrop.setGeometry(rect)
             # Full-window again: drop the badge's rounded window region
