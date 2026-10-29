@@ -30,6 +30,11 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.15": [
+        "Folding and unfolding the sidebar is smooth: the banner pictures on "
+        "Home and Discover, and every page's cards, glide with it instead of "
+        "moving in steps.",
+    ],
     "3.14": [
         "The volume window in the video player has rounded corners and "
         "shows the picture through it while an episode is still loading, "

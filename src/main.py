@@ -4042,10 +4042,16 @@ class MainWindow(QMainWindow):
             if begin is not None:
                 begin()
         # The page that was told about the fold hears that it is over,
-        # completed or cut short, and drops the widths it held for it.
+        # completed or cut short, and drops the widths it held for it -
+        # after it has been given the rail's inset as it now stands, so
+        # the CSS it falls back to is the width the rail has stopped at.
+        self._web_folding = False
         told, self._fold_told_page = getattr(self, "_fold_told_page", None), None
         if told is not None:
             try:
+                fill = getattr(told, "_fill", None)
+                if callable(fill):
+                    fill()
                 told.fold_done()
             except RuntimeError:
                 pass
@@ -4329,24 +4335,58 @@ class MainWindow(QMainWindow):
         # 196ms with a 53px re-flow step behind it.
         self._fold_target = None
         self._fold_mover = None
-        route = str(getattr(self._current_page, "ROUTE", ""))
-        web_fold = live_fold and route not in ("home", "discover")
-        if web_fold:
+        self._web_folding = False
+        #
+        # **A web page's view does not move during a fold at all, since 29
+        # October 2026.** Everything above moved or resized the native
+        # view on Qt's clock while Edge drew on its own, and the screen
+        # showed them a frame apart: the old layout at the window's new
+        # place, then the new one. His report: "the banners images goes
+        # in clear un-smooth steps when folding and unfolding". Measured
+        # on a band across Home's banner, every distinct frame, the share
+        # of frame-to-frame steps that reversed direction:
+        #
+        #   3.12 and 3.14 (view resized every step)        100%
+        #   view only moved, page re-laid out itself         74%
+        #   ... with the page laying out 16 / 33ms ahead     73% / 70%
+        #   view held still, page re-laid out itself          0%
+        #
+        # So Edge's window now always spans from the *folded* rail's edge
+        # and a fold only changes its clip each step, while the page moves
+        # its own left edge and width on the rail's curve (app.js goFold).
+        # One presenter for the page, Qt for the rail; the seam between
+        # them is dark on dark. Home and Discover, left out of this path
+        # at his 2 September ask, take it like every page.
+        #
+        # **Edge's window, not the Qt view.** The first cut put the Qt
+        # view itself under the rail, masked - and Qt does not paint under
+        # a native child of its own (webview2_host.suppress), so the
+        # rail's strip went unpainted when the player or the reader closed
+        # over it, and looked wrong at rest. The Qt view is exactly the
+        # page again; only the WinForms form Edge lives in reaches under
+        # the rail (webview2_host `detach`, web_pages._fill), clipped by a
+        # region on a window Qt does not know about.
+        web_fold = live_fold
+        follow = getattr(self._current_page, "follow_fold", None)
+        if web_fold and callable(follow):
+            self._web_folding = True
+
+            def move_view(follow=follow):
+                # apply() has only *asked* the layout to move the
+                # container; deliver that first, or the region is cut
+                # where the rail was a step ago.
+                QApplication.sendPostedEvents(
+                    None, QEvent.Type.LayoutRequest)
+                try:
+                    follow()
+                except RuntimeError:
+                    pass
+            self._fold_mover = move_view
+        elif web_fold:
+            # A Qt page that folds live is still held at the width it
+            # starts at, as before (_fit_current_page).
             self._fold_target = QRect(0, 0, max(1, self.container.width()),
                                       self.container.height())
-            follow = getattr(self._current_page, "follow_fold", None)
-            if callable(follow):
-                def move_view(follow=follow):
-                    # apply() has only *asked* the layout to move the
-                    # container; deliver that first, or the view is put
-                    # where the rail was a step ago.
-                    QApplication.sendPostedEvents(
-                        None, QEvent.Type.LayoutRequest)
-                    try:
-                        follow()
-                    except RuntimeError:
-                        pass
-                self._fold_mover = move_view
         if self._current_page is not None and not live_fold:
             self._current_page.setGeometry(widest)
             # **Painted once and blitted for the rest of the fold** - the
@@ -4454,23 +4494,13 @@ class MainWindow(QMainWindow):
         def acked():
             if not current():
                 return                    # settled or superseded since
-            # Laid out at its final width and holding still: size the
-            # view to it now, once. A late answer (the rail already left
-            # on the fallback) still gets sized and told where the rail
-            # is, and the cards catch up.
-            self._fold_target = QRect(0, 0, to_width, self.container.height())
-            self._fit_current_page()
-            if getattr(self, "_fold_pending", None) != seq:
-                page.go_fold(getattr(self, "_fold_started_ms", 0.0))
-                return
-            # Not yet: Edge shows its old frame in the new box for
-            # ~16ms after a resize (measured at landing, above), so a
-            # rail that starts now has the cards frozen for its first
-            # four frames and then lurching to catch up - the 45px steps
-            # the fold's first samples showed. The page says when the
-            # new size has been drawn (sized); a bounded wait, in case
-            # the size did not change and no resize ever fires.
-            QTimer.singleShot(FOLD_SIZED_MS, go)
+            # Laid out at its final width and holding still. The view is
+            # not resized for a fold any more (see web_fold above), so
+            # there is no new size for Edge to draw first: the rail and
+            # the page start together, now. A late answer (the rail
+            # already left on the fallback) is told where the rail is,
+            # and the page catches up.
+            go()
 
         def fallback():
             if getattr(self, "_fold_pending", None) != seq:
@@ -4987,6 +5017,37 @@ class MainWindow(QMainWindow):
         # to re-cut a page's artwork is to build it again - which is
         # what leaving and returning already did by hand.
         self.refresh_current_page()
+
+    def _rail_inset(self):
+        """How far the sidebar column reaches past its folded width, in
+        logical px - 0 folded, SIDEBAR_WIDTH - SIDEBAR_COLLAPSED_WIDTH
+        open, and every width between during a fold. A web page's view
+        starts this far left of its page and has the strip cut away
+        (web_pages._fill), so its place on screen is the same whatever
+        the rail does. 0 when the column is not shown at all (the top
+        bar's menu, full screen)."""
+        holder = getattr(self, "sidebar_holder", None)
+        try:
+            if holder is None or not holder.isVisible():
+                return 0
+            # **From the container's own left edge, not the holder's
+            # width.** The page's width is the container's, and the two
+            # must come from one geometry: read from the holder, a fold
+            # step could see the page already wider and the inset still
+            # the step before, and Edge's window was resized there and
+            # back on every step - logged 30 October 2026: width 1891,
+            # 1848, 1892, 1848 ... where 1848 is right. His "clear size
+            # changing steps" on fold; an unfold's errors cancelled.
+            folded_edge = holder.x() + SIDEBAR_COLLAPSED_WIDTH
+            return max(0, self.container.x() - folded_edge)
+        except RuntimeError:
+            return 0
+
+    def _web_fold_running(self):
+        """True while a web page is carrying a fold itself (app.js
+        goFold) - the page is then told nothing about the inset until
+        the fold settles, because it is animating that itself."""
+        return bool(getattr(self, "_web_folding", False))
 
     def _fit_current_page(self):
         # getattr: a resize can arrive before __init__ has assigned this.
