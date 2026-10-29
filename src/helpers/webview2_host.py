@@ -164,6 +164,20 @@ _u.SetFocus.restype = w.HWND
 _u.SetFocus.argtypes = [w.HWND]
 _u.GetFocus.restype = w.HWND
 _u.GetFocus.argtypes = []
+# A detached view (WebView2Page.detach): its form is a child of the main
+# window, placed over the host by hand and clipped to it by a region.
+_u.MapWindowPoints.argtypes = [w.HWND, w.HWND, ctypes.c_void_p, w.UINT]
+_u.MapWindowPoints.restype = ctypes.c_int
+_u.GetWindowRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+_u.GetWindowRect.restype = ctypes.c_bool
+_u.GetWindow.argtypes = [w.HWND, w.UINT]
+_u.GetWindow.restype = w.HWND
+_u.SetWindowRgn.argtypes = [w.HWND, ctypes.c_void_p, ctypes.c_bool]
+_u.SetWindowRgn.restype = ctypes.c_int
+_gdi = ctypes.WinDLL("gdi32")
+_gdi.CreateRectRgn.argtypes = [ctypes.c_int] * 4
+_gdi.CreateRectRgn.restype = ctypes.c_void_p
+GW_HWNDPREV = 3
 
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
@@ -174,6 +188,8 @@ WS_VISIBLE = 0x10000000
 WS_POPUP = 0x80000000
 WS_CAPTION = 0x00C00000
 WS_THICKFRAME = 0x00040000
+WS_CLIPSIBLINGS = 0x04000000
+WS_CLIPCHILDREN = 0x02000000
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_DEFERERASE = 0x2000
@@ -335,6 +351,20 @@ class WebView2Page(QWidget):
         # document is up (the reader: its shortcuts used to wait for a
         # click, 7 September 2026) - see _navigated.
         self.want_focus = False
+        # **Detached: Edge's form belongs to the main window, not to this
+        # widget**, and reaches `_lead` device px left of it (set_lead),
+        # clipped back to this widget's rectangle by a window region.
+        # Set by web_pages before the view is adopted. Why: a fold must
+        # not move or resize Edge (see web_pages._fill), so the form has
+        # to reach under the sidebar - and a *Qt* native window there is
+        # one Qt stops painting under (suppress has the measurement): the
+        # sidebar's strip went unpainted after the player or reader
+        # closed. Qt does not know this form exists, so it paints the
+        # sidebar as it always did, and Windows clips by the region.
+        self.detach = False
+        self._lead = 0.0             # logical px (set_lead)
+        self._parent = 0
+        self._clip = None
         self._last_fit = 0.0
         self._url = url
 
@@ -642,8 +672,23 @@ class WebView2Page(QWidget):
             style = _u.GetWindowLongPtrW(child, GWL_STYLE)
             style = (style & ~WS_POPUP & ~WS_CAPTION & ~WS_THICKFRAME) \
                 | WS_CHILD | WS_VISIBLE
+            if self.detach:
+                # A sibling of Qt's windows now (see detach): it must
+                # never paint into one of them - and never paint its own
+                # ground over Edge, which a widening clip would make it do
+                # on every step of a fold.
+                style |= WS_CLIPSIBLINGS | WS_CLIPCHILDREN
             _u.SetWindowLongPtrW(child, GWL_STYLE, style)
-            _u.SetParent(child, self._host)
+            parent = self._host
+            if self.detach:
+                try:
+                    native = self.nativeParentWidget()
+                    if native is not None:
+                        parent = int(native.winId())
+                except RuntimeError:
+                    pass
+            _u.SetParent(child, parent)
+            self._parent = parent
             self._child = child
             self._fit()
 
@@ -1083,11 +1128,42 @@ class WebView2Page(QWidget):
         # size test alone says there is nothing to do. Screenshotting
         # the real window is what caught it: every page came back 100%
         # flat background (rules/ui.md, and the reason that rule exists).
+        # Where the form goes in its parent's coordinates: the host's own
+        # origin for an adopted form, or that origin mapped into the main
+        # window and `_lead` further left for a detached one (see detach).
+        detached = bool(self._parent) and self._parent != self._host
+        span = width
+        x = y = 0
+        if detached:
+            # **From the sidebar's numbers, not from the host window.**
+            # The form's two edges - the folded rail's on the left, the
+            # window's on the right - do not move during a fold, and the
+            # clip's edge is the rail's own width (the lead). None of that
+            # is read from the host window, which a fold *grows* and which
+            # Qt lands a beat late: reading it there left the clip a step
+            # behind the rail on every fold step - a strip of bare ground
+            # between the rail and the page - while an unfold, where the
+            # host only shrinks, was smooth. The right edge is the host
+            # window's (constant through a fold, exact to the pixel - see
+            # above); the span is the page's width plus the lead, which is
+            # constant too, and does not wait for the host either.
+            origin = w.POINT(0, 0)
+            _u.MapWindowPoints(self._host, self._parent, ctypes.byref(origin), 1)
+            right = origin.x + width
+            page = self.parentWidget()
+            page_w = page.width() if page is not None else self.width()
+            span = int(round((page_w + self._lead) * ratio))
+            cut = max(0, int(round(self._lead * ratio)))
+            x, y = right - span, origin.y
+            self._clip_to_host(cut, span, height)
+            self._keep_above_host()
         if not force:
             box = w.RECT()
-            if _u.GetClientRect(self._child, ctypes.byref(box)):
-                if ((box.right - box.left, box.bottom - box.top)
-                        == (width, height)
+            if _u.GetWindowRect(self._child, ctypes.byref(box)):
+                _u.MapWindowPoints(None, self._parent or self._host,
+                                   ctypes.byref(box), 2)
+                if ((box.left, box.top, box.right - box.left, box.bottom - box.top)
+                        == (x, y, span, height)
                         and not (getattr(self, "_parked", False) and self._loaded)):
                     return      # the fold sends many resizes per frame
         self._sized = (width, height)
@@ -1113,6 +1189,52 @@ class WebView2Page(QWidget):
         flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_DEFERERASE
         if not self._loaded and not force:
             flags |= SWP_NOMOVE
-        _u.SetWindowPos(self._child, None, 0, 0, width, height, flags)
+        _u.SetWindowPos(self._child, None, x, y, span, height, flags)
         if not flags & SWP_NOMOVE:
             self._parked = False
+
+    def set_lead(self, logical_px):
+        """How far a detached form reaches left of this widget, in this
+        widget's logical px - the sidebar's inset (web_pages._fill).
+
+        Only stored: the caller sets it *before* moving this widget, so
+        the fit the move triggers already puts the form where it was -
+        fitting here, against the old host position, is exactly the
+        one-step move a fold must never make. `refit` applies a change
+        that comes with no move."""
+        self._lead = max(0.0, float(logical_px))
+
+    def refit(self):
+        self._fit()
+
+    def lead_logical(self):
+        return float(self._lead)
+
+    def _clip_to_host(self, cut, span, height):
+        """Clip a detached form to the page: the `cut` strip under the
+        sidebar is cut off, the rest up to the form's `span` shows.
+        Windows' region on a window Qt does not own, so nothing resets it
+        (a Qt mask on the host was cleared on every fold step)."""
+        want = (cut, span, height)
+        if self._clip == want:
+            return
+        self._clip = want
+        region = _gdi.CreateRectRgn(cut, 0, span, height)
+        if region:
+            # **No redraw.** A fold widens this clip every step, and a
+            # redraw made Windows erase and repaint the strip it exposed
+            # - the owner's "the unfolding is smooth but the folding is
+            # not smooth at all" (an unfold only narrows it, and exposes
+            # nothing). Edge's picture of that strip is already there;
+            # the clip only has to stop hiding it.
+            _u.SetWindowRgn(self._child, region, False)
+
+    def _keep_above_host(self):
+        """A detached form is a sibling of the host, and must stay just
+        above it - the host paints only ground, and a host above the
+        form would hide the page."""
+        above = _u.GetWindow(self._host, GW_HWNDPREV)
+        if above == self._child:
+            return
+        _u.SetWindowPos(self._child, above or None, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)

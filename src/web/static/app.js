@@ -185,6 +185,35 @@ function sayFold(st) {
              over: f.filter(function (x) { return x > 20; }).length });
 }
 
+/* #page at `width`, its right edge on the view's: the left edge is where
+   the rail's is (the view starts at the folded rail's edge - app.css
+   --qtrail). Width and left together, one layout of one box. */
+function foldEdge(width) {
+  const w = Math.round(width);
+  page.style.width = w + 'px';
+  page.style.left = Math.max(0, innerWidth - w) + 'px';
+}
+
+/* Where the window says the rail's edge is, while no fold runs
+   (web_pages._tell_rail), in the window's pixels beside its view's
+   width - its pixel is not this page's (hostFold's `scale`). */
+let railSaid = null;
+function setRail(r) {
+  if (!r || !r.view) return;
+  railSaid = r;
+  applyRail();
+}
+// Again on every resize: a page built hidden behind the cross-fade can be
+// told before its viewport has its real width, and the scale is only
+// right against the width it keeps.
+function applyRail() {
+  const r = railSaid;
+  if (!r || !innerWidth) return;
+  const px = (r.px || 0) * (innerWidth / r.view);
+  document.documentElement.style.setProperty('--qtrail', px.toFixed(2) + 'px');
+}
+addEventListener('resize', applyRail);
+
 function endFold() {
   const st = foldState;
   foldState = null;
@@ -199,7 +228,10 @@ function endFold() {
   // its first keyframe's transform for ever (review, 3 September
   // 2026), so those are cancelled.
   if (!st.going) (st.anims || []).forEach(function (a) { try { a.cancel(); } catch (e) {} });
+  // Back to app.css's `--qtrail`, which the window set to where the rail
+  // stopped just before saying the fold was done (main._settle_fold).
   page.style.width = '';
+  page.style.left = '';
   if (st.grid && st.grid.isConnected) st.grid.style.width = '';
   // Pictures for the cards the fold brought near the viewport - the
   // lazy sweep listens for resize, and an unfold never resizes the
@@ -244,8 +276,22 @@ function hostFold(f) {
   const grid = page.querySelector('.grid') || page.querySelector('.shelfgrid');
   const all = grid ? Array.prototype.slice.call(
     grid.querySelectorAll('.gc, .sc')) : [];
-  // Nothing here to carry: no answer, and the window keeps its old way.
-  if (!all.length) return;
+  /* **A banner re-lays out with the page, every frame.** The owner, 29
+     October 2026: "the banners images goes in clear un-smooth steps when
+     folding and unfolding". Home and Discover had no grid, so they never
+     answered and the window resized their native view on every step of
+     the rail - and Edge shows its last frame at the window's *new* place
+     for a frame before the new layout lands. Each step was therefore two
+     pictures: the old layout moved by the step d, then the new one, and
+     the banner's centre went -d, +d/2, -d, +d/2 ... Measured on the
+     frozen build (screen band across the picture, every distinct frame):
+     -44, +26, -42, +22 on a fold, the same on 3.12 - it was never new.
+
+     **Every page takes the fold now, grid or not.** The view no longer
+     moves or resizes for one (web_pages._fill, app.css --qtrail): this
+     page's left edge is the only thing that follows the rail, so a page
+     that did not answer would sit still while the rail covered or bared
+     its first column, and jump when the fold landed. */
   /* **Only the cards that can be seen, found without looking at the
      rest.** The owner, 3 September 2026: "the cards transition while
      fold/unfold the sidebar on Manhwa and Movies still not the same as
@@ -299,9 +345,12 @@ function hostFold(f) {
   // trusting the bisection's exact boundary on a partially-realised
   // grid: cheap insurance, and it is still O(log n).
   const columns = 12;
-  const from0 = Math.max(0, firstFrom(seenTop) - columns);
-  const to0 = Math.min(all.length - 1, lastTo(seenBottom) + columns);
-  const cards = to0 >= from0 ? all.slice(from0, to0 + 1) : all.slice(0, 1);
+  let cards = [];
+  if (all.length) {
+    const from0 = Math.max(0, firstFrom(seenTop) - columns);
+    const to0 = Math.min(all.length - 1, lastTo(seenBottom) + columns);
+    cards = to0 >= from0 ? all.slice(from0, to0 + 1) : all.slice(0, 1);
+  }
   // The window's pixel is not this page's (Qt 1.3333 against Chromium
   // 1.25 on the owner's panel, measured 3 September 2026): the width it
   // names is scaled by what its own view measures here.
@@ -317,8 +366,8 @@ function hostFold(f) {
   endFold();
   const bar = page.offsetWidth - page.clientWidth;      // the scrollbar
   const top = page.scrollTop;
-  page.style.width = Math.round(from) + 'px';
-  grid.style.width = Math.max(1, to - bar) + 'px';
+  foldEdge(from);
+  if (grid) grid.style.width = Math.max(1, to - bar) + 'px';
   page.scrollTop = top;
   const after = cards.map(function (c) { return c.getBoundingClientRect(); });
   const seen = innerHeight + 320;
@@ -364,9 +413,8 @@ function goFold(f) {
   // nobody can see - so the frames themselves are timed here and
   // reported with the card count beside them.
   st.frames = [];
-  // #page's width follows the visible edge, so the scrollbar rides it -
-  // as far as the view goes: on an unfold the view is already at the
-  // final width and the strip beyond it is the window's, not ours.
+  // #page's left edge follows the rail's, and its right edge stays on
+  // the window's (foldEdge) - the view itself never moves.
   let last = 0;
   function step(now) {
     if (foldState !== st) return;
@@ -375,7 +423,7 @@ function goFold(f) {
     const p = Math.min(1, (now - t0) / st.ms);
     const e = 1 - Math.pow(1 - p, 3);
     st.width = Math.min(innerWidth, st.from + (st.to - st.from) * e);
-    page.style.width = Math.round(st.width) + 'px';
+    foldEdge(st.width);
     if (p < 1) { st.raf = requestAnimationFrame(step); return; }
     sayFold(st);
   }
@@ -398,6 +446,7 @@ function hostMessage(ev) {
   }
   if (!m) return;
   if (m.fold) hostFold(m.fold);
+  if (m.rail) setRail(m.rail);
   // Escape, while the reader's Apps & Websites menu is down
   // (web_reader._escape_pressed).
   if (m.launcher === 'close' && launcherClose) launcherClose();
@@ -466,6 +515,9 @@ try {
     window.chrome.webview.addEventListener('message', hostMessage);
   }
 } catch (err) { /* standalone */ }
+// A fresh document does not know where the rail's edge is: ask
+// (web_pages._from_page, `rail`), and setRail draws it.
+tellHost({ action: 'rail' });
 // The view being sized for a fold: once a frame at the new size has
 // gone out (the rAF after the resize is that frame; the timeout runs
 // after it is committed), the window may start the rail.

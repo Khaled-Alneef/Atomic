@@ -253,7 +253,13 @@ class _WebPage(GlassPage):
         self.view = webview2_host.WebView2Page(
             url=f"{base_url()}?embed=1#{self.ROUTE}", parent=self)
         self.view.message.connect(self._from_page)
+        # Edge's form reaches under the sidebar (webview2_host `detach`,
+        # _fill), so a fold never moves it. Before _ready adopts it.
+        self.view.detach = True
         self.view.setGeometry(self.rect())
+        # The rail inset last told to the page (_tell_rail) - None until
+        # done, so the first fill does it.
+        self._told_rail = None
         _live_pages.append(self)
         if overlay_open():
             # Built while an overlay is up - stay down until it closes.
@@ -458,11 +464,69 @@ class _WebPage(GlassPage):
         try:
             rect = self._fold_rect() or self.rect()
             top = self._reserved_top()
-            if self.view.geometry() != rect.adjusted(0, top, 0, 0):
-                self.view.setGeometry(rect.x(), rect.y() + top,
-                                      rect.width(), rect.height() - top)
+            # **Edge reaches from the folded rail's edge, whatever the
+            # rail is doing** (main._rail_inset, which has the
+            # measurement): the view is exactly this page, as it always
+            # was, but its detached form (webview2_host's `detach`) reaches
+            # `inset` further left, under the rail, and is clipped back to
+            # the view. So Edge's place on screen never changes during a
+            # fold - the page moves its own content (app.js goFold) - while
+            # nothing Qt owns ever sits over the rail. The lead is set
+            # *before* the view moves, so the fit the move triggers keeps
+            # the form where it was.
+            inset = self._rail_inset()
+            self.view.set_lead(inset)
+            want = rect.adjusted(0, top, 0, 0)
+            # **During a fold the view may shrink, never grow** - the
+            # owner, 29 October 2026: "the folding still has issues!!!!
+            # just make it same as unfolding". An unfold only ever shrinks
+            # the view, and was smooth; a fold grew it on every step,
+            # under a page Edge's form already covers. So a growing view
+            # waits for the fold to land (main._settle_fold fills again):
+            # each direction now takes the unfold's path.
+            grows = want.width() > self.view.geometry().width()
+            if self.view.geometry() != want and not (grows and self._folding()):
+                self.view.setGeometry(want)
+            self.view.refit()
+            self._tell_rail(inset)
         except RuntimeError:
             pass
+
+    def _folding(self):
+        try:
+            return bool(self.window()._web_fold_running())
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _rail_inset(self):
+        try:
+            return max(0, int(self.window()._rail_inset()))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return 0
+
+    def _tell_rail(self, inset):
+        """The page's left edge (app.css `--qtrail`), in the page's own
+        CSS px - its pixel is not Qt's (offer_fold has the measurement).
+        Not while a fold runs: the page is moving that edge itself, and
+        main._settle_fold fills once more before telling it the fold is
+        over. A view that could not be told (still loading) is asked
+        again on the next fill; a page that loads fresh asks for it
+        (`{"action": "rail"}`)."""
+        if self._folding():
+            return
+        # The width Edge has too - the view and the lead under the rail -
+        # since the page scales by innerWidth / view: a page built hidden
+        # behind the cross-fade answered its first one at a width it did
+        # not keep, and Discover and Movies drew their first column under
+        # the rail until something re-told them.
+        key = (int(inset), max(1, int(round(self.view.width()
+                                            + self.view.lead_logical()))))
+        if self._told_rail == key:
+            return
+        told = self.view.tell({"rail": {"px": key[0], "view": key[1]}})
+        self._told_rail = key if told else None
+        if told:
+            logs.info(f"rail: told {self.ROUTE} inset={key[0]} view={key[1]}")
 
     def _fold_rect(self):
         """The width to hold while the sidebar animates, or None.
@@ -502,11 +566,12 @@ class _WebPage(GlassPage):
     # so its own geometry never changed until the fold landed.
 
     def follow_fold(self):
-        """One animation step: put the view where the page now is."""
-        try:
-            self.view.sync_position()
-        except RuntimeError:
-            pass
+        """One animation step: the view follows its page as it always did,
+        while Edge's form stays where it is on screen and only its clip
+        follows the rail (_fill, webview2_host `detach`). It used to move
+        Edge itself (`sync_position`), which is the half of the old fold
+        that stepped - see main._toggle_sidebar."""
+        self._fill()
 
     def offer_fold(self, to_width, ms, on_ack, on_sized=None):
         """Tell the page the width it will be laid out at, so it can
@@ -527,7 +592,15 @@ class _WebPage(GlassPage):
         self._fold_sized = on_sized
         told = self.view.tell({"fold": {
             "seq": self._fold_seq, "to": int(to_width), "ms": int(ms),
-            "view": max(1, int(self.view.width())),
+            # The width Edge has - the view *and* the lead under the rail
+            # (webview2_host `detach`) - since the page scales `to` by
+            # innerWidth / view. The view alone made the scale wrong by
+            # the lead's share whenever a fold started with the rail open
+            # - every fold, never an unfold, where the lead is 0: the page
+            # aimed at the wrong width, hit innerWidth early and snapped
+            # at the end, his "clear size changing steps" on fold only.
+            "view": max(1, int(round(self.view.width()
+                                     + self.view.lead_logical()))),
             # widgets.ease_out_cubic, as CSS spells it - the rail and
             # the cards run the same curve for the same time.
             "curve": "cubic-bezier(0.215, 0.61, 0.355, 1)"}})
@@ -694,6 +767,12 @@ class _WebPage(GlassPage):
                           f"moved={body.get('moved')} "
                           f"prep={body.get('cost')}ms")
                 ack()
+            return
+        if body.get("action") == "rail":
+            # A document that has just loaded asks where its left edge
+            # is (app.js, at start); the next fill tells it.
+            self._told_rail = None
+            self._fill()
             return
         if body.get("action") == "key":
             self._app_key(str(body.get("key") or ""))

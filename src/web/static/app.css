@@ -73,7 +73,12 @@ html, body {
    here sat right beside Qt's own - two identical sidebars, which is what
    the owner saw first. `?embed=1` is set by windows/web_pages.py. */
 body.embed #rail { display: none; }
-body.embed #page { inset: 0; }
+/* **The view reaches under Qt's sidebar** (29 October 2026): it spans
+   from the folded rail's edge, with the strip under the rail cut out of
+   its window, so the page begins `--qtrail` in - what web_pages._fill
+   tells it. A fold moves this edge from here (app.js goFold), never by
+   moving the view, which is what made the banners step. */
+body.embed #page { inset: 0 0 0 var(--qtrail, 0px); }
 
 /* ---- the page ---------------------------------------------------- */
 #page {
