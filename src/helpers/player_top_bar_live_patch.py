@@ -410,7 +410,51 @@ class _VolumeOsd:
         self._timer = QTimer(self.widget)
         self._timer.setSingleShot(True)
         self._timer.setInterval(self.HIDE_MS)
-        self._timer.timeout.connect(self.widget.hide)
+        self._timer.timeout.connect(self._hide)
+        self._image = None
+        # **Over the loading frame the flyout is painted inside it.** The
+        # owner's picture, 29 October 2026: a square black panel during
+        # loading, no corners and nothing seen through it. A
+        # per-pixel-alpha child window blends with mpv's swapchain, but
+        # over a sibling Qt paints (StartupBackdrop) it blends with the
+        # page's ground instead - measured in isolation: the same rounded
+        # 150-alpha panel came out a solid black square over a Qt-painted
+        # native window, plain or SLWA-layered alike, and rounded and
+        # see-through as a plain child of that window. So while the
+        # backdrop is up the picture is drawn by this plain child of it,
+        # the way its logo is; the native window stays for the picture.
+        backdrop = getattr(page, "backdrop", None)
+        self._inner = None
+        if backdrop is not None:
+            osd = self
+
+            class _Inner(QWidget):
+                def paintEvent(self, event):
+                    if osd._image is not None:
+                        from PyQt6.QtGui import QPainter
+                        QPainter(self).drawImage(0, 0, osd._image)
+
+            self._inner = _Inner(backdrop)
+            self._inner.resize(self.WIDTH, self.HEIGHT)
+            self._inner.hide()
+
+    def _hide(self):
+        for widget in (self.widget, self._inner):
+            if widget is not None:
+                try:
+                    widget.hide()
+                except RuntimeError:
+                    pass
+
+    def _over_backdrop(self):
+        backdrop = getattr(self._page, "backdrop", None)
+        try:
+            return (self._inner is not None and backdrop is not None
+                    and backdrop.isVisible() and not backdrop.stalled()
+                    and backdrop.width() >= self.WIDTH
+                    and backdrop.height() >= self.HEIGHT)
+        except (RuntimeError, AttributeError):
+            return False
 
     def show(self, volume, muted=False):
         from PyQt6.QtCore import QPointF, QRectF, Qt
@@ -494,9 +538,23 @@ class _VolumeOsd:
         painter.drawEllipse(QPointF(at, track_y), 9.0, 9.0)
         painter.end()
 
-        widget.show()
-        widget.raise_()
-        _push_layered(widget, image, pw, ph)
+        self._image = image
+        if self._over_backdrop():
+            backdrop = page.backdrop
+            widget.hide()
+            # The page's centre in the backdrop's own coordinates - a
+            # parent-to-child offset, never mapToGlobal (ui.md).
+            self._inner.move((page.width() - self.WIDTH) // 2 - backdrop.x(),
+                             (page.height() - self.HEIGHT) // 2 - backdrop.y())
+            self._inner.show()
+            self._inner.raise_()
+            self._inner.update()
+        else:
+            if self._inner is not None:
+                self._inner.hide()
+            widget.show()
+            widget.raise_()
+            _push_layered(widget, image, pw, ph)
         self._timer.start()
 
 

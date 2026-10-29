@@ -30,6 +30,11 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.14": [
+        "The volume window in the video player has rounded corners and "
+        "shows the picture through it while an episode is still loading, "
+        "not only once it plays.",
+    ],
     "3.13": [
         "Open your apps, websites and games from inside the video player "
         "and the reader: a new button lists them in Apps, Websites and "
