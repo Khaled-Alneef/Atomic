@@ -1656,6 +1656,72 @@ def _reverse_text(text):
     return "".join(chr(0x10FFFF - ord(c)) for c in text)
 
 
+def _linked(name, kind):
+    """Apps and websites: what they open is the useful second line.
+
+    Module level, not inside _home, since the player and the reader
+    list the same rows (`launchers`) - the owner, 29 October 2026:
+    "open my apps and websites from inside the video player and
+    reader"."""
+    out = []
+    # Most recently opened first - see _recent_first.
+    for entry in _recent_first(name, "last_used"):
+        row = _row(entry, kind)
+        # What it opens lives in `targets`, a list of
+        # {type, target} - not in a flat `url` field like every
+        # other kind of entry here.
+        target = ""
+        for item in (entry.get("targets") or []):
+            if isinstance(item, dict) and item.get("target"):
+                target = str(item["target"])
+                break
+        # **No path under the name.** home._build_quick_list draws
+        # the icon and the name and nothing else - the owner, 1
+        # September 2026, with a screenshot of the Qt page: this is
+        # "not at all what I wanted". What it *does* carry is the
+        # red "Not found" when the target is gone, on the right.
+        row["meta"] = ""
+        row["url"] = target
+        if kind == "app":
+            gone = _missing_targets(entry)
+            if gone:
+                row["missing"] = "Not found"
+                row["missing_paths"] = gone
+        out.append(row)
+    return out
+
+
+def _launchers():
+    """Apps and Websites for the reader's launcher menu, in Home's order
+    (most recently opened first) and with Home's rows, so a launch from
+    inside the reader is the same click as one from Home."""
+    return {"kind": "launchers",
+            "apps": _linked("apps.json", "app"),
+            "websites": _linked("websites.json", "site"),
+            "games": _launch_games()}
+
+
+def _launch_games():
+    """Games for the launcher menu - the owner, 29 October 2026: "add
+    games tab with the apps and websites in reader and video player".
+    Home's games order (last played first) and Home's rows, with one
+    change: the launcher draws a 28px square, so the game's own exe icon
+    is its picture where it has one, not the poster a Home card wants."""
+    out = []
+    for entry in _recent_first("games.json", "last_played"):
+        row = _row(entry, "game")
+        row["meta"] = ""
+        try:
+            from helpers import art_paths
+            icon = backend.local_url(art_paths.resolve_art_path(entry.get("icon")))
+        except Exception:
+            icon = ""
+        if icon:
+            row["cover"] = icon
+        out.append(row)
+    return out
+
+
 def _home():
     """Home: what he has saved, and nothing else.
 
@@ -1737,35 +1803,6 @@ def _home():
         return len(seen_at) + 1
 
     ordered = sorted(list(watching) + list(reading), key=_touched)
-
-    def _linked(name, kind):
-        """Apps and websites: what they open is the useful second line."""
-        out = []
-        # Most recently opened first - see _recent_first.
-        for entry in _recent_first(name, "last_used"):
-            row = _row(entry, kind)
-            # What it opens lives in `targets`, a list of
-            # {type, target} - not in a flat `url` field like every
-            # other kind of entry here.
-            target = ""
-            for item in (entry.get("targets") or []):
-                if isinstance(item, dict) and item.get("target"):
-                    target = str(item["target"])
-                    break
-            # **No path under the name.** home._build_quick_list draws
-            # the icon and the name and nothing else - the owner, 1
-            # September 2026, with a screenshot of the Qt page: this is
-            # "not at all what I wanted". What it *does* carry is the
-            # red "Not found" when the target is gone, on the right.
-            row["meta"] = ""
-            row["url"] = target
-            if kind == "app":
-                gone = _missing_targets(entry)
-                if gone:
-                    row["missing"] = "Not found"
-                    row["missing_paths"] = gone
-            out.append(row)
-        return out
 
     heroes = _heroes(ordered)
     sections = [
@@ -4095,6 +4132,8 @@ def answer(route, query=None):
         return _schedule(one("tab", "watch"))
     if route in SHELVES:
         return _shelf(route)
+    if route == "launchers":
+        return _launchers()
     if route == "downloads":
         return _downloads()
     if route == "more":

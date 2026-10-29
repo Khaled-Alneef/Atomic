@@ -130,7 +130,11 @@ class WebReader(QWidget):
         # shortcut is on this widget rather than the window so it goes
         # away with the reader.
         self._escape = QShortcut(QKeySequence("Escape"), self)
-        self._escape.activated.connect(self.close_reader)
+        self._escape.activated.connect(self._escape_pressed)
+        # Whether the page's Apps & Websites menu is down (app.js
+        # `launcherMenu` says so as it opens and closes): Escape shuts
+        # the menu first and the reader only on the next press.
+        self._launcher_open = False
 
         # **The reading music.** The owner: "test the reading music URL
         # several times after you fix it, it is not working now at all".
@@ -200,6 +204,8 @@ class WebReader(QWidget):
                                   body.get("i") or 0)
         elif action == "open":
             self._open_card(body)
+        elif action == "launcher":
+            self._launcher_open = bool(body.get("open"))
 
     def _open_card(self, body):
         """A card clicked on a page drawn in this shell.
@@ -224,6 +230,37 @@ class WebReader(QWidget):
         if str(body.get("kind") or "") == "person":
             if title:
                 open_cast_browse(self.window(), title)
+            return
+        if str(body.get("kind") or "") in ("app", "site"):
+            # The reader's launcher menu (app.js `launcherMenu`) - his
+            # ask, 29 October 2026: "open my apps and websites from
+            # inside the video player and reader". The same launch Home's
+            # rows make (web_pages' `open` handler), so the stamp, the
+            # missing-target toast and the order on Home all follow.
+            from windows import link_grid
+            from windows.web_pages import _find_in
+            name = ("apps.json" if body.get("kind") == "app"
+                    else "websites.json")
+            entry = _find_in(name, str(body.get("id") or ""), title)
+            if entry is not None:
+                link_grid.open_link_entry(self, entry)
+            return
+        if str(body.get("kind") or "") == "game":
+            # The launcher's Games tab: Home's launch, game_launch.run.
+            from windows.web_pages import _find_in
+            entry = _find_in("games.json", str(body.get("id") or ""), title)
+            if entry is None:
+                return
+            try:
+                from helpers import game_launch
+                game_launch.run(entry)
+            except OSError as error:
+                from helpers.widgets import show_toast
+                reason = getattr(error, "strerror", None) or "It Wouldn't Start"
+                show_toast(self, f"Couldn't Open '{entry.get('name') or title}'"
+                                 f" - {reason}", 5000)
+            except Exception:
+                logs.exception("A game launch from the reader's launcher failed")
             return
         from windows import details
         from windows.web_pages import _find, overlay_opened
@@ -337,7 +374,7 @@ class WebReader(QWidget):
         # scrolled. Measured 5 September 2026 driving the frozen build:
         # two Escapes after a PgDn left the reader exactly where it was.
         if name == "Escape":
-            self.close_reader()
+            self._escape_pressed()
             return
         # **Mouse buttons 4 and 5.** The owner, 7 September 2026: "make
         # the 4th and 5th buttons in the mouse work in all pages
@@ -406,6 +443,21 @@ class WebReader(QWidget):
         except Exception:
             pass
         return super().event(event)
+
+    def _escape_pressed(self):
+        """Escape: the launcher menu if it is down, else the reader.
+
+        The page never sees Escape itself - webview2_host._accelerator
+        takes it for the app before the document does - so the menu is
+        closed from here, through the same `view.tell` button 5 uses."""
+        if self._launcher_open:
+            self._launcher_open = False
+            try:
+                if self.view.tell({"launcher": "close"}):
+                    return
+            except Exception:
+                pass
+        self.close_reader()
 
     def close_reader(self):
         # The music goes with the reader, exactly as it does on the Qt

@@ -2334,7 +2334,10 @@ def clear_icon(hover: bool = False, size: int = SEARCH_ICON_SIZE) -> QIcon:
     if hover:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(theme.mix(theme.SURFACE_HOVER, theme.ACCENT, 0.35)))
-        painter.drawEllipse(QRectF(0.5, 0.5, size - 1.0, size - 1.0))
+        # A rounded square, not a disc - the owner, 29 October 2026: "change any circle button in the app ... into square rounded edges".
+        corner = min(theme.RADIUS_SM, size / 4)
+        painter.drawRoundedRect(QRectF(0.5, 0.5, size - 1.0, size - 1.0),
+                                corner, corner)
     pen = QPen(QColor(theme.ACCENT if hover else theme.TEXT_MUTED))
     pen.setWidthF(1.5)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)

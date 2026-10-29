@@ -398,6 +398,9 @@ function hostMessage(ev) {
   }
   if (!m) return;
   if (m.fold) hostFold(m.fold);
+  // Escape, while the reader's Apps & Websites menu is down
+  // (web_reader._escape_pressed).
+  if (m.launcher === 'close' && launcherClose) launcherClose();
   // A key the host wants the page to act on as if pressed - the reader's
   // ArrowRight for mouse button 5 (web_reader.go_forward).
   if (m.key) {
@@ -1661,8 +1664,107 @@ let readerKeys = null;
 // The strip's ResizeObserver, for the same reason - a re-opened chapter
 // replaces it rather than leaving the old one sizing a detached strip.
 let readerResize = null;
+// Closes the reader's Apps & Websites menu (launcherMenu), or null when
+// none is down - a chapter change and the host's Escape both call it.
+let launcherClose = null;
+// The launcher's tab, kept between openings (and chapters).
+let launcherTab = 'apps';
+
+/* **Apps and Websites, from inside the reader.** The owner, 29 October
+   2026: "add a feature that I can open my apps and websites from inside
+   the video player and reader". A menu under the bar's launcher button
+   holding Home's own rows (server `launchers`: most recently opened
+   first, "Not found" where a program is gone), and a row is Home's own
+   tile - its click is the same {action:'open', kind:'app'|'site'|'game'},
+   which web_reader._open_card launches the way Home does.
+
+   Inside the bar, so the pointer on the menu is the pointer on the bar
+   and it stays down (.rbar:hover). Asked for each time it opens, so
+   what was just launched is first the next time. Escape never reaches
+   the page (webview2_host._accelerator takes it for the app), so the
+   shell is told the menu is up and asks for it to close
+   (web_reader._escape_pressed). */
+function launcherMenu(button, bar) {
+  let menu = null;
+  function close() {
+    if (!menu) return;
+    menu.remove();
+    menu = null;
+    launcherClose = null;
+    button.classList.remove('on');
+    button.blur();                // let the bar hide again (.rbar:focus-within)
+    removeEventListener('pointerdown', outside, true);
+    tellHost({ action: 'launcher', open: 0 });
+  }
+  function outside(e) {
+    if (menu && !menu.contains(e.target) && !button.contains(e.target)) close();
+  }
+  /* **Two tabs, one list each** - the owner, 29 October 2026: "make the
+     Apps and Websites has different tabs not in the same scrollable
+     small window". The tabs sit above the list, outside its scroller. */
+  function fill(data) {
+    menu.innerHTML = '';
+    const tabs = el('div', 'rlaunch-tabs');
+    const list = el('div', 'rlaunch-list');
+    // The list scrolls itself - the page's wheel glide takes every wheel
+    // event on the window and would scroll the chapter behind it.
+    list.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      list.scrollTop += e.deltaY;
+    }, { passive: false });
+    function show(key) {
+      launcherTab = key;
+      Array.prototype.forEach.call(tabs.children, function (b) {
+        b.classList.toggle('on', b.dataset.tab === key);
+      });
+      list.innerHTML = '';
+      list.scrollTop = 0;
+      const rows = (data && data[key]) || [];
+      if (!data) list.appendChild(el('div', 'rlaunch-none', 'loading\u2026'));
+      else if (!rows.length) list.appendChild(el('div', 'rlaunch-none', 'None added yet'));
+      rows.forEach(function (row) {
+        const tile = tileFor(row);
+        tile.addEventListener('click', close);
+        list.appendChild(tile);
+      });
+    }
+    // Games beside them - his ask of the same evening.
+    [['apps', 'Apps'], ['websites', 'Websites'], ['games', 'Games']].forEach(function (pair) {
+      const tab = el('button', 'rlaunch-tab', pair[1]);
+      tab.dataset.tab = pair[0];
+      tab.addEventListener('click', function () { show(pair[0]); });
+      tabs.appendChild(tab);
+    });
+    menu.appendChild(tabs);
+    menu.appendChild(list);
+    show(launcherTab);
+  }
+  button.addEventListener('click', async function () {
+    if (menu) { close(); return; }
+    if (launcherClose) launcherClose();
+    menu = el('div', 'rlaunch');
+    const mine = menu;
+    // Under its button, whatever the right-hand cluster grows to.
+    const edge = bar.getBoundingClientRect().right - button.getBoundingClientRect().right;
+    menu.style.right = Math.max(8, Math.round(edge)) + 'px';
+    fill(null);
+    bar.appendChild(menu);
+    button.classList.add('on');
+    launcherClose = close;
+    addEventListener('pointerdown', outside, true);
+    tellHost({ action: 'launcher', open: 1 });
+    let data = {};
+    try {
+      data = await (await fetch('/api/launchers')).json();
+    } catch (err) { /* drawn as two empty sections below */ }
+    if (menu !== mine) return;          // closed while it was asked for
+    fill(data);
+  });
+}
 
 async function openChapter(id, index) {
+  if (launcherClose) launcherClose();
   // The zoom survives a chapter change - it is the reader's setting,
   // not the chapter's (it reset to 100% on every Next; review, 3
   // September 2026).
@@ -1714,6 +1816,11 @@ async function openChapter(id, index) {
   const label = el('div', 'rlabel', 'loading\u2026');
 
   const right = el('div', 'rgroup rright');
+  // Apps and Websites (launcherMenu) - first on the right, apart from
+  // the controls that act on this chapter.
+  const launch = el('button', 'rglyph', '\ue71d');    // AllApps
+  launch.title = 'Apps and websites';
+  launcherMenu(launch, topbar);
   const full = el('button', 'rglyph', '\ue740');      // FullScreen
   full.title = 'Full screen (F)';
   full.addEventListener('click', function () {
@@ -1735,7 +1842,7 @@ async function openChapter(id, index) {
   globe.style.maskImage = 'url(' + GLOBE_MASK + ')';
   browser.appendChild(globe);
   browser.title = 'Open in browser';
-  [full, zoomOut, zoomLabel, zoomIn, download, refresh, browser]
+  [launch, full, zoomOut, zoomLabel, zoomIn, download, refresh, browser]
     .forEach(function (node) { right.appendChild(node); });
 
   topbar.appendChild(left);

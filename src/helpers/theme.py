@@ -416,7 +416,10 @@ SETTINGS_ICON = ""   # Setting (gear) - a button, not a rail row
 
 RADIUS_SM = 8
 # A control's corner where it used to be a pill (half its height) - the owner, 19 October 2026: "change all buttons or lists or all that has the shape of a stretched egg to a square with rounded edges".
-# Circles (a fixed square at half its side) stay circles.
+# And no circle buttons either - the owner, 29 October 2026: "change any
+# circle button in the app ... into square rounded edges". Indicators
+# (a selection tick, a progress dot, a slider knob) stay round, and so
+# does the cover's continue button (app.css .ring), at his word.
 RADIUS_CTL = 10
 RADIUS = 12
 RADIUS_LG = 18

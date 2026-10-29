@@ -6736,6 +6736,11 @@ def main():
                 repainted = game_art.repaint_posters(images.CACHE_DIR)
                 if repainted:
                     logs.info(f"game tiles repainted on the theme: {repainted}")
+                # A letterboxed Steam banner swapped for the portrait the
+                # store names (game_art.STORE_ITEMS_URL).
+                upgraded = game_art.upgrade_letterboxed_covers()
+                if upgraded:
+                    logs.info(f"game covers upgraded to Steam's portrait: {upgraded}")
             except Exception:
                 logs.exception("game tile repaint failed")
             images.shrink_existing()
