@@ -669,12 +669,12 @@ class SettingsDialog(QDialog):
     def _build_category_sidebar(self):
         sidebar = QWidget(objectName="Sidebar")
         sidebar.setFixedWidth(210)
-        # The shared #Sidebar rule rounds only the right corners (in the
-        # main window its left edge is the screen edge). Here the left
-        # edge is the dialog's rounded corner, and the sidebar's square
-        # corners would paint over the transparent rounding - so this
-        # copy rounds its left corners too. Merged property-by-property
-        # with the app rule, so the gradient and right radii stay.
+        # The shared #Sidebar rule is square (in the main window its left
+        # edge is the screen edge). Here the left edge is the dialog's
+        # rounded corner, and the sidebar's square corners would paint
+        # over the transparent rounding - so this copy rounds its left
+        # corners. Merged property-by-property with the app rule, so the
+        # colour and the right border stay.
         sidebar.setStyleSheet(
             f"QWidget#Sidebar {{"
             f" border-top-left-radius: {theme.RADIUS_LG}px;"
