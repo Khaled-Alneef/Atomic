@@ -1296,6 +1296,11 @@ after, across both containers, both piece sizes, 1.5MB/s and 5MB/s. So every
 resume opens with `start=`; a stalled seat waits while bytes arrive and then
 walks to the next source with the seat kept, never to the head.
 
+The head-first path and its seat poll (`_load_from_head`, `_begin_seat_poll`,
+`_seat_data_ready`, `_seat_blind`, `_arm_head_watchdog`) were removed at his
+word the same day (rule 11): proved unreachable by walking the live closures
+from what `_patch` installs.
+
 **The rest of the wait was the head window.** The torrent is
 `sequential_download`, whose picker takes anything wanted from the front of
 the file, so unwatched head at priority 4 was served ahead of the seat band
