@@ -16,6 +16,8 @@ the pointer, since SendInput's wheel goes to the keyboard's window;
 `launchsrc` runs src/main.py under 3.13 with its log at src/data/."""
 import sys, os, time, json, pathlib, re, ctypes
 sys.path.insert(0, r"C:\Users\pc\Code\VS_Code\Python\Atomic\.claude\skills\test")
+import rig
+rig.legacy_driver(__file__)     # takes the foreground and the pointer: CLAUDE.md rule 14
 import stress_common as sc
 from stress_common import rig
 root, out = os.path.abspath(sys.argv[1]), pathlib.Path(sys.argv[2])

@@ -39,6 +39,7 @@ again - the owner's "the logo seems really need a stretch on width ...
 make its ratio the same as the atomic icon in the sidebar".
 """
 
+import os
 import time
 
 from PyQt6.QtCore import QRectF, Qt, QTimer
@@ -169,8 +170,14 @@ def show(logo_path=None) -> "Splash | None":
     signature so main.py reads as "show the splash, here is the mark".
 
     Never raises: this is the very first thing a launch does, and an
-    exception here would take the app down before it had a window."""
+    exception here would take the app down before it had a window.
+
+    ATOMIC_NO_SPLASH: this panel always opens on the primary monitor, which
+    is the one he works on, and a test run must stay off it (CLAUDE.md rule
+    14, measured 3 November 2026). rig.py sets it."""
     try:
+        if os.environ.get("ATOMIC_NO_SPLASH") == "1":
+            return None
         pixmap = _mark()
         if pixmap is None or pixmap.isNull():
             return None

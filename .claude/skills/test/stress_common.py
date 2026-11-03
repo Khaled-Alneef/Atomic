@@ -4,6 +4,7 @@ import os, re, sys, time, json, subprocess, pathlib
 import ctypes, ctypes.wintypes as wt
 sys.path.insert(0, r"C:\Users\pc\Code\VS_Code\Python\Atomic\.claude\skills\test")
 import rig
+rig.legacy_driver(__file__)     # takes the foreground and the pointer: CLAUDE.md rule 14
 rig.u.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
 rig.u.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.UINT]
 T0 = time.time()

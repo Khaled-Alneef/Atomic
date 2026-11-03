@@ -71,30 +71,47 @@ than guessing from raw pixel values.
 ## Driving the real window from outside (rig.py, playwatch.py)
 
 `rig.py` beside this file launches the exe (or `src/main.py` under
-3.13) against a data copy, finds the window by its exact title, clicks,
-hovers, types, sends keys and photographs the window or a crop of it,
-all from a separate process. `playwatch.py` watches the player from the
-user's side: a screen-diff of the picture every second, reporting
-stalls of three seconds or more - a held anime frame reads as a stall,
-so confirm with `player_state.json`'s position advancing in real time.
+3.13) against a data copy, finds the window it started, clicks, hovers,
+types, sends keys and photographs the window or a crop of it, all from a
+separate process and **without touching the monitor he works on, the
+foreground, the pointer or the keyboard (CLAUDE.md rule 14)**.
+`playwatch.py` watches the player from the user's side: a screen-diff of
+the picture every second, reporting stalls of three seconds or more - a
+held anime frame reads as a stall, so confirm with `player_state.json`'s
+position advancing in real time.
 
     python rig.py launch <Atomic.exe or src/main.py> <dir holding an Atomic copy>
-    python rig.py click 448 664 | move x y | key ctrl+2 | type kingdom
+    python rig.py click 448 664 | move x y | key escape | type kingdom
     python rig.py shot name.png [x0 y0 x1 y1]   # window-relative physical px
+    python rig.py guard                         # what the guard stopped, if anything
+    python rig.py close                         # this repo's build; never his
     python playwatch.py 90 out.csv "Reacher S1E2"
 
-Two traps it already carries, both measured 3 September 2026:
+What `launch` does, so a harness never does it by hand: writes the test
+monitor's work area into the copy's `settings.json`, sets `ATOMIC_NO_SPLASH`
+(the logo always opens on the primary monitor, and a build older than 3.16.3
+ignores it, so the guard will stop that build), spawns through `Win32_Process
+Create` so the app has no right to the foreground, pins the pid, marks the
+window topmost with NOACTIVATE, and starts a guard process. The guard ends the
+app the moment it holds the foreground or shows a window off that monitor, and
+says so in `rig_guard.txt`. Clicking the test window yourself trips it too.
+
+- **Coordinates are for the window on the test monitor** (1920x1080 at 100%
+  here, not his 2578x1398), so read them off a shot of this run.
+- **A hover that asks Qt where the pointer is sees the real pointer**, which is
+  his: `QCursor.pos()`, `QApplication.widgetAt`. Those paths need him.
+- **A chord is refused** (`ctrl+1`): Ctrl is read from the real keyboard. Click
+  the sidebar row instead.
+- **`d.py`, `stress_common.py` and the drivers on it, and `drive_flash.py`
+  refuse to start**: they launch for themselves, hold the foreground and move
+  the pointer. Convert them to the commands above before using them. Only his
+  word for that run sets `ATOMIC_RIG_HE_SAID_OK=1`.
+
+One trap it already carries, measured 3 September 2026:
 
 - **Match the title exactly.** "Atomic - File Explorer" (the repo
   folder open in Explorer) matched a startswith test and took the
   clicks meant for the app; a second source run left two windows up.
-- **The Claude desktop app confines the cursor to its own monitor.**
-  With Atomic closed, any click on the primary monitor still produced
-  `GetClipCursor = (-1920, 0, 0, 1080)` and warped the pointer to
-  x=-1, so every synthetic click missed the app while keyboard
-  shortcuts worked. The rig releases the clip (`ClipCursor(None)`)
-  before every pointer move and again between button-down and
-  button-up. It is not the app - grep finds no ClipCursor in src/.
 
 ## The proof-loop checklist (CLAUDE.md rule 12, testing.md has the why)
 
@@ -103,7 +120,8 @@ Two traps it already carries, both measured 3 September 2026:
     [ ] number the cause with a harness before editing
     [ ] preview from source against a copy (rig.py launch src/main.py)
     [ ] build; read PYZ.pyz back: added names present, deleted names gone
-    [ ] frozen exe, separate process: screenshots of each surface named
+    [ ] frozen exe, through rig.py (rule 14: other monitor, no focus, his
+        Atomic left alone): screenshots of each surface named
         in the ask; playwatch 90-100s per title + player_state.json
         position advancing 1s per second; the log lines named up front
         ((pre-started), no stopped/was gone/could not open/falling back)
