@@ -29,6 +29,7 @@ import concurrent.futures
 import html
 import json
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -231,13 +232,21 @@ def _page_urls(body: str, series_url: str) -> list:
     Only pages of *this* URL count: these themes also paginate comments
     and "latest releases" strips with the same parameter, and following
     those adds requests that can only return other series' chapters."""
+    # **Compared without "www."** Measured 3 November 2026: his Survival
+    # Story entry is filed under www.olympustaff.com and its paginator links
+    # to olympustaff.com, so no link counted as this series, and every
+    # refresh replaced the stored 305 chapters with the first page's 41.
+    def same_series(url):
+        return re.sub(r"^(https?://)www\.", r"\1",
+                      url.split("?", 1)[0].rstrip("/"), flags=re.I)
+
     base = series_url.split("?", 1)[0].rstrip("/")
     numbers = set()
     for href, number in _PAGE_LINK_RE.findall(body or ""):
         # Unescaped for the same reason the chapter links are - a `#`
         # inside an entity turns the rest of the path into a fragment.
         absolute = urllib.parse.urljoin(series_url, html.unescape(href))
-        if absolute.split("?", 1)[0].rstrip("/") != base:
+        if same_series(absolute) != same_series(base):
             continue
         try:
             value = int(number)
@@ -613,15 +622,23 @@ def _cached(key):
     return row.get("chapters")
 
 
+# **One writer at a time.** The whole store is dumped to disk, so a second
+# list landing mid-dump raised "dictionary changed size during iteration" -
+# found on the frozen build, 3 November 2026, when a Home draw first refreshed
+# eight lists on lookup_pool's four workers, and it took one refresh with it.
+_store_lock = threading.Lock()
+
+
 def _store(key, chapters):
     import time
-    store = _load_store()
-    store[key] = {"at": time.time(), "chapters": chapters}
-    # Bounded: this is a convenience cache, not a library.
-    if len(store) > 40:
-        for stale in sorted(store, key=lambda k: store[k].get("at", 0))[:len(store) - 40]:
-            store.pop(stale, None)
-    storage.save(CACHE_FILE, store)
+    with _store_lock:
+        store = _load_store()
+        store[key] = {"at": time.time(), "chapters": chapters}
+        # Bounded: this is a convenience cache, not a library.
+        if len(store) > 40:
+            for stale in sorted(store, key=lambda k: store[k].get("at", 0))[:len(store) - 40]:
+                store.pop(stale, None)
+        storage.save(CACHE_FILE, store)
 
 
 def cached_chapters(entry):
@@ -660,6 +677,18 @@ def stale_chapters(entry):
     if not row:
         return None
     return row.get("chapters") or None
+
+
+def latest_number(entry):
+    """The newest chapter number on this entry's stored list, whatever its
+    age, or None. Touches no network."""
+    numbers = []
+    for chapter in stale_chapters(entry) or []:
+        try:
+            numbers.append(float(chapter.get("number")))
+        except (TypeError, ValueError):
+            continue
+    return max(numbers) if numbers else None
 
 
 def listed_at(entry):

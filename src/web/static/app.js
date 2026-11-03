@@ -1095,6 +1095,17 @@ function heroFor(hero) {
     inner.appendChild(art);
   }
   const text = el('div', 'col');
+  /* The name's place, taken by a logo that arrives later. It replaces one
+     already there: Home's answer can carry the logo off disk and
+     /api/featured then names it again, which would draw two. */
+  function wearLogo(url) {
+    const first = text.firstChild;
+    if (first && first.tagName === 'IMG' && first.getAttribute('src') === url) return;
+    const logo = el('img', 'logo');
+    logo.src = url; logo.alt = hero.title || '';
+    if (first && (first.tagName === 'H1' || first.tagName === 'IMG')) text.removeChild(first);
+    text.insertBefore(logo, text.firstChild);
+  }
   if (hero.logo) {
     const logo = el('img', 'logo');
     logo.src = hero.logo; logo.alt = hero.title || '';
@@ -1118,10 +1129,9 @@ function heroFor(hero) {
       if (line) bullets.appendChild(el('p', null, line));
     });
   }
-  // `meta` is a list of lines - the schedule is drawn as "Next
-  // Chapter: N" and the timing under it (backend.schedule_lines). A
-  // plain string is still honoured, which is what the Discover banner
-  // and any older answer send.
+  // `meta` is a list of lines (backend.schedule_lines). A plain string
+  // is still honoured, which is what the Discover banner and any older
+  // answer send.
   const metaLines = Array.isArray(hero.meta) ? hero.meta
                     : (hero.meta ? [hero.meta] : []);
   writeLines((hero.bullets || []).concat(metaLines));
@@ -1142,15 +1152,16 @@ function heroFor(hero) {
           box.classList.remove('poster');
           art_el.src = art.backdrop;
         }
-        if (art.logo) {
-          const logo = el('img', 'logo');
-          logo.src = art.logo; logo.alt = hero.title || '';
-          const first = text.firstChild;
-          if (first && first.tagName === 'H1') text.removeChild(first);
-          text.insertBefore(logo, text.firstChild);
-        }
+        if (art.logo) wearLogo(art.logo);
       })
       .catch(function () { /* the poster stays */ });
+  } else if (hero.id && !hero.logo) {
+    // Has its ground, so /api/featured is not asked - and that was the
+    // only ask for a logo. See backend.hero_for.
+    fetch('/api/herologo?id=' + encodeURIComponent(hero.id))
+      .then(function (r) { return r.json(); })
+      .then(function (art) { if (art.logo) wearLogo(art.logo); })
+      .catch(function () { /* the typed name stays */ });
   }
   if (hero.id) {
     fetch('/api/hero?id=' + encodeURIComponent(hero.id))

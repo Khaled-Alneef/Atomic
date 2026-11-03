@@ -1231,6 +1231,46 @@ Left alone, said out loud: `server._saved_titles` (the card's "saved"
 tint) is still by title, so a saved series tints a same-named film's
 card. Fixing it means app.js comparing ids.
 
+## The banner names the latest chapter, and a released "next" is dropped (3 November 2026)
+
+His ask: *"under the logo in the banner make it says the Manhwa and the last
+Ch number released, also apply this to Kingdom and all readings, why is
+Kingdom saying next ch 889???????"*. Kingdom's record said 889, estimated for
+19 October, with 890 read and 893 on 3asq. MangaDex now answers nothing for
+it, and "an empty answer keeps the old record" (7 September, above) kept it
+for ever. That rule is right for a date that is late and wrong for a number
+already out, so `release_schedule.spent` hides such a record on every surface
+and the Home refresh drops it.
+
+The number comes from the stored chapter list (`chapter_source.latest_number`,
+under 6ms a banner), kept current by `server._refresh_chapter_lists`: once per
+title per CACHE_TTL_S from a Home draw, and only a new number redraws. His
+eight lists were up to 528h old and five chapters behind, three never fetched.
+
+**Found because that refresh would have run it:** `_page_urls` compared hosts
+exactly, his olympustaff entries are filed under `www.` and its paginator
+links without it, so every refresh replaced a whole list with the first page:
+Survival Story 305 -> 41. Compared without `www.` now: 308, Great Mage 278,
+Beginning After the End 260, World After the End 258, Swordmaster 219.
+
+**The genres beside the medium are the details page's, MangaDex's** (his
+follow-up: *"also add the generes IF IT HAS like Kingdom and One piece"*). A
+saved reading entry never stores any, so `_bullets`' read of `entry["genres"]`
+found nothing; `backend._reading_genres` reads `discover.cached_genres`, and
+`server._refresh_reading_genres` asks behind the draw for a title with no
+record, once a session. Five of his eight have an answer on no live lookup:
+The Eternal Supreme, Survival Story, World After the End and Swordmaster's
+Youngest Son answer nothing, so the banner stays "Manhwa". The Beginning After
+The End also answers nothing now, but keeps the five tags already on record:
+an empty reply never wipes a verdict. Novels are not asked; MangaDex would
+answer for a manga of the same name.
+
+**A reading banner has no next chapter at all** (his word the same evening:
+*"I do not want you to show the Next Chapter AT ALL in the banners"*). Neither
+the number nor its Expected/Countdown line; `backend.schedule_lines` answers
+nothing for a reading kind. Video banners keep their Expected line, and the
+hover and the tracker still read the record, which is why `spent` stays.
+
 ## A resume opens at the seat, and the seat is where he stopped (3 November 2026)
 
 His report: *"when I cont watching anything it takes ages to take me to
