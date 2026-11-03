@@ -108,6 +108,36 @@ def needs_refresh(entry: dict, force: bool = False) -> bool:
 
 # ---- display ---------------------------------------------------------
 
+def spent(entry: dict, record=None) -> bool:
+    """Whether a schedule's chapter is already out, so "Next Chapter" would
+    name one behind what the site lists or what he has read.
+
+    The owner, 3 November 2026: "why is Kingdom saying next ch 889???????".
+    Measured on a copy of his data: the record said 889, estimated for 19
+    October, with 890 read and 893 on 3asq. MangaDex has answered nothing
+    since, and an empty answer keeps the old record, correctly for a date
+    that is merely late - but a number already released is not late, it is
+    false, and nothing else was ever going to take it down."""
+    stored = entry.get("next_release") if record is None else record
+    chapter = stored.get("chapter") if isinstance(stored, dict) else None
+    if not chapter:
+        return False
+    known = []
+    try:
+        known.append(float(entry.get("last_watched_chapter") or 0))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from . import chapter_source
+        known.append(chapter_source.latest_number(entry) or 0)
+    except Exception:
+        pass
+    try:
+        return float(chapter) <= max(known, default=0)
+    except (TypeError, ValueError):
+        return False
+
+
 def tooltip_lines(entry: dict, medium: str) -> list:
     """The extra hover lines for an entry, or [] when nothing's known.
 
@@ -117,7 +147,7 @@ def tooltip_lines(entry: dict, medium: str) -> list:
     equivalent for (the number a schedule gives is per-cour and doesn't
     line up with the season/episode already shown above it)."""
     when = _release_time(entry.get("next_release"))
-    if not when:
+    if not when or spent(entry):
         return []
     local = when.astimezone()
     remaining = when - datetime.now(timezone.utc)

@@ -1757,6 +1757,8 @@ def _home():
     # draw - see _refresh_stale_schedules.
     _refresh_stale_schedules(watching, "series.json")
     _refresh_stale_schedules(reading, "tracker.json")
+    _refresh_chapter_lists(reading)
+    _refresh_reading_genres(reading)
     # And every episode list a card reads, from the APIs, behind it too -
     # see _refresh_episode_lists.
     _refresh_episode_lists(watching + _history(("Anime", "Series"))[:EPISODE_LISTS_PER_DRAW])
@@ -1962,6 +1964,98 @@ def _refresh_episode_lists(entries):
             logs.exception("Could not queue an episode-list refresh")
 
 
+# entry id -> when its chapter list was last sent for a refresh from here
+_CHAPTERS_ASKED = {}
+
+
+def _refresh_chapter_lists(entries):
+    """Every saved reading title's chapter list stays current, in the
+    background, because the banner's "Last Released Chapter" reads it - the same
+    shape as _refresh_episode_lists below.
+
+    Measured 3 November 2026 on his eight: lists up to 528h old and five
+    chapters behind, three never fetched at all, because a list was read
+    only when the title's page or the reader asked. Live they took
+    0.55-4.58s each. Once per title per chapter_source.CACHE_TTL_S, the
+    module's own measure of current, and only a new number redraws
+    (CLAUDE.md rule 13)."""
+    try:
+        from helpers import chapter_source, lookup_pool
+    except Exception:
+        return
+    now = time.monotonic()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("id") or "")
+        if not key or now - _CHAPTERS_ASKED.get(key, -1e9) < chapter_source.CACHE_TTL_S:
+            continue
+        _CHAPTERS_ASKED[key] = now
+        at = chapter_source.listed_at(entry)
+        if at and time.time() - at < chapter_source.CACHE_TTL_S:
+            continue
+        try:
+            lookup_pool.submit(_refresh_chapters_worker, dict(entry))
+        except Exception:
+            logs.exception("Could not queue a chapter-list refresh")
+
+
+_GENRES_ASKED = set()
+
+
+def _refresh_reading_genres(entries):
+    """A saved reading title the sweeps never classified has no genres on
+    record, so its banner could not show them however many MangaDex has.
+    Asked behind the draw, once per title per session, and only where the
+    record is empty; a redraw only if an answer came. Novels are skipped,
+    as in backend._reading_genres."""
+    try:
+        from helpers import discover, lookup_pool
+    except Exception:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()
+        if (not title or title in _GENRES_ASKED or entry.get("genres")
+                or str(entry.get("type") or "").strip().lower() == "novel"):
+            continue
+        _GENRES_ASKED.add(title)
+        if discover.cached_genres(title):
+            continue
+        try:
+            lookup_pool.submit(_refresh_genres_worker, title)
+        except Exception:
+            logs.exception("Could not queue a reading-genres lookup")
+
+
+def _refresh_genres_worker(title):
+    """Never raises - a lookup_pool worker dies silently."""
+    try:
+        from helpers import changes, discover
+        names = discover.ask_reading_genres(title)
+        logs.info(f"reading genres asked from Home: {title[:40]} -> {names or 'none'}")
+        if names:
+            changes.bump()
+    except Exception:
+        logs.exception("A reading-genres lookup from Home failed")
+
+
+def _refresh_chapters_worker(entry):
+    """Never raises - a lookup_pool worker dies silently."""
+    try:
+        from helpers import changes, chapter_source
+        before = chapter_source.latest_number(entry)
+        chapter_source.list_chapters(entry, refresh=True)
+        after = chapter_source.latest_number(entry)
+        if after != before:
+            changes.bump()
+            logs.info(f"chapter list refreshed from Home: "
+                      f"{str(entry.get('title'))[:40]} {before} -> {after}")
+    except Exception:
+        logs.exception("A chapter-list refresh from Home failed")
+
+
 def _refresh_episodes_worker(imdb, title):
     """Never raises - a lookup_pool worker dies silently."""
     try:
@@ -1998,6 +2092,11 @@ def _refresh_schedule_worker(entry, file_name):
         fields = {"next_release_checked_at": storage.now_iso()}
         if isinstance(found, dict) and found.get("at"):
             fields["next_release"] = found
+        # A chapter already out is another matter: see release_schedule.spent.
+        if release_schedule.spent(entry, fields.get("next_release",
+                                                     entry.get("next_release"))):
+            fields["next_release"] = None
+            found = None
         if manga_id:
             fields["mangadex_id"] = manga_id
         storage.update_entry(file_name, entry["id"], fields)
@@ -2005,7 +2104,7 @@ def _refresh_schedule_worker(entry, file_name):
             changes.bump()
         at = str((found or {}).get("at") or "") if isinstance(found, dict) else ""
         logs.info(f"schedule refreshed from Home: {str(entry.get('title'))[:40]} "
-                  f"-> {at or 'nothing known, kept what it had'}")
+                  f"-> {at or ('that chapter is already out, record dropped' if 'next_release' in fields else 'nothing known, kept what it had')}")
     except Exception:
         logs.exception("A schedule refresh from Home failed")
 
@@ -4165,6 +4264,8 @@ def answer(route, query=None):
         return backend.settings()
     if route == "hero":
         return backend.hero_meta(one("id"))
+    if route == "herologo":
+        return backend.hero_logo(one("id"))
     if route == "chapters":
         return backend.chapters(one("id"), live=one("live") == "1")
     if route == "pages":

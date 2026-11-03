@@ -442,13 +442,13 @@ PRIMARY_READER = "primary"
 # re-raises so a seek can never demote the index again.
 TAIL_BYTES = 4 * 1024 * 1024
 
-# How much of the head a *resume* primes, in pieces. Opening a file at a
-# seat reads the container header and then jumps, so the rest of the head
-# is bandwidth taken from the index and the seat itself - see
-# _apply_windows for the run where fetching 12MB of unwatched head left
-# the player with no picture at all. Two pieces is 4MB at the usual piece
-# size, comfortably past any Matroska/MP4 header.
-RESUME_HEADER_PIECES = 2
+# How much of the head a *resume* primes. Opening a file at a seat reads
+# the container header and then jumps, so the rest of the head is bandwidth
+# taken from the index and the seat itself - see _apply_windows for the run
+# where fetching 12MB of unwatched head left the player with no picture at
+# all. 4MB is comfortably past any Matroska/MP4 header; it was two pieces,
+# which is 4MB on 2MB pieces and 32MB on the 16MB pieces of his season packs.
+RESUME_HEADER_BYTES = 4 * 1024 * 1024
 
 # **Where playback is going to start, when that is not the beginning.**
 #
@@ -1098,6 +1098,23 @@ class _Torrent:
         except Exception:
             return []
 
+    def _seat_pieces(self):
+        """The part of the band the first frame at the seat is blocked on:
+        the piece holding the seat's keyframe and the run just past it,
+        minus what has landed. See `start_band` in _apply_windows."""
+        if self.start_offset is None or not self.start_armed:
+            return []
+        try:
+            size = self.file_size()
+            if size <= 0:
+                return []
+            first = self.piece_at(int(self.start_offset))
+            last = self.piece_at(min(int(self.start_offset)
+                                     + RESUME_LOOKBACK_BYTES, size - 1))
+            return [p for p in range(first, last + 1) if not self.have(p)]
+        except Exception:
+            return []
+
     def read_piece(self, piece: int, timeout: float = 10.0):
         """A piece's real bytes, from libtorrent rather than from the
         file on disk.
@@ -1466,8 +1483,17 @@ class _Torrent:
             # rest of the window below rather than behind it.
             resuming = bool(self.start_seconds is not None
                             and self._start_pieces())
-            if resuming:
-                urgent_count = min(urgent_count, RESUME_HEADER_PIECES)
+            # **And before the seat is a byte, while nothing is reading:**
+            # the band cannot be armed until the header and the index are
+            # here, so those are the only things worth wanting. A real
+            # reader ends this, so a file whose index can never be read
+            # still plays with its full window.
+            seat_pending = bool(self.start_seconds is not None
+                                and not self.start_armed
+                                and set(self.readers) <= {PRIMARY_READER})
+            if resuming or seat_pending:
+                urgent_count = min(urgent_count, max(
+                    1, -(-RESUME_HEADER_BYTES // self.piece_length())))
 
             if self.want_whole:
                 # A *download* owns this torrent's priorities (see
@@ -1521,6 +1547,18 @@ class _Torrent:
             # `warming` in __init__ for the 74MB-and-no-first-piece
             # measurement behind this.
             if self.warming:
+                window_pieces = urgent_count
+            # **A resume wants no readahead until its seat has landed, and
+            # that was most of the wait.** Priority does not hold this back:
+            # the torrent is `sequential_download`, whose picker takes
+            # anything wanted from the front of the file, so a window of
+            # unwatched head at priority 4 was served ahead of the seat band
+            # at 7. Measured 3 November 2026, real engine, real libmpv, one
+            # seeder at 5MB/s, seat 7:21: the index in at 2.9s and 7.5MB, and
+            # the seat's own piece not until **8.0s and 32MB** - 25MB of the
+            # opening fetched and never shown. On 16MB pieces, a first frame
+            # at 20.4s after about 100MB, for a head, a tail and a seat.
+            if resuming or seat_pending:
                 window_pieces = urgent_count
 
             priorities = [0] * total_pieces
@@ -1630,7 +1668,14 @@ class _Torrent:
             # and the resume seek still cost 6.02s. Re-raised on every
             # focus() for the same reason the index is: this array is
             # absolute.
-            start_band = self._start_pieces()
+            #
+            # **The seat's own pieces first, then the rest of the band.**
+            # Wanted together they arrive together - the piece after the
+            # seat was measured landing before the seat's (3 November
+            # 2026, real engine, one seeder at 5MB/s) - and on the 16MB
+            # pieces of his season packs "the band" is two whole pieces,
+            # so the first frame waited for both.
+            start_band = self._seat_pieces() or self._start_pieces()
             for piece in start_band:
                 if 0 <= piece < total_pieces:
                     priorities[piece] = 7
@@ -3131,7 +3176,7 @@ def add(info_hash: str, *, trackers=(), season=None, episode=None,
     # the first thing asked for and the seat the last - see
     # _apply_windows. `start_at` was applied above, so _start_pieces is
     # already answering by the time this window is built.
-    torrent.focus(0, (RESUME_HEADER_PIECES * torrent.piece_length()
+    torrent.focus(0, (RESUME_HEADER_BYTES
                       if start_at is not None else HEAD_BYTES))
     return info_hash
 

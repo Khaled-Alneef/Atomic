@@ -217,10 +217,15 @@ DOUBLE_CLICK_S = 0.38
 # and this is generous against a 2560-wide picture.
 DOUBLE_CLICK_PX = 24
 
-# Below this there is nothing worth resuming from, and above it the
-# episode is effectively finished - offering "resume at 99%" is worse
-# than starting over.
-RESUME_MIN_S = 30
+# Above RESUME_MAX_FRACTION the episode is effectively finished - offering
+# "resume at 99%" is worse than starting over.
+#
+# **RESUME_MIN_S was 30, and is what stood between his stop and his
+# continue for the first half minute.** The owner, 3 November 2026: "make
+# it always play at the moment the user stopped". Nothing was saved under
+# 30s and nothing under 30s was resumed, so leaving at 0:25 meant 0:00.
+# One second is "he watched nothing", not "not worth going back to".
+RESUME_MIN_S = 1
 RESUME_MAX_FRACTION = 0.97
 
 # How close playback has to get to a pending seek's target before the
@@ -901,6 +906,27 @@ def _resume_key(identity, season, episode) -> str:
     return f"{identity}|film"
 
 
+def _imdb_of(entry) -> str:
+    return str((entry or {}).get("imdb_id") or "").strip().lower()
+
+
+def _same_work(record, entry, season, episode) -> bool:
+    """This record belongs to this episode of this title by IMDb id, under
+    whatever key it was filed.
+
+    **A title taken off the list keeps its place.** Records are filed under
+    the best identity going, which for a saved title is its uuid - and a
+    title removed from the list has no uuid, only the IMDb id on its History
+    row, so nothing could find them. Measured 3 November 2026 on his data:
+    38 records across 10 titles under a uuid no library file holds; Bleach:
+    TYBW, 21:54 into S04E10, Continue opened S04E01 at 0:00. The IMDb id is
+    stored on the record from now on. Those 38 carry nothing to tell whose
+    they are, and they stay where they are."""
+    imdb = _imdb_of(entry)
+    return bool(imdb) and str(record.get("imdb_id") or "").lower() == imdb and (
+        record.get("season") == season and record.get("episode") == episode)
+
+
 def _resume_keys(entry, season, episode) -> list:
     return [_resume_key(identity, season, episode)
             for identity in entry_identities(entry)]
@@ -919,6 +945,9 @@ def load_resume(entry, season, episode):
         for record in records:
             if record.get("id") == key:
                 return record
+    for record in records:
+        if _same_work(record, entry, season, episode):
+            return record
     return None
 
 
@@ -944,6 +973,7 @@ def save_resume(entry, season, episode, position, duration, release=None):
         return          # no id, no imdb id, no title: nothing to key by
     _put_record(keys[0], {
         "entry_id": entry_identities(entry)[0],
+        "imdb_id": _imdb_of(entry),
         "season": season, "episode": episode,
         "position": float(position or 0.0),
         "duration": float(duration or 0.0),
@@ -1138,7 +1168,8 @@ def resume_point(entry):
         return None
     best, best_at = None, ""
     for record in storage.load(RESUME_FILE, []):
-        if record.get("entry_id") not in identities:
+        if (record.get("entry_id") not in identities
+                and f"imdb:{record.get('imdb_id')}" not in identities):
             continue
         position = float(record.get("position") or 0.0)
         duration = float(record.get("duration") or 0.0)
@@ -1179,6 +1210,7 @@ def mark_opened(entry, season, episode):
         if not keys:
             return
         _put_record(keys[0], {"entry_id": entry_identities(entry)[0],
+                              "imdb_id": _imdb_of(entry),
                               "season": season, "episode": episode,
                               "opened_at": storage.now_iso()})
     except Exception:
@@ -1214,7 +1246,8 @@ def clear_resume(entry, season, episode):
     changed = False
     kept = []
     for record in records:
-        if record.get("id") not in keys:
+        if (record.get("id") not in keys
+                and not _same_work(record, entry, season, episode)):
             kept.append(record)
             continue
         # **The subtitle preferences are worth keeping too.** The owner,
@@ -4272,7 +4305,12 @@ class PlayerPage(GlassPage):
             return None, None
         stored_season, stored_episode = tracker.parse_episode_progress(
             self.entry.get("progress"))
-        if self.entry.get("progress_verified") and stored_episode:
+        # **A title with no id is not on the list, so its progress is no
+        # tracker's guess: it is History's, which the player itself wrote.**
+        # Unverified, it fell to `stored_season, 1` below - the row reading
+        # S04E10 and Continue opening S04E01 (3 November 2026).
+        if ((self.entry.get("progress_verified") or not self.entry.get("id"))
+                and stored_episode):
             season = stored_season or 1
             wanted = stored_episode + 1
             # **Forward only on a known season end** - the rule
@@ -9031,6 +9069,13 @@ class PlayerPage(GlassPage):
                 self._awaiting_first_frame = False
                 self._mark_open("first frame")
                 self._say_open_marks()
+                # A source that cannot seek is the one way left to a
+                # picture short of the seat, so his log says which it was.
+                if (self._resume_target is not None and float(value)
+                        < self._resume_target - RESUME_LANDED_TOLERANCE_S):
+                    logs.info(f"seat: first frame at {float(value):.1f}s, short "
+                              f"of {self._resume_target:.1f}s - this source "
+                              f"did not seek there")
                 # The file was just (re)opened; if this episode had a
                 # subtitle loaded and mpv no longer has it, put it back.
                 self._reapply_subtitle()
@@ -9090,6 +9135,8 @@ class PlayerPage(GlassPage):
                 # honest position of the new file, not on a promise.
                 seat = self._resume_target
                 self._clear_seat()
+                logs.info(f"seat: landed at {self._position:.1f}s (asked "
+                          f"{seat:.1f}s)")
                 # The picture is at the seat; if mpv stopped on the way
                 # there, it goes again without a press.
                 self._ensure_playing_after_seat("when the seat landed")
@@ -9680,9 +9727,27 @@ class PlayerPage(GlassPage):
     def _save_position(self):
         self._watch_runaway()
         self._watch_cadence()
-        if self._closing or not self._duration or self._position <= RESUME_MIN_S:
+        if self._closing:
+            return
+        self._store_position()
+
+    def _store_position(self):
+        """Write where the picture is to the resume record, unless that
+        would lose the place. See close_player for why this is apart from
+        the periodic tick."""
+        if not self._duration or self._position <= RESUME_MIN_S:
             return
         if self._position > self._duration * RESUME_MAX_FRACTION:
+            return
+        # **A seat still owed outranks a position short of it.** Measured
+        # on the frozen build, 3 November 2026, resuming at 7:21 with the
+        # file playing from the head: the record read 441.48, then 30.82
+        # and 35.83 for ten seconds until the seek. A stop inside those ten
+        # seconds would have left his next Continue at 0:35, with 7:21 gone
+        # for good. Nothing plays short of the seat any more, but a source
+        # that cannot seek still does, until SEAT_GIVE_UP_S says so.
+        seat = self._resume_target
+        if seat is not None and self._position < seat - RESUME_LANDED_TOLERANCE_S:
             return
         try:
             save_resume(self.entry, self.season, self.episode,
@@ -13756,7 +13821,12 @@ class PlayerPage(GlassPage):
         app = QApplication.instance()
         if relay is not None and app is not None:
             app.removeEventFilter(relay)
-        self._save_position()
+        # **The moment he stopped, not the last five-second tick.** This
+        # called _save_position, which returns at once when `_closing` is
+        # set - and it was set three lines up, so the save at the stop has
+        # never run. See the measurement in .claude/rules/integrations.md,
+        # "A resume opens at the seat".
+        self._store_position()
         self._idle_timer.stop()
         self._pointer_timer.stop()
         self._mouse_timer.stop()

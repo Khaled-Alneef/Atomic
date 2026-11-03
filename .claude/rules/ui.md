@@ -486,6 +486,19 @@ photographed on a copy with every art field stripped and no image cache
 (the closest this machine can get to his other device): the banner is
 there at 2560 and 1920 wide, with the wide art, logo and cover in.
 
+**The logo had the same cause, found two months later** (3 November
+2026: *"The Eternal Supreme has a logo but it is not appearing in the
+home page banner!"*). Its entry read `hero_logo: null` beside a
+`hero_backdrop` of 31 August, both written by the Qt Home, while the
+logo had been in logo_cache since 27 September, fetched by the chapter
+list. The backdrop kept the page off `/api/featured`, so nothing ever
+asked. `backend.hero_for` now falls back to the file on disk
+(`artwork.cached_logo`, Home built in 59ms) and a banner still without
+one asks `/api/herologo` (`app.js` `wearLogo`). Photographed on the
+frozen build: all six slides wear one logo each, and with the file
+deleted from a copy the route fetched it 1.12s after the page drew. The
+fields the Qt Home wrote are leftovers: read them as hints, not verdicts.
+
 ## A resolution group folds in place (6 September 2026)
 
 His recording: *"the folding and unfolding of the resolution sources in

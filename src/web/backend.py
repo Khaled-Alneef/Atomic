@@ -247,10 +247,28 @@ def hero_for(entry):
             return None
         poster = cover_url(entry) or "-"
         backdrop = "" if poster == "-" else poster
+    # **hero_logo is what the Qt Home decided, the last time there was a Qt
+    # Home.** The owner, 3 November 2026: "The Eternal Supreme has a logo
+    # but it is not appearing in the home page banner!". Measured on a copy
+    # of his data: the entry reads hero_logo null beside a hero_backdrop
+    # written 31 August, while its logo has sat in logo_cache since 27
+    # September, fetched by the chapter list - so the list wore the logo
+    # and the banner typed the name. Nothing has rewritten that field since
+    # the web Home landed, and the backdrop kept the page off /api/featured
+    # too. So the file on disk answers when the field does not (a stat or
+    # two), and a banner still without one asks /api/herologo (app.js
+    # heroFor).
+    logo = local_url(entry.get("hero_logo"))
+    if not logo:
+        try:
+            from helpers import artwork
+            logo = local_url(artwork.cached_logo(entry))
+        except Exception:
+            logo = ""
     return {
         "title": str(entry.get("title") or ""),
         "backdrop": backdrop,
-        "logo": local_url(entry.get("hero_logo")),
+        "logo": logo,
         # The entry's own cover, beside the wide art. The banner had
         # only the backdrop and the owner asked for the cover on it.
         "cover": cover_url(entry),
@@ -304,6 +322,38 @@ def _thin_banner_cover(entry):
         return False
 
 
+READING_KINDS = ("manga", "manhwa", "manhua", "novel", "other")
+
+
+def _latest_line(entry):
+    """"Last Released Chapter: 893", or "" while no list has been seen."""
+    if chapter_source is None:
+        return ""
+    try:
+        number = chapter_source.latest_number(entry)
+    except Exception:
+        number = None
+    return f"Last Released Chapter: {number:g}" if number else ""
+
+
+def _reading_genres(entry):
+    """A reading title's genres, the ones its details page shows, from
+    what is on disk. A saved reading entry never stores any: the verdicts
+    live in reading_meta.json, under the title. A novel's tags are its own
+    site's (details._novel_meta_worker): MangaDex would answer for a manga
+    of the same name, so it is not asked."""
+    genres = entry.get("genres")
+    if isinstance(genres, list) and genres:
+        return genres
+    if str(entry.get("type") or "").strip().lower() == "novel":
+        return []
+    try:
+        from helpers import discover
+        return discover.cached_genres(entry.get("title") or "")
+    except Exception:
+        return []
+
+
 def _bullets(entry):
     """The banner's facts, in the four lines the owner asked for.
 
@@ -332,7 +382,20 @@ def _bullets(entry):
     lines.append(f"  {DOT}  ".join(second))
 
     genres = entry.get("genres")
-    if isinstance(genres, list) and genres:
+    # **A reading title says what it is and how far the site has got.** The
+    # owner, 3 November 2026: "under the logo in the banner make it says the
+    # Manhwa and the last Ch number released, also apply this to Kingdom and
+    # all readings". The number is the stored list's, a dictionary lookup;
+    # server._refresh_chapter_lists keeps that list current.
+    kind = str(entry.get("type") or "").strip()
+    if kind.lower() in READING_KINDS:
+        # And its genres where it has any: "also add the generes IF IT HAS
+        # like Kingdom and One piece", the same evening.
+        words = [kind] + list(_reading_genres(entry))[:4]
+        lines.append(f"  {DOT}  ".join(str(w).strip() for w in words
+                                       if str(w).strip()))
+        lines.append(_latest_line(entry))
+    elif isinstance(genres, list) and genres:
         lines.append(f"  {DOT}  ".join(str(g).strip() for g in genres[:4]
                                        if str(g).strip()))
     elif str(genres or "").strip():
@@ -649,9 +712,14 @@ def schedule_lines(entry):
     """The banner's schedule, as the lines it is drawn on.
 
     release_schedule.tooltip_lines is the wording, and it is called here
-    rather than re-implemented: "Next Chapter: 886", then "Expected:
-    Monday 8:00 PM" - always the weekday name, never a date, "so every
-    card reads the same way", and no source anywhere in it.
+    rather than re-implemented: "Expected: Monday 8:00 PM" - always the
+    weekday name, never a date, "so every card reads the same way", and
+    no source anywhere in it.
+
+    **A reading title has no schedule here.** The owner, 3 November 2026:
+    "I do not want you to show the Next Chapter AT ALL in the banners".
+    Its banner says how far the site has got (_latest_line) and nothing
+    about what may come; the hover and the tracker still read the record.
 
     The banner had been printing the stored next_release record instead,
     which put the raw date and "via mangadex" on screen - the owner, 1
@@ -664,33 +732,16 @@ def schedule_lines(entry):
     try:
         from helpers import release_schedule
         kind = str(entry.get("type") or "").strip().lower()
-        # Manhwa and manhua are scheduled exactly as manga is; the
-        # constant is the *medium* the formatter branches on, not the
-        # entry's own word for itself.
-        if kind in ("manga", "manhwa", "manhua", "other"):
-            medium = release_schedule.MEDIUM_MANGA
-        elif kind == "anime":
-            medium = release_schedule.MEDIUM_ANIME
-        else:
-            medium = release_schedule.MEDIUM_SERIES
+        if kind in READING_KINDS:
+            return []
+        medium = (release_schedule.MEDIUM_ANIME if kind == "anime"
+                  else release_schedule.MEDIUM_SERIES)
         lines = release_schedule.tooltip_lines(entry, medium) or []
     except Exception:
         return []
     lines = [str(line) for line in lines if line]
     if not lines:
         return []
-    # **The chapter on its own line, the timing under it.** The owner, 2
-    # September 2026: "in the readings banners in the main page, make the
-    # next chapter label in one line then the expected and the countdown
-    # in the line below it". release_schedule.tooltip_lines gives three -
-    # "Next Chapter: 886", "Expected: Monday 8:00 PM", "Countdown: 2d 5h"
-    # - and all three were joined into one run, which is what made the
-    # banner's schedule read as a sentence rather than a fact and a time.
-    #
-    # A video entry has no chapter line, so it falls through as the one
-    # joined line it always was.
-    if lines[0].startswith("Next Chapter"):
-        return [lines[0], "  ·  ".join(lines[1:])] if len(lines) > 1 else lines
     return ["  ·  ".join(lines)]
 
 
@@ -1252,6 +1303,28 @@ def hero_meta(entry_id):
     third = (f"  {DOT}  ".join(str(g).strip() for g in genres[:4] if str(g).strip())
              if isinstance(genres, list) else str(genres or "").strip())
     return {"bullets": [runtime, f"  {DOT}  ".join(second), third]}
+
+
+def hero_logo(entry_id):
+    """A saved entry's logo, for a banner that drew without one.
+
+    Its own route, not /api/featured: this banner already has its ground,
+    and that route would download two backdrops to find the logo. Not
+    /api/hero either, whose answer waits on Cinemeta. Video by IMDb id,
+    then by name; a reading entry has no id and goes straight to the name,
+    the strict match the chapter list uses. A miss is the typed title,
+    and artwork's marker keeps it from being asked for again for 6h.
+    """
+    entry = entry_by_id(entry_id)
+    if entry is None:
+        return {"logo": ""}
+    try:
+        from helpers import artwork
+        path = (artwork.logo_path(entry)
+                or artwork.logo_path_by_title(entry.get("title") or ""))
+    except Exception:
+        path = None
+    return {"logo": local_url(path) if path else ""}
 
 
 def featured_art(title, imdb="", kind=""):

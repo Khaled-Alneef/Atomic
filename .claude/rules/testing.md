@@ -362,7 +362,8 @@ titles, 24 chapters, and the two blank ones below.
 Four things the driver got wrong before the app did, so the next pass
 does not pay for them again:
 
-- **A resume record exists only after 30s of playback** (`RESUME_MIN_S`),
+- **A resume record exists only after 30s of playback** (`RESUME_MIN_S`
+  - **1s since 3 November 2026**, so this is history for the 30s),
   saved every 5s after that. A "did the position advance" check that
   starts 30s after the pick sees no record at all and reads it as
   stalled. Read the `chapter markers` line (mpv loaded the file) and the

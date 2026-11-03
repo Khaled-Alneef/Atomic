@@ -30,6 +30,21 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.16": [
+        "Continue always opens at the moment you stopped, in episodes and "
+        "movies, and sooner: it no longer plays from the start first.",
+        "Stopping saves your exact place, even a few seconds in, and a title "
+        "you removed from your list keeps its place from now on.",
+        "Reading banners on Home show the type, the genres when the title "
+        "has them, and the Last Released Chapter, and no longer show a next "
+        "chapter.",
+        "Banners show a title's logo when it has one, like The Eternal "
+        "Supreme.",
+        "A next chapter that has already come out is no longer shown.",
+        "Refreshing a title on some reading sites no longer cuts its chapter "
+        "list down to the newest ones.",
+        "The sidebar's right corners are square.",
+    ],
     "3.15": [
         "Folding and unfolding the sidebar is smooth: the banner pictures on "
         "Home and Discover, and every page's cards, glide with it instead of "

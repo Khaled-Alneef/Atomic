@@ -1,4 +1,35 @@
-"""Start the picture as soon as data arrives, and take the seat after.
+"""Open a resumed file at its seat, always - never from the head first.
+
+**Superseded 3 November 2026, by a measurement. The owner: "when I cont
+watching anything it takes ages to take me to the point I stopped in in
+the player while that it plays from the start!!!!!!"** Everything after
+this paragraph is the history of the head-first shape this module used
+to impose, and `load_into_mpv` at the bottom no longer takes it.
+
+Photographed on the frozen build (3.15.1, Brooklyn Nine-Nine S05E13 at
+7:21, swarm only): first frame at 14.2s *from 0:00*, the seat at 48s, 32s
+of an episode he had already seen, with its subtitles. His own log says
+the same on 26 and 31 October and that morning - 87s and 17.6s of head,
+and a third he left after 20s still at the start.
+
+The reason given below - mpv at a seat whose bytes do not exist yet blocks
+and falls back to the head - was measured the same day
+player_seekable_stream_patch found the vendored libmpv's HTTP cannot seek
+at all and moved the file onto `atomic://`. Measured again on that stream,
+real engine and real libmpv, one throttled local seeder:
+
+    mkv, 2MB pieces, 3MB/s, seat 7:21
+      at the seat   first frame 10.1s AT 7:21, then 39.0s in 39.0s
+      head first    first frame  7.1s at 0:00, still at 0:39 after 40s
+
+It does not give up any more: the read blocks, the engine follows it, and
+the picture arrives at the seat. And head-first is what made the wait
+long: mpv goes on reading the opening, so the swarm is split between the
+pieces it wants next and the seat band, and the band is what is waited
+for.
+
+So nothing plays until the seat does. The wait is on the loading frame,
+which says "Skipping to 7:21..." (player._startup_snapshot).
 
 **The owner's report, 30 August 2026:** *"when source reaches buffering
 99% then the skipping to .... appears, it does not play the video until
@@ -60,11 +91,22 @@ POLL_MS = 120
 # leave a timer running for the life of the page.
 SEAT_GIVE_UP_S = 180.0
 
-# How long a file opened *at* the seat has to produce a picture before
-# it is re-opened from the head. Generous enough for a slow host to
-# answer a range request and short enough that a viewer is not staring
-# at black - see _arm_seat_watchdog.
+# How often a file opened at its seat is asked whether it is getting
+# anywhere - see _arm_seat_watchdog. It used to be how long the picture had
+# before the file was re-opened from the head; a direct link's whole open
+# is 3.9-5.2s across his October log, so 12s is well past a healthy one.
 SEAT_WATCHDOG_S = 12.0
+
+# What counts as "the swarm is delivering" across one SEAT_WATCHDOG_S:
+# 256KB/s. A 12s bound on the picture is wrong for a swarm - the seat needs
+# the header, the index and its own pieces, which on the 16MB pieces of his
+# season packs is 48-64MB, whatever any timer says - but a trickle under
+# this will not play the episode either, so it is not worth waiting for.
+SEAT_FLOW_BYTES_S = 256 * 1024
+
+# And the most a delivering swarm is waited for before the next release is
+# asked. His slowest band in October landed 94s after the handover.
+SEAT_PATIENCE_S = 120.0
 
 
 def _log(message):
@@ -249,43 +291,96 @@ def _patch(module):
         except Exception:
             return False
 
+    def _is_engine_stream(stream):
+        """Served out of the piece store? `kind` and `engine`, never the
+        hash - see the note in _seat_reachable_now."""
+        stream = stream or {}
+        kind = str(stream.get("kind") or "").strip().lower()
+        engine = str(stream.get("engine") or "").strip().lower()
+        return kind == "torrent" and engine == "atomic"
+
+    def _engine_payload(stream):
+        """Bytes this engine stream has received so far, or None when it
+        is not one - a debrid link, or a finished file with no torrent."""
+        if not _is_engine_stream(stream):
+            return None
+        info_hash = str((stream or {}).get("info_hash") or "").strip().lower()
+        try:
+            from helpers import torrent_engine
+            torrent = getattr(torrent_engine, "_torrents", {}).get(info_hash)
+            if torrent is None:
+                return None
+            return int(torrent.handle.status().total_payload_download)
+        except Exception:
+            return None
+
     def _arm_seat_watchdog(self, stream, resume_at):
-        """If opening at the seat produces no picture, go back to the head.
+        """No picture at the seat: wait while bytes are arriving, and walk
+        to the next release when they are not. **Never back to the head.**
 
-        **A net under the fast path, not a second mechanism.** Opening
-        with `start=` is safe for the two cases `_seat_reachable_now`
-        proves - a stream this app does not serve, and an engine stream
-        whose band is on disk - but "proved" is about the bytes, and a
-        host can still stall, refuse a range, or hand back something mpv
-        cannot demux from the middle. The failure mode that costs is the
-        one this whole module exists for: a viewer left on black under a
-        message that cannot come true.
+        It used to re-open the file from the beginning at 12s, which is
+        the owner's report again by another road - and on a swarm 12s is
+        routine rather than a failure, see SEAT_FLOW_BYTES_S. Across one
+        tick a torrent is still delivering or it is not; a delivering one
+        also moves the player's own give-up (`_seat_deadline`, 45s, which
+        would otherwise call a working release "stalled"), up to
+        SEAT_PATIENCE_S.
 
-        So the picture is given SEAT_WATCHDOG_S to appear, and if it has
-        not, the file is re-opened from the head and the ordinary poll
-        takes over - which is exactly the path this would have taken
-        without the fast route. Cancelled the moment a frame lands, so
-        the ordinary case pays one timer.
-        """
+        A direct link has no swarm to read. Its file being open is the
+        one sign of life (his 21 October log: `chapter markers` at 8s, a
+        first frame later), so that buys it one more tick; then it is the
+        next source's turn, seat kept. Cancelled by the first frame, so
+        the ordinary case pays one timer."""
         _cancel_watchdog(self)
         run = self._run
+        started = time.monotonic()
+        state = {"payload": _engine_payload(stream), "ticks": 0}
         timer = QTimer(self)
-        timer.setSingleShot(True)
         timer.setInterval(int(SEAT_WATCHDOG_S * 1000))
 
         def bite():
             if getattr(self, "_closing", False) or self._run != run:
+                _cancel_watchdog(self)
                 return
             if not getattr(self, "_awaiting_first_frame", True):
+                _cancel_watchdog(self)
                 return                    # a frame arrived; nothing to do
+            state["ticks"] += 1
+            waited = time.monotonic() - started
+            payload = _engine_payload(stream)
+            moved = None
+            if payload is not None and state["payload"] is not None:
+                moved = payload - state["payload"]
+            state["payload"] = payload
+            if moved is not None:
+                if (moved >= SEAT_FLOW_BYTES_S * SEAT_WATCHDOG_S
+                        and waited < SEAT_PATIENCE_S):
+                    _log(f"seat: no picture yet after {waited:.0f}s, swarm "
+                         f"delivering {moved / SEAT_WATCHDOG_S / 1e6:.2f}MB/s;"
+                         f" waiting")
+                    if getattr(self, "_resume_target", None) is not None:
+                        self._seat_deadline = (time.monotonic()
+                                               + module.SEAT_GIVE_UP_S)
+                    return
+            elif (state["ticks"] < 2
+                    and float(getattr(self, "_duration", 0.0) or 0.0) > 0):
+                _log(f"seat: no picture yet after {waited:.0f}s, the file is "
+                     f"open; one more tick")
+                return
+            _cancel_watchdog(self)
+            _log(f"seat: no picture at the seat in {waited:.0f}s"
+                 + (f", {moved / SEAT_WATCHDOG_S / 1e6:.2f}MB/s"
+                    if moved is not None else "")
+                 + "; trying another source, seat kept")
             try:
-                from helpers import logs
-                logs.info("seat: no picture at the seat in "
-                          f"{SEAT_WATCHDOG_S:.0f}s; reopening from the head")
+                if not self._try_next_source(self._stream_index,
+                                             resume_at=resume_at,
+                                             reason="stalled"):
+                    # Nothing left to walk to: the player's own give-up
+                    # says so when its deadline comes round (_seat_tick).
+                    _log("seat: no other source to try")
             except Exception:
-                pass
-            _load_from_head(self, stream, resume_at)
-            _arm_head_watchdog(self, resume_at)
+                _log("seat: walking to the next source failed")
 
         timer.timeout.connect(bite)
         self._atomic_seat_watchdog = timer
@@ -476,74 +571,35 @@ def _patch(module):
             _stop_poll(self)
             return old_load(self, stream, resume_at)
 
-        # **Open at the seat when the seat is already reachable.** The
-        # owner, 3 September 2026: *"when I play Reacher it takes a while
-        # to skip to the progress point, make it start from the stopped
-        # point directly."*
+        # **Every resume opens at the seat - see the top of this module.**
+        # The engine is told first, because a release the player reuses
+        # (a prewarm, the last source) may never have been given this
+        # seat at add(), and an engine stream with no band is a seek
+        # nothing is fetching for. mpv's own reads then re-aim it
+        # (_serve), and arm_start_band retries by itself until the index
+        # is on disk.
         #
-        # He is right, and this module was doing it to him on purpose in
-        # a case where it buys nothing. What it exists for is written at
-        # the top: a torrent whose bytes at the seat do **not exist yet**
-        # cannot be opened with `start=`, because mpv blocks on a stream
-        # read tens of seconds long, gives up, and restarts at the head
-        # under a "Skipping to 4:00..." that can never come true. That is
-        # a real measurement and it stands.
-        #
-        # It was applied to every resume regardless. Two of them never
-        # needed it:
-        #
-        #   * **a direct URL** - a debrid link, an addon's HTTP stream -
-        #     has no engine behind it and nothing to wait for. HTTP range
-        #     seeking is a request, so `start=` is exact and immediate,
-        #     which is what player._load_into_mpv's own note measured
-        #     (start=8.05 opened at time-pos 8.050 against a deliberately
-        #     slow source);
-        #   * **a torrent whose resume band is already on disk** - an
-        #     episode played before, or a swarm that filled while the
-        #     sources were being listed. `_seat_data_ready` is the exact
-        #     question and it is asked here, before the load, rather than
-        #     only from the poll afterwards.
-        #
-        # In both, going through the head first means watching the
-        # opening of an episode he has already seen and then a skip - the
-        # "takes a while to skip to the progress point" he is describing.
-        # Where the band genuinely is not there, nothing changes: the
-        # file opens from the head and the seat is applied when it lands.
-        if _seat_reachable_now(self, stream, seat):
-            _stop_poll(self)
-            _log(f"seat: opening at {seat:.1f}s - the bytes there are proven")
-            result = old_load(self, stream, resume_at)
-            _arm_seat_watchdog(self, stream, resume_at)
-            return result
-
-        # **A watchdog armed by the load before this one is cancelled
-        # here too.** It only used to be cancelled on the fast path, so a
-        # source switch taken while one was still counting left a
-        # single-shot timer holding the *previous* stream: it bit twelve
-        # seconds later, saw `_awaiting_first_frame` still true (the new
-        # source was still connecting) and re-opened the release that had
-        # just been switched away from.
-        _cancel_watchdog(self)
-        _log(f"seat: opening from the head; {seat:.1f}s will be taken when "
-             f"its data lands")
-
-        # `old_load` reads the seat back out of `_prime_seat` to decide
-        # whether to open with mpv's blocking `start=`. Suppress that one
-        # read so the file opens from the head; the engine already has
-        # the real seat (streams.prepare passed it to torrent_engine.add)
-        # and the poll below keeps it primed.
-        sentinel = object()
-        prior = self.__dict__.get("_prime_seat", sentinel)
-        self._prime_seat = lambda _resume_at=None: (None, None)
-        try:
-            result = old_load(self, stream, resume_at)
-        finally:
-            if prior is sentinel:
-                self.__dict__.pop("_prime_seat", None)
-            else:
-                self.__dict__["_prime_seat"] = prior
-
-        _begin_seat_poll(self, stream, seat)
+        # **The other half of this is the flash he also saw:** a finished
+        # file, or a band already on disk with `start_armed` not yet set,
+        # read as "unproven" here and opened from the head, then jumped
+        # 0.04-0.13s after the first frame (his 29 October, 19:48: 0.1s,
+        # 0.07s, 0.1s).
+        _stop_poll(self)
+        info_hash = str((stream or {}).get("info_hash") or "").strip().lower()
+        if info_hash and _is_engine_stream(stream):
+            try:
+                from helpers import torrent_engine
+                torrent_engine.set_start_seconds(info_hash, float(seat))
+                torrent_engine.arm_start_band(info_hash)
+            except Exception:
+                pass
+        ready = ((stream or {}).get("local_file")
+                 or _seat_reachable_now(self, stream, seat))
+        _log(f"seat: opening at {seat:.1f}s - "
+             + ("the bytes there are proven" if ready else
+                "fetching them under the loading frame"))
+        result = old_load(self, stream, resume_at)
+        _arm_seat_watchdog(self, stream, resume_at)
         return result
 
     def close_player(self):

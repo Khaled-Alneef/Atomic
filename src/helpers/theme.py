@@ -662,10 +662,12 @@ QLabel {{
 /* A restrained top-to-bottom sheen rather than a flat fill - just enough
    gradient to catch the light without competing with the item cards,
    which carry the app's more pronounced gloss.
-   The two right-hand corners are rounded so the column reads as a panel
-   laid on the background rather than as a wall built into the window
-   edge. Corners only - the sidebar's width, its border and everything
-   inside it are untouched, so nothing moves. */
+   Square on the right, on purpose - the owner, 2 November 2026: "wth is
+   that corner in the sidebar????". It was an 18px radius on both right
+   corners, and Qt tapers a border round a radius from this 1px edge to
+   the 0px top and bottom ones, so the line bent away and faded out
+   halfway round: photographed on 3.15 at both corners, an arc that goes
+   nowhere. */
 QWidget#Sidebar {{
     /* One matte colour, top to bottom - the owner, 19 October 2026:
        "make the sidebar color all the same (matte) remove the white
@@ -673,8 +675,6 @@ QWidget#Sidebar {{
        day a spotlight; both are gone. */
     background: {SIDEBAR};
     border-right: 1px solid {BORDER};
-    border-top-right-radius: {RADIUS_LG}px;
-    border-bottom-right-radius: {RADIUS_LG}px;
 }}
 /* The collapse/expand chevron pinned at the sidebar's top edge. The
    icon stack is here because the glyph is a Fluent chevron

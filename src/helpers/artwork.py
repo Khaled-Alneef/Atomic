@@ -733,6 +733,12 @@ def _search_anime_logo(title, timeout):
     return _best_logo(images)
 
 
+def _title_key(title) -> str:
+    """The name a by-title logo is kept under in logo_cache."""
+    return hashlib.sha1(
+        str(title or "").strip().lower().encode("utf-8")).hexdigest()[:16]
+
+
 def logo_path_by_title(title, timeout: int = DEFAULT_TIMEOUT):
     """A local PNG logo found by **title** on TMDB, or None.
 
@@ -761,8 +767,7 @@ def logo_path_by_title(title, timeout: int = DEFAULT_TIMEOUT):
     title = (title or "").strip()
     if not title or not token():
         return None
-    key = hashlib.sha1(title.lower().encode("utf-8")).hexdigest()[:16]
-    cached, missing = _cached_file(key, ".title.png")
+    cached, missing = _cached_file(_title_key(title), ".title.png")
     if cached.exists() and cached.stat().st_size > 0:
         return str(cached)
     if _still_missing(missing):
@@ -919,6 +924,28 @@ def cached(entry):
         found.append(str(path) if ready else "")
     backdrop = found[0] or found[1]
     return backdrop, found[2]
+
+
+def cached_logo(entry) -> str:
+    """This title's logo from disk alone, by IMDb id and then by name - ""
+    when neither is there. A `stat()` or two: no request, no marker.
+
+    Home's banner asks this as it answers, see backend.hero_for: the file
+    is the fact, whichever page happened to fetch it."""
+    imdb_id = str((entry or {}).get("imdb_id") or "")
+    title = str((entry or {}).get("title") or "").strip()
+    candidates = []
+    if imdb_id:
+        candidates.append(_cached_file(imdb_id, ".png")[0])
+    if title:
+        candidates.append(_cached_file(_title_key(title), ".title.png")[0])
+    for path in candidates:
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                return str(path)
+        except OSError:
+            continue
+    return ""
 
 
 # IMDb ids whose cached art has been checked against the kind its own

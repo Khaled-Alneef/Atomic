@@ -1772,6 +1772,21 @@ def reading_deep_browse(deadline=None) -> int:
 _reading_tags = None
 
 
+def ask_reading_genres(title: str) -> list:
+    """reading_genres, kept for cached_genres to answer next time. Only an
+    answer is kept: MangaDex has stopped answering for titles it used to
+    tag (The Beginning After The End, 3 November 2026), and an empty reply
+    must not wipe the verdict already on record."""
+    names = reading_genres(title)
+    key = (title or "").strip().lower()
+    if names and key:
+        _load_reading_meta()
+        with _MEDIUM_LOCK:
+            _GENRE_CACHE[key] = list(names)
+        _save_reading_meta()
+    return names
+
+
 def reading_genres(title: str, limit: int = 6) -> list:
     """The genre tags MangaDex files this title under, or []. What the
     reading details page shows as its genre buttons - the video pages
