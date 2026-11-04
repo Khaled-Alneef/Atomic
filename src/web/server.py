@@ -2492,7 +2492,7 @@ def _search(text, more=False):
                         "site_id": row.get("site_id") or "",
                         "site_name": row.get("site_name") or "",
                         "type": "Manga", "imdb_id": "", "year": ""})
-        return out[:30]
+        return _with_medium(finder.ranked_by_title(out, text)[:SEARCH_READING_ROWS])
 
     def novels():
         """The four novel sites - helpers/novel_sites, under its own
@@ -2572,8 +2572,15 @@ def _search(text, more=False):
     # arrives (app.js mergeSections).
     anime_ids = {str(r.get("imdb_id") or "") for r in found.get("Anime") or []
                  if isinstance(r, dict) and r.get("imdb_id")}
-    for order, name in enumerate(("Anime", "Series", "Movies", "Reading",
-                                  "Novels")):
+    # **Each medium its own row.** The owner, 5 November 2026: "why does it
+    # show all readings in one row and the novels in another? ... Manga and
+    # Manhwa and Manhua and Novels each has its row!". One job answers all
+    # three (_with_medium files them), so they arrive together.
+    reading_rows = found.get("Reading") or []
+    for name in SEARCH_MEDIA:
+        found[name] = [r for r in reading_rows if isinstance(r, dict)
+                       and r.get("medium") == name][:SEARCH_MEDIUM_ROWS]
+    for order, name in enumerate(SEARCH_SECTIONS):
         rows = [r for r in found.get(name) or [] if isinstance(r, dict)
                 and r.get("title")]
         if name == "Series" and anime_ids:
@@ -2584,16 +2591,17 @@ def _search(text, more=False):
             continue
         total += len(rows)
         shaped = [_row(e) for e in rows]
-        if name in ("Novels", "Reading"):
+        if name == "Novels" or name in SEARCH_MEDIA:
             # The site under each title, as on the catalogue pages.
             for row, e in zip(shaped, rows):
                 row["meta"] = row.get("meta") or _site_label(e)
-        sections.append({"title": f"{name}  ({len(rows)})", "key": name.lower(),
+        sections.append({"title": f"{name}  ({len(rows)})",
+                         "key": name.lower().replace(" ", "-"),
                          "order": order, "rows": shaped})
     if cast:
         total += len(cast)
         sections.append({"title": f"Cast  ({len(cast)})", "style": "person",
-                         "key": "cast", "order": 5,
+                         "key": "cast", "order": len(SEARCH_SECTIONS),
                          "rows": [_person_row(r) for r in cast]})
     if pending:
         note = (f"{total} so far for “{text}” · still searching "
@@ -2612,6 +2620,57 @@ _SEARCH_LOCK = threading.Lock()
 SEARCH_FIRST_WAIT_S = 1.5
 SEARCH_MORE_WAIT_S = 0.6
 SEARCH_JOB_TTL_S = 120.0
+
+# The search page's rows, in the order they draw. "Other Readings" exists
+# only when a title has no known medium; filing one under a medium it may
+# not be is the silent wrong answer, and a saved title carries that type.
+SEARCH_MEDIA = ("Manga", "Manhwa", "Manhua", "Other Readings")
+SEARCH_SECTIONS = ("Anime", "Series", "Movies", "Manga", "Manhwa", "Manhua",
+                   "Novels", "Other Readings")
+# All sites' answers before they are split, and one row's worth after.
+SEARCH_READING_ROWS = 60
+SEARCH_MEDIUM_ROWS = 30
+# How long a search waits on a medium nobody has answered yet. Measured 5
+# November 2026 on six real queries, his verdicts on a copy: of 32 rows 22
+# were known at once, and the rest took 0.0-1.48s. Past this a title goes
+# under Other Readings, says so in the log, and is right on the next search.
+SEARCH_MEDIUM_WAIT_S = 4.0
+
+
+def _library_media():
+    """title -> the medium his own saved entry says, for a title no catalogue
+    can name. Only ever asked about those: a row saved from a search before
+    this was filed by medium reads "Manga" whatever it is, so it must not
+    overrule a catalogue. Which is why "Manga" says nothing here."""
+    try:
+        rows = storage.load("tracker.json", []) or []
+    except Exception:
+        return {}
+    return {str(e.get("title") or "").strip().lower(): e.get("type")
+            for e in rows if isinstance(e, dict)
+            and e.get("type") in ("Manhwa", "Manhua")}
+
+
+def _with_medium(rows):
+    """`rows`, each with its `medium` and the `type` its card opens with."""
+    from helpers import discover
+    verdicts = discover.mediums_for([r.get("title") for r in rows],
+                                    SEARCH_MEDIUM_WAIT_S)
+    late = [r.get("title") for r in rows if r.get("title") not in verdicts]
+    if late:
+        logs.info(f"search: {len(late)} of {len(rows)} reading rows had no "
+                  f"medium inside {SEARCH_MEDIUM_WAIT_S:.0f}s: {late[:5]}")
+    library = None
+    for row in rows:
+        medium = verdicts.get(row.get("title"))
+        if medium not in discover.MEDIUM_LANGUAGES:
+            if library is None:
+                library = _library_media()
+            medium = library.get(str(row.get("title") or "").strip().lower())
+        row["medium"] = medium or "Other Readings"
+        # What the Read pages give a title nobody can name.
+        row["type"] = medium or "Manga"
+    return rows
 
 
 def _search_job(text, video, reading, faces, novels):
@@ -4279,6 +4338,8 @@ def answer(route, query=None):
     if route == "mark":
         return backend.mark_read(one("id"), one("key"),
                                  one("read", "1") == "1")
+    if route == "opened":
+        return backend.chapter_opened(one("id"))
     if route == "highlights":
         return backend.novel_highlights(one("id"), one("key"))
     if route == "highlight":

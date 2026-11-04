@@ -298,8 +298,12 @@ def typetext(text):
     if not f:
         _say_guard()
         raise SystemExit("no window")
+    # 150ms, not 20. Measured 5 November 2026: at 20ms a posted "kingdom" arrived
+    # as "king", "kidom" and "kigdom". 150ms is better and still not safe ("black
+    # clver"), so photograph the field before pressing Enter. A real key comes as
+    # a keydown and its char, so this is the rig's, not the app's.
     for ch in text:
-        u.PostMessageW(f[0], 0x0102, ord(ch), 1); time.sleep(0.02)
+        u.PostMessageW(f[0], 0x0102, ord(ch), 1); time.sleep(0.15)
 
 
 def close():

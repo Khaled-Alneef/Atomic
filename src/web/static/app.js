@@ -2844,13 +2844,12 @@ async function openChapter(id, index) {
   ending.appendChild(nextHere);
   strip.appendChild(ending);
 
-  // Marked read on open, which is what the Qt reader records too - never
-  // for a chapter that showed nothing (see noPages above: the pass that
-  // found it had marked two blank chapters read).
+  // **Opening is not reading.** The owner, 5 November 2026: "what happened
+  // to making the chapter readed only if the end reached in readings???".
+  // Opening moves the title up History and Home and marks nothing; the mark
+  // is checkEnd's. A chapter that showed nothing never gets here (noPages).
   if (readerState.key && !noPages) {
-    fetch('/api/mark?id=' + encodeURIComponent(id) +
-          '&key=' + encodeURIComponent(readerState.key))
-      .catch(function () {});
+    fetch('/api/opened?id=' + encodeURIComponent(id)).catch(function () {});
     startPlace(id, readerState.key, strip, ending, placeAsk);
   }
 }
@@ -3032,13 +3031,12 @@ function setHighlight(nm, spans, on) {
 /* **Where reading stopped, kept and given back.** The owner, 18 October
    2026: "when I continue reading make sure it takes me to the exact
    place I stopped in the ch not the next one! and if I finished the ch
-   make sure that it takes me to the next ch". A chapter is marked read
-   the moment it opens, so Continue could not tell a chapter left half-way
-   from a finished one and always stepped past it.
+   make sure that it takes me to the next ch".
 
    The place is the strip child at the top of the view (a page, or a
    paragraph of a novel), how far down it the view starts, and whether
-   the chapter's end - the Previous/Next row - has come on screen. A
+   the chapter's end - the Previous/Next row - has come on screen, which
+   is also what marks it read (checkEnd). A
    child and a fraction rather than a scrollTop, because pages above it
    load at their own pace and a pixel offset taken now names a different
    page once they have; the fraction is re-applied against the child's
@@ -3079,23 +3077,41 @@ function placeNow(rp) {
   const kid = kids[at];
   const height = kid.getBoundingClientRect().height || 1;
   const frac = Math.min(1, Math.max(0, (top - placeTopOf(kid, base)) / height));
-  // The end counts only once he has scrolled to it over real pages:
-  // before the first picture arrives every box is a guess, and on a
-  // short guess the end row is on screen the moment the chapter opens.
-  if (!rp.done && rp.scrolled && top > 0 && placeLaidOut(rp)
-      && rp.ending.getBoundingClientRect().top < page.clientHeight) {
-    rp.done = true;
-  }
   return { page: at, frac: frac };
 }
 
-function placeLaidOut(rp) {
-  const imgs = rp.strip.getElementsByTagName('img');
-  if (!imgs.length) return true;              // a novel's text
-  for (let i = 0; i < imgs.length; i++) {
-    if (imgs[i].naturalWidth > 0) return true;
+// A page has settled once it decoded, or failed: the window's error handler
+// hides a failed picture and strips its src, and one dead page must not stop
+// a chapter from ever finishing.
+function pageSettled(img) {
+  return img.naturalWidth > 0 || img.style.display === 'none';
+}
+
+function checkEnd(rp) {
+  if (rp !== readerPlace || rp.done || rp.restoring || !rp.ready) return;
+  const imgs = rp.strip.getElementsByClassName('rpage');
+  // Before pictures arrive every box is a guess, and on a short guess the
+  // end row is on screen the moment the chapter opens. So the last page must
+  // be in; and when he has not scrolled at all, every page must be, which
+  // leaves only a chapter that truly fits on one screen.
+  if (imgs.length) {
+    if (!pageSettled(imgs[imgs.length - 1])) return;
+    if (!rp.scrolled) {
+      for (let i = 0; i < imgs.length; i++) {
+        if (!pageSettled(imgs[i])) return;
+      }
+    }
   }
-  return false;
+  if (rp.ending.getBoundingClientRect().top >= page.clientHeight) return;
+  rp.done = true;
+  // keepalive: Next on the end row is pressed the moment this is true, and
+  // it takes the page with it.
+  fetch('/api/mark?id=' + encodeURIComponent(rp.id) +
+        '&key=' + encodeURIComponent(rp.key), { keepalive: true })
+    .catch(function () {});
+  tellHost({ action: 'diag', what: 'reader end reached', key: rp.key,
+             scrolled: rp.scrolled ? 1 : 0, pages: imgs.length });
+  savePlace(rp);
 }
 
 function savePlace(rp) {
@@ -3114,13 +3130,16 @@ function startPlace(id, key, strip, ending, placeAsk) {
                done: false, restoring: false, timer: 0,
                ready: false, scrolled: false };
   readerPlace = rp;
+  // Capture, because `load` does not bubble: the end row can already be on
+  // screen when the last page arrives.
+  strip.addEventListener('load', function () { checkEnd(rp); }, true);
   placeAsk.then(function (place) {
     if (rp !== readerPlace) return;           // another chapter since
     rp.ready = true;      // nothing is written over the place before it is read
     place = place || {};
     const resume = place.key === key && !place.done
       && ((place.page | 0) > 0 || (+place.frac || 0) > 0);
-    if (!resume) { savePlace(rp); return; }   // this chapter, from its top
+    if (!resume) { savePlace(rp); checkEnd(rp); return; }   // this chapter, from its top
     restorePlace(rp, place.page | 0, +place.frac || 0);
   });
 }
@@ -3161,6 +3180,9 @@ page.addEventListener('scroll', function () {
   const rp = readerPlace;
   if (!rp || rp.restoring || !rp.ready) return;
   rp.scrolled = true;
+  // Here and not in the 400ms save: leaving inside that pause cancels the
+  // save, and a chapter read to its last line would stay unread.
+  checkEnd(rp);
   clearTimeout(rp.timer);
   rp.timer = setTimeout(function () { savePlace(rp); }, PLACE_SAVE_MS);
 }, { passive: true });

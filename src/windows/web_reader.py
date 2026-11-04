@@ -265,7 +265,7 @@ class WebReader(QWidget):
         from windows import details
         from windows.web_pages import _find, overlay_opened
         entry = _find(str(body.get("id") or ""), title, body.get("type"),
-                      body.get("imdb"))
+                      body.get("imdb"), body.get("url"))
         if entry is None:
             if not title:
                 return

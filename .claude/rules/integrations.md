@@ -1145,8 +1145,8 @@ read pages are not!"* Measured per route on the frozen build:
   once a session (3asq `page/{n}/`, TeamX and Lava `?page={n}`, Azora
   `series?page={n}`; Mangalek 403s, SWAT is an API) and
   `discover.reading_deep_browse` walks pages 2-12 three at a time.
-  **Probe with `_get_answered`**: `_read` counts a 404 as a host failure
-  and two put the site on the refusing list for ten minutes - measured.
+  `_get_answered` was how a probe got past `_read` counting a 404 as a host
+  failure; `_read` no longer does (5 November 2026, below).
 - **The continuation compared against `skip`**, which grows by every
   batch handed over, duplicates included (682 against a page of 44), so
   the cache was never read again after the first pulls. It compares
@@ -1340,3 +1340,52 @@ cannot seek.
 A harness trap from this pass: `lt.create_torrent` makes a hybrid v1+v2
 torrent and `ti.info_hash()` then answers the truncated v2 hash, which is
 the 29 August read_piece timeout again. `flags=v1_only` for a test seeder.
+
+
+## MangaDar is its REST API, and a search names the medium (5 November 2026)
+
+His ask: *"add this website as manga and manhwa and manhua source"*, and
+*"Manga and Manhwa and Manhua and Novels each has its row!"*.
+
+**MangaDar** (`wp-json/mangadar/v1`, keyless) fits none of the four engines,
+so it is gated by host (`manga_sites._is_mangadar`) in search, browse, page
+browse, `fetch_manga_details` and `_site_chapters`, and no other shape is ever
+tried against it. A row's `type.slug` is the medium outright, so
+`discover.teach_media` files it without asking MangaDex; "Other" (nobody knew)
+is the one verdict it overrules. Page urls are signed and expire, so they are
+asked for on each open. `light-novel` rows are left out. Measured: search
+0.12-0.46s, browse 59 rows 0.51s, Kingdom's 939 chapters 0.43s, 20 pages 0.15s.
+
+**A 404 is not a refusal.** `_read` counted any failed request against the
+host, and a search a site has no rows for walks on through the other engines'
+guesses: two 404s on `/wp-admin/admin-ajax.php` and the host answered nothing
+for ten minutes. One "one piece" put TeamX, SWAT and Lava Scans on the list,
+and the next "kingdom" drew MangaDar alone. 400/404/405/410 no longer count;
+403, 429, 5xx and transport errors still do, so Mangalek and Azora still go on
+it. `net.note_host_failure` now logs the moment a host goes on the list, which
+is what found this: nothing had ever said so.
+
+**The search's rows.** `server._with_medium` files the reading rows by
+`discover.mediums_for`: the verdicts held (22 of 32 rows on six real queries)
+at once, the rest asked under `SEARCH_MEDIUM_WAIT_S` (they took 0-1.48s). A
+title no catalogue can name reads his own library if that says Manhwa or
+Manhua ("Manga" says nothing: a search used to save every row as Manga), and
+otherwise goes under "Other Readings" rather than a medium it may not be: 601
+of 2,433 stored verdicts are "Other". Reading rows reach the page 1.5-4s in.
+
+**A reading card opens the site it names** (5 November 2026). His report: Black
+Clover *"only showing few chapters ... in the Mangadar site it has 392"*.
+3asq files it as two listings, 18 and 30 chapters, and MangaDar has 399 rows
+(392 numbered, plus extras). `web_pages._find` matched a reading card by title
+against his History row, which pointed at 3asq, so MangaDar's card opened 3asq's
+18. It takes the card's url now and a different address is not a match; marks
+are kept by title, so they follow. A 3asq card still lists what 3asq has, and that is his decision, the same
+day: a short list stays on its own site rather than switching to a fuller one.
+
+**A faster reading search was built, measured and reverted at his word, the same
+day** (*"revert the changes it takes long time like before"*). Accepting a known
+engine's empty answer, not asking non-serving sites, ending the first answer when
+the reading rows were in, and opening connections on a press of the field took the
+sites' part from 1.6-5.4s to about 0.7s by the route's own clock, 1.1-2.0s (one
+3.4s) on the frozen build. On his machine it read no faster. So the route's number
+is not what he sees: find out what he is watching before trying this again.

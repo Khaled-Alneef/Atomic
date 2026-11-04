@@ -25,6 +25,7 @@ The pages themselves are in src/web, served over http://.
 """
 
 import os
+import re
 import time
 
 from PyQt6 import sip
@@ -828,7 +829,8 @@ class _WebPage(GlassPage):
                 self._run(lambda: _open_links(self, entry))
             return
 
-        entry = _find(entry_id, title, body.get("type"), body.get("imdb"))
+        entry = _find(entry_id, title, body.get("type"), body.get("imdb"),
+                      body.get("url"))
         if entry is None:
             # A Discover title is not in the library, so there is nothing
             # to look up - the details page takes the row itself, which
@@ -1292,9 +1294,9 @@ def _place_index(backend, entry_id, items):
     **A chapter left half-way is reopened, a finished one is not.** The
     owner, 18 October 2026: "make sure it takes me to the exact place I
     stopped in the ch not the next one! and if I finished the ch make
-    sure that it takes me to the next ch". Every chapter is marked read
-    on open, so the marks alone cannot tell the two apart - the reader's
-    place can (web/backend.reading_place): `done` is set once the
+    sure that it takes me to the next ch". A chapter re-read from an older
+    mark is left half-way with no mark to say so, so the reader's place
+    decides (web/backend.reading_place): `done` is set once the
     chapter's end came on screen. Not done -> that chapter (the reader
     scrolls back to the page and the spot itself); done -> the one after
     it, which is the lower index, the list running newest first. None
@@ -1543,9 +1545,25 @@ def entry_side(kind) -> str:
     return ""
 
 
-def _find(entry_id, title, kind="", imdb=""):
+def _page_address(url) -> str:
+    """A series page's address with what does not name it removed."""
+    text = str(url or "").strip().lower()
+    return re.sub(r"^https?://(www\.)?", "", text).rstrip("/")
+
+
+def _find(entry_id, title, kind="", imdb="", url=""):
     """The saved entry behind a clicked card: by id, then by IMDb id,
     then by title.
+
+    **A reading card opens the site it names.** The owner, 5 November 2026:
+    "why is the black clover manga only showing few chapters???? in the
+    Mangadar site it has 392!!!!!". His History holds Black Clover at
+    3asq, whose listing is 18 chapters; a reading row has no IMDb id, so
+    every Black Clover card matched that row by title, MangaDar's (399)
+    included, and his log read `chapter list: host=3asq.online found=18`.
+    A different address is another place to read it, so the card is left to
+    open as itself. His marks are kept by title (history.title_key) and
+    follow him there.
 
     **A title match never crosses an IMDb id or a film/series line.**
     The owner, 2 October 2026: *"when I tried to watch series what women
@@ -1575,10 +1593,14 @@ def _find(entry_id, title, kind="", imdb=""):
     side = entry_side(kind)
     imdb = str(imdb or "").strip()
     film = str(kind or "").strip().lower() in ("movie", "movies")
+    address = _page_address(url) if side == "read" else ""
 
     def agrees(row):
         other = entry_side(row.get("type"))
         if side and other and other != side:
+            return False
+        theirs_at = _page_address(row.get("url"))
+        if address and theirs_at and theirs_at != address:
             return False
         theirs = str(row.get("imdb_id") or "").strip()
         if imdb and theirs and theirs != imdb:

@@ -325,6 +325,27 @@ def keyboard_to_qt(widget) -> bool:
         return False
 
 
+def keyboard_holder() -> int:
+    """The native window holding the keyboard now, for keyboard_back."""
+    try:
+        return int(_u.GetFocus() or 0)
+    except Exception:
+        return 0
+
+
+def keyboard_back(handle) -> bool:
+    """Hand the keyboard back to what keyboard_holder named, if it still
+    exists: a page is often rebuilt while an overlay covers it."""
+    try:
+        if not handle or not _u.IsWindow(handle):
+            return False
+        _u.SetFocus(handle)
+        return int(_u.GetFocus() or 0) == int(handle)
+    except Exception:
+        logs.exception("The keyboard could not be handed back to a view")
+        return False
+
+
 class WebView2Page(QWidget):
     """One page, rendered and scrolled by Edge inside a Qt layout."""
 

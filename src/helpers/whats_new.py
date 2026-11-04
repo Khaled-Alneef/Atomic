@@ -30,6 +30,20 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.17": [
+        "MangaDar is a new reading source, for manga, manhwa and manhua.",
+        "Search results show Manga, Manhwa, Manhua and Novels each in its "
+        "own row. A title nobody can name the type of goes under Other "
+        "Readings.",
+        "The search box in the episode and chapter lists takes typing again, "
+        "and Escape works on that page without a click.",
+        "A chapter is marked as read only when you reach its end, not when "
+        "you open it.",
+        "A reading card opens the site it names, even when you read that "
+        "title on another site before.",
+        "A reading site that has nothing for one search no longer disappears "
+        "from your next searches.",
+    ],
     "3.16": [
         "Continue always opens at the moment you stopped, in episodes and "
         "movies, and sooner: it no longer plays from the start first.",

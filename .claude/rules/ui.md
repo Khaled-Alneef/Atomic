@@ -1029,3 +1029,35 @@ hovered picture; app.css composes them with the Netflix growth (--s) in
 one transform. 9 degrees at 760px perspective moves a picture's near edge
 3-7px, inside the card's 8px padding, so paint containment never clips
 it. Measured with a lean live under the pointer: glides 4-8ms, as before.
+
+
+## A page over a web view has to take the keyboard itself (5 November 2026)
+
+His report: *"the search for the ep or ch in the ep and ch list pages does not
+write!!!!!"*. A press on a web page's card leaves the Win32 focus on its
+`Chrome_WidgetWin_1`, and `overlay_opened` parks that window off screen with the
+focus still in it. Read off the frozen build with `GetGUIThreadInfo` from
+outside: after a click on the field the focus was still that hidden window, a
+key sent there vanished, and the same key sent to the Qt window typed and
+filtered. So a field draws its caret and types nothing, and a caret is no proof.
+`open_details` takes the keyboard (`webview2_host.keyboard_to_qt`, which also
+brings Escape and R back) and `_close_now` returns it (`keyboard_holder` /
+`keyboard_back`), read back on the Home view after Escape. Every
+`widgets.search_field` also takes it on a press. **To test focus without having
+it**, send the key to `hwndFocus`, where a real key would land, not to the top
+window: the rig's `type` posts to the top window and passes either way.
+
+## A chapter is read when its end is reached (5 November 2026)
+
+His word: *"what happened to making the chapter readed only if the end reached
+in readings???????"*. The 18 October work gave the reader a `done` flag for
+Continue and left the mark where it was, on open. `app.js` `checkEnd` writes the
+mark now, once, when the end row is on screen and the last page has settled
+(decoded, or failed and hidden); with no scroll yet, every page must have
+settled, which leaves only a chapter that truly fits a screen. It runs on scroll
+rather than in the 400ms save, because leaving inside that pause cancels the
+save. `/api/opened` keeps the title moving up History and Home on open.
+Measured on the frozen build, Black Clover 392, 20 pages: no mark on open, at
+page 0 or at page 16; `c392` once the end row came up. The Qt reader, which runs
+only on a machine with no WebView2, still marks on open. Marks written by the
+old rule stay as they are: nothing says which were really finished.
