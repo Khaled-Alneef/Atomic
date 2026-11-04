@@ -71,10 +71,11 @@ GitHub tags.
    app `%APPDATA%` is virtualized, and a copytree copies a stale shadow
    (`.claude/rules/testing.md`, "The desktop app's %APPDATA% is not
    his", 8 September 2026).
-6. **Close any running Atomic before a build or checkout touches the
-   binary**, automatically, without asking - it may destroy in-progress
-   test state, but Windows won't let the build replace a running binary
-   either way.
+6. **Close this repository's own test build before a build or checkout
+   touches the binary**, automatically, without asking - it may destroy
+   in-progress test state, but Windows won't let the build replace a running
+   binary either way. **Never his installed Atomic**, wherever it runs from
+   (`rig.py close` matches by path, and see rule 14).
 7. **One second.** The owner's standing rule, 21 August 2026: *"make all
    transitions in the app take at most 1 sec"*. Anything the user
    started and is now watching - a page opening, a search answering,
@@ -397,3 +398,35 @@ couldn't.
     new page reads the counter in its tick. Photographed on the frozen
     build: Reacher removed on its details page, and Home behind it
     without the card two seconds later, no page switch.
+
+14. **Testing never touches what he is doing: the other monitor, and never
+    the focus.** His rule, 3 November 2026: *"make working without taking the
+    window focus and in the other monitor as a rule that always be done!"*
+    He uses the machine while work runs, with his own Atomic open.
+
+    - **The other monitor.** Every window a test opens stays off the primary
+      monitor, the 2K panel he works on. With only one monitor connected,
+      nothing is launched: say so and leave the on-screen check to him.
+    - **Never the focus, the pointer or the keyboard.** No
+      `SetForegroundWindow`, `SetCursorPos`, `mouse_event`, `keybd_event` or
+      `SendInput`. Input goes by posted message to the test window only. A
+      chord like Ctrl+1 cannot go that way, so click the thing instead.
+    - **His Atomic is left alone**: never closed, never driven, never counted
+      as ours. `rig.py` matches by the pid it started and the repo's path.
+    - **Go through `rig.py`**, which does all of it by default: places the
+      window through the copy's settings, turns the launch logo off
+      (`ATOMIC_NO_SPLASH`), starts the app through WMI so it inherits no right
+      to the foreground, and runs a guard that ends the app the moment it
+      takes the foreground or shows a window off that monitor. The older
+      drivers that launch for themselves refuse to run until converted.
+    - **A test that makes sound is his to run**, because the app cannot be
+      muted from outside yet. So is one that only reproduces at his panel's
+      size and 125% scale: **say what was left, and ask**, rather than
+      borrowing his monitor. Rule 10's screenshot is taken on the other
+      monitor, and its size and scale are part of what it shows.
+
+    It is a measurement, not a preference. Started the old way the test
+    window held the foreground for all of a 41-second run while he was
+    typing. Started through WMI it never took it, and no window touched his
+    panel, with his own Atomic open throughout. The steps are in
+    `.claude/skills/test/SKILL.md`.

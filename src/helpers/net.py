@@ -190,6 +190,17 @@ def note_host_failure(url):
     with _refused_lock:
         failures, _when = _refused_hosts.get(host, (0, 0.0))
         _refused_hosts[host] = (failures + 1, time.time())
+    # Said once, as the host goes on the list. Every reader of a refused host
+    # answers nothing and fails soft, so without this line a site simply stops
+    # having results and nothing says why (5 November 2026). The path and not
+    # the URL: a query can carry a token.
+    if failures + 1 == REFUSED_HOST_FAILURES:
+        try:
+            from . import logs
+            logs.info(f"host refusing for {REFUSED_HOST_TTL_S}s: {host}, "
+                      f"last failure on {urllib.parse.urlsplit(str(url)).path[:60]}")
+        except Exception:
+            pass
 
 
 def note_host_success(url):

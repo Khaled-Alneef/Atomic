@@ -181,16 +181,14 @@ sits inside a function's constants, so walk nested code objects.
 
 ### 5. Drive the frozen exe from outside
 
-- **Input and screenshots come from a separate process** - the rig.
+- **Input and screenshots come from a separate process** - the rig,
+  on the other monitor, by posted message (CLAUDE.md rule 14).
   Match the window title exactly and take the largest window with that
   title: "Atomic - File Explorer" took a batch of clicks once, and the
   search suggestions popup is a second window called "Atomic", 72px
   lower, that a screenshot cropped against.
-- **Keyboard is the fallback.** Ctrl+1..9 reach every sidebar page
-  without a pointer, which is how a dead mouse was told apart from a
-  dead app.
-- **A click is not a click until the button-up lands on the same
-  element.** Between down and up, put the cursor back where it was.
+- **A chord needs the real keyboard**, so it is no longer available: the
+  sidebar's Ctrl+1..9 are his to press, and a test clicks the row.
 - **Playback is watched from the screen, then confirmed from the
   app.** `playwatch.py` diffs the picture once a second and reports
   runs of still samples; a stall of three seconds or more is a stall

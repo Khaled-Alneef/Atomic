@@ -5200,6 +5200,13 @@ class DetailsPage(GlassPage):
             pass
         self.hide()
         self.deleteLater()
+        # The web page's own keys (PageDown, Space) answer without a click,
+        # as they did before open_details took the keyboard from it.
+        try:
+            from helpers import webview2_host
+            webview2_host.keyboard_back(getattr(self, "_keyboard_was", 0))
+        except Exception:
+            logs.exception("The keyboard could not go back to the page")
 
 
 class _GenreBrowseSignals(QObject):
@@ -5627,6 +5634,21 @@ def open_details(window, entry, host=None):
     page.raise_()
     freeze_covered(page)   # see widgets._CoveredFreeze
     page.setFocus()
+    # **And the keyboard itself, which setFocus cannot move.** The owner, 5
+    # November 2026: "the search for the ep or ch ... does not write!!!!!".
+    # Measured on the frozen build: a card pressed on a web page leaves the
+    # Win32 focus on that page's Chrome_WidgetWin_1, and overlay_opened
+    # then parks that window off screen with the focus still in it. So the
+    # field drew its caret and every letter went to a hidden document; the
+    # same letter posted to the Qt window typed and filtered correctly.
+    # Escape and R were dead here for the same reason. Remembered so
+    # _close_now can give the keyboard back to the page.
+    try:
+        from helpers import webview2_host
+        page._keyboard_was = webview2_host.keyboard_holder()
+        webview2_host.keyboard_to_qt(page)
+    except Exception:
+        logs.exception("The details page could not take the keyboard")
     return page
 
 

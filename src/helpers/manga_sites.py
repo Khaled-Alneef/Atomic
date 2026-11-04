@@ -47,6 +47,8 @@ DEFAULT_SITES = [
     {"name": "SWAT", "base_url": "https://meshmanga.com/"},
     {"name": "Mangalek", "base_url": "https://mangalik.net/"},
     {"name": "Azora", "base_url": "https://azorafly.com/"},
+    # The owner's ask, 5 November 2026. Its own REST API, see _is_mangadar.
+    {"name": "MangaDar", "base_url": "https://mangadar.com/"},
 ]
 
 
@@ -61,7 +63,7 @@ def _normalize(base_url: str) -> str:
 # a name here adds that site to installs that already have a
 # manga_sites.json - once, recorded in ADDED_FILE, so a site the user
 # then deletes stays deleted rather than coming back every launch.
-LATER_DEFAULTS = ("Mangalek", "Azora")
+LATER_DEFAULTS = ("Mangalek", "Azora", "MangaDar")
 ADDED_FILE = "manga_sites_added.json"
 
 
@@ -211,6 +213,8 @@ def fetch_manga_details(page_url: str, timeout: int = 6, title: str = None):
     exact slug before anyone else's art for a matching title. `title` is
     optional because the tracker calls this with a page URL and nothing
     else; the URL slug stands in for it."""
+    if _is_mangadar(page_url):
+        return _mangadar_details(page_url, timeout)
     swat_match = _SWAT_SERIES_URL_RE.match(page_url)
     if swat_match:
         details = _swat_series_details(swat_match.group(1), swat_match.group(2),
@@ -478,6 +482,9 @@ def _post_text(url: str, fields: dict, timeout: int, accept: str = "*/*") -> str
     return _read(req, url, timeout)
 
 
+_WRONG_SHAPE_CODES = (400, 404, 405, 410)
+
+
 def _read(req, url, timeout):
     """One request, with the refusing-host skip on it.
 
@@ -493,6 +500,17 @@ def _read(req, url, timeout):
     try:
         with net.urlopen(req, timeout=timeout) as resp:
             text = net.read_text(resp, deadline)
+    except urllib.error.HTTPError as error:
+        # **"No such endpoint" is an answer, and the host is up.** Measured 5
+        # November 2026: a search a site has no rows for walks on through the
+        # other engines' guesses, two 404s on /wp-admin/admin-ajax.php put it
+        # on the refusing list, and every search for ten minutes after that
+        # returned nothing from it. One "one piece" lost TeamX, SWAT and Lava
+        # Scans, the next "kingdom" had MangaDar and nobody else. A 403 (the
+        # Mangalek refusal), a 429 and a 5xx still count.
+        if error.code not in _WRONG_SHAPE_CODES:
+            net.note_host_failure(url)
+        raise
     except Exception:
         net.note_host_failure(url)
         raise
@@ -643,6 +661,136 @@ _ENGINES = (_search_madara, _search_ajaxy, _search_v2_api, _search_ajax_html)
 _ENGINES_BY_NAME = {engine.__name__: engine for engine in _ENGINES}
 
 
+# **MangaDar is its own REST API, and only that.** The owner, 5 November
+# 2026: "add this website as manga and manhwa and manhua source". Measured
+# that day: none of the four engines above matches it, and worse, the
+# Madara POST answers 400 and the next engine a 404, and two failures put
+# the host on net.host_refusing's list - the very next search of the site
+# returned 0 rows in 0.0s without asking. So it is gated by host, every
+# path that would guess at it goes to the API instead, and a shape it does
+# not have is never tried:
+#
+#     /search?q=solo+leveling    0.57s   rows with `type.slug`, keyless
+#     /manga?per_page=50&page=2  0.31s   2,116 titles, newest first
+#     /manga/slug/kingdom        0.46s   its id (301) and full card
+#     /manga/301/chapters        0.46s   all 939 in one answer
+#     /chapter/209405            1.40s   20 signed page URLs
+#     a page image               1.0s    501KB webp, no Referer needed
+#
+# `type.slug` answers the medium outright where a title carries one, which
+# is what MangaDex has to be asked for everywhere else; `_mangadar_rows`
+# teaches it to discover. "light-novel" rows (6 of 2,116) are pages of
+# scanned text filed beside the manga, and he asked for the three media.
+_MANGADAR_HOST = "mangadar.com"
+_MANGADAR_API = "wp-json/mangadar/v1"
+_MANGADAR_MEDIUM = {"manga": "Manga", "manhwa": "Manhwa", "manhua": "Manhua"}
+_MANGADAR_SKIP_TYPES = ("light-novel", "novel")
+_MANGADAR_PAGE_SIZE = 50        # what /manga serves at most, asked 100
+# It wraps some titles in Unicode direction isolates: "⁦All-out...⁩".
+_BIDI_MARKS_RE = re.compile("[‎‏‪-‮⁦-⁩]")
+# Its slugs are the site's own; only the ones the Read filters tick.
+_MANGADAR_GENRES = {"action": "Action", "adventure": "Adventure",
+                    "comedy": "Comedy", "drama": "Drama", "fantasy": "Fantasy",
+                    "historical": "Historical", "horror": "Horror",
+                    "isekai": "Isekai", "martial-arts": "Martial Arts",
+                    "mystery": "Mystery", "psychological": "Psychological",
+                    "romance": "Romance", "school-life": "School Life",
+                    "sci-fi": "Sci-Fi", "slice-of-life": "Slice of Life",
+                    "sports": "Sports", "supernatural": "Supernatural",
+                    "thriller": "Thriller", "tragedy": "Tragedy"}
+
+
+def _is_mangadar(url) -> bool:
+    host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+    return host.removeprefix("www.") == _MANGADAR_HOST
+
+
+def _mangadar_rows(items, base_url: str) -> list:
+    """The site's cards as search-shaped rows, its medium and genres told
+    to discover so MangaDex is not asked what the site just said."""
+    rows, told = [], []
+    for record in items or []:
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("type") if isinstance(record.get("type"), dict) else {}
+        slug = str(kind.get("slug") or "").lower()
+        title = _BIDI_MARKS_RE.sub("", str(record.get("title") or ""))
+        url = record.get("url") or ""
+        if slug in _MANGADAR_SKIP_TYPES or not title or not url:
+            continue
+        latest = None
+        for chapter in record.get("latest_chapters") or []:
+            try:
+                latest = float(chapter.get("number"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            break
+        rows.append({"title": title, "url": url,
+                     "cover_url": record.get("cover") or None,
+                     "latest_chapter": latest})
+        medium = _MANGADAR_MEDIUM.get(slug)
+        if medium:
+            genres = [_MANGADAR_GENRES[g.get("slug")]
+                      for g in record.get("genres") or []
+                      if isinstance(g, dict) and g.get("slug") in _MANGADAR_GENRES]
+            told.append((_clean_text(title), medium, genres))
+    if told:
+        try:
+            from . import discover
+            discover.teach_media(told)
+        except Exception:
+            pass
+    return rows
+
+
+def _search_mangadar(base_url: str, query: str, timeout: int) -> list:
+    url = f"{base_url}{_MANGADAR_API}/search?q={urllib.parse.quote_plus(query)}"
+    body = json.loads(_get(url, timeout))
+    return _mangadar_rows(body.get("items") if isinstance(body, dict) else [],
+                          base_url)
+
+
+def _browse_mangadar(base_url: str, limit: int, timeout: int, page: int = 1) -> list:
+    """The listing, newest first. The front page puts what was last updated
+    ahead of what was last added, which is what its own home page leads
+    with; /manga alone sorts by the date a title was added and takes no
+    other order (asked orderby=, sort=: the same rows)."""
+    size = max(1, min(int(limit), _MANGADAR_PAGE_SIZE))
+    listing = json.loads(_get(f"{base_url}{_MANGADAR_API}/manga?per_page={size}"
+                              f"&page={int(page)}", timeout))
+    items = listing.get("items") if isinstance(listing, dict) else []
+    if page == 1:
+        try:
+            home = json.loads(_get(f"{base_url}{_MANGADAR_API}/home", timeout))
+            items = list(home.get("latest_updates") or []) + list(items or [])
+        except Exception:
+            pass        # the listing alone is still a front wall
+    rows, seen = [], set()
+    for row in _mangadar_rows(items, base_url):
+        if row["url"] not in seen:
+            seen.add(row["url"])
+            rows.append(row)
+    return rows[:limit]
+
+
+def _mangadar_details(page_url: str, timeout: int) -> dict:
+    """fetch_manga_details' answer off the API. The scrape it replaces falls
+    through to a Madara POST, which is one of the two failures that get this
+    host refused (see above)."""
+    empty = {"cover_url": None, "latest_chapter": None}
+    parts = urllib.parse.urlsplit(page_url).path.strip("/").split("/")
+    if len(parts) < 2 or parts[0] != "manga":
+        return empty
+    base = page_url[:page_url.index("/manga/") + 1]
+    try:
+        record = json.loads(_get(f"{base}{_MANGADAR_API}/manga/slug/{parts[1]}", timeout))
+        rows = _mangadar_rows([record], base)
+    except Exception:
+        return empty
+    return {"cover_url": rows[0].get("cover_url"),
+            "latest_chapter": rows[0].get("latest_chapter")} if rows else empty
+
+
 def _engine_order(site: dict):
     """The engines to try for this site, the one that answered last time
     first.
@@ -655,6 +803,8 @@ def _engine_order(site: dict):
 
     Still the whole list, not just the remembered one: a site can change
     theme, and falling back costs exactly what it used to."""
+    if _is_mangadar(site.get("base_url")):
+        return (_search_mangadar,)
     remembered = _ENGINES_BY_NAME.get(site.get("search_engine") or "")
     if not remembered:
         return _ENGINES
@@ -1149,6 +1299,11 @@ def browse_site(site: dict, limit: int = 30, timeout: int = 8,
     step = net.step_timeout(deadline, timeout) if deadline else timeout
     if step is None:
         return []
+    if _is_mangadar(base_url):
+        try:
+            return _tidy_rows(_browse_mangadar(base_url, limit, step))
+        except Exception:
+            return []
     try:
         rows = _tidy_rows(_browse_v2_api(base_url, limit, step))
         if rows:
@@ -1205,6 +1360,11 @@ def browse_site_page(site: dict, page: int, limit: int = 60, timeout: int = 8,
     step = net.step_timeout(deadline, timeout) if deadline else timeout
     if step is None:
         return []
+    if _is_mangadar(base_url):
+        try:
+            return _tidy_rows(_browse_mangadar(base_url, limit, step, int(page)))
+        except Exception:
+            return []
     with _page_shape_lock:
         shape = _page_shape.get(base_url)
     try:

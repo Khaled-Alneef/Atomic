@@ -2379,6 +2379,24 @@ class _ClearButtonHighlight(QObject):
         return False
 
 
+class _PressTakesKeyboard(QObject):
+    """A press on the field takes the Win32 keyboard from whatever native
+    child holds it. open_details does this once on the way in, but a reader
+    or a player closing over the same page can leave it elsewhere, and a
+    field drawing a caret it cannot type behind is the one thing to rule
+    out (the owner, 5 November 2026). Not consumed: the field still places
+    its caret."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            try:
+                from . import webview2_host
+                webview2_host.keyboard_to_qt(obj)
+            except Exception:
+                logs.exception("A search field could not take the keyboard")
+        return False
+
+
 def search_field(placeholder: str, width: int = None) -> QLineEdit:
     """A search box with the glass on its left, which is what every
     search field in this app is.
@@ -2390,6 +2408,8 @@ def search_field(placeholder: str, width: int = None) -> QLineEdit:
     field = QLineEdit()
     field.setPlaceholderText(placeholder)
     field.setClearButtonEnabled(True)
+    field._press_takes_keyboard = _PressTakesKeyboard(field)
+    field.installEventFilter(field._press_takes_keyboard)
     glass = field.addAction(magnifier_icon(),
                             QLineEdit.ActionPosition.LeadingPosition)
     # The clear button Qt just made is a plain tool button child with the

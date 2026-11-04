@@ -81,16 +81,6 @@ import time
 _INSTALLED = False
 _PATCHED = set()
 
-# How often the seat poll asks whether the target's data has landed.
-POLL_MS = 120
-
-# Give up applying a seat after this long and simply keep playing from
-# where the picture already is. Deliberately generous - the viewer is
-# watching real video throughout, so a late seek costs nothing but a
-# jump - and bounded, so a torrent that never reaches the offset does not
-# leave a timer running for the life of the page.
-SEAT_GIVE_UP_S = 180.0
-
 # How often a file opened at its seat is asked whether it is getting
 # anywhere - see _arm_seat_watchdog. It used to be how long the picture had
 # before the file was re-opened from the head; a direct link's whole open
@@ -131,98 +121,23 @@ def _patch(module):
 
     from PyQt6.QtCore import QTimer
 
+    # **The head-first path and its seat poll are gone** (_load_from_head,
+    # _arm_head_watchdog, _begin_seat_poll, _seat_data_ready, _seat_blind):
+    # nothing had called them since every resume began opening at the seat,
+    # and he said to remove them, 3 November 2026 (CLAUDE.md rule 11). Why
+    # the poll was built, and what it measured, is above and in
+    # .claude/rules/integrations.md.
     Page = module.PlayerPage
     old_load = Page._load_into_mpv
     old_close = Page.close_player
 
-    def _stop_poll(self):
-        timer = getattr(self, "_atomic_seat_timer", None)
-        if timer is not None:
-            try:
-                timer.stop()
-            except RuntimeError:
-                pass
-        self._atomic_seat_job = None
-
-    def _seat_data_ready(self, stream, seat):
-        """Is there enough contiguous data at the seat to play from it?
-
-        **The whole armed band, not just the piece the offset falls in.**
-        Measured 30 August 2026: seeking as soon as that single piece
-        existed put mpv at the target for ~25s without decoding, then
-        dropped it back to the edge of what it had already buffered
-        (52.3s) where it froze - one piece is 2MB, a couple of seconds of
-        video, and the demuxer needs a run past it before anything plays.
-        `_start_pieces()` is exactly the band `arm_start_band` primed
-        (RESUME_BAND_BYTES, 16MB) minus whatever has landed, so an empty
-        list is the honest "the seek can succeed now".
-
-        A direct URL (debrid, an addon) has no engine behind it and
-        nothing to wait for, so it is ready by definition."""
-        info_hash = str((stream or {}).get("info_hash") or "").strip().lower()
-        if not info_hash:
-            return True
-        try:
-            from helpers import torrent_engine
-        except Exception:
-            return True
-        torrent = getattr(torrent_engine, "_torrents", {}).get(info_hash)
-        if torrent is None:
-            return True
-        try:
-            if getattr(torrent, "start_offset", None) is None:
-                # **"Not yet" or "never"?** The Cues not read yet is
-                # "not yet": arm_start_band owns its own retry and this
-                # asks again next tick. A container the engine cannot
-                # index at all - an .mp4, which is what his film sources
-                # are - is "never", and waiting on it is the owner's
-                # "it starts from the beginning": the poll sat out its
-                # whole 180s for a band that could not be armed while
-                # the film played from 0:00. There is nothing to wait
-                # for, so the seek goes out blind and the engine
-                # follows the demuxer's reads (_serve refocuses on the
-                # byte mpv asks for) - measured on his Obsession .mp4
-                # over the engine's own server, a ranged read at his
-                # seat answered in 15.5s cold and 5.8s once the swarm
-                # was up. Slower than an indexed seat, never instead of
-                # it.
-                return _seat_blind(self, stream)
-            return not torrent._start_pieces()
-        except Exception:
-            return False
-
-    def _seat_blind(self, stream):
-        """True when this stream's seat can never be resolved to a byte
-        (see torrent_engine.seat_resolvable), so a seek must go out
-        without a band."""
-        info_hash = str((stream or {}).get("info_hash") or "").strip().lower()
-        if not info_hash:
-            return False
-        try:
-            from helpers import torrent_engine
-            return torrent_engine.seat_resolvable(info_hash) is False
-        except Exception:
-            return False
-
     def _seat_reachable_now(self, stream, seat):
-        """Can this file be *opened* at the seat, right now?
-
-        Deliberately not `_seat_data_ready`, and the difference is the
-        default. That function answers the poll's question - "is there
-        anything left to wait for" - and says yes when there is no
-        torrent behind the url at all, because nothing can be waited
-        for. Here the question is the opposite way round: opening at the
-        seat is only safe when the bytes are *known* to be there, so
-        anything unproven answers no and the file opens from the head as
-        it did before.
-
-        Measured 3 September 2026 with a stub page driving this method:
-        the first version called `_seat_data_ready` and a torrent the
-        engine had never heard of opened at the seat - the one case the
-        module exists to prevent. In a real play `streams.prepare` has
-        already added the torrent, so the engine not holding it means
-        something is wrong or racing, and that is not a moment to
-        gamble a black screen on.
+        """Are the bytes at the seat known to be there, right now? The
+        file opens at the seat either way since 3 November 2026; this is
+        what load_into_mpv's log line says about it. Anything unproven
+        answers no. In a real play `streams.prepare` has already added
+        the torrent, so the engine not holding it means something is
+        wrong or racing.
 
         Two cases are safe and both are proven, not assumed:
 
@@ -235,8 +150,7 @@ def _patch(module):
           * **an engine stream whose resume band is already on disk** -
             an episode played before, or a swarm that filled while the
             source list was being drawn. `_start_pieces()` empty is
-            exactly that, and it is the same test the poll uses to
-            decide the seek can succeed.
+            exactly that.
 
         **Told apart by `kind`, never by `info_hash`, and that is not a
         detail.** streams._prepare_with_debrid keeps the hash *for
@@ -386,44 +300,6 @@ def _patch(module):
         self._atomic_seat_watchdog = timer
         timer.start()
 
-    def _arm_head_watchdog(self, resume_at):
-        """After the seat watchdog has reopened a source from the head,
-        the source gets SEAT_WATCHDOG_S more to draw anything at all;
-        then it is a dead source and the walk moves on.
-
-        **The owner's 68.8s start, 5 September 2026.** His log: a race
-        of three lanes died at 12s; the walk then landed on a row with a
-        direct url, which opened "proven" at the seat and drew nothing;
-        the watchdog above reopened it from the head at 12s; and the
-        player's own 45s seat give-up was what finally called it stalled
-        and moved to the next source - which then played in 8s. A source
-        that produces no frame from the head either is not a seat
-        problem, it is a dead source, and the walk already knows what to
-        do with one of those."""
-        run = self._run
-        timer = QTimer(self)
-        timer.setSingleShot(True)
-        timer.setInterval(int(SEAT_WATCHDOG_S * 1000))
-
-        def bite():
-            if getattr(self, "_closing", False) or self._run != run:
-                return
-            if not getattr(self, "_awaiting_first_frame", True):
-                return
-            _stop_poll(self)
-            _log(f"seat: no picture from the head either in "
-                 f"{SEAT_WATCHDOG_S:.0f}s; giving up on this source")
-            try:
-                if not self._try_next_source(self._stream_index,
-                                             resume_at=resume_at):
-                    self._finish_working("No Source Would Start")
-            except Exception:
-                pass
-
-        timer.timeout.connect(bite)
-        self._atomic_seat_watchdog = timer
-        timer.start()
-
     def _cancel_watchdog(self):
         timer = getattr(self, "_atomic_seat_watchdog", None)
         if timer is not None:
@@ -433,142 +309,12 @@ def _patch(module):
                 pass
         self._atomic_seat_watchdog = None
 
-    def _load_from_head(self, stream, resume_at):
-        """The slow path, taken deliberately: open unseated and poll."""
-        _cancel_watchdog(self)
-        try:
-            seat = self._prime_seat(resume_at)[0]
-        except Exception:
-            seat = None
-        if not seat:
-            return
-        sentinel = object()
-        prior = self.__dict__.get("_prime_seat", sentinel)
-        self._prime_seat = lambda _resume_at=None: (None, None)
-        try:
-            old_load(self, stream, resume_at)
-        finally:
-            if prior is sentinel:
-                self.__dict__.pop("_prime_seat", None)
-            else:
-                self.__dict__["_prime_seat"] = prior
-        _begin_seat_poll(self, stream, seat)
-
-    def _begin_seat_poll(self, stream, seat):
-        _stop_poll(self)
-        job = {"run": self._run, "seat": float(seat),
-               "stream": dict(stream or {}),
-               "deadline": time.monotonic() + SEAT_GIVE_UP_S}
-        self._atomic_seat_job = job
-
-        # Prime the engine's resume band once, here, and never from the
-        # poll: arm_start_band starts its own background retry when the
-        # index is not readable yet, and calling it four times a second
-        # would race several of those against one another.
-        info_hash = str(job["stream"].get("info_hash") or "").strip().lower()
-        if info_hash:
-            try:
-                from helpers import torrent_engine
-                torrent_engine.set_start_seconds(info_hash, job["seat"])
-                torrent_engine.arm_start_band(info_hash)
-            except Exception:
-                pass
-
-        timer = getattr(self, "_atomic_seat_timer", None)
-        if timer is None:
-            timer = QTimer(self)
-            timer.setInterval(POLL_MS)
-            self._atomic_seat_timer = timer
-
-            def poll():
-                current = getattr(self, "_atomic_seat_job", None)
-                if not current:
-                    timer.stop()
-                    return
-                if getattr(self, "_closing", False) or current["run"] != self._run:
-                    _stop_poll(self)
-                    return
-                # **A real frame first, always.** This is the whole point
-                # of the module: nothing may seek before the viewer has a
-                # picture, because a seek issued into an opening file is
-                # the race that used to leave "Skipping to..." on screen
-                # for good.
-                if getattr(self, "_awaiting_first_frame", True):
-                    return
-                target = float(current["seat"])
-                position = float(getattr(self, "_position", 0.0) or 0.0)
-                if position >= target - module.RESUME_LANDED_TOLERANCE_S:
-                    _stop_poll(self)      # playback got there on its own
-                    _log(f"seat: playback reached {target:.1f}s on its own")
-                    return
-                if time.monotonic() > current["deadline"]:
-                    _stop_poll(self)
-                    _log(f"seat: gave up on {target:.1f}s after "
-                         f"{SEAT_GIVE_UP_S:.0f}s - its data never landed")
-                    return
-                if not _seat_data_ready(self, current["stream"], target):
-                    # **Ask the engine again, every couple of seconds,
-                    # while the seat is not a byte yet.** Its own retry
-                    # used to stop after 8s and nothing re-asked: on a
-                    # 16MB-piece release the Cues landed 20-30s after the
-                    # url, so the band was never armed and this poll sat
-                    # out its 180s - the owner's "do not resume" (5
-                    # September 2026). arm_start_band runs one retry per
-                    # torrent at a time, so asking is cheap.
-                    now = time.monotonic()
-                    if now - current.get("rearmed_at", 0.0) >= 2.0:
-                        current["rearmed_at"] = now
-                        info_hash = str(current["stream"].get("info_hash")
-                                        or "").strip().lower()
-                        if info_hash:
-                            try:
-                                from helpers import torrent_engine
-                                torrent_engine.arm_start_band(info_hash)
-                            except Exception:
-                                pass
-                    return
-
-                _stop_poll(self)
-                if _seat_blind(self, current["stream"]):
-                    _log(f"seat: no index the engine can read in this "
-                         f"container; seeking blind to {target:.1f}s")
-                else:
-                    _log(f"seat: data for {target:.1f}s has landed; "
-                         f"skipping to it")
-                # From here it is the ordinary skip path, and it owns the
-                # promise/watchdog bookkeeping (_seat_timer, _resume_target)
-                # exactly as a manual jump does.
-                self._resume_target = target
-                self._seat_reported = None
-                self._seat_deadline = time.monotonic() + module.SEAT_GIVE_UP_S
-                self._seat_timer.start()
-                if getattr(self, "_work_toast", None) is not None:
-                    self._say_working(
-                        f"Skipping To {module._format_time(target)}...")
-                self._seek_absolute(target, resuming=True)
-                # **mpv can come back from this seek paused, and then
-                # nothing restarts it.** Measured 30 August 2026: after
-                # a seek into a torrent it had to wait on, mpv settled
-                # with a full demuxer cache, `paused-for-cache` false and
-                # `pause` *true* - a frozen picture with the data for it
-                # already in hand. Only asserted when the viewer has not
-                # paused deliberately, which `_paused` tracks.
-                if not getattr(self, "_paused", False):
-                    try:
-                        self.handle["pause"] = False
-                    except Exception:
-                        pass
-
-            timer.timeout.connect(poll)
-        timer.start()
-
     def load_into_mpv(self, stream, resume_at=None):
         try:
             seat = self._prime_seat(resume_at)[0]
         except Exception:
             seat = None
         if not seat:
-            _stop_poll(self)
             return old_load(self, stream, resume_at)
 
         # **Every resume opens at the seat - see the top of this module.**
@@ -584,7 +330,6 @@ def _patch(module):
         # read as "unproven" here and opened from the head, then jumped
         # 0.04-0.13s after the first frame (his 29 October, 19:48: 0.1s,
         # 0.07s, 0.1s).
-        _stop_poll(self)
         info_hash = str((stream or {}).get("info_hash") or "").strip().lower()
         if info_hash and _is_engine_stream(stream):
             try:
@@ -603,7 +348,6 @@ def _patch(module):
         return result
 
     def close_player(self):
-        _stop_poll(self)
         _cancel_watchdog(self)
         return old_close(self)
 

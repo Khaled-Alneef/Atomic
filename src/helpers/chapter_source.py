@@ -34,7 +34,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from . import manga_sites, mangadex, net, novel_sites, storage, title_match
+from . import logs, manga_sites, mangadex, net, novel_sites, storage, title_match
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
@@ -385,11 +385,96 @@ def _v2_api_pages(chapter, deadline) -> list:
     return [i.get("image") for i in ordered if i.get("image")]
 
 
+# MangaDar's REST API, keyless - measured and explained at
+# manga_sites._is_mangadar. Its series page carries the chapters as a
+# script's data, and the one thing its API needs that a row does not carry
+# is the numeric id, so a list is two requests. `locked` rows stay in the
+# list and say so when opened, as a Lava Scans paid chapter does.
+_MANGADAR_SERIES_RE = re.compile(r"^(https?://(?:www\.)?mangadar\.com/)manga/([^/?#]+)", re.I)
+_MANGADAR_API = "wp-json/mangadar/v1"
+_MANGADAR_MAX_PAGES = 20        # one was all 939 of Kingdom; a guard, not a guess
+
+
+def _mangadar_chapters(series_url: str, entry_type, deadline) -> list:
+    match = _MANGADAR_SERIES_RE.match(series_url or "")
+    if not match:
+        return []
+    base, slug = match.group(1), match.group(2)
+    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+    if timeout is None:
+        return []
+    try:
+        record = json.loads(_get(f"{base}{_MANGADAR_API}/manga/slug/{slug}", timeout,
+                                 referer=series_url, accept=_JSON_ACCEPT))
+        series_id = record.get("id")
+    except Exception:
+        logs.exception("MangaDar: the series could not be read")
+        return []
+    if series_id is None:
+        return []
+    chapters, page, last = [], 1, 1
+    while page <= min(last, _MANGADAR_MAX_PAGES):
+        timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+        if timeout is None:
+            break
+        try:
+            body = json.loads(_get(f"{base}{_MANGADAR_API}/manga/{series_id}/chapters"
+                                   f"?page={page}", timeout,
+                                   referer=series_url, accept=_JSON_ACCEPT))
+        except Exception:
+            logs.exception("MangaDar: a chapter page could not be read")
+            break
+        last = int(body.get("total_pages") or 1)
+        for row in body.get("items") or []:
+            number = _number_from(str(row.get("number") or ""))
+            if number is None or row.get("id") is None or not row.get("url"):
+                continue
+            chapters.append({
+                "id": f"{base}{_MANGADAR_API}/chapter/{row['id']}",
+                "number": number,
+                # "Kingdom الفصل 893" says what the row already says.
+                "title": "",
+                "lang": "ar",
+                "source": urllib.parse.urlsplit(series_url).netloc,
+                "url": row["url"],
+                "api_url": f"{base}{_MANGADAR_API}/chapter/{row['id']}",
+                "group": "",
+                "published": row.get("date") or "",
+                "direction": "rtl" if entry_type in _RTL_TYPES else "ltr",
+            })
+        page += 1
+    chapters.sort(key=_sort_key, reverse=True)
+    return chapters
+
+
+def _mangadar_pages(chapter, deadline) -> tuple:
+    """(page urls, reason when there are none). The urls are signed and
+    expire, so they are asked for on each open and never kept."""
+    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+    if timeout is None:
+        return [], "unreachable"
+    try:
+        body = json.loads(_get(chapter.get("api_url"), timeout,
+                               referer=chapter.get("url"), accept=_JSON_ACCEPT))
+    except Exception:
+        return [], "unreachable"
+    data = (body or {}).get("chapter") or {}
+    pages = [p for p in data.get("pages") or [] if isinstance(p, str) and p]
+    if pages:
+        return pages, ""
+    return [], "locked" if data.get("locked") or data.get("is_premium") else "empty"
+
+
 def _site_chapters(entry, deadline, on_partial=None) -> list:
     series_url = (entry or {}).get("url") or ""
     if not series_url.startswith("http"):
         return []
     entry_type = (entry or {}).get("type")
+
+    # The API or nothing: the HTML scan below ends in a Madara POST, which
+    # this host answers 400 (manga_sites._is_mangadar on what that costs).
+    if _MANGADAR_SERIES_RE.match(series_url):
+        return _mangadar_chapters(series_url, entry_type, deadline)
 
     # Tried before the HTML scan, not after: this platform's series page
     # is an empty shell, so scanning it first spends a request to learn
@@ -984,6 +1069,11 @@ def chapter_pages(chapter, deadline=None) -> dict:
         pages = _mangadex_pages(chapter, deadline)
         return {"pages": pages, "headers": {"User-Agent": _UA},
                 "direction": direction}
+
+    if "/mangadar/v1/chapter/" in str(chapter.get("api_url") or ""):
+        pages, reason = _mangadar_pages(chapter, deadline)
+        return {"pages": pages, "headers": _headers(chapter.get("url")),
+                "direction": direction, "reason": reason}
 
     if chapter.get("api_url"):
         pages = _v2_api_pages(chapter, deadline)

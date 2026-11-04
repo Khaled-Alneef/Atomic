@@ -1003,8 +1003,25 @@ def pages(entry_id, index):
             "title": str(entry.get("title") or ""), "reason": reason}
 
 
+def chapter_opened(entry_id):
+    """A chapter was opened: the title moves up History and Home, and no
+    chapter is marked. mark_read is for when its end is reached (app.js
+    checkEnd). The mark used to do this job too, on every open."""
+    entry = entry_by_id(entry_id)
+    if entry is None:
+        return {"ok": False}
+    try:
+        from helpers import changes, history
+        history.touch(entry)
+        changes.bump()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:160]}
+    return {"ok": True}
+
+
 def mark_read(entry_id, key, read=True):
-    """Record a chapter as read, the way the Qt reader does."""
+    """Record a chapter as read: its end was reached in the reader, or the
+    details page's mark menu said so."""
     entry = entry_by_id(entry_id)
     if entry is None or not key:
         return {"ok": False}
@@ -1040,10 +1057,7 @@ def mark_read(entry_id, key, read=True):
 # **Where in a chapter reading stopped.** The owner, 18 October 2026:
 # "when I continue reading make sure it takes me to the exact place I
 # stopped in the ch not the next one! and if I finished the ch make sure
-# that it takes me to the next ch". A chapter is marked read the moment
-# it opens (mark_read, the Qt reader's rule), so Continue - which opens
-# the chapter after the furthest mark - stepped past a chapter left
-# half-way. The reader now reports its place: which chapter (`key`),
+# that it takes me to the next ch". The reader reports its place: which chapter (`key`),
 # which page of it (`page`, the strip's child index), how far down that
 # page (`frac`) and whether it reached the chapter's end (`done`). One
 # record per title, the last chapter opened. Its own file and no

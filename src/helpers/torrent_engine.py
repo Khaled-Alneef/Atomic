@@ -1230,8 +1230,9 @@ class _Torrent:
         None for those, correctly - but the player's seat poll read
         None as "not yet" and waited its whole 180s for a band that
         was never going to be armed, while the film played from 0:00.
-        Telling "never" from "not yet" is what lets the poll seek
-        without a band instead (player_resume_latency_patch).
+        Telling "never" from "not yet" is what let the poll seek
+        without a band instead; the poll went on 3 November 2026, and
+        await_start_band reads this now.
 
         **And True for an .mp4 whose moov can be located, from 5
         September 2026** - the "follow-up that would make it instant"
@@ -3595,9 +3596,10 @@ INDEX_CRITICAL_BYTES = 1024 * 1024
 # one run of four the seat was never armed at all in 75s while the swarm
 # ran at 24MB/s, because this retry had given up at 8s and nothing ever
 # asked again. The player's seat poll then waited its whole 180s on a
-# band that was never going to exist, which is "do not resume". The poll
-# now re-asks as well (player_resume_latency_patch), and only one retry
-# runs per torrent at a time (see arm_start_band).
+# band that was never going to exist, which is "do not resume". Only one
+# retry runs per torrent at a time (see arm_start_band). The poll is gone
+# since 3 November 2026: a resume opens at the seat, and mpv's reads re-aim
+# the engine (_serve).
 ARM_RETRY_S = 60.0
 
 # **How a dead swarm is recognised before its budget runs out.** The
@@ -3761,15 +3763,6 @@ def arm_start_band(info_hash: str):
         torrent._arm_thread = thread
         thread.start()
     return None
-
-
-def seat_resolvable(info_hash: str):
-    """_Torrent.seat_resolvable for a hash, or None when the engine
-    does not hold it."""
-    torrent = _torrents.get((info_hash or "").lower())
-    if torrent is None:
-        return None
-    return torrent.seat_resolvable()
 
 
 def await_start_band(info_hash: str, wait: float = None) -> bool:

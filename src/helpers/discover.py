@@ -1128,6 +1128,61 @@ def _classify(title: str, timeout: float = 8.0):
 _CLASSIFY_INFLIGHT = {}
 
 
+def teach_media(told):
+    """(title, medium, genres) a reading site stated about its own titles.
+
+    Never over a verdict already held, except "Other", which means nobody
+    knew: The Beginning After the End reads "Other" here because neither
+    catalogue files it, and MangaDar calls it manhwa."""
+    if not told:
+        return
+    _load_reading_meta()
+    with _MEDIUM_LOCK:
+        for title, medium, genres in told:
+            key = (title or "").strip().lower()
+            if not key:
+                continue
+            if _MEDIUM_CACHE.get(key) in (None, "Other"):
+                _MEDIUM_CACHE[key] = medium
+            if not _GENRE_CACHE.get(key):
+                _GENRE_CACHE[key] = [g for g in genres if _allowed_genre(g)]
+
+
+def mediums_for(titles, budget_s):
+    """title -> medium for a typed search, asking only what nothing has
+    answered yet. A title still being asked at `budget_s` is absent, and its
+    answer lands in the cache for the next search. Not _classify_pairs: that
+    one wants the genres too and re-asks for a medium it already holds, and
+    it writes the Read pages' pending count, which a search is no part of."""
+    unique = list(dict.fromkeys(t for t in titles if t))
+    _load_reading_meta()
+    verdicts, asking = {}, []
+    with _MEDIUM_LOCK:
+        for title in unique:
+            held = _MEDIUM_CACHE.get(title.lower())
+            if held is None:
+                asking.append(title)
+            else:
+                verdicts[title] = held
+    if not asking:
+        return verdicts
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(MEDIUM_WORKERS, len(asking)),
+        thread_name_prefix="atomic-classify")
+    jobs = {pool.submit(classify_medium, title): title for title in asking}
+    try:
+        for done in concurrent.futures.as_completed(jobs, timeout=budget_s):
+            try:
+                verdicts[jobs[done]] = done.result()
+            except Exception:
+                pass
+    except concurrent.futures.TimeoutError:
+        pass
+    pool.shutdown(wait=False)
+    _save_reading_meta()
+    return verdicts
+
+
 def _classify_now(title, key, timeout, waiting):
     """The network half of _classify, once per title - see the dedupe
     above. `waiting` is told the answer so the other askers wake."""
@@ -1656,31 +1711,39 @@ def discover_reading_sites(query: str = "", limit: int = 30,
     # and the interleave still decides ties, so no site loses its place
     # and nothing is thrown away on a guess about what the user meant.
     if query:
-        from . import title_match
-        wanted = title_match.normalize(query)
-
-        def rank(row):
-            raw = row.get("title") or ""
-            name = title_match.normalize(raw)
-            if name == wanted:
-                # **The plainest of the exact matches first.** normalize
-                # drops the parenthetical, so "One Piece (French)" and
-                # "One Piece" both come back exact and the site's own
-                # order decided between them - which put the French
-                # edition above the manga. Length is what separates
-                # them, and it keeps "Kingdom" ahead of "Kingdom (WAN)"
-                # while leaving the two adjacent, which is the pair the
-                # owner is choosing between.
-                return (0, len(raw))
-            if name.startswith(wanted):
-                return (1, len(raw))
-            if wanted in name:
-                return (2, len(raw))
-            return (3, len(raw))
-
-        interleaved.sort(key=rank)      # stable: ties keep the interleave
+        interleaved = ranked_by_title(interleaved, query)
 
     return [_reading_card(row) for row in interleaved[:limit]]
+
+
+def ranked_by_title(rows, query):
+    """`rows` with the ones named most like `query` first. Stable, so ties
+    keep the order they came in. The search page's reading rows go through
+    this too (5 November 2026): a site that answers first otherwise led
+    "kingdom" with Kingdom Hearts."""
+    from . import title_match
+    wanted = title_match.normalize(query)
+
+    def rank(row):
+        raw = row.get("title") or ""
+        name = title_match.normalize(raw)
+        if name == wanted:
+            # **The plainest of the exact matches first.** normalize
+            # drops the parenthetical, so "One Piece (French)" and
+            # "One Piece" both come back exact and the site's own
+            # order decided between them - which put the French
+            # edition above the manga. Length is what separates
+            # them, and it keeps "Kingdom" ahead of "Kingdom (WAN)"
+            # while leaving the two adjacent, which is the pair the
+            # owner is choosing between.
+            return (0, len(raw))
+        if name.startswith(wanted):
+            return (1, len(raw))
+        if wanted in name:
+            return (2, len(raw))
+        return (3, len(raw))
+
+    return sorted(rows, key=rank)
 
 
 def _reading_card(row) -> dict:

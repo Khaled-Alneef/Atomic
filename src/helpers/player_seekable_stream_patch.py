@@ -517,8 +517,8 @@ def install():
     # Chained onto the shared windows.player hook - a second finder on an
     # already-hooked module silently shadows the rest (helpers/__init__).
     # Installed after player_resume_latency_patch, so this wrapper runs
-    # FIRST on a load and the deferred-resume wrapper sees the rewritten
-    # stream copy - its seat poll reads only info_hash, which survives.
+    # FIRST on a load and the resume wrapper sees the rewritten stream
+    # copy - it reads only info_hash and kind/engine, which survive.
     try:
         from . import requested_fixes_patch as requested
         previous = requested._patch_player

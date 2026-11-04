@@ -7,6 +7,7 @@ import sys, os, time, pathlib, subprocess, ctypes, ctypes.wintypes as wt
 import numpy as np
 sys.path.insert(0, r"C:\Users\pc\Code\VS_Code\Python\Atomic\.claude\skills\test")
 import rig
+rig.legacy_driver(__file__)     # takes the foreground and the pointer: CLAUDE.md rule 14
 target, root, out, label, runs = sys.argv[1:6]
 runs = int(runs); root = os.path.abspath(root); out = pathlib.Path(out); out.mkdir(parents=True, exist_ok=True)
 PY = r"C:\Users\pc\AppData\Local\Programs\Python\Python313\python.exe"
