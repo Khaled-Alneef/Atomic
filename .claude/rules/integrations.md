@@ -440,9 +440,15 @@ raising there before its first row, silently, for every show. Attachments
 are now relative `/download/<id>/subs/file/<n>`, labelled "Arabic [ara,
 ASS]" or "ara [SRT]" (`subtitles._AT_*`). Measured after: One Piece 1144,
 1160, 1161 carry Arabic in Judas, Erai-raws and ToonsHub releases (157-310
-cues each), Solo Leveling S02E05 0 -> 6. **`indexers.ANIMETOSHO_JSON` still
-names the dead host**, so the stream indexer has the same hole - not yet
-fixed.
+cues each), Solo Leveling S02E05 0 -> 6. The stream indexer
+(`indexers.ANIMETOSHO_JSON`) had the same hole and moved the same day: 0 rows
+for every title before, 23 of Solo Leveling S02E05's 100 sources after. Two
+guards came with it, both for rows the live feed offered: past season 1 a
+release must state its season (One Piece S22E59 drew "One Piece - 1-61 (East
+Blue Arc)" as a pack holding 59), and a one- or two-word title must appear
+whole ("May I Ask for One Final Thing ... Piece-of-Shit Prince" for One
+Piece). A spin-off carrying the whole title ("Koisuru One Piece") still
+passes.
 
 **A long anime is one season on OpenSubtitles and on every fansub**
 (7 November 2026). Cinemeta files One Piece as 23 seasons; opensubtitles.org,

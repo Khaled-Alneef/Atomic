@@ -49,14 +49,15 @@ from PyQt6.QtWidgets import (
 
 from helpers import (anime_identity, app_settings, artwork, hero_art, history,
                      images,
-                     logs, lookup_pool, net, storage, theme)
+                     logs, lookup_pool, net, notifications, storage, theme,
+                     window_chrome)
 from helpers.poster_grid import PosterGrid
 from helpers.widgets import (CHECK_GLYPH, PLUS_GLYPH, TRASH_GLYPH,
                              TRASH_ICON_SIZE, Card, GlassPage,
                              GlyphButton, PickCombo, confirm,
                              frameless_dialog, freeze_covered, glyph_icon,
                              scroll_area, search_field, show_toast,
-                             show_undo_toast, use_hover_cursor)
+                             show_undo_toast, SmoothTween, use_hover_cursor)
 
 try:
     from helpers import stremio
@@ -1359,6 +1360,77 @@ class _Exit(QWidget):
         self._worst = max(self._worst, (time.perf_counter() - started) * 1000.0)
 
 
+def _css_colour(value) -> QColor:
+    """A QColor from the theme's CSS forms - "#rrggbb" or "rgba(r, g, b, a)"
+    with a 0-255 alpha, which QColor's own parser does not take."""
+    text = str(value or "").strip()
+    if text.startswith("rgba(") and text.endswith(")"):
+        try:
+            r, g, b, a = (float(part) for part in text[5:-1].split(","))
+            return QColor(int(r), int(g), int(b), int(a))
+        except ValueError:
+            pass
+    return QColor(text)
+
+
+class _NotifyToggle(QPushButton):
+    """This title's own notifications switch, beside Save - the owner's ask,
+    7 November 2026: "a notification turn on/off for each read and watch in
+    the ep/ch list the button shows when saved right next to the save
+    button". The bar's bell drawn small (window_chrome.paint_bell), crossed
+    out while off, and it rings when switched on - the same ring as the
+    bar's. The save button's own grey, so the two read as one row."""
+
+    SIZE = 44
+    ICON = 22
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.on = True
+        self._ring = 1.0
+        self._ring_tween = SmoothTween(self, self._set_ring,
+                                       window_chrome.BELL_RING_MS, curve=lambda x: x)
+        use_hover_cursor(self)
+
+    def set_on(self, on, ring=False):
+        self.on = bool(on)
+        self.setToolTip("Notifications on for this title - click to turn off"
+                        if self.on else
+                        "Notifications off for this title - click to turn on")
+        if ring and self.on and not self._ring_tween.running:
+            self._ring_tween.start(0.0, 1.0)
+        self.update()
+
+    def _set_ring(self, value):
+        self._ring = float(value)
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_css_colour(theme.SECONDARY_FILL_HOVER if self.underMouse()
+                                     else theme.SECONDARY_FILL))
+        painter.drawRoundedRect(QRectF(self.rect()), 6, 6)
+        box = QRectF(0, 0, self.ICON, self.ICON)
+        box.moveCenter(QRectF(self.rect()).center())
+        t = self._ring
+        angle = 0.0 if t >= 1.0 else (window_chrome.BELL_RING_DEG
+                                      * math.sin(math.pi * window_chrome.BELL_RING_SWINGS * t)
+                                      * (1.0 - t) ** 1.4)
+        # Off is the same ink at 60%, not TEXT_MUTED: the ground is a
+        # translucent grey over the title's own art, and a mid grey nearly
+        # vanished on a light backdrop.
+        ink = _css_colour(theme.TEXT_OVER_MEDIA)
+        if not self.on:
+            ink.setAlphaF(0.6)
+        window_chrome.paint_bell(painter, box, ink, angle, muted=not self.on)
+        painter.end()
+
+
 class DetailsPage(GlassPage):
     """One entry, full screen: facts on the left, the episode or chapter
     list on the right."""
@@ -1843,7 +1915,15 @@ class DetailsPage(GlassPage):
         # parentless widget that is shown is a *window* to Qt, title bar
         # and all, until something reparents it a frame later. Every
         # unsaved title opened from Discover flashed one.
-        column.addWidget(self._save_btn)
+        save_row = QHBoxLayout()
+        save_row.setContentsMargins(0, 0, 0, 0)
+        save_row.setSpacing(8)
+        save_row.addWidget(self._save_btn, stretch=1)
+        # This title's notifications switch, shown while it is saved.
+        self._notify_btn = _NotifyToggle()
+        self._notify_btn.clicked.connect(self._toggle_notify)
+        save_row.addWidget(self._notify_btn)
+        column.addLayout(save_row)
         self._sync_save_button()
 
         # **widgets.search_field, not a bare QLineEdit.** The owner, 4
@@ -4592,6 +4672,10 @@ class DetailsPage(GlassPage):
         having changed its mind."""
         saved = bool(self.entry.get("id"))
         hovering = bool(getattr(self, "_save_hover", False))
+        toggle = getattr(self, "_notify_btn", None)
+        if toggle is not None:
+            toggle.setVisible(saved)
+            toggle.set_on(notifications.title_enabled(self.entry))
         # **A tick when it is saved, a plus when it is not, and the bin
         # only under the pointer.** The owner, 4 September 2026: "in the
         # ch/ep list pages in the save button make it shows
@@ -4661,6 +4745,35 @@ class DetailsPage(GlassPage):
             f" background: {fill}; color: {ink}; }}"
             f"QPushButton:hover {{ background: {hover}; }}"
             f"QPushButton:pressed {{ background: {hover}; }}")
+
+    def _toggle_notify(self):
+        """Turn this title's notifications off or back on. Written onto the
+        saved entry, so every scan and the bell's list read it."""
+        if not self.entry.get("id"):
+            return
+        on = not notifications.title_enabled(self.entry)
+        try:
+            from windows.tracker import _progress_data_file
+            if not storage.update_entry(_progress_data_file(self.entry), self.entry["id"],
+                                        {notifications.NOTIFY_FIELD: on}):
+                show_toast(self, "Could Not Change That")
+                return
+        except Exception:
+            logs.exception("details page could not set the title's notifications")
+            show_toast(self, "Could Not Change That")
+            return
+        self.entry[notifications.NOTIFY_FIELD] = on
+        _note_change()
+        self._notify_btn.set_on(on, ring=True)
+        title = self.entry.get("title") or "This Title"
+        show_toast(self, f"Notifications {'On' if on else 'Off'} for '{title}'")
+        # The bar's count follows at once - a muted title's items leave it.
+        refresh = getattr(self.window(), "_refresh_bell", None)
+        if refresh is not None:
+            try:
+                refresh()
+            except Exception:
+                logs.exception("Could not refresh the bell")
 
     def _toggle_saved(self):
         """The button's one handler: keep it, or stop keeping it."""

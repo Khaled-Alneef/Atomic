@@ -60,14 +60,15 @@ asks more than that (13,172 calls across six sidebar folds).
 """
 
 import ctypes
+import math
 import sys
 
-from PyQt6.QtCore import (QEvent, QObject, QPoint, QRect, QRectF, QSize,
-                          Qt, QTimer)
+from PyQt6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF,
+                          QSize, Qt, QTimer)
 from PyQt6.QtCore import pyqtSignal as Signal
 from PyQt6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap,
                          QRegion)
-from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QPushButton,
+from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QPushButton,
                              QSizePolicy, QVBoxLayout, QWidget)
 
 from . import images, rail_anim, theme
@@ -986,6 +987,170 @@ class _SectionButton(DriftButton):
         painter.end()
 
 
+# **The notifications bell rings** - the owner, 7 November 2026: "add an
+# animation to the bell button make it moves right and left like being
+# ringed with adding small swoosh effect". It swings on its crown, the
+# clapper lagging behind the swing, with short swoosh arcs trailing the side
+# it swings away from; the swing decays to rest. Under CLAUDE.md rule 7's
+# second (RING_MS). It rings when the pointer arrives, when it is pressed,
+# and when something new arrives (main._on_notifications_scanned).
+BELL_RING_MS = 900
+BELL_RING_DEG = 20.0
+BELL_RING_SWINGS = 3.5          # half-periods per ring: left, right, left...
+BELL_BADGE = 16
+# A tiny bit bigger and heavier than the section icons beside it - his ask
+# the same evening, once it was on the bar: 24px against their 22, and a
+# 1.85-unit stroke against 1.6.
+BELL_ICON = 24
+BELL_STROKE = 1.85
+
+
+def paint_bell(painter, box, colour, angle=0.0, stroke=None, muted=False):
+    """The notifications bell in `box` (a square), swung `angle` degrees
+    about its crown, with its swooshes while it swings. One drawing for the
+    bar's bell and the details page's per-title switch, so the two cannot
+    drift apart. `muted` crosses it out - that title's notifications off."""
+    stroke = BELL_STROKE if stroke is None else stroke
+    unit = box.width() / 24.0           # drawn on a 24-unit grid
+    colour = QColor(colour)
+    # The swooshes, behind the bell: two short arcs on the side it is
+    # swinging away from, as strong as the swing is wide.
+    strength = min(1.0, abs(angle) / BELL_RING_DEG) if angle else 0.0
+    if strength > 0.05:
+        trail = QColor(colour)
+        trail.setAlphaF(0.85 * strength)
+        pen = QPen(trail, (stroke - 0.2) * unit)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # A positive angle turns the bell clockwise about its crown,
+        # so its mouth swings left: the trail is on the right.
+        side = 1.0 if angle > 0 else -1.0
+        cx = box.center().x()
+        for reach, span in ((9.5, 34.0), (12.5, 44.0)):
+            arc = QRectF(0, 0, 2 * reach * unit, 2 * reach * unit)
+            arc.moveCenter(QPointF(cx, box.top() + 11.0 * unit))
+            start = (-span / 2.0) if side > 0 else (180.0 - span / 2.0)
+            painter.drawArc(arc, int(start * 16), int(span * 16))
+
+    # The bell, swung about its crown.
+    pivot = QPointF(box.center().x(), box.top() + 3.0 * unit)
+    painter.save()
+    painter.translate(pivot)
+    painter.rotate(angle)
+    painter.translate(-pivot)
+    pen = QPen(colour, stroke * unit)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def at(x, y):
+        return QPointF(box.left() + x * unit, box.top() + y * unit)
+
+    body = QPainterPath(at(6.2, 16.0))
+    body.lineTo(at(6.2, 10.8))
+    body.cubicTo(at(6.2, 7.3), at(8.8, 4.6), at(12.0, 4.6))
+    body.cubicTo(at(15.2, 4.6), at(17.8, 7.3), at(17.8, 10.8))
+    body.lineTo(at(17.8, 16.0))
+    painter.drawPath(body)
+    painter.drawLine(at(4.6, 16.6), at(19.4, 16.6))      # the lip
+    painter.drawLine(at(12.0, 2.8), at(12.0, 4.6))       # the crown
+    # The clapper lags the swing - it hangs from inside the bell and
+    # trails it, which is what makes the motion read as a ring.
+    painter.save()
+    clapper = at(12.0, 16.6)
+    painter.translate(clapper)
+    painter.rotate(-angle * 0.9)
+    painter.translate(-clapper)
+    mouth = QRectF(0, 0, 4.4 * unit, 4.4 * unit)
+    mouth.moveCenter(at(12.0, 17.8))
+    painter.drawArc(mouth, 180 * 16, 180 * 16)
+    painter.restore()
+    painter.restore()
+    if muted:
+        # A slash corner to corner across the whole bell.
+        pen = QPen(colour, stroke * unit)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(box.left() + 4.0 * unit, box.top() + 3.0 * unit),
+                         QPointF(box.left() + 20.0 * unit, box.top() + 21.0 * unit))
+
+
+class BellButton(DriftButton):
+    """The bar's notifications bell, painted so it can swing; the unread
+    count rides its bottom-right corner, as the Downloads count does."""
+
+    def __init__(self, parent=None):
+        super().__init__("", parent, radius=float(theme.RADIUS_SM),
+                         tint=theme.SURFACE, objectName="BarSection")
+        self.setFixedSize(QSize(SECTION_BUTTON_WIDTH, 34))
+        self.setToolTip("Notifications")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._ring = 1.0            # 0..1 through a ring; 1 is at rest
+        self._ring_tween = SmoothTween(self, self._set_ring, BELL_RING_MS,
+                                       curve=lambda x: x)
+        self.badge = QLabel(self)
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.badge.setStyleSheet(
+            f"background: {theme.ACCENT}; border: 1px solid {theme.BG};"
+            f" border-radius: {BELL_BADGE // 2}px; color: {theme.ON_ACCENT};"
+            f" font-size: 8pt; font-weight: 700;")
+        self.badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.badge.hide()
+        use_hover_cursor(self)
+
+    def set_count(self, count: int):
+        count = max(0, int(count or 0))
+        if not count:
+            self.badge.hide()
+            self.setToolTip("Notifications")
+            return
+        text = str(count) if count < 100 else "99+"
+        width = BELL_BADGE if len(text) == 1 else 22 if len(text) == 2 else 28
+        self.badge.setText(text)
+        self.badge.setFixedSize(width, BELL_BADGE)
+        self.badge.move(self.width() - width, self.height() - BELL_BADGE)
+        self.badge.show()
+        self.badge.raise_()
+        self.setToolTip(f"Notifications - {count} new")
+
+    def ring(self):
+        if not self._ring_tween.running:        # a property
+            self._ring_tween.start(0.0, 1.0)
+
+    def _set_ring(self, value):
+        self._ring = float(value)
+        self.update()
+
+    def swing(self) -> float:
+        """The bell's angle now, in degrees: a decaying back-and-forth."""
+        t = self._ring
+        if t >= 1.0:
+            return 0.0
+        return (BELL_RING_DEG * math.sin(math.pi * BELL_RING_SWINGS * t)
+                * (1.0 - t) ** 1.4)
+
+    def enterEvent(self, event):
+        self.ring()
+        super().enterEvent(event)
+
+    def mousePressEvent(self, event):
+        self.ring()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        size = float(BELL_ICON)
+        box = QRectF(0, 0, size, size)
+        box.moveCenter(QRectF(self.rect()).center())
+        colour = QColor(theme.mix(theme.TEXT_MUTED, theme.TEXT, self._hover))
+        paint_bell(painter, box, colour, self.swing())
+        painter.end()
+
+
 class _SectionPill(QWidget):
     """The white capsule over the section on screen, laid *over* the
     three buttons (it paints their icons again in black, clipped to
@@ -1564,7 +1729,35 @@ class TitleBar(QWidget):
         grown = self._centre_buttons.width() + button.width() + \
             self._centre_buttons_row.spacing()
         self._centre_buttons.setFixedWidth(grown)
-        self._centre_balance.setFixedWidth(grown)
+        self._rebalance()
+
+    def add_bell(self, bell):
+        """The notifications bell, directly left of the field (the owner's
+        ask, 7 November 2026). In the row itself rather than in the empty
+        balance holder, because that holder is hidden in full screen and
+        the bell has to stay; the holder gives up the bell's width instead
+        (_rebalance), so the field does not move."""
+        self.bell = bell
+        self._centre_row.insertWidget(self._centre_row.indexOf(self.search), bell)
+        self._rebalance()
+
+    def set_bell_visible(self, shown: bool):
+        bell = getattr(self, "bell", None)
+        if bell is None:
+            return
+        bell.setVisible(bool(shown))
+        self._rebalance()
+        self.apply_fullscreen_mask()
+
+    def _rebalance(self):
+        """The left holder matches the buttons on the right, less whatever
+        sits left of the field in the row itself - the bell - so the field
+        stays centred in the window with or without it."""
+        width = self._centre_buttons.width()
+        bell = getattr(self, "bell", None)
+        if bell is not None and not bell.isHidden():
+            width -= bell.width() + self._centre_row.spacing()
+        self._centre_balance.setFixedWidth(max(0, width))
 
     def _remember_search_width(self):
         """Keep the windowed field's width, for full screen to match.
@@ -1694,7 +1887,7 @@ class TitleBar(QWidget):
             layout.activate()
         region = QRegion()
         for widget in (self.search, self._centre_buttons,
-                       getattr(self, "_nav", None)):
+                       getattr(self, "_nav", None), getattr(self, "bell", None)):
             if widget is None or not widget.isVisible():
                 continue
             top_left = widget.mapTo(self, QPoint(0, 0))
@@ -1812,6 +2005,10 @@ class TitleBar(QWidget):
             balance = nav.sizeHint().width()
         else:
             balance = self._centre_balance.width() or SECTION_BUTTON_WIDTH * 3 + 12
+        bell = getattr(self, "bell", None)
+        if bell is not None and not bell.isHidden():
+            # The balance gave up this much to the bell (_rebalance).
+            balance += bell.width() + self._centre_row.spacing()
         return (balance
                 + self.search.maximumWidth()
                 + self._centre_buttons.width()

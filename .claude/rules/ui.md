@@ -1061,3 +1061,42 @@ Measured on the frozen build, Black Clover 392, 20 pages: no mark on open, at
 page 0 or at page 16; `c392` once the end row came up. The Qt reader, which runs
 only on a machine with no WebView2, still marks on open. Marks written by the
 old rule stay as they are: nothing says which were really finished.
+
+## The notifications bell (7 November 2026)
+
+His ask: a bell left of the search field listing new episodes and chapters
+of what he saved, a count bottom-right like Downloads', a Settings >
+Notifications tab (episodes/chapters, new versions; the bell shows while
+either is on - a third "show the button" switch was his to remove), each
+row with its title's cover and the count waiting after its number ("(2
+Unread Chapters)", counted from Home's `_progress_text`), and a ring - the bell swings on its crown with swooshes trailing it
+(`window_chrome.BellButton`, 900ms, inside rule 7; BELL_ICON 24 and a
+1.85 stroke, a tiny bit over the section icons, at his word). The data is
+`helpers/notifications` (disk only; the first sight of a title is its
+baseline, an episode older than RECENT_DAYS is never news); the window is
+`helpers/notification_panel`. Two things paid for on the frozen build:
+
+- **A Qt Popup takes the foreground when it shows**, and with it the
+  keyboard from the page underneath - the rig's guard stopped the app on
+  the first press. `WA_ShowWithoutActivating` keeps it; Qt still closes a
+  Popup on an outside press through its own grab.
+- **`SmoothTween.running` is a property.** `running()` raised in the bell's
+  enterEvent and mousePressEvent, so the press never became a click - and
+  the offscreen check had only set the swing by hand. Drive the real event
+  path (QTest.mouseClick) before the build.
+
+`rig.click` now accepts a popup whose owning process is the one it launched
+(the panel is its own top-level window).
+- **`storage.load("")` is the data directory**, and storage quarantines
+  what it cannot open by renaming it: an update item (no file) asked
+  `notifications.entry_for` for its entry, and a test copy's whole data
+  folder became `Atomic.corrupt`. `entry_for` takes only the two saved
+  lists now. Never hand storage a name built from data.
+- **Each saved title has its own switch** (his ask, the same night): a
+  44px bell beside Save on the episode/chapter page (`details._NotifyToggle`,
+  the bar's `paint_bell`, crossed out when off), shown only while saved,
+  writing `notify` onto the entry. A muted title's baseline keeps moving
+  in `notifications.scan`, so switching it back on brings no backlog, and
+  its items leave the list and the count at once (`muted_ids`). The off
+  ink is white at 60%, not TEXT_MUTED - the ground is translucent over the
+  title's art, and a mid grey vanished on a light one.

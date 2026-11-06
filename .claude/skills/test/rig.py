@@ -217,8 +217,17 @@ def _target(x, y):
     h, rect, _ = f
     pt = w.POINT(rect[0] + int(x), rect[1] + int(y))
     target = u.WindowFromPoint(pt)
-    if not target or u.GetAncestor(target, 2) != h:     # GA_ROOT
-        raise SystemExit(f"refused: the window at {x},{y} is not the test window")
+    root = u.GetAncestor(target, 2) if target else None     # GA_ROOT
+    if not target or root != h:
+        # A popup the test app opened (the notifications panel, a menu) is
+        # its own top-level window, so its root is not the main one. It is
+        # still ours when the process that owns it is the one this rig
+        # launched - never anything of his.
+        owner = w.DWORD(0)
+        if target:
+            u.GetWindowThreadProcessId(root, ctypes.byref(owner))
+        if not target or owner.value != _pinned_pid():
+            raise SystemExit(f"refused: the window at {x},{y} is not the test window")
     return target, pt
 
 
