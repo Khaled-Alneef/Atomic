@@ -750,6 +750,10 @@ ICON_STATS = "\ue701"
 # AllApps, the grid of squares - the Apps & Websites launcher (29 October
 # 2026). The reader's bar carries the same glyph (app.js launcherMenu).
 ICON_LAUNCH = "\ue71d"
+# ...in the reader's face and size, 14 CSS px - logical pixels in both
+# places, so the stylesheet says px (see launch_btn).
+LAUNCH_GLYPH_FACE = "Segoe MDL2 Assets"
+LAUNCH_GLYPH_PX = 14
 ICON_RELOAD = "\ue72c"      # Refresh - the circular arrow, the same
                             # picture every other reload in this app
                             # uses. Not ICON_SYNC (\ue895), which is the
@@ -1749,7 +1753,7 @@ def _hard_edge_font(point_size, bold=False) -> QFont:
     return font
 
 
-def _icon_button_style(font_pt, family=None):
+def _icon_button_style(font_pt, family=None, unit="pt"):
     """The bar button's look: no ground until hovered, no border.
 
     padding:0 - the app-wide QPushButton rule is `padding: 8px 16px`,
@@ -1763,7 +1767,7 @@ def _icon_button_style(font_pt, family=None):
     face = f'"{family}"' if family else theme.FONT_STACK_ICONS
     return (f"QPushButton {{ background: transparent; border: none; padding: 0px;"
             f" color: {theme.TEXT}; font-family: {face};"
-            f" font-size: {font_pt}pt; border-radius: {theme.RADIUS_SM}px; }}"
+            f" font-size: {font_pt}{unit}; border-radius: {theme.RADIUS_SM}px; }}"
             f"QPushButton:hover {{ background: {_GLASS_HOVER}; }}"
             f"QPushButton:pressed {{ background: {_GLASS_PRESSED}; }}"
             f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}")
@@ -1814,7 +1818,7 @@ def _chip_style(font_pt=10.5, padding="5px 14px", rest=None):
             f" background: transparent; border: 1px solid {theme.BORDER}; }}")
 
 
-def _icon_button(glyph, tooltip, size=44, font_pt=16, family=None):
+def _icon_button(glyph, tooltip, size=44, font_pt=16, family=None, unit="pt"):
     button = QPushButton(glyph)
     button.setObjectName("Flat")
     button.setToolTip(tooltip)
@@ -1822,7 +1826,7 @@ def _icon_button(glyph, tooltip, size=44, font_pt=16, family=None):
     # Every clickable shows the hand - the owner's ask, 24 August 2026,
     # and this factory is where most of the player's buttons come from.
     use_hover_cursor(button)
-    button.setStyleSheet(_icon_button_style(font_pt, family))
+    button.setStyleSheet(_icon_button_style(font_pt, family, unit))
     return button
 
 
@@ -4729,8 +4733,18 @@ class PlayerPage(GlassPage):
         # Apps and Websites, first on the right and apart from everything
         # that acts on this episode - the owner, 29 October 2026: "open
         # my apps and websites from inside the video player and reader".
+        # The reader's own glyph, face and size (app.css .rglyph: Segoe
+        # MDL2 Assets at 14px). His word, 7 November 2026: "the icon of
+        # apps websites and games seems really bad and has bottom line that
+        # has less thickness than the other lines, make it exactly the same
+        # as the icon in the reader". Measured at his 125%: Segoe Fluent
+        # Icons at 14pt (23.3 device px) draws AllApps as three rows whose
+        # lines sit on a pixel and a half, one half of each grey; MDL2 at
+        # 14px (17.5 device px, what the reader draws) is four rows of
+        # one-pixel lines, every one solid.
         self.launch_btn = _icon_button(ICON_LAUNCH, "Apps and websites",
-                                       size=40, font_pt=14)
+                                       size=40, font_pt=LAUNCH_GLYPH_PX,
+                                       family=LAUNCH_GLYPH_FACE, unit="px")
         self.launch_btn.clicked.connect(self._open_launch_panel)
         row.addWidget(self.launch_btn)
 
