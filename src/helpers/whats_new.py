@@ -35,6 +35,8 @@ NOTES = {
         "and it goes back to the speed you had. A quick tap still pauses.",
         "Holding the left mouse button on the video does the same: 2x while "
         "you hold, a click still pauses.",
+        "The Apps and Websites button in the video player has the reader's "
+        "icon now, with every line the same weight.",
     ],
     "3.19": [
         "MangaDar's chapters open their own pages, even for a title you read "
