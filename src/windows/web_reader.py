@@ -74,14 +74,29 @@ def _entry_id_for(entry):
             # title matched against both is how the 3asq manga "Kingdom"
             # resolved to the anime (see web_pages._find, 3 September
             # 2026). An entry with no usable type still asks both.
-            from windows.web_pages import entry_side
+            from windows.web_pages import entry_side, _page_address
             side = entry_side(entry.get("type"))
+            # **And only a row at the same address.** The owner, 6
+            # November 2026: "why is mangadar onepiece chapters do not
+            # load although I can open them in browser". His tracker holds
+            # One Piece at 3asq (43 chapters); the MangaDar card opened
+            # MangaDar's list (1,221) - web_pages._find has compared urls
+            # since 5 November - and its chapter's index went to the 3asq
+            # entry here, matched by title. Harnessed on a copy of his
+            # data (scratch h_reader_id.py): chapter 1100, index 117 ->
+            # `no such chapter`; 1198, index 0 -> 3asq's pages, not
+            # MangaDar's. The index is always into the card's own list
+            # (reader._web_chapter_index), so the id must be its too.
+            address = _page_address(entry.get("url")) if side == "read" else ""
             files = {"read": ("tracker.json",),
                      "watch": ("series.json",)}.get(
                 side, ("tracker.json", "series.json"))
             for name in files:
                 for row in storage.load(name, []):
                     if not isinstance(row, dict):
+                        continue
+                    theirs = _page_address(row.get("url"))
+                    if address and theirs and theirs != address:
                         continue
                     if str(row.get("title") or "").strip().lower() == title:
                         found = str(row.get("id") or "")

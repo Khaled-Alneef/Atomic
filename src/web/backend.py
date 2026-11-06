@@ -940,6 +940,15 @@ def pages(entry_id, index):
         if not found or index >= len(found):
             found = chapter_source.list_chapters(entry) or []
         if index < 0 or index >= len(found):
+            # Said in the log: the MangaDar One Piece reader (6 November
+            # 2026) answered this silently for 2.5 minutes - an index
+            # into another site's list (web_reader._entry_id_for).
+            try:
+                from helpers import logs
+                logs.info(f"reader: no such chapter: index={index} of "
+                          f"{len(found)} on {entry.get('url') or entry_id}")
+            except Exception:
+                pass
             return {"pages": [], "error": "no such chapter"}
         chapter = found[index]
         answer = chapter_source.chapter_pages(chapter) or {}

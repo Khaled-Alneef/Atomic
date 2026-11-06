@@ -187,10 +187,18 @@ def _chapters_from_html(body: str, series_url: str, entry_type=None) -> list:
             # `/manga/one-piece/1190/` - Madara's own shape.
             or re.search(r"/\d+(?:\.\d+)?$", path) and slug and slug in path
         )
+        # `/manga/one-piece/1155-5/` is 3asq's 1155.5 (its label says so;
+        # 1039-1 likewise, measured 6 November 2026). Neither test above
+        # took it, and _number_from would have read it as chapter 5.
+        decimal = (re.search(rf"/{re.escape(slug)}/(\d+)-(\d{{1,2}})$", path)
+                   if slug else None)
+        if decimal:
+            looks_like_chapter = True
         if not looks_like_chapter or absolute in seen:
             continue
         seen.add(absolute)
-        number = _number_from(path)
+        number = (float(f"{decimal.group(1)}.{decimal.group(2)}") if decimal
+                  else _number_from(path))
         if number is None:
             continue
         found.append({
@@ -530,11 +538,73 @@ def _site_chapters(entry, deadline, on_partial=None) -> list:
     if timeout is None:
         return chapters
     try:
-        from_ajax = _chapters_from_html(_madara_ajax(series_url, timeout),
-                                        series_url, entry_type)
+        ajax_body = _madara_ajax(series_url, timeout)
+        from_ajax = _chapters_from_html(ajax_body, series_url, entry_type)
     except Exception:
-        from_ajax = []
+        ajax_body, from_ajax = "", []
+    if from_ajax and _ajax_page_numbers(ajax_body):
+        if on_partial is not None and len(from_ajax) >= MIN_PARTIAL_CHAPTERS:
+            try:
+                on_partial(list(from_ajax))
+            except Exception:
+                pass
+        from_ajax = _merged(from_ajax, _more_ajax_pages(
+            ajax_body, series_url, entry_type, deadline))
     return from_ajax if len(from_ajax) > len(chapters) else chapters
+
+
+# **Madara's chapter ajax is paged now.** The owner, 6 November 2026: "why
+# the fuck is one piece manga in 3asq does not show the older chapters
+# although it shows them in browser". Measured that day: 3asq's
+# `ajax/chapters/` POST answers 44 chapters (1198 down to 1155.5) and a
+# pager - `<a href="/?t=2" data-page="2">` ... `t=12` - and the same POST
+# with `?t=N` answers the rest: twelve pages, 1198 down to chapter 0, 2.68s
+# fetched six at a time, `t=13` and on empty. Only page 1 was read, so his
+# list stopped at 43. The pager prints "1 2 3 ... 12", so the numbers are
+# filled in, as _page_urls does.
+_AJAX_PAGE_RE = re.compile(r'href="[^"]*[?&]t=(\d+)"', re.I)
+MAX_AJAX_PAGES = 40     # One Piece is 12; a guard against a runaway pager
+
+
+def _ajax_page_numbers(body: str) -> list:
+    numbers = {int(n) for n in _AJAX_PAGE_RE.findall(body or "")}
+    numbers = {n for n in numbers if 2 <= n <= MAX_AJAX_PAGES}
+    return list(range(2, max(numbers) + 1)) if numbers else []
+
+
+def _more_ajax_pages(first_body: str, series_url: str, entry_type,
+                     deadline) -> list:
+    """Pages 2 upward of a paged Madara chapter ajax, fetched together and
+    each retried once - a page that fails is a hole in the middle of the
+    numbering, which nothing on screen would say (see _more_pages)."""
+    numbers = _ajax_page_numbers(first_body)
+    if not numbers:
+        return []
+    url = series_url.rstrip("/") + "/ajax/chapters/"
+
+    def fetch(n):
+        for _ in range(2):
+            step = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+            if step is None:
+                return ""
+            try:
+                return _get(f"{url}?t={n}", step, referer=series_url, post=b"")
+            except Exception:
+                continue
+        return ""
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(LIST_PAGE_WORKERS, len(numbers))) as pool:
+        bodies = list(pool.map(fetch, numbers))
+    missing = [n for n, b in zip(numbers, bodies) if not b]
+    if missing:
+        logs.info(f"chapter list: {urllib.parse.urlsplit(series_url).netloc} "
+                  f"ajax pages {missing} of {len(numbers) + 1} did not answer")
+    chapters = []
+    for body in bodies:
+        if body:
+            chapters.extend(_chapters_from_html(body, series_url, entry_type))
+    return chapters
 
 
 # --------------------------------------------------------- mangadex path

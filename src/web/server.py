@@ -1561,6 +1561,24 @@ def _grid_row(entry, saved_titles):
     return row
 
 
+def _site_card(row, entry):
+    """`row` wearing the site under its title instead of a chapter.
+
+    The owner, 6 November 2026: "Always in the discovery page show the
+    website name under the card not the chapter!!! especially when
+    searching and hitting enter". A search for "one piece" returns it from
+    3asq and MangaDar, and `_row` put his own mark ("Ch 1199", kept by
+    title) under both, so two places to read it read as one card twice -
+    and app.js progressInto wrote the mark over anything else on the line.
+    `site` tells the page to leave this line alone."""
+    if str(entry.get("type") or "").strip().lower() not in READING_KINDS:
+        return row
+    label = _site_label(entry)
+    if label:
+        row.update(meta=label, metabase=label, prog="", site=label)
+    return row
+
+
 def _site_label(entry) -> str:
     name = str(entry.get("site_name") or "").strip()
     if name:
@@ -2208,7 +2226,8 @@ def _discover():
         # The banner still draws from the whole cached section (`pools`).
         sections.append({"title": f"Top 10 {label}", "style": "top10",
                          "key": f"discover:{key}",
-                         "rows": [_row(e) for e in rows[:TOP10]]})
+                         # A reading row names its site - _site_card.
+                         "rows": [_site_card(_row(e), e) for e in rows[:TOP10]]})
 
     # **A different banner every visit, weighted by medium.** The owner,
     # 2 September 2026: "make the banner in the discover changes when I
@@ -2592,9 +2611,8 @@ def _search(text, more=False):
         total += len(rows)
         shaped = [_row(e) for e in rows]
         if name == "Novels" or name in SEARCH_MEDIA:
-            # The site under each title, as on the catalogue pages.
-            for row, e in zip(shaped, rows):
-                row["meta"] = row.get("meta") or _site_label(e)
+            # The site under each title, never the chapter - _site_card.
+            shaped = [_site_card(row, e) for row, e in zip(shaped, rows)]
         sections.append({"title": f"{name}  ({len(rows)})",
                          "key": name.lower().replace(" ", "-"),
                          "order": order, "rows": shaped})
