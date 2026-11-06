@@ -3781,7 +3781,14 @@ class _KeyRelay(QObject):
         return False
 
     def eventFilter(self, obj, event):
-        if event.type() != QEvent.Type.KeyPress:
+        kind = event.type()
+        # Space's release too: holding it plays at 2x until the key comes
+        # up (player_top_bar_live_patch, _space_pressed), and that release
+        # lands on whatever native child holds the keyboard, as the press
+        # does. Only Space - no other key here acts on its release.
+        release = (kind == QEvent.Type.KeyRelease
+                   and event.key() == Qt.Key.Key_Space)
+        if kind != QEvent.Type.KeyPress and not release:
             return False
         page = self._page
         try:
@@ -3794,6 +3801,9 @@ class _KeyRelay(QObject):
             return False
         if self._is_typing(QApplication.focusWidget()):
             return False
+        if release:
+            page.keyReleaseEvent(event)
+            return True
         page.keyPressEvent(event)
         return event.isAccepted()
 

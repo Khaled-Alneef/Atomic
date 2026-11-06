@@ -30,6 +30,12 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.20": [
+        "Hold Space in the video player to play at 2x, like YouTube - let go "
+        "and it goes back to the speed you had. A quick tap still pauses.",
+        "Holding the left mouse button on the video does the same: 2x while "
+        "you hold, a click still pauses.",
+    ],
     "3.19": [
         "MangaDar's chapters open their own pages, even for a title you read "
         "on another site.",

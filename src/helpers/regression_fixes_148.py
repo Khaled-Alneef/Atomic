@@ -24,7 +24,12 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import time
 import types
+
+# A press on the picture held this long plays at 2x (see poll_mouse) -
+# Space's SPACE_HOLD_MS, so both holds feel the same.
+MOUSE_HOLD_S = 0.35
 
 _INSTALLED = False
 _PATCHED = set()
@@ -155,6 +160,50 @@ def _patch_player(module):
         except (AttributeError, RuntimeError):
             return False
 
+    # **Hold the left button on the picture for 2x** - the owner's ask, 7
+    # November 2026: "make the left click holding also do the x2 like the
+    # space holding in the video player". The click already pauses on
+    # its release (below), so a tap is told from a hold the way Space's
+    # is: past MOUSE_HOLD_S with the button still down it is a hold, 2x
+    # until the release, the pill up, the speed he had put back after,
+    # and that release pauses nothing. Paused, a hold plays at 2x and
+    # the release leaves it playing - what holding Space does from a
+    # pause. Read on this 40ms poll, so the hold lands 350-390ms in.
+    def _hold_allowed(self):
+        """Only a press a plain click would have paused can hold: not one
+        that dismisses a panel or the episode list, not one a panel's
+        own press owns, not while the status box is up, not during a
+        Space hold."""
+        try:
+            if self.handle is None or self._status_visible():
+                return False
+            if self._panel is not None:
+                return False
+            bar = self._episode_bar
+            if bar is not None and bar.isVisible():
+                return False
+            if self._press_seq == self._guarded_press:
+                return False
+            if time.monotonic() - self._panel_guard < module.PANEL_CLICK_GUARD_S:
+                return False
+        except (AttributeError, RuntimeError):
+            return False
+        return (getattr(self, "_atomic_space", None) is None
+                and hasattr(self, "_atomic_speed_boost"))
+
+    def _hold_begin(self, hold):
+        if not _hold_allowed(self) or self._closing:
+            self._atomic_mouse_hold = None
+            return
+        if self._paused:
+            self.toggle_pause()
+        hold["prev"] = self._speed
+        hold["boosted"] = True
+        try:
+            self._atomic_speed_boost(hold["prev"])
+        except Exception:
+            module.logs.exception("left-button hold could not speed up")
+
     def poll_mouse(self):
         """Click the video regardless of pointer travel during that click."""
         if self._closing or os.name != "nt":
@@ -178,13 +227,34 @@ def _patch_player(module):
                 self._is_active()
                 and self._over_video(position)
                 and not _press_in_drag_band(self, position))
+            self._atomic_mouse_hold = (
+                {"at": time.monotonic(), "boosted": False}
+                if self._press_on_video and _hold_allowed(self) else None)
             return
         if down:
+            hold = getattr(self, "_atomic_mouse_hold", None)
+            if (hold and not hold["boosted"]
+                    and time.monotonic() - hold["at"] >= MOUSE_HOLD_S):
+                _hold_begin(self, hold)
             return
 
         if self._mouse_down:
             self._mouse_down = False
             press_position = self._press_pos or position
+            hold = getattr(self, "_atomic_mouse_hold", None)
+            self._atomic_mouse_hold = None
+            if hold and hold["boosted"]:
+                # The release ends the hold and is not a click: no pause,
+                # and it does not count as the first half of a double-click.
+                try:
+                    self._atomic_speed_unboost(hold["prev"])
+                except Exception:
+                    pass
+                self._last_click_time = 0.0
+                self._last_click_pos = None
+                self._press_on_video = False
+                self._press_pos = None
+                return
             if self._press_on_video:
                 # Pass the press point too. _click_toggle intentionally checks
                 # _over_video again for panel guards; using the release point
