@@ -53,6 +53,13 @@ import zipfile
 
 from . import app_settings, logs, net, title_match
 
+# A long anime's broadcast numbering (see _overall_query); a build where
+# it fails to import asks OpenSubtitles by season only, as before.
+try:
+    from . import episode_order
+except Exception:  # pragma: no cover
+    episode_order = None
+
 # The strict release-name reader, imported the same defensive way
 # streams.py imports it: a build where this fails checks one thing fewer,
 # not a subtitle search that will not run.
@@ -479,12 +486,23 @@ def _subtitlecat(query, deadline) -> list:
     return results
 
 
-# One per-language attachment link on an AnimeTosho article page:
-# `<a href="https://animetosho.org/storage/attach/...">Arabic [ara, ASS]</a>`.
+# **AnimeTosho moved, and this source had been answering nothing.**
+# Measured 7 November 2026, after the owner's "ALL arabic are gone" on One
+# Piece: `feed.animetosho.org` is NXDOMAIN at Google's and Cloudflare's
+# resolvers alike, so every search here raised before its first row - for
+# every show, silently, behind run()'s except. `feed.animetosho.xyz`
+# 308-redirects to feed.animetosho.net, which answers (20 rows for "one
+# piece 1160" in 3.9s). The release pages moved with it, and an attachment
+# is now a relative `/download/<id>/subs/file/<n>`, labelled either
+# "Arabic [ara, ASS]" (Judas) or "ara [SRT]" (ToonsHub). The old absolute
+# `animetosho.org/storage/attach/` shape is still read, in case a page
+# carries it.
+_AT_FEED = "https://feed.animetosho.net/json?q="
 _AT_ATTACH_RE = re.compile(
-    r'<a href="(https://animetosho\.org/storage/attach/[^"]+)"[^>]*>'
+    r'<a href="([^"]*(?:/storage/attach/|/subs/file/)[^"]*)"[^>]*>'
     r'([^<]{0,90})</a>', re.I)
 _AT_LANG_RE = re.compile(r"\[(\w{2,3}),\s*(\w{2,4})\]")
+_AT_LANG_BARE_RE = re.compile(r"^\s*(\w{2,3})\s*\[(\w{2,4})\]")
 
 # How many release pages one search is allowed to open, and how many
 # results are enough to stop early. Each page is a request; a search
@@ -516,76 +534,121 @@ def _animetosho(query, deadline) -> list:
     episode = query.get("episode")
     if not title or not episode:
         return []
-    timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
-    if timeout is None:
-        return []
-    # The fansub numbering, not S01E05: these releases write "Title - 05"
-    # or "S02E05" under the show's own season, and the plain form matches
-    # both (the feed's search is a text search).
-    terms = f"{title} {int(episode):02d}"
-    url = "https://feed.animetosho.org/json?q=" + urllib.parse.quote_plus(terms)
-    body = json.loads(_get_text(url, timeout))
-    rows = body if isinstance(body, list) else []
-    if not rows and int(query.get("season") or 0) > 1:
-        # Nothing under the plain form - the release may be filed only
-        # under SxxEyy. One extra request, and only on a miss, so an
-        # episode the first query answered costs nothing more.
+    season = int(query.get("season") or 1)
+    episode = int(episode)
+
+    def feed(terms):
         timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
         if timeout is None:
             return []
-        terms = f"{title} S{int(query['season']):02d}E{int(episode):02d}"
         try:
-            body = json.loads(_get_text(
-                "https://feed.animetosho.org/json?q="
-                + urllib.parse.quote_plus(terms), timeout))
-            rows = body if isinstance(body, list) else []
+            body = json.loads(_get_text(_AT_FEED + urllib.parse.quote_plus(terms), timeout))
         except Exception:
-            rows = []
+            return []
+        return body if isinstance(body, list) else []
 
-    def episode_stated(name):
-        return re.search(rf"(?:^|[\s\-_\[(e])0?{int(episode)}(?:v\d)?(?=[\s\-_\])]|$)",
+    def episode_stated(name, number):
+        # "EP1160" (ToonsHub) and "S02E05." as well as "- 05" and "S01E1160".
+        return re.search(rf"(?:^|[\s\-_\[(e.]|ep)0?{int(number)}(?:v\d)?(?=[\s\-_\]).]|$)",
                          name, re.I)
+
+    def keep(rows, number, overall_number, season_stated):
+        # Not another season's episode of the same number either: once the
+        # feed answered again, Frieren S01E05 drew three "S02E05" releases.
+        out = []
+        for row in rows:
+            name = str(row.get("title") or "")
+            if (not episode_stated(name, number)
+                    or _names_other_episode(name, season, episode, overall_number)
+                    or title_match.similarity(title, name) <= 0.2):
+                continue
+            if season_stated and not (_NAME_SXE_RE.search(name) or season in (
+                    {int(s) for s in _NAME_SEASON_RE.findall(name)}
+                    | (indexers.stated_seasons(name) if indexers is not None else set()))):
+                continue
+            out.append(row)
+        return out
+
+    # A long-running show is released under its broadcast number: One
+    # Piece S23E05 is "One Piece - 1160" in every group's name, and "One
+    # Piece 05" is episode 5 of 1999 (episode_order). So where there is
+    # such a number it is asked too, beside the season's own - both,
+    # because a seasonal show splits between them: Solo Leveling S02E05 is
+    # SubsPlease's "- 17" (English only) and PacMan's multi-sub "S02E05".
+    # Under the season's number a release must then say which season it
+    # is, since a bare "- 05" there is season 1's, or One Piece's of 1999.
+    overall = _overall_query(query, deadline)
+    number = overall["episode"] if overall else None
+
+    def season_pass():
+        # The fansub numbering, not S01E05: these releases write "Title -
+        # 05" or "S02E05" under the show's own season, and the plain form
+        # matches both (the feed's search is a text search).
+        rows = feed(f"{title} {episode:02d}")
+        if not rows and season > 1:
+            # Nothing under the plain form - the release may be filed only
+            # under SxxEyy. One extra request, and only on a miss.
+            rows = feed(f"{title} S{season:02d}E{episode:02d}")
+        return keep(rows, episode, number, bool(overall))
+
+    if overall:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            broadcast = pool.submit(lambda: keep(feed(f"{title} {number:02d}"),
+                                                 number, number, False))
+            seasonal = pool.submit(season_pass)
+            merged = broadcast.result() + seasonal.result()
+    else:
+        merged = season_pass()
+    candidates, links = [], set()
+    for row in merged:
+        if row.get("link") and row["link"] not in links:
+            links.add(row["link"])
+            candidates.append(row)
 
     # Multi-sub groups first - they are the ones that carry Arabic at
     # all, and page fetches are the budget being spent.
-    candidates = [r for r in rows
-                  if episode_stated(str(r.get("title") or ""))
-                  and title_match.similarity(title, str(r.get("title") or "")) > 0.2]
     candidates.sort(key=lambda r: 0 if re.search(
         r"multi|toonshub|erai", str(r.get("title") or ""), re.I) else 1)
 
-    results, pages = [], 0
-    for row in candidates:
-        if pages >= _AT_MAX_PAGES or len(results) >= _AT_ENOUGH:
-            break
-        link = row.get("link") or row.get("article_url")
-        if not link:
-            continue
+    # `link` is the release's AnimeTosho page; `article_url` is now often
+    # another site's (nekobt.to), which lists no attachments.
+    picked = [row for row in candidates if row.get("link")][:_AT_MAX_PAGES]
+
+    def attachments(row):
         timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
         if timeout is None:
-            break
-        pages += 1
+            return []
         try:
-            page = _get_text(link, timeout)
+            page = _get_text(row["link"], timeout)
         except Exception:
-            continue
+            return []
         release = str(row.get("title") or "")[:110]
-        for attach_url, label in _AT_ATTACH_RE.findall(page):
+        found_rows = []
+        for href, label in _AT_ATTACH_RE.findall(page):
             label = label.strip()
-            found = _AT_LANG_RE.search(label)
+            found = _AT_LANG_RE.search(label) or _AT_LANG_BARE_RE.search(label)
             code = (found.group(1).lower() if found else "")
             if not is_arabic_code(code) and "arab" not in label.lower():
                 continue
-            results.append({
+            found_rows.append({
                 "source": "AnimeTosho",
                 "name": f"{label} — {release}",
                 "release": release,
                 "lang": "ar",
-                "url": attach_url,
+                "url": urllib.parse.urljoin(row["link"], href),
                 "format": (found.group(2).lower() if found else "ass"),
                 "rating": int(row.get("seeders") or 0),
             })
-    return results
+        return found_rows
+
+    # The pages together, not in a row: each is 0.5-2s on the new host,
+    # and six in a row was most of the budget. Kept in the feed's order.
+    results = []
+    if picked:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(picked)) as pool:
+            for found_rows in pool.map(attachments, picked):
+                results.extend(found_rows)
+    return results[:_AT_ENOUGH * 2]
 
 
 def _subdl(query, deadline) -> list:
@@ -629,6 +692,7 @@ def _subdl(query, deadline) -> list:
     want_season = int(query.get("season") or 0) or None
     want_episode = int(query.get("episode") or 0) or None
     wanted_title = str(query.get("title") or "").strip()
+    overall = False         # the broadcast number, asked once on first need
     for item in body.get("subtitles") or []:
         if not isinstance(item, dict):
             continue
@@ -655,6 +719,14 @@ def _subdl(query, deadline) -> list:
                     and int(row_season or 0) != want_season:
                 continue
         name = str(item.get("release_name") or item.get("name") or "Arabic subtitle")
+        # The episode the *name* states, for the rows whose fields state
+        # none - see _names_other_episode.
+        if want_episode is not None:
+            if overall is False:
+                overall_query = _overall_query(query, deadline)
+                overall = overall_query["episode"] if overall_query else None
+            if _names_other_episode(name, want_season or 1, want_episode, overall):
+                continue
         # A name search (no IMDb id) can answer with a different title
         # entirely - the id search cannot, so it is exempt.
         if not query.get("imdb_id") and wanted_title and indexers is not None:
@@ -681,6 +753,122 @@ def _subdl(query, deadline) -> list:
     return results
 
 
+# The same episode, numbered the way OpenSubtitles files a long anime.
+#
+# **The owner, 7 November 2026**: One Piece is seasons here and "one very
+# long season" on OpenSubtitles. Measured: opensubtitles.org answers 0
+# rows for any One Piece season past the first and files everything as
+# S01E<broadcast number>; the Stremio addon the same. episode_order turns
+# Cinemeta's S21E01 into 892 (not the 891 that counting Cinemeta's seasons
+# gives - see its docstring), and these two ask for S01E892 beside the
+# season-numbered question, which still runs as before.
+#
+# Safe to ask of any show: OpenSubtitles holds an S01E<n> past the end of
+# Cinemeta's first season only when it numbers the run continuously, and
+# then S01E<n> *is* the n-th episode. Breaking Bad S02E01 asks for S01E08,
+# which does not exist; on five shows numbered by season the overall number
+# equalled counting the seasons for every episode (episode_order).
+
+def _overall_query(query, deadline):
+    """`query` asking for season 1, episode <broadcast number>, or None
+    when that would be the question already asked (season 1) or there is
+    no number to ask with."""
+    try:
+        season, episode = int(query.get("season") or 0), int(query.get("episode") or 0)
+        if season < 2 or episode < 1 or not query.get("imdb_id") or episode_order is None:
+            return None
+        timeout = net.step_timeout(deadline, DEFAULT_TIMEOUT)
+        if timeout is None:
+            return None
+        number = episode_order.overall_number(query["imdb_id"], season, episode, timeout)
+        if not number or number == episode:
+            return None
+        return dict(query, season=1, episode=number, overall_of=(season, episode))
+    except Exception:
+        return None
+
+
+def _opensubtitles_v3_overall(query, deadline) -> list:
+    overall = _overall_query(query, deadline)
+    return _opensubtitles_v3(overall, deadline) if overall else []
+
+
+def _opensubtitles_org_overall(query, deadline) -> list:
+    overall = _overall_query(query, deadline)
+    return _opensubtitles_org(overall, deadline) if overall else []
+
+
+# What a subtitle's release name says about its episode. Not indexers'
+# reader: that one reads one to three digits ("One Piece - 1143" states
+# nothing to it) and takes "[1 ~ 61]" as a pack covering S22E59.
+_NAME_SXE_RE = re.compile(r"\bS(\d{1,2})[\s._-]?E(\d{1,4})(?!\d)", re.I)
+_NAME_EP_RE = re.compile(
+    r"(?:(?<![\w.])-\s*|\bE(?:P|pisode)?[\s._]?)(\d{1,4}(?:\.\d)?)(?:v\d)?(?![\d.]*\d)", re.I)
+_NAME_SEASON_RE = re.compile(r"\b(?:S|Season\s?)(\d{1,2})(?![\dE])", re.I)
+_NAME_RANGE_RE = re.compile(r"(?<![\d.])(\d{1,4})\s*(?:~|-|to)\s*(\d{1,4})(?![\d.]*\d)", re.I)
+
+
+def _names_other_episode(name, season, episode, overall=None) -> bool:
+    """True when `name` positively states an episode that is not this one.
+
+    **The owner's screenshot, 7 November 2026**: One Piece S22E59, and every
+    Arabic row on the panel was SubDL's and none was 1144 - "One Piece -
+    1143", "- 1128.5", "- 1122", "- 1121", "- 1120". SubDL answers a season
+    question with the season (13 rows here), most of them marked
+    `full_season` with no episode, which `_subdl` let through as packs.
+    Their names state an episode; it was never read.
+
+    This episode is S<season>E<episode>, or S01E<overall> / a bare <overall>
+    where the show has a broadcast number (episode_order) - fansub names
+    write One Piece as "- 1144". A range has to cover it: by the broadcast
+    number when there is one ("[East Blue Saga][1 ~ 61]" covers 59 but not
+    1144), within the season when the name states that season. A name that
+    states nothing ("One Piece Arabic") is not contradicting anything, and
+    stays."""
+    try:
+        season, episode = int(season or 1), int(episode)
+        overall = int(overall) if overall and int(overall) != episode else None
+        text = name
+        if indexers is not None:
+            try:
+                text = indexers._strip_noise(name)       # 1080p, x265, 10bit...
+            except Exception:
+                text = name
+        marked = _NAME_SXE_RE.findall(text)
+        if marked:
+            return not any((int(s), int(e)) in {(season, episode), (1, overall), (season, overall)}
+                           for s, e in marked)
+        ranges = [(int(a), int(b)) for a, b in _NAME_RANGE_RE.findall(text) if int(a) < int(b)]
+        if ranges:
+            # A bare "S21" before the range ("One piece S21 1-100", a SubDL
+            # row) is a season indexers.stated_seasons does not read.
+            stated = {int(s) for s in _NAME_SEASON_RE.findall(text)}
+            if indexers is not None:
+                try:
+                    stated |= indexers.stated_seasons(name)
+                except Exception:
+                    pass
+            want = overall if (overall and season not in stated) else episode
+            return not any(a <= want <= b for a, b in ranges)
+        numbers = _NAME_EP_RE.findall(text)
+        if numbers:
+            # "Sousou no Frieren 2nd Season - 05" is not S01E05 (AnimeTosho
+            # offered it for exactly that). A name stating seasons, none of
+            # them this one, is another season's episode of that number.
+            stated = {int(s) for s in _NAME_SEASON_RE.findall(text)}
+            if indexers is not None:
+                try:
+                    stated |= indexers.stated_seasons(name)
+                except Exception:
+                    pass
+            if stated and season not in stated and not (overall and 1 in stated):
+                return True
+            return not any(float(n) in (episode, overall) for n in numbers)
+        return False
+    except Exception:
+        return False
+
+
 def _search_terms(query) -> str:
     """What to type into a search box for this episode."""
     title = query.get("title") or ""
@@ -703,6 +891,9 @@ _SOURCES = (
     # groups by it, SOURCE_PRIORITY puts it first, and the download
     # dialog's "prefer" choice matches on it (see _opensubtitles_org).
     ("OpenSubtitles", _opensubtitles_org),
+    # The same two, numbered as one long season - see _overall_query.
+    ("OpenSubtitles", _opensubtitles_v3_overall),
+    ("OpenSubtitles", _opensubtitles_org_overall),
     ("SubtitleCat", _subtitlecat),
     ("AnimeTosho", _animetosho),
 )

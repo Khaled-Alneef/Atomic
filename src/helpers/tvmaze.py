@@ -108,6 +108,30 @@ def fetch_next_episode(imdb_id: str = None, title: str = None, timeout: int = 8)
     return {"at": when, "season": episode.get("season"), "episode": episode.get("number")}
 
 
+def fetch_episodes(imdb_id: str, timeout: int = 8):
+    """Every regular, numbered episode TVmaze lists for the show, in
+    broadcast order, as [{"airdate": "YYYY-MM-DD" or "", "name": str}],
+    or None when the show is not on TVmaze or the request failed.
+
+    By IMDb id only - an episode order borrowed from a near-miss title
+    would number the wrong show. Specials are left out (TVmaze types them
+    "significant_special"/"insignificant_special" and gives them no
+    number), so a row's position in the list is its overall episode number
+    - see episode_order, which is what this exists for."""
+    if not imdb_id:
+        return None
+    try:
+        show = _get(f"{BASE_URL}/lookup/shows?imdb={urllib.parse.quote(imdb_id)}", timeout)
+        if not show or not show.get("id"):
+            return None
+        rows = _get(f"{BASE_URL}/shows/{int(show['id'])}/episodes", timeout)
+    except Exception:
+        return None
+    return [{"airdate": str(row.get("airdate") or ""), "name": str(row.get("name") or "")}
+            for row in rows or []
+            if isinstance(row, dict) and row.get("type") == "regular" and row.get("number")]
+
+
 # ---- The catalogue-wide calendar -----------------------------------------
 # The owner's ask, 25 August 2026: *"in the airing soon make the series
 # also show, not just the anime!"*. "Airing Soon" was AniList's calendar

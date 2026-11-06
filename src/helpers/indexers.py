@@ -20,7 +20,8 @@ that function lives in this module rather than in streams.py.
 the same rule the addon defaults follow. Query "Solo Leveling", and the
 owner's four real video entries at episode 5:
 
-    Anime Tosho    https://feed.animetosho.org/json   75 rows, 0.4-2.5s
+    Anime Tosho    https://feed.animetosho.net/json   75 rows, 0.4-2.5s
+                   (.org until November 2026; see ANIMETOSHO_JSON)
                    carries info_hash, a magnet with its trackers, and a
                    seeder count. Its rows also carry nyaa_id, tosho_id
                    and anidex_id, which is the useful part: it *is* an
@@ -70,7 +71,13 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # this only stops one indexer eating all of it.
 DEFAULT_TIMEOUT = 8
 
-ANIMETOSHO_JSON = "https://feed.animetosho.org/json"
+# **Moved: feed.animetosho.org is NXDOMAIN** at Google's and Cloudflare's
+# resolvers (measured 7 November 2026), and this source had answered 0 rows
+# for every title since - silently, through the except below. The .xyz
+# address 308s here. Rows carry the same fields (info_hash, magnet_uri,
+# seeders, total_size), and torrent_url now points at storage.animetosho.net,
+# which serves the file (165KB, a valid torrent, measured the same day).
+ANIMETOSHO_JSON = "https://feed.animetosho.net/json"
 SUBSPLEASE_API = "https://subsplease.org/api/"
 
 # How many rows of one indexer's answer to keep. They come back newest
@@ -520,7 +527,32 @@ def animetosho(entry_title, season, episode, deadline) -> list:
             info_hash = _hash_from(row.get("magnet_uri") or "")
         if not info_hash or not is_same_title(entry_title, title):
             continue
+        # A two-word title passes is_same_title on one word (0.6 of 2
+        # rounds to 1), and on two that are anywhere: with the feed
+        # answering again, One Piece S01E05 drew "May I Ask for One Final
+        # Thing S01E05 May I Send This Piece-of-Shit Prince Flying". Here,
+        # where a row is offered to play, a title of one or two words has
+        # to appear whole, its words together and in order. A spin-off that
+        # carries the whole title ("Koisuru One Piece") still passes; no
+        # word test tells those apart.
+        wanted = _words(entry_title)
+        if len(wanted) <= 2:
+            seq = _words(title)
+            if not any(seq[i:i + len(wanted)] == wanted for i in range(len(seq))):
+                continue
         if episode_match(title, season, episode) is None:
+            continue
+        # **Past season 1 a release has to say which season it is.** With
+        # the feed answering again, One Piece S22E59 drew "[pushPOP] One
+        # Piece - 1-61 (East Blue Arc)" and "Combined Episode 829-841
+        # Episode 59": episode_match reads any range holding 59 as a pack,
+        # and a name with no season in it is numbered from the start of the
+        # show - so the pack would hand over East Blue's episode 59. Solo
+        # Leveling "S02E05", "S02" packs and "2nd Season - 05" all state it
+        # (measured, same day); a bare "Title - 05" for a later season is
+        # season 1's as often as not, and is not offered.
+        if season and int(season) > 1 and not (
+                _SxE_RE.search(_strip_noise(title)) or stated_seasons(title)):
             continue
         _remember_torrent_url(info_hash, row.get("torrent_url"))
         results.append(_stream(title, info_hash,

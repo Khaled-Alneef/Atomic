@@ -87,7 +87,8 @@ if "--mpv-host" in sys.argv:
     _mpv_proxy.serve(sys.argv[_flag + 1], sys.argv[_flag + 2])
     raise SystemExit(0)
 
-from helpers import (app_settings, downloads, frame_pacing, images, layout, logs,
+from helpers import (app_settings, changes, downloads, frame_pacing, images, layout, logs,
+                     notifications,
                      rail_anim, rail_icons, splash, top_nav, window_chrome,
                      native_cursor, setup_wizard, startup,
                      storage, theme, updater, whats_new)
@@ -338,6 +339,15 @@ TITLE_BAR_ALLOWANCE = 48
 # already in memory, so 2.5s of nothing costs nothing.
 DOWNLOAD_BAR_HEIGHT = 4
 DOWNLOAD_POLL_MS = 1000
+# The notifications bell (helpers/notifications). A scan reads files on disk
+# (0.07s over his fifteen saved titles), so the tick is cheap: it scans when
+# helpers/changes moved - Home's list refreshers bump it when a list on disk
+# changed - and otherwise every NOTIFY_RESCAN_S, which is also how often the
+# refreshers are handed the saved titles again (rate-limited per title there).
+NOTIFY_FIRST_MS = 8000
+HOVER_TRACE_S = 3
+NOTIFY_TICK_MS = 60 * 1000
+NOTIFY_RESCAN_S = 15 * 60
 DOWNLOAD_IDLE_POLL_MS = 2500
 
 # Where the bar sits over the page in full screen, measured rather than
@@ -950,6 +960,85 @@ class _MouseNavFilter(QObject):
             self._window.navigate_forward()
             return True
         return False
+
+
+def bell_wanted() -> bool:
+    """The bell is on the bar while it has anything to list - his ask, 7
+    November 2026: with update and other notifications both off it goes,
+    and it comes back the moment either is on."""
+    return (app_settings.get_notifications_enabled()
+            or app_settings.get_update_notifications())
+
+
+class _HoverTrace(QObject):
+    """For HOVER_TRACE_S after the bell's window closes: what is under the
+    pointer as Qt and Windows see it, whether Qt has it marked hovered, and
+    how many Enter events reach widgets - logged on change, so the owner's
+    machine names the cause of "no hover after closing it" (see
+    main._on_notifications_dismissed)."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        self._enters = 0
+        self._last = None
+        self._ticks = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        QApplication.instance().installEventFilter(self)
+        self._timer.start()
+        self.note("closed")
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Enter and isinstance(obj, QWidget):
+            self._enters += 1
+        return False
+
+    def _describe(self):
+        pos = QCursor.pos()
+        under = QApplication.widgetAt(pos)
+        name = (f"{type(under).__name__}#{under.objectName() or '-'}"
+                if under is not None else "none")
+        hovered = bool(under is not None and under.underMouse())
+        grabber = QWidget.mouseGrabber()
+        active = QApplication.activeWindow()
+        try:
+            import ctypes
+            capture = ctypes.windll.user32.GetCapture()
+        except Exception:
+            capture = None
+        return (f"under={name} hovered={hovered} "
+                f"grab={type(grabber).__name__ if grabber is not None else 'none'} "
+                f"active={type(active).__name__ if active is not None else 'none'} "
+                f"capture={capture or 0} enters={self._enters}")
+
+    def note(self, what):
+        try:
+            logs.info(f"hover trace: {what}: {self._describe()}")
+        except Exception:
+            pass
+
+    def _tick(self):
+        self._ticks += 1
+        try:
+            state = self._describe()
+        except Exception:
+            state = "unreadable"
+        if state != self._last:
+            self._last = state
+            logs.info(f"hover trace +{self._ticks * 100}ms: {state}")
+        if self._ticks * 100 >= HOVER_TRACE_S * 1000:
+            self._timer.stop()
+            QApplication.instance().removeEventFilter(self)
+            self.deleteLater()
+
+
+class _NotificationSignals(QObject):
+    # A scan runs off the UI thread; how many items it added comes back here.
+    scanned = Signal(int)
 
 
 class _UpdateCheckSignals(QObject):
@@ -2371,6 +2460,11 @@ class MainWindow(QMainWindow):
         self.top_search = self.title_bar.search
         self.top_search.textEdited.connect(self._on_top_search)
         self.top_search.installEventFilter(self)
+        # The notifications bell, left of the field (helpers/notifications).
+        self.bell = window_chrome.BellButton()
+        self.bell.clicked.connect(self._open_notifications)
+        self.title_bar.add_bell(self.bell)
+        self.title_bar.set_bell_visible(bell_wanted())
         root_layout.addWidget(self.title_bar)
         # **The page menu is in the bar now, not in a sidebar** - the
         # owner's redesign, 19 October 2026 (helpers/top_nav has what was
@@ -2416,6 +2510,7 @@ class MainWindow(QMainWindow):
 
         self._update_signals = _UpdateCheckSignals()
         self._update_signals.found.connect(self._on_update_found)
+        self._start_notifications()
 
         # No native caption from here on. Set before the first show()
         # so the window is never created with a frame it then loses -
@@ -4835,12 +4930,176 @@ class MainWindow(QMainWindow):
         # waiting: an alert, because the owner asked to be *reminded*
         # rather than told once - a reminder nobody sees twice is not
         # one. The dot carries it in between either way.
+        # Under the bell as well, once per version, when that is switched on.
+        try:
+            if (app_settings.get_update_notifications()
+                    and notifications.add_update(version)):
+                self._refresh_bell(ring=True)
+        except Exception:
+            logs.exception("Could not add the update notification")
         first_time = app_settings.get_notified_update_version() != version
         app_settings.set_notified_update_version(version)
         if first_time:
             show_toast(self, f"Atomic {version} Is Available - Install It in Settings", 6000)
             return
         self._remind_about_update(version)
+
+    # ---- The notifications bell ---------------------------------------
+    def _start_notifications(self):
+        self._notify_signals = _NotificationSignals()
+        self._notify_signals.scanned.connect(self._on_notifications_scanned)
+        self._notify_version = None
+        self._notify_at = 0.0
+        self._notify_running = False
+        self._notify_timer = QTimer(self)
+        self._notify_timer.timeout.connect(self._notifications_tick)
+        self._notify_timer.start(NOTIFY_TICK_MS)
+        QTimer.singleShot(NOTIFY_FIRST_MS, lambda: self._notifications_tick(force=True))
+        self._refresh_bell()
+
+    def _notifications_tick(self, force=False):
+        """Scan for new episodes and chapters when something may have
+        changed - see NOTIFY_TICK_MS. Never two at once."""
+        if self._notify_running or not app_settings.get_notifications_enabled():
+            return
+        version = changes.version()
+        now = time.monotonic()
+        if (not force and version == self._notify_version
+                and now - self._notify_at < NOTIFY_RESCAN_S):
+            return
+        self._notify_version = version
+        self._notify_at = now
+        self._notify_running = True
+        threading.Thread(target=self._notifications_worker, daemon=True).start()
+
+    def _notifications_worker(self):
+        # Must emit on every path, or _notify_running stays set for good.
+        try:
+            added = notifications.scan()
+        except Exception:
+            logs.exception("Notifications scan failed")
+            added = 0
+        self._notify_signals.scanned.emit(added)
+
+    def _on_notifications_scanned(self, added):
+        self._notify_running = False
+        self._refresh_bell(ring=added > 0)
+
+    def _notification_rows(self):
+        return notifications.items(
+            include_watch=app_settings.get_notifications_enabled(),
+            include_updates=app_settings.get_update_notifications())
+
+    def _refresh_bell(self, ring=False):
+        bell = getattr(self, "bell", None)
+        if bell is None:
+            return
+        try:
+            count = sum(1 for row in self._notification_rows() if not row.get("read"))
+        except Exception:
+            logs.exception("Could not read the notifications")
+            count = 0
+        bell.set_count(count)
+        if ring and count and bell.isVisible():
+            bell.ring()
+
+    def _open_notifications(self):
+        """The bell's window, under the bell. Opening it reads everything
+        in it, so the count clears; the rows keep the dot they had."""
+        from helpers.notification_panel import NotificationPanel, PANEL_WIDTH
+        # The bell is a toggle: a press on it while the window is open
+        # closes the window (its outside-press watch) a moment before this
+        # click arrives, and must not open it again.
+        if time.monotonic() - getattr(self, "_notification_closed_at", 0.0) < 0.6:
+            return
+        rows = self._notification_rows()
+        notifications.mark_all_read()
+        self._refresh_bell()
+        panel = NotificationPanel(rows, self)
+        panel.dismissed.connect(self._on_notifications_dismissed)
+        panel.opened.connect(self._open_notification_item)
+        panel.cleared.connect(self._clear_notifications)
+        # From the window's own global geometry, never mapToGlobal (it is
+        # off by the other monitor's scale factor - .claude/rules/ui.md).
+        origin = self.geometry().topLeft() + self.bell.mapTo(self, QPoint(0, 0))
+        x = origin.x() + self.bell.width() // 2 - PANEL_WIDTH // 2
+        frame = self.geometry()
+        x = max(frame.left() + 8, min(x, frame.right() - PANEL_WIDTH - 8))
+        panel.popup_at(QPoint(x, origin.y() + self.bell.height() + 8))
+        self._notification_panel = panel
+
+    def _on_notifications_dismissed(self, at):
+        self._notification_closed_at = at
+        # **Hover after the window closes** - the owner, 7 November 2026:
+        # "I needed to press twice outside the notifications window to hover
+        # on the sidebar". Measured on his machine (_HoverTrace): after the
+        # press that closed it, the sidebar read "not hovered" for 4.6s and
+        # Qt sent almost no Enter events, until his second press. A press is
+        # a mouse capture taken and given back - Qt captures on every press
+        # and releases on the release - and the release is what makes
+        # Windows and Qt agree again on which window the pointer is in. The
+        # first press could not do it: the window was still alive during
+        # it. So once the window has gone and the press is over, the same
+        # capture is taken and given back once (_resync_mouse). A first try
+        # that only re-sent Qt an Enter changed nothing in his trace and is
+        # gone. The trace stays, so his log says whether this holds.
+        trace = _HoverTrace(self)
+        trace.start()
+        self._resync_tries = 0
+        QTimer.singleShot(50, lambda: self._resync_mouse(trace))
+
+    def _resync_mouse(self, trace=None):
+        """Take the mouse capture and give it straight back, once the press
+        that closed the notifications window has been released - only while
+        this app is the active one and the pointer is over this window, so
+        it can never take the mouse from anything else."""
+        from helpers.notification_panel import _buttons_down
+        try:
+            if _buttons_down():
+                self._resync_tries += 1
+                if self._resync_tries < 40:              # 2s at most
+                    QTimer.singleShot(50, lambda: self._resync_mouse(trace))
+                return
+            if not self.isActiveWindow() or not self.geometry().contains(QCursor.pos()):
+                if trace is not None:
+                    trace.note("re-sync skipped (app not active or pointer outside)")
+                return
+            handle = self.windowHandle()
+            if handle is None:
+                return
+            if trace is not None:
+                trace.note("before re-sync")
+            handle.setMouseGrabEnabled(True)
+            handle.setMouseGrabEnabled(False)
+            if trace is not None:
+                QTimer.singleShot(30, lambda: trace.note("after re-sync"))
+        except Exception:
+            logs.exception("Could not re-sync the mouse after the notifications closed")
+
+    def _clear_notifications(self):
+        notifications.clear()
+        self._refresh_bell()
+
+    def _open_notification_item(self, item):
+        if item.get("kind") == "update":
+            self._open_settings()
+            return
+        entry = notifications.entry_for(item)
+        if entry is None:
+            show_toast(self, "That Title Is No Longer Saved", 3000)
+            return
+        try:
+            from windows import details
+            details.open_details(self, entry)
+        except Exception:
+            logs.exception("Could not open a notification's title")
+
+    def apply_notification_settings(self):
+        """Settings > Notifications changed something."""
+        self.title_bar.set_bell_visible(bell_wanted())
+        self._refresh_bell()
+        if app_settings.get_notifications_enabled():
+            self._notifications_tick(force=True)
 
     def _remind_about_update(self, version):
         """The reminder, once per launch while an update is waiting.

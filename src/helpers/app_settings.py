@@ -212,6 +212,33 @@ def set_setup_shown_for(version: str):
     storage.save(SETTINGS_FILE, data)
 
 
+# ---- Notifications (Settings > Notifications) ----------------------------
+# The owner's ask, 7 November 2026: a bell left of the search field listing
+# the new episodes and chapters of what he saved, with three switches. All
+# on by default - a bell that starts silent would look broken.
+
+def get_notifications_enabled() -> bool:
+    """New episodes and chapters of saved titles appear under the bell."""
+    return bool(_load().get("notifications_enabled", True))
+
+
+def set_notifications_enabled(enabled: bool):
+    data = _load()
+    data["notifications_enabled"] = bool(enabled)
+    storage.save(SETTINGS_FILE, data)
+
+
+def get_update_notifications() -> bool:
+    """A new Atomic version appears under the bell as well."""
+    return bool(_load().get("update_notifications", True))
+
+
+def set_update_notifications(enabled: bool):
+    data = _load()
+    data["update_notifications"] = bool(enabled)
+    storage.save(SETTINGS_FILE, data)
+
+
 def get_notified_update_version() -> str:
     """The version the startup update check has already announced, or ""
     if it never has.

@@ -432,6 +432,34 @@ in the same pass:
   to **zero cues**. Only the Format line naming Start/End is the events
   one. This bug silently broke every .ass subtitle from every source.
 
+**AnimeTosho moved to animetosho.net** (7 November 2026). His report:
+*"ALL arabic are gone"* on One Piece. `feed.animetosho.org` is NXDOMAIN at
+Google's and Cloudflare's resolvers; `feed.animetosho.xyz` 308s to
+`feed.animetosho.net`, which answers. Every subtitle search had been
+raising there before its first row, silently, for every show. Attachments
+are now relative `/download/<id>/subs/file/<n>`, labelled "Arabic [ara,
+ASS]" or "ara [SRT]" (`subtitles._AT_*`). Measured after: One Piece 1144,
+1160, 1161 carry Arabic in Judas, Erai-raws and ToonsHub releases (157-310
+cues each), Solo Leveling S02E05 0 -> 6. The stream indexer
+(`indexers.ANIMETOSHO_JSON`) had the same hole and moved the same day: 0 rows
+for every title before, 23 of Solo Leveling S02E05's 100 sources after. Two
+guards came with it, both for rows the live feed offered: past season 1 a
+release must state its season (One Piece S22E59 drew "One Piece - 1-61 (East
+Blue Arc)" as a pack holding 59), and a one- or two-word title must appear
+whole ("May I Ask for One Final Thing ... Piece-of-Shit Prince" for One
+Piece). A spin-off carrying the whole title ("Koisuru One Piece") still
+passes.
+
+**A long anime is one season on OpenSubtitles and on every fansub**
+(7 November 2026). Cinemeta files One Piece as 23 seasons; opensubtitles.org,
+its Stremio addon and the release groups number it 1-1165. `episode_order`
+places a Cinemeta episode in TVmaze's broadcast order by air date (counting
+Cinemeta's seasons is wrong for 590 of 1,179 One Piece episodes - its list
+has holes), and subtitles asks S01E<n> beside the season form. SubDL answers
+a season question with the whole season, rows marked `full_season` with
+another episode in their name; `subtitles._names_other_episode` drops any
+row whose name states a different episode or season.
+
 **The Stremio OpenSubtitles addon is not the site** (21 September
 2026). His report: Dagashi Kashi S01E02 showed no Arabic while
 opensubtitles.org listed three. Measured: every source answered 0 rows,

@@ -30,6 +30,19 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.21": [
+        "A notifications bell left of the search bar: new episodes and "
+        "chapters of the shows and readings you saved, with the count on "
+        "the bell. Each one shows its cover and how many episodes or "
+        "chapters are waiting, and opens the title when you press it.",
+        "Turn notifications on or off for each title with the bell beside "
+        "Save on its episode or chapter list, and in Settings > "
+        "Notifications for new episodes and chapters and for new versions.",
+        "One Piece and other long anime get their Arabic subtitles from "
+        "OpenSubtitles and Anime Tosho again, matched to the right episode.",
+        "SubDL no longer lists subtitles from other episodes, and Anime "
+        "Tosho is back as a source for anime streams.",
+    ],
     "3.20": [
         "Hold Space in the video player to play at 2x, like YouTube - let go "
         "and it goes back to the speed you had. A quick tap still pauses.",

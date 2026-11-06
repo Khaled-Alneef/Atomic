@@ -50,8 +50,8 @@ from .widgets import (confirm, finish_toast, frameless_dialog, inform,
 # different font or scale factor). "Watching" needs 104px, cannot read as
 # excluding films, and pairs with "Reading" one row below - the two things
 # the tracker does.
-CATEGORIES = ["General", "Preferences", "Watching", "Reading", "Games",
-              "API Keys", "Data", "Keybinds", "Uninstall"]
+CATEGORIES = ["General", "Preferences", "Notifications", "Watching", "Reading",
+              "Games", "API Keys", "Data", "Keybinds", "Uninstall"]
 
 # Uninstall is a category rather than a section at the bottom of Data,
 # and it is the one row drawn in the danger colour: it deletes every
@@ -535,6 +535,7 @@ class SettingsDialog(QDialog):
         self._page_builders = [
             self._build_general_page,
             self._build_preferences_page,
+            self._build_notifications_page,
             self._build_anime_page,
             self._build_reading_page,
             self._build_games_page,
@@ -883,6 +884,53 @@ class SettingsDialog(QDialog):
 
         form.addStretch()
         return page
+
+    def _build_notifications_page(self):
+        """The bell left of the search field (helpers/notifications) - the
+        owner's ask, 7 November 2026: the new episodes and chapters on or
+        off, and new versions on or off. The bell itself shows while either
+        is on and goes when both are off (his follow-up the same evening,
+        which replaced a third "show the button" switch). Each switch takes
+        effect at once, on the window behind."""
+        page = QWidget()
+        form = QVBoxLayout(page)
+        form.setContentsMargins(4, 4, 12, 4)
+        form.setSpacing(6)
+
+        form.addWidget(QLabel("Notifications", objectName="SectionTitle"))
+        self.notify_check = QCheckBox("Show new episodes and chapters")
+        self.notify_check.setChecked(app_settings.get_notifications_enabled())
+        self.notify_check.toggled.connect(
+            lambda on: self._set_notification_option(app_settings.set_notifications_enabled, on))
+        form.addWidget(self.notify_check)
+        hint = QLabel("New releases of the shows and readings you saved.",
+                      objectName="Muted")
+        hint.setWordWrap(True)
+        form.addWidget(hint)
+
+        form.addSpacing(8)
+        self.update_notify_check = QCheckBox("Show new update notifications")
+        self.update_notify_check.setChecked(app_settings.get_update_notifications())
+        self.update_notify_check.toggled.connect(
+            lambda on: self._set_notification_option(app_settings.set_update_notifications, on))
+        form.addWidget(self.update_notify_check)
+        hint = QLabel("A new version of Atomic, listed under the bell. With both "
+                      "off, the bell leaves the bar.", objectName="Muted")
+        hint.setWordWrap(True)
+        form.addWidget(hint)
+
+        form.addStretch()
+        return page
+
+    def _set_notification_option(self, setter, on):
+        setter(bool(on))
+        window = self.parent()
+        apply = getattr(window, "apply_notification_settings", None)
+        if apply is not None:
+            try:
+                apply()
+            except Exception:
+                logs.exception("Could not apply the notification settings")
 
     def _build_keybinds_page(self):
         """The keyboard map. Read-only - these are fixed, and saying so
