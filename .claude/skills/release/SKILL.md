@@ -140,7 +140,8 @@ repeat until clean, and tag that binary:
 ```
 
 Exit 0 is clean, 2 is flagged; `-DisableRemediation` reports without
-quarantining. **Check `Get-Service WinDefend` is Running first** - a
+quarantining. **Pass a full path and read the output:** a relative path fails
+with `0x80508023` and also exits 2, which read as three flagged files at 3.17. **Check `Get-Service WinDefend` is Running first** - a
 stopped service fails the scan with `0x800106ba`, which looks like
 "nothing found" to anyone reading only for a threat name. Re-run a
 verdict once to confirm: it is stable per file, and only varies between

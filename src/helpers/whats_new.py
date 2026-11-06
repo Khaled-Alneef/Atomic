@@ -30,6 +30,14 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.18": [
+        "Changing the source while an episode is stuck loading no longer "
+        "freezes the app.",
+        "The windows inside the video player keep the same colour at their "
+        "corners while a video loads, from the moment they open.",
+        "The line beside the next-season arrow in the player's episode list "
+        "is gone.",
+    ],
     "3.17": [
         "MangaDar is a new reading source, for manga, manhwa and manhua.",
         "Search results show Manga, Manhwa, Manhua and Novels each in its "
