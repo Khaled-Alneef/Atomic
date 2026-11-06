@@ -814,6 +814,9 @@ function markProgress(card, row) {
   }
   card.dataset.pbase = row.metabase || '';
   card.dataset.psep = row.sep || '  ';
+  // A Discover or search reading card names its site, and a mark never
+  // replaces it (server._site_card, the owner's ask of 6 November 2026).
+  if (row.site) card.dataset.psite = '1';
   return card;
 }
 
@@ -4867,6 +4870,7 @@ function progressInto() {
           const has = (reading ? savedRead : savedWatch).has(title);
           if (meta.classList.contains('s') !== has) meta.classList.toggle('s', has);
         }
+        if (card.dataset.psite) return;   // the site's name stays
         const marks = (reading ? live.read : live.marks) || {};
         let now = '';
         if (id && Object.prototype.hasOwnProperty.call(marks, id)) now = marks[id];

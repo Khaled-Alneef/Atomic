@@ -978,19 +978,42 @@ def _serving_sites_only(rows, deadline=None):
         entry = {"title": sample[0].get("title") or "",
                  "type": "Manga", "url": sample[0].get("url") or "",
                  "site_id": site_id}
+        started = time.monotonic()
         try:
             found = chapter_source._site_chapters(
                 entry, net.deadline_in(_SERVES_PROBE_S), None)
         except Exception:
             found = []
+        if not found and time.monotonic() - started >= _SERVES_PROBE_S - 1.0:
+            # **Out of time is not a refusal.** The owner, 6 November
+            # 2026: his friend's "one piece" search had no MangaDar row.
+            # The sample is the site's first row, and for that query on
+            # MangaDar it is One Piece itself: 1,221 chapters in one
+            # 543KB answer, 2.70s cold on his line (0.63s warm), inside a
+            # budget the slug lookup shares. A slower line or one stalled
+            # handshake missed it, and the site was then dropped from
+            # every search for _SERVES_TTL_S, on disk. A refusal - the
+            # case this exists for, Mangalek's 403 - answers in one round
+            # trip; only a definite answer is kept now.
+            return site_id, None
         return site_id, bool(found)
 
     if unknown:
+        from . import logs
         # Together, not one after another - six sites serially is six
         # times the wait for an answer that is the same either way.
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(unknown)) as pool:
             for site_id, ok in pool.map(probe, unknown):
+                if ok is None:
+                    logs.info(f"reading sites: {site_id} did not answer its "
+                              f"probe inside {_SERVES_PROBE_S:.0f}s; kept, "
+                              f"asked again next time")
+                    continue
+                if not ok:
+                    logs.info(f"reading sites: {site_id} cannot serve a "
+                              f"chapter list; its rows are left out for "
+                              f"{_SERVES_TTL_S // 3600}h")
                 _SERVES_CACHE[site_id] = (time.monotonic(), ok)
         _save_reading_meta()
 

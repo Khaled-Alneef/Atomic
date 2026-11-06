@@ -30,6 +30,17 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.19": [
+        "MangaDar's chapters open their own pages, even for a title you read "
+        "on another site.",
+        "3asq lists every chapter of a title again, not only the newest "
+        "forty - One Piece shows 565 instead of 43.",
+        "Chapters like 1155.5 on 3asq are in the chapter list now.",
+        "A reading site that answers slowly no longer disappears from your "
+        "searches for hours.",
+        "Reading cards on Discover and in search results show the site's name "
+        "under the title instead of a chapter number.",
+    ],
     "3.18": [
         "Changing the source while an episode is stuck loading no longer "
         "freezes the app.",
