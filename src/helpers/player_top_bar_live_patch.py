@@ -43,6 +43,15 @@ AC_SRC_OVER = 0x00
 AC_SRC_ALPHA = 0x01
 BI_RGB = 0
 
+# Hold Space for 2x (see _patch's _space_pressed). 350ms: a tap is well
+# under 200ms, and a hold is meant to start soon after the finger rests.
+SPACE_HOLD_MS = 350
+SPACE_HOLD_SPEED = 2.0
+# How often a hold checks the key is still physically down, for a
+# release that went to another window.
+SPACE_GUARD_MS = 120
+VK_SPACE = 0x20
+
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 
@@ -55,6 +64,8 @@ _user32.GetDC.restype = ctypes.c_void_p
 _user32.GetDC.argtypes = (ctypes.c_void_p,)
 _user32.ReleaseDC.restype = ctypes.c_int
 _user32.ReleaseDC.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+_user32.GetAsyncKeyState.restype = ctypes.c_short
+_user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
 _gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
 _gdi32.CreateCompatibleDC.argtypes = (ctypes.c_void_p,)
 _gdi32.DeleteDC.restype = ctypes.c_int
@@ -538,24 +549,90 @@ class _VolumeOsd:
         painter.drawEllipse(QPointF(at, track_y), 9.0, 9.0)
         painter.end()
 
+        self._present(image, pw, ph,
+                      (page.width() - self.WIDTH) // 2,
+                      (page.height() - self.HEIGHT) // 2)
+        self._timer.start()
+
+    def _present(self, image, pw, ph, x, y):
+        """Put a composed picture up at (x, y) of the page - per-pixel over
+        the video, painted inside the backdrop while that is up."""
+        page, widget = self._page, self.widget
         self._image = image
         if self._over_backdrop():
             backdrop = page.backdrop
             widget.hide()
-            # The page's centre in the backdrop's own coordinates - a
+            # The page's point in the backdrop's own coordinates - a
             # parent-to-child offset, never mapToGlobal (ui.md).
-            self._inner.move((page.width() - self.WIDTH) // 2 - backdrop.x(),
-                             (page.height() - self.HEIGHT) // 2 - backdrop.y())
+            self._inner.move(x - backdrop.x(), y - backdrop.y())
             self._inner.show()
             self._inner.raise_()
             self._inner.update()
         else:
             if self._inner is not None:
                 self._inner.hide()
+            widget.move(x, y)
             widget.show()
             widget.raise_()
             _push_layered(widget, image, pw, ph)
-        self._timer.start()
+
+
+class _SpeedOsd(_VolumeOsd):
+    """The "2x" pill while Space is held - YouTube's, top centre over the
+    picture, up for as long as the key is down and gone with it. The
+    same per-pixel plumbing as the volume flyout, for the same reason:
+    it sits over mpv's native child."""
+
+    WIDTH, HEIGHT = 116, 48
+    RADIUS = 24.0
+    # Below where the top bar's title sits, so the two never overlap
+    # when the bar is woken mid-hold.
+    TOP_PX = 84
+
+    def show(self, speed=2.0):
+        from PyQt6.QtCore import QPointF, QRectF, Qt
+        from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPolygonF
+
+        page, widget = self._page, self.widget
+        theme = self._player.theme
+        dpr = float(widget.devicePixelRatioF() or 1.0)
+        pw, ph = int(self.WIDTH * dpr), int(self.HEIGHT * dpr)
+        image = QImage(pw, ph, QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        panel = QColor(theme.BG)
+        panel.setAlpha(self.PANEL_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(panel)
+        painter.drawRoundedRect(QRectF(0, 0, self.WIDTH, self.HEIGHT),
+                                self.RADIUS, self.RADIUS)
+        white = QColor(theme.TEXT_OVER_MEDIA)
+        font = QFont(theme.FONT_FAMILY_NAV)
+        font.setPixelSize(20)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        painter.setPen(white)
+        painter.drawText(QRectF(30, 0, 40, self.HEIGHT),
+                         int(Qt.AlignmentFlag.AlignVCenter
+                             | Qt.AlignmentFlag.AlignLeft),
+                         f"{speed:g}x")
+        # Two solid triangles, the fast-forward mark.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(white)
+        cy, h = self.HEIGHT / 2, 8.0
+        for left in (61.0, 74.0):
+            painter.drawPolygon(QPolygonF([
+                QPointF(left, cy - h), QPointF(left + 13.0, cy),
+                QPointF(left, cy + h)]))
+        painter.end()
+        self._present(image, pw, ph,
+                      (page.width() - self.WIDTH) // 2, self.TOP_PX)
+
+    def hide(self):
+        self._hide()
 
 
 def _push_layered(widget, image, pw, ph):
@@ -741,6 +818,9 @@ def _patch(player) -> None:
         from PyQt6.QtCore import Qt
 
         key = event.key()
+        if key == Qt.Key.Key_Space:
+            _space_pressed(self, event)
+            return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             self._seek_relative(
                 -player.SEEK_STEP_S if key == Qt.Key.Key_Left
@@ -769,11 +849,138 @@ def _patch(player) -> None:
             return
         return old_keys(self, event)
 
+    # **Hold Space for 2x, YouTube's way** - the owner's ask, 6 November
+    # 2026: "make holding the space in the video player speed up x2 like
+    # youtube!". A tap still plays and pauses; a hold past
+    # SPACE_HOLD_MS plays at SPACE_HOLD_SPEED for as long as the key is
+    # down, with the pill up, and the release puts back the speed he
+    # had. While playing, a tap can only be told from a hold once the
+    # key comes up, so the pause lands on the release (YouTube's own
+    # keyup); while paused there is nothing to tell apart - the press
+    # plays at once, and holding on from there still goes to 2x.
+    # Nothing here wakes the bars during a hold - only a tap does, as
+    # Space always did.
+    from PyQt6.QtCore import QTimer
+    logs = player.logs
+
+    def _space_pressed(page, event):
+        if event.isAutoRepeat():
+            return          # Windows' key repeat; the hold is timed, not counted
+        state = getattr(page, "_atomic_space", None)
+        if state is not None:
+            return          # a press with no release seen - the guard ends it
+        if page.handle is None:
+            return
+        state = {"boosted": False, "toggled": False, "prev": page._speed}
+        page._atomic_space = state
+        if page._paused:
+            page._wake_controls()
+            page.toggle_pause()
+            state["toggled"] = True
+        timer = QTimer(page)
+        timer.setSingleShot(True)
+        timer.setInterval(SPACE_HOLD_MS)
+        timer.timeout.connect(lambda: _space_held(page, state))
+        timer.start()
+        guard = QTimer(page)
+        guard.setInterval(SPACE_GUARD_MS)
+        guard.timeout.connect(lambda: _space_guard(page, state))
+        guard.start()
+        state["timer"], state["guard"] = timer, guard
+
+    def _space_held(page, state):
+        if getattr(page, "_atomic_space", None) is not state:
+            return
+        if page.handle is None or page._paused or page._closing:
+            return
+        state["boosted"] = True
+        page._set_speed(SPACE_HOLD_SPEED)
+        osd = getattr(page, "_atomic_speed_osd", None)
+        if osd is None:
+            try:
+                osd = _SpeedOsd(player, page)
+                page._atomic_speed_osd = osd
+            except Exception:
+                logs.exception("speed pill could not be built")
+                osd = None
+        if osd is not None:
+            try:
+                osd.show(SPACE_HOLD_SPEED)
+            except Exception:
+                logs.exception("speed pill could not be shown")
+        logs.info(f"player key: Space held -> speed {SPACE_HOLD_SPEED:g}x"
+                  f" (was {state['prev']:g}x)")
+
+    def _space_released(page, event=None, cancel=False):
+        if event is not None and event.isAutoRepeat():
+            return
+        state = getattr(page, "_atomic_space", None)
+        if state is None:
+            return
+        page._atomic_space = None
+        for name in ("timer", "guard"):
+            try:
+                state[name].stop()
+                state[name].deleteLater()
+            except (KeyError, RuntimeError):
+                pass
+        if state["boosted"]:
+            osd = getattr(page, "_atomic_speed_osd", None)
+            if osd is not None:
+                try:
+                    osd.hide()
+                except Exception:
+                    pass
+            try:
+                page._set_speed(state["prev"])
+            except RuntimeError:
+                return
+            logs.info(f"player key: Space let go -> speed {state['prev']:g}x")
+        elif not state["toggled"] and not cancel:
+            try:
+                page._wake_controls()
+                page.toggle_pause()
+            except RuntimeError:
+                pass
+
+    def _space_guard(page, state):
+        """End a hold whose release never reached the page - the window
+        lost the keyboard mid-hold, or a field took it - so the player is
+        never left at 2x. Reads the key's state; sends nothing.
+
+        "Up" is trusted only after the key was once seen down: a press
+        that is a posted message rather than a finger never shows in the
+        key state, and must be ended by its own release. And a release
+        lost this way is never read as a tap - the key went to someone
+        else, so nothing is paused for it."""
+        if getattr(page, "_atomic_space", None) is not state:
+            return
+        try:
+            down = bool(_user32.GetAsyncKeyState(VK_SPACE) & 0x8000)
+        except Exception:
+            return
+        if down:
+            state["seen_down"] = True
+        elif state.get("seen_down"):
+            logs.info("player key: Space up with no release seen - ending the hold")
+            _space_released(page, cancel=True)
+
+    def key_release(self, event):
+        from PyQt6.QtCore import Qt
+
+        if event.key() == Qt.Key.Key_Space:
+            _space_released(self, event)
+            return
+        return old_release(self, event)
+
+    old_release = Page.keyReleaseEvent
+
     Page._build_top_bar = build_top_bar
     Page._layout_overlays = layout_overlays
     Page._wake_controls = wake_controls
     Page._veil = veil
     Page.keyPressEvent = key_press
+    Page.keyReleaseEvent = key_release
 
 
 def install() -> None:
