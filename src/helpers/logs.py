@@ -181,6 +181,93 @@ def start_memtrace():
         exception("memtrace could not start")
 
 
+# **A frozen window says where it is frozen.** The owner, 6 November
+# 2026: "the app crashes when I open the sources window while the ep is
+# running". Windows' own records called both of that night's "crashes"
+# hangs (Application Hang 1002, AppHangB1 - "stopped interacting with
+# Windows and was closed"), and the log said nothing at all: its last
+# line both times was "seat: opening at 230.4s", and then the next
+# start. A hang ends in the process being killed, so nothing after it
+# can write; the stack has to be taken *while* it hangs, from another
+# thread. The UI thread stamps a beat every STALL_BEAT_MS; a watcher
+# thread that finds the beat older than STALL_S writes the UI thread's
+# stack once, and a line with the length when the beat comes back.
+# Always on: a timer at 4Hz and a thread asleep between checks.
+STALL_BEAT_MS = 250
+STALL_S = 1.5
+STALL_SAMPLE_S = 0.1
+
+
+def start_stall_watch():
+    try:
+        import time, traceback
+        from PyQt6.QtCore import QTimer
+        main_ident = threading.get_ident()
+        beat = [time.monotonic()]
+
+        def stamp():
+            beat[0] = time.monotonic()
+
+        timer = QTimer()
+        timer.timeout.connect(stamp)
+        timer.start(STALL_BEAT_MS)
+        start_stall_watch._timer = timer       # kept alive on the function
+
+        def where(frame, depth):
+            """The UI thread's innermost `depth` frames as one line."""
+            parts = []
+            while frame is not None and len(parts) < depth:
+                code = frame.f_code
+                name = code.co_filename.replace("\\", "/").rsplit("/", 2)
+                parts.append(f"{'/'.join(name[-2:])}:{frame.f_lineno} {code.co_name}")
+                frame = frame.f_back
+            return " < ".join(parts)
+
+        # **One snapshot is a moment, not the stall.** The first version
+        # logged the stack once, at the 1.5s mark, and it named
+        # storage.load for a 2.6s freeze when a card was pressed - which
+        # a 300KB file cannot account for. So the UI thread is sampled
+        # every STALL_SAMPLE_S all the time into a short ring (a few
+        # microseconds a sample), and when a stall ends, the samples taken
+        # since the last beat before it are counted by place: a profile
+        # of the whole stall, its first second included.
+        import collections
+        ring = collections.deque(maxlen=int(60 / STALL_SAMPLE_S))
+
+        def watch():
+            reported = None             # the beat a stall was reported for
+            while True:
+                time.sleep(STALL_SAMPLE_S)
+                try:
+                    now = time.monotonic()
+                    frame = sys._current_frames().get(main_ident)
+                    ring.append((now, where(frame, 7) if frame else "?"))
+                    last = beat[0]
+                    late = now - last
+                    if late > STALL_S and reported is None:
+                        reported = last
+                        warning(f"ui stall: the window has not ticked for "
+                                f"{late:.1f}s; UI thread at: {where(frame, 16)}")
+                    elif reported is not None and reported != last:
+                        counts = {}
+                        for at, key in ring:
+                            if reported < at < last:
+                                counts[key] = counts.get(key, 0) + 1
+                        total = sum(counts.values())
+                        top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
+                        info(f"ui stall: over, the window ticked again "
+                             f"{last - reported:.1f}s after the last beat before it; "
+                             f"{total} samples: " + " || ".join(
+                                 f"{count}x {key}" for key, count in top))
+                        reported = None
+                except Exception:
+                    pass
+
+        threading.Thread(target=watch, name="ui-stall-watch", daemon=True).start()
+    except Exception:
+        exception("the UI stall watch could not start")
+
+
 def memtrace_mark(label):
     """One working-set line, only while ATOMIC_MEMTRACE is on."""
     ws = getattr(start_memtrace, "working_set", None)
