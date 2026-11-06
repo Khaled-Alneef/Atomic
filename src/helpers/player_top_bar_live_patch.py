@@ -871,6 +871,8 @@ def _patch(player) -> None:
             return          # a press with no release seen - the guard ends it
         if page.handle is None:
             return
+        if getattr(page, "_atomic_mouse_hold", None):
+            return          # the left button is holding; Space waits its turn
         state = {"boosted": False, "toggled": False, "prev": page._speed}
         page._atomic_space = state
         if page._paused:
@@ -893,7 +895,14 @@ def _patch(player) -> None:
             return
         if page.handle is None or page._paused or page._closing:
             return
+        if getattr(page, "_atomic_mouse_hold", None):
+            return          # the left button already holds it at 2x
         state["boosted"] = True
+        _boost(page, state["prev"], "key: Space")
+
+    def _boost(page, prev, what):
+        """2x and the pill, for a hold - Space's or the left button's. The
+        caller keeps `prev`, the speed to put back."""
         page._set_speed(SPACE_HOLD_SPEED)
         osd = getattr(page, "_atomic_speed_osd", None)
         if osd is None:
@@ -908,8 +917,22 @@ def _patch(player) -> None:
                 osd.show(SPACE_HOLD_SPEED)
             except Exception:
                 logs.exception("speed pill could not be shown")
-        logs.info(f"player key: Space held -> speed {SPACE_HOLD_SPEED:g}x"
-                  f" (was {state['prev']:g}x)")
+        logs.info(f"player {what} held -> speed {SPACE_HOLD_SPEED:g}x"
+                  f" (was {prev:g}x)")
+
+    def _unboost(page, prev, what):
+        """The hold's end: the pill down and the speed he had put back."""
+        osd = getattr(page, "_atomic_speed_osd", None)
+        if osd is not None:
+            try:
+                osd.hide()
+            except Exception:
+                pass
+        try:
+            page._set_speed(prev)
+        except RuntimeError:
+            return
+        logs.info(f"player {what} let go -> speed {prev:g}x")
 
     def _space_released(page, event=None, cancel=False):
         if event is not None and event.isAutoRepeat():
@@ -925,17 +948,7 @@ def _patch(player) -> None:
             except (KeyError, RuntimeError):
                 pass
         if state["boosted"]:
-            osd = getattr(page, "_atomic_speed_osd", None)
-            if osd is not None:
-                try:
-                    osd.hide()
-                except Exception:
-                    pass
-            try:
-                page._set_speed(state["prev"])
-            except RuntimeError:
-                return
-            logs.info(f"player key: Space let go -> speed {state['prev']:g}x")
+            _unboost(page, state["prev"], "key: Space")
         elif not state["toggled"] and not cancel:
             try:
                 page._wake_controls()
@@ -981,6 +994,13 @@ def _patch(player) -> None:
     Page._veil = veil
     Page.keyPressEvent = key_press
     Page.keyReleaseEvent = key_release
+    # The left button's hold (regression_fixes_148's poll_mouse, which is
+    # where a press on the picture is seen - mpv's window is not Qt's)
+    # goes through the same two, so the pill and the restore are one
+    # implementation. Added, not replacing anything, so the order the
+    # two patches install in does not matter.
+    Page._atomic_speed_boost = lambda self, prev: _boost(self, prev, "mouse: left button")
+    Page._atomic_speed_unboost = lambda self, prev: _unboost(self, prev, "mouse: left button")
 
 
 def install() -> None:
