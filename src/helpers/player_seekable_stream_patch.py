@@ -46,6 +46,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import socket
 import sys
 import threading
 import time
@@ -223,13 +224,41 @@ class _EngineStream:
             self._cancelled = True
             resp, self._resp = self._resp, None
         if resp is not None:
-            try:
-                resp.close()
-            except Exception:
-                pass
+            _abort(resp)
 
     def close(self):
         self.cancel()
+
+
+def _abort(resp):
+    """End a response *now*, even while another thread is blocked in its
+    recv.
+
+    **resp.close() does not do that, and that was the freeze.** The
+    owner, 6 November 2026: "the app crashes when I open the sources
+    window while the ep is running" - Windows logged both as hangs
+    (AppHangB1), on a Tomodachi Game episode whose sources sat at
+    0.00MB/s. mpv cancels the stream it is replacing and waits for its
+    read to return; cancel() closed the urllib response, which drops the
+    file wrapper and leaves the socket open, so the read went on waiting
+    for bytes the swarm was not sending - up to the engine's 45s
+    PIECE_WAIT_S. mpv's core waited on that read, the video child's one
+    request loop waited on mpv, and every synchronous read the UI thread
+    made waited the proxy's full 8s: measured with a real child and a
+    server that never sends (h_switch.py), `get path` and `get duration`
+    after a source switch 8.00s each, against 0.00s before it. Shutting
+    the socket down wakes the blocked recv at once, which the read loop
+    then sees as cancelled."""
+    try:
+        sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+        if sock is not None:
+            sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        resp.close()
+    except Exception:
+        pass
 
 
 def _open(uri):
@@ -342,10 +371,7 @@ class _DirectReader:
             self._cancelled = True
             resp, self._resp = self._resp, None
         if resp is not None:
-            try:
-                resp.close()
-            except Exception:
-                pass
+            _abort(resp)      # a stalled debrid read blocks mpv the same way
 
     def close(self):
         self.cancel()

@@ -1637,7 +1637,7 @@ def _make_native(widget):
     return widget
 
 
-def _set_window_alpha(widget, alpha) -> bool:
+def _set_window_alpha(widget, alpha, follow_corners=True) -> bool:
     """Let DWM blend this native child window over whatever is under it.
 
     This is the one route to translucency that works here (see the module
@@ -1666,14 +1666,66 @@ def _set_window_alpha(widget, alpha) -> bool:
         # GetLastError first.
         took = bool(user32.SetLayeredWindowAttributes(
             hwnd, 0, int(max(0, min(255, alpha))), _LWA_ALPHA))
-        # Its smooth corners blend at the same alpha (_SmoothCorners).
+        # Its smooth corners blend at the same alpha (_SmoothCorners) -
+        # except for _reveal_veiled's momentary 0, which must not re-cut
+        # the window for a translucency it will never be shown at.
         corners = getattr(widget, "_atomic_corners", None)
-        if took and corners is not None:
+        if took and follow_corners and corners is not None:
             corners.set_alpha(alpha)
         return took
     except Exception:
         logs.exception("Could not make the player bar translucent")
         return False
+
+
+def _reveal_veiled(widget, alpha):
+    """Show a veiled window (a panel, the episode list, the message box)
+    already painted and with its smooth corners on, all in one go.
+
+    **The owner, 5 November 2026, after the corners were made to match:
+    "the first moment when I open the window shows the old issue, then
+    it shows perfectly good".** Sampled at the screen's rate on the
+    frozen build, opening Statistics over the loading frame: one frame
+    of a **white** box (the native window shown before Qt had painted
+    it), then 12ms of the painted body with its four corners still the
+    bare squares _round_overlay cut out - the backdrop showing through
+    them, which is the old issue exactly - and only then the corner
+    pieces, which _SmoothCorners draws one event-loop turn after a Show.
+
+    So a window that was not already up is shown at DWM alpha 0, painted
+    there (repaint is synchronous), cut and given its corners for the
+    alpha it is about to have, and only then lifted to it. That ended the
+    white frame; the bare squares it could not end by ordering alone -
+    the pieces always land a composition or more after the window - and
+    _smooth_cut is what does that, for a solid window. A window already
+    on screen (a panel being refilled) just takes the alpha, as before -
+    dropping it to 0 would blink it."""
+    try:
+        fresh = not widget.isVisible()
+    except RuntimeError:
+        return
+    corners = getattr(widget, "_atomic_corners", None)
+    if fresh:
+        _set_window_alpha(widget, 0, follow_corners=False)
+        if corners is not None:
+            # Cut for the final alpha *before* the paint: Qt paints only
+            # inside the window's region, so a disc added after it stays
+            # unpainted for a frame - which the sampler caught as the
+            # same bare corner (81,38,38 at 8px in, for 5ms).
+            corners.alpha = int(max(0, min(255, alpha)))
+            corners.cut()
+    widget.show()
+    _raise_native(widget)
+    if fresh:
+        try:
+            widget.repaint()
+        except RuntimeError:
+            return
+        if corners is not None:
+            # Drawn while the window is still at 0, so set_alpha below
+            # has nothing left to do.
+            corners.refresh()
+    _set_window_alpha(widget, alpha)
 
 
 def _hard_edge_font(point_size, bold=False) -> QFont:
@@ -1848,15 +1900,11 @@ def _round_overlay(widget, radius=BAR_RADIUS, square=(), smooth=True):
         return
     rect_kind = QRegion.RegionType.Rectangle
     if smooth and os.name == "nt":
-        region = QRegion(0, 0, w, h, rect_kind)
-        for name, (x, y) in _corner_origins(w, h, radius).items():
-            if name not in square:
-                region = region.subtracted(QRegion(x, y, radius, radius, rect_kind))
+        corners = _SmoothCorners.attach(widget, radius, square)
         # Every layout pass lands here, and a SetWindowRgn that changes
         # nothing still repaints the window.
-        if widget.mask() != region:
-            widget.setMask(region)
-        _SmoothCorners.attach(widget, radius, square).refresh()
+        corners.cut()
+        corners.refresh()
         return
     ellipse = QRegion.RegionType.Ellipse
     region = QRegion(0, radius, w, h - 2 * radius, rect_kind)
@@ -1884,6 +1932,43 @@ def _corner_origins(w, h, radius):
     """Each corner's r x r square, by name, in the widget's coordinates."""
     return {"tl": (0, 0), "tr": (w - radius, 0),
             "bl": (0, h - radius), "br": (w - radius, h - radius)}
+
+
+def _smooth_cut(w, h, radius, square, solid):
+    """The window region under a set of smooth corners (_SmoothCorners).
+
+    Translucent, each rounded corner's r x r square is cut out whole and
+    the corner piece is all there is of it - a piece over the window's
+    own body would veil the corner twice.
+
+    **Solid, a disc one pixel inside the curve is left in.** The owner,
+    5 November 2026: *"the first moment when I open the window shows the
+    old issue, then it shows perfectly good"*. The pieces reach the
+    screen at least one composition after the window does - sampled at
+    the screen's rate, three openings each: 4ms of bare corners pushing
+    them just before the window's alpha, 8ms with a DwmFlush between,
+    20-25ms staging them at a ULW constant alpha of 0, 25-30ms staging
+    them hidden - and a bare square shows the backdrop through it, which
+    is the old issue exactly. With the disc in, that first frame has a
+    hard-edged corner of the right colour instead, and the piece then
+    only adds the anti-aliased rim: at alpha 255 a piece over the body is
+    the body, so nothing changes where they overlap."""
+    rect_kind = QRegion.RegionType.Rectangle
+    region = QRegion(0, 0, w, h, rect_kind)
+    centres = {"tl": (radius, radius), "tr": (w - radius, radius),
+               "bl": (radius, h - radius), "br": (w - radius, h - radius)}
+    inner = radius - 1
+    for name, (x, y) in _corner_origins(w, h, radius).items():
+        if name in square:
+            continue
+        box = QRegion(x, y, radius, radius, rect_kind)
+        region = region.subtracted(box)
+        if solid and inner > 0:
+            cx, cy = centres[name]
+            disc = QRegion(cx - inner, cy - inner, 2 * inner, 2 * inner,
+                           QRegion.RegionType.Ellipse)
+            region = region.united(disc.intersected(box))
+    return region
 
 
 class _CornerPiece(QWidget):
@@ -1992,7 +2077,29 @@ class _SmoothCorners(QObject):
         alpha = int(max(0, min(255, alpha)))
         if alpha != self.alpha:
             self.alpha = alpha      # part of refresh's key, so it redraws
+            self.cut()              # solid and translucent cut differently
             self.refresh()
+
+    def cut(self):
+        """Give the owner its window region for the current alpha
+        (_smooth_cut) - only when it differs, since a SetWindowRgn that
+        changes nothing still repaints the window."""
+        try:
+            owner = self.owner
+            w, h = owner.width(), owner.height()
+        except RuntimeError:
+            return
+        if w <= 0 or h <= 0:
+            return
+        radius = max(0, min(self.radius, w // 2, h // 2))
+        if radius == 0:
+            return
+        region = _smooth_cut(w, h, radius, self.square, self.alpha >= 255)
+        try:
+            if owner.mask() != region:
+                owner.setMask(region)
+        except RuntimeError:
+            pass
 
     def piece_hwnds(self):
         found = set()
@@ -2058,8 +2165,21 @@ class _SmoothCorners(QObject):
                 column.fill(0)
                 column.setDevicePixelRatio(dpr)
                 painter = QPainter(column)
+                # **The owner alone, not its children.** The owner, 5
+                # November 2026, circling it: "just remove this line in
+                # the right arrow in the ep list inside the player". At
+                # his 125% the episode list's season arrow has its top
+                # border on the last row of the 20px corner square, and
+                # its right part crosses this column - rendered with
+                # DrawChildren, that one border pixel was stretched
+                # across the corner into a 1px line from the button to
+                # the panel's edge (reproduced at QT_SCALE_FACTOR 1.25,
+                # row 82 of the window, x 479-498; at 100% the button
+                # sits one row lower and it never showed). Every owner
+                # here paints its own ground and border, so the column
+                # loses nothing by leaving the children out.
                 owner.render(painter, QPoint(0, 0), QRegion(col_x, 0, 1, h),
-                             QWidget.RenderFlag.DrawChildren)
+                             QWidget.RenderFlag.DrawWindowBackground)
                 painter.end()
                 columns[col_x] = column
             column = columns[col_x]
@@ -4053,6 +4173,9 @@ class PlayerPage(GlassPage):
         # carries the whole message on its own.
         self.backdrop = StartupBackdrop(self)
         self.backdrop.hide()
+        # Its show and hide re-alpha the windows over it - see
+        # _over_loading_frame.
+        self.backdrop.installEventFilter(self)
         self.logo = self.backdrop.logo
         self.logo.hide()
 
@@ -4979,7 +5102,14 @@ class PlayerPage(GlassPage):
         bar.setStyleSheet(
             f"background: {_bar_style()};{_radius_css(square=('tl', 'bl'))}")
         outer = QVBoxLayout(bar)
-        outer.setContentsMargins(14, 14, 10, 14)
+        # Top and bottom at the corner radius, so nothing sits inside a
+        # rounded corner's square: _SmoothCorners' pieces lie over that
+        # square, and with 14 here and 10 on the right the Next-season
+        # arrow's top-right reached into it - at his 125% its border was
+        # streaked into a line to the panel's edge (the owner, 5 November
+        # 2026: "just remove this line in the right arrow in the ep
+        # list"), and with the streak gone the piece cut a notch in it.
+        outer.setContentsMargins(14, BAR_RADIUS, 10, BAR_RADIUS)
         outer.setSpacing(8)
 
         # Header per the owner's reference: ‹ Prev, a Season dropdown in
@@ -5616,9 +5746,11 @@ class PlayerPage(GlassPage):
         self._panel_season = self.season
         self._fill_episode_bar()
         self._layout_overlays()         # geometry first - see _show_status
-        self._episode_bar.show()
-        self._episode_bar.raise_()
-        _set_window_alpha(self._episode_bar, self._list_alpha())
+        # Painted and cornered before it appears - see _reveal_veiled.
+        _reveal_veiled(self._episode_bar, self._list_alpha())
+        # It went through alpha 0 behind _veil's back, so _veil's record
+        # of what it last set is no longer a promise.
+        getattr(self, "_veiled", {}).pop(id(self._episode_bar), None)
         self._wake_controls()
 
     # ---- start-up ----------------------------------------------------
@@ -12070,13 +12202,13 @@ class PlayerPage(GlassPage):
         self._guard_click()
         # Geometry first - see _show_status.
         self._layout_overlays()
-        panel.show()
-        # _raise_native for the same reason as the rest: this runs on
-        # every *rebuild* too, and stream results arrive progressively -
-        # so a list being read is restacked several times per lookup,
-        # under the pointer that is about to press a row.
-        _raise_native(panel)
-        _set_window_alpha(panel, self._list_alpha())
+        # Raised inside, with _raise_native for the same reason as the
+        # rest: this runs on every *rebuild* too, and stream results
+        # arrive progressively - so a list being read is restacked
+        # several times per lookup, under the pointer that is about to
+        # press a row. A first show is painted and cornered before it
+        # appears (_reveal_veiled).
+        _reveal_veiled(panel, self._list_alpha())
         self._wake_controls()
 
     # ---- status ------------------------------------------------------
@@ -12112,12 +12244,18 @@ class PlayerPage(GlassPage):
         # needed positioning.
         self._layout_overlays()
         self._show_backdrop()
-        self.status.show()
-        self.status.raise_()
         # The bars' own veil - see the status stylesheet for why this
-        # stopped being colour-keyed.
-        _set_window_alpha(self.status, BAR_ALPHA)
+        # stopped being colour-keyed. Solid over the loading frame, where
+        # the veil cannot see through and its rounded corners can
+        # (_over_loading_frame). Painted and cornered before it appears
+        # (_reveal_veiled); _layout_overlays above has already cut it.
+        _reveal_veiled(self.status, self._status_alpha())
         _round_overlay(self.status)
+
+    def _status_alpha(self) -> int:
+        """The message box's DWM alpha: the bars' veil over a running
+        picture, solid over the loading frame (_over_loading_frame)."""
+        return 255 if self._over_loading_frame() else BAR_ALPHA
 
     def _show_loading_soon(self, text=""):
         """The loading frame, only once the wait proves real.
@@ -12394,13 +12532,52 @@ class PlayerPage(GlassPage):
         2026: "make the windows ... inside the video player goes full
         opacity when paused". The windows only; the two bars stay bare
         over the frame either way (he had the bars made solid too, for
-        one build, and asked for that back)."""
-        return 255 if getattr(self, "_paused", False) else BAR_ALPHA
+        one build, and asked for that back).
+
+        Solid over the loading frame as well - see _over_loading_frame."""
+        if getattr(self, "_paused", False) or self._over_loading_frame():
+            return 255
+        return BAR_ALPHA
+
+    def _over_loading_frame(self) -> bool:
+        """Whether the full-window loading frame (the backdrop still, at
+        startup or in a stall) is what the windows sit over.
+
+        **Glass does not work over it, and the corners gave that away.**
+        The owner, 5 November 2026: *"when the video is loading the
+        corners seems to have different color or opacity than the window
+        it self"*. A window's DWM alpha (SetLayeredWindowAttributes)
+        blends it against the page under it, never against the backdrop,
+        which is another native child (OverlayPanel's docstring says the
+        same of the video): measured on the frozen build, a panel at 180
+        over the Brooklyn Nine-Nine still read a flat 20-21 across its
+        whole body while the picture behind it ran 40-105. Its smooth
+        corners are per-pixel layered windows (_SmoothCorners), and those
+        *do* blend with the backdrop - so each 16px square showed the
+        picture through at 70% (40,36,34 beside the body's 21,21,21): a
+        lighter, tinted box at every corner. Solid is the one alpha at
+        which the body and its corners are the same pixels whatever is
+        under them, and there is no moving picture here to be seen
+        through anyway - which is the pause rule's own reason."""
+        backdrop = getattr(self, "backdrop", None)
+        try:
+            return bool(backdrop is not None and backdrop.isVisible()
+                        and not backdrop.stalled())
+        except RuntimeError:
+            return False
 
     def _apply_pause_opacity(self):
         """Re-alpha whatever window is up the moment pause flips - an
         open panel and the episode list otherwise keep the alpha they
-        were shown with."""
+        were shown with. The loading frame coming and going calls it too
+        (eventFilter), and the message box rides along on that one."""
+        status = getattr(self, "status", None)
+        if status is not None:
+            try:
+                if status.isVisible():
+                    _set_window_alpha(status, self._status_alpha())
+            except RuntimeError:
+                pass
         if self._panel is not None:
             try:
                 _set_window_alpha(self._panel, self._list_alpha())
@@ -13595,6 +13772,12 @@ class PlayerPage(GlassPage):
     def eventFilter(self, obj, event):
         if obj is self.parent() and event.type() == QEvent.Type.Resize:
             self.setGeometry(self.parent().rect())
+            return False
+        if obj is getattr(self, "backdrop", None):
+            # Only to follow the loading frame coming and going; the
+            # backdrop's pointer events never woke the bars and still don't.
+            if event.type() in (QEvent.Type.Show, QEvent.Type.Hide):
+                self._apply_pause_opacity()
             return False
         if event.type() in (QEvent.Type.Enter, QEvent.Type.MouseMove):
             self._wake_controls()

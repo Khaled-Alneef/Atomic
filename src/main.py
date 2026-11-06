@@ -6824,6 +6824,10 @@ def main():
         logs.start_memtrace()          # only with ATOMIC_MEMTRACE set
     except Exception:
         pass
+    try:
+        logs.start_stall_watch()       # a frozen window logs its stack
+    except Exception:
+        pass
     # The arc-name season maps for tracked anime, warmed here for one
     # reason: **AniList is what supplies the romaji, and AniList goes
     # away.** Measured 23 August 2026, mid-session, it began answering
