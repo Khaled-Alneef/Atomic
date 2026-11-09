@@ -5790,6 +5790,123 @@ class _FramelessShell(QObject):
         painter.end()
 
 
+class _SmoothButton(QObject):
+    """Draws one button itself: antialiased corners and a real hover.
+
+    His report, 9 November 2026, with a picture of Uninstall's "No": *"why
+    does the buttons have unsmooth edges like this??!"*. A QSS border-radius
+    at his 125% scale is the same jagged corner _FramelessShell's docstring
+    records for the panel, and the cure is the same. His other ask beside
+    it was a hover on the red buttons: SettingsDialog's own sheet repaints
+    #Danger as an outline, and being the nearer sheet it overrides the
+    app-wide #Danger:hover, so the red had no hover state at all - nor had
+    the Yes that opens as its child and inherits that sheet.
+
+    An event filter, so the QSS still sizes the button. Consuming Paint only
+    replaces how it is drawn."""
+
+    def __init__(self, button):
+        super().__init__(button)
+        self._button = button
+        button.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Paint:
+            self._paint()
+            return True
+        return False
+
+    @staticmethod
+    def _alpha(colour, alpha):
+        result = QColor(colour)
+        result.setAlpha(alpha)
+        return result
+
+    def _colours(self):
+        """(fill, border, text) for the button's state, any may be None."""
+        button = self._button
+        over = button.underMouse() and button.isEnabled()
+        down = button.isDown()
+        name = button.objectName()
+        if name == "Danger":
+            if not button.isEnabled():
+                dim = QColor(theme.mix(theme.DANGER, theme.BG, 0.72))
+                return None, dim, QColor(theme.TEXT_DIM)
+            if down:
+                solid = QColor(theme.mix(theme.DANGER, theme.BG, 0.18))
+                return solid, solid, QColor(theme.ON_DANGER)
+            if over:
+                solid = QColor(theme.DANGER)
+                return solid, solid, QColor(theme.ON_DANGER)
+            return None, QColor(theme.DANGER), QColor(theme.DANGER)
+        if name == "Accent":
+            alpha = 170 if down else 205 if over else 255
+            return (self._alpha(theme.ACCENT_HOVER, alpha), None,
+                    QColor(theme.ON_ACCENT))
+        if not button.isEnabled():
+            return None, self._alpha(theme.TEXT, 30), QColor(theme.TEXT_DIM)
+        fill = self._alpha(theme.TEXT, 20) if down else None
+        border = QColor(theme.TEXT) if over else self._alpha(theme.TEXT, 60)
+        return fill, border, QColor(theme.TEXT)
+
+    def _paint(self):
+        button = self._button
+        fill, border, text = self._colours()
+        painter = QPainter(button)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        # One whole device pixel of line, on whole device pixels. A plain
+        # 1px pen at 125% is 1.25 device pixels wide and lands across two
+        # rows, which reads as a blurred edge (zoomed 9 November 2026).
+        # mapTo inside one window, never mapToGlobal (ui.md).
+        ratio = button.devicePixelRatioF()
+        stroke = max(1.0, round(ratio)) / ratio
+        origin = button.mapTo(button.window(), QPoint(0, 0))
+
+        def snap(value, offset):
+            return round((value + offset) * ratio) / ratio - offset
+
+        outer = QRectF(QPointF(snap(0, origin.x()), snap(0, origin.y())),
+                       QPointF(snap(button.width(), origin.x()),
+                               snap(button.height(), origin.y())))
+        radius = theme.RADIUS_SM
+        shape = QPainterPath()
+        shape.addRoundedRect(outer, radius, radius)
+        if fill is not None:
+            painter.fillPath(shape, fill)
+        if border is not None:
+            # **A ring whose inner curve has the outer curve's radius**, not
+            # a stroke. His picture of the first version, 9 November 2026:
+            # "the boarder line seems clearly less thick than the straight
+            # lines". A one-pixel light line on a dark ground spreads over
+            # dimmer pixels on a curve. Light integrated across the line,
+            # corner against straight, 45 degrees, at his 125%, red: a stroke
+            # 0.41, this ring 0.99 (30 and 60 degrees 1.02). The equal radius
+            # is what thickens the diagonal, and it tapers into the straight
+            # edges with no join to see.
+            ring = QPainterPath(shape)
+            ring.setFillRule(Qt.FillRule.OddEvenFill)
+            ring.addRoundedRect(outer.adjusted(stroke, stroke, -stroke, -stroke),
+                                radius, radius)
+            painter.fillPath(ring, border)
+        painter.setFont(button.font())
+        painter.setPen(text)
+        painter.drawText(QRectF(button.rect()),
+                         Qt.AlignmentFlag.AlignCenter, button.text())
+        painter.end()
+
+
+def smooth_buttons(root):
+    """Give every text button under `root` the drawn look. Safe to repeat:
+    a button already done is skipped, and one with an icon stays as it is."""
+    for button in root.findChildren(QPushButton):
+        if (button.property("smooth_drawn") or button.text() == ""
+                or not button.icon().isNull()):
+            continue
+        button.setProperty("smooth_drawn", True)
+        _SmoothButton(button)
+
+
 def frameless_dialog(dialog, title=""):
     """Make `dialog` a frameless rounded panel: no native title bar, no
     X/minimize/maximize, soft RADIUS_LG corners, draggable by its own
@@ -5853,6 +5970,10 @@ def _message_dialog(parent, title, text, accept_text, reject_text=None,
     default.setFocus()
     dialog.setMinimumWidth(400)
     frameless_dialog(dialog, title=title)
+    # A question asked from Settings inherits Settings' sheet, so it wears
+    # Settings' drawn buttons too.
+    if getattr(parent, "SMOOTH_BUTTONS", False):
+        smooth_buttons(dialog)
     return dialog
 
 

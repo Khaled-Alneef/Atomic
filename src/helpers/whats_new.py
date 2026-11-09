@@ -30,6 +30,17 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.22": [
+        "Uninstall now removes Atomic completely: the app, its data folder, "
+        "the shortcuts and taskbar pin, the Windows startup entry and its "
+        "temporary files. Your downloaded episodes and chapters stay.",
+        "The buttons in Settings and its questions have smooth corners, and "
+        "the red Uninstall and Yes buttons light up under the pointer.",
+        "The notifications bell counts unread chapters from the one after "
+        "the last you read.",
+        "If Atomic ever crashes, it now leaves a record of what happened, so "
+        "the cause can be found.",
+    ],
     "3.21": [
         "A notifications bell left of the search bar: new episodes and "
         "chapters of the shows and readings you saved, with the count on "

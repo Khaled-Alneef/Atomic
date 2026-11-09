@@ -396,11 +396,20 @@ def guard(pid, allowed):
         u.GetWindowThreadProcessId(h, ctypes.byref(owner))
         if owner.value in family and u.IsWindowVisible(h):
             r = w.RECT(); u.GetWindowRect(h, ctypes.byref(r))
-            on_screen = r.right > r.left and r.bottom > r.top and r.left > -30000
+            # Parked is anything this far out, not only Windows' -32000: Qt
+            # parks a hidden tooltip at (-26666, -26666), and the guard ended
+            # a run on it at +214s (7 November 2026).
+            on_screen = (r.right > r.left and r.bottom > r.top
+                         and r.right > -20000 and r.bottom > -20000)
             outside = r.right <= allowed[0] or r.left >= allowed[2] or r.bottom <= allowed[1] or r.top >= allowed[3]
             spills = r.left < allowed[0] - 16 or r.right > allowed[2] + 16 or r.top < allowed[1] - 16 or r.bottom > allowed[3] + 16
             if on_screen and (outside or spills):
-                bad.append(f"a window at {(r.left, r.top, r.right, r.bottom)}, off the test monitor {allowed}")
+                # Which window, and whose: the family includes mpv's child
+                # and Edge's helpers, and a rect alone did not say which.
+                cls = ctypes.create_unicode_buffer(128)
+                u.GetClassNameW(h, cls, 128)
+                bad.append(f"a window at {(r.left, r.top, r.right, r.bottom)}, off the test monitor "
+                           f"{allowed} (class {cls.value!r}, {_owning_exe_name(h)}, pid {owner.value})")
         return True
 
     while _alive(pid):
@@ -453,6 +462,12 @@ def launch(exe, appdata):
         exe = os.path.abspath(exe)
         python = subprocess.run(["py", "-3.13", "-c", "import sys; print(sys.executable)"],
                                 capture_output=True, text=True).stdout.strip()
+        # pythonw, not python: a console program started through WMI gets a
+        # console window of its own, and that window took the foreground at
+        # +1.7s and the guard ended the run (7 November 2026).
+        windowless = os.path.join(os.path.dirname(python), "pythonw.exe")
+        if os.path.isfile(windowless):
+            python = windowless
         line = f'"{python}" "{exe}"'
     else:
         exe = os.path.abspath(exe)

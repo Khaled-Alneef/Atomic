@@ -68,7 +68,7 @@ it updates itself from Settings.
 |---|---|
 | **Windows 10 / 11 (64-bit)** | [**Atomic.zip** — latest release](https://github.com/Khaled-Alneef/Atomic/releases/latest) |
 | **Install** | Unzip it anywhere you can write to, and run `Atomic.exe` |
-| **Uninstall** | Delete the exe. Settings → Data → Uninstall also removes `%APPDATA%\Atomic` |
+| **Uninstall** | Settings → Uninstall removes the app, `%APPDATA%\Atomic`, the shortcuts, the startup entry and what it keeps in `%TEMP%`. `Downloads\Atomic` is left alone |
 
 > **Why a zip and not a bare .exe?** Downloading an unsigned executable
 > from a browser gets it refused by Microsoft Defender's machine-learning
