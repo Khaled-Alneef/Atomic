@@ -39,7 +39,7 @@ from . import (
     storage, theme, uninstall, updater,
 )
 from .widgets import (confirm, finish_toast, frameless_dialog, inform,
-                      show_toast, smooth_combo, use_hover_cursor)
+                      show_toast, smooth_buttons, smooth_combo, use_hover_cursor)
 
 # "Watching", not "Anime & Series": that name predates films being tracked,
 # and the page's settings serve all three media. The
@@ -455,6 +455,8 @@ def _round_save(button):
 
 
 class SettingsDialog(QDialog):
+    SMOOTH_BUTTONS = True   # widgets._message_dialog asks
+
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -633,6 +635,9 @@ class SettingsDialog(QDialog):
         # No title heading: the content column already opens with its
         # own "Settings" PanelTitle.
         frameless_dialog(self)
+        # Cancel, Save and the first page; each later page does its own as
+        # it is built (_ensure_page).
+        smooth_buttons(self)
         self.exec()
 
     # ------------------------------------------------------------------
@@ -770,6 +775,7 @@ class SettingsDialog(QDialog):
         page = self._page_builders[row]()
         self.stack.widget(row).layout().addWidget(_plain_scroller(page))
         _pointing_hands(page)
+        smooth_buttons(page)
 
     # ------------------------------------------------------------------
     def _build_general_page(self):
