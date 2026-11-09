@@ -128,6 +128,7 @@ _SERVICE_CONNECT = 10
 _FOLDER_GET_TASK = 13
 _FOLDER_DELETE_TASK = 15
 _FOLDER_REGISTER_TASK = 16
+_TASK_GET_XML = 20          # IRegisteredTask::get_Xml
 
 
 class _GUID(ctypes.Structure):
@@ -332,6 +333,33 @@ def _task_exists(name=_TASK_NAME) -> bool:
         return False
 
 
+def _registered_task_xml(name=_TASK_NAME) -> str:
+    """The definition Windows holds for the task, or "" without one."""
+    try:
+        with _root_folder() as folder, _Bstr(name) as path:
+            task = ctypes.c_void_p()
+            hr = _call(folder, _FOLDER_GET_TASK,
+                       (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)),
+                       path, ctypes.byref(task))
+            if hr < 0:
+                return ""
+            text = ctypes.c_void_p()
+            try:
+                hr = _call(task, _TASK_GET_XML,
+                           (ctypes.POINTER(ctypes.c_void_p),), ctypes.byref(text))
+                if hr < 0 or not text.value:
+                    return ""
+                value = ctypes.wstring_at(text.value)
+                oleaut = ctypes.WinDLL("oleaut32")
+                oleaut.SysFreeString.argtypes = [ctypes.c_void_p]
+                oleaut.SysFreeString(text)
+                return value
+            finally:
+                _release(task)
+    except Exception:
+        return ""
+
+
 def _create_task(name=_TASK_NAME, xml=None) -> bool:
     """Register (or replace) the logon task. Returns True on success.
 
@@ -435,6 +463,16 @@ def set_enabled(enabled: bool) -> None:
     # Task Scheduler refused (service disabled, policy, etc.) - keep the
     # old, slower Run entry rather than leaving startup silently off.
     _write_run_key_value()
+
+
+def names_this_copy() -> bool:
+    """Whether the registered startup entry launches this very exe. Read,
+    not assumed: a test build must not take the installed app's entry with
+    it when its Uninstall is pressed (his ask, 9 November 2026: "I want to
+    test it without deleting my local files and app!")."""
+    exe = os.path.normcase(sys.executable)
+    return (exe in os.path.normcase(_run_key_value() or "")
+            or os.path.normcase(escape(sys.executable)) in os.path.normcase(_registered_task_xml()))
 
 
 def install_dir() -> Path:
