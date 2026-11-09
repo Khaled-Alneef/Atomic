@@ -329,10 +329,17 @@ def backlog(item) -> str:
     """"(3 Unwatched Episodes)" / "(1 Unread Chapter)" for the title an item
     names, or "" - nothing waiting, an update, or a title no longer saved.
 
-    Counted from **the episode or chapter Continue would open**, which is
-    what Home's card prints (web.server._progress_text), so the window and
-    the card cannot disagree: every aired episode from that one on, every
-    chapter on the stored list from that number on. Disk only."""
+    Counted off the number Home's card prints (web.server._progress_text),
+    so the window and the card cannot disagree - **but that number means
+    two different things, and the count has to know which.** A video card
+    says the episode Continue will open, so that one is still waiting; a
+    reading card has said the chapter he last *finished* since 1 October
+    2026, so that one is not. Counting both from the number on, as this
+    did at first, was "3 unread chapters while I have 2 ONLY" (the owner,
+    9 November 2026). Measured on his data: The Eternal Supreme read to
+    580 with 581 and 582 listed, shown as 3; The Great Mage read to 277
+    with 278 and 282 listed, shown as 3; and every title he had caught up
+    on read "(1 Unread Chapter)". Disk only."""
     kind = item.get("kind")
     if kind not in ("episode", "chapter"):
         return ""
@@ -347,11 +354,18 @@ def backlog(item) -> str:
     if kind == "episode":
         found = _ON_EPISODE_RE.search(on)
         start = (int(found.group(1)), int(found.group(2))) if found else (1, 1)
-        count = sum(1 for s, e, _n, _a in _aired(entry) if (s, e) >= start)
+        # With nothing aired after it the card stays on the last episode
+        # he finished (server._season_step): his Black Clover, S02E06 and
+        # all caught up, read "(1 Unwatched Episode)".
+        finished = (bool(entry.get("progress_verified"))
+                    and str(entry.get("progress") or "").strip().upper() == on.strip().upper())
+        count = sum(1 for s, e, _n, _a in _aired(entry)
+                    if (s, e) > start or ((s, e) == start and not finished))
         unit = "Unwatched Episode"
     else:
         found = _ON_CHAPTER_RE.search(on)
-        start = float(found.group(1)) if found else 0.0
+        # None: nothing read yet, so every chapter on the list is waiting.
+        read_to = float(found.group(1)) if found else None
         try:
             from . import chapter_source
             numbers = set()
@@ -362,7 +376,7 @@ def backlog(item) -> str:
                     continue
         except Exception:
             return ""
-        count = sum(1 for number in numbers if number >= start)
+        count = sum(1 for number in numbers if read_to is None or number > read_to)
         unit = "Unread Chapter"
     if count <= 0:
         return ""
