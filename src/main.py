@@ -82,6 +82,10 @@ if "--mpv-host" in sys.argv:
     _here = Path(__file__).resolve().parent
     if str(_here) not in sys.path:
         sys.path.insert(0, str(_here))
+    # Its own crash record (crash_<pid>_video.log): mpv lives in this
+    # process, and a crash here reaches the app only as "host lost".
+    from helpers import crash_log as _crash_log
+    _crash_log.arm("video")
     from helpers import mpv_proxy as _mpv_proxy
     _flag = sys.argv.index("--mpv-host")
     _mpv_proxy.serve(sys.argv[_flag + 1], sys.argv[_flag + 2])
@@ -6843,6 +6847,12 @@ def main():
     # takes the whole process down through qFatal with no traceback
     # anywhere. See helpers/logs.py.
     logs.install_excepthook()
+    # And what the hook cannot catch: an access violation ends the
+    # process before Python runs another line, and atomic.log just stops.
+    # His 7 November crash (python313.dll 0x6955b) left nothing anywhere
+    # but Windows' event log - see helpers/crash_log.
+    from helpers import crash_log
+    crash_log.arm(version=updater.APP_VERSION)
     # Before the QApplication, so every timer Qt ever creates lives in a
     # process that Windows has agreed not to quantise - see
     # startup.allow_precise_timers for the 13.9ms-per-4ms-timer
