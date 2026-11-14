@@ -3509,6 +3509,70 @@ def file_progress(info_hash: str, index=None) -> dict:
         return {}
 
 
+def on_disk(info_hash: str, from_fraction: float = 0.0) -> dict:
+    """What of the file being *played* is on disk - for the player's
+    Completed row and the light band of its seek strip.
+
+    **Not `stats()["progress"]`, which is what the Completed row used to
+    print.** libtorrent's `status.progress` is the share of the pieces
+    *wanted right now*, and while streaming that is only the window
+    (STREAM_FILL_PRIORITY is 0): as the window slides, pieces already on
+    disk stop counting and new empty ones start to. Measured 14 November
+    2026 (real engine, one local seeder, a reader advancing like
+    playback): the row read 0% -> 1.11% -> 25% -> 10% while the file
+    held 85% of itself on disk and never lost a byte - the owner's "why
+    is the percentage going up and down".
+
+    Answers, for the file the stream serves:
+      done / total / fraction  bytes of it on disk (never falls)
+      reach_fraction           where one unbroken run of on-disk pieces,
+                               starting at `from_fraction` of the file,
+                               ends - as a fraction of the file. Equal
+                               to `from_fraction` when the piece there
+                               is missing. A gap ends it: past a gap the
+                               player would stall, so it is not
+                               "loaded" in the sense the strip means.
+    {} when the engine does not hold the torrent.
+
+    One `status(query_pieces)` call, not a have_piece() per piece -
+    measured below on the GUI thread's own clock."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None or torrent.file_index is None:
+        return {}
+    try:
+        size = torrent.file_size()
+        if size <= 0:
+            return {}
+        # Whole pieces only. The default (per block) fell twice in one
+        # 50s run of the measurement above - half-fetched blocks are
+        # counted and then given up - and a "how much is loaded" number
+        # that steps back is the complaint itself. A verified piece is
+        # never un-had while the file is open.
+        try:
+            done = int(torrent.handle.file_progress(
+                lt.torrent_handle.piece_granularity)[torrent.file_index])
+        except Exception:
+            done = 0
+        have = torrent.handle.status(lt.torrent_handle.query_pieces).pieces
+        start = int(min(max(float(from_fraction or 0.0), 0.0), 1.0) * (size - 1))
+        piece = torrent.piece_at(start)
+        last = torrent.piece_at(size - 1)
+        while piece <= last and piece < len(have) and have[piece]:
+            piece += 1
+        if piece > last:
+            reach = size
+        else:
+            # The first missing piece's start, back in the file's own
+            # offsets (the file need not start on a piece boundary).
+            reach = max(start, piece * torrent.piece_length()
+                        - torrent.file_offset())
+        return {"done": done, "total": size,
+                "fraction": min(1.0, done / size),
+                "reach_fraction": min(1.0, reach / size)}
+    except Exception:
+        return {}
+
+
 def peers(info_hash: str) -> int:
     torrent = _torrents.get(info_hash)
     if torrent is None:
