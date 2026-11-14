@@ -255,6 +255,15 @@ SEAT_GIVE_UP_S = 45.0
 # always decodable.
 SEEK_BUFFER_MARGIN_S = 1.0
 
+# How often the seek strip's light band re-reads what the torrent has on
+# disk (PlayerPage._refresh_disk_reach). A second is finer than one
+# column of a 2560px strip moves for any real episode, and the read is
+# one libtorrent call.
+DISK_REACH_POLL_MS = 1000
+# The engine's hash, out of the url mpv is given: the engine's own
+# http://127.0.0.1:PORT/HASH/N or the atomic:// copy of it.
+_ENGINE_URL_HASH = re.compile(r"127\.0\.0\.1:\d+/([0-9a-fA-F]{40})/")
+
 # When an episode counts as watched. Credits and a next-episode teaser
 # are routinely the last ~10%, so waiting for the file to actually end
 # would mean most finished episodes never got marked.
@@ -4281,6 +4290,17 @@ class PlayerPage(GlassPage):
         self._seat_timer = QTimer(self)
         self._seat_timer.setInterval(1000)
         self._seat_timer.timeout.connect(self._seat_tick)
+        # What of a torrent's file is on disk ahead of the playhead -
+        # the seek strip's light band (see _refresh_disk_reach). Its own
+        # tick, because the swarm fills the disk whether or not mpv is
+        # sending time-pos events.
+        self._disk_reach_s = 0.0
+        self._engine_hash = ""
+        self._playing_source = ""
+        self._reach_timer = QTimer(self)
+        self._reach_timer.setInterval(DISK_REACH_POLL_MS)
+        self._reach_timer.timeout.connect(self._refresh_disk_reach)
+        self._reach_timer.start()
 
         if parent is not None:
             parent.installEventFilter(self)
@@ -6137,6 +6157,10 @@ class PlayerPage(GlassPage):
         self._pending_start_seek = None
         self.seek_bar.set_duration(0)
         self.seek_bar.set_position(0)
+        self._disk_reach_s = 0.0
+        self._buffered_to = 0.0
+        self._engine_hash = ""
+        self._playing_source = ""
         self.seek_bar.set_buffered(0)
         self._refresh_title_label()
         self._fill_episode_bar()
@@ -8405,6 +8429,24 @@ class PlayerPage(GlassPage):
             # see _file_ready.
             self._file_ready = False
             self._loading_url = url
+            # Which torrent the engine is serving *this* file from, read
+            # off the url itself (http://127.0.0.1:PORT/HASH/N, or the
+            # atomic:// copy of it). Not the source row's info_hash: a
+            # debrid play keeps the hash for identity and is not served
+            # out of the piece store (integrations.md).
+            match = _ENGINE_URL_HASH.search(url)
+            self._engine_hash = match.group(1).lower() if match else ""
+            self._disk_reach_s = 0.0
+            # And what kind of thing mpv is reading, for the statistics
+            # panel's Source rows - see _source_kind.
+            if self._engine_hash:
+                self._playing_source = "torrent"
+            elif stream.get("local_file"):
+                self._playing_source = "disk"
+            elif str(stream.get("engine") or "").lower() == "debrid":
+                self._playing_source = "debrid"
+            else:
+                self._playing_source = "direct"
             if seat:
                 # **The file is opened at the seat, not played from the
                 # head and seeked after.** The old shape - load, wait
@@ -9334,8 +9376,12 @@ class PlayerPage(GlassPage):
             # Kept on the page as well as drawn: it is what tells a seek
             # whether its target is data mpv already holds or data the
             # swarm has not sent yet (see _seek_absolute).
+            # `_buffered_to` stays mpv's own reach - the seek rule reads
+            # it as "data mpv already holds". The *drawing* takes the
+            # disk's reach too (see _refresh_disk_reach).
             self._buffered_to = float(value)
-            self.seek_bar.set_buffered(float(value))
+            self.seek_bar.set_buffered(
+                max(float(value), float(self._disk_reach_s or 0.0)))
         elif name == "pause":
             self._paused = bool(value)
             self.play_btn.set_paused(self._paused)
@@ -11034,6 +11080,71 @@ class PlayerPage(GlassPage):
             return f"{rate / 1_000:.0f} KB/s"
         return f"{int(rate)} B/s"
 
+    def _refresh_disk_reach(self):
+        """Put how much of a torrent's file is on disk ahead of the
+        playhead into the seek strip's light band.
+
+        **The band used to be mpv's `demuxer-cache-time` alone**, which
+        is what mpv has read into memory - capped by demuxer_max_bytes
+        (64MiB) - not what the swarm has put on disk. The owner: "the
+        light part of the seeker bar ... only shows ~2 mins ahead".
+        Measured 14 November 2026 on the real engine: one unbroken run
+        of 196MB on disk ahead of the reader, about three minutes at the
+        test's rate, while mpv's cache can only ever hold 64MiB.
+
+        A byte becomes a time in proportion to the file (size against
+        duration). That is exact for a constant bitrate and close for
+        the usual variable one; the container's index could be exact,
+        but reading the Cues off disk once a second is not a cost a
+        drawing should pay. The band is the larger of this and mpv's
+        own reach, so it never shows less than before."""
+        reach = 0.0
+        try:
+            torrent_hash = self._engine_hash
+            duration = float(self._duration or 0.0)
+            if torrent_hash and duration > 0:
+                from helpers import torrent_engine
+                found = torrent_engine.on_disk(
+                    torrent_hash,
+                    from_fraction=float(self._position or 0.0) / duration)
+                if found:
+                    reach = min(duration,
+                                float(found["reach_fraction"]) * duration)
+        except Exception:
+            reach = 0.0
+        self._disk_reach_s = reach
+        try:
+            self.seek_bar.set_buffered(max(
+                reach, float(getattr(self, "_buffered_to", 0.0) or 0.0)))
+        except Exception:
+            pass
+
+    # Within this many seconds of the end counts as loaded to the end: a
+    # demuxer's reach stops at the last packet's timestamp, which sits a
+    # frame or an audio block short of the duration mpv reports.
+    LOADED_END_SLACK_S = 1.0
+
+    def _link_loaded_text(self, kind) -> str:
+        """The Completed row for a stream with no swarm behind it.
+
+        The owner, 14 November 2026: "if the video is 100% loaded make it
+        shows 100% not '-'!!!!" - after this row read "-" for every
+        debrid play. A finished file on disk is whole. An HTTPS link has
+        no file filling anywhere, so what is "completed" is how far into
+        the video mpv has loaded - the end of its demuxer cache, the same
+        reach the seek strip's light band draws - over the duration, and
+        100% once that reaches the end. Before mpv knows a duration there
+        is nothing to divide by, and the row says so with "-"."""
+        if kind == "disk":
+            return "100.00 %"
+        duration = float(self._duration or 0.0)
+        if duration <= 0:
+            return "-"
+        reach = float(getattr(self, "_buffered_to", 0.0) or 0.0)
+        if reach >= duration - self.LOADED_END_SLACK_S:
+            return "100.00 %"
+        return f"{max(0.0, reach) / duration * 100:.2f} %"
+
     def _playing_info_hash(self):
         """The info hash of the release actually on screen, or "" when
         this episode is not a torrent at all (a direct URL, a debrid
@@ -11351,7 +11462,21 @@ class PlayerPage(GlassPage):
                 setters["startup"]("Playing")
             # Asked every tick, not captured when the panel opened - see
             # the note where these rows are built.
-            live_hash = self._playing_info_hash()
+            # **What mpv is reading, not what the source row says.** A
+            # debrid link keeps its torrent's hash for identity
+            # (integrations.md), so asking the engine for the row's hash
+            # read "Connecting..." for a whole debrid play - the owner's
+            # screenshot, 14 November 2026: Silicon Valley S02E02 playing
+            # at 1920x1080 from `race: 3c88f31d won (debrid)`. The row's
+            # hash is asked only while nothing has been loaded yet, which
+            # is the swarm-while-sourcing view of 28 August.
+            kind = self._playing_source
+            if kind == "torrent":
+                live_hash = self._engine_hash
+            elif not kind:
+                live_hash = self._playing_info_hash()
+            else:
+                live_hash = ""
             found = {}
             if live_hash:
                 try:
@@ -11364,8 +11489,31 @@ class PlayerPage(GlassPage):
                 setters["peers"](str(int(found.get("peers") or 0)))
                 setters["swarm_speed"](
                     self._rate_text(found.get("download_rate")))
+                # The playing file's own bytes on disk - never
+                # `found["progress"]`, which is the share of the pieces
+                # wanted right now and rose and fell as the streaming
+                # window slid (see torrent_engine.on_disk).
+                disk = {}
+                try:
+                    from helpers import torrent_engine
+                    disk = torrent_engine.on_disk(live_hash)
+                except Exception:
+                    disk = {}
                 setters["done"](
-                    f"{float(found.get('progress') or 0.0) * 100:.2f} %")
+                    f"{float(disk['fraction']) * 100:.2f} %" if disk else "-")
+            elif kind in ("debrid", "direct", "disk"):
+                # No swarm behind it, so no peers; the speed is mpv's own
+                # read rate (`cache-speed`), which for an HTTPS link is
+                # the download, and a finished file on disk is whole.
+                setters["source_note"]({"debrid": "Debrid",
+                                        "direct": "Direct link",
+                                        "disk": "On disk"}[kind])
+                setters["peers"]("-")
+                speed = (None if kind == "disk"
+                         else self._mpv_number("cache-speed"))
+                setters["swarm_speed"](
+                    "-" if speed is None else self._rate_text(speed))
+                setters["done"](self._link_loaded_text(kind))
             else:
                 # Three states share these dashes, and the note is what
                 # tells them apart: no release picked yet, a release
@@ -11387,6 +11535,12 @@ class PlayerPage(GlassPage):
             setters["video"](live["video"])
             setters["audio"](live["audio"])
             buffer_s = live["buffer"]
+            # The same reach the light band draws: what is on disk ahead
+            # of the playhead, when that is more than mpv holds in memory.
+            ahead_s = (float(self._disk_reach_s or 0.0)
+                       - float(self._position or 0.0))
+            if ahead_s > 0 and (buffer_s is None or ahead_s > buffer_s):
+                buffer_s = ahead_s
             setters["buffer"]("-" if buffer_s is None else f"{buffer_s:.1f} s")
 
         refresh()

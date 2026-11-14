@@ -3298,73 +3298,68 @@ def finished_file_path(info_hash: str, *, season=None, episode=None,
             return None
         if int(os.path.getsize(path)) != expected:
             return None         # still downloading - not ours to shortcut
-        if not _fully_written(path, expected):
-            return None         # the right length, and full of holes
+        if not _file_pieces_verified(info_hash, info, index):
+            return None         # libtorrent has not verified every piece
         return path
     except Exception:
         return None
 
 
+def _file_pieces_verified(info_hash: str, info, index) -> bool:
+    """Has libtorrent verified every piece holding this file?
 
-def _fully_written(path: str, expected: int) -> bool:
-    """Is every byte of this file actually on disk?
+    **The answer finished_file_path rests on now - not the file system.**
+    The owner's friend, 14 November 2026, on a Prison Break .mp4 he was
+    still streaming at ~1MB/s: a press at 17:40 "takes him to the end of
+    the ep". His log: two pieces near the seat given up on at 17:39:33
+    and 17:39:44, then `race: 33b033eb won (on disk)` - only a
+    `local_file` stream says that - `seat: opening at 1131.8s`, mpv
+    reading zeros (`Invalid NAL unit size (0 > 72721)`), and `seat:
+    landed at 2527.9s (asked 1131.8s)`, the last frame. A part-fetched
+    file had been handed to mpv as a finished one.
 
-    **A length check is not a completeness check, and that cost three
-    bugs.** libtorrent pre-allocates the whole file the moment a torrent
-    starts, so a download that has fetched a tenth of the pieces still
-    has a file of exactly the right size - it is *sparse*, with holes
-    where the missing pieces go. finished_file_path tested only the
-    length, so it handed the player a half-empty file as though it were
-    a finished one.
+    **A length check is not a completeness check** - libtorrent
+    pre-allocates the whole file the moment a torrent starts. Measured 1
+    September 2026 on the owner's Reacher S01E02: the exact torrent
+    length on disk with 4KB of zeros in the middle, and played from it
+    mpv seeked into the hole and landed at the end - the same picture
+    as his friend's. What answered then was `_fully_written`, which
+    asked NTFS how much of the file is allocated (allowing 2% missing)
+    and sampled eleven 4KB blocks where it could not. That measured
+    wrong both ways on 14 November (h_sparse.py, a 240MB sparse file):
+    **0.39% allocated for a complete file** whose writes the cache had
+    not flushed yet, and **100% allocated with a 7MB hole** in the
+    middle once it had - True for every hole tried (0.5% to 3%); on the
+    real engine with one 2MB piece of 120 missing it said True too. It
+    was removed at his word the same day (CLAUDE.md rule 11).
 
-    Measured 1 September 2026 on the owner's Reacher S01E02: 2,021,317,323
-    bytes on disk, the exact torrent length, real data in the last 4KB and
-    **4KB of zeros in the middle**. Played from that file mpv seeks into a
-    hole and lands at the end of what it can index, which is his "when I
-    click in random time ahead in the progress bar it takes me to the vid
-    end"; playback stops on reaching the first hole, which is his "freezes
-    after ~25 seconds"; and the buffering readout disagrees with the bytes
-    that exist, which is his "99% buffering although it loaded ~16%".
-
-    Asked two ways. NTFS records how much of a sparse file is really
-    allocated, and GetCompressedFileSizeW reports it - that is exact and
-    costs one call. Where that is unavailable the file is sampled
-    instead: a hole reads as zeros, and a compressed video stream does
-    not contain 4KB of aligned zeros by accident.
-
-    Wrong in the safe direction on purpose: saying "no" only means the
-    ordinary path is taken, which plays. Saying "yes" wrongly is what
-    breaks playback.
-    """
+    libtorrent knows exactly: the torrent's own handle while it is in the
+    session (which it was, in his case - he was streaming it), and the
+    `have_pieces` a previous session saved in its resume data otherwise.
+    Neither on hand answers no, which only means the ordinary engine
+    path - the one that plays."""
     try:
-        if os.name == "nt":
-            import ctypes
-            import ctypes.wintypes as w
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.GetCompressedFileSizeW.restype = w.DWORD
-            kernel.GetCompressedFileSizeW.argtypes = [w.LPCWSTR,
-                                                      ctypes.POINTER(w.DWORD)]
-            high = w.DWORD(0)
-            low = kernel.GetCompressedFileSizeW(str(path), ctypes.byref(high))
-            if low != 0xFFFFFFFF or ctypes.get_last_error() == 0:
-                allocated = (int(high.value) << 32) | int(low)
-                if allocated > 0:
-                    # A hair under, because a compressed volume can store
-                    # a complete file in fewer bytes than it holds.
-                    return allocated >= expected * 0.98
+        files = info.files()
+        piece_length = int(info.piece_length())
+        offset = int(files.file_offset(index))
+        size = int(files.file_size(index))
+        if size <= 0 or piece_length <= 0:
+            return False
+        first = offset // piece_length
+        last = (offset + size - 1) // piece_length
+        key = (info_hash or "").lower()
+        torrent = _torrents.get(key)
+        if torrent is not None:
+            handle = torrent.handle
+            return all(handle.have_piece(p) for p in range(first, last + 1))
+        params = _cached_resume(key)
+        have = list(getattr(params, "have_pieces", None) or [])
+        if len(have) <= last:
+            return False
+        return all(have[p] for p in range(first, last + 1))
     except Exception:
-        pass
-    try:
-        holes = 0
-        with open(path, "rb") as handle:
-            for step in range(1, 12):
-                handle.seek(expected * step // 13)
-                block = handle.read(4096)
-                if block and not any(block):
-                    holes += 1
-        return holes == 0
-    except OSError:
         return False
+
 
 
 def episode_file(info_hash: str):
@@ -3510,6 +3505,70 @@ def file_progress(info_hash: str, index=None) -> dict:
                 "path": path,
                 "name": os.path.basename(path),
                 "finished": wanted > 0 and done >= wanted}
+    except Exception:
+        return {}
+
+
+def on_disk(info_hash: str, from_fraction: float = 0.0) -> dict:
+    """What of the file being *played* is on disk - for the player's
+    Completed row and the light band of its seek strip.
+
+    **Not `stats()["progress"]`, which is what the Completed row used to
+    print.** libtorrent's `status.progress` is the share of the pieces
+    *wanted right now*, and while streaming that is only the window
+    (STREAM_FILL_PRIORITY is 0): as the window slides, pieces already on
+    disk stop counting and new empty ones start to. Measured 14 November
+    2026 (real engine, one local seeder, a reader advancing like
+    playback): the row read 0% -> 1.11% -> 25% -> 10% while the file
+    held 85% of itself on disk and never lost a byte - the owner's "why
+    is the percentage going up and down".
+
+    Answers, for the file the stream serves:
+      done / total / fraction  bytes of it on disk (never falls)
+      reach_fraction           where one unbroken run of on-disk pieces,
+                               starting at `from_fraction` of the file,
+                               ends - as a fraction of the file. Equal
+                               to `from_fraction` when the piece there
+                               is missing. A gap ends it: past a gap the
+                               player would stall, so it is not
+                               "loaded" in the sense the strip means.
+    {} when the engine does not hold the torrent.
+
+    One `status(query_pieces)` call, not a have_piece() per piece -
+    measured below on the GUI thread's own clock."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None or torrent.file_index is None:
+        return {}
+    try:
+        size = torrent.file_size()
+        if size <= 0:
+            return {}
+        # Whole pieces only. The default (per block) fell twice in one
+        # 50s run of the measurement above - half-fetched blocks are
+        # counted and then given up - and a "how much is loaded" number
+        # that steps back is the complaint itself. A verified piece is
+        # never un-had while the file is open.
+        try:
+            done = int(torrent.handle.file_progress(
+                lt.torrent_handle.piece_granularity)[torrent.file_index])
+        except Exception:
+            done = 0
+        have = torrent.handle.status(lt.torrent_handle.query_pieces).pieces
+        start = int(min(max(float(from_fraction or 0.0), 0.0), 1.0) * (size - 1))
+        piece = torrent.piece_at(start)
+        last = torrent.piece_at(size - 1)
+        while piece <= last and piece < len(have) and have[piece]:
+            piece += 1
+        if piece > last:
+            reach = size
+        else:
+            # The first missing piece's start, back in the file's own
+            # offsets (the file need not start on a piece boundary).
+            reach = max(start, piece * torrent.piece_length()
+                        - torrent.file_offset())
+        return {"done": done, "total": size,
+                "fraction": min(1.0, done / size),
+                "reach_fraction": min(1.0, reach / size)}
     except Exception:
         return {}
 

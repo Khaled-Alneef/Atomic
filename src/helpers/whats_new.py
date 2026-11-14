@@ -30,6 +30,18 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.23": [
+        "Clicking ahead on the seek bar no longer jumps to the end of an "
+        "episode that is still downloading.",
+        "In the player's statistics, Completed only goes up now: it shows "
+        "how much of the episode is downloaded, and 100% once it is all "
+        "there - for Real-Debrid links too.",
+        "The light part of the seek bar shows everything already "
+        "downloaded ahead of you, not just the next couple of minutes.",
+        "The statistics name the source you are actually playing from - "
+        "Torrent, Debrid, On disk or Direct link - instead of saying "
+        "Connecting... while a debrid link plays.",
+    ],
     "3.22": [
         "Uninstall now removes Atomic completely: the app, its data folder, "
         "the shortcuts and taskbar pin, the Windows startup entry and its "

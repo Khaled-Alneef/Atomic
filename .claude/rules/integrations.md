@@ -1417,3 +1417,29 @@ the reading rows were in, and opening connections on a press of the field took t
 sites' part from 1.6-5.4s to about 0.7s by the route's own clock, 1.1-2.0s (one
 3.4s) on the frozen build. On his machine it read no faster. So the route's number
 is not what he sees: find out what he is watching before trying this again.
+
+## "Finished" is libtorrent's word, not the file system's (14 November 2026)
+
+His friend's log: a press at 17:40 on a Prison Break .mp4 "takes him to the
+end of the ep". Two pieces near the seat were given up on, the source walk
+then logged `race: 33b033eb won (on disk)` - only a `local_file` stream says
+that - and mpv, opened on the cache file at 1131.8s, read zeros (`Invalid NAL
+unit size (0 > ...)`) and logged `seat: landed at 2527.9s`. `finished_file_
+path` had passed a part-fetched file on `_fully_written`, whose NTFS allocation
+test allows 2% missing and measured wrong both ways (`h_sparse.py`: 0.39% for a
+complete file before the cache flushed, 100% with a 7MB hole after). On the
+real engine with one 2MB piece of 120 missing it said True. `_file_pieces_
+verified` now asks the torrent's handle while it is in the session and the
+saved resume data's `have_pieces` otherwise; neither on hand is "not
+finished". `_fully_written` was removed at his word the same day (rule 11);
+its measurements are in `_file_pieces_verified`'s docstring.
+
+**The player's Completed row and seek-strip band read the disk, not the
+window.** `status.progress` is the share of the *wanted* pieces, and while
+streaming only the window is wanted, so it read 0% -> 1.1% -> 25% -> 10%
+while 85% of the file was on disk (69 rises and 23 drops in one 50s run).
+`torrent_engine.on_disk` gives the playing file's whole pieces on disk
+(per-block counting fell twice in a run) and how far one unbroken run reaches
+from the playhead; the band is the larger of that and mpv's
+`demuxer-cache-time` (64MiB at most - his "only ~2 mins ahead"), byte to time
+in proportion to the file. 0.07ms a read.
