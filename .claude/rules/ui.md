@@ -1100,3 +1100,57 @@ baseline, an episode older than RECENT_DAYS is never news); the window is
   its items leave the list and the count at once (`muted_ids`). The off
   ink is white at 60%, not TEXT_MUTED - the ground is translucent over the
   title's art, and a mid grey vanished on a light one.
+
+
+## A self-running Qt object never calls a lambda (14 November 2026)
+
+His report: *"the app just crashed when I used the Eng Embedded!!!!!"*, then
+*"this crash sometimes also happens when changing the source while inside the
+video player, or the subtitles"*. Windows' record of it, three times since 4
+November: an access violation in python313 at +0x6955b, which is
+COPY_FREE_VARS - the first instruction of a closure, loading its cells - and
+the crash record's UI thread reading `<invalid frame>`. Native code called a
+Python function that had been freed. On 14 November the same fault arrived
+inside `DispatchMessageW` as a .NET AccessViolationException, because
+WinForms' DoEvents pump was the loop that happened to deliver it.
+
+The function was `_tile_motion`'s `lambda value: on_step(float(value))`, wired
+to each panel row's hover `QVariantAnimation`. A pick, a source change or a
+subtitle change rebuilds the panel: the old rows are hidden (a Leave, so the
+animation starts running back), unparented and deleteLater'd. Until that
+delete runs the C++ row and its animation are alive, but the row's Python side
+is garbage - and **PyQt lets the cyclic collector clear a connected lambda
+with it**, on whatever thread the collector happens to run. The animation's
+next frame calls the freed lambda. Reproduced offscreen under `-X dev`
+(scratch `h_animfree.py`): six rebuilt rows' animations ticked after one
+`gc.collect()` faulted with his exact record, 3 of 3; with no collection 6 of
+6 ticked; with the slot a bound method, 3 of 3 survived.
+
+So: **anything that fires on its own - a QTimer, a QVariantAnimation, a
+QPropertyAnimation - owned by a widget that can be thrown away is wired to a
+method, never a lambda or a `partial`.** PyQt holds a bound method by weak
+reference, so a dead owner means the tick calls nothing. Signals only input
+can fire (a button's `clicked`) cannot reach a hidden, deleteLater'd widget
+and are not the risk. The player page's own three timers
+(player_top_bar_live_patch: the bar's 150ms refresh, Space's hold and guard)
+were moved to methods the same day; a scan of every `QTimer` /
+`*Animation` constructed in a function and connected to a lambda or partial
+found nothing else but the main window's DPI timer, which lives as long as
+the app.
+
+**The other side of the same weak reference: cleanup on `destroyed` can
+silently never run** (15 November 2026). His picture: four dark corners left
+on the video after picking a source in Resolution & Source. A panel's smooth
+corners (`_SmoothCorners`) are sibling windows, so nothing Qt does to the
+panel takes them with it, and the only thing that ever removed them was
+`destroyed -> self._drop`. Once `_close_panel` drops the page's reference,
+the panel's wrapper and its corners object form a cycle nothing points at; a
+collection before the deleteLater lands frees the bound method, and the
+signal fires into nothing. Harnessed (scratch `h_corners.py`, a real panel):
+0 of 4 pieces left without a collection, **4 of 4 on screen with one**, and 0
+of 4 through `_close_panel`, which now calls `corners.release()` while
+everything is alive. So **a thing that must disappear with a widget is taken
+down by whoever retires the widget**, not by a Python slot on its
+`destroyed`. Two other `destroyed.connect(self._...)` sites exist
+(`widgets.py` overlay `_finish`, `web_reader._card_closed`) and were not
+examined that day.

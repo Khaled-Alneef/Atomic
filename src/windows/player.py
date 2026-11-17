@@ -2060,6 +2060,7 @@ class _SmoothCorners(QObject):
         self.square = set()
         self.alpha = 255
         self.pieces = {}
+        self.released = False       # release(): the owner is being retired
         self._drawn = None          # what the pieces were last pushed for
         owner.installEventFilter(self)
         owner.destroyed.connect(self._drop)
@@ -2075,6 +2076,33 @@ class _SmoothCorners(QObject):
                 except RuntimeError:
                     pass
         return False
+
+    def release(self):
+        """Take the pieces down now, for an owner being retired.
+
+        **`destroyed` alone was not enough, and the owner photographed
+        what that costs**, 15 November 2026: four dark corners left on
+        the video after picking a source in Resolution & Source - *"why
+        are the corners stuck?????"*. The pieces are siblings of the
+        panel, not children (the panel's window region would clip them),
+        so nothing Qt does to the panel takes them with it: the only
+        thing that ever did was `destroyed -> _drop`. PyQt holds that
+        bound method by weak reference, and once _close_panel drops the
+        page's reference the panel's wrapper, its `_atomic_corners` and
+        this object form a cycle nothing else points at. If Python's
+        collector runs before Qt processes the deleteLater - and a source
+        switch does a great deal of work in exactly that gap - the slot
+        is gone when `destroyed` fires. Harnessed (h_corners.py, a real
+        panel revealed as the player does it): deleteLater alone, `_drop`
+        ran and 0 of 4 pieces were left; the same with one gc.collect()
+        between, `_drop` never ran and **4 of 4 stayed on screen**.
+
+        So whoever retires an owner calls this while everything is still
+        alive (_close_panel), and refresh() never brings the pieces back
+        afterwards. The `destroyed` connection stays as the fallback for
+        an owner nobody retires by hand."""
+        self.released = True
+        self._drop()
 
     def _drop(self, *_args):
         for piece in self.pieces.values():
@@ -2134,6 +2162,8 @@ class _SmoothCorners(QObject):
                 pass
 
     def refresh(self):
+        if self.released:
+            return          # retired: nothing may put a piece back up
         try:
             owner = self.owner
             parent = owner.parentWidget()
@@ -3079,7 +3109,25 @@ def _tile_motion(owner, on_step):
     curve.addCubicBezierSegment(QPointF(0.16, 1.0), QPointF(0.3, 1.0),
                                 QPointF(1.0, 1.0))
     anim.setEasingCurve(curve)
-    anim.valueChanged.connect(lambda value: on_step(float(value)))
+    # **The bound method itself, never a lambda around it** - the owner's
+    # "the app just crashed when I used the Eng Embedded" (14 November
+    # 2026), and the crashes on a source or subtitle change beside it.
+    # A pick rebuilds its panel: the old rows are hidden (a Leave, so this
+    # animation starts running back), unparented and deleteLater'd. Until
+    # that delete runs the C++ row and this animation are alive - but the
+    # row's Python side is garbage, and PyQt lets the collector clear a
+    # connected lambda along with it. The animation's next frame then
+    # called the freed lambda: an access violation at the closure's first
+    # instruction (python313 +0x6955b, COPY_FREE_VARS - Windows' record of
+    # 4 Nov, 7 Nov and 14 Nov), "<invalid frame>" on the UI thread in the
+    # crash record, and inside DispatchMessageW when WinForms' pump was the
+    # loop that delivered the frame. Reproduced offscreen under -X dev
+    # (scratch h_animfree.py): ticking the animations of six rebuilt rows
+    # after one gc.collect() faulted with that same record; with no
+    # collection, 6 of 6 ticked. PyQt holds a bound method by weak
+    # reference, so once the row's Python side is gone the frame calls
+    # nothing. The value arrives as the float the animation runs on.
+    anim.valueChanged.connect(on_step)
     return anim
 
 
@@ -9997,9 +10045,19 @@ class PlayerPage(GlassPage):
         # the poll's late sample must not read that press as a click on
         # whatever the panel uncovered - see _guard_click.
         self._guard_click()
-        if self._panel is not None:
-            self._panel.deleteLater()
+        panel = self._panel
+        if panel is not None:
             self._panel = None
+            # Its smooth corners first, while every Python object behind
+            # them is still alive - see _SmoothCorners.release for the
+            # four corners left stuck on the video without this.
+            corners = getattr(panel, "_atomic_corners", None)
+            if corners is not None:
+                try:
+                    corners.release()
+                except RuntimeError:
+                    pass
+            panel.deleteLater()
         self.setFocus()
 
     def _new_panel(self, title, kind, rebuild=False):
