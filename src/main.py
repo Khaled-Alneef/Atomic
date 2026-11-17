@@ -7128,7 +7128,108 @@ def main():
     # for. After whats_new deliberately - that dialog is modal, so a
     # timer armed before it would tick inside its nested event loop.
     window.schedule_update_check()
-    sys.exit(app.exec())
+    code = app.exec()
+    _exit_without_teardown(code)
+
+
+# How long a close waits for a non-daemon thread still writing something.
+# Measured at a close from Home and from the player: there were none.
+EXIT_THREAD_JOIN_S = 5.0
+
+
+def _exit_without_teardown(code):
+    """End the process once the window has closed, without Qt's teardown.
+
+    **The owner's "fix the crash when closing the app", 14 November 2026.**
+    Windows' Application log holds a crash for most closes since 3
+    November, two signatures, both inside the teardown that runs after the
+    event loop returns, and both caught with gdb on a close (WM_CLOSE, the
+    X button's path) of a copy of his data:
+
+    - 0xc0000409, fast fail 0xa (Control Flow Guard) about 6.7s after the
+      window went - Py_FinalizeEx -> ~QApplication -> QWidget::destroy,
+      an indirect call through 0xffffffffffffffff. `sys.exit(app.exec())`
+      left `app` and `window` on the exception's traceback, so Python's
+      own finalization freed them in whatever order it took them. Every
+      close from Home, frozen build and source tree alike.
+    - with the player open, sip +0x10416 (his crashes of 3 and 5
+      November): sip's walk over every wrapper, run from QApplication's
+      destruction, reading its object map after the map had been
+      reallocated under it - the walk reads the table's address once,
+      and other threads create and drop wrappers whenever the teardown
+      lets go of the interpreter. Deleting the QApplication early, while
+      Python was whole, cured the first and not this one: 1 close in 7
+      with the player open still died in it.
+
+    So the teardown is not run at all. Everything a close has to do is
+    done before this point: the window's closeEvent has saved and stopped
+    what it owns, any non-daemon thread is waited for as Python's exit
+    would, and the app's own exit work runs here by name - the catalogue
+    and reading indexes' flush, logging's flush, the crash record's
+    clean-exit removal (the hooks they register with atexit, which are
+    then never reached) - and the process is ended with TerminateProcess
+    (see the note at the end: os._exit deadlocked in Qt's DLL detach). Not `atexit._run_exitfuncs()`: tried first, it
+    also ran sip's hook, which destroys every Python-owned window (Qt's
+    teardown again, measured destroying a top-level QWidget), after
+    pythonnet's own hook had unloaded .NET - two "WebView2: the view could
+    not be disposed" errors on every close. Then the process ends and
+    Windows takes back its memory, windows and handles. Nothing was lost
+    by skipping the teardown: it has not once finished since the crashes
+    began.
+    """
+    try:
+        main_thread = threading.main_thread()
+        for thread in threading.enumerate():
+            if thread is not main_thread and not thread.daemon:
+                thread.join(EXIT_THREAD_JOIN_S)
+    except Exception:
+        pass
+    try:
+        from helpers import catalog_index, reading_index
+        for flush in (catalog_index.flush, reading_index.flush):
+            try:
+                flush()
+            except Exception:
+                logs.exception("Could not flush an index at exit")
+    except Exception:
+        pass
+    try:
+        logs.info(f"exit: code {code}, without Qt's teardown")
+        import logging
+        logging.shutdown()
+    except Exception:
+        pass
+    try:
+        from helpers import crash_log
+        crash_log.clean_exit()
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None:
+                stream.flush()
+        except Exception:
+            pass
+    # **TerminateProcess, not os._exit.** os._exit is ExitProcess, which
+    # stops every other thread and then runs each DLL's detach code - and
+    # Qt's platform plugin, detaching, destroys an object that sends an
+    # event through the app's Python event filters. Caught with gdb, the
+    # same evening: the UI thread inside qwindows' detach -> QObject's
+    # destructor -> sendThroughApplicationEventFilters -> sip -> Python,
+    # waiting for the interpreter lock a thread ExitProcess had already
+    # stopped was holding. Every close hung for good. TerminateProcess
+    # ends the process with no detach code at all, and everything that
+    # has to reach the disk was written above.
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), int(code or 0))
+    except Exception:
+        pass
+    os._exit(int(code or 0))
 
 
 if __name__ == "__main__":
