@@ -1039,6 +1039,26 @@ def _timeline_rank(name: str, playing: str) -> int:
     return 2                    # one side says nothing
 
 
+_OPENSUBTITLES_FILE_RE = re.compile(r"opensubtitles\.org/.*?/file/(\d+)|"
+                                    r"strem\.io/.*?/file/(\d+)", re.I)
+
+
+def row_identity(url) -> str:
+    """What makes two rows the same subtitle.
+
+    **One OpenSubtitles file arrives twice** (17 November 2026): the
+    Stremio addon (`subs5.strem.io/.../file/1955914968`) and the site's
+    own search (`dl.opensubtitles.org/.../file/1955914968.gz`) are the
+    same file under two urls, so his Silicon Valley S04E08 listed its
+    three Arabic subtitles six times. The file id is the identity for
+    both; every other url is its own."""
+    text = str(url or "")
+    match = _OPENSUBTITLES_FILE_RE.search(text)
+    if match:
+        return "opensubtitles:" + (match.group(1) or match.group(2))
+    return text
+
+
 def _rank(results, query) -> list:
     """Arabic before anything else, then the source, then the release it
     is timed to, then exact episode match, then a real translation over a
@@ -1065,12 +1085,26 @@ def _rank(results, query) -> list:
                 1 if item.get("translated") else 0,
                 -int(item.get("rating") or 0))
 
-    seen, unique = set(), []
+    # The best-ranked of a file's two urls is the one kept: the site's row
+    # names its release (the addon's carries a numeric id), so the
+    # episode term above puts it first.
+    # A kept addon row whose release is only the addon's numeric id takes
+    # the name its site twin carries, so the panel can say what it is.
+    seen, unique = {}, []
     for item in sorted(results, key=key):
-        marker = item.get("url")
-        if not marker or marker in seen:
+        marker = row_identity(item.get("url"))
+        if not marker:
             continue
-        seen.add(marker)
+        kept = seen.get(marker)
+        if kept is not None:
+            named = str(item.get("release") or "").strip()
+            if named and not named.isdigit() and str(kept.get("release") or "").strip().isdigit():
+                kept["release"] = item.get("release")
+                if item.get("name"):
+                    kept["name"] = item.get("name")
+            continue
+        item = dict(item)
+        seen[marker] = item
         unique.append(item)
     return unique
 

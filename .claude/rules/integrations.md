@@ -1443,3 +1443,38 @@ while 85% of the file was on disk (69 rises and 23 drops in one 50s run).
 from the playhead; the band is the larger of that and mpv's
 `demuxer-cache-time` (64MiB at most - his "only ~2 mins ahead"), byte to time
 in proportion to the file. 0.07ms a read.
+
+## An outside subtitle is timed against the file's own tracks (17 November 2026)
+
+His report: *"the episode I am in now seems to be not loading the subtitles
+correctly ... I mean the Arabic"*. Silicon Valley S04E08 on the MAX WEB-DL
+(TURG): the Arabic was clean UTF-8 and the right episode, and every line came
+**50.2s late**. Measured against the English SDH muxed into the same file: 139
+of 537 lines within 0.35s as loaded, 490 at -50.2s, both halves agreeing. The
+episode's other two Arabic files: -46.2s (MOROSE), and no single shift at all
+(OSN, a different cut).
+
+`helpers/sub_sync` measures each fresh outside subtitle against the playing
+file's own text tracks (every track in one file shares its clock, whatever the
+language) and the player sets Delay from it, with a toast; a shift that does
+not stand out (share under half, or a runner-up over 60%) is not applied and
+says "This Subtitle Is Timed for Another Version". A delay already set for the
+same pick on that episode is kept, and a hand edit while measuring wins.
+
+**The reference is the Cues index, not the clusters.** mkvmerge writes a cue
+point for every subtitle block, so `mkv_subs.cue_starts` reads every line's
+start in about 20ms from 133KB at the file's tail, which the engine fetches
+before playback - a cluster walk of a file still arriving stops at its first
+hole. **The SeekHead can be two hops**: that file's first SeekHead (17 bytes)
+names only a second one at the tail, which names the Cues.
+`torrent_engine._matroska_layout` does not follow the hop, so resolve_start
+answers None for such a file - left alone, said here.
+
+**One OpenSubtitles file arrives twice** - the Stremio addon and the site,
+two urls, one `/file/<id>` - so his S04E08 listed three Arabic files six
+times. `subtitles.row_identity` is the file id; `_rank` folds by it and the
+remembered pick matches by it.
+
+Not covered: debrid and direct links (no file on this disk), most .mp4s and
+anything without a text track, and a steady drift (a frame-rate mismatch),
+which is rejected rather than half-fixed.
