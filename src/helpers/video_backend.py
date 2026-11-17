@@ -504,6 +504,13 @@ def create(window_id: int, **overrides):
         raise PlayerError(_load_error or "no video engine")
     options = default_options()
     options.update(overrides)
+    # **A test run makes no sound** (CLAUDE.md rule 14: a test that makes
+    # sound is his to run, because the app could not be muted from
+    # outside). Added 14 November 2026 to reproduce his "Eng Embedded"
+    # crash on the real player: mpv's null output plays and clocks the
+    # file exactly as before, with nothing reaching a speaker.
+    if os.environ.get("ATOMIC_NO_AUDIO") == "1":
+        options["ao"] = "null"
 
     # **In its own process, because an mpv core in this one permanently
     # wrecks Qt's timers.** Measured: QTimer 250/s clean, 64/s once a

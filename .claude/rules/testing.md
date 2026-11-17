@@ -464,3 +464,69 @@ Rules from it:
   his files - which is the one mercy in this - but it poisons every
   later read. Rule 5 stands: redirect `storage.DATA_DIR`, `backend.
   DATA_DIR` and `server.DATA` after every import.
+
+
+## faulthandler writes every first-chance exception (14 November 2026)
+
+`crash_log` arms faulthandler, and on Windows faulthandler runs on *every*
+first-chance exception but the CLR's and C++'s - one something will catch
+included. Measured: a ctypes call's access violation, turned into OSError,
+wrote "Windows fatal exception: access violation" and the process went on. In
+the video child that is every Lua error mpv's scripts make (LuaJIT unwinds
+with SEH code 0xe24c4a02 and catches it), and with `all_threads=True` each
+one walked the other threads' frames while they ran: all four video deaths
+from 12 to 14 November faulted inside python313's traceback dumping code
+(+0x2b6d90, +0x2b77c3), none before the 9 November build that armed it. The
+record writes the raising thread only now, and a leftover holding only
+0xe24c4a02 is not read as a death - by whole line (`crash_log._FATAL_LINE`), because two
+threads raising at once tear each other's lines (`code 0xWindows fatal exception:
+e24c4a02`), which a substring test read as a death on the first frozen run. **A crash record's "fatal exception" is a
+first-chance exception, not proof of a crash** - Windows' Application log
+(event 1000, faulting module and offset) is what says the process died.
+
+Three tools from the same hunt:
+
+- **`-X dev` makes a use-after-free fault every time.** PYTHONMALLOC=debug
+  poisons freed memory, so a call into a freed function crashes on the spot
+  instead of when the memory happens to be reused. The harness that had
+  survived 300 rounds of real clicks found the bug in one tick under it.
+- **A repeating fault offset names the code.** `objdump -d
+  --start-address=` (the mingw binutils on PATH) on the faulting DLL, read
+  against its exports (pefile), turned "python313.dll +0x6955b" into
+  COPY_FREE_VARS and "sip +0x10416" into the walk of every wrapper PyQt runs
+  at shutdown.
+- **`ATOMIC_NO_AUDIO=1`** (video_backend.create) plays on mpv's null audio
+  output, so a playback test no longer makes sound (CLAUDE.md rule 14). And
+  when one of his own windows covers the test monitor, `PrintWindow`
+  (PW_RENDERFULLCONTENT) photographs the test window alone and a posted click
+  goes to the deepest child of the test window at that point
+  (`ChildWindowFromPointEx`), never to `WindowFromPoint`, which answers
+  whatever is on top - a screenshot of the screen there was of his Discord,
+  and was deleted.
+
+On the frozen build the same day (a copy of his data, silent, the other monitor
+behind his Discord): Silicon Valley S02E03 on his TURG release, 30 Subtitles-panel
+picks alternating his embedded "eng" and English 1 OpenSubtitles, each confirmed in
+player_state.json, and two source changes through Resolution & Source, each landing
+at its seat - the app alive throughout, no Windows crash event, and the playing
+video child writing 13 LuaJIT exceptions as one line each and living through them.
+
+## A close is tested by closing, not by the rig (14 November 2026)
+
+`rig.close` is `Stop-Process -Force`, which skips everything a real close
+runs, so no rig run had ever seen the crash Windows logged on most of his
+closes since 3 November. Post WM_CLOSE to the test window (the X's path),
+hold a handle on the process, and read its exit code (scratch `closeit.py`):
+before the fix every close from Home was 0xc0000409 at 6.7s, the source
+tree 0xc0000005. **gdb is on this machine** (the mingw toolchain on PATH):
+`gdb -batch -p <pid> -x script.py`, a gdb Python loop that `continue`s past
+first-chance exceptions and dumps `bt`, `x/i $pc` and `info sharedlibrary`
+on 0xc0000409/0xc0000005, named all three faults behind it in an evening -
+Py_FinalizeEx -> ~QApplication -> QWidget::destroy (a Control Flow Guard
+stop on a dead pointer), sip's object-map walk under `sip.delete(app)` with
+the player open (1 close in 7), and ExitProcess deadlocking in qwindows'
+DLL detach -> a Python event filter -> the interpreter lock of a stopped
+thread. main._exit_without_teardown has the whole story; after it, 6 of 6
+frozen closes (4 with the player open) exited with code 0 in 0.1-0.2s, no
+helper process left behind. When a fix ends a process early, check what it
+spawned (mpv's child, Edge's processes) is gone too.
