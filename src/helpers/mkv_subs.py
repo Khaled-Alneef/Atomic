@@ -188,6 +188,149 @@ def list_tracks(path):
                 pass
 
 
+_SEEK_HEAD = 0x114D9B74
+_SEEK = 0x4DBB
+_SEEK_ID = 0x53AB
+_SEEK_POSITION = 0x53AC
+_CUES = 0x1C53BB6B
+_CUE_POINT = 0xBB
+_CUE_TIME = 0xB3
+_CUE_TRACK_POSITIONS = 0xB7
+_CUE_TRACK = 0xF7
+# A Cues element past this is a broken size field: a 28-minute episode
+# with nine subtitle tracks measured 133,233 bytes.
+_CUES_CAP = 32 * 1024 * 1024
+
+
+def _seek_targets(stream, start, size, segment_start, deadline):
+    """{element id: absolute offset} from one SeekHead."""
+    found = {}
+    for element, element_size, offset in _walk(stream, start + size, deadline):
+        if element != _SEEK:
+            continue
+        seek_id = seek_pos = None
+        for child, child_size, child_start in _walk(
+                stream, offset + element_size, deadline):
+            data = stream.read(child_size) if child_size <= 8 else b""
+            if child == _SEEK_ID:
+                seek_id = _read_uint(data)
+            elif child == _SEEK_POSITION:
+                seek_pos = _read_uint(data)
+            stream.seek(child_start + child_size)
+        if seek_id is not None and seek_pos is not None:
+            found.setdefault(seek_id, segment_start + seek_pos)
+    return found
+
+
+def cue_starts(path, numbers=None, budget_s=4.0):
+    """{track number: [start seconds, ...]} for the text subtitle tracks,
+    read off the Cues index alone. Empty when the file has no such index.
+
+    **Why the index and not the clusters (17 November 2026).** Subtitle
+    sync (helpers/sub_sync) needs the times this file's own lines start
+    at, and needs them while the episode is still arriving. mkvmerge
+    writes a cue point for *every* subtitle block, so the index already
+    holds every line's start: his Silicon Valley S04E08 (TURG, 730MB)
+    carries 703 cue points for its English SDH track, the first at
+    5.88s - the same times ffmpeg extracts from the blocks. The index is
+    133KB at the file's tail, which the engine fetches before playback
+    (_index_pieces), while the blocks run the whole length of the file
+    and a top-to-bottom walk stops at the first hole.
+
+    **The SeekHead can be two hops.** That file's first SeekHead is 17
+    bytes and names only a second SeekHead at the tail, which is where
+    the Cues are named. torrent_engine._matroska_layout does not follow
+    the hop and answers None for this file; this does.
+
+    A file still downloading reads as zeros where it has no bytes, and a
+    zero is not a valid EBML length, so an index not yet on disk walks
+    to nothing rather than to garbage."""
+    stream = None
+    try:
+        stream, start, end = _open(path)
+        if stream is None:
+            return {}
+        deadline = time.monotonic() + float(budget_s)
+        if numbers is None:
+            numbers = [t["number"] for t in list_tracks(path)]
+        wanted = set(int(n) for n in numbers or ())
+        if not wanted:
+            return {}
+        scale = 1_000_000
+        targets = {}
+        heads_read = set()
+        for element, size, offset in _walk(stream, end, deadline):
+            if element == _INFO:
+                for child, child_size, child_start in _walk(
+                        stream, offset + size, deadline):
+                    if child == _TIMESTAMP_SCALE:
+                        scale = _read_uint(stream.read(child_size)) or scale
+                    stream.seek(child_start + child_size)
+            elif element == _SEEK_HEAD:
+                heads_read.add(offset)
+                for key, value in _seek_targets(stream, offset, size,
+                                                start, deadline).items():
+                    targets.setdefault(key, value)
+            elif element == _CLUSTER:
+                break           # the head is over; the rest is media
+        # Follow a SeekHead that names another SeekHead (at most twice).
+        for _ in range(2):
+            if _CUES in targets or _SEEK_HEAD not in targets:
+                break
+            at = targets.pop(_SEEK_HEAD)
+            stream.seek(at)
+            element = _read_vint(stream, keep_marker=True)
+            size = _read_vint(stream)
+            if element != _SEEK_HEAD or not size or size > 1 << 20:
+                break
+            body = stream.tell()
+            if body in heads_read:
+                break
+            heads_read.add(body)
+            for key, value in _seek_targets(stream, body, size, start,
+                                            deadline).items():
+                targets.setdefault(key, value)
+        if _CUES not in targets:
+            return {}
+        stream.seek(targets[_CUES])
+        element = _read_vint(stream, keep_marker=True)
+        size = _read_vint(stream)
+        if element != _CUES or not size or size > _CUES_CAP:
+            return {}
+        cues = io.BytesIO(stream.read(size))
+        found = {}
+        for element, size, offset in _walk(cues, len(cues.getbuffer()), deadline):
+            if element != _CUE_POINT:
+                continue
+            when = None
+            tracks = []
+            for child, child_size, child_start in _walk(
+                    cues, offset + size, deadline):
+                if child == _CUE_TIME:
+                    when = _read_uint(cues.read(child_size))
+                elif child == _CUE_TRACK_POSITIONS:
+                    for kid, kid_size, kid_start in _walk(
+                            cues, child_start + child_size, deadline):
+                        if kid == _CUE_TRACK:
+                            tracks.append(_read_uint(cues.read(kid_size)))
+                        cues.seek(kid_start + kid_size)
+                cues.seek(child_start + child_size)
+            if when is None:
+                continue
+            for track in tracks:
+                if track in wanted:
+                    found.setdefault(track, set()).add(round(when * scale / 1e9, 3))
+        return {track: sorted(times) for track, times in found.items()}
+    except Exception:
+        return {}
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
 def _srt_time(seconds):
     if seconds < 0:
         seconds = 0.0

@@ -72,7 +72,7 @@ from PyQt6.QtWidgets import (
 )
 
 from helpers import (skiptimes, app_settings, artwork, downloads, logs,
-                     mkv_subs, net, storage, theme, video_backend,
+                     mkv_subs, net, storage, sub_sync, theme, video_backend,
                      watch_marks, window_chrome)
 from helpers import drawn_icons
 from helpers.widgets import (Card, GlassPage, GlyphButton, LogoProgress,
@@ -2060,6 +2060,7 @@ class _SmoothCorners(QObject):
         self.square = set()
         self.alpha = 255
         self.pieces = {}
+        self.released = False       # release(): the owner is being retired
         self._drawn = None          # what the pieces were last pushed for
         owner.installEventFilter(self)
         owner.destroyed.connect(self._drop)
@@ -2075,6 +2076,33 @@ class _SmoothCorners(QObject):
                 except RuntimeError:
                     pass
         return False
+
+    def release(self):
+        """Take the pieces down now, for an owner being retired.
+
+        **`destroyed` alone was not enough, and the owner photographed
+        what that costs**, 15 November 2026: four dark corners left on
+        the video after picking a source in Resolution & Source - *"why
+        are the corners stuck?????"*. The pieces are siblings of the
+        panel, not children (the panel's window region would clip them),
+        so nothing Qt does to the panel takes them with it: the only
+        thing that ever did was `destroyed -> _drop`. PyQt holds that
+        bound method by weak reference, and once _close_panel drops the
+        page's reference the panel's wrapper, its `_atomic_corners` and
+        this object form a cycle nothing else points at. If Python's
+        collector runs before Qt processes the deleteLater - and a source
+        switch does a great deal of work in exactly that gap - the slot
+        is gone when `destroyed` fires. Harnessed (h_corners.py, a real
+        panel revealed as the player does it): deleteLater alone, `_drop`
+        ran and 0 of 4 pieces were left; the same with one gc.collect()
+        between, `_drop` never ran and **4 of 4 stayed on screen**.
+
+        So whoever retires an owner calls this while everything is still
+        alive (_close_panel), and refresh() never brings the pieces back
+        afterwards. The `destroyed` connection stays as the fallback for
+        an owner nobody retires by hand."""
+        self.released = True
+        self._drop()
 
     def _drop(self, *_args):
         for piece in self.pieces.values():
@@ -2134,6 +2162,8 @@ class _SmoothCorners(QObject):
                 pass
 
     def refresh(self):
+        if self.released:
+            return          # retired: nothing may put a piece back up
         try:
             owner = self.owner
             parent = owner.parentWidget()
@@ -2586,6 +2616,9 @@ class _WorkBridge(QObject):
     # translation announces itself through this, since it takes tens of
     # seconds and silence there reads as a hang.
     note = Signal(str, int)
+    # A subtitle sync measurement: result dict, run, sync token, the
+    # media file it was measured against, delay edits at its start.
+    sub_synced = Signal(object, int, int, str, int)
 
 
 # ---------------------------------------------------------------------
@@ -3079,7 +3112,25 @@ def _tile_motion(owner, on_step):
     curve.addCubicBezierSegment(QPointF(0.16, 1.0), QPointF(0.3, 1.0),
                                 QPointF(1.0, 1.0))
     anim.setEasingCurve(curve)
-    anim.valueChanged.connect(lambda value: on_step(float(value)))
+    # **The bound method itself, never a lambda around it** - the owner's
+    # "the app just crashed when I used the Eng Embedded" (14 November
+    # 2026), and the crashes on a source or subtitle change beside it.
+    # A pick rebuilds its panel: the old rows are hidden (a Leave, so this
+    # animation starts running back), unparented and deleteLater'd. Until
+    # that delete runs the C++ row and this animation are alive - but the
+    # row's Python side is garbage, and PyQt lets the collector clear a
+    # connected lambda along with it. The animation's next frame then
+    # called the freed lambda: an access violation at the closure's first
+    # instruction (python313 +0x6955b, COPY_FREE_VARS - Windows' record of
+    # 4 Nov, 7 Nov and 14 Nov), "<invalid frame>" on the UI thread in the
+    # crash record, and inside DispatchMessageW when WinForms' pump was the
+    # loop that delivered the frame. Reproduced offscreen under -X dev
+    # (scratch h_animfree.py): ticking the animations of six rebuilt rows
+    # after one gc.collect() faulted with that same record; with no
+    # collection, 6 of 6 ticked. PyQt holds a bound method by weak
+    # reference, so once the row's Python side is gone the frame calls
+    # nothing. The value arrives as the float the animation runs on.
+    anim.valueChanged.connect(on_step)
     return anim
 
 
@@ -3947,6 +3998,13 @@ class PlayerPage(GlassPage):
         self._sub_delay = 0.0
         # Said once per player, not once per nudge - see _apply_sub_delay.
         self._delay_warned = False
+        # Subtitle sync (helpers/sub_sync): which pick a measurement
+        # belongs to, whether this pick keeps a delay he set for it
+        # before, and how many times he has touched the delay - a
+        # measurement that lands after a touch of his is not applied.
+        self._sync_token = 0
+        self._sync_skip = False
+        self._delay_edits = 0
         self._sub_size = SUB_SIZE_DEFAULT
         # The Font row's family, "" for Default - Settings, not the
         # episode record (see app_settings.get_subtitle_font).
@@ -4116,6 +4174,7 @@ class PlayerPage(GlassPage):
         # already holding rather than in a 2s box of its own that fades
         # while the translator is still working (see _pick_subtitle).
         self._work.note.connect(self._on_sub_note)
+        self._work.sub_synced.connect(self._on_sub_synced)
 
         # Cinemeta's real season/episode map, once it arrives: what the
         # season list, the prev/next bounds and the wrong-episode guard
@@ -6732,13 +6791,18 @@ class PlayerPage(GlassPage):
             return          # a later batch may still carry it
         result, provider, label = match
         self._sub_auto_done = True
+        same_row = (
+            (stored.get("url") and subtitles_module.row_identity(stored.get("url"))
+             == subtitles_module.row_identity(result.get("url")))
+            or str(result.get("release") or "").strip().lower()
+            == str(stored.get("release") or "").strip().lower())
         logs.info(
             f"subtitle: auto-applying the remembered pick "
             f"({stored.get('source') or 'embedded'} {stored.get('lang') or '?'} "
             f"{stored.get('release') or stored.get('label') or '?'}) as "
             f"{result.get('source')} {result.get('lang')} "
             f"{result.get('release') or result.get('name') or '?'}"
-            f"{'' if not stored.get('release') else (' - SAME ROW' if str(result.get('release') or '').strip().lower() == str(stored.get('release')).strip().lower() else ' - A DIFFERENT ROW')}")
+            f"{'' if not stored.get('release') else (' - SAME ROW' if same_row else ' - A DIFFERENT ROW')}")
         self._pick_subtitle(result, provider=provider, label=label,
                             automatic=True)
 
@@ -6836,8 +6900,13 @@ class PlayerPage(GlassPage):
 
         best = None
         if want_url:
+            # By the file, not the url: subtitles._rank now folds an
+            # OpenSubtitles file's addon and site urls into one row, so a
+            # pick remembered by its addon url is found under the site's.
+            want_id = subtitles_module.row_identity(want_url)
             best = next((s for s in same_lang
-                         if str(s.get("url") or "") == want_url), None)
+                         if subtitles_module.row_identity(s.get("url")) == want_id),
+                        None)
         if best is None and want_release:
             best = next((s for s in same_source
                          if str(s.get("release") or s.get("name") or "")
@@ -6978,6 +7047,9 @@ class PlayerPage(GlassPage):
                 # do. A failure below still says so.
                 if not quiet:
                     self._finish_sub_toast("Subtitle Loaded")
+                    # A fresh load, not the re-add after a reload: that
+                    # one keeps the delay it already has.
+                    self._start_sub_sync(path, run)
                 self._remember_subtitle_choice()
                 if self._panel is not None                         and getattr(self._panel, "kind", "") == "subs":
                     self._open_subtitle_panel(rebuild=True)
@@ -7076,6 +7148,108 @@ class PlayerPage(GlassPage):
         except Exception:
             # Never fatal: the subtitle is loaded and playing either way.
             logs.exception("Could not remember the subtitle choice")
+
+    # ---- subtitle sync (helpers/sub_sync) ---------------------------
+    #
+    # His Silicon Valley S04E08, 17 November 2026: the Arabic he picked
+    # was 50.2s late on his MAX WEB-DL, and the only cure was typing
+    # -50.2 into Delay. Each fresh outside subtitle is now measured
+    # against the file's own text tracks and the delay set from that.
+    # How long the measurement keeps asking while the file's index is not
+    # on disk yet. The engine fetches the index before playback
+    # (_index_pieces), so this is a backstop, not the usual wait.
+    SUB_SYNC_WAIT_S = 120.0
+    SUB_SYNC_POLL_S = 4.0
+
+    def _keeps_own_delay(self, result):
+        """Whether this pick is the one this episode was last watched
+        with *and* a delay was set for it - his or an earlier sync's.
+        That delay stands; measuring again would overwrite a correction
+        he may have made by hand on top of the sync."""
+        try:
+            stored = load_sub_prefs(self.entry, self.season, self.episode) or {}
+            if abs(float(stored.get("delay") or 0.0)) < 0.05:
+                return False
+            choice = stored.get("choice") or {}
+            local = str((result or {}).get("local_path") or "")
+            if local:
+                return local == str(choice.get("path") or "")
+            want = subtitles_module.row_identity(choice.get("url"))
+            return bool(want) and want == subtitles_module.row_identity(
+                (result or {}).get("url"))
+        except Exception:
+            return False
+
+    def _start_sub_sync(self, path, run):
+        if self._sync_skip:
+            logs.info("subtitle sync: kept the delay already set for this "
+                      f"subtitle ({self._sub_delay:+.2f}s)")
+            return
+        media = self._local_media_path()
+        if not media:
+            # A debrid link or any direct HTTPS source: no file on this
+            # disk, so no track of its own to measure by.
+            logs.info("subtitle sync: no file on this disk to measure against")
+            return
+        playing = str(getattr(self, "_playing_path", "") or "")
+        finished = bool(playing) and "://" not in playing
+        self._spawn(self._sub_sync_worker, str(path), media, finished, run,
+                    self._sync_token, self._delay_edits)
+
+    def _sub_sync_worker(self, path, media, finished, run, token, edits):
+        """Never raises; always reports, so a measurement is never lost
+        silently (integrations.md: a thread must emit something)."""
+        result = None
+        try:
+            text = subtitles_module.read_file(path) if subtitles_module else None
+            starts = [cue["start"] for cue in subtitles_module.parse(text or "")]
+            stop = time.monotonic() + self.SUB_SYNC_WAIT_S
+            began = time.monotonic()
+            while True:
+                result = sub_sync.measure(starts, media, finished=finished)
+                waiting = (result.get("verdict") == "no-reference"
+                           and result.get("reason") == "no text track indexed"
+                           and not finished)
+                if not waiting or time.monotonic() >= stop:
+                    break
+                if self._closing or run != self._run or token != self._sync_token:
+                    return
+                time.sleep(self.SUB_SYNC_POLL_S)
+            result["waited_s"] = round(time.monotonic() - began, 1)
+        except Exception:
+            logs.exception("subtitle sync: the worker failed")
+            result = {"verdict": "no-reference", "reason": "error"}
+        self._work.sub_synced.emit(result, run, token, media, edits)
+
+    def _on_sub_synced(self, result, run, token, media, edits):
+        if self._closing or run != self._run or token != self._sync_token:
+            return
+        result = result or {}
+        logs.info(f"subtitle sync: {sub_sync.describe(result)} on "
+                  f"{sub_sync.file_name(media)} after {result.get('waited_s', 0)}s")
+        if media != self._local_media_path():
+            logs.info("subtitle sync: the source changed while measuring; not applied")
+            return
+        if edits != self._delay_edits:
+            logs.info("subtitle sync: the delay was changed by hand meanwhile; not applied")
+            return
+        verdict = result.get("verdict")
+        if verdict == "other-cut":
+            show_toast(self._toast_anchor(),
+                       "This Subtitle Is Timed for Another Version")
+            return
+        if verdict != "synced":
+            return
+        shift = float(result.get("shift") or 0.0)
+        if abs(shift - self._sub_delay) < 0.05:
+            return              # already where it belongs
+        self._sub_delay = round(shift, 2)
+        self._apply_sub_delay()
+        self._update_stepper("set_delay_text", self._delay_text())
+        self._remember_sub_prefs()
+        if shift:
+            show_toast(self._toast_anchor(),
+                       f"Subtitle Timing Matched to This Video ({shift:+.1f}s)")
 
     def _external_sub_state(self, path):
         """Has mpv taken the file handed to sub-add?
@@ -9997,9 +10171,19 @@ class PlayerPage(GlassPage):
         # the poll's late sample must not read that press as a click on
         # whatever the panel uncovered - see _guard_click.
         self._guard_click()
-        if self._panel is not None:
-            self._panel.deleteLater()
+        panel = self._panel
+        if panel is not None:
             self._panel = None
+            # Its smooth corners first, while every Python object behind
+            # them is still alive - see _SmoothCorners.release for the
+            # four corners left stuck on the video without this.
+            corners = getattr(panel, "_atomic_corners", None)
+            if corners is not None:
+                try:
+                    corners.release()
+                except RuntimeError:
+                    pass
+            panel.deleteLater()
         self.setFocus()
 
     def _new_panel(self, title, kind, rebuild=False):
@@ -10564,6 +10748,8 @@ class PlayerPage(GlassPage):
         # by a translator must not become the thing every future episode
         # of this title tries first.
         self._pending_sub_choice = (result, provider, label)
+        self._sync_token += 1
+        self._sync_skip = self._keeps_own_delay(result)
         self._drop_sub_toast()
         self._sub_toast = show_toast(self._toast_anchor(),
                                      "Loading Subtitle...", duration_ms=None)
@@ -10606,6 +10792,7 @@ class PlayerPage(GlassPage):
 
     def _set_delay(self, seconds):
         """A delay typed into the panel, in seconds."""
+        self._delay_edits += 1
         self._sub_delay = round(float(seconds), 2)
         self._apply_sub_delay()
         self._update_stepper("set_delay_text", self._delay_text())
@@ -10632,6 +10819,7 @@ class PlayerPage(GlassPage):
         self._remember_sub_prefs()
 
     def _nudge_delay(self, delta):
+        self._delay_edits += 1
         self._sub_delay = round(self._sub_delay + delta, 2)
         self._apply_sub_delay()
         self._update_stepper("set_delay_text", self._delay_text())

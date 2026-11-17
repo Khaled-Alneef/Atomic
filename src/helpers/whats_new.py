@@ -30,6 +30,21 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.24": [
+        "Outside subtitles now line up with the video by themselves: when "
+        "you pick one, Atomic compares it with the subtitles inside the "
+        "episode and sets the Delay for you - an Arabic file that ran 50 "
+        "seconds late is on time now.",
+        "A subtitle made for a different version of the episode says so "
+        "instead of quietly showing at the wrong moments.",
+        "The same OpenSubtitles file is no longer listed twice in the "
+        "Subtitles panel.",
+        "Fixed the crash when choosing an embedded subtitle, changing the "
+        "source or changing the subtitle while watching.",
+        "Fixed the panel corners that could stay stuck on the video after "
+        "picking a source.",
+        "Closing Atomic no longer crashes.",
+    ],
     "3.23": [
         "Clicking ahead on the seek bar no longer jumps to the end of an "
         "episode that is still downloading.",

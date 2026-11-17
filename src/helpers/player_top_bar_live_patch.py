@@ -748,7 +748,11 @@ def _patch(player) -> None:
         # that must not lag - see _Recompose.
         timer = QTimer(self)
         timer.setInterval(150)
-        timer.timeout.connect(lambda: refresh_live_bar(player, self))
+        # A method of the page, not a lambda around it: PyQt holds a
+        # method weakly, and a lambda wired to a timer the page owns can
+        # be freed by Python's collector while the timer still runs -
+        # the panel rows' crash of 14 November 2026 (player._tile_motion).
+        timer.timeout.connect(self._atomic_bar_tick)
         timer.start()
         self._atomic_bar_timer = timer
         relay = _Recompose(self)
@@ -882,11 +886,14 @@ def _patch(player) -> None:
         timer = QTimer(page)
         timer.setSingleShot(True)
         timer.setInterval(SPACE_HOLD_MS)
-        timer.timeout.connect(lambda: _space_held(page, state))
+        # Methods of the page, not lambdas: see build_top_bar's timer.
+        # One hold is live at a time (_space_released stops and deletes
+        # both), so each reads the live state off the page.
+        timer.timeout.connect(page._atomic_space_hold_tick)
         timer.start()
         guard = QTimer(page)
         guard.setInterval(SPACE_GUARD_MS)
-        guard.timeout.connect(lambda: _space_guard(page, state))
+        guard.timeout.connect(page._atomic_space_guard_tick)
         guard.start()
         state["timer"], state["guard"] = timer, guard
 
@@ -1000,6 +1007,23 @@ def _patch(player) -> None:
     # implementation. Added, not replacing anything, so the order the
     # two patches install in does not matter.
     Page._atomic_speed_boost = lambda self, prev: _boost(self, prev, "mouse: left button")
+    # The page's own timers' slots (build_top_bar, _space_pressed): class
+    # attributes, so a connection holds the page weakly and the function
+    # lives as long as the class.
+    Page._atomic_bar_tick = lambda self: refresh_live_bar(player, self)
+
+    def _hold_tick(self):
+        state = getattr(self, "_atomic_space", None)
+        if state is not None:
+            _space_held(self, state)
+
+    def _guard_tick(self):
+        state = getattr(self, "_atomic_space", None)
+        if state is not None:
+            _space_guard(self, state)
+
+    Page._atomic_space_hold_tick = _hold_tick
+    Page._atomic_space_guard_tick = _guard_tick
     Page._atomic_speed_unboost = lambda self, prev: _unboost(self, prev, "mouse: left button")
 
 

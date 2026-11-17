@@ -12,7 +12,7 @@ then replayed about eighty times on a copy of his data, on the build he
 was running, without one crash. It is rare, and a reproduction is not
 the road to it; the next one has to name itself.
 
-So every run arms faulthandler (all threads) into a file of its own,
+So every run arms faulthandler (the raising thread) into a file of its own,
 `crash_<pid>.log` in the data directory:
 
 - **A clean exit deletes it** (atexit). Nothing accumulates.
@@ -32,14 +32,33 @@ So every run arms faulthandler (all threads) into a file of its own,
 
 Faulthandler on Windows ignores the CLR's own exceptions (0xE0434352)
 and C++ ones (0xE06D7363), so the .NET side of WebView2 does not write
-here. A first-chance access violation that something else handles would
-still be written; that is harmless, because only a run that did not end
-cleanly is ever kept. Never raises.
+here. Every *other* first-chance exception is written, whoever handles
+it - measured 14 November 2026: a ctypes call's access violation, caught
+and turned into OSError, wrote "Windows fatal exception: access
+violation" and the process carried on.
+
+**And writing it was not harmless, which this note used to say.** It is
+written from inside the exception, on the thread that raised it, while
+every other thread goes on running - and with all_threads=True the dump
+walks those threads' frames as they change. The video child raises
+constantly: mpv's Lua scripts unwind every error with LuaJIT's own SEH
+exception, 0xe24c4a02, which LuaJIT always catches. His records from 12
+to 14 November hold block after block of it, two threads' dumps
+interleaved line by line, and Windows' own record of all four video
+deaths in that time puts the fault inside python313's traceback dumping
+code (offsets 0x2b6d90 three times, 0x2b77c3 once - the functions after
+PyTraceBack_Print), with none there before the 9 November build that
+armed this. The last of them was "the video process stopped mid-episode"
+two seconds after a source change. So only the raising thread is
+written now: its own stack is the one a crash needs, and it is the one
+stack nothing else is changing. And 0xe24c4a02 is never read as a death.
+Never raises.
 """
 
 import atexit
 import faulthandler
 import os
+import re
 import time
 from pathlib import Path
 
@@ -49,6 +68,19 @@ KEEP = 5                    # kept crash records, newest first
 _LIVE_PREFIX = "crash_"     # crash_<pid>[_<role>].log while a run is alive
 _KEPT_PREFIX = "crash-"     # crash-<YYYYmmdd-HHMMSS>[_<role>].log once kept
 _FATAL = ("Windows fatal exception", "Fatal Python error")
+# Exceptions faulthandler writes that are part of something working: LuaJIT
+# (mpv's Lua scripts) raises 0xe24c4a02 for every Lua error and catches it
+# itself. A leftover holding only these is a run ended from outside.
+_HANDLED_CODES = ("code 0xe24c4a02",)
+# A fatal line as faulthandler writes it, whole: a named kind ("access
+# violation", "stack overflow") or a complete code. **Two threads raising
+# at once interleave their lines** - measured on the frozen build, 14
+# November 2026: "Windows fatal exception: code 0xWindows fatal
+# exception: e24c4a02" - and a torn line names no code at all, so a
+# substring test for the LuaJIT code missed it and called a healthy run a
+# death. Only threads raising together tear a line, and they are LuaJIT's.
+_FATAL_LINE = re.compile(r"^(?:Windows fatal exception: (?:code 0x[0-9a-fA-F]{8}|[a-z][a-z ]*)"
+                         r"|Fatal Python error: .*)$")
 # How much of a kept record atomic.log is given: the fatal line and the
 # crashing thread's frames are at the top of a block, and twenty lines
 # are enough for both without pasting every idle thread's stack.
@@ -70,7 +102,9 @@ def _last_fatal_block(text: str) -> list:
     lines = text.splitlines()
     start = None
     for index, line in enumerate(lines):
-        if line.startswith(_FATAL):
+        line = line.strip()
+        if (_FATAL_LINE.match(line)
+                and not any(code in line for code in _HANDLED_CODES)):
             start = index
     if start is None:
         return []
@@ -111,7 +145,7 @@ def _collect(data: Path, version: str) -> None:
         except OSError:
             continue        # still open: a sibling that is running
         logs.warning(f"crash: the last run{' (' + role + ')' if role else ''} "
-                     f"died - {kept.name} has every thread's stack:")
+                     f"died - {kept.name} has the crashing thread's stack:")
         for line in block[:SUMMARY_LINES]:
             logs.warning("crash:   " + line.rstrip())
     try:
@@ -138,6 +172,12 @@ def _clean_exit() -> None:
         pass
 
 
+def clean_exit() -> None:
+    """The clean-exit removal, for an exit that ends the process without
+    running atexit (main._exit_without_teardown)."""
+    _clean_exit()
+
+
 def arm(role: str = "", version: str = "") -> None:
     """Start recording this process's crashes. Call once, as early as
     the data directory is known. `role` names a helper process's file
@@ -153,7 +193,9 @@ def arm(role: str = "", version: str = "") -> None:
         _file.write(f"=== Atomic {version} pid {os.getpid()} "
                     f"{role or 'app'} started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         _file.flush()
-        faulthandler.enable(file=_file, all_threads=True)
+        # The raising thread only - see the module note: a dump of every
+        # thread, taken while they run, is what killed the video child.
+        faulthandler.enable(file=_file, all_threads=False)
         atexit.register(_clean_exit)
     except Exception:
         _file = None
