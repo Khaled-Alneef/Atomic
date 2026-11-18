@@ -8451,8 +8451,14 @@ class PlayerPage(GlassPage):
         if seat:
             return 0.55, f"Skipping to {_format_time(seat)}..."
         percent = getattr(self, "_buffering_percent", 0)
-        if percent > 0:
-            return (0.92 + 0.08 * min(percent, 100) / 100.0,
+        # **Under 100 only.** At 100 mpv's cache is full and is not what
+        # the wait is for: his 18 November report, "it says Buffering
+        # 100% and stuck there for some time", was the engine stream's
+        # reader blocked on a piece the swarm never sent (0.00MB/s), with
+        # mpv's own cache reading 100 throughout. So a full cache hands
+        # the words to the source's own numbers below.
+        if 0 < percent < 100:
+            return (0.92 + 0.08 * percent / 100.0,
                     f"Buffering... {int(percent)}%")
         if not self._streams_started:
             return 0.05, "Looking for a source..."
@@ -8465,6 +8471,24 @@ class PlayerPage(GlassPage):
         # ends on a different release writes the winner back to this
         # same index before mpv is handed anything.
         info_hash = str(stream.get("info_hash") or "").strip().lower()
+        engine_stream = (str(stream.get("kind") or "").lower() == "torrent"
+                         and str(stream.get("engine") or "").lower() == "atomic")
+        if percent >= 100:
+            if not engine_stream:
+                return 0.98, "Starting playback..."
+            # What a full cache is still waiting on is the swarm, so say
+            # how fast it is actually sending - "0.0 MB/s" is the truth
+            # the old "100%" was hiding, and the stall watchdog walks to
+            # the next source when it stays there.
+            try:
+                from helpers import torrent_engine
+                rate = torrent_engine.payload_rate(info_hash) / 1e6
+                peers = int((torrent_engine.stats(info_hash) or {})
+                            .get("peers") or 0)
+            except Exception:
+                rate, peers = 0.0, 0
+            return (0.92, f"Waiting for the source... {rate:.1f} MB/s"
+                          f" from {peers} peer{'s' if peers != 1 else ''}")
         if not info_hash:
             # A direct URL: mpv is opening it and reports nothing until
             # its cache does. Park high enough that the drift stays shy

@@ -249,6 +249,10 @@ def _patch(module):
         run = self._run
         started = time.monotonic()
         state = {"payload": _engine_payload(stream), "ticks": 0}
+        # The same watch runs on an open from the head (resume_at None),
+        # so the log says which one it was - see load_into_mpv.
+        tag = "seat" if resume_at else "open"
+        where = "at the seat" if resume_at else "from the head"
         timer = QTimer(self)
         timer.setInterval(int(SEAT_WATCHDOG_S * 1000))
 
@@ -269,7 +273,7 @@ def _patch(module):
             if moved is not None:
                 if (moved >= SEAT_FLOW_BYTES_S * SEAT_WATCHDOG_S
                         and waited < SEAT_PATIENCE_S):
-                    _log(f"seat: no picture yet after {waited:.0f}s, swarm "
+                    _log(f"{tag}: no picture yet after {waited:.0f}s, swarm "
                          f"delivering {moved / SEAT_WATCHDOG_S / 1e6:.2f}MB/s;"
                          f" waiting")
                     if getattr(self, "_resume_target", None) is not None:
@@ -278,23 +282,29 @@ def _patch(module):
                     return
             elif (state["ticks"] < 2
                     and float(getattr(self, "_duration", 0.0) or 0.0) > 0):
-                _log(f"seat: no picture yet after {waited:.0f}s, the file is "
+                _log(f"{tag}: no picture yet after {waited:.0f}s, the file is "
                      f"open; one more tick")
                 return
             _cancel_watchdog(self)
-            _log(f"seat: no picture at the seat in {waited:.0f}s"
+            _log(f"{tag}: no picture {where} in {waited:.0f}s"
                  + (f", {moved / SEAT_WATCHDOG_S / 1e6:.2f}MB/s"
                     if moved is not None else "")
-                 + "; trying another source, seat kept")
+                 + "; trying another source"
+                 + (", seat kept" if resume_at else ""))
+            if hasattr(self, "_say_working"):
+                try:
+                    self._say_working("That Source Stalled - Trying Another...")
+                except Exception:
+                    pass
             try:
                 if not self._try_next_source(self._stream_index,
                                              resume_at=resume_at,
                                              reason="stalled"):
                     # Nothing left to walk to: the player's own give-up
                     # says so when its deadline comes round (_seat_tick).
-                    _log("seat: no other source to try")
+                    _log(f"{tag}: no other source to try")
             except Exception:
-                _log("seat: walking to the next source failed")
+                _log(f"{tag}: walking to the next source failed")
 
         timer.timeout.connect(bite)
         self._atomic_seat_watchdog = timer
@@ -315,7 +325,18 @@ def _patch(module):
         except Exception:
             seat = None
         if not seat:
-            return old_load(self, stream, resume_at)
+            # **An open from the head is watched too** (18 November 2026).
+            # His report: "it says Buffering 100% and stuck there for some
+            # time". His log, Silicon Valley S06E05 at 20:36: the race kept
+            # d862b4d1 "after 3s, now 0.00MB/s" (the other lanes dead,
+            # Real-Debrid 451 on all six), mpv read the tail's 32MB piece
+            # in 18s and then sat on piece 163, the file's head, through
+            # three 45s give-ups and counting - and nothing ever walked on,
+            # because this watchdog was armed only for a resume. mpv's
+            # cache-buffering-state had said 100 the whole time.
+            result = old_load(self, stream, resume_at)
+            _arm_seat_watchdog(self, stream, resume_at)
+            return result
 
         # **Every resume opens at the seat - see the top of this module.**
         # The engine is told first, because a release the player reuses
