@@ -9015,19 +9015,29 @@ class PlayerPage(GlassPage):
         except Exception:
             logs.exception("Could not resume after a seek")
 
+    def _engine_stream_hash(self):
+        """The playing stream's info hash when the torrent engine serves
+        it, else "". `kind`/`engine`, never the hash alone: a debrid
+        stream keeps its hash and is not a torrent (integrations.md).
+        Not `_engine_hash`: that name is already the string the stream
+        URL's hash is kept in (set in _load_into_mpv), and an instance
+        attribute shadows a method - the first frozen run raised
+        TypeError here at the first frame."""
+        try:
+            stream = (self._streams or [])[self._stream_index] or {}
+        except (IndexError, TypeError):
+            return ""
+        kind = str(stream.get("kind") or "").strip().lower()
+        engine = str(stream.get("engine") or "").strip().lower()
+        if kind != "torrent" and engine != "atomic":
+            return ""
+        return str(stream.get("info_hash") or "").strip().lower()
+
     def _engine_has_seat(self, target):
         """Whether the bytes a seek to `target` reads are already on
         disk, when this is an engine stream whose index can say - True,
         False, or None for "cannot tell / not an engine stream"."""
-        try:
-            stream = (self._streams or [])[self._stream_index] or {}
-        except (IndexError, TypeError):
-            return None
-        kind = str(stream.get("kind") or "").strip().lower()
-        engine = str(stream.get("engine") or "").strip().lower()
-        if kind != "torrent" and engine != "atomic":
-            return None
-        info_hash = str(stream.get("info_hash") or "").strip().lower()
+        info_hash = self._engine_stream_hash()
         if not info_hash:
             return None
         try:
@@ -9035,6 +9045,17 @@ class PlayerPage(GlassPage):
             return torrent_engine.seat_on_disk(info_hash, float(target))
         except Exception:
             return None
+
+    def _warm_seek_index(self):
+        # Called from the first-frame block, so it must never raise: an
+        # exception here skipped everything after it in that block.
+        try:
+            info_hash = self._engine_stream_hash()
+            if info_hash:
+                from helpers import torrent_engine
+                torrent_engine.warm_seek_index(info_hash)
+        except Exception:
+            logs.exception("could not warm the seek index")
 
     def toggle_mute(self):
         if self.handle is None:
@@ -9479,6 +9500,10 @@ class PlayerPage(GlassPage):
                 self._runaway_gap = 0.0
                 self._runaway_bad = 0
                 self._begin_smooth_sync()
+                # The seek index parsed now, off this thread, so the
+                # first arrow press does not pay for it - see
+                # torrent_engine._cue_table.
+                self._warm_seek_index()
                 for delay in RUNAWAY_EARLY_MS:
                     QTimer.singleShot(delay, self._watch_runaway)
                 if BARE_PLAYER:
