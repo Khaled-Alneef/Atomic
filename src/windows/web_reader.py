@@ -302,7 +302,8 @@ class WebReader(QWidget):
             # only be seen by closing the page it opened from, which is
             # exactly what the owner described.
             host = self.parentWidget() or _overlay_host(self.window())
-            page = details.open_details(self.window(), entry, host=host)
+            page = details.open_details(self.window(), entry, host=host,
+                                        register=False)
             page.raise_()
             # And the view goes down with it: this shell's view is a
             # native child window, and on Windows a native child paints

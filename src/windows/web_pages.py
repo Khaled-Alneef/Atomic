@@ -58,8 +58,19 @@ _live_pages = []
 
 
 def overlay_opened(page):
-    """Register an overlay so no web page paints over it."""
+    """Register an overlay so no web page paints over it.
+
+    Once per page: a second registration would count it twice, and
+    _overlay_closing's `depth == 1` test would then never put the pages
+    back on its close (details.open_details registers for its callers,
+    and a caller may still do it too)."""
     global _overlay_depth
+    try:
+        if getattr(page, "_overlay_registered", False):
+            return
+        page._overlay_registered = True
+    except (AttributeError, RuntimeError):
+        pass
     _overlay_depth += 1
     _suppress_all(True)
     try:
@@ -152,6 +163,44 @@ def cover_with(view, page):
     swapped = time.perf_counter()
     logs.info(f"overlay swap: prepared={(prepared - started) * 1000:.0f}ms, "
               f"swapped={(swapped - prepared) * 1000:.0f}ms")
+
+
+def overlay_over(page):
+    """Register an overlay opened by something that is not a web page,
+    with the same no-frame-of-neither order as cover_with: the overlay's
+    first paint is prepared while the views are still up, then every view
+    goes down and the overlay is drawn in the same turn.
+
+    **Back from the reader showed Home for a moment.** The owner, 19
+    November 2026: "when I press the back button while reading manga, the
+    page shows the main page for few ms first, then the ch list page". His
+    log: that chapter list had been opened from the bell, and
+    main._open_notification_item called details.open_details and nothing
+    else - so the chapter list never counted as an overlay, the reader
+    opened over it made the count 1, and the reader's close made it 0.
+    Probed on the source tree (the bell's own function, a copy of his
+    data): `_suppress_all depth=0` as the reader went, Home's view shown
+    over the chapter list at +0ms and put back down by the 150ms
+    geometry tick 113ms later. Five of the seven open_details callers
+    were like that (the bell, search results, the Qt tracker's three, a
+    genre page's card); open_details now registers here for all of them.
+    """
+    try:
+        QApplication.sendPostedEvents(page, QEvent.Type.LayoutRequest)
+        layout = page.layout()
+        if layout is not None:
+            layout.activate()
+        page.grab()
+    except Exception as error:
+        # The preparation is only about the first frame; the registration
+        # below is the fix, so a failure here never skips it.
+        logs.info(f"overlay over: first paint not prepared ({type(error).__name__}: {error})")
+    overlay_opened(page)
+    logs.info(f"overlay over: {type(page).__name__} registered, depth={_overlay_depth}")
+    try:
+        page.repaint()
+    except RuntimeError:
+        pass
 
 
 def _overlay_gone(*_args):
@@ -1207,7 +1256,7 @@ class _WebPage(GlassPage):
             # view no longer goes down first. This page is rebuilt while
             # the overlay opens, and the rebuilt one's view stays hidden
             # until it has loaded and asks overlay_open() before it shows.
-            page = details.open_details(self.app, entry)
+            page = details.open_details(self.app, entry, register=False)
             cover_with(view, page)
             # Registered app-wide, not on this instance: this page is
             # about to be rebuilt, and the rebuilt one has to know. After

@@ -5679,7 +5679,7 @@ class GenreBrowsePage(GlassPage):
                      or ("Manga" if self._is_reading else "Series"))
 
 
-def open_details(window, entry, host=None):
+def open_details(window, entry, host=None, register=True):
     """Put the details page over `window`. The one entry point - the same
     central-widget host trick reader.open_reader documents, so the
     sidebar is covered rather than hidden.
@@ -5694,6 +5694,12 @@ def open_details(window, entry, host=None):
     genre and the cast pages still do not open on clicking the cards,
     instead if I click one it will take me to it when I click the back
     button"* - it had opened every time, behind.
+
+    `register=False` is for the two callers that swap a web view out
+    themselves and register after the swap (web_pages._open_overlay,
+    web_reader._open_card - cover_with). Everything else is registered
+    here, so a reader or player opened over this page cannot bring the
+    web page underneath back up when it closes (web_pages.overlay_over).
     """
     if host is None:
         host = (window.overlay_host() if hasattr(window, "overlay_host")
@@ -5746,6 +5752,12 @@ def open_details(window, entry, host=None):
         entrance.start()
     page.raise_()
     freeze_covered(page)   # see widgets._CoveredFreeze
+    if register:
+        try:
+            from windows import web_pages
+            web_pages.overlay_over(page)
+        except Exception:
+            logs.exception("The details page could not register as an overlay")
     page.setFocus()
     # **And the keyboard itself, which setFocus cannot move.** The owner, 5
     # November 2026: "the search for the ep or ch ... does not write!!!!!".
