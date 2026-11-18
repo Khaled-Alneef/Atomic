@@ -30,6 +30,15 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.25": [
+        "A source that stops sending when an episode first opens is no "
+        "longer waited on forever: the player moves to the next source "
+        "by itself, and a slow season pack that is still downloading is "
+        "still given its time.",
+        "While an episode loads, the player shows how fast the source is "
+        "actually sending instead of a \"Buffering 100%\" that never "
+        "moved.",
+    ],
     "3.24": [
         "Outside subtitles now line up with the video by themselves: when "
         "you pick one, Atomic compares it with the subtitles inside the "
