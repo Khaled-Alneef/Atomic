@@ -654,6 +654,11 @@ def _alert_pump():
 # dropping peers), long enough that rebuilding a 20,000-entry priority
 # array is nothing - _serve already does it once per 8MB served.
 WINDOW_TICK_S = 1.0
+# How long a torrent stays off libtorrent's queue after its last reader -
+# see _Torrent.hold_off_queue. Long enough to cover a pause, a seek's
+# reconnect and the gaps while mpv's cache is full; a torrent left alone
+# longer than this is queued like any other again.
+QUEUE_HOLD_S = 120.0
 
 
 _RESUME_SAVE_INTERVAL_S = 20.0
@@ -699,6 +704,7 @@ def _window_ticker():
             if torrent.want_whole or torrent.file_index is None:
                 continue
             try:
+                torrent.hold_off_queue()
                 torrent.refresh_windows()
             except Exception:
                 pass
@@ -920,6 +926,10 @@ class _Torrent:
         self.served_hwm = {}
         self.file_index = None
         self.last_touched = time.time()
+        # When a reader last held this torrent, and whether hold_off_queue
+        # is what took it off libtorrent's queue - see there.
+        self.read_seen_at = 0.0
+        self._held_off_queue = False
         # Byte offset playback is going to *start* at, when a resume
         # point says it is not zero. Kept wanted through every focus()
         # the same way the index is - see RESUME_BAND_BYTES.
@@ -1409,6 +1419,57 @@ class _Torrent:
             self.last_offset = int(offset_in_file)
             windows = list(self.readers.values())
         self._apply_windows(windows)
+
+    def hold_off_queue(self, now=None):
+        """Keep a torrent somebody is watching out of libtorrent's queue.
+
+        **A full window is a finished torrent, and the queue pauses
+        finished torrents.** The owner's frozen run, 19 November 2026:
+        five arrow presses on Brooklyn Nine-Nine over a 2.3MB/s lane, and
+        "Skipping To 2:43..." for **40 seconds** before the picture came
+        back. Everything outside the window is priority 0, so the moment
+        the window's pieces are all here libtorrent counts the torrent
+        as finished - queued like a seed - and _make_session gives seeds
+        no active slot (`active_seeds` 0). The torrent is paused, every
+        peer is disconnected ("torrent paused" in the engine's own peer
+        alerts), and the next press's pieces wait for the queue's next
+        pass and a fresh round of handshakes.
+
+        Measured with the real engine and libmpv on his Attack on Titan
+        S04E22 (4MiB pieces, one local seeder throttled to 0.6MB/s - his
+        lane's 1.78x of the file's rate), four +5s presses 6s apart:
+        control - three "torrent paused" disconnects and the fourth press
+        still not playing after 60s (4.0s, 5.0s, 12.5s, never); with the
+        queue kept off the torrent - no pause, 1.6s, 6.0s, 11.5s, 5.5s,
+        which is the target's piece arriving at the lane's rate.
+
+        Not by raising `active_seeds`: that would keep every *complete*
+        torrent seeding in the background too, which is a different
+        decision. And not by clearing auto_managed in add(): that was
+        measured breaking startup outright (see the note there). So only
+        a torrent a reader is on, or was on in the last QUEUE_HOLD_S, is
+        held; it goes back to the queue after that, and only if this is
+        what took it off."""
+        now = time.time() if now is None else now
+        with self.lock:
+            live = any(key != PRIMARY_READER for key in self.readers)
+        if live:
+            self.read_seen_at = now
+        watched = live or now - self.read_seen_at < QUEUE_HOLD_S
+        try:
+            managed = bool(int(self.handle.flags()) & int(lt.torrent_flags.auto_managed))
+            if watched and managed:
+                self.handle.unset_flags(lt.torrent_flags.auto_managed)
+                self.handle.resume()
+                self._held_off_queue = True
+                logs.info(f"queue: {self.info_hash[:8]} held off the queue while it is watched")
+            elif not watched and not managed and self._held_off_queue:
+                self.handle.set_flags(lt.torrent_flags.auto_managed)
+                self._held_off_queue = False
+                logs.info(f"queue: {self.info_hash[:8]} back on the queue - "
+                          f"nothing read it for {QUEUE_HOLD_S:.0f}s")
+        except Exception:
+            pass
 
     def refresh_windows(self):
         """Re-apply the current windows without moving them.
