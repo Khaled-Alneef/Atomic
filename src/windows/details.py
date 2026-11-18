@@ -2861,12 +2861,29 @@ class DetailsPage(GlassPage):
             # count() - 1: the trailing stretch is always the last item,
             # and rows go in above it.
             shown = self._rows.count() - 1
+            inserted = []
             for _ in range(min(int(count), len(self._row_queue))):
                 widget = self._row_queue.pop(0)()
                 if widget is None:
                     continue
                 self._rows.insertWidget(shown, widget)
+                inserted.append(widget)
                 shown += 1
+            # **Shown now, not on the next turn.** insertWidget only
+            # *posts* a row's show (_q_showIfNotHidden), and a refill
+            # runs in the same turn as whatever exposed the list - the
+            # reader's close emits `closed` right after it hides, and
+            # _on_overlay_closed rebuilds every row. The window's paint
+            # was posted first, so it drew the panel with the old rows
+            # gone and the new ones still hidden: an empty list for one
+            # frame on every back from a chapter, 40-90ms on the frozen
+            # build (19 November 2026, three of three). An explicit show
+            # makes the posted one a no-op, and activating the layout
+            # gives the rows their geometry before that paint.
+            for widget in inserted:
+                widget.show()
+            if inserted:
+                self._rows.activate()
         finally:
             self._rows_host.setUpdatesEnabled(True)
             batch, self._still_batch = self._still_batch, None
